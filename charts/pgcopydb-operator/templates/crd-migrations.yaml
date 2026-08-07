@@ -206,6 +206,69 @@ spec:
                     description: useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
                     type: boolean
                 type: object
+              cutover:
+                description: cutover controls how a live migration ends; ignored without
+                  follow.
+                properties:
+                  approved:
+                    description: |-
+                      approved triggers the cutover in Manual mode. Mutable. Setting it back
+                      to false after the cutover started has no effect.
+                    type: boolean
+                  mode:
+                    default: Manual
+                    description: mode selects Manual (default) or Automatic cutover.
+                    enum:
+                    - Manual
+                    - Automatic
+                    type: string
+                type: object
+              follow:
+                description: |-
+                  follow enables live migration (CDC after the base copy). Immutable:
+                  a one-shot clone cannot become a live migration after the fact.
+                properties:
+                  enabled:
+                    description: enabled turns the migration into a live one.
+                    type: boolean
+                  maxCatchupLag:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 16Mi
+                    description: |-
+                      maxCatchupLag is the replication lag under which the migration counts
+                      as caught up (the CaughtUp condition and Automatic cutover trigger).
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  plugin:
+                    default: pgoutput
+                    description: plugin is the logical decoding plugin (--plugin).
+                    enum:
+                    - pgoutput
+                    - wal2json
+                    - test_decoding
+                    type: string
+                  publication:
+                    description: |-
+                      publication names a pre-created publication (--publication); empty lets
+                      pgcopydb create and drop its own.
+                    type: string
+                  replayNoOpUpdates:
+                    description: |-
+                      replayNoOpUpdates replays UPDATEs that change no columns
+                      (--replay-no-op-updates), needed when target triggers must fire.
+                    type: boolean
+                  slotName:
+                    description: |-
+                      slotName overrides the replication slot name (--slot-name). Empty means
+                      a generated name unique to this Migration; set it only when fanning
+                      several migrations out of one source instance deliberately.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: follow is immutable
+                  rule: self == oldSelf
               runner:
                 description: runner configures the worker pod.
                 properties:
@@ -1686,6 +1749,9 @@ spec:
                 - Pending
                 - Validating
                 - Cloning
+                - Streaming
+                - CutoverPending
+                - CuttingOver
                 - Verifying
                 - Completed
                 - Failed
@@ -1721,6 +1787,27 @@ spec:
                   tablesTotal:
                     format: int64
                     type: integer
+                type: object
+              replication:
+                description: replication reports streaming state while following.
+                properties:
+                  endpos:
+                    description: endpos is the cutover LSN once set.
+                    type: string
+                  lagBytes:
+                    description: lagBytes is the byte distance between the source
+                      WAL head and replayLSN.
+                    format: int64
+                    type: integer
+                  replayLSN:
+                    description: replayLSN is the last transaction durably applied
+                      to the target.
+                    type: string
+                  slotName:
+                    type: string
+                  writeLSN:
+                    description: writeLSN is the last LSN received from the source.
+                    type: string
                 type: object
               startedAt:
                 format: date-time
