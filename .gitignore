@@ -1,7 +1,9 @@
-# Kubebuilder-generated set, pre-merged so the H1 scaffold's .gitignore is a no-op diff.
+# Kubebuilder set (kept in union with the scaffold's generated .gitignore).
 bin/
 Dockerfile.cross
 *.exe
+*.exe~
+*.dll
 *.so
 *.dylib
 *.test
