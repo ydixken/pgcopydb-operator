@@ -222,6 +222,86 @@ type RunnerSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
+// FollowOptions enables live migration: clone under a replication slot, then
+// stream and apply changes until cutover (pgcopydb clone --follow).
+type FollowOptions struct {
+	// enabled turns the migration into a live one.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// plugin is the logical decoding plugin (--plugin).
+	// +kubebuilder:validation:Enum=pgoutput;wal2json;test_decoding
+	// +kubebuilder:default=pgoutput
+	// +optional
+	Plugin string `json:"plugin,omitempty"`
+
+	// slotName overrides the replication slot name (--slot-name). Empty means
+	// a generated name unique to this Migration; set it only when fanning
+	// several migrations out of one source instance deliberately.
+	// +optional
+	SlotName string `json:"slotName,omitempty"`
+
+	// publication names a pre-created publication (--publication); empty lets
+	// pgcopydb create and drop its own.
+	// +optional
+	Publication string `json:"publication,omitempty"`
+
+	// replayNoOpUpdates replays UPDATEs that change no columns
+	// (--replay-no-op-updates), needed when target triggers must fire.
+	// +optional
+	ReplayNoOpUpdates bool `json:"replayNoOpUpdates,omitempty"`
+
+	// maxCatchupLag is the replication lag under which the migration counts
+	// as caught up (the CaughtUp condition and Automatic cutover trigger).
+	// +kubebuilder:default="16Mi"
+	// +optional
+	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
+}
+
+// CutoverMode picks who pulls the trigger.
+// +kubebuilder:validation:Enum=Manual;Automatic
+type CutoverMode string
+
+const (
+	// CutoverManual waits for spec.cutover.approved.
+	CutoverManual CutoverMode = "Manual"
+	// CutoverAutomatic cuts over as soon as the migration is caught up.
+	CutoverAutomatic CutoverMode = "Automatic"
+)
+
+// CutoverSpec controls when replication stops and the migration finalizes.
+// Cutover means: writes to the source MUST already be stopped, the stream is
+// frozen at the source's current LSN, drained, and sequences re-synced.
+type CutoverSpec struct {
+	// mode selects Manual (default) or Automatic cutover.
+	// +kubebuilder:default=Manual
+	// +optional
+	Mode CutoverMode `json:"mode,omitempty"`
+
+	// approved triggers the cutover in Manual mode. Mutable. Setting it back
+	// to false after the cutover started has no effect.
+	// +optional
+	Approved bool `json:"approved,omitempty"`
+}
+
+// ReplicationStatus mirrors the pgcopydb sentinel while streaming.
+type ReplicationStatus struct {
+	// +optional
+	SlotName string `json:"slotName,omitempty"`
+	// writeLSN is the last LSN received from the source.
+	// +optional
+	WriteLSN string `json:"writeLSN,omitempty"`
+	// replayLSN is the last transaction durably applied to the target.
+	// +optional
+	ReplayLSN string `json:"replayLSN,omitempty"`
+	// endpos is the cutover LSN once set.
+	// +optional
+	Endpos string `json:"endpos,omitempty"`
+	// lagBytes is the byte distance between the source WAL head and replayLSN.
+	// +optional
+	LagBytes *int64 `json:"lagBytes,omitempty"`
+}
+
 // MigrationSpec is the desired state of a Migration. source and target are
 // immutable after creation (a migration is a one-shot job, like batch/v1 Job).
 type MigrationSpec struct {
@@ -238,6 +318,16 @@ type MigrationSpec struct {
 	// clone configures the base copy.
 	// +optional
 	Clone CloneOptions `json:"clone,omitempty"`
+
+	// follow enables live migration (CDC after the base copy). Immutable:
+	// a one-shot clone cannot become a live migration after the fact.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="follow is immutable"
+	// +optional
+	Follow *FollowOptions `json:"follow,omitempty"`
+
+	// cutover controls how a live migration ends; ignored without follow.
+	// +optional
+	Cutover CutoverSpec `json:"cutover,omitempty"`
 
 	// workVolume configures the work-directory PVC.
 	// +optional
@@ -266,25 +356,31 @@ type MigrationSpec struct {
 
 // MigrationPhase is a human-facing summary derived from conditions. It exists
 // for the printer column only; conditions are authoritative.
-// +kubebuilder:validation:Enum=Pending;Validating;Cloning;Verifying;Completed;Failed;Suspended
+// +kubebuilder:validation:Enum=Pending;Validating;Cloning;Streaming;CutoverPending;CuttingOver;Verifying;Completed;Failed;Suspended
 type MigrationPhase string
 
 const (
-	PhasePending    MigrationPhase = "Pending"
-	PhaseValidating MigrationPhase = "Validating"
-	PhaseCloning    MigrationPhase = "Cloning"
-	PhaseVerifying  MigrationPhase = "Verifying"
-	PhaseCompleted  MigrationPhase = "Completed"
-	PhaseFailed     MigrationPhase = "Failed"
-	PhaseSuspended  MigrationPhase = "Suspended"
+	PhasePending        MigrationPhase = "Pending"
+	PhaseValidating     MigrationPhase = "Validating"
+	PhaseCloning        MigrationPhase = "Cloning"
+	PhaseStreaming      MigrationPhase = "Streaming"
+	PhaseCutoverPending MigrationPhase = "CutoverPending"
+	PhaseCuttingOver    MigrationPhase = "CuttingOver"
+	PhaseVerifying      MigrationPhase = "Verifying"
+	PhaseCompleted      MigrationPhase = "Completed"
+	PhaseFailed         MigrationPhase = "Failed"
+	PhaseSuspended      MigrationPhase = "Suspended"
 )
 
 // Condition type constants (positive polarity, per Kubernetes API conventions).
 const (
-	ConditionValidated      = "Validated"
-	ConditionCloneCompleted = "CloneCompleted"
-	ConditionComplete       = "Complete"
-	ConditionFailed         = "Failed"
+	ConditionValidated       = "Validated"
+	ConditionCloneCompleted  = "CloneCompleted"
+	ConditionStreaming       = "Streaming"
+	ConditionCaughtUp        = "CaughtUp"
+	ConditionCutoverComplete = "CutoverCompleted"
+	ConditionComplete        = "Complete"
+	ConditionFailed          = "Failed"
 )
 
 // CloneProgress mirrors pgcopydb list progress --json into status.
@@ -328,6 +424,10 @@ type MigrationStatus struct {
 	// progress reports base-copy progress.
 	// +optional
 	Progress *CloneProgress `json:"progress,omitempty"`
+
+	// replication reports streaming state while following.
+	// +optional
+	Replication *ReplicationStatus `json:"replication,omitempty"`
 
 	// jobName is the current worker Job.
 	// +optional
