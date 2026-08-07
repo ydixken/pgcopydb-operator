@@ -207,6 +207,22 @@ func PreludeScript(entries []Passfile) string {
 	if len(entries) == 0 {
 		return execPgcopydb
 	}
+	return passfileAssembly(entries) + execPgcopydb
+}
+
+// WrapScript prefixes an arbitrary shell script with the passfile assembly,
+// for auxiliary Jobs (drain verification, preflight) that need authenticated
+// psql without exec-ing pgcopydb. Without entries the script runs as is.
+func WrapScript(entries []Passfile, script string) string {
+	if len(entries) == 0 {
+		return script
+	}
+	return passfileAssembly(entries) + script
+}
+
+// passfileAssembly renders the shared shell fragment that builds the libpq
+// passfile and exports PGPASSFILE for everything that follows.
+func passfileAssembly(entries []Passfile) string {
 	var b strings.Builder
 	b.WriteString("set -eu\numask 077\n: > " + PgpassPath + "\n")
 	for _, e := range entries {
@@ -217,6 +233,5 @@ func PreludeScript(entries []Passfile) string {
 			e.Host, e.User, e.File, PgpassPath)
 	}
 	b.WriteString("export PGPASSFILE=" + PgpassPath + "\n")
-	b.WriteString(execPgcopydb)
 	return b.String()
 }

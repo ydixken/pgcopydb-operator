@@ -127,20 +127,43 @@ func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, e
 // the endpos recorded in the work-dir sentinel.
 func buildVerifyJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
+	// The origin parks at the last applied COMMIT record, which can trail
+	// endpos (the source WAL head at approval) by a few non-data records
+	// even on a fully drained, quiesced source (observed live: 56 bytes).
+	// The tolerance below one WAL page still catches both real loss modes
+	// (they gap by the size of the skipped data, hundreds of KB and up);
+	// a hypothetical lost transaction smaller than the tolerance is the
+	// residual risk, and spec.verification.data is the airtight check.
 	script := `set -eu
 endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
 echo "endpos=$endpos origin_progress=$progress"
-ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$progress'::pg_lsn, '$endpos'::pg_lsn) >= 0)::int")
+ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn) <= 8192)::int")
 [ "$ok" = "1" ]`
-	args := []string{"-c", script}
-	job, err := jobSkeleton(m, runnerImage, verifyJobName(m), args, 1)
+	job, err := jobSkeleton(m, runnerImage, verifyJobName(m), nil, 1)
 	if err != nil {
 		return nil, err
 	}
-	// The skeleton assumes pgcopydb argv appended to the prelude; this Job
-	// runs a shell script instead, reusing the same env and mounts.
-	job.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh"}
+	// The skeleton wires the pgcopydb exec prelude; this Job runs a script
+	// instead, but still needs the passfile assembly for authenticated psql
+	// (running bare /bin/sh here once shipped verification that failed auth
+	// and falsely refuted every drain, found live).
+	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
+	if err != nil {
+		return nil, err
+	}
+	tgt, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	if err != nil {
+		return nil, err
+	}
+	var passfiles []conn.Passfile
+	for _, mat := range []*conn.Materialized{src, tgt} {
+		if mat.Passfile != nil {
+			passfiles = append(passfiles, *mat.Passfile)
+		}
+	}
+	job.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh", "-c", conn.WrapScript(passfiles, script)}
+	job.Spec.Template.Spec.Containers[0].Args = nil
 	return job, nil
 }
 
