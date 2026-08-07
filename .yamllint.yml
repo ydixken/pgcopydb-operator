@@ -1,0 +1,9 @@
+extends: default
+
+rules:
+  document-start:
+    present: false  # standalone config files; a --- header adds nothing
+  line-length:
+    max: 140  # digest-pinned image refs and commented CI lines overflow 80 by design
+  truthy:
+    check-keys: false  # GitHub workflow files use the bare `on:` key, which default truthy flags
