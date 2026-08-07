@@ -37,6 +37,7 @@ import (
 
 	pgcopydboperatoriov1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -181,11 +182,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	poller, err := progress.New(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create progress poller")
+		os.Exit(1)
+	}
 	if err := (&controller.MigrationReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		Recorder:    mgr.GetEventRecorder("pgcopydb-operator"),
 		RunnerImage: runnerImage,
+		Poller:      poller,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "migration")
 		os.Exit(1)

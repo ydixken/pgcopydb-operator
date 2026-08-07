@@ -35,6 +35,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // pollInterval is how often a running clone is re-checked (progress polling
@@ -56,6 +58,10 @@ type MigrationReconciler struct {
 
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
+
+	// Poller reads clone progress from running worker pods; nil disables
+	// polling (envtest has no pods to ask).
+	Poller *progress.Poller
 }
 
 // +kubebuilder:rbac:groups=pgcopydb-operator.io,resources=migrations,verbs=get;list;watch;create;update;patch;delete
@@ -64,6 +70,8 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;configmaps,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 
 // Reconcile drives one Migration toward completion.
 func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -75,6 +83,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if !m.DeletionTimestamp.IsZero() {
 		// Owned objects go with the CR via garbage collection.
+		metrics.Forget(m.Namespace, m.Name)
 		return ctrl.Result{}, nil
 	}
 
@@ -136,6 +145,15 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	m.Status.Phase = v1alpha1.PhaseCloning
+	if r.Poller != nil {
+		// Best effort: a missing sample (pod starting/terminating, catalogs
+		// not ready) keeps the previous numbers instead of failing the pass.
+		if p, err := r.Poller.CloneProgress(ctx, m.Namespace, job.Name); err != nil {
+			log.V(1).Info("progress poll failed", "error", err)
+		} else if p != nil {
+			m.Status.Progress = p
+		}
+	}
 	if err := r.updateStatus(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -291,6 +309,7 @@ func (r *MigrationReconciler) setCondition(m *v1alpha1.Migration, t string, s me
 
 func (r *MigrationReconciler) updateStatus(ctx context.Context, m *v1alpha1.Migration) error {
 	m.Status.ObservedGeneration = m.Generation
+	metrics.Record(m)
 	return r.Status().Update(ctx, m)
 }
 

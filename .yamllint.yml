@@ -4,6 +4,8 @@ extends: default
 # style and regenerates it, so we do not lint it by hand.
 ignore:
   - config/
+  # Transient agent worktrees; their content is linted when integrated.
+  - .claude/worktrees/
 
 rules:
   document-start:
