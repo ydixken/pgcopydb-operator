@@ -1,5 +1,10 @@
 extends: default
 
+# config/ is the kubebuilder-generated kustomize tree; controller-gen owns its
+# style and regenerates it, so we do not lint it by hand.
+ignore:
+  - config/
+
 rules:
   document-start:
     present: false  # standalone config files; a --- header adds nothing
