@@ -54,7 +54,16 @@ var _ = Describe("Migration Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					// Minimal valid spec: source/target are required and CEL
+					// enforces the inline-fields one-of.
+					Spec: pgcopydboperatoriov1alpha1.MigrationSpec{
+						Source: pgcopydboperatoriov1alpha1.PostgresConnection{
+							Host: "source.example.com", Database: "app", Username: "migrator",
+						},
+						Target: pgcopydboperatoriov1alpha1.PostgresConnection{
+							Host: "target.example.com", Database: "app", Username: "app",
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
