@@ -48,7 +48,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 - [ ] `spec.follow` (plugin, slotName, publication, replayNoOpUpdates, maxCatchupLag) + generated unique slot/origin/publication names.
 - [ ] Follow-mode preflight: `wal_level`, slot capacity, REPLICATION privilege, replica-identity audit (fail on PK-less tables unless allowlisted), plugin availability.
-- [ ] Control plane: runner starts with `PGCOPYDB_HOST=0.0.0.0`; operator drives sentinel via TCP (S1/S2 outcome; exec fallback). NetworkPolicy in chart.
+- [x] Control plane decision (2026-08-07): sentinel driven via pods/exec in the runner pod (same filesystem, sanctioned by pgcopydb docs; exec plumbing already exists for progress). No PGCOPYDB_HOST set, so no open port and no NetworkPolicy needed yet; the TCP coordinator (S1-verified) stays the documented alternative if exec proves limiting.
 - [ ] Conditions Streaming/CaughtUp (lag from sentinel selectors vs `pg_current_wal_lsn`), `status.replication` block, lag metric.
 - [ ] Cutover `mode: Manual|Automatic` + `approved` gate: quiesce guidance, `sentinel set endpos --current`, drain = Job exit 0 (authoritative; sequences re-synced by `clone --follow` itself), CutoverCompleted.
 - [ ] Cleanup Job + finalizer: `pgcopydb stream cleanup` on abort/deletion (drops slot, publication, origin); slot-retention warning while suspended.
