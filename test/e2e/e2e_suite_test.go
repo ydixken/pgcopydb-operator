@@ -61,7 +61,9 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	operatorTag = "v0.1.0-alpha.5"
+	// alpha.8 adds the drain-verify gate (origin progress vs endpos) on top of
+	// alpha.7's exec credential fix; live cutover depends on both.
+	operatorTag = "v0.1.0-alpha.8"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
@@ -148,6 +150,32 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "migrations.pgcopydb-operator.io"}, crd)).
 		To(Succeed(), "CRD migrations.pgcopydb-operator.io not found or cluster unreachable;"+
 			" install the CRD first (chart with crds.install=true, or config/crd), the suite will not create it")
+	// A pre-follow CRD would silently prune spec.follow at admission and the
+	// live scenarios would run as plain clones; fail fast instead.
+	versions, _, _ := unstructured.NestedSlice(crd.Object, "spec", "versions")
+	Expect(versions).NotTo(BeEmpty(), "CRD has no versions")
+	v0, _ := versions[0].(map[string]any)
+	_, hasFollow, _ := unstructured.NestedMap(v0, "schema", "openAPIV3Schema",
+		"properties", "spec", "properties", "follow")
+	Expect(hasFollow).To(BeTrue(),
+		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
+			" follow controller; upgrade the CRD (chart >= v0.1.0-alpha.6) before running the live scenarios")
+
+	// The suite is single-tenant per cluster: two runs share the release name,
+	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
+	// plus the first AfterSuite silently destroy each other's environment.
+	// Fail fast when the release exists; E2E_FORCE=true takes over a release
+	// that a crashed run left behind.
+	By("checking no other e2e run holds the operator release")
+	if err := exec.Command("helm", "status", helmRelease, "-n", nsOperator).Run(); err == nil {
+		if os.Getenv("E2E_FORCE") != "true" {
+			Fail("helm release " + helmRelease + " already exists in " + nsOperator +
+				": another e2e run is active, or a crashed run left it behind. The suite is" +
+				" single-tenant per cluster; wait for the other run to finish, or rerun with" +
+				" E2E_FORCE=true to take the release over.")
+		}
+		_, _ = fmt.Fprintln(GinkgoWriter, "E2E_FORCE=true: taking over the existing release")
+	}
 
 	By("installing the suite's own operator into " + nsOperator)
 	// Accepted caveat: the production operator watches cluster-wide and may
@@ -155,7 +183,6 @@ var _ = BeforeSuite(func() {
 	// controller converges either way (attempts derive from persisted status,
 	// Job creation tolerates AlreadyExists), so the specs assert terminal
 	// phase, attempts, Jobs, and data, never event counts or timing.
-	// A crashed run may have left the release behind; clear it first.
 	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
 	helmRun("install", helmRelease, chartPath,
 		"-n", nsOperator, "--create-namespace",
@@ -190,6 +217,12 @@ var _ = BeforeSuite(func() {
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
 	resetTargetObjects()
+
+	By("clearing replication leftovers on the source from crashed runs")
+	resetSourceReplication()
+
+	By("granting the follow-mode privileges to the app role")
+	ensureFollowPrivileges()
 })
 
 var _ = AfterSuite(func() {
@@ -210,12 +243,22 @@ var _ = AfterSuite(func() {
 })
 
 // helmRun executes helm against the current kubectl context, echoes its
-// output, and fails the suite on error.
+// output, and fails the suite on error. Transient API-server hiccups (TLS
+// handshake timeouts happen on the shared dev cluster) get two quick retries;
+// a real failure still aborts with helm's output on record.
 func helmRun(args ...string) {
 	GinkgoHelper()
-	out, err := exec.Command("helm", args...).CombinedOutput()
-	_, _ = GinkgoWriter.Write(out)
-	Expect(err).NotTo(HaveOccurred(), "helm %s failed", strings.Join(args, " "))
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var out []byte
+		out, err = exec.Command("helm", args...).CombinedOutput()
+		_, _ = GinkgoWriter.Write(out)
+		if err == nil {
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+	Expect(err).NotTo(HaveOccurred(), "helm %s failed after 3 attempts", strings.Join(args, " "))
 }
 
 // deleteNamespaces deletes the given namespaces and waits until they are
@@ -274,6 +317,14 @@ func cnpgCluster(name string, initSQL []string) *unstructured.Unstructured {
 			"instances": int64(1),
 			"storage":   map[string]any{"size": "3Gi"},
 			"bootstrap": map[string]any{"initdb": initdb},
+			// CNPG defaults wal_sender_timeout to 5s for its own HA streaming;
+			// that terminates pgcopydb's logical-decoding walsender whenever a
+			// standby status update is a few seconds late (observed live). Use
+			// the PostgreSQL default so follow scenarios exercise the operator,
+			// not the fixture's aggressive timeout.
+			"postgresql": map[string]any{
+				"parameters": map[string]any{"wal_sender_timeout": "60s"},
+			},
 		},
 	}}
 }
@@ -308,21 +359,83 @@ func resetTargetObjects() {
 	psql(tgtPod, "DROP TABLE IF EXISTS public.customers CASCADE")
 }
 
+// ensureFollowPrivileges grants the app role the non-superuser follow
+// prerequisites: the REPLICATION attribute on the source (slot creation and
+// WAL sender), EXECUTE on the pg_replication_origin_* functions on the target
+// (origin tracking during apply and cleanup), and SET on
+// session_replication_role on the target (the apply session's preamble;
+// without it pgcopydb 0.18 silently applies nothing while reporting success).
+// Runs on every suite start because kept fixtures skip initdb SQL; every
+// statement is idempotent. PREREQUISITES.md documents the same set for users.
+func ensureFollowPrivileges() {
+	GinkgoHelper()
+	psql(srcPod, "ALTER ROLE app REPLICATION")
+	psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
+		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
+		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
+	psql(tgtPod, "GRANT SET ON PARAMETER session_replication_role TO app")
+}
+
+// resetSourceReplication drops what a crashed follow run may have left on the
+// source: live-write rows (the fresh-clone scenario asserts exact fixture
+// counts), pgcopydb replication slots, and auto-created publications. Slot and
+// publication names are deterministic per Migration name, so a leftover would
+// collide with this run's follow scenarios.
+func resetSourceReplication() {
+	GinkgoHelper()
+	psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	psql(srcPod, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
+		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
+	psql(srcPod, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
+		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
+}
+
 // psql runs one statement inside a CNPG instance pod as the in-pod postgres
 // superuser (peer auth on the unix socket, no password involved) and returns
 // trimmed stdout. kubectl exec is deliberate: it reuses the same current
-// context as the client and saves a hand-rolled SPDY executor.
+// context as the client and saves a hand-rolled SPDY executor. Failures to
+// even reach the pod get two retries; anything after connecting fails hard,
+// because the statement may have run and not every caller is idempotent.
 func psql(pod, sql string) string {
 	GinkgoHelper()
-	cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-tAc", sql)
-	out, err := cmd.Output()
-	if err != nil {
+	var lastErr error
+	var lastStderr string
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+			"psql", "-U", "postgres", appDB, "-tAc", sql)
+		out, err := cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+		lastErr = err
+		lastStderr = ""
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			Expect(err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, pod, string(ee.Stderr))
+			lastStderr = string(ee.Stderr)
 		}
-		Expect(err).NotTo(HaveOccurred(), "psql %q on %s failed", sql, pod)
+		if !transientExecError(lastStderr) {
+			break
+		}
+		time.Sleep(5 * time.Second)
 	}
-	return strings.TrimSpace(string(out))
+	Expect(lastErr).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, pod, lastStderr)
+	return ""
+}
+
+// transientExecError reports whether kubectl exec failed before reaching the
+// pod (API-server hiccups happen on the shared dev cluster). Only those are
+// safe to retry for arbitrary SQL.
+func transientExecError(stderr string) bool {
+	for _, marker := range []string{
+		"TLS handshake timeout",
+		"Unable to connect to the server",
+		"error dialing backend",
+		"connection refused",
+	} {
+		if strings.Contains(stderr, marker) {
+			return true
+		}
+	}
+	return false
 }
