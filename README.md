@@ -48,6 +48,7 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 
 ## Documentation
 
+- [PREREQUISITES.md](PREREQUISITES.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
