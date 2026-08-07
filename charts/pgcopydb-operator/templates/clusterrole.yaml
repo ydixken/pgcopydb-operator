@@ -1,5 +1,6 @@
 {{- if .Values.rbac.create }}
-{{- /* Rules mirror config/rbac/role.yaml, the controller-gen output. */}}
+{{- /* Rules below are copied verbatim from config/rbac/role.yaml (the
+controller-gen output); update them together. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -7,57 +8,72 @@ metadata:
   labels:
     {{- include "pgcopydb-operator.labels" . | nindent 4 }}
 rules:
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-      - persistentvolumeclaims
-    verbs:
-      - create
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - ""
-    resources:
-      - events
-    verbs:
-      - create
-      - patch
-  - apiGroups:
-      - batch
-    resources:
-      - jobs
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - pgcopydb-operator.io
-    resources:
-      - migrations
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - pgcopydb-operator.io
-    resources:
-      - migrations/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - pgcopydb-operator.io
-    resources:
-      - migrations/status
-    verbs:
-      - get
-      - patch
-      - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - pgcopydb-operator.io
+  resources:
+  - migrations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - pgcopydb-operator.io
+  resources:
+  - migrations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - pgcopydb-operator.io
+  resources:
+  - migrations/status
+  verbs:
+  - get
+  - patch
+  - update
 {{- end }}

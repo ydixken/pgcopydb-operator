@@ -105,11 +105,12 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 		return nil, err
 	}
 
-	// Attempt > 1 resumes from the catalogs. The snapshot of the failed
-	// attempt is gone with its process, so --resume needs --not-consistent
-	// (see docs/research/pgcopydb-cli.md, resume semantics).
+	// Attempt 1 restarts (wipes) the work dir: any state found there is
+	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
+	// failed attempt is gone with its process, so --resume needs
+	// --not-consistent (see docs/research/pgcopydb-cli.md).
 	resume := attempt > 1
-	args := pgcopydb.CloneArgs(&m.Spec, resume, resume)
+	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 
 	env := append(src.Env, tgt.Env...)
 	// Structured runner logs for humans and future machine parsing.

@@ -26,8 +26,13 @@ import (
 )
 
 func TestCloneArgs_Minimal(t *testing.T) {
-	got := CloneArgs(&v1alpha1.MigrationSpec{}, false, false)
+	got := CloneArgs(&v1alpha1.MigrationSpec{}, false, false, false)
 	assertArgs(t, got, "clone --dir /workdir")
+}
+
+func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
+	got := CloneArgs(&v1alpha1.MigrationSpec{}, true, false, false)
+	assertArgs(t, got, "clone --dir /workdir --restart")
 }
 
 func TestCloneArgs_Full(t *testing.T) {
@@ -55,7 +60,7 @@ func TestCloneArgs_Full(t *testing.T) {
 			Filters: &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}},
 		},
 	}
-	got := CloneArgs(spec, true, true)
+	got := CloneArgs(spec, false, true, true)
 	// Skips are sorted: analyze, largeObjects, vacuum.
 	want := "clone --dir /workdir" +
 		" --table-jobs 8 --index-jobs 4 --restore-jobs 2 --large-objects-jobs 3" +
@@ -69,9 +74,9 @@ func TestCloneArgs_Full(t *testing.T) {
 
 func TestCloneArgs_EmptyFiltersOmitsFlag(t *testing.T) {
 	spec := &v1alpha1.MigrationSpec{Clone: v1alpha1.CloneOptions{Filters: &v1alpha1.Filters{}}}
-	for _, a := range CloneArgs(spec, false, false) {
+	for _, a := range CloneArgs(spec, false, false, false) {
 		if a == "--filters" {
-			t.Fatalf("empty filters must not add --filters: %v", CloneArgs(spec, false, false))
+			t.Fatalf("empty filters must not add --filters: %v", CloneArgs(spec, false, false, false))
 		}
 	}
 }
@@ -82,7 +87,7 @@ func TestCloneArgs_NoCredentialsInArgv(t *testing.T) {
 		Source: v1alpha1.PostgresConnection{Host: "secret-host", Username: "u"},
 		Target: v1alpha1.PostgresConnection{Host: "t", Username: "u"},
 	}
-	for _, a := range CloneArgs(spec, false, false) {
+	for _, a := range CloneArgs(spec, false, false, false) {
 		if strings.Contains(a, "secret-host") || strings.Contains(a, "--source") || strings.Contains(a, "--target") {
 			t.Fatalf("argv leaked connection info: %v", a)
 		}
