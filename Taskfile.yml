@@ -1,0 +1,44 @@
+# Task runner for the pgcopydb-operator harness. Deliberately a Taskfile, not a
+# Makefile: kubebuilder owns the Makefile it generates at scaffold time, and
+# keeping it pristine keeps upstream diffs clean. Once the scaffold lands,
+# `test` delegates to `make test` (envtest setup lives there); this file stays
+# the human/agent entrypoint.
+version: "3"
+
+set: [pipefail]
+
+tasks:
+  help:
+    desc: List all tasks.
+    aliases: [default]
+    cmds:
+      - task --list-all
+
+  lint:
+    desc: Lint everything present (yamllint now; golangci-lint once Go code exists).
+    cmds:
+      - yamllint --strict .
+      - cmd: |-
+          if [ -f go.mod ]; then golangci-lint run; else echo "lint: no go.mod yet, skipping golangci-lint"; fi
+
+  test:
+    desc: Run unit tests (delegates to kubebuilder's make test once scaffolded).
+    cmds:
+      - cmd: |-
+          if [ -f Makefile ]; then make test; else echo "test: no Go module yet, nothing to test"; fi
+
+  e2e:
+    desc: >-
+      Run e2e tests against the CURRENT kubectl context (a real cluster).
+      Local only, never wired into CI. Confirms the context before running.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    prompt: >-
+      e2e will run against kubectl context '{{.KUBE_CONTEXT}}', a real
+      cluster. Continue?
+    preconditions:
+      - sh: test -d test/e2e
+        msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    cmds:
+      - go test ./test/e2e/... -v -timeout 30m
