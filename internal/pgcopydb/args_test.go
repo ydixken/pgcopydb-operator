@@ -63,7 +63,7 @@ func TestCloneArgs_Full(t *testing.T) {
 		" --drop-if-exists --roles --no-role-passwords --no-owner --no-acl" +
 		" --no-comments --no-tablespaces --use-copy-binary --fail-fast" +
 		" --skip-analyze --skip-large-objects --skip-vacuum" +
-		" --filters /workdir/filters.ini --resume --not-consistent"
+		" --filters /etc/pgcopydb/conf/filters.ini --resume --not-consistent"
 	assertArgs(t, got, want)
 }
 

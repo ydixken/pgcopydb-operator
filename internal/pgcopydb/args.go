@@ -36,9 +36,9 @@ const WorkDir = "/workdir"
 // flagDir is the pgcopydb work-directory flag.
 const flagDir = "--dir"
 
-// FiltersPath is where the operator writes the rendered --filters INI inside
-// the runner, when filters are configured.
-const FiltersPath = WorkDir + "/filters.ini"
+// FiltersPath is where the rendered --filters INI is mounted in the runner
+// (from an operator-owned ConfigMap), when filters are configured.
+const FiltersPath = "/etc/pgcopydb/conf/filters.ini"
 
 // skipFlag maps a SkipOption to its pgcopydb flag.
 var skipFlag = map[v1alpha1.SkipOption]string{
