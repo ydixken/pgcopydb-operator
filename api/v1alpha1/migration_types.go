@@ -17,52 +17,337 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// MigrationSpec defines the desired state of Migration
-type MigrationSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of Migration. Edit migration_types.go to remove/update
+// PostgresConnection describes how to reach one PostgreSQL endpoint. It is a
+// self-contained type so a reusable connection kind can reference it later.
+// Provide either the inline fields (host/database/username plus a password
+// secret) or uriSecretRef (a full libpq URI/DSN), never both.
+// +kubebuilder:validation:XValidation:rule="has(self.uriSecretRef) ? !has(self.host) && !has(self.username) : has(self.host) && has(self.username)",message="set either uriSecretRef or the inline host/username fields, not both"
+type PostgresConnection struct {
+	// host is the server hostname or IP. Required unless uriSecretRef is set.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Host string `json:"host,omitempty"`
+
+	// port is the server port.
+	// +kubebuilder:default=5432
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// database is the database name to connect to. Required unless uriSecretRef is set.
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// username is the role to connect as. Required unless uriSecretRef is set.
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// passwordSecretRef selects the password. Rendered into a libpq passfile,
+	// never into argv or CR status.
+	// +optional
+	PasswordSecretRef *corev1.SecretKeySelector `json:"passwordSecretRef,omitempty"`
+
+	// sslMode is the libpq sslmode.
+	// +kubebuilder:validation:Enum=disable;allow;prefer;require;verify-ca;verify-full
+	// +kubebuilder:default=prefer
+	// +optional
+	SSLMode string `json:"sslMode,omitempty"`
+
+	// tls references client certificate material, mounted 0600 for libpq.
+	// +optional
+	TLS *TLSSecretRefs `json:"tls,omitempty"`
+
+	// uriSecretRef selects a full libpq connection URI/DSN (with credentials).
+	// Mutually exclusive with the inline fields; useful for DBaaS sources.
+	// +optional
+	URISecretRef *corev1.SecretKeySelector `json:"uriSecretRef,omitempty"`
 }
 
-// MigrationStatus defines the observed state of Migration.
+// TLSSecretRefs points at client certificate material for a connection.
+type TLSSecretRefs struct {
+	// rootCA is the server CA bundle (libpq sslrootcert).
+	// +optional
+	RootCA *corev1.SecretKeySelector `json:"rootCA,omitempty"`
+	// cert is the client certificate (libpq sslcert).
+	// +optional
+	Cert *corev1.SecretKeySelector `json:"cert,omitempty"`
+	// key is the client private key (libpq sslkey).
+	// +optional
+	Key *corev1.SecretKeySelector `json:"key,omitempty"`
+}
+
+// SkipOption names a section of the base copy to skip. Maps to pgcopydb
+// --skip-* flags; CDC (follow) is unaffected by these.
+// +kubebuilder:validation:Enum=largeObjects;extensions;collations;vacuum;analyze;dbProperties;ctidSplit
+type SkipOption string
+
+// CloneOptions maps the pgcopydb clone surface. All fields are optional; zero
+// values mean "use the pgcopydb default".
+type CloneOptions struct {
+	// tableJobs is the number of concurrent table COPY workers (pgcopydb --table-jobs).
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TableJobs int32 `json:"tableJobs,omitempty"`
+
+	// indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	IndexJobs int32 `json:"indexJobs,omitempty"`
+
+	// restoreJobs is pg_restore --jobs (--restore-jobs); 0 follows indexJobs.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	RestoreJobs int32 `json:"restoreJobs,omitempty"`
+
+	// largeObjectsJobs is the number of concurrent large-object workers.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	LargeObjectsJobs int32 `json:"largeObjectsJobs,omitempty"`
+
+	// splitTablesLargerThan enables same-table concurrency for tables at or
+	// above this size (--split-tables-larger-than), rendered to bytes.
+	// +optional
+	SplitTablesLargerThan *resource.Quantity `json:"splitTablesLargerThan,omitempty"`
+
+	// splitMaxParts caps the number of parts per table (--split-max-parts).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	SplitMaxParts int32 `json:"splitMaxParts,omitempty"`
+
+	// dropIfExists issues pg_restore --clean --if-exists on the target.
+	// +optional
+	DropIfExists bool `json:"dropIfExists,omitempty"`
+
+	// roles copies roles before the clone (--roles). Needs superuser on the
+	// source unless noRolePasswords is also set.
+	// +optional
+	Roles bool `json:"roles,omitempty"`
+
+	// noRolePasswords dumps roles without passwords (--no-role-passwords),
+	// avoiding the superuser requirement of roles.
+	// +optional
+	NoRolePasswords bool `json:"noRolePasswords,omitempty"`
+
+	// noOwner skips ALTER OWNER on restore (--no-owner).
+	// +optional
+	NoOwner bool `json:"noOwner,omitempty"`
+
+	// noACL skips GRANT/REVOKE on restore (--no-acl).
+	// +optional
+	NoACL bool `json:"noACL,omitempty"`
+
+	// noComments skips COMMENT statements (--no-comments).
+	// +optional
+	NoComments bool `json:"noComments,omitempty"`
+
+	// noTablespaces skips tablespace selection (--no-tablespaces).
+	// +optional
+	NoTablespaces bool `json:"noTablespaces,omitempty"`
+
+	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
+	// +optional
+	UseCopyBinary bool `json:"useCopyBinary,omitempty"`
+
+	// failFast stops the whole run on the first failed child (--fail-fast).
+	// +optional
+	FailFast bool `json:"failFast,omitempty"`
+
+	// skip lists base-copy sections to skip.
+	// +listType=set
+	// +optional
+	Skip []SkipOption `json:"skip,omitempty"`
+
+	// filters is rendered to the pgcopydb --filters INI file.
+	// +optional
+	Filters *Filters `json:"filters,omitempty"`
+}
+
+// Filters maps the pgcopydb --filters INI sections. pgcopydb rejects some
+// combinations (for example include-only-table with exclude-table); those are
+// enforced by CEL below and surfaced as validation errors.
+// +kubebuilder:validation:XValidation:rule="!(has(self.includeOnlyTables) && (has(self.excludeTables) || has(self.excludeSchemas)))",message="includeOnlyTables cannot be combined with excludeTables or excludeSchemas"
+// +kubebuilder:validation:XValidation:rule="!(has(self.includeOnlySchemas) && has(self.excludeSchemas))",message="includeOnlySchemas cannot be combined with excludeSchemas"
+// +kubebuilder:validation:XValidation:rule="!(has(self.includeOnlyExtensions) && has(self.excludeExtensions))",message="includeOnlyExtensions cannot be combined with excludeExtensions"
+type Filters struct {
+	// +optional
+	IncludeOnlyTables []string `json:"includeOnlyTables,omitempty"`
+	// +optional
+	ExcludeTables []string `json:"excludeTables,omitempty"`
+	// +optional
+	IncludeOnlySchemas []string `json:"includeOnlySchemas,omitempty"`
+	// +optional
+	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
+	// +optional
+	ExcludeIndexes []string `json:"excludeIndexes,omitempty"`
+	// +optional
+	ExcludeTableData []string `json:"excludeTableData,omitempty"`
+	// +optional
+	IncludeOnlyExtensions []string `json:"includeOnlyExtensions,omitempty"`
+	// +optional
+	ExcludeExtensions []string `json:"excludeExtensions,omitempty"`
+}
+
+// WorkVolume configures the PVC that holds the pgcopydb work directory. This
+// is the unit of resumability and MUST survive pod restarts.
+type WorkVolume struct {
+	// storageClassName selects the StorageClass; empty uses the cluster default.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// size is the requested volume size.
+	// +kubebuilder:default="10Gi"
+	// +optional
+	Size resource.Quantity `json:"size,omitempty"`
+}
+
+// RunnerSpec configures the migration worker pod.
+type RunnerSpec struct {
+	// image overrides the runner image (default: operator-configured).
+	// +optional
+	Image string `json:"image,omitempty"`
+	// resources sets the runner container resource requirements.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+}
+
+// MigrationSpec is the desired state of a Migration. source and target are
+// immutable after creation (a migration is a one-shot job, like batch/v1 Job).
+type MigrationSpec struct {
+	// source is the PostgreSQL endpoint to migrate from. Immutable.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
+	// +required
+	Source PostgresConnection `json:"source"`
+
+	// target is the PostgreSQL endpoint to migrate to. Immutable.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable"
+	// +required
+	Target PostgresConnection `json:"target"`
+
+	// clone configures the base copy.
+	// +optional
+	Clone CloneOptions `json:"clone,omitempty"`
+
+	// workVolume configures the work-directory PVC.
+	// +optional
+	WorkVolume WorkVolume `json:"workVolume,omitempty"`
+
+	// runner configures the worker pod.
+	// +optional
+	Runner RunnerSpec `json:"runner,omitempty"`
+
+	// suspend stops the worker while preserving the work volume.
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
+
+	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
+	// Job (backoffLimit 0) that resumes via the pgcopydb work directory.
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	BackoffLimit int32 `json:"backoffLimit,omitempty"`
+
+	// ttlSecondsAfterFinished deletes owned Jobs this long after completion.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+}
+
+// MigrationPhase is a human-facing summary derived from conditions. It exists
+// for the printer column only; conditions are authoritative.
+// +kubebuilder:validation:Enum=Pending;Validating;Cloning;Verifying;Completed;Failed;Suspended
+type MigrationPhase string
+
+const (
+	PhasePending    MigrationPhase = "Pending"
+	PhaseValidating MigrationPhase = "Validating"
+	PhaseCloning    MigrationPhase = "Cloning"
+	PhaseVerifying  MigrationPhase = "Verifying"
+	PhaseCompleted  MigrationPhase = "Completed"
+	PhaseFailed     MigrationPhase = "Failed"
+	PhaseSuspended  MigrationPhase = "Suspended"
+)
+
+// Condition type constants (positive polarity, per Kubernetes API conventions).
+const (
+	ConditionValidated      = "Validated"
+	ConditionCloneCompleted = "CloneCompleted"
+	ConditionComplete       = "Complete"
+	ConditionFailed         = "Failed"
+)
+
+// CloneProgress mirrors pgcopydb list progress --json into status.
+type CloneProgress struct {
+	// +optional
+	TablesTotal int64 `json:"tablesTotal,omitempty"`
+	// +optional
+	TablesDone int64 `json:"tablesDone,omitempty"`
+	// +optional
+	IndexesTotal int64 `json:"indexesTotal,omitempty"`
+	// +optional
+	IndexesDone int64 `json:"indexesDone,omitempty"`
+	// bytesTotal is the total bytes to copy, as reported by pgcopydb.
+	// +optional
+	BytesTotal *resource.Quantity `json:"bytesTotal,omitempty"`
+	// bytesDone is the bytes copied so far.
+	// +optional
+	BytesDone *resource.Quantity `json:"bytesDone,omitempty"`
+}
+
+// MigrationStatus is the observed state of a Migration.
 type MigrationStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// observedGeneration is the .metadata.generation last reconciled.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// phase is a human-facing summary derived from conditions.
+	// +optional
+	Phase MigrationPhase `json:"phase,omitempty"`
 
-	// conditions represent the current state of the Migration resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// conditions represent the current state of the Migration.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// attempts is the number of worker Jobs created so far.
+	// +optional
+	Attempts int32 `json:"attempts,omitempty"`
+
+	// progress reports base-copy progress.
+	// +optional
+	Progress *CloneProgress `json:"progress,omitempty"`
+
+	// jobName is the current worker Job.
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=pgm
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Tables",type=string,JSONPath=`.status.progress.tablesDone`
+// +kubebuilder:printcolumn:name="Attempts",type=integer,JSONPath=`.status.attempts`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Migration is the Schema for the migrations API
+// Migration is the Schema for the migrations API.
 type Migration struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -81,7 +366,7 @@ type Migration struct {
 
 // +kubebuilder:object:root=true
 
-// MigrationList contains a list of Migration
+// MigrationList contains a list of Migration.
 type MigrationList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
