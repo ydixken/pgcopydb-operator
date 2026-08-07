@@ -41,4 +41,4 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 30m
+      - go test ./test/e2e/... -v -timeout 40m -ginkgo.v

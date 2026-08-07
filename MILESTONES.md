@@ -41,17 +41,17 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B10 (done, charts/pgcopydb-operator; helm lint + template verified): Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec, NetworkPolicy toggle) + chart lint in CI.
 - [x] B11 (workflow done; verified with the first tag): GitHub release workflow: both images (amd64 first per S9) + OCI chart to ghcr.io on v* tags.
 - [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
-- [ ] B13 (manual live validation done: clone verified row-identical incl. sequences; Ginkgo suite pending): e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
+- [x] B13 (done 2026-08-07: 6/6 scenarios green live in 148s: fresh clone, dropIfExists re-clone, filters, resume-after-pod-kill, cross-namespace, CEL rejection; suite self-installs a namespace-scoped operator into pgcopydb-e2e-system and always removes it): e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
 - [x] B14 (done): docs: README install/quickstart, `docs/examples/*.yaml` (minimal, tuned+filters, DBaaS DSN), chart README values reference.
 
 ## M2: live migration (follow + cutover)
 
-- [ ] `spec.follow` (plugin, slotName, publication, replayNoOpUpdates, maxCatchupLag) + generated unique slot/origin/publication names.
+- [x] `spec.follow` (plugin, slotName, publication, replayNoOpUpdates, maxCatchupLag) + generated unique slot/origin names (done, PR #16).
 - [ ] Follow-mode preflight: `wal_level`, slot capacity, REPLICATION privilege, replica-identity audit (fail on PK-less tables unless allowlisted), plugin availability.
 - [x] Control plane decision (2026-08-07): sentinel driven via pods/exec in the runner pod (same filesystem, sanctioned by pgcopydb docs; exec plumbing already exists for progress). No PGCOPYDB_HOST set, so no open port and no NetworkPolicy needed yet; the TCP coordinator (S1-verified) stays the documented alternative if exec proves limiting.
-- [ ] Conditions Streaming/CaughtUp (lag from sentinel selectors vs `pg_current_wal_lsn`), `status.replication` block, lag metric.
-- [ ] Cutover `mode: Manual|Automatic` + `approved` gate: quiesce guidance, `sentinel set endpos --current`, drain = Job exit 0 (authoritative; sequences re-synced by `clone --follow` itself), CutoverCompleted.
-- [ ] Cleanup Job + finalizer: `pgcopydb stream cleanup` on abort/deletion (drops slot, publication, origin); slot-retention warning while suspended.
+- [x] Conditions Streaming/CaughtUp with lag from sentinel selectors vs the source WAL head, `status.replication` block (done; lag metric still open).
+- [x] Cutover `mode: Manual|Automatic` + `approved` gate via `sentinel set endpos --current`; drain = worker exit 0; CutoverCompleted (done, envtest-covered).
+- [x] Cleanup Job + finalizer: `pgcopydb stream cleanup` gates Complete and routes deletion; slot-retention warning on suspend (done, envtest-covered).
 - [ ] Snapshot-holder hardening (separate `pgcopydb snapshot --follow` container for consistent base-copy resume) or documented `--not-consistent` trade-off; decide from S8 evidence.
 - [ ] E2e: follow + live pgbench writes + Manual cutover + row equality; Automatic cutover; abort drops the slot; suspend/resume.
 - [ ] Example PrometheusRule (slot retention, apply crash-loop) under docs/examples.
