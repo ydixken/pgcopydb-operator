@@ -269,4 +269,55 @@ var _ = Describe("Migration Controller", func() {
 		args := strings.Join(getJob(fmt.Sprintf("%s-run-2", name)).Spec.Template.Spec.Containers[0].Args, " ")
 		Expect(args).To(ContainSubstring("--resume"))
 	})
+
+	It("converges without error or duplicate events when a pass holds a stale object", func() {
+		const name = "mig-stale"
+		defer cleanup(name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+
+		// drainEvents empties the fake recorder so each phase of the test
+		// only sees the events it caused.
+		drainEvents := func(rec *events.FakeRecorder) []string {
+			var out []string
+			for {
+				select {
+				case e := <-rec.Events:
+					out = append(out, e)
+				default:
+					return out
+				}
+			}
+		}
+
+		// Pass B's view of the world: fetched before pass A writes status.
+		stale := getMigration(name)
+		base := stale.DeepCopy()
+
+		// Pass A: creates the Job, emits AttemptStarted, writes status. The
+		// Migration's resourceVersion moves past what pass B holds.
+		r := newReconciler()
+		rec := r.Recorder.(*events.FakeRecorder)
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("AttemptStarted")))
+
+		// Pass B replays the attempt from its stale copy. The Job already
+		// exists, so AttemptStarted must not fire again, and the status
+		// patch must land despite the stale resourceVersion (a full Update
+		// here is exactly the conflict seen in production).
+		_, err = r.startAttempt(ctx, stale, base)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(drainEvents(rec)).NotTo(ContainElement(ContainSubstring("AttemptStarted")))
+
+		// A follow-up pass converges on single-attempt state.
+		reconcileOnce(name)
+		m := getMigration(name)
+		Expect(m.Status.Attempts).To(Equal(int32(1)))
+		Expect(m.Status.JobName).To(Equal(name + "-run-1"))
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionValidated)).To(BeTrue())
+		Expect(getJob(name + "-run-1")).NotTo(BeNil())
+	})
 })

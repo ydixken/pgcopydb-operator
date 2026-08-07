@@ -75,13 +75,29 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 
 // Reconcile drives one Migration toward completion.
+//
+// A residual write conflict (the Owns(Job) watch triggers overlapping passes)
+// requeues silently: the next pass reads the fresh object and converges, so
+// the conflict carries no information worth logging or eventing.
 func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	res, err := r.reconcile(ctx, req)
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return res, err
+}
+
+func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	m := &v1alpha1.Migration{}
 	if err := r.Get(ctx, req.NamespacedName, m); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// base is the object as fetched; status writes patch against it so a
+	// stale copy (an overlapping pass already moved the object on) does not
+	// conflict the way a full Update would.
+	base := m.DeepCopy()
 	if !m.DeletionTimestamp.IsZero() {
 		// Owned objects go with the CR via garbage collection.
 		metrics.Forget(m.Namespace, m.Name)
@@ -96,7 +112,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if m.Spec.Suspend {
-		return r.reconcileSuspended(ctx, m)
+		return r.reconcileSuspended(ctx, m, base)
 	}
 
 	// Validation: materializing both connections exercises every spec error
@@ -107,7 +123,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "InvalidSpec", err.Error())
 		m.Status.Phase = v1alpha1.PhaseFailed
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "InvalidSpec", "Validate", "%s", err.Error())
-		return ctrl.Result{}, r.updateStatus(ctx, m)
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 	r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
 
@@ -117,7 +133,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Job orchestration: observe the current attempt or start the next one.
 	if m.Status.JobName == "" {
-		return r.startAttempt(ctx, m)
+		return r.startAttempt(ctx, m, base)
 	}
 
 	job := &batchv1.Job{}
@@ -127,7 +143,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// The Job vanished (TTL, manual delete, or a suspend cycle). Start
 		// the next attempt; pgcopydb resumes from the work-dir catalogs.
 		log.Info("worker Job missing, starting next attempt", "job", m.Status.JobName)
-		return r.startAttempt(ctx, m)
+		return r.startAttempt(ctx, m, base)
 	case err != nil:
 		return ctrl.Result{}, err
 	}
@@ -140,9 +156,9 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
 			r.setCondition(m, v1alpha1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "migration finished")
 			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Completed", "Complete", "pgcopydb clone finished")
-			return ctrl.Result{}, r.updateStatus(ctx, m)
+			return ctrl.Result{}, r.updateStatus(ctx, m, base)
 		}
-		return r.handleFailedJob(ctx, m, job)
+		return r.handleFailedJob(ctx, m, base, job)
 	}
 
 	m.Status.Phase = v1alpha1.PhaseCloning
@@ -155,7 +171,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			m.Status.Progress = p
 		}
 	}
-	if err := r.updateStatus(ctx, m); err != nil {
+	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
@@ -163,7 +179,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // reconcileSuspended deletes the active worker (keeping the PVC, so a later
 // resume continues from the catalogs) and parks the Migration.
-func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m *v1alpha1.Migration) (ctrl.Result, error) {
+func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
 	if m.Status.JobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: m.Status.JobName}, job)
@@ -181,18 +197,18 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m *v1alpha
 		m.Status.JobName = ""
 	}
 	m.Status.Phase = v1alpha1.PhaseSuspended
-	return ctrl.Result{}, r.updateStatus(ctx, m)
+	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
 
 // startAttempt creates the next worker Job, unless the retry budget is spent.
 // Budget: backoffLimit is the number of retries, so backoffLimit+1 attempts.
-func (r *MigrationReconciler) startAttempt(ctx context.Context, m *v1alpha1.Migration) (ctrl.Result, error) {
+func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
 		msg := fmt.Sprintf("retry budget exhausted after %d attempts", m.Status.Attempts)
 		m.Status.Phase = v1alpha1.PhaseFailed
 		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", msg)
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "BackoffLimitExceeded", "Fail", "%s", msg)
-		return ctrl.Result{}, r.updateStatus(ctx, m)
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
 	attempt := m.Status.Attempts + 1
@@ -205,8 +221,9 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m *v1alpha1.Migr
 	if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-		return ctrl.Result{}, err
+	createErr := r.Create(ctx, job)
+	if createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+		return ctrl.Result{}, createErr
 	}
 
 	if m.Status.StartedAt == nil {
@@ -218,8 +235,12 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m *v1alpha1.Migr
 	m.Status.Phase = v1alpha1.PhaseCloning
 	r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneRunning",
 		fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
-	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "attempt %d as Job %s", attempt, job.Name)
-	if err := r.updateStatus(ctx, m); err != nil {
+	if createErr == nil {
+		// AlreadyExists means an overlapping pass created this Job and
+		// announced the attempt; a second event would just be noise.
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "attempt %d as Job %s", attempt, job.Name)
+	}
+	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
@@ -227,7 +248,7 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m *v1alpha1.Migr
 
 // handleFailedJob either schedules the next resume attempt or fails the
 // Migration for good.
-func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m *v1alpha1.Migration, job *batchv1.Job) (ctrl.Result, error) {
+func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1alpha1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
 		m.Status.Phase = v1alpha1.PhaseFailed
@@ -235,14 +256,14 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m *v1alpha1.M
 		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded",
 			fmt.Sprintf("attempt %d failed: %s", m.Status.Attempts, reason))
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "Failed", "Fail", "attempt %d failed: %s", m.Status.Attempts, reason)
-		return ctrl.Result{}, r.updateStatus(ctx, m)
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
 	// Clear jobName; the next pass creates attempt N+1 with --resume.
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "AttemptFailed", "Retry",
 		"attempt %d failed (%s), retrying with --resume", m.Status.Attempts, reason)
 	m.Status.JobName = ""
-	if err := r.updateStatus(ctx, m); err != nil {
+	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{Requeue: true}, nil
@@ -328,10 +349,14 @@ func (r *MigrationReconciler) setCondition(m *v1alpha1.Migration, t string, s me
 	})
 }
 
-func (r *MigrationReconciler) updateStatus(ctx context.Context, m *v1alpha1.Migration) error {
+// updateStatus writes m's status as a merge patch against base, the object as
+// it was fetched at the top of the pass. Unlike Update, the patch carries no
+// resourceVersion, so a pass working from a copy that another pass has since
+// moved on still lands instead of erroring with a conflict.
+func (r *MigrationReconciler) updateStatus(ctx context.Context, m, base *v1alpha1.Migration) error {
 	m.Status.ObservedGeneration = m.Generation
 	metrics.Record(m)
-	return r.Status().Update(ctx, m)
+	return r.Status().Patch(ctx, m, client.MergeFrom(base))
 }
 
 // SetupWithManager sets up the controller with the Manager.
