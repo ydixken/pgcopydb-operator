@@ -184,7 +184,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileWith(fake, name)
 		verifyJob := fetchJob(ctx, name+"-verify")
-		Expect(verifyJob.Spec.Template.Spec.Containers[0].Args[1]).To(ContainSubstring("pg_replication_origin_progress"))
+		Expect(verifyJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("pg_replication_origin_progress"))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeFalse())
 
 		// Verification passes: cutover completed, cleanup Job appears.
