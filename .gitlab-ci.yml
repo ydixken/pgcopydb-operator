@@ -30,6 +30,9 @@ lint:yaml:
   image: pipelinecomponents/yamllint:0.35.13@sha256:5ab5eb7da0ed5e606b07c1723fc8b275e925189f70ac259b26b7329cb5f8f44d
   script:
     - yamllint --strict .
+    # The chart embeds the generated CRD; drift between controller-gen
+    # output and the chart template must fail the pipeline.
+    - ./hack/sync-chart-crd.sh --check
 
 # `make lint`, not bare golangci-lint: the scaffolded config uses a custom
 # logcheck module plugin, and the Makefile builds the matching custom binary

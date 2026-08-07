@@ -18,6 +18,8 @@ tasks:
     desc: Lint everything (yamllint, then kubebuilder's make lint for Go).
     cmds:
       - yamllint --strict .
+      # The chart embeds generated artifacts (CRD); this fails on drift.
+      - ./hack/sync-chart-crd.sh --check
       - cmd: |-
           if [ -f Makefile ]; then make lint; else echo "lint: no Makefile yet, skipping Go lint"; fi
 
