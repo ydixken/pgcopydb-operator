@@ -47,7 +47,9 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 ## M2: live migration (follow + cutover)
 
 - [x] `spec.follow` (plugin, slotName, publication, replayNoOpUpdates, maxCatchupLag) + generated unique slot/origin names (done, PR #16).
-- [ ] Follow-mode preflight: `wal_level`, slot capacity, REPLICATION privilege, replica-identity audit (fail on PK-less tables unless allowlisted), plugin availability.
+- [ ] Follow-mode preflight: `wal_level`, slot capacity, REPLICATION privilege on the source role, EXECUTE on the target's pg_replication_origin_* functions, replica-identity audit (fail on PK-less tables unless allowlisted), plugin availability. Live evidence (2026-08-07): missing grants burned 4 attempts in 110s with the real cause visible only in pod logs.
+- [ ] Surface the worker's terminal error in status: the Failed condition currently says only "Job has reached the specified backoff limit"; the operator should extract the last pgcopydb ERROR line (structured JSON logs) into the condition message.
+- [ ] Retry-after-setup-crash guard: pgcopydb `--resume` re-runs CREATE PUBLICATION non-idempotently and fails on its own leftover when the previous attempt died mid-setup; needs an operator-side guard (drop the auto-managed publication before retrying) or an upstream issue.
 - [x] Control plane decision (2026-08-07): sentinel driven via pods/exec in the runner pod (same filesystem, sanctioned by pgcopydb docs; exec plumbing already exists for progress). No PGCOPYDB_HOST set, so no open port and no NetworkPolicy needed yet; the TCP coordinator (S1-verified) stays the documented alternative if exec proves limiting.
 - [x] Conditions Streaming/CaughtUp with lag from sentinel selectors vs the source WAL head, `status.replication` block (done; lag metric still open).
 - [x] Cutover `mode: Manual|Automatic` + `approved` gate via `sentinel set endpos --current`; drain = worker exit 0; CutoverCompleted (done, envtest-covered).
