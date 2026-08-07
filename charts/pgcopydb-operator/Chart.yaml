@@ -7,6 +7,26 @@ appVersion: "0.1.0"
 home: https://github.com/ydixken/pgcopydb-operator
 sources:
   - https://github.com/ydixken/pgcopydb-operator
+keywords:
+  - postgresql
+  - migration
+  - pgcopydb
+  - operator
+maintainers:
+  - name: Yannick Dixken
+    email: ydixken@googlemail.com
 annotations:
   # Chart.yaml has no first-class license field; Artifact Hub reads this one.
   artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/crds: |
+    - kind: Migration
+      version: v1alpha1
+      name: migrations.pgcopydb-operator.io
+      displayName: Migration
+      description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."
+  artifacthub.io/links: |
+    - name: Usage guide
+      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/usage.md
+    - name: Prerequisites
+      url: https://github.com/ydixken/pgcopydb-operator/blob/main/PREREQUISITES.md

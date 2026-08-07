@@ -29,7 +29,7 @@ Migration CRs) in place.
 | `serviceAccount.create` | `true` | Create the manager ServiceAccount. |
 | `serviceAccount.name` | `""` | ServiceAccount name; empty derives from the fullname. |
 | `rbac.create` | `true` | Create ClusterRole, bindings, and the leader-election Role. |
-| `watchNamespaces` | `[]` | Namespaces to reconcile; empty is cluster-wide. Namespaced RBAC is future work, the chart always renders a ClusterRole. |
+| `watchNamespaces` | `[]` | Namespaces the manager watches and reconciles (passed as `--watch-namespaces`); empty is cluster-wide. RBAC stays cluster-scoped either way, only the informer cache narrows. |
 | `replicaCount` | `1` | Manager replicas; extras are leader-election standbys. |
 | `leaderElection.enabled` | `true` | Pass `--leader-elect` and create the election Role. |
 | `crds.install` | `true` | Render the Migration CRD. |
@@ -69,3 +69,8 @@ target, resumable across retries through a work PVC (10Gi by default).
 Passwords come from the referenced Secrets and are written to a libpq
 passfile, never to the command line. Progress appears in
 `kubectl get migrations` (phase, tables copied, attempts).
+
+Endpoint requirements (privileges, WAL settings) are in
+[PREREQUISITES.md](https://github.com/ydixken/pgcopydb-operator/blob/main/PREREQUISITES.md);
+the full walkthrough, including live migrations with cutover, is the
+[usage guide](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/usage.md).

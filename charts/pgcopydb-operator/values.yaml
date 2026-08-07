@@ -61,7 +61,8 @@ metrics:
     enabled: false
 
 networkPolicy:
-  # Placeholder for the M2 sentinel-port policy; renders nothing yet.
+  # Placeholder; renders nothing yet. The exec-based sentinel control plane
+  # opens no port, so there is nothing to restrict so far.
   enabled: false
 
 nodeSelector: {}

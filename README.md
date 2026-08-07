@@ -3,7 +3,7 @@
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 > [!important]
-> In development. M1 (one-shot clone, chart, metrics) is functional; follow/cutover is M2. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
+> In development. One-shot clone (M1) and live migration with follow and controlled cutover (M2) are functional and e2e-tested; verification (M3) and release polish (M4) are underway. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
 
 ## Install
 
@@ -18,6 +18,8 @@ Then create a `Migration` (full examples with explanations in [docs/examples/](d
 kubectl apply -f docs/examples/migration-minimal.yaml
 kubectl get pgm -w
 ```
+
+The [usage guide](docs/usage.md) walks through everything from here: clones, live migrations with cutover, suspend, retries, and troubleshooting.
 
 ## Structure
 
@@ -48,8 +50,10 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 
 ## Documentation
 
+- [Usage guide](docs/usage.md): install, first clone, live migration with cutover, troubleshooting.
 - [PREREQUISITES.md](PREREQUISITES.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.
+- [docs/coverage.md](docs/coverage.md): every pgcopydb clone/follow option mapped to the Migration spec.
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.

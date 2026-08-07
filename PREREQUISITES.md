@@ -26,7 +26,7 @@ Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone -
 
 ## Client tool versions
 
-The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg_restore` MUST be at least the target server's major version. The default runner image ships pgcopydb 0.18 with PostgreSQL 17 client tools; for a newer target major, set `spec.runner.image` to an image with matching tools.
+The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg_restore` MUST be at least the target server's major version. The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools; for a newer target major, set `spec.runner.image` to an image with matching tools.
 
 ## Base clone (every Migration)
 

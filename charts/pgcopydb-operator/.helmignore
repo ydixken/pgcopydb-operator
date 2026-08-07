@@ -1,0 +1,3 @@
+# Artifact Hub repository metadata is pushed as its own OCI artifact
+# (tag artifacthub.io), not packaged into the chart.
+artifacthub-repo.yml
