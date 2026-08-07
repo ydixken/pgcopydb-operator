@@ -116,9 +116,9 @@ var _ = Describe("Migration Controller", func() {
 			j.Status.Failed = 1
 			j.Status.Conditions = append(j.Status.Conditions,
 				batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
-					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"},
+					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg},
 				batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
-					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"})
+					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg})
 		}
 		ExpectWithOffset(1, k8sClient.Status().Update(ctx, j)).To(Succeed())
 	}

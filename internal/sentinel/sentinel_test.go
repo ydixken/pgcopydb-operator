@@ -20,7 +20,7 @@ import "testing"
 
 func TestParseLSN(t *testing.T) {
 	cases := map[string]uint64{
-		"0/0":        0,
+		ZeroLSN:      0,
 		"0/5000000":  0x5000000,
 		"1/0":        1 << 32,
 		"A/2C000028": 0xA<<32 | 0x2C000028,

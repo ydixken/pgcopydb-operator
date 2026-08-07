@@ -32,6 +32,10 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
 
+// ZeroLSN is PostgreSQL's null LSN; the sentinel reports it for an unset
+// endpos.
+const ZeroLSN = "0/0"
+
 // Client reads and drives the sentinel of one running migration pod.
 type Client struct {
 	exec *podexec.Exec
@@ -131,7 +135,7 @@ func (s *State) ToStatus(slotName string) *v1alpha1.ReplicationStatus {
 		WriteLSN:  s.WriteLSN,
 		ReplayLSN: s.ReplayLSN,
 	}
-	if s.Endpos != "" && s.Endpos != "0/0" {
+	if s.Endpos != "" && s.Endpos != ZeroLSN {
 		rs.Endpos = s.Endpos
 	}
 	if lag := s.Lag(); lag >= 0 {
