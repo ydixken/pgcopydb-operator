@@ -29,9 +29,13 @@ import (
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 )
 
-// WorkDir is the in-container path of the pgcopydb work directory (the mounted
-// work volume). pgcopydb --dir points here; it is the unit of resumability.
-const WorkDir = "/workdir"
+// WorkMount is where the work volume is mounted. The pgcopydb work dir lives
+// one level below it: --restart removes the work dir wholesale, which cannot
+// work on the mount point itself.
+const WorkMount = "/work"
+
+// WorkDir is the pgcopydb --dir path; the unit of resumability.
+const WorkDir = WorkMount + "/pgcopydb"
 
 // flagDir is the pgcopydb work-directory flag.
 const flagDir = "--dir"

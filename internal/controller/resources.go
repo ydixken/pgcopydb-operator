@@ -137,7 +137,7 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	mounts := []corev1.VolumeMount{
-		{Name: "workdir", MountPath: pgcopydb.WorkDir},
+		{Name: "workdir", MountPath: pgcopydb.WorkMount},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
 	volumes = append(volumes, src.Volumes...)
