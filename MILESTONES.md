@@ -72,6 +72,8 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 ### Live-iteration findings (2026-08-07, all shipped)
 
+1. PGPASSFILE now lives in the container spec env, not only the prelude shell: exec'd sentinel commands (WAL-head query, endpos) failed password auth otherwise, pinning follow migrations at Streaming. Found by the live follow suite; envtest cannot see it (fake sentinel), which is exactly why both test layers exist.
+
 1. First attempts pass `--restart`: a fresh Migration once adopted the still-terminating work PVC of a deleted one and choked on foreign catalogs. Owned-object creation also refuses foreign owners now.
 1. Events were silently dropped: the new events API needs `events.k8s.io` RBAC; the chart ClusterRole now mirrors controller-gen output verbatim (which also restored pods/exec for progress polling).
 1. Runner ships PostgreSQL client major 18: pg_dump must be >= the newest server major on either side (new unpinned clusters already run 18), and the work dir moved below the volume mount so `--restart` can remove it.
