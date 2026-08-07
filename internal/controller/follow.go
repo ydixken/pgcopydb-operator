@@ -198,6 +198,24 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
+	// Verification runs after the drain is proven and after cleanup: a data
+	// compare against a target still applying WAL would mismatch by design,
+	// so it must wait for the drain; and cleanup goes first because the slot
+	// retains WAL on the source for as long as it exists, while the compare
+	// needs no replication state at all (a mismatch never reopens the
+	// stream). CutoverCompleted is already surfaced above: holding it back
+	// for a long data compare would stretch the write-downtime window.
+	vdone, err := r.ensureVerification(ctx, m)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !vdone {
+		if err := r.updateStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+	}
+
 	now := metav1.Now()
 	m.Status.CompletedAt = &now
 	m.Status.Phase = v1alpha1.PhaseCompleted

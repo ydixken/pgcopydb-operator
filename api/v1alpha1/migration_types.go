@@ -262,6 +262,26 @@ type FollowOptions struct {
 	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
 }
 
+// VerificationOptions selects post-migration pgcopydb compare checks. Both
+// default to off: even the schema compare costs a catalog fetch on both sides,
+// and the data compare reads every table row twice. Results are information,
+// not a gate: a mismatch sets the Verified condition to False and emits a
+// warning event, but the Migration still completes (the data has arrived; what
+// to do about a difference is the operator's call). Mutable until completion.
+type VerificationOptions struct {
+	// schema runs pgcopydb compare schema: tables, columns, indexes,
+	// constraints, and sequence values as pgcopydb models them. Not a full
+	// DDL diff (no functions, triggers, ACLs, defaults).
+	// +optional
+	Schema bool `json:"schema,omitempty"`
+
+	// data runs pgcopydb compare data: per-table row counts and full-table
+	// checksums. Expensive: budget a sequential scan of every table on both
+	// sides.
+	// +optional
+	Data bool `json:"data,omitempty"`
+}
+
 // CutoverMode picks who pulls the trigger.
 // +kubebuilder:validation:Enum=Manual;Automatic
 type CutoverMode string
@@ -333,6 +353,12 @@ type MigrationSpec struct {
 	// +optional
 	Cutover CutoverSpec `json:"cutover,omitempty"`
 
+	// verification runs pgcopydb compare checks once the migration reaches
+	// its success path (clone: after the copy; follow: after cutover drained
+	// and replication state is cleaned up).
+	// +optional
+	Verification *VerificationOptions `json:"verification,omitempty"`
+
 	// workVolume configures the work-directory PVC.
 	// +optional
 	WorkVolume WorkVolume `json:"workVolume,omitempty"`
@@ -383,6 +409,7 @@ const (
 	ConditionStreaming       = "Streaming"
 	ConditionCaughtUp        = "CaughtUp"
 	ConditionCutoverComplete = "CutoverCompleted"
+	ConditionVerified        = "Verified"
 	ConditionComplete        = "Complete"
 	ConditionFailed          = "Failed"
 )

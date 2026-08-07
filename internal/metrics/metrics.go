@@ -21,6 +21,8 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
@@ -69,10 +71,15 @@ var (
 		Name: "pgcopydb_migration_replication_lag_bytes",
 		Help: "Replication lag in bytes while streaming (absent outside follow).",
 	}, []string{labelNamespace, labelName})
+
+	verified = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pgcopydb_migration_verified",
+		Help: "1 when pgcopydb compare verification passed, 0 on mismatch (absent before a result).",
+	}, []string{labelNamespace, labelName})
 )
 
 func init() {
-	metrics.Registry.MustRegister(phase, attempts, tablesDone, tablesTotal, indexesDone, indexesTotal, replicationLagBytes)
+	metrics.Registry.MustRegister(phase, attempts, tablesDone, tablesTotal, indexesDone, indexesTotal, replicationLagBytes, verified)
 }
 
 // Record refreshes every gauge for one Migration from its status.
@@ -92,6 +99,17 @@ func Record(m *v1alpha1.Migration) {
 	if r := m.Status.Replication; r != nil && r.LagBytes != nil {
 		replicationLagBytes.WithLabelValues(m.Namespace, m.Name).Set(float64(*r.LagBytes))
 	}
+	// Verified maps the condition: True is 1, False is 0, and no series while
+	// there is no result yet (a 0 before the compare ran would read as a
+	// mismatch on a dashboard).
+	switch cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionVerified); {
+	case cond == nil || cond.Status == metav1.ConditionUnknown:
+		verified.DeletePartialMatch(prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name})
+	case cond.Status == metav1.ConditionTrue:
+		verified.WithLabelValues(m.Namespace, m.Name).Set(1)
+	default:
+		verified.WithLabelValues(m.Namespace, m.Name).Set(0)
+	}
 }
 
 // Forget removes every series of a deleted Migration.
@@ -104,4 +122,5 @@ func Forget(namespace, name string) {
 	indexesDone.DeletePartialMatch(l)
 	indexesTotal.DeletePartialMatch(l)
 	replicationLagBytes.DeletePartialMatch(l)
+	verified.DeletePartialMatch(l)
 }
