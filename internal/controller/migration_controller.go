@@ -213,13 +213,9 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 				// sequences synced; Complete waits for slot cleanup.
 				return r.finishFollow(ctx, m, base)
 			}
-			now := metav1.Now()
-			m.Status.CompletedAt = &now
-			m.Status.Phase = v1alpha1.PhaseCompleted
-			r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
-			r.setCondition(m, v1alpha1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "migration finished")
-			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Completed", "Complete", "pgcopydb clone finished")
-			return ctrl.Result{}, r.updateStatus(ctx, m, base)
+			// Sets CloneCompleted, runs verification when requested, then
+			// Complete; see verification.go.
+			return r.finishClone(ctx, m, base)
 		}
 		return r.handleFailedJob(ctx, m, base, job)
 	}

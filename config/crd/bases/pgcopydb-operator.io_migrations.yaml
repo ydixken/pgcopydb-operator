@@ -1645,6 +1645,25 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              verification:
+                description: |-
+                  verification runs pgcopydb compare checks once the migration reaches
+                  its success path (clone: after the copy; follow: after cutover drained
+                  and replication state is cleaned up).
+                properties:
+                  data:
+                    description: |-
+                      data runs pgcopydb compare data: per-table row counts and full-table
+                      checksums. Expensive: budget a sequential scan of every table on both
+                      sides.
+                    type: boolean
+                  schema:
+                    description: |-
+                      schema runs pgcopydb compare schema: tables, columns, indexes,
+                      constraints, and sequence values as pgcopydb models them. Not a full
+                      DDL diff (no functions, triggers, ACLs, defaults).
+                    type: boolean
+                type: object
               workVolume:
                 description: workVolume configures the work-directory PVC.
                 properties:

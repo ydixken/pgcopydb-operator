@@ -61,9 +61,9 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 ## M3: verification + service polish
 
-- [ ] `spec.verification` (schema/data) running `pgcopydb compare` post-completion in a Job on the work PVC; results in conditions + status.
+- [x] `spec.verification` (schema/data, both opt-in: even compare schema costs catalog fetches, compare data reads every row twice) running `pgcopydb compare` per enabled check in a Job on the work PVC; Verified condition (SchemaMismatch/DataMismatch), phase Verifying, `pgcopydb_migration_verified` metric. A mismatch reports, it does not fail the Migration: the transfer already happened, and on follow mode post-cutover writes to the target are indistinguishable from real diffs. Follow ordering: after the drain-verify gate (compare on a live target mismatches by design) and after cleanup (the slot retains WAL while it exists; compare needs no replication state). Envtest-covered (done 2026-08-07).
 - [ ] Evaluate `PostgresConnection` kind + `connectionRef` (as-a-service reusable endpoints) based on e2e experience.
-- [ ] Data-compare guidance for follow mode (quiesce before compare) in docs.
+- [x] Data-compare guidance for follow mode (quiesce before compare) in docs: see docs/examples/migration-verified.yaml (done 2026-08-07).
 
 ## M4: OSS release polish
 
