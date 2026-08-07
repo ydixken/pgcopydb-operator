@@ -1,0 +1,19 @@
+# Minimal one-shot clone: copy everything from source to target.
+# Passwords come from Secrets and never appear in the CR, Job spec, or logs.
+# Watch it: kubectl get pgm -w; details: kubectl describe migration shop
+apiVersion: pgcopydb-operator.io/v1alpha1
+kind: Migration
+metadata:
+  name: shop
+spec:
+  source:
+    host: db.old-datacenter.example.com
+    database: shop
+    username: migrator
+    passwordSecretRef: {name: shop-source, key: password}
+    sslMode: require
+  target:
+    host: shop-pg-rw.shop.svc
+    database: shop
+    username: app
+    passwordSecretRef: {name: shop-pg-app, key: password}

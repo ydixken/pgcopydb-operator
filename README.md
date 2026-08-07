@@ -3,34 +3,53 @@
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 > [!important]
-> In development, milestone M1 (one-shot clone). See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
+> In development. M1 (one-shot clone, chart, metrics) is functional; follow/cutover is M2. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
+
+## Install
+
+```sh
+helm install pgcopydb-operator oci://ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator \
+  --namespace pgcopydb-system --create-namespace
+```
+
+Then create a `Migration` (full examples with explanations in [docs/examples/](docs/examples/)):
+
+```sh
+kubectl apply -f docs/examples/migration-minimal.yaml
+kubectl get pgm -w
+```
 
 ## Structure
 
 ```text
-.claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
-.github/workflows/         # push mirror GitHub -> GitLab (CI runs on the mirror)
-.gitlab-ci.yml             # branch pipelines: yamllint now; Go lint/test/image build self-activate with the scaffold
-.renovaterc.json           # keeps the tag+digest image pins current, once Renovate is enabled
-.yamllint.yml              # yamllint policy, every deviation commented
-AGENTS.md                  # single source of truth for agents (CLAUDE.md points here)
-CONTRIBUTING.md            # tooling, workflow, commit and PR conventions
-MILESTONES.md              # task ledger and decision log
-Taskfile.yml               # task help | lint | test | e2e
-docs/research/             # pgcopydb CLI + CDC references, dev-cluster recon, prior art
+api/v1alpha1/              # Migration CRD types (CEL validation, no webhooks)
+charts/pgcopydb-operator/  # Helm chart (published as OCI to ghcr.io)
+cmd/, internal/            # manager and controller (kubebuilder go/v4)
+config/                    # kubebuilder-generated kustomize tree
+docs/examples/             # Migration resources with short explanations
+docs/research/             # pgcopydb CLI + CDC references, prior art
 docs/superpowers/specs/    # approved design documents
+images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
+test/e2e/                  # e2e suite (local only, current kubectl context)
+.claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
+.github/workflows/         # GitHub->GitLab mirror + ghcr release workflow
+.gitlab-ci.yml             # branch pipelines: yamllint, golangci-lint, envtest, image build
+Taskfile.yml               # task help | lint | test | e2e
 ```
 
-## Quickstart
+## Developing
 
 ```sh
 task help   # list tasks
-task lint   # the pre-commit gate
-task e2e    # e2e tests against your CURRENT kubectl context (local only; prompts first)
+task lint   # the pre-commit gate (yamllint + make lint)
+task test   # unit and envtest suites
+task e2e    # e2e against your CURRENT kubectl context (local only; prompts first)
 ```
 
 ## Documentation
 
+- [docs/examples/](docs/examples/): Migration resources for common scenarios.
+- [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.
 - [MILESTONES.md](MILESTONES.md): where the project stands and why decisions were made.

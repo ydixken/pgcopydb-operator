@@ -42,7 +42,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B11 (workflow done; verified with the first tag): GitHub release workflow: both images (amd64 first per S9) + OCI chart to ghcr.io on v* tags.
 - [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
 - [ ] B13: e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
-- [ ] B14: docs: README quickstart, `docs/examples/*.yaml` (each example a real resource with a short explanation), values documentation in chart README.
+- [x] B14 (done): docs: README install/quickstart, `docs/examples/*.yaml` (minimal, tuned+filters, DBaaS DSN), chart README values reference.
 
 ## M2: live migration (follow + cutover)
 
