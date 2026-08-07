@@ -32,6 +32,9 @@ spec:
             - --leader-elect
             {{- end }}
             - --runner-image={{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}
+            {{- with .Values.watchNamespaces }}
+            - --watch-namespaces={{ join "," . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-bind-address=:8443
             {{- else }}

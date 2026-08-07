@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -29,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -61,6 +63,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var runnerImage string
+	var watchNamespaces string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -69,6 +72,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&runnerImage, "runner-image", "ghcr.io/ydixken/pgcopydb-operator/runner:latest",
 		"Default image for migration worker Jobs; spec.runner.image overrides per Migration.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated namespaces to watch; empty watches the whole cluster.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -158,7 +163,7 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -176,7 +181,20 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	// Scope the cache to an explicit namespace list when asked; the RBAC in
+	// the chart stays cluster-scoped, only the watch narrows. Empty = all.
+	if watchNamespaces != "" {
+		namespaces := map[string]cache.Config{}
+		for ns := range strings.SplitSeq(watchNamespaces, ",") {
+			if ns = strings.TrimSpace(ns); ns != "" {
+				namespaces[ns] = cache.Config{}
+			}
+		}
+		managerOptions.Cache = cache.Options{DefaultNamespaces: namespaces}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)

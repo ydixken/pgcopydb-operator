@@ -26,9 +26,9 @@ serviceAccount:
 rbac:
   create: true
 
-# Namespaces the manager reconciles; empty means cluster-wide.
-# NOTE: namespaced RBAC rendering is future work, the chart always renders a
-# ClusterRole today regardless of this list.
+# Namespaces the manager watches and reconciles; empty means cluster-wide.
+# RBAC stays cluster-scoped either way (the chart renders a ClusterRole);
+# only the informer cache narrows.
 watchNamespaces: []
 
 # One replica is enough: leader election makes extra replicas hot standbys only.
