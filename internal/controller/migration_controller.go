@@ -70,6 +70,7 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;configmaps,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 
@@ -255,16 +256,36 @@ func (r *MigrationReconciler) ensureOwned(ctx context.Context, m *v1alpha1.Migra
 	if err := controllerutil.SetControllerReference(m, pvc, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := r.createStrictlyOwned(ctx, m, pvc); err != nil {
 		return err
 	}
 	if cm := buildFiltersConfigMap(m); cm != nil {
 		if err := controllerutil.SetControllerReference(m, cm, r.Scheme); err != nil {
 			return err
 		}
-		if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
+		if err := r.createStrictlyOwned(ctx, m, cm); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// createStrictlyOwned creates obj, and on AlreadyExists verifies the existing
+// object is controlled by THIS Migration. A leftover from a deleted Migration
+// (garbage collection is asynchronous) must never be adopted: it would be
+// deleted under the running Job. The error requeues until GC clears it.
+func (r *MigrationReconciler) createStrictlyOwned(ctx context.Context, m *v1alpha1.Migration, obj client.Object) error {
+	err := r.Create(ctx, obj)
+	if err == nil || !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	existing := obj.DeepCopyObject().(client.Object)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(existing, m) {
+		return fmt.Errorf("%s %q exists but belongs to another owner (stale object awaiting garbage collection?)",
+			existing.GetObjectKind().GroupVersionKind().Kind, obj.GetName())
 	}
 	return nil
 }

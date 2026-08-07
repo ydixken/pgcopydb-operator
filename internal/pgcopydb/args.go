@@ -52,11 +52,14 @@ var skipFlag = map[v1alpha1.SkipOption]string{
 }
 
 // CloneArgs renders the argv for `pgcopydb clone` from a Migration spec.
-// resume=true adds --resume (used on retry attempts, when the work directory
-// already holds catalogs). notConsistent adds --not-consistent, needed when
-// the original snapshot transaction is gone. The source/target URIs are passed
-// via the environment, so they are deliberately absent from the returned argv.
-func CloneArgs(spec *v1alpha1.MigrationSpec, resume, notConsistent bool) []string {
+// restart=true adds --restart: first attempts wipe the work directory, since
+// a fresh Migration can only find foreign state there (a stale volume from a
+// deleted Migration otherwise poisons the run). resume=true adds --resume
+// (retry attempts, when the catalogs are this Migration's own). notConsistent
+// adds --not-consistent, needed when the original snapshot transaction is
+// gone. The source/target URIs are passed via the environment, so they are
+// deliberately absent from the returned argv.
+func CloneArgs(spec *v1alpha1.MigrationSpec, restart, resume, notConsistent bool) []string {
 	c := spec.Clone
 	args := []string{"clone", flagDir, WorkDir}
 
@@ -118,6 +121,9 @@ func CloneArgs(spec *v1alpha1.MigrationSpec, resume, notConsistent bool) []strin
 
 	if c.Filters != nil && !c.Filters.IsEmpty() {
 		args = append(args, "--filters", FiltersPath)
+	}
+	if restart {
+		args = append(args, "--restart")
 	}
 	if resume {
 		args = append(args, "--resume")
