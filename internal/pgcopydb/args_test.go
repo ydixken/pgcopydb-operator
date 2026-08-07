@@ -27,12 +27,12 @@ import (
 
 func TestCloneArgs_Minimal(t *testing.T) {
 	got := CloneArgs(&v1alpha1.MigrationSpec{}, false, false, false)
-	assertArgs(t, got, "clone --dir /workdir")
+	assertArgs(t, got, "clone --dir /work/pgcopydb")
 }
 
 func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
 	got := CloneArgs(&v1alpha1.MigrationSpec{}, true, false, false)
-	assertArgs(t, got, "clone --dir /workdir --restart")
+	assertArgs(t, got, "clone --dir /work/pgcopydb --restart")
 }
 
 func TestCloneArgs_Full(t *testing.T) {
@@ -62,7 +62,7 @@ func TestCloneArgs_Full(t *testing.T) {
 	}
 	got := CloneArgs(spec, false, true, true)
 	// Skips are sorted: analyze, largeObjects, vacuum.
-	want := "clone --dir /workdir" +
+	want := "clone --dir /work/pgcopydb" +
 		" --table-jobs 8 --index-jobs 4 --restore-jobs 2 --large-objects-jobs 3" +
 		" --split-tables-larger-than 1073741824 --split-max-parts 5" +
 		" --drop-if-exists --roles --no-role-passwords --no-owner --no-acl" +
