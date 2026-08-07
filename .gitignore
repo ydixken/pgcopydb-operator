@@ -1,0 +1,31 @@
+# Kubebuilder-generated set, pre-merged so the H1 scaffold's .gitignore is a no-op diff.
+bin/
+Dockerfile.cross
+*.exe
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+!vendor/**/zz_generated.*
+
+# Editors
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# macOS host
+.DS_Store
+
+# Local cluster credentials are secrets and MUST never be committed.
+kubeconfig/
+*.kubeconfig
+
+# Local secrets
+.env
+
+# Per-user agent settings (the vendored .claude/skills/ stays tracked)
+.claude/settings.local.json
