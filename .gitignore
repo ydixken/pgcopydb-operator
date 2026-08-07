@@ -31,3 +31,6 @@ kubeconfig/
 
 # Per-user agent settings (the vendored .claude/skills/ stays tracked)
 .claude/settings.local.json
+
+# Agent worktrees are transient workspaces, never repo content.
+.claude/worktrees/
