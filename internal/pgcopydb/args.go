@@ -23,6 +23,7 @@ package pgcopydb
 
 import (
 	"fmt"
+	"hash/crc32"
 	"slices"
 	"strings"
 
@@ -168,3 +169,55 @@ func RenderFilters(f *v1alpha1.Filters) string {
 }
 
 func itoa(i int32) string { return fmt.Sprintf("%d", i) }
+
+// SentinelPort is where the follow supervisor's TCP coordinator listens; the
+// wire protocol is unauthenticated, so the chart restricts it by NetworkPolicy.
+const SentinelPort = 5442
+
+// SlotName derives a deterministic, per-Migration replication slot and origin
+// name. Postgres slot names allow [a-z0-9_], max 63 bytes; namespace and name
+// are sanitized and a short hash keeps truncated names collision-free.
+func SlotName(namespace, name string) string {
+	raw := namespace + "_" + name
+	sanitized := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return '_'
+		}
+	}, raw)
+	sum := fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(raw)))
+	const max = 63 - 1 - 8 - len("pgcopydb_")
+	if len(sanitized) > max {
+		sanitized = sanitized[:max]
+	}
+	return "pgcopydb_" + sanitized + "_" + sum
+}
+
+// FollowArgs renders the argv additions for a live migration; empty when
+// follow is not enabled. The slot and origin default to the generated
+// per-Migration name so several migrations can share one source instance.
+func FollowArgs(spec *v1alpha1.MigrationSpec, namespace, name string) []string {
+	f := spec.Follow
+	if f == nil || !f.Enabled {
+		return nil
+	}
+	slot := f.SlotName
+	if slot == "" {
+		slot = SlotName(namespace, name)
+	}
+	args := []string{"--follow", "--slot-name", slot, "--origin", slot}
+	if f.Plugin != "" {
+		args = append(args, "--plugin", f.Plugin)
+	}
+	if f.Publication != "" {
+		args = append(args, "--publication", f.Publication)
+	}
+	if f.ReplayNoOpUpdates {
+		args = append(args, "--replay-no-op-updates")
+	}
+	return args
+}
