@@ -1,0 +1,19 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "pgcopydb-operator.fullname" . }}
+  labels:
+    {{- include "pgcopydb-operator.labels" . | nindent 4 }}
+spec:
+  endpoints:
+    - port: https-metrics
+      scheme: https
+      honorLabels: false
+      tlsConfig:
+        # The manager serves metrics with a self-signed certificate.
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      {{- include "pgcopydb-operator.selectorLabels" . | nindent 6 }}
+{{- end }}

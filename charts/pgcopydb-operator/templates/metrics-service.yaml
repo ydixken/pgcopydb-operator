@@ -1,0 +1,16 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pgcopydb-operator.fullname" . }}-metrics
+  labels:
+    {{- include "pgcopydb-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: https-metrics
+      port: 8443
+      protocol: TCP
+      targetPort: https-metrics
+  selector:
+    {{- include "pgcopydb-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

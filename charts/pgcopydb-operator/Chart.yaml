@@ -1,0 +1,12 @@
+apiVersion: v2
+name: pgcopydb-operator
+description: Kubernetes operator that migrates PostgreSQL databases with pgcopydb.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/ydixken/pgcopydb-operator
+sources:
+  - https://github.com/ydixken/pgcopydb-operator
+annotations:
+  # Chart.yaml has no first-class license field; Artifact Hub reads this one.
+  artifacthub.io/license: Apache-2.0
