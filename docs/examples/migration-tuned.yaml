@@ -1,0 +1,29 @@
+# Tuned clone: more parallelism, same-table splitting for big tables,
+# schema filtering, and a larger work volume. Filters render to pgcopydb's
+# --filters INI; table names follow PostgreSQL quoting, ~/regex/ works.
+apiVersion: pgcopydb-operator.io/v1alpha1
+kind: Migration
+metadata:
+  name: warehouse
+spec:
+  source:
+    host: warehouse.internal.example.com
+    database: warehouse
+    username: migrator
+    passwordSecretRef: {name: warehouse-source, key: password}
+  target:
+    host: warehouse-pg-rw.warehouse.svc
+    database: warehouse
+    username: app
+    passwordSecretRef: {name: warehouse-pg-app, key: password}
+  clone:
+    tableJobs: 8
+    indexJobs: 8
+    splitTablesLargerThan: 2Gi  # tables above this copy in parallel parts
+    skip: [largeObjects]        # no large objects in this database
+    filters:
+      excludeSchemas: ["audit", "scratch"]
+      excludeTableData: ["public.event_log"]  # schema yes, rows no
+  workVolume:
+    size: 50Gi  # holds dumps and catalogs; size it near the database size
+  backoffLimit: 5
