@@ -51,6 +51,7 @@ func filtersCMName(m *v1alpha1.Migration) string { return m.Name + "-filters" }
 func jobName(m *v1alpha1.Migration, attempt int32) string {
 	return fmt.Sprintf("%s-run-%d", m.Name, attempt)
 }
+func cleanupJobName(m *v1alpha1.Migration) string { return m.Name + "-cleanup" }
 
 // buildWorkPVC returns the work-directory claim. It holds pgcopydb's catalogs
 // and is the unit of resumability: it survives Job restarts and is only
@@ -96,6 +97,28 @@ func buildFiltersConfigMap(m *v1alpha1.Migration) *corev1.ConfigMap {
 // retries are operator-driven so the attempt count and reasons live in the
 // Migration status, and each retry resumes from the work-dir catalogs.
 func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
+	// Attempt 1 restarts (wipes) the work dir: any state found there is
+	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
+	// failed attempt is gone with its process, so --resume needs
+	// --not-consistent (see docs/research/pgcopydb-cli.md).
+	resume := attempt > 1
+	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
+	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
+	return jobSkeleton(m, runnerImage, jobName(m, attempt), args, 0)
+}
+
+// buildCleanupJob tears down source/target replication state after a live
+// migration (or on abort/deletion): pgcopydb stream cleanup drops the slot,
+// the auto-created publication, and the target origin. It needs the work-dir
+// catalogs and both connections, so it reuses the worker pod shape. Job-level
+// retries are fine here: cleanup is idempotent.
+func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir}
+	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, 2)
+}
+
+// jobSkeleton builds the shared worker pod shape around the given argv.
+func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string, backoff int32) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err
@@ -104,13 +127,6 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 	if err != nil {
 		return nil, err
 	}
-
-	// Attempt 1 restarts (wipes) the work dir: any state found there is
-	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
-	// failed attempt is gone with its process, so --resume needs
-	// --not-consistent (see docs/research/pgcopydb-cli.md).
-	resume := attempt > 1
-	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 
 	env := append(src.Env, tgt.Env...)
 	// Structured runner logs for humans and future machine parsing.
@@ -168,11 +184,10 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 	runAsNonRoot := true
 	noPrivEsc := false
 	readOnlyRoot := true
-	backoff := int32(0)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName(m, attempt),
+			Name:      name,
 			Namespace: m.Namespace,
 			Labels:    labels(m),
 		},
