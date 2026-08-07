@@ -1,6 +1,6 @@
 # MILESTONES.md
 
-Status: **H0 done, design approved (2026-08-07). M1 in progress.**
+Status: **M1 functional (2026-08-07): first live migration completed end to end on the e2e cluster** (CNPG-to-CNPG, 251k rows, indexes and sequences verified identical; three defects found and fixed through live iteration). Remaining M1: e2e suite (B13), GitOps registration (B12).
 
 Design: [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md). Research ground truth: [docs/research/](docs/research/). Facts about the private e2e infrastructure are never committed here. This file is the compaction-proof task ledger: every task carries enough context to execute without the original conversation.
 
@@ -41,7 +41,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B10 (done, charts/pgcopydb-operator; helm lint + template verified): Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec, NetworkPolicy toggle) + chart lint in CI.
 - [x] B11 (workflow done; verified with the first tag): GitHub release workflow: both images (amd64 first per S9) + OCI chart to ghcr.io on v* tags.
 - [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
-- [ ] B13: e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
+- [ ] B13 (manual live validation done: clone verified row-identical incl. sequences; Ginkgo suite pending): e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
 - [x] B14 (done): docs: README install/quickstart, `docs/examples/*.yaml` (minimal, tuned+filters, DBaaS DSN), chart README values reference.
 
 ## M2: live migration (follow + cutover)
@@ -67,6 +67,13 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [ ] Option-coverage audit: spec surface vs `docs/research/pgcopydb-cli.md`, close gaps or record exclusions.
 - [ ] Multi-arch images (amd64+arm64), Artifact Hub listing, CRD reference docs generation, versioned docs.
 - [ ] Public issue templates/community files as adoption warrants (deliberately deferred, see H0 slop-trap decision).
+
+### Live-iteration findings (2026-08-07, all shipped)
+
+1. First attempts pass `--restart`: a fresh Migration once adopted the still-terminating work PVC of a deleted one and choked on foreign catalogs. Owned-object creation also refuses foreign owners now.
+1. Events were silently dropped: the new events API needs `events.k8s.io` RBAC; the chart ClusterRole now mirrors controller-gen output verbatim (which also restored pods/exec for progress polling).
+1. Runner ships PostgreSQL client major 18: pg_dump must be >= the newest server major on either side (new unpinned clusters already run 18), and the work dir moved below the volume mount so `--restart` can remove it.
+1. Open hardening items: classify deterministic pgcopydb failures (permission errors) to stop useless retries; status updates move to patch semantics (in review).
 
 ## Decision log
 
