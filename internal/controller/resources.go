@@ -138,6 +138,14 @@ func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string,
 			passfiles = append(passfiles, *mat.Passfile)
 		}
 	}
+	if len(passfiles) > 0 {
+		// PGPASSFILE must live in the container spec, not only in the
+		// prelude shell: commands the operator execs into the pod (sentinel
+		// reads, the WAL-head query, endpos setting) inherit the spec env,
+		// and without it they fail password authentication. Found live by
+		// the follow e2e suite; the prelude's own export stays for pid 1.
+		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
+	}
 
 	volumes := []corev1.Volume{
 		{
