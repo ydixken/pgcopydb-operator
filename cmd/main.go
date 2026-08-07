@@ -39,7 +39,9 @@ import (
 
 	pgcopydboperatoriov1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -200,9 +202,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	poller, err := progress.New(mgr.GetConfig())
+	podExec, err := podexec.New(mgr.GetConfig())
 	if err != nil {
-		setupLog.Error(err, "Failed to create progress poller")
+		setupLog.Error(err, "Failed to create pod exec transport")
 		os.Exit(1)
 	}
 	if err := (&controller.MigrationReconciler{
@@ -210,7 +212,8 @@ func main() {
 		Scheme:      mgr.GetScheme(),
 		Recorder:    mgr.GetEventRecorder("pgcopydb-operator"),
 		RunnerImage: runnerImage,
-		Poller:      poller,
+		Poller:      progress.NewFromExec(podExec),
+		Sentinel:    sentinel.New(podExec),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "migration")
 		os.Exit(1)

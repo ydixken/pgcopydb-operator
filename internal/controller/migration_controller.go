@@ -62,6 +62,9 @@ type MigrationReconciler struct {
 	// Poller reads clone progress from running worker pods; nil disables
 	// polling (envtest has no pods to ask).
 	Poller *progress.Poller
+
+	// Sentinel drives follow migrations; nil disables follow handling.
+	Sentinel SentinelOps
 }
 
 // +kubebuilder:rbac:groups=pgcopydb-operator.io,resources=migrations,verbs=get;list;watch;create;update;patch;delete
@@ -99,9 +102,9 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// conflict the way a full Update would.
 	base := m.DeepCopy()
 	if !m.DeletionTimestamp.IsZero() {
-		// Owned objects go with the CR via garbage collection.
-		metrics.Forget(m.Namespace, m.Name)
-		return ctrl.Result{}, nil
+		// Live migrations route through slot cleanup (finalizer); everything
+		// else goes with the CR via garbage collection.
+		return r.reconcileDeletion(ctx, m)
 	}
 
 	// Terminal states are absorbing: a finished migration is history, not a
@@ -127,6 +130,9 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
 
+	if err := r.ensureFinalizer(ctx, m); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.ensureOwned(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,6 +156,11 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	if done, ok := jobFinished(job); done {
 		if ok {
+			if followEnabled(m) {
+				// Worker exit 0 in follow mode means endpos reached and
+				// sequences synced; Complete waits for slot cleanup.
+				return r.finishFollow(ctx, m, base)
+			}
 			now := metav1.Now()
 			m.Status.CompletedAt = &now
 			m.Status.Phase = v1alpha1.PhaseCompleted
@@ -171,6 +182,11 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 			m.Status.Progress = p
 		}
 	}
+	if followEnabled(m) {
+		// May advance the phase to Streaming/CutoverPending/CuttingOver and
+		// trigger the cutover itself; see follow.go.
+		r.reconcileFollowRunning(ctx, m, job.Name)
+	}
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -191,6 +207,10 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 				return ctrl.Result{}, err
 			}
 			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Suspended", "Suspend", "worker Job deleted, work volume kept")
+			if followEnabled(m) {
+				r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "SlotRetained", "Suspend",
+					"the replication slot stays open while suspended and retains WAL on the source")
+			}
 		} else if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}

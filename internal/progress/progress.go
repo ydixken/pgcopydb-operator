@@ -17,57 +17,50 @@ limitations under the License.
 // Package progress reads clone progress from a running worker pod by exec-ing
 // pgcopydb's own JSON reporting (`pgcopydb list progress --json`). The command
 // reads the SQLite catalogs in the work dir, so it must run inside the pod
-// that mounts the work volume; a plain HTTP probe cannot replace it.
+// that mounts the work volume.
 package progress
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
 
 // Poller execs progress commands in worker pods.
 type Poller struct {
-	config    *rest.Config
-	clientset kubernetes.Interface
+	exec *podexec.Exec
 }
 
 // New builds a Poller from the manager's rest config.
 func New(config *rest.Config) (*Poller, error) {
-	cs, err := kubernetes.NewForConfig(config)
+	e, err := podexec.New(config)
 	if err != nil {
 		return nil, err
 	}
-	return &Poller{config: config, clientset: cs}, nil
+	return &Poller{exec: e}, nil
 }
 
+// NewFromExec shares an existing exec transport.
+func NewFromExec(e *podexec.Exec) *Poller { return &Poller{exec: e} }
+
 // CloneProgress returns the current copy progress of the Job's running pod,
-// or (nil, nil) when no pod is ready to answer (starting, terminating): a
-// missing sample is not an error, the previous status value simply stands.
+// or (nil, nil) when no pod is ready to answer: a missing sample is not an
+// error, the previous status value simply stands.
 func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (*v1alpha1.CloneProgress, error) {
-	pods, err := p.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		// The Job controller labels worker pods with job-name.
-		LabelSelector: "job-name=" + jobName,
-		FieldSelector: "status.phase=Running",
-	})
+	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil {
 		return nil, err
 	}
-	if len(pods.Items) == 0 {
+	if pod == "" {
 		return nil, nil
 	}
-	out, err := p.exec(ctx, namespace, pods.Items[0].Name,
+	out, err := p.exec.InPod(ctx, namespace, pod,
 		[]string{"pgcopydb", "list", "progress", "--json", "--dir", pgcopydb.WorkDir})
 	if err != nil {
 		// The command fails while the catalogs are still initializing; treat
@@ -77,30 +70,9 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 	return ParseListProgress(out)
 }
 
-// exec runs argv in the pgcopydb container and returns stdout.
-func (p *Poller) exec(ctx context.Context, namespace, pod string, argv []string) ([]byte, error) {
-	req := p.clientset.CoreV1().RESTClient().Post().
-		Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: "pgcopydb",
-			Command:   argv,
-			Stdout:    true,
-			Stderr:    true,
-		}, scheme.ParameterCodec)
-	exec, err := remotecommand.NewSPDYExecutor(p.config, "POST", req.URL())
-	if err != nil {
-		return nil, err
-	}
-	var stdout, stderr bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &stdout, Stderr: &stderr}); err != nil {
-		return nil, fmt.Errorf("exec %v: %w (stderr: %s)", argv, err, stderr.String())
-	}
-	return stdout.Bytes(), nil
-}
-
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
-// (see docs/research/pgcopydb-cli.md section 10). Unknown fields are ignored
-// so schema drift degrades to missing numbers, never to a failure.
+// (docs/research/pgcopydb-cli.md section 10). Unknown fields are ignored so
+// schema drift degrades to missing numbers, never to a failure.
 type listProgress struct {
 	Tables  counts `json:"tables"`
 	Indexes counts `json:"indexes"`
