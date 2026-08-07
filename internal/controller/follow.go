@@ -242,6 +242,51 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Mig
 	return true, nil
 }
 
+// ensurePreflight creates and observes the follow preflight Job. Returns
+// (passed, failureMessage, err); passed=false with an empty failureMessage
+// means the check is still running. The failure message carries the pod's own
+// check output (one line per failed prerequisite, with the exact GRANT or
+// setting to fix it) so nobody has to chase pod logs of a finished Job.
+func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1alpha1.Migration) (bool, string, error) {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: preflightJobName(m)}, job)
+	if apierrors.IsNotFound(err) {
+		job, err = buildPreflightJob(m, r.RunnerImage)
+		if err != nil {
+			return false, "", err
+		}
+		if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
+			return false, "", err
+		}
+		createErr := r.Create(ctx, job)
+		if createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+			return false, "", createErr
+		}
+		if createErr == nil {
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightStarted", "Preflight",
+				"checking follow-mode prerequisites as Job %s", job.Name)
+		}
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	done, ok := jobFinished(job)
+	switch {
+	case !done:
+		return false, "", nil
+	case ok:
+		return true, "", nil
+	}
+	msg := "follow preflight failed"
+	if tail := r.jobLogTail(ctx, m.Namespace, job.Name, preflightLogTail); tail != "" {
+		msg += ":\n" + tail
+	} else {
+		msg += "; the check output was not readable, inspect the logs of Job " + job.Name
+	}
+	return false, msg, nil
+}
+
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1alpha1.Migration) (bool, bool, error) {

@@ -65,6 +65,31 @@ func (e *Exec) RunningPod(ctx context.Context, namespace, jobName string) (strin
 	return pods.Items[0].Name, nil
 }
 
+// JobLogs returns up to tailLines of the Job's newest pod's logs, running or
+// terminated. Failed Jobs are the intended target: their terminal pgcopydb
+// error or preflight verdict only exists in the pod log. The newest pod is
+// the right one when the Job's own backoffLimit produced several.
+func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
+	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "job-name=" + jobName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("no pods found for Job %s", jobName)
+	}
+	newest := pods.Items[0]
+	for _, p := range pods.Items[1:] {
+		if p.CreationTimestamp.After(newest.CreationTimestamp.Time) {
+			newest = p
+		}
+	}
+	return e.clientset.CoreV1().Pods(namespace).
+		GetLogs(newest.Name, &corev1.PodLogOptions{Container: "pgcopydb", TailLines: &tailLines}).
+		DoRaw(ctx)
+}
+
 // InPod runs argv in the pod's pgcopydb container and returns stdout.
 func (e *Exec) InPod(ctx context.Context, namespace, pod string, argv []string) ([]byte, error) {
 	req := e.clientset.CoreV1().RESTClient().Post().

@@ -43,8 +43,10 @@ const (
 	Target Side = "target"
 )
 
-// execPgcopydb hands control to pgcopydb with the Job-provided args.
-const execPgcopydb = `exec pgcopydb "$@"`
+// execArgv0 hands control to the program passed as $0 with the Job-provided
+// args. The Job's Command supplies $0 (pgcopydb for workers, /bin/sh for
+// script Jobs), so one prelude serves both shapes.
+const execArgv0 = `exec "$0" "$@"`
 
 // PgpassPath is where the runner prelude assembles the passfile. It must be
 // writable in the runner image (the work volume is, and /tmp is).
@@ -199,39 +201,32 @@ func tlsVolume(s Side, tls *v1alpha1.TLSSecretRefs) (corev1.Volume, corev1.Volum
 }
 
 // PreludeScript returns the shell prelude that assembles the passfile from the
-// projected password files and then execs pgcopydb with the given args
-// appended by the caller via "$@". Escaping: libpq passfile requires '\' and
-// ':' in any field to be backslash-escaped; passwords are the only
-// uncontrolled field (hosts/users come from the validated spec).
-func PreludeScript(entries []Passfile) string {
-	if len(entries) == 0 {
-		return execPgcopydb
-	}
-	return passfileAssembly(entries) + execPgcopydb
-}
-
-// WrapScript prefixes an arbitrary shell script with the passfile assembly,
-// for auxiliary Jobs (drain verification, preflight) that need authenticated
-// psql without exec-ing pgcopydb. Without entries the script runs as is.
-func WrapScript(entries []Passfile, script string) string {
-	if len(entries) == 0 {
-		return script
-	}
-	return passfileAssembly(entries) + script
-}
-
-// passfileAssembly renders the shared shell fragment that builds the libpq
-// passfile and exports PGPASSFILE for everything that follows.
-func passfileAssembly(entries []Passfile) string {
+// projected password files, runs the caller's setup commands, and then execs
+// $0 (named by the Job's Command) with the args appended via "$@". Escaping:
+// libpq passfile requires '\' and ':' in any field to be backslash-escaped;
+// passwords are the only uncontrolled field (hosts/users come from the
+// validated spec). setup runs after the passfile export so its commands can
+// already authenticate; it must be trusted, operator-composed shell.
+func PreludeScript(entries []Passfile, setup string) string {
 	var b strings.Builder
-	b.WriteString("set -eu\numask 077\n: > " + PgpassPath + "\n")
-	for _, e := range entries {
-		// sed escapes backslashes first, then colons; $(cat ...) would strip
-		// trailing newlines which sed does not, so sed reads the file itself.
-		fmt.Fprintf(&b,
-			"printf '%%s:*:*:%%s:%%s\\n' '%s' '%s' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
-			e.Host, e.User, e.File, PgpassPath)
+	b.WriteString("set -eu\n")
+	if len(entries) > 0 {
+		b.WriteString("umask 077\n: > " + PgpassPath + "\n")
+		for _, e := range entries {
+			// sed escapes backslashes first, then colons; $(cat ...) would strip
+			// trailing newlines which sed does not, so sed reads the file itself.
+			fmt.Fprintf(&b,
+				"printf '%%s:*:*:%%s:%%s\\n' '%s' '%s' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
+				e.Host, e.User, e.File, PgpassPath)
+		}
+		b.WriteString("export PGPASSFILE=" + PgpassPath + "\n")
 	}
-	b.WriteString("export PGPASSFILE=" + PgpassPath + "\n")
+	if setup != "" {
+		b.WriteString(setup)
+		if !strings.HasSuffix(setup, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString(execArgv0)
 	return b.String()
 }

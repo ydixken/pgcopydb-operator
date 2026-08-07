@@ -24,26 +24,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
+
+// passwordMigration is the canned inline-credentials spec the builder tests
+// share; callers mutate follow/cutover as needed.
+func passwordMigration() *v1alpha1.Migration {
+	return &v1alpha1.Migration{
+		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
+		Spec: v1alpha1.MigrationSpec{
+			Source: v1alpha1.PostgresConnection{
+				Host: "s", Database: "d", Username: "u",
+				PasswordSecretRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: testPasswordKey,
+				},
+			},
+			Target: v1alpha1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
+		},
+	}
+}
 
 // TestBuildJob_PGPassfileInSpecEnv is the regression test for a live-found
 // defect: PGPASSFILE exported only inside the prelude shell is invisible to
 // commands the operator execs into the pod (sentinel reads, WAL-head query),
 // which broke caught-up detection and cutover for password-based connections.
 func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
-	withPassword := &v1alpha1.Migration{
-		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-		Spec: v1alpha1.MigrationSpec{
-			Source: v1alpha1.PostgresConnection{
-				Host: "s", Database: "d", Username: "u",
-				PasswordSecretRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: "password",
-				},
-			},
-			Target: v1alpha1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
-		},
-	}
-	job, err := buildJob(withPassword, "img", 1)
+	job, err := buildJob(passwordMigration(), "img", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +83,7 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 }
 
 // TestBuildVerifyJob_AuthAndTolerance covers the two live-found verify-gate
-// defects: the script must run behind the passfile assembly (bare /bin/sh
+// defects: the script must run behind the passfile prelude (bare /bin/sh
 // failed auth and falsely refuted every drain), and the predicate must
 // tolerate the origin trailing endpos by non-data WAL records.
 func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
@@ -87,13 +93,13 @@ func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
 			Source: v1alpha1.PostgresConnection{
 				Host: "s", Database: "d", Username: "u",
 				PasswordSecretRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: "password",
+					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: testPasswordKey,
 				},
 			},
 			Target: v1alpha1.PostgresConnection{
 				Host: "t", Database: "d", Username: "u",
 				PasswordSecretRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "sec2"}, Key: "password",
+					LocalObjectReference: corev1.LocalObjectReference{Name: "sec2"}, Key: testPasswordKey,
 				},
 			},
 			Follow: &v1alpha1.FollowOptions{Enabled: true},
@@ -104,17 +110,21 @@ func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := job.Spec.Template.Spec.Containers[0]
-	if len(c.Command) != 3 || c.Command[0] != "/bin/sh" || c.Command[1] != "-c" {
-		t.Fatalf("verify job must run one wrapped script, got command %v", c.Command)
+	// Script Jobs keep the worker shape: sh -c <prelude> /bin/sh, with the
+	// script handed to the exec'd shell as args.
+	if len(c.Command) != 4 || c.Command[0] != "/bin/sh" || c.Command[1] != "-c" || c.Command[3] != "/bin/sh" {
+		t.Fatalf("verify job must exec a shell through the prelude, got command %v", c.Command)
 	}
-	script := c.Command[2]
-	for _, want := range []string{"PGPASSFILE", "pg_replication_origin_progress", "<= 8192"} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("verify script missing %q:\n%s", want, script)
+	if !strings.Contains(c.Command[2], "PGPASSFILE") {
+		t.Fatalf("verify job prelude must assemble the passfile:\n%s", c.Command[2])
+	}
+	if len(c.Args) != 2 || c.Args[0] != "-c" {
+		t.Fatalf("verify job must pass the script as sh -c args, got %v", c.Args)
+	}
+	for _, want := range []string{"pg_replication_origin_progress", "<= 8192"} {
+		if !strings.Contains(c.Args[1], want) {
+			t.Fatalf("verify script missing %q:\n%s", want, c.Args[1])
 		}
-	}
-	if len(c.Args) != 0 {
-		t.Fatalf("verify job must not carry args, got %v", c.Args)
 	}
 }
 
@@ -125,4 +135,115 @@ func envValue(env []corev1.EnvVar, name string) string {
 		}
 	}
 	return ""
+}
+
+// TestPublicationDropGuard covers the retry-after-setup-crash guard: only a
+// retry attempt of a follow migration with an auto-managed publication drops
+// the leftover, and only ever pgcopydb's own (slot-named) publication.
+func TestPublicationDropGuard(t *testing.T) {
+	follow := func(pub, slot string) *v1alpha1.Migration {
+		m := passwordMigration()
+		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Publication: pub, SlotName: slot}
+		return m
+	}
+	generated := pgcopydb.SlotName("ns", "m")
+
+	cases := []struct {
+		name    string
+		m       *v1alpha1.Migration
+		attempt int32
+		want    string // "" = no guard
+	}{
+		{"first attempt has no guard", follow("", ""), 1, ""},
+		{"retry drops the auto-managed publication", follow("", ""), 2, `DROP PUBLICATION IF EXISTS "` + generated + `"`},
+		{"retry honors an explicit slot name", follow("", "my_slot"), 2, `DROP PUBLICATION IF EXISTS "my_slot"`},
+		{"user-provided publication is never touched", follow("userpub", ""), 2, ""},
+		{"non-follow migration has no guard", passwordMigration(), 2, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			guard := publicationDropGuard(tc.m, tc.attempt)
+			if tc.want == "" {
+				if guard != "" {
+					t.Fatalf("unexpected guard: %q", guard)
+				}
+				return
+			}
+			if !strings.Contains(guard, tc.want) || !strings.Contains(guard, "PGCOPYDB_SOURCE_PGURI") {
+				t.Fatalf("guard %q does not drop %q on the source", guard, tc.want)
+			}
+			// The guard must reach the Job's prelude, after the passfile
+			// export and before the exec that hands over to pgcopydb.
+			job, err := buildJob(tc.m, "img", tc.attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prelude := job.Spec.Template.Spec.Containers[0].Command[2]
+			guardAt := strings.Index(prelude, guard)
+			execAt := strings.Index(prelude, `exec "$0" "$@"`)
+			exportAt := strings.Index(prelude, "export PGPASSFILE=")
+			if guardAt < 0 || execAt < 0 || exportAt < 0 || exportAt >= guardAt || guardAt >= execAt {
+				t.Fatalf("guard misplaced in prelude (export=%d guard=%d exec=%d):\n%s", exportAt, guardAt, execAt, prelude)
+			}
+		})
+	}
+}
+
+// TestBuildPreflightJob pins the preflight Job shape: a shell script (with
+// the passfile prelude intact) probing every follow prerequisite, one
+// fix-me line per check.
+func TestBuildPreflightJob(t *testing.T) {
+	job, err := buildPreflightJob(passwordMigration(), "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Name != "m-preflight" {
+		t.Fatalf("job name = %q", job.Name)
+	}
+	if *job.Spec.BackoffLimit != 1 {
+		t.Fatalf("backoffLimit = %d, want 1 (one retry for transient blips)", *job.Spec.BackoffLimit)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if got := c.Command[len(c.Command)-1]; got != shellPath {
+		t.Fatalf("script Job $0 = %q, want %s", got, shellPath)
+	}
+	if !strings.Contains(c.Command[2], "PGPASSFILE") {
+		t.Fatal("preflight prelude lost the passfile assembly; psql cannot authenticate without it")
+	}
+	script := c.Args[1]
+	for _, want := range []string{
+		"wal_level",
+		"max_replication_slots",
+		"rolreplication",
+		"ALTER ROLE",
+		"has_function_privilege",
+		"pg_replication_origin_xact_setup",
+		"GRANT EXECUTE ON FUNCTION",
+		"set session_replication_role = 'replica'",
+		"GRANT SET ON PARAMETER session_replication_role",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("preflight script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+// TestBuildVerifyJob_KeepsPassfilePrelude is the regression test for the
+// script-Job passfile gap: without the prelude, psql in the verify pod cannot
+// authenticate against password-based targets.
+func TestBuildVerifyJob_KeepsPassfilePrelude(t *testing.T) {
+	job, err := buildVerifyJob(passwordMigration(), "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if !strings.Contains(c.Command[2], "PGPASSFILE") {
+		t.Fatal("verify prelude lost the passfile assembly")
+	}
+	if got := c.Command[len(c.Command)-1]; got != shellPath {
+		t.Fatalf("script Job $0 = %q, want %s", got, shellPath)
+	}
+	if !strings.Contains(c.Args[1], "pg_replication_origin_progress") {
+		t.Fatalf("verify script lost the origin-progress check:\n%s", c.Args[1])
+	}
 }

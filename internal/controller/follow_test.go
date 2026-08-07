@@ -116,6 +116,17 @@ func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string,
 	return f.state.Endpos, nil
 }
 
+// fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
+// sentinel: tests choose what a pod "logged".
+type fakeLogs struct {
+	out string
+	err error
+}
+
+func (f *fakeLogs) JobLogs(context.Context, string, string, int64) ([]byte, error) {
+	return []byte(f.out), f.err
+}
+
 var _ = Describe("Migration Controller follow mode", func() {
 	ctx := context.Background()
 
@@ -126,26 +137,51 @@ var _ = Describe("Migration Controller follow mode", func() {
 		return m
 	}
 
-	reconcileWith := func(fake *fakeSentinel, name string) *v1alpha1.Migration {
+	reconcileLogged := func(fake *fakeSentinel, logs LogReader, name string) *v1alpha1.Migration {
+		GinkgoHelper()
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Logs = logs
 		_, err := r.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
 		})
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred())
 		m := &v1alpha1.Migration{}
-		ExpectWithOffset(1, k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
 		return m
 	}
 
-	It("walks streaming, caught-up, manual cutover, drain, and cleanup", func() {
+	reconcileWith := func(fake *fakeSentinel, name string) *v1alpha1.Migration {
+		GinkgoHelper()
+		return reconcileLogged(fake, nil, name)
+	}
+
+	// passPreflight drives the gate every follow migration now starts with:
+	// the first pass creates only the preflight Job; its success unlocks run-1.
+	passPreflight := func(fake *fakeSentinel, name string) *v1alpha1.Migration {
+		GinkgoHelper()
+		m := reconcileWith(fake, name)
+		finishJob(ctx, name+"-preflight", true)
+		return m
+	}
+
+	It("walks preflight, streaming, caught-up, manual cutover, drain, and cleanup", func() {
 		const name = "mig-follow-manual"
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
 
+		// Pass 1 creates the preflight Job, not the worker: the finalizer is
+		// already on (a preflight cannot leak a slot, but the order is fixed).
 		m := reconcileWith(fake, name)
 		Expect(m.Finalizers).To(ContainElement(finalizerName))
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseValidating))
+		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+
+		finishJob(ctx, name+"-preflight", true)
+		reconcileWith(fake, name)
 		job := fetchJob(ctx, name+"-run-1")
 		args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 		Expect(args).To(ContainSubstring("--follow"))
@@ -184,7 +220,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileWith(fake, name)
 		verifyJob := fetchJob(ctx, name+"-verify")
-		Expect(verifyJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("pg_replication_origin_progress"))
+		Expect(verifyJob.Spec.Template.Spec.Containers[0].Args[1]).To(ContainSubstring("pg_replication_origin_progress"))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeFalse())
 
 		// Verification passes: cutover completed, cleanup Job appears.
@@ -208,6 +244,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverAutomatic))).To(Succeed())
+		passPreflight(fake, name)
 		reconcileWith(fake, name)
 
 		caughtUpLSN := "0/100"
@@ -222,6 +259,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
+		passPreflight(fake, name)
 		reconcileWith(fake, name)
 
 		// Worker exits 0 (the deceptive resume-after-crash case), but the
@@ -245,7 +283,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
-		m := reconcileWith(fake, name) // creates run-1, adds finalizer
+		passPreflight(fake, name)      // adds finalizer, clears the gate
+		m := reconcileWith(fake, name) // creates run-1
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
 		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
@@ -270,5 +309,51 @@ var _ = Describe("Migration Controller follow mode", func() {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, &v1alpha1.Migration{})
 			return errors.IsNotFound(err)
 		}).WithTimeout(deletionDriveTimeout).Should(BeTrue())
+	})
+
+	It("absorbs a preflight failure with the check output in the conditions", func() {
+		const name = "mig-preflight-fail"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		logs := &fakeLogs{out: "preflight: source wal_level is 'replica', follow needs 'logical': set wal_level = logical on the source and restart it\n"}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
+
+		reconcileWith(fake, name)
+		finishJob(ctx, name+"-preflight", false)
+		m := reconcileLogged(fake, logs, name)
+
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionValidated)
+		Expect(validated.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validated.Reason).To(Equal("PreflightFailed"))
+		Expect(validated.Message).To(ContainSubstring("wal_level is 'replica'"))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(failed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(failed.Reason).To(Equal("PreflightFailed"))
+		Expect(failed.Message).To(ContainSubstring("set wal_level = logical"))
+
+		// Absorbing: no worker ever starts, further passes change nothing.
+		m = reconcileLogged(fake, logs, name)
+		Expect(m.Status.Attempts).To(Equal(int32(0)))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+	})
+
+	It("degrades to a log pointer when the preflight output is unreadable", func() {
+		const name = "mig-preflight-nologs"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
+
+		reconcileWith(fake, name)
+		finishJob(ctx, name+"-preflight", false)
+		// nil LogReader: envtest's default, and the operator's stance when
+		// the pod is already gone.
+		m := reconcileWith(fake, name)
+
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("PreflightFailed"))
+		Expect(failed.Message).To(ContainSubstring("inspect the logs of Job " + name + "-preflight"))
 	})
 })

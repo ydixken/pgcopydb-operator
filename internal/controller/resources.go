@@ -37,6 +37,9 @@ const (
 	// runnerUID matches the runner image's non-root user (distroless
 	// nonroot convention, uid 65532).
 	runnerUID int64 = 65532
+
+	// shellPath runs the prelude, and doubles as $0 in script Jobs.
+	shellPath = "/bin/sh"
 )
 
 func labels(m *v1alpha1.Migration) map[string]string {
@@ -51,8 +54,9 @@ func filtersCMName(m *v1alpha1.Migration) string { return m.Name + "-filters" }
 func jobName(m *v1alpha1.Migration, attempt int32) string {
 	return fmt.Sprintf("%s-run-%d", m.Name, attempt)
 }
-func cleanupJobName(m *v1alpha1.Migration) string { return m.Name + "-cleanup" }
-func verifyJobName(m *v1alpha1.Migration) string  { return m.Name + "-verify" }
+func cleanupJobName(m *v1alpha1.Migration) string   { return m.Name + "-cleanup" }
+func verifyJobName(m *v1alpha1.Migration) string    { return m.Name + "-verify" }
+func preflightJobName(m *v1alpha1.Migration) string { return m.Name + "-preflight" }
 
 // buildWorkPVC returns the work-directory claim. It holds pgcopydb's catalogs
 // and is the unit of resumability: it survives Job restarts and is only
@@ -105,7 +109,24 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 	resume := attempt > 1
 	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
-	return jobSkeleton(m, runnerImage, jobName(m, attempt), args, 0)
+	return jobSkeleton(m, runnerImage, jobName(m, attempt), args, publicationDropGuard(m, attempt), 0)
+}
+
+// publicationDropGuard returns the retry prelude that drops pgcopydb's own
+// leftover publication, or "" when the guard does not apply. Background: when
+// an attempt dies between CREATE PUBLICATION and the catalog write recording
+// it, pgcopydb --resume re-runs the CREATE non-idempotently and fails on its
+// own leftover ("already exists", found live). Only the auto-managed
+// publication (named after the slot) is ever dropped; a user-provided
+// spec.follow.publication is pgcopydb's to leave alone and ours too.
+func publicationDropGuard(m *v1alpha1.Migration, attempt int32) string {
+	if attempt <= 1 || !followEnabled(m) || m.Spec.Follow.Publication != "" {
+		return ""
+	}
+	// effectiveSlotName is safe to interpolate: generated names are
+	// [a-z0-9_], and spec.follow.slotName is pattern-restricted to the same
+	// charset by the CRD.
+	return `psql "$PGCOPYDB_SOURCE_PGURI" -Xqc 'DROP PUBLICATION IF EXISTS "` + effectiveSlotName(m) + `"'`
 }
 
 // buildCleanupJob tears down source/target replication state after a live
@@ -115,7 +136,7 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 // retries are fine here: cleanup is idempotent.
 func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
 	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir}
-	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, 2)
+	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, "", 2)
 }
 
 // buildVerifyJob checks, after the worker exited 0, that the target really
@@ -140,35 +161,82 @@ progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_or
 echo "endpos=$endpos origin_progress=$progress"
 ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn) <= 8192)::int")
 [ "$ok" = "1" ]`
-	job, err := jobSkeleton(m, runnerImage, verifyJobName(m), nil, 1)
+	// scriptJob keeps the worker pod's passfile prelude: running this under
+	// bare /bin/sh once shipped verification that failed auth and falsely
+	// refuted every password-based drain (found live).
+	return scriptJob(m, runnerImage, verifyJobName(m), script, 1)
+}
+
+// preflightScript checks every follow prerequisite the operator can probe via
+// psql before the first worker runs; each failed check prints one line naming
+// the exact GRANT or setting that fixes it. All four live loss/failure modes
+// of 2026-08-07 (see MILESTONES.md) trip one of these checks. The
+// session_replication_role probe is the silent-loss gate: without that SET,
+// pgcopydb 0.18 applies nothing while reporting success (PREREQUISITES.md).
+// The origin-function list is exactly what pgcopydb's setup/apply/cleanup and
+// the operator's own verify Job execute on the target.
+const preflightScript = `set -u
+check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
+if ! check "$PGCOPYDB_SOURCE_PGURI" 'select 1' >/dev/null; then
+  echo "preflight: cannot connect to the source database"; exit 1
+fi
+if ! check "$PGCOPYDB_TARGET_PGURI" 'select 1' >/dev/null; then
+  echo "preflight: cannot connect to the target database"; exit 1
+fi
+fail=0
+wal_level=$(check "$PGCOPYDB_SOURCE_PGURI" 'show wal_level')
+if [ "$wal_level" != logical ]; then
+  echo "preflight: source wal_level is '$wal_level', follow needs 'logical': set wal_level = logical on the source and restart it"
+  fail=1
+fi
+free_slots=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('max_replication_slots')::int - count(*) from pg_replication_slots")
+if [ "${free_slots:-0}" -lt 1 ]; then
+  echo "preflight: no free replication slot on the source: raise max_replication_slots or drop an unused slot from pg_replication_slots"
+  fail=1
+fi
+src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user')
+if [ "$(check "$PGCOPYDB_SOURCE_PGURI" 'select (rolreplication or rolsuper)::int from pg_roles where rolname = current_user')" != 1 ]; then
+  echo "preflight: source role \"$src_user\" lacks the REPLICATION attribute: ALTER ROLE \"$src_user\" REPLICATION"
+  fail=1
+fi
+origin_grants=$(check "$PGCOPYDB_TARGET_PGURI" "select string_agg(format('GRANT EXECUTE ON FUNCTION %s TO %I;', p.oid::regprocedure, current_user), ' ') from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'pg_catalog' and p.proname in ('pg_replication_origin_oid', 'pg_replication_origin_create', 'pg_replication_origin_drop', 'pg_replication_origin_session_setup', 'pg_replication_origin_xact_setup', 'pg_replication_origin_advance', 'pg_replication_origin_progress') and not has_function_privilege(current_user, p.oid, 'execute')")
+if [ -n "$origin_grants" ]; then
+  echo "preflight: target role lacks EXECUTE on replication origin functions, run on the target: $origin_grants"
+  fail=1
+fi
+tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
+if ! check "$PGCOPYDB_TARGET_PGURI" "begin; set session_replication_role = 'replica'; rollback;" >/dev/null; then
+  echo "preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: GRANT SET ON PARAMETER session_replication_role TO \"$tgt_user\" (PostgreSQL 15+; older targets need a superuser role)"
+  fail=1
+fi
+if [ "$fail" -eq 0 ]; then echo "preflight: all follow-mode checks passed"; fi
+exit "$fail"`
+
+// buildPreflightJob probes the follow prerequisites once, before the first
+// worker Job of a follow-enabled Migration. backoffLimit 1 absorbs a single
+// transient blip (pod eviction, connection reset) without failing the
+// Migration; a deterministic check failure fails twice and is terminal.
+func buildPreflightJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+	return scriptJob(m, runnerImage, preflightJobName(m), preflightScript, 1)
+}
+
+// scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to
+// run a shell script instead of a pgcopydb argv: the prelude execs $0, which
+// here is /bin/sh -c <script> instead of pgcopydb.
+func scriptJob(m *v1alpha1.Migration, runnerImage, name, script string, backoff int32) (*batchv1.Job, error) {
+	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", backoff)
 	if err != nil {
 		return nil, err
 	}
-	// The skeleton wires the pgcopydb exec prelude; this Job runs a script
-	// instead, but still needs the passfile assembly for authenticated psql
-	// (running bare /bin/sh here once shipped verification that failed auth
-	// and falsely refuted every drain, found live).
-	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
-	if err != nil {
-		return nil, err
-	}
-	tgt, err := conn.Materialize(conn.Target, &m.Spec.Target)
-	if err != nil {
-		return nil, err
-	}
-	var passfiles []conn.Passfile
-	for _, mat := range []*conn.Materialized{src, tgt} {
-		if mat.Passfile != nil {
-			passfiles = append(passfiles, *mat.Passfile)
-		}
-	}
-	job.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh", "-c", conn.WrapScript(passfiles, script)}
-	job.Spec.Template.Spec.Containers[0].Args = nil
+	cmd := job.Spec.Template.Spec.Containers[0].Command
+	cmd[len(cmd)-1] = shellPath
 	return job, nil
 }
 
-// jobSkeleton builds the shared worker pod shape around the given argv.
-func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string, backoff int32) (*batchv1.Job, error) {
+// jobSkeleton builds the shared worker pod shape around the given argv. setup
+// is optional shell run by the prelude after the passfile is assembled and
+// before pgcopydb starts (see conn.PreludeScript).
+func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string, setup string, backoff int32) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err
@@ -272,9 +340,10 @@ func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string,
 						Name:  "pgcopydb",
 						Image: image,
 						// sh -c '<prelude>' pgcopydb <args...>: the prelude
-						// assembles the passfile and execs pgcopydb "$@",
-						// where $0 is "pgcopydb" and $@ are the Args below.
-						Command:      []string{"/bin/sh", "-c", conn.PreludeScript(passfiles), "pgcopydb"},
+						// assembles the passfile, runs setup, and execs
+						// "$0" "$@", where $0 is "pgcopydb" (scriptJob swaps
+						// it for /bin/sh) and $@ are the Args below.
+						Command:      []string{shellPath, "-c", conn.PreludeScript(passfiles, setup), "pgcopydb"},
 						Args:         args,
 						Env:          env,
 						VolumeMounts: mounts,

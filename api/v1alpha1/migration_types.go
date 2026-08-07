@@ -237,7 +237,11 @@ type FollowOptions struct {
 
 	// slotName overrides the replication slot name (--slot-name). Empty means
 	// a generated name unique to this Migration; set it only when fanning
-	// several migrations out of one source instance deliberately.
+	// several migrations out of one source instance deliberately. The pattern
+	// is PostgreSQL's own slot-name charset; the operator relies on it when
+	// interpolating the name into SQL (origin verification, retry cleanup).
+	// +kubebuilder:validation:Pattern=`^[a-z0-9_]+$`
+	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	SlotName string `json:"slotName,omitempty"`
 

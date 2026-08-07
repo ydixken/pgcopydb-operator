@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -36,12 +37,33 @@ import (
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // pollInterval is how often a running clone is re-checked (progress polling
 // attaches here later).
 const pollInterval = 30 * time.Second
+
+const (
+	// workerLogTail bounds the log window scanned for the terminal pgcopydb
+	// error: the cause sits at the end, but supervisor shutdown chatter can
+	// follow it.
+	workerLogTail = 200
+	// preflightLogTail bounds the preflight verdict carried into the
+	// condition message: one line per failed check plus psql stderr.
+	preflightLogTail = 20
+	// maxDetailLen caps extracted log lines in condition/event messages
+	// (events are server-limited to about 1KiB).
+	maxDetailLen = 700
+)
+
+// LogReader fetches worker pod logs so terminal errors can be surfaced in
+// status; nil degrades to the Job's own condition message (envtest has no
+// pods to read).
+type LogReader interface {
+	JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
+}
 
 // MigrationReconciler reconciles a Migration object.
 //
@@ -65,6 +87,9 @@ type MigrationReconciler struct {
 
 	// Sentinel drives follow migrations; nil disables follow handling.
 	Sentinel SentinelOps
+
+	// Logs reads worker pod logs for failure surfacing; nil disables it.
+	Logs LogReader
 }
 
 // +kubebuilder:rbac:groups=pgcopydb-operator.io,resources=migrations,verbs=get;list;watch;create;update;patch;delete
@@ -76,6 +101,7 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
 // Reconcile drives one Migration toward completion.
 //
@@ -135,6 +161,32 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if err := r.ensureOwned(ctx, m); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Follow preflight: before any worker runs, a one-shot Job probes the
+	// replication prerequisites (wal_level, slot headroom, REPLICATION
+	// attribute, origin-function EXECUTE, the session_replication_role SET
+	// gate). Every one of these failed live before it failed loudly; two of
+	// them lose data silently. Failure is absorbing: these are configuration
+	// errors on the databases, retrying the migration cannot fix them.
+	if followEnabled(m) && m.Status.Attempts == 0 {
+		passed, failMsg, err := r.ensurePreflight(ctx, m)
+		switch {
+		case err != nil:
+			return ctrl.Result{}, err
+		case failMsg != "":
+			m.Status.Phase = v1alpha1.PhaseFailed
+			r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionFalse, "PreflightFailed", failMsg)
+			r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "PreflightFailed", failMsg)
+			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "PreflightFailed", "Preflight", "%s", truncate(failMsg, maxDetailLen))
+			return ctrl.Result{}, r.updateStatus(ctx, m, base)
+		case !passed:
+			m.Status.Phase = v1alpha1.PhaseValidating
+			if err := r.updateStatus(ctx, m, base); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+		}
 	}
 
 	// Job orchestration: observe the current attempt or start the next one.
@@ -267,9 +319,14 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1alpha
 }
 
 // handleFailedJob either schedules the next resume attempt or fails the
-// Migration for good.
+// Migration for good. The Job's own condition only says that the pod failed;
+// the actual cause (a pgcopydb ERROR) lives in the pod log, so its last error
+// line is appended when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1alpha1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
+	if detail := r.workerErrorDetail(ctx, m.Namespace, job.Name); detail != "" {
+		reason += "; last error: " + detail
+	}
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
 		m.Status.Phase = v1alpha1.PhaseFailed
 		r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
@@ -345,6 +402,37 @@ func jobFinished(job *batchv1.Job) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// jobLogTail returns the trimmed tail of the Job's newest pod's logs, or ""
+// when logs are unreadable (no reader wired, pod already gone, RBAC): callers
+// degrade to the information they already have.
+func (r *MigrationReconciler) jobLogTail(ctx context.Context, namespace, jobName string, lines int64) string {
+	if r.Logs == nil {
+		return ""
+	}
+	raw, err := r.Logs.JobLogs(ctx, namespace, jobName, lines)
+	if err != nil {
+		logf.FromContext(ctx).V(1).Info("pod log fetch failed", "job", jobName, "error", err)
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// workerErrorDetail pulls the last pgcopydb ERROR/FATAL message out of a
+// failed worker's structured logs (PGCOPYDB_LOG_JSON=on); "" when no parsable
+// error line is available.
+func (r *MigrationReconciler) workerErrorDetail(ctx context.Context, namespace, jobName string) string {
+	tail := r.jobLogTail(ctx, namespace, jobName, workerLogTail)
+	return truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen)
+}
+
+// truncate caps s for contexts with server-side size limits (event notes).
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func failureReason(job *batchv1.Job) string {
