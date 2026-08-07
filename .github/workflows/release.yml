@@ -1,0 +1,73 @@
+name: Release
+
+# Publishes the public artifacts to ghcr.io on version tags:
+# manager image, runner image, and the Helm chart as OCI.
+# amd64 only for now (decision S9); arm64 arrives with M4.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  manager-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+  runner-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: images/runner
+          push: true
+          tags: |
+            ${{ env.IMAGE }}/runner:${{ github.ref_name }}
+            ${{ env.IMAGE }}/runner:latest
+      - name: Smoke-test pgcopydb and pg_dump versions
+        # The build canary already asserts majors; this proves the pushed
+        # image actually runs (spike S6 closure for amd64).
+        run: |
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
+
+  chart:
+    runs-on: ubuntu-latest
+    needs: [manager-image, runner-image]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - name: Push chart as OCI
+        # Chart version and appVersion both track the git tag (without the
+        # leading v, Helm requires SemVer).
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          helm package charts/pgcopydb-operator --version "$VERSION" --app-version "$GITHUB_REF_NAME"
+          helm push "pgcopydb-operator-$VERSION.tgz" "oci://$IMAGE/charts"

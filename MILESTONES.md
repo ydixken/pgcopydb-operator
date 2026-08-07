@@ -39,7 +39,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B8 (done, internal/metrics; ServiceMonitor ships with the chart): Prometheus metrics (phase, tables/bytes done, attempts, failures) + chart ServiceMonitor toggle.
 - [x] B9 (Dockerfile done, images/runner/; CI build job + ghcr publish pending, B11): `images/runner/` Dockerfile (Debian + PGDG, pgcopydb 0.18, postgresql-client-17, non-root, digest-pinned) + GitLab CI build job + ghcr publish in release workflow.
 - [x] B10 (done, charts/pgcopydb-operator; helm lint + template verified): Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec, NetworkPolicy toggle) + chart lint in CI.
-- [ ] B11: GitHub release workflow: goreleaser-or-docker-build of both images (amd64 first; arm64 per S9) + `helm push` OCI chart to ghcr.io.
+- [x] B11 (workflow done; verified with the first tag): GitHub release workflow: both images (amd64 first per S9) + OCI chart to ghcr.io on v* tags.
 - [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
 - [ ] B13: e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
 - [ ] B14: docs: README quickstart, `docs/examples/*.yaml` (each example a real resource with a short explanation), values documentation in chart README.
