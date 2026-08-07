@@ -16,9 +16,9 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 ### Spikes (verify research gaps, record outcome here)
 
-- [ ] S1: confirm `--host/--port` (sentinel TCP) is accepted by `pgcopydb clone --follow` and `follow` in a live v0.18 container (getopt table says yes, help text omits it). Outcome feeds the control-plane choice (TCP vs exec).
-- [ ] S2: probe the sentinel TCP protocol for auth (none expected per `ld_ipc.h`); decide NetworkPolicy shape for port 5442.
-- [ ] S3: test `pg_replication_origin_create/_advance/_xact_setup` as a non-superuser on PG17 (GRANT EXECUTE path); determines target-credential requirements for follow.
+- [x] S1 (done 2026-08-07, live container run): `clone --follow --host --port` parses and runs (no getopt rejection). TCP sentinel coordinator is the M2 control plane.
+- [x] S2 (source-verified): the sentinel wire protocol has no authentication; the chart MUST ship a NetworkPolicy restricting 5442 to the operator (M2 task below).
+- [x] S3 (done 2026-08-07, live on PG18): denied by default; plain GRANT EXECUTE on the six pg_replication_origin_* functions suffices. Follow preflight checks for superuser OR these grants and names the missing ones.
 - [x] S4 (done 2026-08-07, live check): follow-mode prerequisites (logical wal_level, slot and sender headroom) are met on the e2e cluster out of the box; specifics live in private ops notes.
 - [ ] S5: how to declare a REPLICATION-attribute role via CNPG `managed.roles` for the e2e source fixture.
 - [x] S6 (image built and smoke-tested on arm64 via podman: pgcopydb 0.18, pg_dump 17.10, non-root; amd64 + registry push still pending in CI, see B11): build the runner image (pgcopydb 0.18 + postgresql-client-17) and run a clone against a PG17 target; upstream image ships PG16 client tools and pg_dump must be >= target major.
