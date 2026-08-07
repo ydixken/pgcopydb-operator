@@ -2,7 +2,7 @@
 
 Status: **H0 done, design approved (2026-08-07). M1 in progress.**
 
-Design: [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md). Research ground truth: [docs/research/](docs/research/). This file is the compaction-proof task ledger: every task carries enough context to execute without the original conversation.
+Design: [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md). Research ground truth: [docs/research/](docs/research/). Facts about the private e2e infrastructure are never committed here. This file is the compaction-proof task ledger: every task carries enough context to execute without the original conversation.
 
 [TOC]
 
@@ -18,13 +18,13 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 - [ ] S1: confirm `--host/--port` (sentinel TCP) is accepted by `pgcopydb clone --follow` and `follow` in a live v0.18 container (getopt table says yes, help text omits it). Outcome feeds the control-plane choice (TCP vs exec).
 - [ ] S2: probe the sentinel TCP protocol for auth (none expected per `ld_ipc.h`); decide NetworkPolicy shape for port 5442.
-- [ ] S3: test `pg_replication_origin_create/_advance/_xact_setup` as a non-superuser on PG17 (GRANT EXECUTE path) against a CNPG cluster; determines target-credential requirements for follow.
-- [x] S4 (done 2026-08-07, live check): CNPG defaults verified on the dev cluster: `wal_level=logical`, `max_replication_slots=32`, `max_wal_senders=10`, PostgreSQL 17.9. Follow mode needs no per-cluster tuning.
-- [ ] S5: how to declare a REPLICATION-attribute role via CNPG `managed.roles` for the e2e source cluster.
+- [ ] S3: test `pg_replication_origin_create/_advance/_xact_setup` as a non-superuser on PG17 (GRANT EXECUTE path); determines target-credential requirements for follow.
+- [x] S4 (done 2026-08-07, live check): follow-mode prerequisites (logical wal_level, slot and sender headroom) are met on the e2e cluster out of the box; specifics live in private ops notes.
+- [ ] S5: how to declare a REPLICATION-attribute role via CNPG `managed.roles` for the e2e source fixture.
 - [x] S6 (image built and smoke-tested on arm64 via podman: pgcopydb 0.18, pg_dump 17.10, non-root; amd64 + registry push still pending in CI, see B11): build the runner image (pgcopydb 0.18 + postgresql-client-17) and run a clone against a PG17 target; upstream image ships PG16 client tools and pg_dump must be >= target major.
 - [ ] S7: capture exact JSON from `pgcopydb list progress --json`, `list progress --summary --json`, `summary.json`, and `stream sentinel get` single-value selectors from a live run; check `sentinel get --json` endpos bug still present; commit samples under `docs/research/samples/`.
 - [ ] S8: SIGTERM a mid-clone run; record exit code and verify `--resume` picks up correctly (drives Job-failure interpretation).
-- [x] S9 (done 2026-08-07, live check): k3s v1.35.1, 3 amd64 nodes (20 CPU / 32Gi each). Runner image targets amd64 first; arm64 in M4.
+- [x] S9 (done 2026-08-07, live check): e2e-cluster facts recorded in private ops notes (this repository is public). Project consequence: the runner image targets amd64 first; arm64 in M4.
 - [ ] S10: (deferred) OCI-sourced ArgoCD Application viability; M1 uses the proven git-repo-with-path chart source.
 
 ### Build
@@ -40,7 +40,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B9 (Dockerfile done, images/runner/; CI build job + ghcr publish pending, B11): `images/runner/` Dockerfile (Debian + PGDG, pgcopydb 0.18, postgresql-client-17, non-root, digest-pinned) + GitLab CI build job + ghcr publish in release workflow.
 - [ ] B10: Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec, NetworkPolicy toggle) + chart lint in CI.
 - [ ] B11: GitHub release workflow: goreleaser-or-docker-build of both images (amd64 first; arm64 per S9) + `helm push` OCI chart to ghcr.io.
-- [ ] B12: register in cloudcats/app-of-apps: `platform/templates/pgcopydb-operator/application-pgcopydb-operator.yaml` (sync-wave -3, ServerSideApply, git source `charts/pgcopydb-operator` on GitHub main), values block in `platform/values.yaml`, GitHub URL in `platform-appproject.yaml` `sourceRepos` (whitelist is mandatory). MR to that repo.
+- [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
 - [ ] B13: e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
 - [ ] B14: docs: README quickstart, `docs/examples/*.yaml` (each example a real resource with a short explanation), values documentation in chart README.
 
@@ -95,6 +95,6 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 | 2026-08-07 | Job with `backoffLimit: 0`; retries are operator-driven with `--resume`         | Retry policy and attempt counts belong in CR status; pgcopydb catalogs make resume correct (prior-art + CLI research).                               |
 | 2026-08-07 | CEL validation + defaults, no admission webhooks in v1                          | Removes cert-manager dependency; immutability via transition rules; conversion webhook reconsidered only when multi-version arrives.                  |
 | 2026-08-07 | TCP sentinel coordinator as follow control plane, exec as fallback              | v0.18 built it exactly for cross-container control (no shared volume, no SQLITE_BUSY); it is unauthenticated so the chart ships a NetworkPolicy. S1/S2 verify. |
-| 2026-08-07 | Chart source for the dev cluster = git-repo-with-path, not OCI                  | No existing Application in app-of-apps uses OCI; git+path is the proven route (S10 may revisit).                                                     |
+| 2026-08-07 | GitOps chart source = git-repo-with-path, not OCI                               | Matches the proven pattern in the private GitOps repo (S10 may revisit).                                                                             |
 | 2026-08-07 | Unit tests by default; documentation always current; both hard requirements     | User requirement; codified in AGENTS.md.                                                                                                             |
 | 2026-08-07 | MILESTONES.md replaces PROGRESS.md as the single task ledger                    | User requirement; decision log carried over.                                                                                                          |

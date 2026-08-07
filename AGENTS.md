@@ -7,7 +7,8 @@ Operating guide for AI agents and humans working in this repository. The keyword
 ## Caution
 
 - Standing authorization (2026-08-07): agents MAY push, open PRs, and merge autonomously for this project's development, and MUST verify results (pipelines, e2e) after doing so. Force-pushes to `main` remain forbidden.
-- Agents MAY read and reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
+- **This repository is public.** Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project. E2e-relevant details live in private ops notes outside git. When a doc needs such a fact, it writes "see private ops notes".
+- Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
 - `task e2e` runs against a **real cluster**: whatever `kubectl config current-context` points at. Check the context before running, and never bypass the confirmation prompt (`task --yes` is forbidden for this target). The dev cluster is shared; keep e2e resources in the `pgcopydb-e2e` namespace and clean up.
 
 ## Mandatory skills

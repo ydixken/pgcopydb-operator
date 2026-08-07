@@ -2,7 +2,7 @@
 
 Date: 2026-08-07. Status: approved. The keywords MUST, SHOULD, MAY follow RFC 2119.
 
-Ground truth for every pgcopydb claim: [docs/research/pgcopydb-cli.md](../../research/pgcopydb-cli.md) and [docs/research/pgcopydb-follow.md](../../research/pgcopydb-follow.md) (pgcopydb v0.18). Cluster facts: [docs/research/dev-cluster.md](../../research/dev-cluster.md). Pattern sources: [docs/research/prior-art.md](../../research/prior-art.md).
+Ground truth for every pgcopydb claim: [docs/research/pgcopydb-cli.md](../../research/pgcopydb-cli.md) and [docs/research/pgcopydb-follow.md](../../research/pgcopydb-follow.md) (pgcopydb v0.18). Pattern sources: [docs/research/prior-art.md](../../research/prior-art.md). Facts about the private e2e environment are deliberately not in this repository.
 
 ## Purpose
 
@@ -137,12 +137,12 @@ Pre-flight validation (Validating, M1 subset + M2 follow checks): connectivity b
 
 Templated CRDs gated by `crds.install` with `helm.sh/resource-policy: keep`; values: `image.*`, `runner.image.*`, `imagePullSecrets`, `rbac.create`, `serviceAccount.*`, `watchNamespaces` (empty = cluster-wide), `resources`, `metrics.serviceMonitor.enabled`, `networkPolicy.enabled`, `nodeSelector/tolerations/affinity`. No webhooks, no cert-manager dependency.
 
-Dev cluster registration (app-of-apps): `platform/templates/pgcopydb-operator/application-pgcopydb-operator.yaml` at sync-wave `-3` with ServerSideApply, git-repo-with-path source (`charts/pgcopydb-operator` on GitHub main; the proven pattern), values block in `platform/values.yaml`, GitHub repo URL added to the `platform` AppProject `sourceRepos` whitelist. OCI source can replace it once proven.
+Deployment to the e2e environment goes through a private GitOps repository; that recipe describes private infrastructure and stays there, never in this repository.
 
 ## Testing
 
 - Unit/envtest: every package; controller reconcile paths against envtest with a fake runner (Job status manipulation); CEL validation tests via envtest CRD apply; flag/INI rendering golden tests. Mandatory by default (AGENTS.md).
-- E2e (`task e2e`, local against dev cluster context): Ginkgo suite in `test/e2e` adapted off kind. Fixtures: two CNPG `Cluster` CRs (pagila demo data via initdb import job), namespace `pgcopydb-e2e`. Scenarios: same-cluster clone, cross-namespace with Secrets + service DNS (stands in for cross-cluster; the wire protocol is identical), filters, resume after runner-pod kill, follow + live pgbench writes + Manual cutover + row equality, Automatic cutover, abort path drops the slot, compare verification. Cross-cluster against a second real cluster stays a documented manual scenario until a second cluster exists.
+- E2e (`task e2e`, local against the developer's current kubectl context): Ginkgo suite in `test/e2e` adapted off kind. Fixtures: two CNPG `Cluster` CRs (pagila demo data via initdb import job), namespace `pgcopydb-e2e`. Scenarios: same-cluster clone, cross-namespace with Secrets + service DNS (stands in for cross-cluster; the wire protocol is identical), filters, resume after runner-pod kill, follow + live pgbench writes + Manual cutover + row equality, Automatic cutover, abort path drops the slot, compare verification. Cross-cluster against a second real cluster stays a documented manual scenario until a second cluster exists.
 - The ten research gaps become M1 spike tasks with recorded outcomes in MILESTONES.md.
 
 ## Security posture
