@@ -48,6 +48,8 @@ Superuser is required only for:
 
 ## Live migration (`spec.follow.enabled: true`)
 
+The operator preflights the instance and role requirements of this section before the first attempt: a `<name>-preflight` Job checks `wal_level`, free-slot headroom, the source role's REPLICATION attribute, EXECUTE on the origin functions, and the `session_replication_role` SET privilege. A failed check fails the Migration with the exact missing GRANT or setting in the `Validated` condition message, before any data moves. The schema and workload contract below (replica identity, no DDL) is NOT yet preflighted; checking it stays your job.
+
 Source instance:
 
 - `wal_level` MUST be `logical` (changing it requires a server restart).
@@ -58,7 +60,7 @@ Source instance:
 Source role:
 
 - MUST have the `REPLICATION` attribute (or be superuser): `ALTER ROLE app REPLICATION`. Without it, slot creation fails with "permission denied to start WAL sender".
-- Publication: pgcopydb auto-creates a publication for the migrated tables (named after the slot) and drops it during cleanup. The role MUST have CREATE on the source database and own every published table. Alternatively, pre-create a publication (superuser is needed for `FOR ALL TABLES`) and point `spec.follow.publication` at it; pgcopydb then leaves it alone.
+- Publication: pgcopydb auto-creates a publication for the migrated tables (named after the slot) and drops it during cleanup. The role MUST have CREATE on the source database and own every published table. Alternatively, pre-create a publication (superuser is needed for `FOR ALL TABLES`) and point `spec.follow.publication` at it; pgcopydb then leaves it alone. On a retry after a crashed attempt, the operator drops a leftover auto-managed publication before resuming (pgcopydb would otherwise fail on its own leftover); a publication named in `spec.follow.publication` is never touched.
 - Plugin: `pgoutput` (default) and `test_decoding` ship with PostgreSQL; `wal2json` MUST be installed on the source before selecting it.
 
 Target role:

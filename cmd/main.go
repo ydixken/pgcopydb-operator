@@ -214,6 +214,7 @@ func main() {
 		RunnerImage: runnerImage,
 		Poller:      progress.NewFromExec(podExec),
 		Sentinel:    sentinel.New(podExec),
+		Logs:        podExec,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "migration")
 		os.Exit(1)

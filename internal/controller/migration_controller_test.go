@@ -44,6 +44,10 @@ const testNS = "default"
 // testDB is the database/username used by the canned valid spec.
 const testDB = "app"
 
+// testPasswordKey is the secret key every test connection reads its password
+// from.
+const testPasswordKey = "password"
+
 // newReconciler builds the reconciler under test. envtest runs no Job
 // controller and no garbage collector, so tests drive Job status by hand,
 // which is exactly what makes every controller path deterministic here.
@@ -64,7 +68,7 @@ func validMigration(name string) *v1alpha1.Migration {
 				Host: "source.example.com", Database: testDB, Username: "migrator",
 				PasswordSecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "src-credentials"},
-					Key:                  "password",
+					Key:                  testPasswordKey,
 				},
 			},
 			Target: v1alpha1.PostgresConnection{
@@ -148,6 +152,10 @@ var _ = Describe("Migration Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-work", Namespace: testNS}, pvc)).To(Succeed())
 		Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal("10Gi"))
 
+		// Preflight is a follow-mode gate; a plain clone starts directly.
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-preflight", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
+
 		job := getJob(name + "-run-1")
 		c := job.Spec.Template.Spec.Containers[0]
 		Expect(c.Image).To(Equal(testRunnerImage))
@@ -216,6 +224,82 @@ var _ = Describe("Migration Controller", func() {
 		final := getMigration(name)
 		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
 		Expect(meta.IsStatusConditionTrue(final.Status.Conditions, v1alpha1.ConditionFailed)).To(BeTrue())
+	})
+
+	It("surfaces the worker's terminal error from structured logs", func() {
+		const name = "mig-error-surface"
+		defer cleanup(name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		const lastError = "permission denied for function pg_replication_origin_drop"
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: `{"error_severity":"INFO","message":"STEP 1: setup"}` + "\n" +
+			`{"error_severity":"ERROR","message":"` + lastError + `"}` + "\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+		pass := func() {
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+			})
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		}
+		drainEvents := func() []string {
+			var out []string
+			for {
+				select {
+				case e := <-rec.Events:
+					out = append(out, e)
+				default:
+					return out
+				}
+			}
+		}
+
+		pass() // run-1
+		markJob(name+"-run-1", false)
+		pass() // failure observed: the retry event carries the log detail
+		Expect(drainEvents()).To(ContainElement(SatisfyAll(
+			ContainSubstring("AttemptFailed"), ContainSubstring(lastError))))
+
+		pass() // run-2
+		markJob(name+"-run-2", false)
+		pass() // budget spent: the Failed condition carries the log detail
+
+		final := getMigration(name)
+		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
+		Expect(failed.Message).To(ContainSubstring(lastError))
+	})
+
+	It("keeps the Job's failure message when worker logs are unreadable", func() {
+		const name = "mig-error-nologs"
+		defer cleanup(name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 1 // CRD defaulting forbids 0 via omitempty
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		r := newReconciler()
+		r.Logs = &fakeLogs{err: fmt.Errorf("pods \"gone\" not found")}
+		pass := func() {
+			_, err := r.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+			})
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		}
+		pass() // run-1
+		markJob(name+"-run-1", false)
+		pass() // retry scheduled
+		pass() // run-2
+		markJob(name+"-run-2", false)
+		pass() // budget spent
+
+		final := getMigration(name)
+		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
+		Expect(failed.Message).NotTo(ContainSubstring("last error"))
 	})
 
 	It("renders filters into an owned ConfigMap and wires the flag", func() {

@@ -133,14 +133,32 @@ func TestMaterialize_InlineWithPassword(t *testing.T) {
 
 func TestPreludeScript(t *testing.T) {
 	entries := []Passfile{{Host: "h1", User: "u1", File: "/etc/pgcopydb/creds/source-mnt/source-password"}}
-	s := PreludeScript(entries)
-	for _, want := range []string{"umask 077", "PGPASSFILE=/tmp/pgpass", execPgcopydb, "h1", "u1"} {
+	s := PreludeScript(entries, "")
+	for _, want := range []string{"umask 077", "PGPASSFILE=/tmp/pgpass", execArgv0, "h1", "u1"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("prelude missing %q:\n%s", want, s)
 		}
 	}
-	// No entries: plain exec, no passfile machinery.
-	if got := PreludeScript(nil); got != execPgcopydb {
+	// No entries: strict shell straight to exec, no passfile machinery.
+	if got := PreludeScript(nil, ""); got != "set -eu\n"+execArgv0 {
 		t.Fatalf("empty prelude wrong: %q", got)
+	}
+}
+
+// TestPreludeScript_SetupOrdering pins the contract setup commands rely on:
+// they run after the passfile export (so psql in setup can authenticate) and
+// before control is handed to $0.
+func TestPreludeScript_SetupOrdering(t *testing.T) {
+	entries := []Passfile{{Host: "h1", User: "u1", File: "/etc/pgcopydb/creds/source-mnt/source-password"}}
+	setup := `psql "$PGCOPYDB_SOURCE_PGURI" -Xc 'select 1'`
+	s := PreludeScript(entries, setup)
+	exportAt := strings.Index(s, "export PGPASSFILE=")
+	setupAt := strings.Index(s, setup)
+	execAt := strings.Index(s, execArgv0)
+	if exportAt < 0 || setupAt < 0 || execAt < 0 {
+		t.Fatalf("prelude missing a section:\n%s", s)
+	}
+	if exportAt >= setupAt || setupAt >= execAt {
+		t.Fatalf("prelude sections out of order (export=%d setup=%d exec=%d):\n%s", exportAt, setupAt, execAt, s)
 	}
 }
