@@ -64,10 +64,15 @@ var (
 		Name: "pgcopydb_migration_indexes_total",
 		Help: "Indexes planned for creation.",
 	}, []string{labelNamespace, labelName})
+
+	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pgcopydb_migration_replication_lag_bytes",
+		Help: "Replication lag in bytes while streaming (absent outside follow).",
+	}, []string{labelNamespace, labelName})
 )
 
 func init() {
-	metrics.Registry.MustRegister(phase, attempts, tablesDone, tablesTotal, indexesDone, indexesTotal)
+	metrics.Registry.MustRegister(phase, attempts, tablesDone, tablesTotal, indexesDone, indexesTotal, replicationLagBytes)
 }
 
 // Record refreshes every gauge for one Migration from its status.
@@ -84,6 +89,9 @@ func Record(m *v1alpha1.Migration) {
 		indexesDone.WithLabelValues(m.Namespace, m.Name).Set(float64(p.IndexesDone))
 		indexesTotal.WithLabelValues(m.Namespace, m.Name).Set(float64(p.IndexesTotal))
 	}
+	if r := m.Status.Replication; r != nil && r.LagBytes != nil {
+		replicationLagBytes.WithLabelValues(m.Namespace, m.Name).Set(float64(*r.LagBytes))
+	}
 }
 
 // Forget removes every series of a deleted Migration.
@@ -95,4 +103,5 @@ func Forget(namespace, name string) {
 	tablesTotal.DeletePartialMatch(l)
 	indexesDone.DeletePartialMatch(l)
 	indexesTotal.DeletePartialMatch(l)
+	replicationLagBytes.DeletePartialMatch(l)
 }
