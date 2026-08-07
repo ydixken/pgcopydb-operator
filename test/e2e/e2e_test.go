@@ -227,6 +227,82 @@ var _ = Describe("Migration", Ordered, func() {
 		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 			"replication slot leaked on the source after deletion")
 	})
+
+	It("suspends a streaming Migration and resumes it through cutover", func() {
+		const name = "e2e-suspend"
+		mig := newFollowMigration(name, v1alpha1.CutoverManual)
+		create(mig)
+
+		By("waiting for streaming so the slot exists on the source")
+		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		Expect(sourceSlotCount()).To(Equal("1"), "expected exactly the streaming migration's slot")
+
+		By("suspending the Migration")
+		setSuspend(name, true)
+		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseSuspended)
+
+		By("waiting for the worker Job to be gone (foreground deletion)")
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, &batchv1.Job{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "worker Job still present, get error: %v", err)
+		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+		By("checking the work PVC and the source slot survive suspension")
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-work"},
+			&corev1.PersistentVolumeClaim{})).To(Succeed(), "work PVC gone while suspended")
+		Expect(sourceSlotCount()).To(Equal("1"), "replication slot must be retained while suspended")
+
+		By("checking the SlotRetained warning event fired on suspend")
+		// Matched by UID: kept fixtures mean an earlier run's e2e-suspend events
+		// may still be in the namespace.
+		Eventually(func(g Gomega) {
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(ctx, events, client.InNamespace(nsE2E))).To(Succeed())
+			var found bool
+			for _, e := range events.Items {
+				if e.InvolvedObject.UID == mig.UID && e.Reason == "SlotRetained" &&
+					e.Type == corev1.EventTypeWarning {
+					found = true
+					break
+				}
+			}
+			g.Expect(found).To(BeTrue(), "SlotRetained warning event not recorded")
+		}, time.Minute, 2*time.Second).Should(Succeed())
+
+		By("writing 500 rows on the source while suspended")
+		psql(srcPod, "INSERT INTO orders (customer_id, amount, note) SELECT (g % 50000) + 1,"+
+			" (g % 60)::numeric / 2, 'live-susp-' || g FROM generate_series(1, 500) g")
+
+		By("resuming the Migration")
+		setSuspend(name, false)
+
+		By("waiting for streaming to recover on a fresh attempt")
+		m := waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
+
+		By("checking attempt 2 ran with --resume")
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, job)).To(Succeed())
+		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--resume"))
+
+		By("waiting for CutoverPending and approving the cutover")
+		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseCutoverPending)
+		approveCutover(name)
+
+		m = waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
+		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		expectCleanupSucceeded(name)
+
+		By("comparing data and slot state after the resumed cutover")
+		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
+		Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-susp-%'")).To(Equal("500"),
+			"rows written while suspended did not arrive after resume")
+		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
+		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
+
+		By("removing the suspend-window rows so the source matches the seeded fixture again")
+		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
+	})
 })
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
@@ -314,6 +390,16 @@ func newFollowMigration(name string, mode v1alpha1.CutoverMode) *v1alpha1.Migrat
 	m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
 	m.Spec.Cutover = v1alpha1.CutoverSpec{Mode: mode}
 	return m
+}
+
+// setSuspend flips spec.suspend, the pause/resume switch.
+func setSuspend(name string, suspend bool) {
+	GinkgoHelper()
+	m := &v1alpha1.Migration{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+	patch := client.MergeFrom(m.DeepCopy())
+	m.Spec.Suspend = suspend
+	Expect(k8sClient.Patch(ctx, m, patch)).To(Succeed(), "failed to set suspend=%v on %s", suspend, name)
 }
 
 // approveCutover flips spec.cutover.approved, the Manual-mode trigger.

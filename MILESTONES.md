@@ -56,7 +56,8 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] Cutover `mode: Manual|Automatic` + `approved` gate via `sentinel set endpos --current`; drain = worker exit 0; CutoverCompleted (done, envtest-covered).
 - [x] Cleanup Job + finalizer: `pgcopydb stream cleanup` gates Complete and routes deletion; slot-retention warning on suspend (done, envtest-covered).
 - [ ] Snapshot-holder hardening (separate `pgcopydb snapshot --follow` container for consistent base-copy resume) or documented `--not-consistent` trade-off; decide from S8 evidence.
-- [x] E2e (2026-08-07, 9/9 green in 464s live): follow with live-write burst + Manual cutover + row/sequence equality, Automatic cutover, delete-mid-stream drops the slot. Still open: a suspend/resume-under-streaming scenario and sustained pgbench-style write load.
+- [x] E2e (2026-08-07, 9/9 green in 464s live): follow with live-write burst + Manual cutover + row/sequence equality, Automatic cutover, delete-mid-stream drops the slot. Still open: sustained pgbench-style write load.
+- [ ] E2e suspend/resume scenario (2026-08-07): 10th spec written and validated live through resume (suspend under streaming: worker Job gone, work PVC and slot kept, `SlotRetained` warning event, attempt 2 with `--resume`, rows written while suspended replayed to the target). It died at the final Completed wait on the two verify-gate defects it found, both since fixed (missing passfile prelude, exact origin-vs-endpos predicate; see the finding below). The spec is merged and the code is fixed; what is still owed is the live 10/10 rerun, which happens after the cluster upgrade.
 - [ ] Example PrometheusRule (slot retention, apply crash-loop) under docs/examples.
 
 ## M3: verification + service polish
