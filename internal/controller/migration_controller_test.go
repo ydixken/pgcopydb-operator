@@ -18,79 +18,255 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	pgcopydboperatoriov1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 )
 
+const testRunnerImage = "ghcr.io/example/runner:test"
+
+// testNS is where every test Migration lives; envtest ships the namespace.
+const testNS = "default"
+
+// testDB is the database/username used by the canned valid spec.
+const testDB = "app"
+
+// newReconciler builds the reconciler under test. envtest runs no Job
+// controller and no garbage collector, so tests drive Job status by hand,
+// which is exactly what makes every controller path deterministic here.
+func newReconciler() *MigrationReconciler {
+	return &MigrationReconciler{
+		Client:      k8sClient,
+		Scheme:      k8sClient.Scheme(),
+		Recorder:    events.NewFakeRecorder(100),
+		RunnerImage: testRunnerImage,
+	}
+}
+
+func validMigration(name string) *v1alpha1.Migration {
+	return &v1alpha1.Migration{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec: v1alpha1.MigrationSpec{
+			Source: v1alpha1.PostgresConnection{
+				Host: "source.example.com", Database: testDB, Username: "migrator",
+				PasswordSecretRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "src-credentials"},
+					Key:                  "password",
+				},
+			},
+			Target: v1alpha1.PostgresConnection{
+				Host: "target.example.com", Database: testDB, Username: testDB,
+			},
+		},
+	}
+}
+
 var _ = Describe("Migration Controller", func() {
-	Context("When reconciling a resource", func() {
-		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
-		)
+	ctx := context.Background()
 
-		ctx := context.Background()
+	reconcileOnce := func(name string) {
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+		})
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	}
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+	getMigration := func(name string) *v1alpha1.Migration {
+		m := &v1alpha1.Migration{}
+		ExpectWithOffset(1, k8sClient.Get(ctx,
+			types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
+		return m
+	}
+
+	getJob := func(name string) *batchv1.Job {
+		j := &batchv1.Job{}
+		ExpectWithOffset(1, k8sClient.Get(ctx,
+			types.NamespacedName{Name: name, Namespace: testNS}, j)).To(Succeed())
+		return j
+	}
+
+	// markJob flips the worker Job to a terminal state, standing in for the
+	// Job controller that envtest does not run.
+	markJob := func(name string, succeeded bool) {
+		j := getJob(name)
+		now := metav1.Now()
+		if j.Status.StartTime == nil {
+			j.Status.StartTime = &now
 		}
-		migration := &pgcopydboperatoriov1alpha1.Migration{}
+		if succeeded {
+			j.Status.Succeeded = 1
+			j.Status.CompletionTime = &now
+			j.Status.Conditions = append(j.Status.Conditions,
+				batchv1.JobCondition{Type: batchv1.JobSuccessCriteriaMet, Status: corev1.ConditionTrue},
+				batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue})
+		} else {
+			j.Status.Failed = 1
+			j.Status.Conditions = append(j.Status.Conditions,
+				batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
+					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"},
+				batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+					Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"})
+		}
+		ExpectWithOffset(1, k8sClient.Status().Update(ctx, j)).To(Succeed())
+	}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind Migration")
-			err := k8sClient.Get(ctx, typeNamespacedName, migration)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &pgcopydboperatoriov1alpha1.Migration{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					// Minimal valid spec: source/target are required and CEL
-					// enforces the inline-fields one-of.
-					Spec: pgcopydboperatoriov1alpha1.MigrationSpec{
-						Source: pgcopydboperatoriov1alpha1.PostgresConnection{
-							Host: "source.example.com", Database: "app", Username: "migrator",
-						},
-						Target: pgcopydboperatoriov1alpha1.PostgresConnection{
-							Host: "target.example.com", Database: "app", Username: "app",
-						},
-					},
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
-		})
+	cleanup := func(name string) {
+		m := &v1alpha1.Migration{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, m); err == nil {
+			Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		}
+		// envtest has no garbage collector; remove owned objects by label.
+		sel := []client.DeleteAllOfOption{
+			client.InNamespace(testNS),
+			client.MatchingLabels(map[string]string{labelMigration: name}),
+		}
+		_ = k8sClient.DeleteAllOf(ctx, &batchv1.Job{}, sel...)
+		_ = k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, sel...)
+		_ = k8sClient.DeleteAllOf(ctx, &corev1.ConfigMap{}, sel...)
+	}
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &pgcopydboperatoriov1alpha1.Migration{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+	It("creates the work PVC and the first attempt Job", func() {
+		const name = "mig-first-attempt"
+		defer cleanup(name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		reconcileOnce(name)
 
-			By("Cleanup the specific resource instance Migration")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &MigrationReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		pvc := &corev1.PersistentVolumeClaim{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-work", Namespace: testNS}, pvc)).To(Succeed())
+		Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal("10Gi"))
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
+		job := getJob(name + "-run-1")
+		c := job.Spec.Template.Spec.Containers[0]
+		Expect(c.Image).To(Equal(testRunnerImage))
+		Expect(strings.Join(c.Args, " ")).To(Equal("clone --dir /workdir"))
+		Expect(strings.Join(c.Args, " ")).NotTo(ContainSubstring("--resume"))
+		// Source password travels via the prelude-assembled passfile.
+		Expect(c.Command[2]).To(ContainSubstring("PGPASSFILE"))
+		envNames := map[string]string{}
+		for _, e := range c.Env {
+			envNames[e.Name] = e.Value
+		}
+		Expect(envNames).To(HaveKey("PGCOPYDB_SOURCE_PGURI"))
+		Expect(envNames["PGCOPYDB_SOURCE_PGURI"]).NotTo(ContainSubstring("password"))
+		Expect(*job.Spec.BackoffLimit).To(Equal(int32(0)))
+		Expect(*job.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(65532)))
+
+		m := getMigration(name)
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Attempts).To(Equal(int32(1)))
+		Expect(m.Status.JobName).To(Equal(name + "-run-1"))
+		Expect(m.Status.StartedAt).NotTo(BeNil())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionValidated)).To(BeTrue())
+		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1alpha1.ConditionCloneCompleted)).To(BeTrue())
+	})
+
+	It("completes when the worker Job succeeds", func() {
+		const name = "mig-complete"
+		defer cleanup(name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		reconcileOnce(name)
+		markJob(name+"-run-1", true)
+		reconcileOnce(name)
+
+		m := getMigration(name)
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
+		Expect(m.Status.CompletedAt).NotTo(BeNil())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
+
+		// Terminal state is absorbing: another pass changes nothing.
+		reconcileOnce(name)
+		Expect(getMigration(name).Status.Attempts).To(Equal(int32(1)))
+	})
+
+	It("retries with --resume and fails after the budget", func() {
+		const name = "mig-retry"
+		defer cleanup(name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		reconcileOnce(name)
+
+		markJob(name+"-run-1", false)
+		reconcileOnce(name) // observes failure, clears jobName
+		reconcileOnce(name) // starts attempt 2
+
+		job2 := getJob(name + "-run-2")
+		args := strings.Join(job2.Spec.Template.Spec.Containers[0].Args, " ")
+		Expect(args).To(ContainSubstring("--resume"))
+		Expect(args).To(ContainSubstring("--not-consistent"))
+		Expect(getMigration(name).Status.Attempts).To(Equal(int32(2)))
+
+		markJob(name+"-run-2", false)
+		reconcileOnce(name)
+
+		final := getMigration(name)
+		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		Expect(meta.IsStatusConditionTrue(final.Status.Conditions, v1alpha1.ConditionFailed)).To(BeTrue())
+	})
+
+	It("renders filters into an owned ConfigMap and wires the flag", func() {
+		const name = "mig-filters"
+		defer cleanup(name)
+		m := validMigration(name)
+		m.Spec.Clone.Filters = &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		reconcileOnce(name)
+
+		cm := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-filters", Namespace: testNS}, cm)).To(Succeed())
+		Expect(cm.Data["filters.ini"]).To(Equal("[exclude-schema]\naudit\n"))
+
+		job := getJob(name + "-run-1")
+		Expect(strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")).
+			To(ContainSubstring("--filters /etc/pgcopydb/conf/filters.ini"))
+	})
+
+	It("suspends by deleting the worker and resumes with a fresh attempt", func() {
+		const name = "mig-suspend"
+		defer cleanup(name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		reconcileOnce(name)
+
+		m := getMigration(name)
+		m.Spec.Suspend = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		reconcileOnce(name)
+
+		m = getMigration(name)
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseSuspended))
+		Expect(m.Status.JobName).To(BeEmpty())
+		// Foreground deletion in envtest leaves the object with a deletion
+		// timestamp (no GC runs); that is the observable "being deleted".
+		job := &batchv1.Job{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, job)
+		if err == nil {
+			Expect(job.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		}
+
+		m.Spec.Suspend = false
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		reconcileOnce(name)
+
+		m = getMigration(name)
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
+		args := strings.Join(getJob(fmt.Sprintf("%s-run-2", name)).Spec.Template.Spec.Containers[0].Args, " ")
+		Expect(args).To(ContainSubstring("--resume"))
 	})
 })
