@@ -42,7 +42,10 @@ lint:go:
   variables:
     GOMODCACHE: $CI_PROJECT_DIR/.go/pkg/mod
   cache:
+    # Own key: this cache holds an in-tree GOMODCACHE, which MUST NOT leak
+    # into test:unit (controller-gen's ./... walk chokes on cached modules).
     key:
+      prefix: lint
       files: [go.sum]
     paths: [.go/pkg/mod, bin/]
   script:
@@ -56,12 +59,14 @@ test:unit:
   image: golang:1.26.5@sha256:2005724102f45917a63e9d092fc0e4ea56ea575048ce147caad5f5f61502c365
   rules:
     - exists: [go.mod]
-  variables:
-    GOMODCACHE: $CI_PROJECT_DIR/.go/pkg/mod
   cache:
+    # Modules stay in the image-default GOMODCACHE outside the tree:
+    # controller-gen (via make manifests) walks ./... and fails on cached
+    # third-party modules. Only tool binaries and envtest assets are cached.
     key:
+      prefix: test
       files: [go.sum]
-    paths: [.go/pkg/mod]
+    paths: [bin/]
   script:
     - make test
     - go tool cover -func=cover.out | tail -n 1  # emits "total: (statements) NN.N%"
