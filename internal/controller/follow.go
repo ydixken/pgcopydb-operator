@@ -151,15 +151,41 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 	}
 }
 
-// finishFollow runs after the worker Job exited 0: for a live migration that
-// means endpos was reached, everything up to it is applied, and sequences are
-// already re-synced by pgcopydb. What remains is dropping the replication
-// state through the cleanup Job; Complete waits for it.
+// finishFollow runs after the worker Job exited 0. Exit 0 alone is NOT
+// trusted: after a crash inside the drain window, pgcopydb --resume exits 0
+// without replaying pending WAL ("endpos previously reached" tracks the
+// receive side). A verify Job compares the target's replication origin
+// progress, the durable apply truth, against the recorded endpos; only proof
+// gates CutoverCompleted and the cleanup. On refuted drain the Migration
+// fails loudly with the slot intact, so the data stays recoverable (at the
+// documented cost of WAL retention on the source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
 	r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
-	r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionTrue, "Drained",
-		"endpos reached, changes applied, sequences synced")
 	m.Status.Phase = v1alpha1.PhaseCuttingOver
+
+	verified, failedVerify, err := r.ensureVerify(ctx, m)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if failedVerify {
+		m.Status.Phase = v1alpha1.PhaseFailed
+		r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
+			"the worker exited before applying all changes up to endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
+		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "DrainIncomplete",
+			"cutover drain verification refuted completeness; do not switch applications to the target")
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "DrainIncomplete", "Verify",
+			"origin progress is behind endpos on the target; cutover is NOT complete")
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
+	}
+	if !verified {
+		if err := r.updateStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+	}
+
+	r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",
+		"target origin progress reached endpos; changes applied, sequences synced")
 
 	done, err := r.ensureCleanup(ctx, m)
 	if err != nil {
@@ -214,6 +240,34 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Mig
 			"stream cleanup failed after retries; the replication slot %q may be leaking WAL on the source and needs manual removal", effectiveSlotName(m))
 	}
 	return true, nil
+}
+
+// ensureVerify creates and observes the drain-verification Job. Returns
+// (verified, refuted, err); (false, false, nil) means still running.
+func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1alpha1.Migration) (bool, bool, error) {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: verifyJobName(m)}, job)
+	if apierrors.IsNotFound(err) {
+		job, err = buildVerifyJob(m, r.RunnerImage)
+		if err != nil {
+			return false, false, err
+		}
+		if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
+			return false, false, err
+		}
+		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+			return false, false, err
+		}
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	done, ok := jobFinished(job)
+	if !done {
+		return false, false, nil
+	}
+	return ok, !ok, nil
 }
 
 // reconcileDeletion routes deletion through cleanup for live migrations. The

@@ -52,6 +52,7 @@ func jobName(m *v1alpha1.Migration, attempt int32) string {
 	return fmt.Sprintf("%s-run-%d", m.Name, attempt)
 }
 func cleanupJobName(m *v1alpha1.Migration) string { return m.Name + "-cleanup" }
+func verifyJobName(m *v1alpha1.Migration) string  { return m.Name + "-verify" }
 
 // buildWorkPVC returns the work-directory claim. It holds pgcopydb's catalogs
 // and is the unit of resumability: it survives Job restarts and is only
@@ -115,6 +116,32 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
 	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir}
 	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, 2)
+}
+
+// buildVerifyJob checks, after the worker exited 0, that the target really
+// applied everything up to endpos. Exit code 0 is not proof of a complete
+// drain: a crash between endpos-set and drain-complete makes pgcopydb's
+// --resume short-circuit on the receive-side "endpos previously reached" and
+// exit 0 without replaying pending WAL (found live, silent data loss). The
+// durable truth is the target's replication origin progress, compared against
+// the endpos recorded in the work-dir sentinel.
+func buildVerifyJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+	origin := effectiveSlotName(m)
+	script := `set -eu
+endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
+echo "endpos=$endpos origin_progress=$progress"
+ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$progress'::pg_lsn, '$endpos'::pg_lsn) >= 0)::int")
+[ "$ok" = "1" ]`
+	args := []string{"-c", script}
+	job, err := jobSkeleton(m, runnerImage, verifyJobName(m), args, 1)
+	if err != nil {
+		return nil, err
+	}
+	// The skeleton assumes pgcopydb argv appended to the prelude; this Job
+	// runs a shell script instead, reusing the same env and mounts.
+	job.Spec.Template.Spec.Containers[0].Command = []string{"/bin/sh"}
+	return job, nil
 }
 
 // jobSkeleton builds the shared worker pod shape around the given argv.
