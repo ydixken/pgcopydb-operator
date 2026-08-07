@@ -128,7 +128,7 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 			"replication lag is above spec.follow.maxCatchupLag or unknown")
 	}
 
-	endposSet := st.Endpos != "" && st.Endpos != "0/0"
+	endposSet := st.Endpos != "" && st.Endpos != sentinel.ZeroLSN
 	switch {
 	case endposSet:
 		// Cutover already triggered; the worker drains and exits 0.

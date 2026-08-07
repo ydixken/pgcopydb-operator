@@ -37,6 +37,9 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
+// jobFailedMsg is the canned failure message test helpers stamp on Jobs.
+const jobFailedMsg = "pod failed"
+
 // deletionDriveTimeout bounds the Eventually loops that drive multi-pass
 // deletion flows; envtest passes are fast, this is generous.
 const deletionDriveTimeout = 15 * time.Second
@@ -66,9 +69,9 @@ func finishJob(ctx context.Context, name string, succeeded bool) {
 		j.Status.Failed = 1
 		j.Status.Conditions = append(j.Status.Conditions,
 			batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
-				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"},
+				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg},
 			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
-				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: "pod failed"})
+				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg})
 	}
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, j)).To(Succeed())
 }
@@ -154,7 +157,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
 
 		// Apply on, lag far above threshold: Streaming, not caught up.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/40000000", ReplayLSN: "0/10000000", SourceHead: "0/48000000", Endpos: "0/0"}
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/40000000", ReplayLSN: "0/10000000", SourceHead: "0/48000000", Endpos: sentinel.ZeroLSN}
 		m = reconcileWith(fake, name)
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseStreaming))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionStreaming)).To(BeTrue())
@@ -163,7 +166,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(*m.Status.Replication.LagBytes).To(BeNumerically(">", int64(16<<20)))
 
 		// Caught up, Manual, not approved: waiting.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/48000010", ReplayLSN: "0/48000000", SourceHead: "0/48000010", Endpos: "0/0"}
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/48000010", ReplayLSN: "0/48000000", SourceHead: "0/48000010", Endpos: sentinel.ZeroLSN}
 		m = reconcileWith(fake, name)
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCutoverPending))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCaughtUp)).To(BeTrue())
@@ -199,7 +202,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverAutomatic))).To(Succeed())
 		reconcileWith(fake, name)
 
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/100", ReplayLSN: "0/100", SourceHead: "0/100", Endpos: "0/0"}
+		caughtUpLSN := "0/100"
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		m := reconcileWith(fake, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCuttingOver))
