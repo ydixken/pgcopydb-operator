@@ -1,6 +1,6 @@
 # Runner image for the operator's migration Jobs: pgcopydb 0.18 plus the
-# PostgreSQL 17 client tools, since pg_dump/pg_restore MUST be >= the target
-# major (our targets run PostgreSQL 17).
+# PostgreSQL 18 client tools: pg_dump/pg_restore MUST be >= the newest server
+# major on either side, and 18 is the current release major.
 #
 # Built from debian:bookworm-slim with the PGDG apt repo instead of the
 # upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16

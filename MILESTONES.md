@@ -67,8 +67,12 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 ## M4: OSS release polish
 
-- [ ] Option-coverage audit: spec surface vs `docs/research/pgcopydb-cli.md`, close gaps or record exclusions.
-- [ ] Multi-arch images (amd64+arm64), Artifact Hub listing, CRD reference docs generation, versioned docs.
+- [x] Option-coverage audit (done: [docs/coverage.md](docs/coverage.md)): every clone/follow option from `docs/research/pgcopydb-cli.md` sections 2.1/2.2 mapped to a spec field, operator-managed behavior, or a recorded exclusion. Three unintentional gaps found, queued below.
+- [ ] Close audit gaps (small additive API fields): `clone.estimateTableSizes` (`--estimate-table-sizes`; `skip: analyze` is already exposed but only matters with it), a `clone.skip` entry `extensionComments` (`--skip-ext-comments`), `follow.wal2jsonNumericAsString` (`--wal2json-numeric-as-string`; wal2json is selectable but its only tuning knob is not).
+- [x] Usage guide (done: [docs/usage.md](docs/usage.md): install, first clone, live-migration runbook with Manual/Automatic cutover, suspend, retries, deletion, troubleshooting from the live findings) plus a commented follow example ([docs/examples/migration-follow.yaml](docs/examples/migration-follow.yaml)).
+- [x] Multi-arch images (workflow done: release builds manager and runner for linux/amd64 + linux/arm64 via QEMU/buildx; verified with the next tag, like B11).
+- [x] Artifact Hub metadata (done: `charts/pgcopydb-operator/artifacthub-repo.yml`, Chart.yaml annotations). One manual step remains, listing the repo: on artifacthub.io add a repository of kind "Helm charts (OCI)" with url `oci://ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator`, then push the metadata next to the chart: `oras push ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator:artifacthub.io --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml`; set the assigned repositoryID in the file and re-push for verified-publisher status.
+- [ ] CRD reference docs generation, versioned docs.
 - [ ] Public issue templates/community files as adoption warrants (deliberately deferred, see H0 slop-trap decision).
 
 ### Live-iteration findings (2026-08-07, all shipped)
