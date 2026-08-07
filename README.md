@@ -1,9 +1,9 @@
 # pgcopydb-operator
 
-A Kubernetes operator that automates PostgreSQL clone and migration workflows using [pgcopydb](https://github.com/dimitri/pgcopydb).
+A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 > [!important]
-> This repository is a **harness only**: guidelines, task runner, and CI. There is no operator code yet. See [PROGRESS.md](PROGRESS.md) for milestones and the decision log.
+> In development, milestone M1 (one-shot clone). See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
 
 ## Structure
 
@@ -15,8 +15,10 @@ A Kubernetes operator that automates PostgreSQL clone and migration workflows us
 .yamllint.yml              # yamllint policy, every deviation commented
 AGENTS.md                  # single source of truth for agents (CLAUDE.md points here)
 CONTRIBUTING.md            # tooling, workflow, commit and PR conventions
-PROGRESS.md                # milestones and decision log
+MILESTONES.md              # task ledger and decision log
 Taskfile.yml               # task help | lint | test | e2e
+docs/research/             # pgcopydb CLI + CDC references, dev-cluster recon, prior art
+docs/superpowers/specs/    # approved design documents
 ```
 
 ## Quickstart
@@ -30,6 +32,7 @@ task e2e    # e2e tests against your CURRENT kubectl context (local only; prompt
 ## Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
-- [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory ponytail and humanizer skills.
-- [PROGRESS.md](PROGRESS.md): where the project stands and why decisions were made.
+- [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.
+- [MILESTONES.md](MILESTONES.md): where the project stands and why decisions were made.
+- [Design](docs/superpowers/specs/2026-08-07-operator-design.md): the approved operator architecture.
 - [LICENSE](LICENSE): Apache 2.0.
