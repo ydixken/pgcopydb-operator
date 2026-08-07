@@ -19,12 +19,12 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [ ] S1: confirm `--host/--port` (sentinel TCP) is accepted by `pgcopydb clone --follow` and `follow` in a live v0.18 container (getopt table says yes, help text omits it). Outcome feeds the control-plane choice (TCP vs exec).
 - [ ] S2: probe the sentinel TCP protocol for auth (none expected per `ld_ipc.h`); decide NetworkPolicy shape for port 5442.
 - [ ] S3: test `pg_replication_origin_create/_advance/_xact_setup` as a non-superuser on PG17 (GRANT EXECUTE path) against a CNPG cluster; determines target-credential requirements for follow.
-- [x] S4 (done, docs/research/samples/spike-findings.md): dev-cluster CNPG defaults verified: `wal_level=logical`, `max_replication_slots=32`, `max_wal_senders=10`, PG 17.9. Original task: check dev-cluster CNPG defaults: `SHOW wal_level` (CNPG sets `logical` by default), `max_replication_slots`, `max_wal_senders` on an existing cluster.
+- [x] S4 (done 2026-08-07, live check): CNPG defaults verified on the dev cluster: `wal_level=logical`, `max_replication_slots=32`, `max_wal_senders=10`, PostgreSQL 17.9. Follow mode needs no per-cluster tuning.
 - [ ] S5: how to declare a REPLICATION-attribute role via CNPG `managed.roles` for the e2e source cluster.
 - [x] S6 (image built and smoke-tested on arm64 via podman: pgcopydb 0.18, pg_dump 17.10, non-root; amd64 + registry push still pending in CI, see B11): build the runner image (pgcopydb 0.18 + postgresql-client-17) and run a clone against a PG17 target; upstream image ships PG16 client tools and pg_dump must be >= target major.
 - [ ] S7: capture exact JSON from `pgcopydb list progress --json`, `list progress --summary --json`, `summary.json`, and `stream sentinel get` single-value selectors from a live run; check `sentinel get --json` endpos bug still present; commit samples under `docs/research/samples/`.
 - [ ] S8: SIGTERM a mid-clone run; record exit code and verify `--resume` picks up correctly (drives Job-failure interpretation).
-- [x] S9 (done, docs/research/samples/spike-findings.md): k3s v1.35.1, 3 amd64 nodes (20 CPU / 32Gi each). Original task: record live dev-cluster facts: Kubernetes/k3s version, node architecture, Longhorn free capacity (`kubectl version`, `kubectl get nodes -o wide`).
+- [x] S9 (done 2026-08-07, live check): k3s v1.35.1, 3 amd64 nodes (20 CPU / 32Gi each). Runner image targets amd64 first; arm64 in M4.
 - [ ] S10: (deferred) OCI-sourced ArgoCD Application viability; M1 uses the proven git-repo-with-path chart source.
 
 ### Build
