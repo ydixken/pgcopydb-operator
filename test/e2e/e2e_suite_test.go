@@ -61,9 +61,10 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	// alpha.8 adds the drain-verify gate (origin progress vs endpos) on top of
-	// alpha.7's exec credential fix; live cutover depends on both.
-	operatorTag = "v0.1.0-alpha.8"
+	// alpha.9 carries the integrated M2/M3 stack: the follow preflight Job
+	// before run-1, spec.verification (pgcopydb compare), and the fixed
+	// drain-verify gate (authenticated script, 8KB tolerance).
+	operatorTag = "v0.1.0-alpha.9"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
