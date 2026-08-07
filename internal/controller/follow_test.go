@@ -179,8 +179,16 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCuttingOver))
 
-		// Worker drains and exits 0: cutover completed, cleanup Job appears.
+		// Worker drains and exits 0: exit code alone is not trusted, a
+		// verify Job must first prove origin progress reached endpos.
 		finishJob(ctx, name+"-run-1", true)
+		m = reconcileWith(fake, name)
+		verifyJob := fetchJob(ctx, name+"-verify")
+		Expect(verifyJob.Spec.Template.Spec.Containers[0].Args[1]).To(ContainSubstring("pg_replication_origin_progress"))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeFalse())
+
+		// Verification passes: cutover completed, cleanup Job appears.
+		finishJob(ctx, name+"-verify", true)
 		m = reconcileWith(fake, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeTrue())
 		cleanupJob := fetchJob(ctx, name+"-cleanup")
@@ -207,6 +215,29 @@ var _ = Describe("Migration Controller follow mode", func() {
 		m := reconcileWith(fake, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCuttingOver))
+	})
+
+	It("fails loudly when drain verification is refuted", func() {
+		const name = "mig-follow-lost"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1alpha1.CutoverManual))).To(Succeed())
+		reconcileWith(fake, name)
+
+		// Worker exits 0 (the deceptive resume-after-crash case), but the
+		// verify Job refutes the drain: no cleanup, absorbing Failed, and the
+		// message says the slot is kept.
+		finishJob(ctx, name+"-run-1", true)
+		reconcileWith(fake, name)
+		finishJob(ctx, name+"-verify", false)
+		m := reconcileWith(fake, name)
+		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionFailed)).To(BeTrue())
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Message).To(ContainSubstring("slot is kept"))
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cleanup", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("routes deletion through slot cleanup", func() {

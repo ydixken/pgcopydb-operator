@@ -72,6 +72,8 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 
 ### Live-iteration findings (2026-08-07, all shipped)
 
+1. **Data-loss gate (critical)**: a crash between endpos-set and drain-complete makes pgcopydb `--resume` exit 0 without replaying pending WAL ("endpos previously reached" tracks the receive side). The operator no longer trusts exit 0: a verify Job compares the target's replication origin progress against the recorded endpos; only proof gates CutoverCompleted and cleanup, refutation fails loudly with the slot kept (data recoverable, WAL retention warned). Upstream issue against pgcopydb's resume-after-endpos path still to be filed (needs maintainer sign-off for outward communication). Also worth pursuing: session-level `wal_sender_timeout` on the source connection (aggressive server defaults, for example 5s, kill walsenders mid-drain; version-aware design needed since startup-packet GUCs fail on old servers; documented in PREREQUISITES.md meanwhile).
+
 1. PGPASSFILE now lives in the container spec env, not only the prelude shell: exec'd sentinel commands (WAL-head query, endpos) failed password auth otherwise, pinning follow migrations at Streaming. Found by the live follow suite; envtest cannot see it (fake sentinel), which is exactly why both test layers exist.
 
 1. First attempts pass `--restart`: a fresh Migration once adopted the still-terminating work PVC of a deleted one and choked on foreign catalogs. Owned-object creation also refuses foreign owners now.
