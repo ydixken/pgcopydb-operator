@@ -1,0 +1,78 @@
+# CI for pgcopydb-operator. GitLab is a push mirror of the GitHub repo
+# (.github/workflows/mirror-to-gitlab.yml); development and PRs happen on
+# GitHub, so this pipeline runs BRANCH pipelines only; merge_request_event
+# rules would never fire on a mirror (it pushes branches, it opens no MRs).
+#
+# Jobs gate on the files they need (rules:exists), so the pipeline is green on
+# the bare harness and starts doing real work in the very commit the
+# kubebuilder scaffold (go.mod, Makefile, Dockerfile) lands, with no CI edit then.
+#
+# E2e tests are deliberately NOT here: they run locally against the
+# developer's current kubeconfig context via `task e2e` (see AGENTS.md).
+#
+# Every image is pinned by tag AND digest; Renovate bumps both together.
+
+workflow:
+  rules:
+    # Every branch push; no tag pipelines (no release process yet).
+    - if: $CI_COMMIT_BRANCH
+
+default:
+  interruptible: true  # a newer push on the same branch cancels the older run
+
+stages: [lint, test, docker-build]
+
+# The harness's executable content is YAML (this file, Taskfile.yml, the
+# GitHub mirror workflow); yamllint is the one check that exercises it. Always
+# on, so every mirror push proves the mirror -> pipeline loop end to end.
+lint:yaml:
+  stage: lint
+  image: pipelinecomponents/yamllint:0.35.13@sha256:5ab5eb7da0ed5e606b07c1723fc8b275e925189f70ac259b26b7329cb5f8f44d
+  script:
+    - yamllint --strict .
+
+# Activates when the Go module lands. Image major MUST match the config format
+# of the scaffolded .golangci.yml (v2).
+lint:go:
+  stage: lint
+  image: golangci/golangci-lint:v2.12.2@sha256:5cceeef04e53efe1470638d4b4b4f5ceefd574955ab3941b2d9a68a8c9ad5240
+  rules:
+    - exists: [go.mod]
+  script:
+    - golangci-lint run
+
+# `make test`, not bare `go test`: kubebuilder's target installs the envtest
+# assets the controller suites need, and the Makefile ships in the same commit
+# as go.mod. Its cover.out feeds the coverage regex below.
+test:unit:
+  stage: test
+  image: golang:1.26.5@sha256:2005724102f45917a63e9d092fc0e4ea56ea575048ce147caad5f5f61502c365
+  rules:
+    - exists: [go.mod]
+  variables:
+    GOMODCACHE: $CI_PROJECT_DIR/.go/pkg/mod
+  cache:
+    key:
+      files: [go.sum]
+    paths: [.go/pkg/mod]
+  script:
+    - make test
+    - go tool cover -func=cover.out | tail -n 1  # emits "total: (statements) NN.N%"
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+
+# Image build+push to the GitLab registry: main only, and only once the
+# kubebuilder scaffold ships a Dockerfile (one rule ANDs both conditions).
+docker-build:
+  stage: docker-build
+  image: docker:29.7.1@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+  services:
+    # Same digest as the job image: upstream merged dind into the base image.
+    - docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      exists: [Dockerfile]
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
