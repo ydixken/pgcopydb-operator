@@ -8,7 +8,7 @@ A Kubernetes operator that automates PostgreSQL clone and migration workflows us
 ## Structure
 
 ```text
-.claude/skills/            # vendored ponytail + humanizer skills, mandatory for agents (AGENTS.md)
+.claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # push mirror GitHub -> GitLab (CI runs on the mirror)
 .gitlab-ci.yml             # branch pipelines: yamllint now; Go lint/test/image build self-activate with the scaffold
 .renovaterc.json           # keeps the tag+digest image pins current, once Renovate is enabled

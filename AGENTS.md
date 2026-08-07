@@ -12,10 +12,11 @@ Operating guide for AI agents and humans working in this repository. The keyword
 
 ## Mandatory skills
 
-Both skills are vendored in this repo and are always-on, not optional, not per-request:
+These skills are vendored in this repo and are always-on, not optional, not per-request:
 
 - **ponytail** ([`.claude/skills/ponytail/SKILL.md`](.claude/skills/ponytail/SKILL.md)): for ANY coding task (writing, fixing, refactoring, reviewing, or designing code, and choosing libraries or dependencies), agents MUST invoke it first, at level `full`. Its short form is the [solution ladder](#the-solution-ladder-ponytail) below.
 - **humanizer** ([`.claude/skills/humanizer/SKILL.md`](.claude/skills/humanizer/SKILL.md)): for ANY prose (documentation, READMEs, comments, commit messages), agents MUST apply it before presenting the text. No AI slop in writing.
+- **brainstorming** ([`.claude/skills/brainstorming/SKILL.md`](.claude/skills/brainstorming/SKILL.md)): before ANY creative work (new features, components, functionality, or behavior changes), agents MUST invoke it to explore intent, requirements, and design before implementing.
 
 ## Writing conventions
 
