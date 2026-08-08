@@ -1,6 +1,6 @@
 # MILESTONES.md
 
-Status: **M1 complete, M2 live migration and M3 verification functional (2026-08-08): full e2e suite 10/10 green on v0.1.0-alpha.9** (first live migration 2026-08-07: CNPG-to-CNPG, 251k rows, indexes and sequences verified identical; defects found live were fixed same day). Remaining: M4 release polish, the open M2 boxes, and spikes S7/S8.
+Status: **M1 complete, M2 live migration and M3 verification functional (2026-08-08): full e2e suite 10/10 green on v0.1.0-alpha.9** (first live migration 2026-08-07: CNPG-to-CNPG, 251k rows, indexes and sequences verified identical; defects found live were fixed same day). Remaining: M4 release polish and the open M2 boxes; every spike S1 to S10 is closed.
 
 Design: [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md). Research ground truth: [docs/research/](docs/research/). Facts about the private e2e infrastructure are never committed here. This file is the compaction-proof task ledger: every task carries enough context to execute without the original conversation.
 
