@@ -5,7 +5,7 @@ Verbatim outputs captured live on 2026-08-08 from pgcopydb 0.18 (`0.18-1.pgdg12+
 | File | Invocation | Note |
 |------|------------|------|
 | `summary.json` | none (file `<workdir>/summary.json`) | Written at clone completion. Top-level keys: `setup`, `steps`, `tables[]` (per table: `oid`, `schema`, `name`, `duration`, `network`, `index`, `indexes[]`, `constraints[]`). |
-| `list-progress-summary.json` | `pgcopydb list progress --summary --json` | Byte-identical to `summary.json`: the command just reads that file. Before completion it fails (`Summary JSON file ... does not exists`, exit 12). There is no working mid-run progress command in 0.18, see next row. |
+| `list-progress-summary.json` | `pgcopydb list progress --summary --json` | Identical JSON to `summary.json` (the command just reads that file); the only difference is a trailing newline the command adds, so the two files are not byte-identical. Before completion it fails (`Summary JSON file ... does not exists`, exit 12). There is no working mid-run progress command in 0.18, see next row. |
 | `list-progress-failure.txt` | `pgcopydb list progress --json` | **Broken in 0.18**, with and without `--json`, mid-run and post-run: the query references a `bytes` column the catalog schema does not have. Always exit 12. Upstream: [dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036). |
 | `sentinel-get-streaming.txt` / `.json` | `pgcopydb stream sentinel get [--json]` | During `clone --follow` streaming, before an endpos was set. |
 | `sentinel-get-endpos-set.txt` / `.json` | same | After `stream sentinel set endpos --current` returned `0/2B33F780`. |
