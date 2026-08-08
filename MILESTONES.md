@@ -122,7 +122,7 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 ### W-E: PG version matrix (wave 3)
 
-- [ ] E2E_PG_SOURCE/TARGET envs -> cnpgCluster imageName (default pinned 17); major-mismatch recreate for kept fixtures; task e2e:matrix sequential combos 14->18, 18->18, 15->17 at E2E_SCALE=0.1, !chaos (~100 min). Upgrade-direction only; PG14 sources only.
+- [x] E2E_PG_SOURCE/TARGET envs -> cnpgCluster imageName (default pinned 17); major-mismatch recreate for kept fixtures; task e2e:matrix sequential combos 14->18, 18->18, 15->17 at E2E_SCALE=0.1, !chaos (~100 min). Upgrade-direction only; PG14 sources only. (Done 2026-08-08: majors validated as plain 14-18 at init, plus target>=source and target>=15 fail-fast checks; ensureClusterMajor reads server_version_num on kept clusters and deletes before the apply, because SSA-ing a new major's imageName onto a live cluster would wedge it; hack/e2e-matrix.sh runs every combo even after a failure, keeps fixtures between combos, lets the last combo clean up, prints a summary, exits nonzero on any failure, and passes E2E_FORCE from the second combo on so a timeout-killed run cannot strand the rest; one prompt via task e2e:matrix, 40m budget per combo. Live matrix run pending, see Closing.)
 
 ### W-F: v1beta1 promotion (last code track; v0.2.0-alpha.1)
 

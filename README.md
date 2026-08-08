@@ -48,6 +48,7 @@ task lint   # the pre-commit gate (yamllint + make lint)
 task test   # unit and envtest suites
 task e2e    # e2e against your CURRENT kubectl context (local only; prompts first)
             # E2E_SCALE sizes the seeded fixtures (default 1 = ~12GB); task e2e:stress runs the ~120GB tier
+            # task e2e:matrix runs the PG version combos 14->18, 18->18, 15->17 at scale 0.1
 
 ```
 
