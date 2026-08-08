@@ -747,11 +747,20 @@ func checkLonghornCapacity() {
 func ensureFollowPrivileges() {
 	GinkgoHelper()
 	psql(srcPod, "ALTER ROLE app REPLICATION")
-	psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+	grantTargetFollowPrivileges(appDB)
+}
+
+// grantTargetFollowPrivileges grants the target-side follow prerequisites to
+// app in one database. EXECUTE on catalog functions is per-database, so a
+// second target database (the chaos fan-out scenario) needs its own pass; the
+// parameter grant is cluster-wide but idempotent and simply rides along.
+func grantTargetFollowPrivileges(db string) {
+	GinkgoHelper()
+	psqlDB(tgtPod, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
-	psql(tgtPod, "GRANT SET ON PARAMETER session_replication_role TO app")
+	psqlDB(tgtPod, db, "GRANT SET ON PARAMETER session_replication_role TO app")
 }
 
 // resetSourceReplication drops what a crashed follow run may have left on the
@@ -781,19 +790,26 @@ func resetTargetReplication() {
 		" WHERE roname LIKE 'pgcopydb%'")
 }
 
-// psql runs one statement inside a CNPG instance pod as the in-pod postgres
-// superuser (peer auth on the unix socket, no password involved) and returns
-// trimmed stdout. kubectl exec is deliberate: it reuses the same current
-// context as the client and saves a hand-rolled SPDY executor. Failures to
-// even reach the pod get two retries; anything after connecting fails hard,
-// because the statement may have run and not every caller is idempotent.
+// psql runs one statement against the app database; see psqlDB.
 func psql(pod, sql string) string {
+	GinkgoHelper()
+	return psqlDB(pod, appDB, sql)
+}
+
+// psqlDB runs one statement in the given database inside a CNPG instance pod
+// as the in-pod postgres superuser (peer auth on the unix socket, no password
+// involved) and returns trimmed stdout. kubectl exec is deliberate: it reuses
+// the same current context as the client and saves a hand-rolled SPDY
+// executor. Failures to even reach the pod get two retries; anything after
+// connecting fails hard, because the statement may have run and not every
+// caller is idempotent.
+func psqlDB(pod, db, sql string) string {
 	GinkgoHelper()
 	var lastErr error
 	var lastStderr string
 	for attempt := 1; attempt <= 3; attempt++ {
 		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", appDB, "-tAc", sql)
+			"psql", "-U", "postgres", db, "-tAc", sql)
 		out, err := cmd.Output()
 		if err == nil {
 			return strings.TrimSpace(string(out))
@@ -811,6 +827,55 @@ func psql(pod, sql string) string {
 	}
 	Expect(lastErr).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, pod, lastStderr)
 	return ""
+}
+
+// waitFailed waits until the Migration in nsE2E is terminally Failed with the
+// given Failed-condition reason and returns it. Counterpart to waitPhase,
+// which treats Failed as a hard stop.
+func waitFailed(name, reason string) *v1alpha1.Migration {
+	GinkgoHelper()
+	m := &v1alpha1.Migration{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		g.Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed),
+			"migration %s at phase %q, attempts %d", name, m.Status.Phase, m.Status.Attempts)
+		c := apimeta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		g.Expect(c).NotTo(BeNil(), "Failed condition missing on %s", name)
+		g.Expect(c.Reason).To(Equal(reason), "Failed reason is %q, message: %s", c.Reason, c.Message)
+	}, migrationTimeout, 2*time.Second).Should(Succeed())
+	return m
+}
+
+// deletePod deletes every pod matching the label selector in nsE2E with a
+// 1-second grace period (chaos kills want the process gone, not drained) and
+// fails when nothing matched: a kill that found no victim means the scenario
+// mistimed its window, not that the operator survived it.
+func deletePod(selector client.MatchingLabels) {
+	GinkgoHelper()
+	pods := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), selector)).To(Succeed())
+	Expect(pods.Items).NotTo(BeEmpty(), "no pod matches %v", selector)
+	for i := range pods.Items {
+		err := k8sClient.Delete(ctx, &pods.Items[i], client.GracePeriodSeconds(1))
+		if err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete pod %s", pods.Items[i].Name)
+		}
+	}
+}
+
+// deleteMigration deletes the named Migration in nsE2E and waits until the
+// finalizer released it (deletion of a live migration runs slot cleanup
+// first), so the next scenario starts without leftovers.
+func deleteMigration(name string) {
+	GinkgoHelper()
+	m := &v1alpha1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
+	if err := k8sClient.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "failed to delete Migration %s", name)
+	}
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1alpha1.Migration{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Migration %s still terminating", name)
+	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 }
 
 // transientExecError reports whether kubectl exec failed before reaching the
