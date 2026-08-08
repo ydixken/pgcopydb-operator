@@ -42,7 +42,8 @@ tasks:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
       Local only, never wired into CI. Confirms the context before running.
-      E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures.
+      E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures. Chaos
+      scenarios are excluded; use e2e:chaos for those.
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context
@@ -53,7 +54,23 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v
+      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.label-filter='!chaos'
+
+  e2e:chaos:
+    desc: >-
+      Chaos e2e (pod kills, disk pressure, concurrent migrations; the specs
+      labeled "chaos") against the CURRENT kubectl context. Local only.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    prompt: >-
+      e2e CHAOS (kills fixture pods, fills volumes) will run against kubectl
+      context '{{.KUBE_CONTEXT}}', a real cluster. Continue?
+    preconditions:
+      - sh: test -d test/e2e
+        msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    cmds:
+      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.label-filter='chaos'
 
   e2e:matrix:
     desc: >-
@@ -91,4 +108,4 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v
+      - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v -ginkgo.label-filter='!chaos'

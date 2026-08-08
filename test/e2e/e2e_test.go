@@ -367,6 +367,97 @@ var _ = Describe("Migration", Ordered, func() {
 		By("removing the suspend-window rows so the source matches the seeded fixture again")
 		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
 	})
+
+	// The failure-path specs close the ordered container: each one breaks a
+	// prerequisite on purpose and restores it in DeferCleanup, and running
+	// them after every live scenario keeps a missed restore from poisoning
+	// anything downstream. The asserted hints are substrings of the message
+	// constants in internal/controller/resources.go (preflightScript).
+	It("fails preflight when the migration role lacks REPLICATION", func() {
+		const name = "e2e-norepl"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			ensureFollowPrivileges()
+			resetSourceReplication()
+			resetTargetReplication()
+		})
+
+		By("revoking REPLICATION from the app role on the source")
+		psql(srcPod, "ALTER ROLE app NOREPLICATION")
+
+		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		m := waitFailed(name, "PreflightFailed")
+		Expect(failureMessage(m)).To(ContainSubstring(`ALTER ROLE "app" REPLICATION`),
+			"preflight verdict must carry the exact re-grant hint")
+	})
+
+	It("fails preflight when the target role lacks EXECUTE on the origin functions", func() {
+		const name = "e2e-noorigin"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			ensureFollowPrivileges()
+			resetSourceReplication()
+			resetTargetReplication()
+		})
+
+		By("revoking EXECUTE on the pg_replication_origin functions on the target")
+		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
+			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
+
+		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		m := waitFailed(name, "PreflightFailed")
+		Expect(failureMessage(m)).To(ContainSubstring("lacks EXECUTE on replication origin functions"))
+		Expect(failureMessage(m)).To(ContainSubstring("GRANT EXECUTE ON FUNCTION"),
+			"preflight verdict must carry the ready-to-run GRANT statements")
+	})
+
+	It("fails preflight when the target role cannot SET session_replication_role", func() {
+		const name = "e2e-nosrr"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			ensureFollowPrivileges()
+			resetSourceReplication()
+			resetTargetReplication()
+		})
+
+		By("revoking SET on session_replication_role on the target")
+		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+
+		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		m := waitFailed(name, "PreflightFailed")
+		Expect(failureMessage(m)).To(
+			ContainSubstring(`GRANT SET ON PARAMETER session_replication_role TO "app"`),
+			"preflight verdict must carry the exact re-grant hint")
+	})
+
+	It("exhausts the retry budget against an unreachable source and stays Failed", func() {
+		const name = "e2e-backoff"
+		DeferCleanup(func() { deleteMigration(name) })
+
+		m := newMigration(name, nsE2E, v1alpha1.CloneOptions{})
+		// .invalid never resolves (RFC 2606), so every attempt fails fast at
+		// connect time; backoffLimit 1 buys exactly two attempts.
+		m.Spec.Source.Host = "e2e-no-such-host.invalid"
+		m.Spec.BackoffLimit = 1
+		create(m)
+
+		By("waiting for the terminal failure after exactly two attempts")
+		failed := waitFailed(name, "BackoffLimitExceeded")
+		Expect(failed.Status.Attempts).To(Equal(int32(2)))
+
+		By("checking Failed is absorbing: no third attempt within a full poll interval")
+		Consistently(func(g Gomega) {
+			cur := &v1alpha1.Migration{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
+			g.Expect(cur.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+			g.Expect(cur.Status.Attempts).To(Equal(int32(2)))
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-3"}, &batchv1.Job{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"a third attempt Job appeared in the absorbing Failed state")
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
+	})
 })
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
@@ -445,16 +536,20 @@ func rowCounts(pod string) string {
 		" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events)")
 }
 
-// seedTableCounts returns every seeded table's count in one round trip, in
-// the order of expectedSeedCounts. events is the partitioned parent, so its
-// count is the total across all partitions.
+// seedCountSQL flattens every seeded table's count into one string, in the
+// order of expectedSeedCounts. events is the partitioned parent, so its count
+// is the total across all partitions. A named constant so the chaos fan-out
+// scenario can run the same query against a second target database.
+const seedCountSQL = "SELECT (SELECT count(*) FROM customers) || '/' ||" +
+	" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events) || '/' ||" +
+	" (SELECT count(*) FROM audit.access_log) || '/' || (SELECT count(*) FROM app_users) || '/' ||" +
+	" (SELECT count(*) FROM events) || '/' || (SELECT count(*) FROM readings) || '/' ||" +
+	" (SELECT count(*) FROM documents)"
+
+// seedTableCounts returns every seeded table's count in one round trip.
 func seedTableCounts(pod string) string {
 	GinkgoHelper()
-	return psql(pod, "SELECT (SELECT count(*) FROM customers) || '/' ||"+
-		" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events) || '/' ||"+
-		" (SELECT count(*) FROM audit.access_log) || '/' || (SELECT count(*) FROM app_users) || '/' ||"+
-		" (SELECT count(*) FROM events) || '/' || (SELECT count(*) FROM readings) || '/' ||"+
-		" (SELECT count(*) FROM documents)")
+	return psql(pod, seedCountSQL)
 }
 
 // expectedSeedCounts derives the seedTableCounts string from the scale; the
