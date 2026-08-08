@@ -131,6 +131,12 @@ var (
 	stress = envTrue("E2E_STRESS")
 	scale  = 1.0
 
+	// pgSource and pgTarget pick the PostgreSQL major for each fixture
+	// cluster's operand image (E2E_PG_SOURCE/E2E_PG_TARGET, default 17).
+	// Upgrade direction only, and PG14 only as a source; init enforces both.
+	pgSource = 17
+	pgTarget = 17
+
 	srcStorageSize      = "40Gi"
 	tgtStorageSize      = "40Gi"
 	workVolumeSize      = "10Gi"
@@ -168,6 +174,37 @@ func init() {
 		}
 		scale = f
 	}
+	pgSource = pgMajorEnv("E2E_PG_SOURCE")
+	pgTarget = pgMajorEnv("E2E_PG_TARGET")
+	// The version matrix is upgrade-direction only: pgcopydb needs pg_dump at
+	// least at the target's major, and a newer major's dump does not restore
+	// into an older server. PG14 is a source only: the follow-mode target
+	// contract includes GRANT SET ON PARAMETER session_replication_role,
+	// which PostgreSQL grew in 15 (docs/reference/prerequisites.md).
+	if pgTarget < pgSource {
+		panic(fmt.Sprintf("E2E_PG_TARGET (%d) is older than E2E_PG_SOURCE (%d):"+
+			" the version matrix is upgrade-direction only", pgTarget, pgSource))
+	}
+	if pgTarget < 15 {
+		panic("E2E_PG_TARGET must be 15 or newer: the follow-mode target needs" +
+			" GRANT SET ON PARAMETER session_replication_role (PG15+); PG14 works as a source only")
+	}
+}
+
+// pgMajorEnv reads a PostgreSQL major from the environment: a plain major
+// between 14 and 18, the range the CNPG operand images and pgcopydb 0.18
+// cover here. The default pins 17, what CNPG would pick implicitly today, so
+// kept fixtures never change majors just because the CNPG default moved.
+func pgMajorEnv(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 17
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 14 || n > 18 {
+		panic(name + " must be a plain PostgreSQL major between 14 and 18, got " + strconv.Quote(v))
+	}
+	return n
 }
 
 // scaled mirrors e2e_scaled() in fixtures/schema.sql: the row count for a
@@ -291,9 +328,12 @@ var _ = BeforeSuite(func() {
 		}
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
-	By("creating or adopting the CNPG source and target clusters")
-	applyCluster(cnpgCluster(sourceCluster, srcStorageSize))
-	applyCluster(cnpgCluster(targetCluster, tgtStorageSize))
+	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
+		pgSource, pgTarget))
+	ensureClusterMajor(sourceCluster, pgSource)
+	ensureClusterMajor(targetCluster, pgTarget)
+	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
+	applyCluster(cnpgCluster(targetCluster, tgtStorageSize, pgTarget))
 	waitClusterReady(sourceCluster)
 	waitClusterReady(targetCluster)
 
@@ -382,12 +422,12 @@ func ensureNamespace(name string) {
 }
 
 // cnpgCluster builds a minimal CNPG Cluster: one instance, tier-sized
-// storage, app database owned by app. Seeding happens in a separate Job (see
-// ensureSeededSource), not at initdb time: a Job survives pod restarts, its
-// log is inspectable, and re-runs are cheap on kept clusters. Built as
-// unstructured on purpose: importing the CNPG API just for two fixtures is
-// not worth a dependency.
-func cnpgCluster(name, size string) *unstructured.Unstructured {
+// storage, the requested PostgreSQL major, app database owned by app. Seeding
+// happens in a separate Job (see ensureSeededSource), not at initdb time: a
+// Job survives pod restarts, its log is inspectable, and re-runs are cheap on
+// kept clusters. Built as unstructured on purpose: importing the CNPG API
+// just for two fixtures is not worth a dependency.
+func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	storage := map[string]any{"size": size}
 	if fixtureStorageClass != "" {
 		storage["storageClass"] = fixtureStorageClass
@@ -398,6 +438,10 @@ func cnpgCluster(name, size string) *unstructured.Unstructured {
 		"metadata":   map[string]any{"name": name, "namespace": nsE2E},
 		"spec": map[string]any{
 			"instances": int64(1),
+			// An explicit major so the version matrix (task e2e:matrix) can
+			// vary it and the default never drifts with the CNPG operator's
+			// own operand default.
+			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
 			"storage":   storage,
 			"bootstrap": map[string]any{"initdb": map[string]any{
 				"database": appDB,
@@ -471,25 +515,63 @@ func ensureSeededSource() {
 }
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
-// and brings a fresh one up. Also the hook for the version matrix (W-E),
-// which recreates on a PG-major mismatch.
+// and brings a fresh one up. Used when kept fixtures carry a stale seed
+// profile or scale; a PG-major mismatch on a kept cluster is handled earlier
+// by ensureClusterMajor, for the target too.
 func recreateSourceCluster() {
+	GinkgoHelper()
+	deleteCluster(sourceCluster)
+	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
+	waitClusterReady(sourceCluster)
+}
+
+// deleteCluster deletes a CNPG cluster (volumes included) and waits until it
+// is gone.
+func deleteCluster(name string) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
 	c.SetGroupVersionKind(cnpgGVK)
 	c.SetNamespace(nsE2E)
-	c.SetName(sourceCluster)
+	c.SetName(name)
 	if err := k8sClient.Delete(ctx, c); err != nil && !apierrors.IsNotFound(err) {
-		Expect(err).NotTo(HaveOccurred(), "failed to delete CNPG cluster %s", sourceCluster)
+		Expect(err).NotTo(HaveOccurred(), "failed to delete CNPG cluster %s", name)
 	}
 	Eventually(func(g Gomega) {
-		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: sourceCluster},
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name},
 			&unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": cnpgGVK.Group + "/" + cnpgGVK.Version, "kind": cnpgGVK.Kind}})
-		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "CNPG cluster %s still terminating", sourceCluster)
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "CNPG cluster %s still terminating", name)
 	}, 10*time.Minute, 5*time.Second).Should(Succeed())
-	applyCluster(cnpgCluster(sourceCluster, srcStorageSize))
-	waitClusterReady(sourceCluster)
+}
+
+// ensureClusterMajor deletes a kept cluster whose server runs a different
+// PostgreSQL major than this run requests; the subsequent apply then creates
+// it fresh on the right image. The check runs before that apply on purpose:
+// CNPG cannot change majors in place, so server-side applying another major's
+// imageName onto a live cluster would wedge it instead of upgrading it.
+func ensureClusterMajor(name string, major int) {
+	GinkgoHelper()
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, c)
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", name)
+	// The kept instance has to answer psql before its major can be read.
+	waitClusterReady(name)
+	if got := serverMajor(name + "-1"); got != major {
+		By(fmt.Sprintf("deleting %s: kept cluster runs PG %d, this run wants PG %d", name, got, major))
+		deleteCluster(name)
+	}
+}
+
+// serverMajor asks the running instance for its PostgreSQL major version.
+func serverMajor(pod string) int {
+	GinkgoHelper()
+	num, err := strconv.Atoi(psql(pod, "SELECT current_setting('server_version_num')"))
+	Expect(err).NotTo(HaveOccurred(), "unparseable server_version_num from %s", pod)
+	return num / 10000
 }
 
 // runSeedJob applies schema.sql and seed.sql to the source database through
@@ -660,7 +742,8 @@ func checkLonghornCapacity() {
 // without it pgcopydb 0.18 silently applies nothing while reporting success).
 // Runs on every suite start because kept fixtures skip initdb SQL; every
 // statement is idempotent. docs/reference/prerequisites.md documents the same
-// set for users.
+// set for users. GRANT SET ON PARAMETER exists from PG15; init rejects older
+// targets (PG14 is a source only), so the statement always parses here.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
 	psql(srcPod, "ALTER ROLE app REPLICATION")

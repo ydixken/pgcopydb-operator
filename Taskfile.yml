@@ -55,6 +55,26 @@ tasks:
     cmds:
       - go test ./test/e2e/... -v -timeout 3h -ginkgo.v
 
+  e2e:matrix:
+    desc: >-
+      PG version-matrix e2e against the CURRENT kubectl context: the full
+      suite (chaos excluded) once per combo 14->18, 18->18, 15->17, each at
+      E2E_SCALE=0.1, fixtures kept between combos. A failing combo does not
+      stop the later ones; the task prints a summary and exits nonzero if
+      any combo failed. Local only.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    prompt: >-
+      e2e MATRIX (three sequential full-suite runs, PG 14->18, 18->18,
+      15->17, about two hours) will run against kubectl context
+      '{{.KUBE_CONTEXT}}', a real cluster. Continue?
+    preconditions:
+      - sh: test -d test/e2e
+        msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    cmds:
+      - ./hack/e2e-matrix.sh
+
   e2e:stress:
     desc: >-
       Stress e2e (E2E_STRESS=true, scale 10, ~120GB fixtures) against the
