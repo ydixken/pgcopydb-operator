@@ -147,7 +147,9 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 ### Closing
 
-- [ ] v0.2.0-alpha.x release(s), GitOps pin, live default suite green; task e2e:chaos green; one E2E_STRESS run; one task e2e:matrix run; break/fix findings ledgered; final sweep.
+- [x] v0.2.0-alpha.1 released 2026-08-08: manager+runner images and chart on ghcr (release workflow green, runner image run-checked), GitOps pin bumped to v0.2.0-alpha.1.
+- [ ] Live default suite green on v0.2.0-alpha.1. Blocked 2026-08-08 evening: kubeconfig OIDC token expired, re-auth needs the maintainer's browser sign-in; suite failed fast in BeforeSuite (CRD check, cluster unreachable), no cluster resources touched.
+- [ ] task e2e:chaos green; one E2E_STRESS run; one task e2e:matrix run; break/fix findings ledgered; final sweep. Same blocker as above.
 
 ## Decision log
 
