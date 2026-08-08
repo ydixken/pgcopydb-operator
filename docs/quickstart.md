@@ -10,10 +10,12 @@ kubectl get pgm -w
 ```
 
 ```text
-NAME   PHASE      TABLES   ATTEMPTS   AGE
-shop   Cloning    12       1          40s
-shop   Completed  31       1          3m
+NAME   PHASE      COMPLETE   ATTEMPTS   AGE
+shop   Cloning               1          40s
+shop   Completed  True       1          3m
 ```
+
+`COMPLETE` mirrors the `Complete` condition and stays empty until the migration finishes. Live migrations get a `LAG` column (replication lag in bytes) with `kubectl get pgm -o wide`.
 
 What happens behind the phases:
 
