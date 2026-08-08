@@ -1,11 +1,14 @@
-# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
-# Ignore everything by default and re-include only needed files
-**
+# Portable ignore list honored by both BuildKit (ghcr multi-arch build) and
+# buildah/podman (the GitLab build-validation job). The BuildKit-only
+# "exclude ** then re-include !**/*.go" idiom does not work under buildah:
+# it drops all Go sources from the context, so cmd/main.go goes missing.
+# Exclude only what the build never needs; the final image is the binary
+# alone (distroless COPY manager), so extra context never reaches it.
+.git
+bin
+dist
+testbin
+.claude
 
-# Re-include Go source files (but not *_test.go)
-!**/*.go
+# Tests are not needed to build the manager binary.
 **/*_test.go
-
-# Re-include Go module files
-!go.mod
-!go.sum
