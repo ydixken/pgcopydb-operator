@@ -371,7 +371,8 @@ func resetTargetObjects() {
 // session_replication_role on the target (the apply session's preamble;
 // without it pgcopydb 0.18 silently applies nothing while reporting success).
 // Runs on every suite start because kept fixtures skip initdb SQL; every
-// statement is idempotent. PREREQUISITES.md documents the same set for users.
+// statement is idempotent. docs/reference/prerequisites.md documents the same
+// set for users.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
 	psql(srcPod, "ALTER ROLE app REPLICATION")

@@ -26,7 +26,7 @@ annotations:
       displayName: Migration
       description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."
   artifacthub.io/links: |
-    - name: Usage guide
-      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/usage.md
+    - name: Quickstart
+      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/quickstart.md
     - name: Prerequisites
-      url: https://github.com/ydixken/pgcopydb-operator/blob/main/PREREQUISITES.md
+      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/reference/prerequisites.md

@@ -54,6 +54,19 @@ lint:go:
   script:
     - make lint
 
+# Mirror parity for the docs site: the same strict mkdocs build that gates
+# the GitHub Pages deploy (.github/workflows/docs.yml). Build only; Pages
+# deploys from GitHub. The api.md staleness gate stays GitHub-side (it
+# needs a Go toolchain; one gate is enough).
+docs:
+  stage: lint
+  image: python:3.13-slim@sha256:9662417aace5ae7b8e2609cce472b72a8958e134ba372808abe9cc1a0c0125e6
+  rules:
+    - exists: [mkdocs.yml]
+  script:
+    - pip install mkdocs-material==9.7.7
+    - mkdocs build --strict
+
 # `make test`, not bare `go test`: kubebuilder's target installs the envtest
 # assets the controller suites need, and the Makefile ships in the same commit
 # as go.mod. Its cover.out feeds the coverage regex below.

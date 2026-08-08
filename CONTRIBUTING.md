@@ -18,7 +18,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 1. Branch from `main`.
 1. Make one logical change.
-1. If the change touches `api/v1alpha1`, run `task docs` and commit the regenerated `docs/api.md` with it.
+1. If the change touches `api/v1alpha1`, run `task docs` and commit the regenerated `docs/reference/api.md` with it.
 1. Run `task lint` (and `task test` once Go code exists). Both MUST be clean before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
 

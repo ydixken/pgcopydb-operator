@@ -70,7 +70,9 @@ Passwords come from the referenced Secrets and are written to a libpq
 passfile, never to the command line. Progress appears in
 `kubectl get migrations` (phase, tables copied, attempts).
 
-Endpoint requirements (privileges, WAL settings) are in
-[PREREQUISITES.md](https://github.com/ydixken/pgcopydb-operator/blob/main/PREREQUISITES.md);
-the full walkthrough, including live migrations with cutover, is the
-[usage guide](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/usage.md).
+Endpoint requirements (privileges, WAL settings) are in the
+[prerequisites](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/reference/prerequisites.md);
+the walkthrough starts at the
+[quickstart](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/quickstart.md),
+live migrations with cutover at the
+[live-migration runbook](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/operations/live-migration.md).

@@ -19,7 +19,7 @@ kubectl apply -f docs/examples/migration-minimal.yaml
 kubectl get pgm -w
 ```
 
-The [usage guide](docs/usage.md) walks through everything from here: clones, live migrations with cutover, suspend, retries, and troubleshooting.
+The [quickstart](docs/quickstart.md) walks through the first clone; [live migration](docs/operations/live-migration.md) covers follow, cutover, and the runbook.
 
 ## Structure
 
@@ -28,13 +28,14 @@ api/v1alpha1/              # Migration CRD types (CEL validation, no webhooks)
 charts/pgcopydb-operator/  # Helm chart (published as OCI to ghcr.io)
 cmd/, internal/            # manager and controller (kubebuilder go/v4)
 config/                    # kubebuilder-generated kustomize tree
+docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
 docs/research/             # pgcopydb CLI + CDC references, prior art
 docs/superpowers/specs/    # approved design documents
 images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
 test/e2e/                  # e2e suite (local only, current kubectl context)
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
-.github/workflows/         # GitHub->GitLab mirror + ghcr release workflow
+.github/workflows/         # GitHub->GitLab mirror, ghcr release, docs deploy
 .gitlab-ci.yml             # branch pipelines: yamllint, golangci-lint, envtest, image build
 Taskfile.yml               # task help | lint | test | e2e
 ```
@@ -50,11 +51,13 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 
 ## Documentation
 
-- [Usage guide](docs/usage.md): install, first clone, live migration with cutover, troubleshooting.
-- [PREREQUISITES.md](PREREQUISITES.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
+- [Quickstart](docs/quickstart.md), [installation](docs/installation.md), [configuration](docs/configuration.md): getting a Migration running and tuned.
+- [Live migration](docs/operations/live-migration.md), [verification](docs/operations/verification.md), [lifecycle](docs/operations/lifecycle.md): the operations runbooks.
+- [Troubleshooting](docs/troubleshooting.md): symptoms mapped to causes and fixes.
+- [Prerequisites](docs/reference/prerequisites.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.
-- [CRD reference](docs/api.md): every `Migration` field with defaults and validation, generated from the Go types (`task docs`).
-- [docs/coverage.md](docs/coverage.md): every pgcopydb clone/follow option mapped to the Migration spec.
+- [CRD reference](docs/reference/api.md): every `Migration` field with defaults and validation, generated from the Go types (`task docs`).
+- [Option coverage](docs/reference/coverage.md): every pgcopydb clone/follow option mapped to the Migration spec.
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.

@@ -1,7 +1,8 @@
 # Live migration: base copy under a replication slot, then logical replication
 # until you approve the cutover. Follow mode has strict source and target
 # prerequisites (wal_level, REPLICATION attribute, target grants, replica
-# identities); read PREREQUISITES.md first. Runbook: docs/usage.md.
+# identities); read docs/reference/prerequisites.md first. Runbook:
+# docs/operations/live-migration.md.
 apiVersion: pgcopydb-operator.io/v1alpha1
 kind: Migration
 metadata:
@@ -17,7 +18,8 @@ spec:
     host: billing-pg-rw.billing.svc
     database: billing
     # Needs EXECUTE on pg_replication_origin_* and (PG15+) GRANT SET ON
-    # PARAMETER session_replication_role; see PREREQUISITES.md for both.
+    # PARAMETER session_replication_role; docs/reference/prerequisites.md
+    # covers both.
     username: app
     passwordSecretRef: {name: billing-pg-app, key: password}
   follow:

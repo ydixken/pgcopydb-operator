@@ -179,7 +179,8 @@ ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_l
 // the exact GRANT or setting that fixes it. All four live loss/failure modes
 // of 2026-08-07 (see MILESTONES.md) trip one of these checks. The
 // session_replication_role probe is the silent-loss gate: without that SET,
-// pgcopydb 0.18 applies nothing while reporting success (PREREQUISITES.md).
+// pgcopydb 0.18 applies nothing while reporting success (see
+// docs/reference/prerequisites.md).
 // The origin-function list is exactly what pgcopydb's setup/apply/cleanup and
 // the operator's own verify Job execute on the target. The closing
 // replica-identity audit lists tables where pgoutput would reject UPDATE and
