@@ -149,9 +149,7 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// are absorbing (source/target are immutable, retrying cannot help).
 	if _, err := buildJob(m, r.RunnerImage, 1); err != nil {
 		r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionFalse, "InvalidSpec", err.Error())
-		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "InvalidSpec", err.Error())
-		m.Status.Phase = v1alpha1.PhaseFailed
-		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "InvalidSpec", "Validate", "%s", err.Error())
+		r.fail(m, "InvalidSpec", "Validate", err.Error())
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 	r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
@@ -163,30 +161,8 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// Follow preflight: before any worker runs, a one-shot Job probes the
-	// replication prerequisites (wal_level, slot headroom, REPLICATION
-	// attribute, origin-function EXECUTE, the session_replication_role SET
-	// gate). Every one of these failed live before it failed loudly; two of
-	// them lose data silently. Failure is absorbing: these are configuration
-	// errors on the databases, retrying the migration cannot fix them.
-	if followEnabled(m) && m.Status.Attempts == 0 {
-		passed, failMsg, err := r.ensurePreflight(ctx, m)
-		switch {
-		case err != nil:
-			return ctrl.Result{}, err
-		case failMsg != "":
-			m.Status.Phase = v1alpha1.PhaseFailed
-			r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionFalse, "PreflightFailed", failMsg)
-			r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "PreflightFailed", failMsg)
-			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "PreflightFailed", "Preflight", "%s", truncate(failMsg, maxDetailLen))
-			return ctrl.Result{}, r.updateStatus(ctx, m, base)
-		case !passed:
-			m.Status.Phase = v1alpha1.PhaseValidating
-			if err := r.updateStatus(ctx, m, base); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
-		}
+	if res, handled, err := r.preflightGate(ctx, m, base); handled || err != nil {
+		return res, err
 	}
 
 	// Job orchestration: observe the current attempt or start the next one.
@@ -220,12 +196,47 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleFailedJob(ctx, m, base, job)
 	}
 
+	return r.observeRunningJob(ctx, m, base, job)
+}
+
+// preflightGate probes the follow prerequisites before any worker runs: a
+// one-shot Job checks wal_level, slot headroom, the REPLICATION attribute,
+// origin-function EXECUTE, and the session_replication_role SET gate. Every
+// one of these failed live before it failed loudly; two of them lose data
+// silently. Failure is absorbing: these are configuration errors on the
+// databases, retrying the migration cannot fix them. handled=true means this
+// pass ends here; false lets the caller proceed to Job orchestration.
+func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, bool, error) {
+	if !followEnabled(m) || m.Status.Attempts != 0 {
+		return ctrl.Result{}, false, nil
+	}
+	passed, failMsg, err := r.ensurePreflight(ctx, m)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, true, err
+	case failMsg != "":
+		r.setCondition(m, v1alpha1.ConditionValidated, metav1.ConditionFalse, "PreflightFailed", failMsg)
+		r.fail(m, "PreflightFailed", "Preflight", failMsg)
+		return ctrl.Result{}, true, r.updateStatus(ctx, m, base)
+	case !passed:
+		m.Status.Phase = v1alpha1.PhaseValidating
+		if err := r.updateStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
+	}
+	return ctrl.Result{}, false, nil
+}
+
+// observeRunningJob samples a live worker (clone progress, follow state) and
+// schedules the next look.
+func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1alpha1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1alpha1.PhaseCloning
 	if r.Poller != nil {
 		// Best effort: a missing sample (pod starting/terminating, catalogs
 		// not ready) keeps the previous numbers instead of failing the pass.
 		if p, err := r.Poller.CloneProgress(ctx, m.Namespace, job.Name); err != nil {
-			log.V(1).Info("progress poll failed", "error", err)
+			logf.FromContext(ctx).V(1).Info("progress poll failed", "error", err)
 		} else if p != nil {
 			m.Status.Progress = p
 		}
@@ -271,11 +282,12 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 // startAttempt creates the next worker Job, unless the retry budget is spent.
 // Budget: backoffLimit is the number of retries, so backoffLimit+1 attempts.
 func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
+	// Reachable despite handleFailedJob's own budget check: the final
+	// attempt's Job can vanish while running (TTL, manual delete) or be
+	// cleared by a suspend cycle, and the next pass lands here over budget.
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		msg := fmt.Sprintf("retry budget exhausted after %d attempts", m.Status.Attempts)
-		m.Status.Phase = v1alpha1.PhaseFailed
-		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", msg)
-		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "BackoffLimitExceeded", "Fail", "%s", msg)
+		r.fail(m, "BackoffLimitExceeded", "Fail",
+			fmt.Sprintf("retry budget exhausted after %d attempts", m.Status.Attempts))
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
@@ -324,11 +336,9 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1al
 		reason += "; last error: " + detail
 	}
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		m.Status.Phase = v1alpha1.PhaseFailed
 		r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
-		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded",
+		r.fail(m, "BackoffLimitExceeded", "Fail",
 			fmt.Sprintf("attempt %d failed: %s", m.Status.Attempts, reason))
-		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "Failed", "Fail", "attempt %d failed: %s", m.Status.Attempts, reason)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
@@ -382,6 +392,47 @@ func (r *MigrationReconciler) createStrictlyOwned(ctx context.Context, m *v1alph
 			existing.GetObjectKind().GroupVersionKind().Kind, obj.GetName())
 	}
 	return nil
+}
+
+// fail marks the Migration terminally failed: phase, the Failed condition,
+// and a warning event. reason names the cause, action the reconcile step. The
+// event note is capped (events are server-limited to about 1KiB); conditions
+// keep the full message.
+func (r *MigrationReconciler) fail(m *v1alpha1.Migration, reason, action, msg string) {
+	m.Status.Phase = v1alpha1.PhaseFailed
+	r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, reason, msg)
+	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reason, action, "%s", truncate(msg, maxDetailLen))
+}
+
+// ensureJob fetches the named child Job, creating it from build when absent.
+// A nil job with a nil error means the Job was created just now (or an
+// overlapping pass won the create race) and has nothing to observe yet.
+// created reports that THIS pass issued the create, so callers gate their
+// announce events on it and stay silent on the race (the guard proven by the
+// stale-object regression test).
+func (r *MigrationReconciler) ensureJob(ctx context.Context, m *v1alpha1.Migration, name string, build func() (*batchv1.Job, error)) (*batchv1.Job, bool, error) {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: name}, job)
+	if err == nil {
+		return job, false, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, false, err
+	}
+	job, err = build()
+	if err != nil {
+		return nil, false, err
+	}
+	if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
+		return nil, false, err
+	}
+	if err := r.Create(ctx, job); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return nil, true, nil
 }
 
 // jobFinished reports (finished, succeeded) from the Job's conditions.

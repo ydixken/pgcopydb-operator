@@ -128,9 +128,8 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 			"replication lag is above spec.follow.maxCatchupLag or unknown")
 	}
 
-	endposSet := st.Endpos != "" && st.Endpos != sentinel.ZeroLSN
 	switch {
-	case endposSet:
+	case sentinel.EndposSet(st.Endpos):
 		// Cutover already triggered; the worker drains and exits 0.
 		m.Status.Phase = v1alpha1.PhaseCuttingOver
 	case cutoverWanted(m, caughtUp):
@@ -168,13 +167,10 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 		return ctrl.Result{}, err
 	}
 	if failedVerify {
-		m.Status.Phase = v1alpha1.PhaseFailed
 		r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
 			"the worker exited before applying all changes up to endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
-		r.setCondition(m, v1alpha1.ConditionFailed, metav1.ConditionTrue, "DrainIncomplete",
+		r.fail(m, "DrainIncomplete", "Verify",
 			"cutover drain verification refuted completeness; do not switch applications to the target")
-		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "DrainIncomplete", "Verify",
-			"origin progress is behind endpos on the target; cutover is NOT complete")
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 	if !verified {
@@ -229,25 +225,18 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 // (then with a loud warning: the slot may leak on the source, and that needs
 // an operator's attention, not an endlessly blocked Migration).
 func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Migration) (bool, error) {
-	job := &batchv1.Job{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: cleanupJobName(m)}, job)
-	if apierrors.IsNotFound(err) {
-		job, err = buildCleanupJob(m, r.RunnerImage)
-		if err != nil {
-			return false, err
-		}
-		if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
-			return false, err
-		}
-		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-			return false, err
-		}
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CleanupStarted", "Cleanup",
-			"dropping replication slot, publication, and origin")
-		return false, nil
-	}
+	job, created, err := r.ensureJob(ctx, m, cleanupJobName(m), func() (*batchv1.Job, error) {
+		return buildCleanupJob(m, r.RunnerImage)
+	})
 	if err != nil {
 		return false, err
+	}
+	if created {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CleanupStarted", "Cleanup",
+			"dropping replication slot, publication, and origin")
+	}
+	if job == nil {
+		return false, nil
 	}
 	done, ok := jobFinished(job)
 	if !done {
@@ -266,28 +255,18 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Mig
 // check output (one line per failed prerequisite, with the exact GRANT or
 // setting to fix it) so nobody has to chase pod logs of a finished Job.
 func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1alpha1.Migration) (bool, string, error) {
-	job := &batchv1.Job{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: preflightJobName(m)}, job)
-	if apierrors.IsNotFound(err) {
-		job, err = buildPreflightJob(m, r.RunnerImage)
-		if err != nil {
-			return false, "", err
-		}
-		if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
-			return false, "", err
-		}
-		createErr := r.Create(ctx, job)
-		if createErr != nil && !apierrors.IsAlreadyExists(createErr) {
-			return false, "", createErr
-		}
-		if createErr == nil {
-			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightStarted", "Preflight",
-				"checking follow-mode prerequisites as Job %s", job.Name)
-		}
-		return false, "", nil
-	}
+	job, created, err := r.ensureJob(ctx, m, preflightJobName(m), func() (*batchv1.Job, error) {
+		return buildPreflightJob(m, r.RunnerImage)
+	})
 	if err != nil {
 		return false, "", err
+	}
+	if created {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightStarted", "Preflight",
+			"checking follow-mode prerequisites as Job %s", preflightJobName(m))
+	}
+	if job == nil {
+		return false, "", nil
 	}
 	done, ok := jobFinished(job)
 	switch {
@@ -308,22 +287,10 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1alpha1.M
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1alpha1.Migration) (bool, bool, error) {
-	job := &batchv1.Job{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: verifyJobName(m)}, job)
-	if apierrors.IsNotFound(err) {
-		job, err = buildVerifyJob(m, r.RunnerImage)
-		if err != nil {
-			return false, false, err
-		}
-		if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
-			return false, false, err
-		}
-		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-			return false, false, err
-		}
-		return false, false, nil
-	}
-	if err != nil {
+	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
+		return buildVerifyJob(m, r.RunnerImage)
+	})
+	if err != nil || job == nil {
 		return false, false, err
 	}
 	done, ok := jobFinished(job)

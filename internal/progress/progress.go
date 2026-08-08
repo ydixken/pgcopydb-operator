@@ -25,8 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"k8s.io/client-go/rest"
-
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
@@ -35,15 +33,6 @@ import (
 // Poller execs progress commands in worker pods.
 type Poller struct {
 	exec *podexec.Exec
-}
-
-// New builds a Poller from the manager's rest config.
-func New(config *rest.Config) (*Poller, error) {
-	e, err := podexec.New(config)
-	if err != nil {
-		return nil, err
-	}
-	return &Poller{exec: e}, nil
 }
 
 // NewFromExec shares an existing exec transport.

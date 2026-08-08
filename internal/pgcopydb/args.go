@@ -42,7 +42,9 @@ const WorkDir = WorkMount + "/pgcopydb"
 const flagDir = "--dir"
 
 // FiltersPath is where the rendered --filters INI is mounted in the runner
-// (from an operator-owned ConfigMap), when filters are configured.
+// (from an operator-owned ConfigMap), when filters are configured. The mount
+// in resources.go derives its directory from this path; there is no second
+// copy of the literal.
 const FiltersPath = "/etc/pgcopydb/conf/filters.ini"
 
 // skipFlag maps a SkipOption to its pgcopydb flag.
@@ -173,10 +175,6 @@ func RenderFilters(f *v1alpha1.Filters) string {
 }
 
 func itoa(i int32) string { return fmt.Sprintf("%d", i) }
-
-// SentinelPort is where the follow supervisor's TCP coordinator listens; the
-// wire protocol is unauthenticated, so the chart restricts it by NetworkPolicy.
-const SentinelPort = 5442
 
 // SlotName derives a deterministic, per-Migration replication slot and origin
 // name. Postgres slot names allow [a-z0-9_], max 63 bytes; namespace and name
