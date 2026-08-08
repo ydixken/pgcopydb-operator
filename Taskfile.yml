@@ -30,13 +30,13 @@ tasks:
           if [ -f Makefile ]; then make test; else echo "test: no Go module yet, nothing to test"; fi
 
   docs:
-    desc: Regenerate the CRD reference (docs/api.md) from the Go API types.
+    desc: Regenerate the CRD reference (docs/reference/api.md) from the Go API types.
     cmds:
       - GOBIN=$(pwd)/bin go install github.com/elastic/crd-ref-docs@v0.3.0
       - >-
         bin/crd-ref-docs --source-path=api/v1alpha1
         --config=hack/crd-ref-docs.yaml --renderer=markdown
-        --output-path=docs/api.md
+        --output-path=docs/reference/api.md
 
   e2e:
     desc: >-

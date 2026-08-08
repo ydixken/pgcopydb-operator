@@ -2,7 +2,7 @@
 
 Date: 2026-08-07. Status: approved. The keywords MUST, SHOULD, MAY follow RFC 2119.
 
-Ground truth for every pgcopydb claim: [docs/research/pgcopydb-cli.md](../../research/pgcopydb-cli.md) and [docs/research/pgcopydb-follow.md](../../research/pgcopydb-follow.md) (pgcopydb v0.18). Pattern sources: [docs/research/prior-art.md](../../research/prior-art.md). Facts about the private e2e environment are deliberately not in this repository.
+Ground truth for every pgcopydb claim: [docs/research/pgcopydb-cli.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/pgcopydb-cli.md) and [docs/research/pgcopydb-follow.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/pgcopydb-follow.md) (pgcopydb v0.18). Pattern sources: [docs/research/prior-art.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/prior-art.md). Facts about the private e2e environment are deliberately not in this repository.
 
 ## Purpose
 

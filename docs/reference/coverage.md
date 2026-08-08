@@ -1,6 +1,6 @@
 # pgcopydb option coverage
 
-Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb-cli.md](research/pgcopydb-cli.md), sections 2.1 and 2.2, pgcopydb 0.18) mapped to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion. The three gaps the audit found are closed; the ledger lives in [MILESTONES.md](../MILESTONES.md).
+Every `pgcopydb clone` and `pgcopydb follow` option (per [pgcopydb-cli.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/pgcopydb-cli.md), sections 2.1 and 2.2, pgcopydb 0.18) mapped to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion. The three gaps the audit found are closed; the ledger lives in [MILESTONES.md](https://github.com/ydixken/pgcopydb-operator/blob/main/MILESTONES.md).
 
 ## `pgcopydb clone`
 

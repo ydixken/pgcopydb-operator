@@ -1,0 +1,52 @@
+# Docs site configuration (Material for MkDocs). Built and deployed by
+# .github/workflows/docs.yml; build it locally with `mkdocs build --strict`.
+# Cross-page links are page-relative .md paths so the same files render on
+# GitHub and on the site.
+site_name: pgcopydb-operator
+repo_url: https://github.com/ydixken/pgcopydb-operator
+docs_dir: docs
+
+# research/ and superpowers/ are working material, not user docs; the
+# approved design spec is the one page that stays in. Gitignore-style
+# patterns, so re-including a file means re-including its parents first.
+exclude_docs: |
+  research/
+  superpowers/*
+  !superpowers/specs
+  superpowers/specs/*
+  !superpowers/specs/2026-08-07-operator-design.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - toc.follow
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Installation: installation.md
+  - Configuration: configuration.md
+  - Operations:
+      - Live migration: operations/live-migration.md
+      - Verification: operations/verification.md
+      - Suspend, retries, deletion: operations/lifecycle.md
+  - Troubleshooting: troubleshooting.md
+  - Reference:
+      - Prerequisites: reference/prerequisites.md
+      - CRD reference: reference/api.md
+      - pgcopydb option coverage: reference/coverage.md
+  - Design: superpowers/specs/2026-08-07-operator-design.md
