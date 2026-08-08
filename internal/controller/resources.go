@@ -136,7 +136,13 @@ func publicationDropGuard(m *v1alpha1.Migration, attempt int32) string {
 // catalogs and both connections, so it reuses the worker pod shape. Job-level
 // retries are fine here: cleanup is idempotent.
 func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
-	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir}
+	// Pass the migration's own slot and origin names explicitly: stream
+	// cleanup defaults --origin to "pgcopydb", so a follow migration with a
+	// generated per-migration origin would leave that origin behind on the
+	// target (observed live: origins accumulate while slots are dropped).
+	slot := effectiveSlotName(m)
+	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir,
+		"--slot-name", slot, "--origin", slot}
 	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, "", 2)
 }
 

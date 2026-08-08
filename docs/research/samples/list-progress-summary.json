@@ -1,0 +1,240 @@
+{
+    "setup": {
+        "table-jobs": 4,
+        "index-jobs": 4
+    },
+    "steps": [
+        {
+            "label": "Unknown Top Level Timing Section",
+            "conn": "both",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 0
+        },
+        {
+            "label": "Catalog Queries (table ordering, filtering, etc)",
+            "conn": "source",
+            "duration": 167,
+            "duration_pretty": "167ms",
+            "concurrency": 1
+        },
+        {
+            "label": "Dump Schema",
+            "conn": "source",
+            "duration": 93,
+            "duration_pretty": " 93ms",
+            "concurrency": 1
+        },
+        {
+            "label": "Prepare Schema",
+            "conn": "target",
+            "duration": 194,
+            "duration_pretty": "194ms",
+            "concurrency": 1
+        },
+        {
+            "label": "COPY, INDEX, CONSTRAINTS, VACUUM (wall clock)",
+            "conn": "both",
+            "duration": 4246,
+            "duration_pretty": " 4s246",
+            "concurrency": 12
+        },
+        {
+            "label": "COPY (cumulative)",
+            "conn": "both",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 4
+        },
+        {
+            "label": "CREATE INDEX (cumulative)",
+            "conn": "target",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 4
+        },
+        {
+            "label": "CONSTRAINTS (cumulative)",
+            "conn": "target",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 4
+        },
+        {
+            "label": "VACUUM (cumulative)",
+            "conn": "target",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 4
+        },
+        {
+            "label": "Reset Sequences",
+            "conn": "both",
+            "duration": 0,
+            "duration_pretty": "",
+            "concurrency": 1
+        },
+        {
+            "label": "Large Objects (cumulative)",
+            "conn": "both",
+            "duration": 0,
+            "duration_pretty": "  0ms",
+            "concurrency": 4
+        },
+        {
+            "label": "Finalize Schema",
+            "conn": "both",
+            "duration": 114,
+            "duration_pretty": "114ms",
+            "concurrency": 4
+        },
+        {
+            "label": "Total Wall Clock Duration",
+            "conn": "both",
+            "duration": 4657,
+            "duration_pretty": " 4s657",
+            "concurrency": 20
+        }
+    ],
+    "tables": [
+        {
+            "oid": 16479,
+            "schema": "public",
+            "name": "spike_bulk",
+            "duration": 3731,
+            "network": {
+                "bytes": 323888895,
+                "bytes-pretty": "308 MB",
+                "transmit-rate": "694 MBit\/s"
+            },
+            "index": {
+                "count": 1,
+                "duration": 207
+            },
+            "indexes": [
+                {
+                    "oid": 16485,
+                    "schema": "public",
+                    "name": "spike_bulk_pkey",
+                    "sql": "CREATE UNIQUE INDEX spike_bulk_pkey ON public.spike_bulk USING btree (id)",
+                    "ms": 205
+                }
+            ],
+            "constraints": [
+                {
+                    "oid": 16486,
+                    "schema": "public",
+                    "name": "spike_bulk_pkey",
+                    "sql": "ALTER TABLE public.spike_bulk ADD CONSTRAINT spike_bulk_pkey PRIMARY KEY USING INDEX spike_bulk_pkey",
+                    "ms": 2
+                }
+            ]
+        },
+        {
+            "oid": 16398,
+            "schema": "public",
+            "name": "orders",
+            "duration": 405,
+            "network": {
+                "bytes": 6162157,
+                "bytes-pretty": "6017 kB",
+                "transmit-rate": "121 MBit\/s"
+            },
+            "index": {
+                "count": 2,
+                "duration": 335
+            },
+            "indexes": [
+                {
+                    "oid": 16405,
+                    "schema": "public",
+                    "name": "orders_pkey",
+                    "sql": "CREATE UNIQUE INDEX orders_pkey ON public.orders USING btree (id)",
+                    "ms": 160
+                },
+                {
+                    "oid": 16412,
+                    "schema": "public",
+                    "name": "orders_customer_idx",
+                    "sql": "CREATE INDEX orders_customer_idx ON public.orders USING btree (customer_id)",
+                    "ms": 169
+                }
+            ],
+            "constraints": [
+                {
+                    "oid": 16406,
+                    "schema": "public",
+                    "name": "orders_pkey",
+                    "sql": "ALTER TABLE public.orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX orders_pkey",
+                    "ms": 6
+                }
+            ]
+        },
+        {
+            "oid": 16387,
+            "schema": "public",
+            "name": "customers",
+            "duration": 257,
+            "network": {
+                "bytes": 2477788,
+                "bytes-pretty": "2419 kB",
+                "transmit-rate": "77 MBit\/s"
+            },
+            "index": {
+                "count": 1,
+                "duration": 25
+            },
+            "indexes": [
+                {
+                    "oid": 16395,
+                    "schema": "public",
+                    "name": "customers_pkey",
+                    "sql": "CREATE UNIQUE INDEX customers_pkey ON public.customers USING btree (id)",
+                    "ms": 19
+                }
+            ],
+            "constraints": [
+                {
+                    "oid": 16396,
+                    "schema": "public",
+                    "name": "customers_pkey",
+                    "sql": "ALTER TABLE public.customers ADD CONSTRAINT customers_pkey PRIMARY KEY USING INDEX customers_pkey",
+                    "ms": 6
+                }
+            ]
+        },
+        {
+            "oid": 16415,
+            "schema": "audit",
+            "name": "events",
+            "duration": 79,
+            "network": {
+                "bytes": 14786,
+                "bytes-pretty": "14 kB",
+                "transmit-rate": "1497 kBit\/s"
+            },
+            "index": {
+                "count": 1,
+                "duration": 10
+            },
+            "indexes": [
+                {
+                    "oid": 16422,
+                    "schema": "audit",
+                    "name": "events_pkey",
+                    "sql": "CREATE UNIQUE INDEX events_pkey ON audit.events USING btree (id)",
+                    "ms": 4
+                }
+            ],
+            "constraints": [
+                {
+                    "oid": 16423,
+                    "schema": "audit",
+                    "name": "events_pkey",
+                    "sql": "ALTER TABLE audit.events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_pkey",
+                    "ms": 6
+                }
+            ]
+        }
+    ]
+}

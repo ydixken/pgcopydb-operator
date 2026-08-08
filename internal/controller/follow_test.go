@@ -228,8 +228,12 @@ var _ = Describe("Migration Controller follow mode", func() {
 		m = reconcileWith(fake, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeTrue())
 		cleanupJob := fetchJob(ctx, name+"-cleanup")
-		Expect(strings.Join(cleanupJob.Spec.Template.Spec.Containers[0].Args, " ")).
-			To(Equal("stream cleanup --dir /work/pgcopydb"))
+		cleanupArgs := strings.Join(cleanupJob.Spec.Template.Spec.Containers[0].Args, " ")
+		Expect(cleanupArgs).To(HavePrefix("stream cleanup --dir /work/pgcopydb"))
+		// The slot and origin are passed explicitly so the migration's own
+		// generated origin is dropped, not the default "pgcopydb".
+		Expect(cleanupArgs).To(ContainSubstring("--slot-name "))
+		Expect(cleanupArgs).To(ContainSubstring("--origin "))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeFalse())
 
 		// Cleanup succeeds: Complete.
