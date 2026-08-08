@@ -97,12 +97,17 @@ docker-build:
     # buildah/stable enforces short-name resolution and cannot prompt without
     # a TTY, so point it at a permissive config that resolves to docker.io.
     CONTAINERS_REGISTRIES_CONF: /tmp/registries.conf
+    # This build validates amd64 (the dev cluster arch); ghcr ships multi-arch.
+    BUILD_PLATFORM: linux/amd64
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       exists: [Dockerfile]
   script:
     - printf 'unqualified-search-registries = ["docker.io"]\nshort-name-mode = "permissive"\n' > /tmp/registries.conf
     - buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - buildah bud -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    # --platform makes buildah populate TARGETOS/TARGETARCH the way docker
+    # buildx does, so the multi-arch Dockerfile's GOARCH=${TARGETARCH} build
+    # gets a real value instead of an empty one.
+    - buildah bud --platform "$BUILD_PLATFORM" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
     - buildah push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
     - buildah push "$CI_REGISTRY_IMAGE:latest"
