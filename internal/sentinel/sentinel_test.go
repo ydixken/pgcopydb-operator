@@ -16,7 +16,20 @@ limitations under the License.
 
 package sentinel
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
+
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
+)
 
 func TestParseLSN(t *testing.T) {
 	cases := map[string]uint64{
@@ -71,5 +84,84 @@ func TestToStatus(t *testing.T) {
 	}
 	if (*State)(nil).ToStatus("x") != nil {
 		t.Fatal("nil state must yield nil status")
+	}
+}
+
+func TestToStatus_EndposSetAndLagUnknown(t *testing.T) {
+	// A frozen stream carries its cutover LSN into status; before the first
+	// WAL-head sample, lag is unknown and must stay absent, not read as 0.
+	s := &State{WriteLSN: "0/21", ReplayLSN: "0/11", Endpos: "0/A0"}
+	rs := s.ToStatus("slot1")
+	if rs.Endpos != "0/A0" {
+		t.Fatalf("endpos: %q", rs.Endpos)
+	}
+	if rs.LagBytes != nil {
+		t.Fatalf("lag must be unknown without a source head, got %d", *rs.LagBytes)
+	}
+}
+
+// fakeAPI serves a pod list (or an error). Exec requests fail because the
+// server never upgrades to SPDY: for Read that is the not-ready contract
+// under test, for SetEndposCurrent it is a hard error.
+func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case fail:
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case strings.HasSuffix(r.URL.Path, "/pods"):
+			w.Header().Set("Content-Type", "application/json")
+			list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}, Items: pods}
+			_ = json.NewEncoder(w).Encode(list)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	e, err := podexec.New(&rest.Config{Host: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(e)
+}
+
+func runningPod() corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "w-0", Namespace: "ns", Labels: map[string]string{"job-name": "j"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
+	// No running pod: (nil, nil), the previous sample stands.
+	st, err := fakeAPI(t, nil, false).Read(context.Background(), "ns", "j")
+	if err != nil || st != nil {
+		t.Fatalf("no pod: want (nil, nil), got (%v, %v)", st, err)
+	}
+	// Pod up but the sentinel query fails (follow setup not done yet, or the
+	// exec transport hiccuped): also (nil, nil), never a reconcile error.
+	st, err = fakeAPI(t, []corev1.Pod{runningPod()}, false).Read(context.Background(), "ns", "j")
+	if err != nil || st != nil {
+		t.Fatalf("sentinel not ready: want (nil, nil), got (%v, %v)", st, err)
+	}
+}
+
+func TestRead_ListError(t *testing.T) {
+	if _, err := fakeAPI(t, nil, true).Read(context.Background(), "ns", "j"); err == nil {
+		t.Fatal("want error when the pod list fails")
+	}
+}
+
+func TestSetEndposCurrent_Errors(t *testing.T) {
+	// Unlike Read, cutover must not silently do nothing: every failure is loud.
+	if _, err := fakeAPI(t, nil, false).SetEndposCurrent(context.Background(), "ns", "j"); err == nil ||
+		!strings.Contains(err.Error(), "no running worker pod") {
+		t.Fatalf("no pod must fail loudly, got %v", err)
+	}
+	if _, err := fakeAPI(t, nil, true).SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
+		t.Fatal("want error when the pod list fails")
+	}
+	if _, err := fakeAPI(t, []corev1.Pod{runningPod()}, false).SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
+		t.Fatal("want error when the exec fails")
 	}
 }

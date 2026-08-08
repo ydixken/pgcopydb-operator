@@ -40,6 +40,10 @@ import (
 // jobFailedMsg is the canned failure message test helpers stamp on Jobs.
 const jobFailedMsg = "pod failed"
 
+// caughtUpLSN is the LSN specs park every sentinel field on to script a
+// zero-lag stream.
+const caughtUpLSN = "0/100"
+
 // deletionDriveTimeout bounds the Eventually loops that drive multi-pass
 // deletion flows; envtest passes are fast, this is generous.
 const deletionDriveTimeout = 15 * time.Second
@@ -91,16 +95,21 @@ func removeMigration(ctx context.Context, name string) {
 }
 
 // fakeSentinel scripts the sentinel the way envtest scripts Job status: tests
-// set the state, the reconciler reads it.
+// set the state (or an error), the reconciler reads it.
 type fakeSentinel struct {
 	mu        sync.Mutex
 	state     *sentinel.State
 	endposSet bool
+	readErr   error
+	setErr    error
 }
 
 func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
 	if f.state == nil {
 		return nil, nil
 	}
@@ -111,6 +120,9 @@ func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, er
 func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.setErr != nil {
+		return "", f.setErr
+	}
 	f.endposSet = true
 	f.state.Endpos = f.state.SourceHead
 	return f.state.Endpos, nil
@@ -242,7 +254,6 @@ var _ = Describe("Migration Controller follow mode", func() {
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name)
 
-		caughtUpLSN := "0/100"
 		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		m := reconcileAndGet(ctx, r, name)
 		Expect(fake.endposSet).To(BeTrue())
