@@ -61,10 +61,11 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	// alpha.9 carries the integrated M2/M3 stack: the follow preflight Job
-	// before run-1, spec.verification (pgcopydb compare), and the fixed
-	// drain-verify gate (authenticated script, 8KB tolerance).
-	operatorTag = "v0.1.0-alpha.9"
+	// alpha.11 adds the cleanup-origin fix (stream cleanup passes
+	// --slot-name/--origin, so a follow migration's generated origin is dropped
+	// on the target) and the preflight extensions (replica-identity audit), on
+	// top of alpha.9's exec-credential fix and alpha.8's drain-verify gate.
+	operatorTag = "v0.1.0-alpha.11"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
@@ -221,6 +222,9 @@ var _ = BeforeSuite(func() {
 
 	By("clearing replication leftovers on the source from crashed runs")
 	resetSourceReplication()
+
+	By("clearing replication origin leftovers on the target from crashed runs")
+	resetTargetReplication()
 
 	By("granting the follow-mode privileges to the app role")
 	ensureFollowPrivileges()
@@ -390,6 +394,19 @@ func resetSourceReplication() {
 		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
 	psql(srcPod, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
 		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
+}
+
+// resetTargetReplication drops pgcopydb replication origins a crashed or
+// pre-alpha.11 run left on the target. Cleanup before that fix never passed
+// --origin, so a follow migration's custom-named origin lingered. The follow
+// scenarios now assert the target ends with zero pgcopydb origins, so a
+// leftover from an earlier run would fail them; drop them up front. Safe at
+// suite start: no Migration runs and the source carries no slots, so no origin
+// is in use.
+func resetTargetReplication() {
+	GinkgoHelper()
+	psql(tgtPod, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
+		" WHERE roname LIKE 'pgcopydb%'")
 }
 
 // psql runs one statement inside a CNPG instance pod as the in-pod postgres

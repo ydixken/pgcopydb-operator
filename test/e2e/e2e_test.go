@@ -189,6 +189,7 @@ var _ = Describe("Migration", Ordered, func() {
 			"live rows written during streaming did not all arrive on the target")
 		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
+		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 
 		By("removing the live rows so the source matches the seeded fixture again")
 		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-%'")
@@ -205,6 +206,7 @@ var _ = Describe("Migration", Ordered, func() {
 		By("comparing data and slot state after the unattended cutover")
 		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
+		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 	})
 
 	It("drops the replication slot when a streaming Migration is deleted", func() {
@@ -226,6 +228,8 @@ var _ = Describe("Migration", Ordered, func() {
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 			"replication slot leaked on the source after deletion")
+		Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin leaked on the target after deletion")
 	})
 
 	It("suspends a streaming Migration and resumes it through cutover", func() {
@@ -299,6 +303,7 @@ var _ = Describe("Migration", Ordered, func() {
 			"rows written while suspended did not arrive after resume")
 		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
+		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 
 		By("removing the suspend-window rows so the source matches the seeded fixture again")
 		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
@@ -434,6 +439,16 @@ func expectCleanupSucceeded(name string) {
 func sourceSlotCount() string {
 	GinkgoHelper()
 	return psql(srcPod, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")
+}
+
+// targetOriginCount counts pgcopydb-created replication origins on the target.
+// stream cleanup drops the generated origin (alpha.11's cleanup-origin fix), so
+// a completed or deleted follow migration must leave none behind.
+// pg_replication_origin is a shared catalog, so the app-database connection
+// sees it.
+func targetOriginCount() string {
+	GinkgoHelper()
+	return psql(tgtPod, "SELECT count(*) FROM pg_replication_origin WHERE roname LIKE 'pgcopydb%'")
 }
 
 // copySecret writes a password-only secret; CreateOrUpdate keeps reruns with
