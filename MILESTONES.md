@@ -135,7 +135,15 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 ### W-H: Competitive comparison (wave 1, parallel)
 
-- [ ] docs/design/comparison.md: CNPG, Percona Everest DataImporter, Zalando, mariadb-operator sync; CRD ergonomics, conditions conventions, day-2 ops, docs, testing signals; adopt/reject list; motivated changes become M5 tasks (small ones implemented this push).
+- [x] docs/design/comparison.md: CNPG, Percona Everest DataImporter, Zalando, mariadb-operator sync; CRD ergonomics, conditions conventions, day-2 ops, docs, testing signals; adopt/reject list; motivated changes become M5 tasks (small ones implemented this push). Done 2026-08-08: doc landed with per-axis evidence and a 6-project summary table; five adoptions ledgered below, seven rejections recorded with revisit conditions; no adoption blocks v0.2.0. Side finding: the committed LICENSE file is GPL-2.0 while README and all source headers say Apache-2.0; license choice needs a maintainer decision, flagged, not changed.
+
+#### W-H adoptions
+
+- [ ] (S, docs+markers) Condition-aware printer columns on Migration: keep Phase/Attempts/Age, add Complete (`.status.conditions[?(@.type=="Complete")].status`) and Lag (`.status.replication.lagBytes`, priority 1), drop the dead Tables column until pgcopydb #1036 ships a fix; `make manifests` + chart CRD copy. Pattern: mariadb-operator.
+- [ ] (S, docs) "Migrating into a CloudNativePG cluster" recipe page: `-rw` Service target, app-Secret reuse, PREREQUISITES grant block, `managed.roles` replication for CNPG sources, `wal_sender_timeout` via `spec.postgresql.parameters`; note the e2e suite already runs this shape. Place via W-G.
+- [ ] (S, docs) Argo CD health check snippet for Migration (`resource.customizations` Lua: Failed=Degraded, Complete=Healthy, Suspended=Suspended, else Progressing). Lesson from zalando/postgres-operator #1693/#2864.
+- [ ] (S, docs) Conditions and reasons reference table: all eight condition types, polarity, every controller-set reason with one line on when it appears. Feeds the W-G reference section.
+- [ ] (M, e2e) Operator-upgrade e2e spec: install latest released chart, start a follow migration under live writes, upgrade the operator to the local build mid-stream, assert completion and condition continuity. Pattern: CNPG's "-prime" upgrade tier; becomes load-bearing with W-F's second API version.
 
 ### Closing
 
