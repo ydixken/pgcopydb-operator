@@ -78,23 +78,30 @@ test:unit:
 # Image build+push to the GitLab registry: main only, and only once the
 # kubebuilder scaffold ships a Dockerfile (one rule ANDs both conditions).
 # This is build validation; the consumed artifacts ship to ghcr via the
-# GitHub release workflow. Built with buildah, not docker-in-docker: the
-# dedicated k8s runner's dind push corrupts large blobs ("blob unknown to
-# registry"), and a daemonless builder sidesteps that whole class of problem
-# (no dind, no privileged socket, no bridge-MTU or storage-driver surprises).
+# GitHub release workflow. Built with buildah, not docker-in-docker: docker
+# 29's dind defaults to the containerd-snapshotter image store, which fails
+# the push to this registry ("blob unknown to registry"; a controlled
+# per-version experiment on the runner showed overlay2 pushes and the
+# snapshotter store does not). buildah is daemonless and uses neither the
+# docker daemon nor its image store, so it sidesteps the failure entirely.
 docker-build:
   stage: docker-build
   image:
     name: quay.io/buildah/stable:v1.38.0@sha256:a66e0125a03ed7bf521d13457d3dc64b8468d7c66688afd63c7ab188c3026c1a
     entrypoint: [""]
   variables:
-    # vfs needs no host mounts and works in an unprivileged rootless pod.
+    # vfs needs no host mounts and works without a nested overlay.
     STORAGE_DRIVER: vfs
     BUILDAH_FORMAT: docker
+    # The Dockerfile pins base images by short name plus digest (golang:...);
+    # buildah/stable enforces short-name resolution and cannot prompt without
+    # a TTY, so point it at a permissive config that resolves to docker.io.
+    CONTAINERS_REGISTRIES_CONF: /tmp/registries.conf
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       exists: [Dockerfile]
   script:
+    - printf 'unqualified-search-registries = ["docker.io"]\nshort-name-mode = "permissive"\n' > /tmp/registries.conf
     - buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - buildah bud -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
     - buildah push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
