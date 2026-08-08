@@ -24,6 +24,21 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline. Watch it, but never commit or open MRs there.
 
+## E2e tests
+
+`task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)). The suite installs a throwaway operator, creates two CNPG clusters, and seeds the source through a Kubernetes Job running psql with the SQL under `test/e2e/fixtures/`. Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
+
+Two tiers, controlled by environment variables:
+
+| Variable           | Default | Effect                                                                                                              |
+|--------------------|---------|----------------------------------------------------------------------------------------------------------------------|
+| `E2E_SCALE`        | `1`     | Fixture size multiplier. 1 seeds roughly 12GB; row counts scale linearly, so 0.1 gives a ~1.2GB quick run.           |
+| `E2E_STRESS`       | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes, longer budgets. Use `task e2e:stress`.      |
+| `E2E_KEEP_FIXTURES`| unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed.  |
+| `E2E_FORCE`        | unset   | `true` takes over the helm release a crashed run left behind.                                                        |
+
+The stress tier (`task e2e:stress`) requires Longhorn. The suite creates a `longhorn-e2e-ephemeral` StorageClass (numberOfReplicas 1, reclaimPolicy Delete) if absent, and refuses to start (Skip) unless the `nodes.longhorn.io` CRs report enough available storage for the requested volumes times 1.2 headroom. The capacity check reads live cluster state; nothing about the cluster is hardcoded.
+
 ## Commits and pull requests
 
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.

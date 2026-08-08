@@ -42,6 +42,7 @@ tasks:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
       Local only, never wired into CI. Confirms the context before running.
+      E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures.
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context
@@ -52,4 +53,22 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 40m -ginkgo.v
+      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v
+
+  e2e:stress:
+    desc: >-
+      Stress e2e (E2E_STRESS=true, scale 10, ~120GB fixtures) against the
+      CURRENT kubectl context. Requires Longhorn; the suite creates the
+      longhorn-e2e-ephemeral StorageClass if absent and skips unless the
+      nodes.longhorn.io CRs report enough available storage. Local only.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    prompt: >-
+      e2e STRESS (~120GB seeded data, hours of runtime) will run against
+      kubectl context '{{.KUBE_CONTEXT}}', a real cluster. Continue?
+    preconditions:
+      - sh: test -d test/e2e
+        msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    cmds:
+      - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v

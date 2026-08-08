@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"net/url"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -35,15 +36,6 @@ import (
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 )
 
-// fixtureCounts is customers/orders/audit.events as seeded by fixtureSQL.
-const fixtureCounts = "50000/200000/1000"
-
-// followTimeout covers an unattended live migration end to end: base copy,
-// catchup, cutover, drain, and the cleanup Job. The operator samples the
-// sentinel on a 30s cadence and CNPG WAL flushing adds seconds to lag
-// convergence, so phase changes arrive in whole polling ticks.
-const followTimeout = 10 * time.Minute
-
 // The scenarios share the two CNPG fixtures and run in order: later ones
 // build on the populated target that earlier ones leave behind.
 var _ = Describe("Migration", Ordered, func() {
@@ -52,9 +44,16 @@ var _ = Describe("Migration", Ordered, func() {
 		m := waitCompleted("e2e-fresh", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
-		By("comparing row counts and sequence values on both sides")
-		Expect(rowCounts(srcPod)).To(Equal(fixtureCounts))
-		Expect(rowCounts(tgtPod)).To(Equal(fixtureCounts))
+		By("checking the seeded source matches the scale-derived expectations")
+		Expect(seedTableCounts(srcPod)).To(Equal(expectedSeedCounts()),
+			"source row counts do not match the scale formula; seed and suite disagree")
+		Expect(largeObjectCount(srcPod)).To(Equal(fmt.Sprint(scaled(40))))
+
+		By("comparing table groups, matview, large objects, and sequences on both sides")
+		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(matviewState(tgtPod)).To(Equal(matviewState(srcPod)),
+			"materialized view not repopulated identically on the target")
+		Expect(largeObjectCount(tgtPod)).To(Equal(largeObjectCount(srcPod)))
 		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
 	})
 
@@ -79,8 +78,8 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("checking audit stayed away while public tables arrived")
 		Expect(psql(tgtPod, "SELECT to_regclass('audit.events') IS NULL")).To(Equal("t"))
-		Expect(psql(tgtPod, "SELECT count(*) FROM customers")).To(Equal("50000"))
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders")).To(Equal("200000"))
+		Expect(psql(tgtPod, "SELECT count(*) FROM customers")).To(Equal(fmt.Sprint(scaled(50000))))
+		Expect(psql(tgtPod, "SELECT count(*) FROM orders")).To(Equal(fmt.Sprint(scaled(200000))))
 	})
 
 	It("resumes with a second attempt after the runner pod dies", func() {
@@ -114,7 +113,7 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: "e2e-resume-run-2"}, job)).To(Succeed())
 		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--resume"))
 
-		Expect(rowCounts(tgtPod)).To(Equal(fixtureCounts))
+		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
 	})
 
 	It("clones across namespaces using local secrets and remote hosts", func() {
@@ -124,7 +123,7 @@ var _ = Describe("Migration", Ordered, func() {
 		for _, name := range []string{srcSecret, tgtSecret} {
 			orig := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, orig)).To(Succeed())
-			copySecret(nsX, name, orig.Data["password"])
+			copySecret(nsX, name, orig.Data[passwordKey])
 		}
 
 		create(newMigration("e2e-xns", nsX, v1alpha1.CloneOptions{DropIfExists: true}))
@@ -143,6 +142,60 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(err.Error()).To(ContainSubstring("not both"))
 	})
 
+	It("clones with uriSecretRef connections built from the CNPG secrets", func() {
+		const uriSecretName = "e2e-uris"
+		By("building libpq URIs from the app secrets and storing them in one Secret")
+		data := map[string][]byte{}
+		for key, cluster := range map[string]string{"source": sourceCluster, "target": targetCluster} {
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
+			// url.UserPassword escapes the generated password, whatever is in it.
+			u := url.URL{
+				Scheme: "postgresql",
+				User:   url.UserPassword(appDB, string(sec.Data[passwordKey])),
+				Host:   cluster + "-rw." + nsE2E + ".svc:5432",
+				Path:   "/" + appDB,
+			}
+			data[key] = []byte(u.String())
+		}
+		uriSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: uriSecretName}}
+		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, uriSecret, func() error {
+			uriSecret.Data = data
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred(), "failed to store the URI secret")
+
+		m := newMigration("e2e-uri", nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
+		m.Spec.Source = v1alpha1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "source"}}
+		m.Spec.Target = v1alpha1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "target"}}
+		create(m)
+		waitCompleted("e2e-uri", nsE2E)
+
+		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+	})
+
+	It("verifies a clone with pgcopydb compare and sets Verified", func() {
+		m := newMigration("e2e-verified", nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
+		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true, Data: true}
+		create(m)
+
+		// The data compare re-reads every table on both sides, so this
+		// scenario gets the follow budget, not the clone one.
+		m = waitPhase("e2e-verified", nsE2E, followTimeout, v1alpha1.PhaseCompleted)
+		expectConditionTrue(m, v1alpha1.ConditionVerified)
+
+		By("checking both compare Jobs succeeded")
+		for _, check := range []string{"schema", "data"} {
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx,
+				client.ObjectKey{Namespace: nsE2E, Name: "e2e-verified-compare-" + check}, job)).To(Succeed())
+			Expect(job.Status.Succeeded).To(BeNumerically(">=", 1),
+				"compare %s Job did not succeed", check)
+		}
+	})
+
 	// The follow scenarios run strictly after each other: each asserts the
 	// source is free of pgcopydb replication slots when it finishes, and the
 	// next one relies on that clean slate for its own slot counting.
@@ -154,8 +207,8 @@ var _ = Describe("Migration", Ordered, func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
 
 		By("inserting 1000 fresh rows into source orders while streaming")
-		psql(srcPod, "INSERT INTO orders (customer_id, amount, note) SELECT (g % 50000) + 1,"+
-			" (g % 90)::numeric / 3, 'live-' || g FROM generate_series(1, 1000) g")
+		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+			" (g %% 90)::numeric / 3, 'live-' || g FROM generate_series(1, 1000) g", scaled(50000)))
 
 		By("verifying status.replication fills in from the sentinel")
 		m := &v1alpha1.Migration{}
@@ -197,10 +250,16 @@ var _ = Describe("Migration", Ordered, func() {
 
 	It("runs an Automatic cutover to completion unattended", func() {
 		const name = "e2e-follow-auto"
-		create(newFollowMigration(name, v1alpha1.CutoverAutomatic))
+		// Schema verification on top: after cutover and cleanup the compare
+		// runs against a quiesced pair, so CutoverCompleted and Verified
+		// must both come out True on one Migration.
+		mig := newFollowMigration(name, v1alpha1.CutoverAutomatic)
+		mig.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true}
+		create(mig)
 
 		m := waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
 		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		expectConditionTrue(m, v1alpha1.ConditionVerified)
 		expectCleanupSucceeded(name)
 
 		By("comparing data and slot state after the unattended cutover")
@@ -274,8 +333,8 @@ var _ = Describe("Migration", Ordered, func() {
 		}, time.Minute, 2*time.Second).Should(Succeed())
 
 		By("writing 500 rows on the source while suspended")
-		psql(srcPod, "INSERT INTO orders (customer_id, amount, note) SELECT (g % 50000) + 1,"+
-			" (g % 60)::numeric / 2, 'live-susp-' || g FROM generate_series(1, 500) g")
+		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+			" (g %% 60)::numeric / 2, 'live-susp-' || g FROM generate_series(1, 500) g", scaled(50000)))
 
 		By("resuming the Migration")
 		setSuspend(name, false)
@@ -319,20 +378,26 @@ func e2eConn(cluster string) v1alpha1.PostgresConnection {
 		Username: appDB,
 		PasswordSecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: cluster + "-app"},
-			Key:                  "password",
+			Key:                  passwordKey,
 		},
 	}
 }
 
 func newMigration(name, ns string, clone v1alpha1.CloneOptions) *v1alpha1.Migration {
+	// The work volume follows the tier: it holds the schema dump, catalogs,
+	// and (for follow) buffered change files, not the table data itself.
+	wv := v1alpha1.WorkVolume{Size: resource.MustParse(workVolumeSize)}
+	if fixtureStorageClass != "" {
+		sc := fixtureStorageClass
+		wv.StorageClassName = &sc
+	}
 	return &v1alpha1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1alpha1.MigrationSpec{
-			Source: e2eConn(sourceCluster),
-			Target: e2eConn(targetCluster),
-			Clone:  clone,
-			// Small work volume: the fixture dump is a few hundred MB at most.
-			WorkVolume: v1alpha1.WorkVolume{Size: resource.MustParse("2Gi")},
+			Source:     e2eConn(sourceCluster),
+			Target:     e2eConn(targetCluster),
+			Clone:      clone,
+			WorkVolume: wv,
 		},
 	}
 }
@@ -372,11 +437,48 @@ func failureMessage(m *v1alpha1.Migration) string {
 	return "(no Failed condition message)"
 }
 
-// rowCounts returns customers/orders/audit.events counts in one round trip.
+// rowCounts returns customers/orders/audit.events counts in one round trip:
+// the tables the live-write scenarios touch.
 func rowCounts(pod string) string {
 	GinkgoHelper()
 	return psql(pod, "SELECT (SELECT count(*) FROM customers) || '/' ||"+
 		" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events)")
+}
+
+// seedTableCounts returns every seeded table's count in one round trip, in
+// the order of expectedSeedCounts. events is the partitioned parent, so its
+// count is the total across all partitions.
+func seedTableCounts(pod string) string {
+	GinkgoHelper()
+	return psql(pod, "SELECT (SELECT count(*) FROM customers) || '/' ||"+
+		" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events) || '/' ||"+
+		" (SELECT count(*) FROM audit.access_log) || '/' || (SELECT count(*) FROM app_users) || '/' ||"+
+		" (SELECT count(*) FROM events) || '/' || (SELECT count(*) FROM readings) || '/' ||"+
+		" (SELECT count(*) FROM documents)")
+}
+
+// expectedSeedCounts derives the seedTableCounts string from the scale; the
+// base counts match the CALL arguments in fixtures/seed.sql.
+func expectedSeedCounts() string {
+	return fmt.Sprintf("%d/%d/%d/%d/%d/%d/%d/%d",
+		scaled(50000), scaled(200000), scaled(1000), scaled(100000),
+		scaled(20000), scaled(8000000), scaled(2500000), scaled(350000))
+}
+
+// matviewState reports whether event_daily_counts is populated and how many
+// rows it holds. pg_restore repopulates it with REFRESH on the target, so
+// both sides must agree.
+func matviewState(pod string) string {
+	GinkgoHelper()
+	return psql(pod, "SELECT ispopulated || '/' || (SELECT count(*) FROM event_daily_counts)"+
+		" FROM pg_matviews WHERE matviewname = 'event_daily_counts'")
+}
+
+// largeObjectCount counts large objects; pg_largeobject_metadata is
+// per-database, so this sees exactly the fixture LOs.
+func largeObjectCount(pod string) string {
+	GinkgoHelper()
+	return psql(pod, "SELECT count(*) FROM pg_largeobject_metadata")
 }
 
 // sequenceValues flattens every sequence and its last_value into one line, so
@@ -457,7 +559,7 @@ func copySecret(ns, name string, password []byte) {
 	GinkgoHelper()
 	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
-		sec.Data = map[string][]byte{"password": password}
+		sec.Data = map[string][]byte{passwordKey: password}
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred(), "failed to copy secret %s into %s", name, ns)
