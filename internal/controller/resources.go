@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
@@ -44,26 +44,26 @@ const (
 	shellPath = "/bin/sh"
 )
 
-func labels(m *v1alpha1.Migration) map[string]string {
+func labels(m *v1beta1.Migration) map[string]string {
 	return map[string]string{
 		labelManagedBy: managerName,
 		labelMigration: m.Name,
 	}
 }
 
-func workPVCName(m *v1alpha1.Migration) string   { return m.Name + "-work" }
-func filtersCMName(m *v1alpha1.Migration) string { return m.Name + "-filters" }
-func jobName(m *v1alpha1.Migration, attempt int32) string {
+func workPVCName(m *v1beta1.Migration) string   { return m.Name + "-work" }
+func filtersCMName(m *v1beta1.Migration) string { return m.Name + "-filters" }
+func jobName(m *v1beta1.Migration, attempt int32) string {
 	return fmt.Sprintf("%s-run-%d", m.Name, attempt)
 }
-func cleanupJobName(m *v1alpha1.Migration) string   { return m.Name + "-cleanup" }
-func verifyJobName(m *v1alpha1.Migration) string    { return m.Name + "-verify" }
-func preflightJobName(m *v1alpha1.Migration) string { return m.Name + "-preflight" }
+func cleanupJobName(m *v1beta1.Migration) string   { return m.Name + "-cleanup" }
+func verifyJobName(m *v1beta1.Migration) string    { return m.Name + "-verify" }
+func preflightJobName(m *v1beta1.Migration) string { return m.Name + "-preflight" }
 
 // buildWorkPVC returns the work-directory claim. It holds pgcopydb's catalogs
 // and is the unit of resumability: it survives Job restarts and is only
 // removed with the Migration itself (ownerReference garbage collection).
-func buildWorkPVC(m *v1alpha1.Migration) *corev1.PersistentVolumeClaim {
+func buildWorkPVC(m *v1beta1.Migration) *corev1.PersistentVolumeClaim {
 	size := m.Spec.WorkVolume.Size
 	if size.IsZero() {
 		size = defaultWorkVolumeSize()
@@ -85,7 +85,7 @@ func buildWorkPVC(m *v1alpha1.Migration) *corev1.PersistentVolumeClaim {
 }
 
 // buildFiltersConfigMap renders the --filters INI, or nil when unused.
-func buildFiltersConfigMap(m *v1alpha1.Migration) *corev1.ConfigMap {
+func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
 	ini := pgcopydb.RenderFilters(m.Spec.Clone.Filters)
 	if ini == "" {
 		return nil
@@ -103,7 +103,7 @@ func buildFiltersConfigMap(m *v1alpha1.Migration) *corev1.ConfigMap {
 // buildJob assembles the worker Job for one attempt. backoffLimit is always 0:
 // retries are operator-driven so the attempt count and reasons live in the
 // Migration status, and each retry resumes from the work-dir catalogs.
-func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
+func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
 	// Attempt 1 restarts (wipes) the work dir: any state found there is
 	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
 	// failed attempt is gone with its process, so --resume needs
@@ -121,7 +121,7 @@ func buildJob(m *v1alpha1.Migration, runnerImage string, attempt int32) (*batchv
 // own leftover ("already exists", found live). Only the auto-managed
 // publication (named after the slot) is ever dropped; a user-provided
 // spec.follow.publication is pgcopydb's to leave alone and ours too.
-func publicationDropGuard(m *v1alpha1.Migration, attempt int32) string {
+func publicationDropGuard(m *v1beta1.Migration, attempt int32) string {
 	if attempt <= 1 || !followEnabled(m) || m.Spec.Follow.Publication != "" {
 		return ""
 	}
@@ -136,7 +136,7 @@ func publicationDropGuard(m *v1alpha1.Migration, attempt int32) string {
 // the auto-created publication, and the target origin. It needs the work-dir
 // catalogs and both connections, so it reuses the worker pod shape. Job-level
 // retries are fine here: cleanup is idempotent.
-func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	// Pass the migration's own slot and origin names explicitly: stream
 	// cleanup defaults --origin to "pgcopydb", so a follow migration with a
 	// generated per-migration origin would leave that origin behind on the
@@ -154,7 +154,7 @@ func buildCleanupJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, e
 // exit 0 without replaying pending WAL (found live, silent data loss). The
 // durable truth is the target's replication origin progress, compared against
 // the endpos recorded in the work-dir sentinel.
-func buildVerifyJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+func buildVerifyJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
 	// The origin parks at the last applied COMMIT record, which can trail
 	// endpos (the source WAL head at approval) by a few non-data records
@@ -262,9 +262,9 @@ echo "preflight: note: wal2json presence on the source cannot be verified from S
 // Migration; a deterministic check failure fails twice and is terminal.
 // The replica-identity allowlist travels as an env var, not script text: env
 // values are never shell-evaluated, so table names need no quoting rules.
-func buildPreflightJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
+func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	script := preflightScript
-	if f := m.Spec.Follow; f != nil && f.Plugin == v1alpha1.PluginWal2json {
+	if f := m.Spec.Follow; f != nil && f.Plugin == v1beta1.PluginWal2json {
 		script += preflightWal2jsonNote
 	}
 	job, err := scriptJob(m, runnerImage, preflightJobName(m), script+preflightScriptFooter, 1)
@@ -287,7 +287,7 @@ func buildPreflightJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job,
 // scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to
 // run a shell script instead of a pgcopydb argv: the prelude execs $0, which
 // here is /bin/sh -c <script> instead of pgcopydb.
-func scriptJob(m *v1alpha1.Migration, runnerImage, name, script string, backoff int32) (*batchv1.Job, error) {
+func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, backoff int32) (*batchv1.Job, error) {
 	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", backoff)
 	if err != nil {
 		return nil, err
@@ -300,7 +300,7 @@ func scriptJob(m *v1alpha1.Migration, runnerImage, name, script string, backoff 
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
 // is optional shell run by the prelude after the passfile is assembled and
 // before pgcopydb starts (see conn.PreludeScript).
-func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string, setup string, backoff int32) (*batchv1.Job, error) {
+func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err

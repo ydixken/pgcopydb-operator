@@ -23,12 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
-func setVerified(m *v1alpha1.Migration, status metav1.ConditionStatus) {
+func setVerified(m *v1beta1.Migration, status metav1.ConditionStatus) {
 	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
-		Type: v1alpha1.ConditionVerified, Status: status, Reason: "Test",
+		Type: v1beta1.ConditionVerified, Status: status, Reason: "Test",
 	})
 }
 

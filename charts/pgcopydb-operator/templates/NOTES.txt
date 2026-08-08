@@ -1,6 +1,6 @@
 pgcopydb-operator {{ .Chart.AppVersion }} is running as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}: manager Deployment, ServiceAccount, and RBAC{{ if .Values.crds.install }}, plus the Migration CRD (migrations.pgcopydb-operator.io){{ end }}.
 
-Create a Migration (apiVersion pgcopydb-operator.io/v1alpha1) pointing at your source and target databases; the chart README has a minimal example.
+Create a Migration (apiVersion pgcopydb-operator.io/v1beta1) pointing at your source and target databases; the chart README has a minimal example.
 
 Watch progress with: kubectl get migrations -w
 Docs: https://github.com/ydixken/pgcopydb-operator

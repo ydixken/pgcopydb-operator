@@ -1,5 +1,5 @@
 # Config for elastic/crd-ref-docs, which generates docs/reference/api.md from
-# the Go types in api/v1alpha1. Regenerate with `task docs`.
+# the Go types in api/v1beta1. Regenerate with `task docs`.
 processor:
   # List boilerplate; nobody writes a MigrationList by hand.
   ignoreTypes:

@@ -34,7 +34,7 @@ tasks:
     cmds:
       - GOBIN=$(pwd)/bin go install github.com/elastic/crd-ref-docs@v0.3.0
       - >-
-        bin/crd-ref-docs --source-path=api/v1alpha1
+        bin/crd-ref-docs --source-path=api/v1beta1
         --config=hack/crd-ref-docs.yaml --renderer=markdown
         --output-path=docs/reference/api.md
 

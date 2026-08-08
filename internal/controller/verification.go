@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
@@ -45,18 +45,18 @@ const (
 	compareData   = "data"
 )
 
-func compareJobName(m *v1alpha1.Migration, check string) string {
+func compareJobName(m *v1beta1.Migration, check string) string {
 	return m.Name + "-compare-" + check
 }
 
-func verificationRequested(m *v1alpha1.Migration) bool {
+func verificationRequested(m *v1beta1.Migration) bool {
 	v := m.Spec.Verification
 	return v != nil && (v.Schema || v.Data)
 }
 
 // enabledChecks returns the requested checks in execution order: schema first
 // because it is cheap and its result frames a later data mismatch.
-func enabledChecks(m *v1alpha1.Migration) []string {
+func enabledChecks(m *v1beta1.Migration) []string {
 	var checks []string
 	if m.Spec.Verification.Schema {
 		checks = append(checks, compareSchema)
@@ -72,7 +72,7 @@ func enabledChecks(m *v1alpha1.Migration) []string {
 // which is exactly what jobSkeleton provides. Backoff 1 absorbs one infra
 // flake (pod eviction) without reporting a false mismatch; a genuine mismatch
 // costs one redundant re-run, which is bounded.
-func buildCompareJob(m *v1alpha1.Migration, runnerImage, check string) (*batchv1.Job, error) {
+func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.Job, error) {
 	args := pgcopydb.CompareSchemaArgs()
 	if check == compareData {
 		args = pgcopydb.CompareDataArgs()
@@ -83,8 +83,8 @@ func buildCompareJob(m *v1alpha1.Migration, runnerImage, check string) (*batchv1
 // finishClone ends a clone-only migration: CloneCompleted, then verification
 // when requested, then Complete. It runs on every pass while the worker Job
 // reads succeeded, so it must stay idempotent.
-func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
-	r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
+func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
 
 	done, err := r.ensureVerification(ctx, m)
 	if err != nil {
@@ -99,8 +99,8 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1alpha1
 
 	now := metav1.Now()
 	m.Status.CompletedAt = &now
-	m.Status.Phase = v1alpha1.PhaseCompleted
-	r.setCondition(m, v1alpha1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "migration finished")
+	m.Status.Phase = v1beta1.PhaseCompleted
+	r.setCondition(m, v1beta1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "migration finished")
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Completed", "Complete", "pgcopydb clone finished")
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
@@ -109,11 +109,11 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1alpha1
 // then data: sequential keeps both databases at one extra scan and both pods
 // off each other's RWO work volume) and reports done=false while one still
 // runs. Everything is re-derived from the persisted Jobs, never from memory.
-func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1alpha1.Migration) (bool, error) {
+func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1.Migration) (bool, error) {
 	if !verificationRequested(m) {
 		return true, nil
 	}
-	m.Status.Phase = v1alpha1.PhaseVerifying
+	m.Status.Phase = v1beta1.PhaseVerifying
 
 	var mismatched []string
 	for _, check := range enabledChecks(m) {
@@ -124,7 +124,7 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1alpha
 			return false, err
 		}
 		if job == nil {
-			r.setCondition(m, v1alpha1.ConditionVerified, metav1.ConditionUnknown, "VerificationRunning",
+			r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionUnknown, "VerificationRunning",
 				fmt.Sprintf("pgcopydb compare %s running", check))
 			if created {
 				r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "VerificationStarted", "Verify",
@@ -142,7 +142,7 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1alpha
 	}
 
 	if len(mismatched) == 0 {
-		r.setCondition(m, v1alpha1.ConditionVerified, metav1.ConditionTrue, "ComparePassed",
+		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed",
 			"pgcopydb compare found source and target matching")
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Verified", "Verify",
 			"pgcopydb compare found source and target matching")
@@ -156,7 +156,7 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1alpha
 	msg := fmt.Sprintf("pgcopydb compare reported differences (%v); details are in the compare Job logs. "+
 		"The transfer itself finished; on a follow migration, writes reaching the target after cutover also show up here",
 		mismatched)
-	r.setCondition(m, v1alpha1.ConditionVerified, metav1.ConditionFalse, reason, msg)
+	r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionFalse, reason, msg)
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "VerificationMismatch", "Verify", "%s", msg)
 	return true, nil
 }

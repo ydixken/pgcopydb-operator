@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
 
@@ -108,7 +108,7 @@ func TestParseListProgress_StatusRoundTrip(t *testing.T) {
 	if got := p.BytesDone.String(); got != "999" {
 		t.Fatalf("bytesDone renders %q, want 999", got)
 	}
-	raw, err := json.Marshal(v1alpha1.CloneProgress{BytesTotal: p.BytesTotal, BytesDone: p.BytesDone})
+	raw, err := json.Marshal(v1beta1.CloneProgress{BytesTotal: p.BytesTotal, BytesDone: p.BytesDone})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,7 +27,7 @@ import (
 	"slices"
 	"strings"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // WorkMount is where the work volume is mounted. The pgcopydb work dir lives
@@ -48,15 +48,15 @@ const flagDir = "--dir"
 const FiltersPath = "/etc/pgcopydb/conf/filters.ini"
 
 // skipFlag maps a SkipOption to its pgcopydb flag.
-var skipFlag = map[v1alpha1.SkipOption]string{
-	v1alpha1.SkipOption("largeObjects"):      "--skip-large-objects",
-	v1alpha1.SkipOption("extensions"):        "--skip-extensions",
-	v1alpha1.SkipOption("extensionComments"): "--skip-ext-comments",
-	v1alpha1.SkipOption("collations"):        "--skip-collations",
-	v1alpha1.SkipOption("vacuum"):            "--skip-vacuum",
-	v1alpha1.SkipOption("analyze"):           "--skip-analyze",
-	v1alpha1.SkipOption("dbProperties"):      "--skip-db-properties",
-	v1alpha1.SkipOption("ctidSplit"):         "--skip-split-by-ctid",
+var skipFlag = map[v1beta1.SkipOption]string{
+	v1beta1.SkipOption("largeObjects"):      "--skip-large-objects",
+	v1beta1.SkipOption("extensions"):        "--skip-extensions",
+	v1beta1.SkipOption("extensionComments"): "--skip-ext-comments",
+	v1beta1.SkipOption("collations"):        "--skip-collations",
+	v1beta1.SkipOption("vacuum"):            "--skip-vacuum",
+	v1beta1.SkipOption("analyze"):           "--skip-analyze",
+	v1beta1.SkipOption("dbProperties"):      "--skip-db-properties",
+	v1beta1.SkipOption("ctidSplit"):         "--skip-split-by-ctid",
 }
 
 // CloneArgs renders the argv for `pgcopydb clone` from a Migration spec.
@@ -67,7 +67,7 @@ var skipFlag = map[v1alpha1.SkipOption]string{
 // adds --not-consistent, needed when the original snapshot transaction is
 // gone. The source/target URIs are passed via the environment, so they are
 // deliberately absent from the returned argv.
-func CloneArgs(spec *v1alpha1.MigrationSpec, restart, resume, notConsistent bool) []string {
+func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool) []string {
 	c := spec.Clone
 	args := []string{"clone", flagDir, WorkDir}
 
@@ -122,7 +122,7 @@ func CloneArgs(spec *v1alpha1.MigrationSpec, restart, resume, notConsistent bool
 	}
 
 	// Skip flags in a deterministic order so the argv is stable for golden tests.
-	skips := append([]v1alpha1.SkipOption(nil), c.Skip...)
+	skips := append([]v1beta1.SkipOption(nil), c.Skip...)
 	slices.Sort(skips)
 	for _, s := range skips {
 		if flag, ok := skipFlag[s]; ok {
@@ -148,7 +148,7 @@ func CloneArgs(spec *v1alpha1.MigrationSpec, restart, resume, notConsistent bool
 // RenderFilters produces the pgcopydb --filters INI, or "" when no filters are
 // set. Section order matches the pgcopydb documentation; entries keep the
 // user's order (they are identifiers, and pgcopydb treats them as a set).
-func RenderFilters(f *v1alpha1.Filters) string {
+func RenderFilters(f *v1beta1.Filters) string {
 	if f == nil || f.IsEmpty() {
 		return ""
 	}
@@ -202,7 +202,7 @@ func SlotName(namespace, name string) string {
 // FollowArgs renders the argv additions for a live migration; empty when
 // follow is not enabled. The slot and origin default to the generated
 // per-Migration name so several migrations can share one source instance.
-func FollowArgs(spec *v1alpha1.MigrationSpec, namespace, name string) []string {
+func FollowArgs(spec *v1beta1.MigrationSpec, namespace, name string) []string {
 	f := spec.Follow
 	if f == nil || !f.Enabled {
 		return nil

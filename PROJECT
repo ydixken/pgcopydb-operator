@@ -17,4 +17,12 @@ resources:
   kind: Migration
   path: github.com/ydixken/pgcopydb-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: pgcopydb-operator.io
+  kind: Migration
+  path: github.com/ydixken/pgcopydb-operator/api/v1beta1
+  version: v1beta1
 version: "3"

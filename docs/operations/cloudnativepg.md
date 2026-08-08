@@ -79,7 +79,7 @@ spec:
 ## 5. The Migration
 
 ```yaml
-apiVersion: pgcopydb-operator.io/v1alpha1
+apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
   name: shop

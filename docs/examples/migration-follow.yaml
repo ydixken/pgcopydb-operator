@@ -3,7 +3,7 @@
 # prerequisites (wal_level, REPLICATION attribute, target grants, replica
 # identities); read docs/reference/prerequisites.md first. Runbook:
 # docs/operations/live-migration.md.
-apiVersion: pgcopydb-operator.io/v1alpha1
+apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
   name: billing

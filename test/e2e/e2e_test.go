@@ -33,14 +33,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // The scenarios share the two CNPG fixtures and run in order: later ones
 // build on the populated target that earlier ones leave behind.
 var _ = Describe("Migration", Ordered, func() {
 	It("completes a fresh clone with matching rows and sequences", func() {
-		create(newMigration("e2e-fresh", nsE2E, v1alpha1.CloneOptions{}))
+		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
@@ -58,7 +58,7 @@ var _ = Describe("Migration", Ordered, func() {
 	})
 
 	It("re-clones onto the populated target with dropIfExists", func() {
-		create(newMigration("e2e-reclone", nsE2E, v1alpha1.CloneOptions{DropIfExists: true}))
+		create(newMigration("e2e-reclone", nsE2E, v1beta1.CloneOptions{DropIfExists: true}))
 		m := waitCompleted("e2e-reclone", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 	})
@@ -70,9 +70,9 @@ var _ = Describe("Migration", Ordered, func() {
 		By("dropping the audit schema on the target")
 		psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
 
-		create(newMigration("e2e-filters", nsE2E, v1alpha1.CloneOptions{
+		create(newMigration("e2e-filters", nsE2E, v1beta1.CloneOptions{
 			DropIfExists: true,
-			Filters:      &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}},
+			Filters:      &v1beta1.Filters{ExcludeSchemas: []string{"audit"}},
 		}))
 		waitCompleted("e2e-filters", nsE2E)
 
@@ -83,7 +83,7 @@ var _ = Describe("Migration", Ordered, func() {
 	})
 
 	It("resumes with a second attempt after the runner pod dies", func() {
-		create(newMigration("e2e-resume", nsE2E, v1alpha1.CloneOptions{DropIfExists: true}))
+		create(newMigration("e2e-resume", nsE2E, v1beta1.CloneOptions{DropIfExists: true}))
 
 		// A Running attempt-1 pod means the Migration is mid-clone; poll fast
 		// because the whole clone only takes about a minute.
@@ -126,12 +126,12 @@ var _ = Describe("Migration", Ordered, func() {
 			copySecret(nsX, name, orig.Data[passwordKey])
 		}
 
-		create(newMigration("e2e-xns", nsX, v1alpha1.CloneOptions{DropIfExists: true}))
+		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{DropIfExists: true}))
 		waitCompleted("e2e-xns", nsX)
 	})
 
 	It("rejects a spec with both uriSecretRef and inline host", func() {
-		m := newMigration("e2e-invalid", nsE2E, v1alpha1.CloneOptions{})
+		m := newMigration("e2e-invalid", nsE2E, v1beta1.CloneOptions{})
 		m.Spec.Source.URISecretRef = &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "does-not-matter"},
 			Key:                  "uri",
@@ -165,10 +165,10 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 		Expect(err).NotTo(HaveOccurred(), "failed to store the URI secret")
 
-		m := newMigration("e2e-uri", nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
-		m.Spec.Source = v1alpha1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+		m := newMigration("e2e-uri", nsE2E, v1beta1.CloneOptions{DropIfExists: true})
+		m.Spec.Source = v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "source"}}
-		m.Spec.Target = v1alpha1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+		m.Spec.Target = v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "target"}}
 		create(m)
 		waitCompleted("e2e-uri", nsE2E)
@@ -177,14 +177,14 @@ var _ = Describe("Migration", Ordered, func() {
 	})
 
 	It("verifies a clone with pgcopydb compare and sets Verified", func() {
-		m := newMigration("e2e-verified", nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true, Data: true}
+		m := newMigration("e2e-verified", nsE2E, v1beta1.CloneOptions{DropIfExists: true})
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		create(m)
 
 		// The data compare re-reads every table on both sides, so this
 		// scenario gets the follow budget, not the clone one.
-		m = waitPhase("e2e-verified", nsE2E, followTimeout, v1alpha1.PhaseCompleted)
-		expectConditionTrue(m, v1alpha1.ConditionVerified)
+		m = waitPhase("e2e-verified", nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionVerified)
 
 		By("checking both compare Jobs succeeded")
 		for _, check := range []string{"schema", "data"} {
@@ -201,17 +201,17 @@ var _ = Describe("Migration", Ordered, func() {
 	// next one relies on that clean slate for its own slot counting.
 	It("streams live writes and completes a Manual cutover", func() {
 		const name = "e2e-follow-manual"
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		create(newFollowMigration(name, v1beta1.CutoverManual))
 
 		By("waiting for the base copy to finish and streaming to start")
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("inserting 1000 fresh rows into source orders while streaming")
 		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
 			" (g %% 90)::numeric / 3, 'live-' || g FROM generate_series(1, 1000) g", scaled(50000)))
 
 		By("verifying status.replication fills in from the sentinel")
-		m := &v1alpha1.Migration{}
+		m := &v1beta1.Migration{}
 		Eventually(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			rep := m.Status.Replication
@@ -222,7 +222,7 @@ var _ = Describe("Migration", Ordered, func() {
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
 		By("waiting for CutoverPending (caught up, Manual gate holds)")
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseCutoverPending)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 
 		// The burst above was the only writer, so writes are already stopped;
 		// approving now is safe.
@@ -230,8 +230,8 @@ var _ = Describe("Migration", Ordered, func() {
 		approveCutover(name)
 
 		By("waiting for the cutover to drain and complete")
-		m = waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseCompleted)
-		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		m = waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
 
 		By("comparing data, sequences, and slot state after cutover")
@@ -253,13 +253,13 @@ var _ = Describe("Migration", Ordered, func() {
 		// Schema verification on top: after cutover and cleanup the compare
 		// runs against a quiesced pair, so CutoverCompleted and Verified
 		// must both come out True on one Migration.
-		mig := newFollowMigration(name, v1alpha1.CutoverAutomatic)
-		mig.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true}
+		mig := newFollowMigration(name, v1beta1.CutoverAutomatic)
+		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		create(mig)
 
-		m := waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
-		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
-		expectConditionTrue(m, v1alpha1.ConditionVerified)
+		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
+		expectConditionTrue(m, v1beta1.ConditionVerified)
 		expectCleanupSucceeded(name)
 
 		By("comparing data and slot state after the unattended cutover")
@@ -270,10 +270,10 @@ var _ = Describe("Migration", Ordered, func() {
 
 	It("drops the replication slot when a streaming Migration is deleted", func() {
 		const name = "e2e-follow-del"
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		create(newFollowMigration(name, v1beta1.CutoverManual))
 
 		By("waiting for streaming so the slot exists on the source")
-		m := waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 		Expect(sourceSlotCount()).To(Equal("1"), "expected exactly the streaming migration's slot")
 
 		By("deleting the Migration mid-stream")
@@ -281,7 +281,7 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("waiting for cleanup to run and the finalizer to release the CR")
 		Eventually(func(g Gomega) {
-			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1alpha1.Migration{})
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1beta1.Migration{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
 				"Migration still present (finalizer not released), get error: %v", err)
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
@@ -293,16 +293,16 @@ var _ = Describe("Migration", Ordered, func() {
 
 	It("suspends a streaming Migration and resumes it through cutover", func() {
 		const name = "e2e-suspend"
-		mig := newFollowMigration(name, v1alpha1.CutoverManual)
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
 		create(mig)
 
 		By("waiting for streaming so the slot exists on the source")
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 		Expect(sourceSlotCount()).To(Equal("1"), "expected exactly the streaming migration's slot")
 
 		By("suspending the Migration")
 		setSuspend(name, true)
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseSuspended)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseSuspended)
 
 		By("waiting for the worker Job to be gone (foreground deletion)")
 		Eventually(func(g Gomega) {
@@ -340,7 +340,7 @@ var _ = Describe("Migration", Ordered, func() {
 		setSuspend(name, false)
 
 		By("waiting for streaming to recover on a fresh attempt")
-		m := waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 
 		By("checking attempt 2 ran with --resume")
@@ -349,11 +349,11 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--resume"))
 
 		By("waiting for CutoverPending and approving the cutover")
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseCutoverPending)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(name)
 
-		m = waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
-		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
 
 		By("comparing data and slot state after the resumed cutover")
@@ -385,7 +385,7 @@ var _ = Describe("Migration", Ordered, func() {
 		By("revoking REPLICATION from the app role on the source")
 		psql(srcPod, "ALTER ROLE app NOREPLICATION")
 
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
 		Expect(failureMessage(m)).To(ContainSubstring(`ALTER ROLE "app" REPLICATION`),
 			"preflight verdict must carry the exact re-grant hint")
@@ -406,7 +406,7 @@ var _ = Describe("Migration", Ordered, func() {
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
 
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
 		Expect(failureMessage(m)).To(ContainSubstring("lacks EXECUTE on replication origin functions"))
 		Expect(failureMessage(m)).To(ContainSubstring("GRANT EXECUTE ON FUNCTION"),
@@ -425,7 +425,7 @@ var _ = Describe("Migration", Ordered, func() {
 		By("revoking SET on session_replication_role on the target")
 		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
 
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
+		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
 		Expect(failureMessage(m)).To(
 			ContainSubstring(`GRANT SET ON PARAMETER session_replication_role TO "app"`),
@@ -436,7 +436,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-backoff"
 		DeferCleanup(func() { deleteMigration(name) })
 
-		m := newMigration(name, nsE2E, v1alpha1.CloneOptions{})
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		// .invalid never resolves (RFC 2606), so every attempt fails fast at
 		// connect time; backoffLimit 1 buys exactly two attempts.
 		m.Spec.Source.Host = "e2e-no-such-host.invalid"
@@ -449,9 +449,9 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("checking Failed is absorbing: no third attempt within a full poll interval")
 		Consistently(func(g Gomega) {
-			cur := &v1alpha1.Migration{}
+			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
-			g.Expect(cur.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
+			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 			g.Expect(cur.Status.Attempts).To(Equal(int32(2)))
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-3"}, &batchv1.Job{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
@@ -462,8 +462,8 @@ var _ = Describe("Migration", Ordered, func() {
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
 // so the same spec works from pgcopydb-e2e-x.
-func e2eConn(cluster string) v1alpha1.PostgresConnection {
-	return v1alpha1.PostgresConnection{
+func e2eConn(cluster string) v1beta1.PostgresConnection {
+	return v1beta1.PostgresConnection{
 		Host:     cluster + "-rw." + nsE2E + ".svc",
 		Database: appDB,
 		Username: appDB,
@@ -474,17 +474,17 @@ func e2eConn(cluster string) v1alpha1.PostgresConnection {
 	}
 }
 
-func newMigration(name, ns string, clone v1alpha1.CloneOptions) *v1alpha1.Migration {
+func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migration {
 	// The work volume follows the tier: it holds the schema dump, catalogs,
 	// and (for follow) buffered change files, not the table data itself.
-	wv := v1alpha1.WorkVolume{Size: resource.MustParse(workVolumeSize)}
+	wv := v1beta1.WorkVolume{Size: resource.MustParse(workVolumeSize)}
 	if fixtureStorageClass != "" {
 		sc := fixtureStorageClass
 		wv.StorageClassName = &sc
 	}
-	return &v1alpha1.Migration{
+	return &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: v1alpha1.MigrationSpec{
+		Spec: v1beta1.MigrationSpec{
 			Source:     e2eConn(sourceCluster),
 			Target:     e2eConn(targetCluster),
 			Clone:      clone,
@@ -493,26 +493,26 @@ func newMigration(name, ns string, clone v1alpha1.CloneOptions) *v1alpha1.Migrat
 	}
 }
 
-func create(m *v1alpha1.Migration) {
+func create(m *v1beta1.Migration) {
 	GinkgoHelper()
 	Expect(k8sClient.Create(ctx, m)).To(Succeed(), "failed to create Migration %s/%s", m.Namespace, m.Name)
 }
 
 // waitCompleted waits for phase Completed within the standard clone budget.
-func waitCompleted(name, ns string) *v1alpha1.Migration {
+func waitCompleted(name, ns string) *v1beta1.Migration {
 	GinkgoHelper()
-	return waitPhase(name, ns, migrationTimeout, v1alpha1.PhaseCompleted)
+	return waitPhase(name, ns, migrationTimeout, v1beta1.PhaseCompleted)
 }
 
 // waitPhase waits until the Migration reaches one of the wanted phases and
 // bails out early on Failed so a broken run reports the operator's failure
 // message instead of a timeout.
-func waitPhase(name, ns string, timeout time.Duration, want ...v1alpha1.MigrationPhase) *v1alpha1.Migration {
+func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.MigrationPhase) *v1beta1.Migration {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, m)).To(Succeed())
-		if m.Status.Phase == v1alpha1.PhaseFailed {
+		if m.Status.Phase == v1beta1.PhaseFailed {
 			StopTrying(fmt.Sprintf("migration %s/%s failed: %s", ns, name, failureMessage(m))).Now()
 		}
 		g.Expect(want).To(ContainElement(m.Status.Phase),
@@ -521,8 +521,8 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1alpha1.Migratio
 	return m
 }
 
-func failureMessage(m *v1alpha1.Migration) string {
-	if c := apimeta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed); c != nil {
+func failureMessage(m *v1beta1.Migration) string {
+	if c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed); c != nil {
 		return c.Message
 	}
 	return "(no Failed condition message)"
@@ -587,17 +587,17 @@ func sequenceValues(pod string) string {
 // newFollowMigration builds a live migration against the shared fixtures.
 // dropIfExists is mandatory here: earlier scenarios leave the target populated
 // and a follow clone onto leftover objects would fail its base copy.
-func newFollowMigration(name string, mode v1alpha1.CutoverMode) *v1alpha1.Migration {
-	m := newMigration(name, nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
-	m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
-	m.Spec.Cutover = v1alpha1.CutoverSpec{Mode: mode}
+func newFollowMigration(name string, mode v1beta1.CutoverMode) *v1beta1.Migration {
+	m := newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true})
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
+	m.Spec.Cutover = v1beta1.CutoverSpec{Mode: mode}
 	return m
 }
 
 // setSuspend flips spec.suspend, the pause/resume switch.
 func setSuspend(name string, suspend bool) {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 	patch := client.MergeFrom(m.DeepCopy())
 	m.Spec.Suspend = suspend
@@ -607,14 +607,14 @@ func setSuspend(name string, suspend bool) {
 // approveCutover flips spec.cutover.approved, the Manual-mode trigger.
 func approveCutover(name string) {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 	patch := client.MergeFrom(m.DeepCopy())
 	m.Spec.Cutover.Approved = true
 	Expect(k8sClient.Patch(ctx, m, patch)).To(Succeed(), "failed to approve cutover for %s", name)
 }
 
-func expectConditionTrue(m *v1alpha1.Migration, condType string) {
+func expectConditionTrue(m *v1beta1.Migration, condType string) {
 	GinkgoHelper()
 	c := apimeta.FindStatusCondition(m.Status.Conditions, condType)
 	Expect(c).NotTo(BeNil(), "condition %s missing on %s", condType, m.Name)

@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -44,7 +44,7 @@ var _ = Describe("Migration Controller verification", func() {
 		const name = "mig-verify-pass"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true, Data: true}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		reconcileAndGet(ctx, newReconciler(), name)
 
@@ -52,20 +52,20 @@ var _ = Describe("Migration Controller verification", func() {
 		// data Job must not exist yet and Complete must wait.
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseVerifying))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
 		schemaJob := fetchJob(ctx, name+"-compare-schema")
 		Expect(strings.Join(schemaJob.Spec.Template.Spec.Containers[0].Args, " ")).
 			To(Equal("compare schema --dir /work/pgcopydb"))
 		Expect(jobMissing(name + "-compare-data")).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCloneCompleted)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeFalse())
-		cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionVerified)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeFalse())
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
 		Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
 
 		// Schema matches: the data check follows.
 		finishJob(ctx, name+"-compare-schema", true)
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseVerifying))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
 		dataJob := fetchJob(ctx, name+"-compare-data")
 		Expect(strings.Join(dataJob.Spec.Template.Spec.Containers[0].Args, " ")).
 			To(Equal("compare data --dir /work/pgcopydb --json"))
@@ -73,17 +73,17 @@ var _ = Describe("Migration Controller verification", func() {
 		// Data matches too: Verified True and the migration completes.
 		finishJob(ctx, name+"-compare-data", true)
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 		Expect(m.Status.CompletedAt).NotTo(BeNil())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionVerified)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionVerified)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 	})
 
 	It("reports a data mismatch without failing the migration", func() {
 		const name = "mig-verify-mismatch"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Data: true}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		reconcileAndGet(ctx, newReconciler(), name)
 
@@ -96,19 +96,19 @@ var _ = Describe("Migration Controller verification", func() {
 		m = reconcileAndGet(ctx, newReconciler(), name)
 		// A mismatch is information, not a failure: Verified False with the
 		// mismatch reason, but the Migration still completes.
-		cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionVerified)
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("DataMismatch"))
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionFailed)).To(BeFalse())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
 	})
 
 	It("reports a schema mismatch with its own reason", func() {
 		const name = "mig-verify-schema-bad"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		reconcileAndGet(ctx, newReconciler(), name)
 
@@ -116,10 +116,10 @@ var _ = Describe("Migration Controller verification", func() {
 		reconcileAndGet(ctx, newReconciler(), name)
 		finishJob(ctx, name+"-compare-schema", false)
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionVerified)
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("SchemaMismatch"))
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 	})
 
 	It("verifies a follow migration only after drain and cleanup", func() {
@@ -130,9 +130,9 @@ var _ = Describe("Migration Controller verification", func() {
 		r.Sentinel = fake
 
 		m := validMigration(name)
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
-		m.Spec.Cutover = v1alpha1.CutoverSpec{Mode: v1alpha1.CutoverAutomatic}
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		// Follow migrations start behind the preflight gate: the first pass
 		// creates only that Job, its success unlocks run-1.
@@ -156,15 +156,15 @@ var _ = Describe("Migration Controller verification", func() {
 		// Cleanup done: now the compare runs, then the migration completes.
 		finishJob(ctx, name+"-cleanup", true)
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseVerifying))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
 		fetchJob(ctx, name+"-compare-schema")
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeFalse())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeFalse())
 
 		finishJob(ctx, name+"-compare-schema", true)
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionVerified)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionVerified)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 	})
 })

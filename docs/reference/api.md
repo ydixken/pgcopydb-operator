@@ -1,12 +1,12 @@
 # API Reference
 
 ## Packages
-- [pgcopydb-operator.io/v1alpha1](#pgcopydb-operatoriov1alpha1)
+- [pgcopydb-operator.io/v1beta1](#pgcopydb-operatoriov1beta1)
 
 
-## pgcopydb-operator.io/v1alpha1
+## pgcopydb-operator.io/v1beta1
 
-Package v1alpha1 contains API Schema definitions for the  v1alpha1 API group.
+Package v1beta1 contains API Schema definitions for the  v1beta1 API group.
 
 ### Resource Types
 - [Migration](#migration)
@@ -166,7 +166,7 @@ Migration is the Schema for the migrations API.
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `apiVersion` _string_ | `pgcopydb-operator.io/v1alpha1` | | |
+| `apiVersion` _string_ | `pgcopydb-operator.io/v1beta1` | | |
 | `kind` _string_ | `Migration` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 | `spec` _[MigrationSpec](#migrationspec)_ | spec defines the desired state of Migration |  | Required: \{\} <br /> |

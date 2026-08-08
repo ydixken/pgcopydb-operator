@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
@@ -50,18 +50,18 @@ type SentinelOps interface {
 	SetEndposCurrent(ctx context.Context, namespace, jobName string) (string, error)
 }
 
-func followEnabled(m *v1alpha1.Migration) bool {
+func followEnabled(m *v1beta1.Migration) bool {
 	return m.Spec.Follow != nil && m.Spec.Follow.Enabled
 }
 
-func effectiveSlotName(m *v1alpha1.Migration) string {
+func effectiveSlotName(m *v1beta1.Migration) string {
 	if m.Spec.Follow != nil && m.Spec.Follow.SlotName != "" {
 		return m.Spec.Follow.SlotName
 	}
 	return pgcopydb.SlotName(m.Namespace, m.Name)
 }
 
-func maxCatchupLagBytes(m *v1alpha1.Migration) int64 {
+func maxCatchupLagBytes(m *v1beta1.Migration) int64 {
 	if m.Spec.Follow != nil && m.Spec.Follow.MaxCatchupLag != nil {
 		return m.Spec.Follow.MaxCatchupLag.Value()
 	}
@@ -69,9 +69,9 @@ func maxCatchupLagBytes(m *v1alpha1.Migration) int64 {
 }
 
 // cutoverWanted decides whether the stream should be frozen now.
-func cutoverWanted(m *v1alpha1.Migration, caughtUp bool) bool {
+func cutoverWanted(m *v1beta1.Migration, caughtUp bool) bool {
 	switch m.Spec.Cutover.Mode {
-	case v1alpha1.CutoverAutomatic:
+	case v1beta1.CutoverAutomatic:
 		return caughtUp
 	default:
 		// Manual is the default mode: the user flips approved once writes to
@@ -82,7 +82,7 @@ func cutoverWanted(m *v1alpha1.Migration, caughtUp bool) bool {
 
 // ensureFinalizer adds the cleanup finalizer to follow migrations before any
 // worker runs, so a deletion at any later point routes through cleanup.
-func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1alpha1.Migration) error {
+func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Migration) error {
 	if !followEnabled(m) || controllerutil.ContainsFinalizer(m, finalizerName) {
 		return nil
 	}
@@ -93,7 +93,7 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1alpha1.M
 // reconcileFollowRunning handles the streaming and cutover phases while the
 // worker Job runs. The sentinel sample is best effort: no sample keeps the
 // previous status, exactly like progress polling.
-func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1alpha1.Migration, jobName string) {
+func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string) {
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
 		return
@@ -112,26 +112,26 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 		return
 	}
 
-	r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
+	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
 		"base copy finished, replaying changes")
-	r.setCondition(m, v1alpha1.ConditionStreaming, metav1.ConditionTrue, "Replaying",
+	r.setCondition(m, v1beta1.ConditionStreaming, metav1.ConditionTrue, "Replaying",
 		"logical replication is applying changes")
-	m.Status.Phase = v1alpha1.PhaseStreaming
+	m.Status.Phase = v1beta1.PhaseStreaming
 
 	lag := st.Lag()
 	caughtUp := lag >= 0 && lag <= maxCatchupLagBytes(m)
 	if caughtUp {
-		r.setCondition(m, v1alpha1.ConditionCaughtUp, metav1.ConditionTrue, "LagBelowThreshold",
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionTrue, "LagBelowThreshold",
 			"replication lag is below spec.follow.maxCatchupLag")
 	} else {
-		r.setCondition(m, v1alpha1.ConditionCaughtUp, metav1.ConditionFalse, "Lagging",
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionFalse, "Lagging",
 			"replication lag is above spec.follow.maxCatchupLag or unknown")
 	}
 
 	switch {
 	case sentinel.EndposSet(st.Endpos):
 		// Cutover already triggered; the worker drains and exits 0.
-		m.Status.Phase = v1alpha1.PhaseCuttingOver
+		m.Status.Phase = v1beta1.PhaseCuttingOver
 	case cutoverWanted(m, caughtUp):
 		lsn, err := r.Sentinel.SetEndposCurrent(ctx, m.Namespace, jobName)
 		if err != nil {
@@ -141,12 +141,12 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 				"setting endpos failed, retrying: %s", err.Error())
 			return
 		}
-		m.Status.Phase = v1alpha1.PhaseCuttingOver
+		m.Status.Phase = v1beta1.PhaseCuttingOver
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CutoverStarted", "Cutover",
 			"stream frozen at endpos %s, draining", lsn)
 	case caughtUp:
 		// Manual mode, waiting for approval.
-		m.Status.Phase = v1alpha1.PhaseCutoverPending
+		m.Status.Phase = v1beta1.PhaseCutoverPending
 	}
 }
 
@@ -158,16 +158,16 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1a
 // gates CutoverCompleted and the cleanup. On refuted drain the Migration
 // fails loudly with the slot intact, so the data stays recoverable (at the
 // documented cost of WAL retention on the source).
-func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha1.Migration) (ctrl.Result, error) {
-	r.setCondition(m, v1alpha1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
-	m.Status.Phase = v1alpha1.PhaseCuttingOver
+func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
+	m.Status.Phase = v1beta1.PhaseCuttingOver
 
 	verified, failedVerify, err := r.ensureVerify(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if failedVerify {
-		r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
+		r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
 			"the worker exited before applying all changes up to endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
 		r.fail(m, "DrainIncomplete", "Verify",
 			"cutover drain verification refuted completeness; do not switch applications to the target")
@@ -180,7 +180,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
 	}
 
-	r.setCondition(m, v1alpha1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",
+	r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",
 		"target origin progress reached endpos; changes applied, sequences synced")
 
 	done, err := r.ensureCleanup(ctx, m)
@@ -214,8 +214,8 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 
 	now := metav1.Now()
 	m.Status.CompletedAt = &now
-	m.Status.Phase = v1alpha1.PhaseCompleted
-	r.setCondition(m, v1alpha1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "live migration finished")
+	m.Status.Phase = v1beta1.PhaseCompleted
+	r.setCondition(m, v1beta1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "live migration finished")
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Completed", "Complete", "live migration finished")
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
@@ -224,7 +224,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1alpha
 // once replication state is dropped, or when cleanup exhausted its retries
 // (then with a loud warning: the slot may leak on the source, and that needs
 // an operator's attention, not an endlessly blocked Migration).
-func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Migration) (bool, error) {
+func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migration) (bool, error) {
 	job, created, err := r.ensureJob(ctx, m, cleanupJobName(m), func() (*batchv1.Job, error) {
 		return buildCleanupJob(m, r.RunnerImage)
 	})
@@ -254,7 +254,7 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1alpha1.Mig
 // means the check is still running. The failure message carries the pod's own
 // check output (one line per failed prerequisite, with the exact GRANT or
 // setting to fix it) so nobody has to chase pod logs of a finished Job.
-func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1alpha1.Migration) (bool, string, error) {
+func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Migration) (bool, string, error) {
 	job, created, err := r.ensureJob(ctx, m, preflightJobName(m), func() (*batchv1.Job, error) {
 		return buildPreflightJob(m, r.RunnerImage)
 	})
@@ -286,7 +286,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1alpha1.M
 
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
-func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1alpha1.Migration) (bool, bool, error) {
+func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
 	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
 		return buildVerifyJob(m, r.RunnerImage)
 	})
@@ -303,7 +303,7 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1alpha1.Migr
 // reconcileDeletion routes deletion through cleanup for live migrations. The
 // finalizer keeps the CR (and thus the owned PVC with the catalogs) alive
 // until the slot is dropped; then garbage collection takes everything.
-func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1alpha1.Migration) (ctrl.Result, error) {
+func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1beta1.Migration) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(m, finalizerName) {
 		metrics.Forget(m.Namespace, m.Name)
 		return ctrl.Result{}, nil

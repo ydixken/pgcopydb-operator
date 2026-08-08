@@ -27,7 +27,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
@@ -43,7 +43,7 @@ func NewFromExec(e *podexec.Exec) *Poller { return &Poller{exec: e} }
 // CloneProgress returns the current copy progress of the Job's running pod,
 // or (nil, nil) when no pod is ready to answer: a missing sample is not an
 // error, the previous status value simply stands.
-func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (*v1alpha1.CloneProgress, error) {
+func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error) {
 	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil {
 		return nil, err
@@ -78,12 +78,12 @@ type counts struct {
 }
 
 // ParseListProgress converts pgcopydb JSON output into status progress.
-func ParseListProgress(raw []byte) (*v1alpha1.CloneProgress, error) {
+func ParseListProgress(raw []byte) (*v1beta1.CloneProgress, error) {
 	var lp listProgress
 	if err := json.Unmarshal(raw, &lp); err != nil {
 		return nil, fmt.Errorf("parse list progress output: %w", err)
 	}
-	p := &v1alpha1.CloneProgress{
+	p := &v1beta1.CloneProgress{
 		TablesTotal:  lp.Tables.Total,
 		TablesDone:   lp.Tables.Done,
 		IndexesTotal: lp.Indexes.Total,

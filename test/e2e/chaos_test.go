@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // Chaos scenarios: pod kills, disk pressure, and concurrency against the
@@ -43,14 +43,14 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			waitClusterReady(sourceCluster)
 		})
 
-		create(newMigration(name, nsE2E, v1alpha1.CloneOptions{DropIfExists: true}))
+		create(newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true}))
 
 		By("waiting for attempt 1 to be mid-copy")
 		Eventually(func(g Gomega) {
-			m := &v1alpha1.Migration{}
+			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			g.Expect(m.Status.Attempts).To(Equal(int32(1)))
-			g.Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+			g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 			// Table presence on the target means the pre-data restore is done
 			// and the data copy is running or imminent: mid-clone, not
 			// pre-clone. At tiny E2E_SCALE values the copy window shrinks and
@@ -76,7 +76,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		const name = "e2e-chaos-diskfull"
 		DeferCleanup(func() { deleteMigration(name) })
 
-		m := newMigration(name, nsE2E, v1alpha1.CloneOptions{DropIfExists: true})
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true})
 		m.Spec.WorkVolume.Size = resource.MustParse("200Mi")
 		// ENOSPC is deterministic on a full volume; a bigger budget would just
 		// fail the same way more times.
@@ -115,14 +115,14 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		grantTargetFollowPrivileges(dbB)
 
 		By("starting both follow migrations")
-		create(newFollowMigration(nameA, v1alpha1.CutoverManual))
-		mb := newFollowMigration(nameB, v1alpha1.CutoverManual)
+		create(newFollowMigration(nameA, v1beta1.CutoverManual))
+		mb := newFollowMigration(nameB, v1beta1.CutoverManual)
 		mb.Spec.Target.Database = dbB
 		create(mb)
 
 		By("waiting for both to stream")
-		ma := waitPhase(nameA, nsE2E, followTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
-		mbl := waitPhase(nameB, nsE2E, followTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		ma := waitPhase(nameA, nsE2E, followTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+		mbl := waitPhase(nameB, nsE2E, followTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("checking the source carries two distinct pgcopydb slots")
 		Expect(psql(srcPod, "SELECT count(DISTINCT slot_name) FROM pg_replication_slots"+
@@ -134,15 +134,15 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			"both migrations report the same slot")
 
 		By("approving both cutovers")
-		waitPhase(nameA, nsE2E, followTimeout, v1alpha1.PhaseCutoverPending)
+		waitPhase(nameA, nsE2E, followTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(nameA)
-		waitPhase(nameB, nsE2E, followTimeout, v1alpha1.PhaseCutoverPending)
+		waitPhase(nameB, nsE2E, followTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(nameB)
 
 		By("waiting for both to complete independently")
 		for _, name := range []string{nameA, nameB} {
-			m := waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
-			expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+			m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+			expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 			expectCleanupSucceeded(name)
 		}
 
@@ -173,8 +173,8 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 				"replication origin left on the target after cleanup")
 		})
 
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		create(newFollowMigration(name, v1beta1.CutoverManual))
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("approving the cutover and writing a backlog until endpos is set")
 		approveCutover(name)
@@ -183,15 +183,15 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		// it sets in the same status write that records the endpos.
 		batch := 0
 		Eventually(func(g Gomega) {
-			m := &v1alpha1.Migration{}
+			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-			if m.Status.Phase != v1alpha1.PhaseCuttingOver {
+			if m.Status.Phase != v1beta1.PhaseCuttingOver {
 				batch++
 				psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
 					" SELECT (g %% %d) + 1, (g %% 90)::numeric / 3, 'live-drain-%d-' || g"+
 					" FROM generate_series(1, 2000) g", scaled(50000), batch))
 			}
-			g.Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCuttingOver))
+			g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		}, migrationTimeout, time.Second).Should(Succeed())
 
 		By("killing the runner pod inside the drain window")
@@ -200,15 +200,15 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		By("waiting for a terminal phase and asserting the invariant")
 		m := waitTerminal(name, followTimeout)
 		switch m.Status.Phase {
-		case v1alpha1.PhaseCompleted:
-			expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		case v1beta1.PhaseCompleted:
+			expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 			Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")).
 				To(Equal(psql(srcPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")),
 					"INVARIANT VIOLATED: Completed with rows missing on the target")
 			Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
 			Expect(sourceSlotCount()).To(Equal("0"))
-		case v1alpha1.PhaseFailed:
-			c := apimeta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		case v1beta1.PhaseFailed:
+			c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 			Expect(c).NotTo(BeNil())
 			Expect(c.Reason).To(Equal("DrainIncomplete"),
 				"INVARIANT VIOLATED: failed outside the drain-verify gate: %s: %s", c.Reason, c.Message)
@@ -229,8 +229,8 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 				"replication origin left on the target after cleanup")
 		})
 
-		create(newFollowMigration(name, v1alpha1.CutoverManual))
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending)
+		create(newFollowMigration(name, v1beta1.CutoverManual))
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("writing live rows and killing the target primary mid-apply")
 		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
@@ -240,19 +240,19 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 
 		By("waiting for the stream to recover on a later attempt")
 		Eventually(func(g Gomega) {
-			m := &v1alpha1.Migration{}
+			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			g.Expect(m.Status.Attempts).To(BeNumerically(">=", 2),
 				"the worker survived a dead target without a new attempt")
-			g.Expect([]v1alpha1.MigrationPhase{v1alpha1.PhaseStreaming, v1alpha1.PhaseCutoverPending}).
+			g.Expect([]v1beta1.MigrationPhase{v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending}).
 				To(ContainElement(m.Status.Phase), "phase %q after the target kill", m.Status.Phase)
 		}, migrationTimeout, 2*time.Second).Should(Succeed())
 
 		By("approving the cutover and waiting for completion")
-		waitPhase(name, nsE2E, migrationTimeout, v1alpha1.PhaseCutoverPending)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(name)
-		m := waitPhase(name, nsE2E, followTimeout, v1alpha1.PhaseCompleted)
-		expectConditionTrue(m, v1alpha1.ConditionCutoverComplete)
+		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
 
 		By("checking origin dedup: every live row arrived exactly once")
@@ -267,12 +267,12 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 // waitTerminal waits until the Migration in nsE2E reaches Completed or Failed
 // and returns it; the caller owns the verdict on which of the two (or both,
 // for the drain-kill invariant) is acceptable.
-func waitTerminal(name string, timeout time.Duration) *v1alpha1.Migration {
+func waitTerminal(name string, timeout time.Duration) *v1beta1.Migration {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-		g.Expect([]v1alpha1.MigrationPhase{v1alpha1.PhaseCompleted, v1alpha1.PhaseFailed}).
+		g.Expect([]v1beta1.MigrationPhase{v1beta1.PhaseCompleted, v1beta1.PhaseFailed}).
 			To(ContainElement(m.Status.Phase),
 				"migration %s at phase %q, attempts %d", name, m.Status.Phase, m.Status.Attempts)
 	}, timeout, 2*time.Second).Should(Succeed())

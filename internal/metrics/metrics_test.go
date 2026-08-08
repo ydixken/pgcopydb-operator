@@ -27,11 +27,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
-func newMigration(namespace, name string) *v1alpha1.Migration {
-	return &v1alpha1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+func newMigration(namespace, name string) *v1beta1.Migration {
+	return &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
 }
 
 func TestRecordPhase(t *testing.T) {
@@ -44,7 +44,7 @@ func TestRecordPhase(t *testing.T) {
 		t.Fatalf("phase series with empty phase = %d, want 0", got)
 	}
 
-	m.Status.Phase = v1alpha1.PhaseCloning
+	m.Status.Phase = v1beta1.PhaseCloning
 	Record(m)
 	if got := testutil.CollectAndCount(phase); got != 1 {
 		t.Fatalf("phase series = %d, want 1", got)
@@ -56,7 +56,7 @@ func TestRecordPhase(t *testing.T) {
 	// Flipping the phase must replace the old series, not add a second one.
 	// The count check proves the Cloning series is gone; do not probe it with
 	// WithLabelValues, that would resurrect it.
-	m.Status.Phase = v1alpha1.PhaseStreaming
+	m.Status.Phase = v1beta1.PhaseStreaming
 	Record(m)
 	if got := testutil.CollectAndCount(phase); got != 1 {
 		t.Fatalf("phase series after flip = %d, want 1", got)
@@ -71,7 +71,7 @@ func TestRecordGauges(t *testing.T) {
 	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
 
 	m.Status.Attempts = 3
-	m.Status.Progress = &v1alpha1.CloneProgress{
+	m.Status.Progress = &v1beta1.CloneProgress{
 		TablesTotal:  10,
 		TablesDone:   4,
 		IndexesTotal: 6,
@@ -107,7 +107,7 @@ func TestRecordReplicationLag(t *testing.T) {
 	}
 
 	// Block present but lag unknown: still no series, a zero would lie.
-	m.Status.Replication = &v1alpha1.ReplicationStatus{}
+	m.Status.Replication = &v1beta1.ReplicationStatus{}
 	Record(m)
 	if got := testutil.CollectAndCount(replicationLagBytes); got != 0 {
 		t.Fatalf("lag series without lagBytes = %d, want 0", got)
@@ -128,11 +128,11 @@ func TestForget(t *testing.T) {
 	gone := newMigration("ns1", "gone")
 	stays := newMigration("ns2", "stays")
 	lag := int64(1)
-	for _, m := range []*v1alpha1.Migration{gone, stays} {
-		m.Status.Phase = v1alpha1.PhaseStreaming
+	for _, m := range []*v1beta1.Migration{gone, stays} {
+		m.Status.Phase = v1beta1.PhaseStreaming
 		m.Status.Attempts = 1
-		m.Status.Progress = &v1alpha1.CloneProgress{TablesTotal: 1, TablesDone: 1, IndexesTotal: 1, IndexesDone: 1}
-		m.Status.Replication = &v1alpha1.ReplicationStatus{LagBytes: &lag}
+		m.Status.Progress = &v1beta1.CloneProgress{TablesTotal: 1, TablesDone: 1, IndexesTotal: 1, IndexesDone: 1}
+		m.Status.Replication = &v1beta1.ReplicationStatus{LagBytes: &lag}
 		Record(m)
 	}
 	t.Cleanup(func() { Forget(stays.Namespace, stays.Name) })

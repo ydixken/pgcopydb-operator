@@ -21,7 +21,7 @@ annotations:
   artifacthub.io/operator: "true"
   artifacthub.io/crds: |
     - kind: Migration
-      version: v1alpha1
+      version: v1beta1
       name: migrations.pgcopydb-operator.io
       displayName: Migration
       description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."

@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 const testRunnerImage = "ghcr.io/example/runner:test"
@@ -63,13 +63,13 @@ func newReconciler() *MigrationReconciler {
 // reconcileAndGet runs one reconcile pass with r and returns the fresh
 // Migration. The one reconcile-and-observe helper for every suite; tests that
 // need a sentinel or log reader wire it into r first.
-func reconcileAndGet(ctx context.Context, r *MigrationReconciler, name string) *v1alpha1.Migration {
+func reconcileAndGet(ctx context.Context, r *MigrationReconciler, name string) *v1beta1.Migration {
 	GinkgoHelper()
 	_, err := r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
 	})
 	Expect(err).NotTo(HaveOccurred())
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
 	return m
 }
@@ -88,18 +88,18 @@ func drainEvents(rec *events.FakeRecorder) []string {
 	}
 }
 
-func validMigration(name string) *v1alpha1.Migration {
-	return &v1alpha1.Migration{
+func validMigration(name string) *v1beta1.Migration {
+	return &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
-		Spec: v1alpha1.MigrationSpec{
-			Source: v1alpha1.PostgresConnection{
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{
 				Host: "source.example.com", Database: testDB, Username: "migrator",
 				PasswordSecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "src-credentials"},
 					Key:                  testPasswordKey,
 				},
 			},
-			Target: v1alpha1.PostgresConnection{
+			Target: v1beta1.PostgresConnection{
 				Host: "target.example.com", Database: testDB, Username: testDB,
 			},
 		},
@@ -109,8 +109,8 @@ func validMigration(name string) *v1alpha1.Migration {
 var _ = Describe("Migration Controller", func() {
 	ctx := context.Background()
 
-	getMigration := func(name string) *v1alpha1.Migration {
-		m := &v1alpha1.Migration{}
+	getMigration := func(name string) *v1beta1.Migration {
+		m := &v1beta1.Migration{}
 		ExpectWithOffset(1, k8sClient.Get(ctx,
 			types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
 		return m
@@ -147,12 +147,12 @@ var _ = Describe("Migration Controller", func() {
 		Expect(*job.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(65532)))
 
 		m := getMigration(name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-1"))
 		Expect(m.Status.StartedAt).NotTo(BeNil())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionValidated)).To(BeTrue())
-		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1alpha1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated)).To(BeTrue())
+		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 	})
 
 	It("completes when the worker Job succeeds", func() {
@@ -163,10 +163,10 @@ var _ = Describe("Migration Controller", func() {
 		finishJob(ctx, name+"-run-1", true)
 
 		m := reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 		Expect(m.Status.CompletedAt).NotTo(BeNil())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCloneCompleted)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 
 		// Terminal state is absorbing: another pass changes nothing.
 		m = reconcileAndGet(ctx, newReconciler(), name)
@@ -193,8 +193,8 @@ var _ = Describe("Migration Controller", func() {
 
 		finishJob(ctx, name+"-run-2", false)
 		final := reconcileAndGet(ctx, newReconciler(), name)
-		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
-		Expect(meta.IsStatusConditionTrue(final.Status.Conditions, v1alpha1.ConditionFailed)).To(BeTrue())
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		Expect(meta.IsStatusConditionTrue(final.Status.Conditions, v1beta1.ConditionFailed)).To(BeTrue())
 	})
 
 	It("fails without a fresh attempt when the final attempt's Job vanishes", func() {
@@ -215,8 +215,8 @@ var _ = Describe("Migration Controller", func() {
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-2"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
-		failed := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
 		Expect(failed.Message).To(ContainSubstring("retry budget exhausted after 2 attempts"))
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
@@ -247,8 +247,8 @@ var _ = Describe("Migration Controller", func() {
 		finishJob(ctx, name+"-run-2", false)
 		// Budget spent: the Failed condition carries the log detail.
 		final := reconcileAndGet(ctx, r, name)
-		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
-		failed := meta.FindStatusCondition(final.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
 		Expect(failed.Message).To(ContainSubstring(lastError))
 	})
@@ -269,8 +269,8 @@ var _ = Describe("Migration Controller", func() {
 		finishJob(ctx, name+"-run-2", false)
 		// Budget spent.
 		final := reconcileAndGet(ctx, r, name)
-		Expect(final.Status.Phase).To(Equal(v1alpha1.PhaseFailed))
-		failed := meta.FindStatusCondition(final.Status.Conditions, v1alpha1.ConditionFailed)
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
 		Expect(failed.Message).NotTo(ContainSubstring("last error"))
 	})
@@ -279,7 +279,7 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-filters"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
-		m.Spec.Clone.Filters = &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}}
+		m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeSchemas: []string{"audit"}}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		reconcileAndGet(ctx, newReconciler(), name)
 
@@ -302,7 +302,7 @@ var _ = Describe("Migration Controller", func() {
 		m.Spec.Suspend = true
 		Expect(k8sClient.Update(ctx, m)).To(Succeed())
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseSuspended))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseSuspended))
 		Expect(m.Status.JobName).To(BeEmpty())
 		// Foreground deletion in envtest leaves the object with a deletion
 		// timestamp (no GC runs); that is the observable "being deleted".
@@ -317,7 +317,7 @@ var _ = Describe("Migration Controller", func() {
 		m.Spec.Suspend = false
 		Expect(k8sClient.Update(ctx, m)).To(Succeed())
 		m = reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		args := strings.Join(fetchJob(ctx, fmt.Sprintf("%s-run-2", name)).Spec.Template.Spec.Containers[0].Args, " ")
 		Expect(args).To(ContainSubstring("--resume"))
@@ -354,8 +354,8 @@ var _ = Describe("Migration Controller", func() {
 		m := reconcileAndGet(ctx, newReconciler(), name)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-1"))
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionValidated)).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated)).To(BeTrue())
 		Expect(fetchJob(ctx, name+"-run-1")).NotTo(BeNil())
 	})
 })

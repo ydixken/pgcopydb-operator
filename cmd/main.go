@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	pgcopydboperatoriov1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	pgcopydboperatoriov1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
@@ -53,7 +54,10 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	// Both API versions stay served; v1beta1 is the storage version and the
+	// one the controller watches, v1alpha1 remains readable for old clients.
 	utilruntime.Must(pgcopydboperatoriov1alpha1.AddToScheme(scheme))
+	utilruntime.Must(pgcopydboperatoriov1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

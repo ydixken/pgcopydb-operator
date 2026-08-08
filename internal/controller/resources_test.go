@@ -27,7 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
@@ -36,17 +36,17 @@ const pgoutputPlugin = "pgoutput"
 
 // passwordMigration is the canned inline-credentials spec the builder tests
 // share; callers mutate follow/cutover as needed.
-func passwordMigration() *v1alpha1.Migration {
-	return &v1alpha1.Migration{
+func passwordMigration() *v1beta1.Migration {
+	return &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-		Spec: v1alpha1.MigrationSpec{
-			Source: v1alpha1.PostgresConnection{
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{
 				Host: "s", Database: "d", Username: "u",
 				PasswordSecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: testPasswordKey,
 				},
 			},
-			Target: v1alpha1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
+			Target: v1beta1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
 		},
 	}
 }
@@ -65,15 +65,15 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 	}
 
 	// uriSecretRef carries credentials in the DSN itself: no passfile, no env.
-	uriOnly := &v1alpha1.Migration{
+	uriOnly := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: "m2", Namespace: "ns"},
-		Spec: v1alpha1.MigrationSpec{
-			Source: v1alpha1.PostgresConnection{
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{
 				URISecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "dsn"}, Key: "uri",
 				},
 			},
-			Target: v1alpha1.PostgresConnection{
+			Target: v1beta1.PostgresConnection{
 				URISecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "dsn2"}, Key: "uri",
 				},
@@ -94,22 +94,22 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 // failed auth and falsely refuted every drain), and the predicate must
 // tolerate the origin trailing endpos by non-data WAL records.
 func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
-	m := &v1alpha1.Migration{
+	m := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-		Spec: v1alpha1.MigrationSpec{
-			Source: v1alpha1.PostgresConnection{
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{
 				Host: "s", Database: "d", Username: "u",
 				PasswordSecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "sec"}, Key: testPasswordKey,
 				},
 			},
-			Target: v1alpha1.PostgresConnection{
+			Target: v1beta1.PostgresConnection{
 				Host: "t", Database: "d", Username: "u",
 				PasswordSecretRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "sec2"}, Key: testPasswordKey,
 				},
 			},
-			Follow: &v1alpha1.FollowOptions{Enabled: true},
+			Follow: &v1beta1.FollowOptions{Enabled: true},
 		},
 	}
 	job, err := buildVerifyJob(m, "img")
@@ -148,16 +148,16 @@ func envValue(env []corev1.EnvVar, name string) string {
 // retry attempt of a follow migration with an auto-managed publication drops
 // the leftover, and only ever pgcopydb's own (slot-named) publication.
 func TestPublicationDropGuard(t *testing.T) {
-	follow := func(pub, slot string) *v1alpha1.Migration {
+	follow := func(pub, slot string) *v1beta1.Migration {
 		m := passwordMigration()
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Publication: pub, SlotName: slot}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: pub, SlotName: slot}
 		return m
 	}
 	generated := pgcopydb.SlotName("ns", "m")
 
 	cases := []struct {
 		name    string
-		m       *v1alpha1.Migration
+		m       *v1beta1.Migration
 		attempt int32
 		want    string // "" = no guard
 	}{
@@ -246,7 +246,7 @@ func TestBuildPreflightJob(t *testing.T) {
 // var so table names never meet shell quoting.
 func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
 	m := passwordMigration()
-	m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	job, err := buildPreflightJob(m, "img")
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
 		t.Fatalf("allowlist env must be absent without spec entries, got %q", got)
 	}
 
-	m.Spec.Follow.Plugin = v1alpha1.PluginWal2json
+	m.Spec.Follow.Plugin = v1beta1.PluginWal2json
 	m.Spec.Follow.AllowMissingReplicaIdentity = []string{"public.audit_log", "stats.rollup"}
 	job, err = buildPreflightJob(m, "img")
 	if err != nil {
@@ -302,7 +302,7 @@ esac
 	run := func(t *testing.T, plugin, offenders string, allow []string) (string, int) {
 		t.Helper()
 		m := passwordMigration()
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: plugin, AllowMissingReplicaIdentity: allow}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: plugin, AllowMissingReplicaIdentity: allow}
 		job, err := buildPreflightJob(m, "img")
 		if err != nil {
 			t.Fatal(err)
