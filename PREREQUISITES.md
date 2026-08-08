@@ -48,7 +48,7 @@ Superuser is required only for:
 
 ## Live migration (`spec.follow.enabled: true`)
 
-The operator preflights the instance and role requirements of this section before the first attempt: a `<name>-preflight` Job checks `wal_level`, free-slot headroom, the source role's REPLICATION attribute, EXECUTE on the origin functions, and the `session_replication_role` SET privilege. A failed check fails the Migration with the exact missing GRANT or setting in the `Validated` condition message, before any data moves. The schema and workload contract below (replica identity, no DDL) is NOT yet preflighted; checking it stays your job.
+The operator preflights the requirements of this section before the first attempt: a `<name>-preflight` Job checks `wal_level`, free-slot headroom, the source role's REPLICATION attribute, EXECUTE on the origin functions, the `session_replication_role` SET privilege, and audits every user table for a usable replica identity. A failed check fails the Migration with the exact missing GRANT, setting, or table list in the `Validated` condition message, before any data moves. The rest of the workload contract (no DDL, large objects, wal2json presence) is not preflighted; checking it stays your job.
 
 Source instance:
 
@@ -61,7 +61,7 @@ Source role:
 
 - MUST have the `REPLICATION` attribute (or be superuser): `ALTER ROLE app REPLICATION`. Without it, slot creation fails with "permission denied to start WAL sender".
 - Publication: pgcopydb auto-creates a publication for the migrated tables (named after the slot) and drops it during cleanup. The role MUST have CREATE on the source database and own every published table. Alternatively, pre-create a publication (superuser is needed for `FOR ALL TABLES`) and point `spec.follow.publication` at it; pgcopydb then leaves it alone. On a retry after a crashed attempt, the operator drops a leftover auto-managed publication before resuming (pgcopydb would otherwise fail on its own leftover); a publication named in `spec.follow.publication` is never touched.
-- Plugin: `pgoutput` (default) and `test_decoding` ship with PostgreSQL; `wal2json` MUST be installed on the source before selecting it.
+- Plugin: `pgoutput` (default) and `test_decoding` ship with PostgreSQL; `wal2json` MUST be installed on the source before selecting it. The preflight cannot verify that: a logical decoding plugin is a bare shared library with no catalog entry to query, and the only positive probe (creating a slot with it) is too invasive for a check. A missing plugin fails the first attempt at slot creation with `could not access file "wal2json"`.
 
 Target role:
 
@@ -86,7 +86,7 @@ END $$;
 
 Schema and workload contract:
 
-- Every table that receives UPDATE or DELETE during the migration window MUST have a primary key or a replica identity (`REPLICA IDENTITY USING INDEX ...` or `REPLICA IDENTITY FULL`). With `pgoutput`, DML on a published table without one fails on the source at write time, breaking the application, not just the migration.
+- Every table that receives UPDATE or DELETE during the migration window MUST have a primary key or a replica identity (`REPLICA IDENTITY USING INDEX ...` or `REPLICA IDENTITY FULL`). With `pgoutput`, DML on a published table without one fails on the source at write time, breaking the application, not just the migration. The preflight audits all user tables for this and fails on offenders; it deliberately ignores `clone.filters`, since a filtered table can still take writes. Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
 - Large-object changes during the window are not replicated (base copy only). Sequences need no handling: pgcopydb re-syncs them automatically after cutover.
 

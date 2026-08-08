@@ -255,6 +255,20 @@ type FollowOptions struct {
 	// +optional
 	ReplayNoOpUpdates bool `json:"replayNoOpUpdates,omitempty"`
 
+	// allowMissingReplicaIdentity acknowledges tables that the preflight
+	// replica-identity audit would otherwise fail on. Entries are
+	// schema-qualified table names exactly as the preflight prints them
+	// (schema.table, unquoted); the single entry "*" acknowledges every
+	// offender. Acknowledged tables are reported as a warning instead of
+	// failing the Migration. The risk stays: UPDATE or DELETE on such a
+	// table during the migration window fails on the source at write time,
+	// so acknowledge only tables that are read-only or insert-only while
+	// the migration runs. Immutable with the rest of follow.
+	// +kubebuilder:validation:XValidation:rule="self.all(x, x != '')",message="entries must be non-empty table names (or \"*\")"
+	// +listType=set
+	// +optional
+	AllowMissingReplicaIdentity []string `json:"allowMissingReplicaIdentity,omitempty"`
+
 	// maxCatchupLag is the replication lag under which the migration counts
 	// as caught up (the CaughtUp condition and Automatic cutover trigger).
 	// +kubebuilder:default="16Mi"

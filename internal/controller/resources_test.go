@@ -17,6 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,6 +30,9 @@ import (
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
+
+// pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
+const pgoutputPlugin = "pgoutput"
 
 // passwordMigration is the canned inline-credentials spec the builder tests
 // share; callers mutate follow/cutover as needed.
@@ -221,11 +228,149 @@ func TestBuildPreflightJob(t *testing.T) {
 		"GRANT EXECUTE ON FUNCTION",
 		"set session_replication_role = 'replica'",
 		"GRANT SET ON PARAMETER session_replication_role",
+		"relreplident",
+		"REPLICA IDENTITY USING INDEX",
+		"REPLICA IDENTITY FULL",
+		"allowMissingReplicaIdentity",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("preflight script missing %q:\n%s", want, script)
 		}
 	}
+}
+
+// TestBuildPreflightJob_PluginAndAllowlist pins the wiring of the two
+// preflight extensions: the wal2json note appears only when that plugin is
+// selected (pgoutput and test_decoding ship with PostgreSQL, nothing to
+// note), and the replica-identity allowlist travels as a newline-joined env
+// var so table names never meet shell quoting.
+func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	job, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if strings.Contains(c.Args[1], "wal2json") {
+		t.Fatalf("pgoutput preflight must not carry the wal2json note:\n%s", c.Args[1])
+	}
+	if got := envValue(c.Env, "PREFLIGHT_ALLOW_MISSING_RI"); got != "" {
+		t.Fatalf("allowlist env must be absent without spec entries, got %q", got)
+	}
+
+	m.Spec.Follow.Plugin = "wal2json"
+	m.Spec.Follow.AllowMissingReplicaIdentity = []string{"public.audit_log", "stats.rollup"}
+	job, err = buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c = job.Spec.Template.Spec.Containers[0]
+	if !strings.Contains(c.Args[1], `could not access file \"wal2json\"`) {
+		t.Fatalf("wal2json preflight lost its note:\n%s", c.Args[1])
+	}
+	if got := envValue(c.Env, "PREFLIGHT_ALLOW_MISSING_RI"); got != "public.audit_log\nstats.rollup" {
+		t.Fatalf("allowlist env = %q", got)
+	}
+}
+
+// TestPreflightScript_ReplicaIdentityAudit executes the generated preflight
+// script under /bin/sh with a stub psql, proving the audit verdict logic end
+// to end: an offender fails the check, an allowlisted offender downgrades to
+// a warning, and "*" acknowledges every offender. The stub answers each
+// probe by matching the query text and serves the offender list from
+// $PSQL_RI.
+func TestPreflightScript_ReplicaIdentityAudit(t *testing.T) {
+	dir := t.TempDir()
+	stub := `#!/bin/sh
+q="$6"
+case "$q" in
+  *relreplident*) printf '%s' "${PSQL_RI:-}" ;;
+  *max_replication_slots*) echo 5 ;;
+  *rolreplication*) echo 1 ;;
+  *string_agg*) echo "" ;;
+  *session_replication_role*) exit 0 ;;
+  *wal_level*) echo logical ;;
+  *current_user*) echo u ;;
+  *) echo 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(t *testing.T, plugin, offenders string, allow []string) (string, int) {
+		t.Helper()
+		m := passwordMigration()
+		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: plugin, AllowMissingReplicaIdentity: allow}
+		job, err := buildPreflightJob(m, "img")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		cmd := exec.Command(shellPath, "-c", c.Args[1])
+		cmd.Env = append(os.Environ(),
+			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PGCOPYDB_SOURCE_PGURI=src",
+			"PGCOPYDB_TARGET_PGURI=tgt",
+			"PSQL_RI="+offenders,
+			"PREFLIGHT_ALLOW_MISSING_RI="+envValue(c.Env, "PREFLIGHT_ALLOW_MISSING_RI"),
+		)
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			return string(out), 0
+		case errors.As(err, &exitErr):
+			return string(out), exitErr.ExitCode()
+		default:
+			t.Fatalf("running preflight script: %v\n%s", err, out)
+			return "", 0
+		}
+	}
+
+	t.Run("no offenders passes", func(t *testing.T) {
+		out, code := run(t, pgoutputPlugin, "", nil)
+		if code != 0 || !strings.Contains(out, "all follow-mode checks passed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("wal2json prints its note and still passes", func(t *testing.T) {
+		out, code := run(t, "wal2json", "", nil)
+		if code != 0 ||
+			!strings.Contains(out, `slot creation with: could not access file "wal2json"`) ||
+			!strings.Contains(out, "all follow-mode checks passed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("offender fails, allowlisted sibling warns", func(t *testing.T) {
+		out, code := run(t, pgoutputPlugin, "public.a\npublic.b", []string{"public.b"})
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "preflight: table public.a has no replica identity usable for UPDATE/DELETE") ||
+			!strings.Contains(out, "REPLICA IDENTITY USING INDEX") ||
+			!strings.Contains(out, "REPLICA IDENTITY FULL") {
+			t.Fatalf("missing offender line with both fixes:\n%s", out)
+		}
+		if !strings.Contains(out, "preflight: warning: acknowledged table public.b") {
+			t.Fatalf("missing warning for the allowlisted table:\n%s", out)
+		}
+	})
+	t.Run("fully allowlisted offender only warns", func(t *testing.T) {
+		out, code := run(t, pgoutputPlugin, "public.a", []string{"public.a"})
+		if code != 0 || !strings.Contains(out, "preflight: warning: acknowledged table public.a") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("star acknowledges all offenders", func(t *testing.T) {
+		out, code := run(t, pgoutputPlugin, "public.a\npublic.b", []string{"*"})
+		if code != 0 ||
+			!strings.Contains(out, "preflight: warning: acknowledged table public.a") ||
+			!strings.Contains(out, "preflight: warning: acknowledged table public.b") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
 }
 
 // TestBuildVerifyJob_KeepsPassfilePrelude is the regression test for the
