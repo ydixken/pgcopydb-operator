@@ -45,6 +45,7 @@ func TestCloneArgs_Full(t *testing.T) {
 			LargeObjectsJobs:      3,
 			SplitTablesLargerThan: &split,
 			SplitMaxParts:         5,
+			EstimateTableSizes:    true,
 			DropIfExists:          true,
 			Roles:                 true,
 			NoRolePasswords:       true,
@@ -55,19 +56,20 @@ func TestCloneArgs_Full(t *testing.T) {
 			UseCopyBinary:         true,
 			FailFast:              true,
 			Skip: []v1alpha1.SkipOption{
-				"vacuum", "largeObjects", "analyze",
+				"vacuum", "largeObjects", "analyze", "extensionComments",
 			},
 			Filters: &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}},
 		},
 	}
 	got := CloneArgs(spec, false, true, true)
-	// Skips are sorted: analyze, largeObjects, vacuum.
+	// Skips are sorted: analyze, extensionComments, largeObjects, vacuum.
 	want := "clone --dir /work/pgcopydb" +
 		" --table-jobs 8 --index-jobs 4 --restore-jobs 2 --large-objects-jobs 3" +
 		" --split-tables-larger-than 1073741824 --split-max-parts 5" +
+		" --estimate-table-sizes" +
 		" --drop-if-exists --roles --no-role-passwords --no-owner --no-acl" +
 		" --no-comments --no-tablespaces --use-copy-binary --fail-fast" +
-		" --skip-analyze --skip-large-objects --skip-vacuum" +
+		" --skip-analyze --skip-ext-comments --skip-large-objects --skip-vacuum" +
 		" --filters /etc/pgcopydb/conf/filters.ini --resume --not-consistent"
 	assertArgs(t, got, want)
 }

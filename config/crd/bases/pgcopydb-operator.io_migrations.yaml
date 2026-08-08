@@ -69,6 +69,14 @@ spec:
                     description: dropIfExists issues pg_restore --clean --if-exists
                       on the target.
                     type: boolean
+                  estimateTableSizes:
+                    description: |-
+                      estimateTableSizes bases split decisions on pg_class page-count
+                      estimates instead of exact size queries (--estimate-table-sizes). To
+                      refresh those estimates pgcopydb first runs vacuumdb --analyze-only
+                      (with tableJobs workers) on the SOURCE; add "analyze" to skip to leave
+                      the source untouched and trust its existing statistics.
+                    type: boolean
                   failFast:
                     description: failFast stops the whole run on the first failed
                       child (--fail-fast).
@@ -164,10 +172,13 @@ spec:
                     items:
                       description: |-
                         SkipOption names a section of the base copy to skip. Maps to pgcopydb
-                        --skip-* flags; CDC (follow) is unaffected by these.
+                        --skip-* flags; CDC (follow) is unaffected by these. extensionComments
+                        (--skip-ext-comments) is already implied by extensions; list it alone to
+                        install extensions but drop their COMMENT statements.
                       enum:
                       - largeObjects
                       - extensions
+                      - extensionComments
                       - collations
                       - vacuum
                       - analyze
@@ -282,10 +293,22 @@ spec:
                     maxLength: 63
                     pattern: ^[a-z0-9_]+$
                     type: string
+                  wal2jsonNumericAsString:
+                    description: |-
+                      wal2jsonNumericAsString makes wal2json emit numeric values as JSON
+                      strings (--wal2json-numeric-as-string), preserving precision a JSON
+                      number would lose. Only meaningful with plugin wal2json; admission
+                      rejects it under any other plugin.
+                    type: boolean
                 type: object
                 x-kubernetes-validations:
                 - message: follow is immutable
                   rule: self == oldSelf
+                - message: 'wal2jsonNumericAsString configures the wal2json plugin
+                    and does nothing under any other; set plugin: wal2json or drop
+                    the field'
+                  rule: '!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString)
+                    || (has(self.plugin) && self.plugin == ''wal2json'')'
               runner:
                 description: runner configures the worker pod.
                 properties:
