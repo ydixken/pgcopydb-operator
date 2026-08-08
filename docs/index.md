@@ -12,7 +12,10 @@ Where to go:
 - [Live migration](operations/live-migration.md): follow mode, preflight, and the cutover runbook.
 - [Verification](operations/verification.md): `pgcopydb compare` after completion.
 - [Suspend, retries, deletion](operations/lifecycle.md): day-2 lifecycle of a Migration.
+- [Migrating into CloudNativePG](operations/cloudnativepg.md): the recipe for CNPG targets and sources.
+- [Argo CD health checks](operations/argocd.md): GitOps health for `Migration` resources.
 - [Troubleshooting](troubleshooting.md): symptoms mapped to causes and fixes.
 - [Prerequisites](reference/prerequisites.md): what your endpoints must provide; read this before a live migration.
 - [CRD reference](reference/api.md): every `Migration` field with defaults and validation.
+- [Conditions and reasons](reference/conditions.md): the condition types and reason strings as API contract.
 - [Design](superpowers/specs/2026-08-07-operator-design.md): the approved operator architecture.

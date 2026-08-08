@@ -139,10 +139,10 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 #### W-H adoptions
 
-- [ ] (S, docs+markers) Condition-aware printer columns on Migration: keep Phase/Attempts/Age, add Complete (`.status.conditions[?(@.type=="Complete")].status`) and Lag (`.status.replication.lagBytes`, priority 1), drop the dead Tables column until pgcopydb #1036 ships a fix; `make manifests` + chart CRD copy. Pattern: mariadb-operator.
-- [ ] (S, docs) "Migrating into a CloudNativePG cluster" recipe page: `-rw` Service target, app-Secret reuse, PREREQUISITES grant block, `managed.roles` replication for CNPG sources, `wal_sender_timeout` via `spec.postgresql.parameters`; note the e2e suite already runs this shape. Place via W-G.
-- [ ] (S, docs) Argo CD health check snippet for Migration (`resource.customizations` Lua: Failed=Degraded, Complete=Healthy, Suspended=Suspended, else Progressing). Lesson from zalando/postgres-operator #1693/#2864.
-- [ ] (S, docs) Conditions and reasons reference table: all eight condition types, polarity, every controller-set reason with one line on when it appears. Feeds the W-G reference section.
+- [x] (S, docs+markers) Condition-aware printer columns on Migration: keep Phase/Attempts/Age, add Complete (`.status.conditions[?(@.type=="Complete")].status`) and Lag (`.status.replication.lagBytes`, priority 1), drop the dead Tables column until pgcopydb #1036 ships a fix; `make manifests` + chart CRD copy. Pattern: mariadb-operator. Done 2026-08-08: markers changed, CRD and chart template regenerated, quickstart sample output updated.
+- [x] (S, docs) "Migrating into a CloudNativePG cluster" recipe page: `-rw` Service target, app-Secret reuse, PREREQUISITES grant block, `managed.roles` replication for CNPG sources, `wal_sender_timeout` via `spec.postgresql.parameters`; note the e2e suite already runs this shape. Place via W-G. Done 2026-08-08: docs/operations/cloudnativepg.md, in the Operations nav.
+- [x] (S, docs) Argo CD health check snippet for Migration (`resource.customizations` Lua: Failed=Degraded, Complete=Healthy, Suspended=Suspended, else Progressing). Lesson from zalando/postgres-operator #1693/#2864. Done 2026-08-08: docs/operations/argocd.md, marked as a starting point.
+- [x] (S, docs) Conditions and reasons reference table: all eight condition types, polarity, every controller-set reason with one line on when it appears. Feeds the W-G reference section. Done 2026-08-08: docs/reference/conditions.md; 21 condition reasons plus the event-reason table, extracted from the controller.
 - [ ] (M, e2e) Operator-upgrade e2e spec: install latest released chart, start a follow migration under live writes, upgrade the operator to the local build mid-stream, assert completion and condition continuity. Pattern: CNPG's "-prime" upgrade tier; becomes load-bearing with W-F's second API version.
 
 ### Closing

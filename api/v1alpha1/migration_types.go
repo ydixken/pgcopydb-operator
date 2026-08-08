@@ -511,7 +511,8 @@ type MigrationStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=pgm
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
-// +kubebuilder:printcolumn:name="Tables",type=string,JSONPath=`.status.progress.tablesDone`
+// +kubebuilder:printcolumn:name="Complete",type=string,JSONPath=`.status.conditions[?(@.type=="Complete")].status`
+// +kubebuilder:printcolumn:name="Lag",type=integer,priority=1,JSONPath=`.status.replication.lagBytes`
 // +kubebuilder:printcolumn:name="Attempts",type=integer,JSONPath=`.status.attempts`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
