@@ -77,17 +77,25 @@ test:unit:
 
 # Image build+push to the GitLab registry: main only, and only once the
 # kubebuilder scaffold ships a Dockerfile (one rule ANDs both conditions).
+# This is build validation; the consumed artifacts ship to ghcr via the
+# GitHub release workflow. Built with buildah, not docker-in-docker: the
+# dedicated k8s runner's dind push corrupts large blobs ("blob unknown to
+# registry"), and a daemonless builder sidesteps that whole class of problem
+# (no dind, no privileged socket, no bridge-MTU or storage-driver surprises).
 docker-build:
   stage: docker-build
-  image: docker:29.7.1@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
-  services:
-    # Same digest as the job image: upstream merged dind into the base image.
-    - docker:29.7.1-dind@sha256:e8faad5a8dc5279dff929afc5449f2791736912fff9f99351d742db2fad01b4c
+  image:
+    name: quay.io/buildah/stable:v1.38.0@sha256:a66e0125a03ed7bf521d13457d3dc64b8468d7c66688afd63c7ab188c3026c1a
+    entrypoint: [""]
+  variables:
+    # vfs needs no host mounts and works in an unprivileged rootless pod.
+    STORAGE_DRIVER: vfs
+    BUILDAH_FORMAT: docker
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       exists: [Dockerfile]
   script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA -t $CI_REGISTRY_IMAGE:latest .
-    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
-    - docker push $CI_REGISTRY_IMAGE:latest
+    - buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - buildah bud -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:latest" .
+    - buildah push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - buildah push "$CI_REGISTRY_IMAGE:latest"
