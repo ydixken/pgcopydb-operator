@@ -49,4 +49,6 @@ nav:
       - Prerequisites: reference/prerequisites.md
       - CRD reference: reference/api.md
       - pgcopydb option coverage: reference/coverage.md
-  - Design: superpowers/specs/2026-08-07-operator-design.md
+  - Design:
+      - Architecture: superpowers/specs/2026-08-07-operator-design.md
+      - Competitive comparison: design/comparison.md
