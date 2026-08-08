@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
@@ -60,11 +62,14 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 }
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
-// (docs/research/pgcopydb-cli.md section 10). Unknown fields are ignored so
-// schema drift degrades to missing numbers, never to a failure.
+// (docs/research/pgcopydb-cli.md section 10; bytes object per upstream
+// progress.c). Unknown fields are ignored so schema drift degrades to missing
+// numbers, never to a failure. Bytes is a pointer so an output without the
+// object (older pgcopydb) yields no byte counters instead of fake zeros.
 type listProgress struct {
-	Tables  counts `json:"tables"`
-	Indexes counts `json:"indexes"`
+	Tables  counts  `json:"tables"`
+	Indexes counts  `json:"indexes"`
+	Bytes   *counts `json:"bytes"`
 }
 
 type counts struct {
@@ -78,10 +83,15 @@ func ParseListProgress(raw []byte) (*v1alpha1.CloneProgress, error) {
 	if err := json.Unmarshal(raw, &lp); err != nil {
 		return nil, fmt.Errorf("parse list progress output: %w", err)
 	}
-	return &v1alpha1.CloneProgress{
+	p := &v1alpha1.CloneProgress{
 		TablesTotal:  lp.Tables.Total,
 		TablesDone:   lp.Tables.Done,
 		IndexesTotal: lp.Indexes.Total,
 		IndexesDone:  lp.Indexes.Done,
-	}, nil
+	}
+	if lp.Bytes != nil {
+		p.BytesTotal = resource.NewQuantity(lp.Bytes.Total, resource.BinarySI)
+		p.BytesDone = resource.NewQuantity(lp.Bytes.Done, resource.BinarySI)
+	}
+	return p, nil
 }

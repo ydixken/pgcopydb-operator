@@ -140,8 +140,7 @@ var _ = Describe("Migration Controller verification", func() {
 		finishJob(ctx, name+"-preflight", true)
 
 		// Caught up: Automatic mode freezes the stream, the worker drains.
-		lsn := "0/100"
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: lsn, ReplayLSN: lsn, SourceHead: lsn, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-run-1", true)
 

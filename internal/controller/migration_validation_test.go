@@ -18,10 +18,13 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 )
@@ -49,5 +52,123 @@ var _ = Describe("Migration CRD validation", func() {
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		// Never reconciled, so no finalizer blocks the cleanup delete.
 		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+	})
+
+	// One entry per admission rule, plus accept-side controls proving a rule
+	// is not overbroad. wantErr "" means the spec must be admitted.
+	slot := func(name string) func(*v1alpha1.Migration) {
+		return func(m *v1alpha1.Migration) {
+			m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, SlotName: name}
+		}
+	}
+	filters := func(f *v1alpha1.Filters) func(*v1alpha1.Migration) {
+		return func(m *v1alpha1.Migration) { m.Spec.Clone.Filters = f }
+	}
+	DescribeTable("create-time rules",
+		func(name string, mutate func(*v1alpha1.Migration), wantErr string) {
+			m := validMigration(name)
+			mutate(m)
+			err := k8sClient.Create(ctx, m)
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring(wantErr)))
+		},
+		Entry("connection with both inline fields and uriSecretRef", "cel-conn-both",
+			func(m *v1alpha1.Migration) {
+				m.Spec.Source.URISecretRef = &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "dsn"}, Key: "value",
+				}
+			}, "not both"),
+		Entry("connection with neither inline fields nor uriSecretRef", "cel-conn-neither",
+			func(m *v1alpha1.Migration) {
+				m.Spec.Source = v1alpha1.PostgresConnection{Database: testDB}
+			}, "set either uriSecretRef or the inline host/username fields"),
+		Entry("uriSecretRef-only connections on both sides", "cel-conn-uri-only",
+			func(m *v1alpha1.Migration) {
+				uri := func(name string) v1alpha1.PostgresConnection {
+					return v1alpha1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: "value",
+					}}
+				}
+				m.Spec.Source = uri("src-dsn")
+				m.Spec.Target = uri("tgt-dsn")
+			}, ""),
+		Entry("includeOnlyTables with excludeTables", "cel-filter-tables",
+			filters(&v1alpha1.Filters{IncludeOnlyTables: []string{"public.t1"}, ExcludeTables: []string{"public.t2"}}),
+			"includeOnlyTables cannot be combined with excludeTables or excludeSchemas"),
+		Entry("includeOnlyTables with excludeSchemas", "cel-filter-tables-schemas",
+			filters(&v1alpha1.Filters{IncludeOnlyTables: []string{"public.t3"}, ExcludeSchemas: []string{"legacy"}}),
+			"includeOnlyTables cannot be combined with excludeTables or excludeSchemas"),
+		Entry("includeOnlySchemas with excludeSchemas", "cel-filter-schemas",
+			filters(&v1alpha1.Filters{IncludeOnlySchemas: []string{"public"}, ExcludeSchemas: []string{"scratch"}}),
+			"includeOnlySchemas cannot be combined with excludeSchemas"),
+		Entry("includeOnlyExtensions with excludeExtensions", "cel-filter-extensions",
+			filters(&v1alpha1.Filters{IncludeOnlyExtensions: []string{"citext"}, ExcludeExtensions: []string{"postgis"}}),
+			"includeOnlyExtensions cannot be combined with excludeExtensions"),
+		Entry("includeOnlyTables with the compatible exclusions", "cel-filter-ok",
+			filters(&v1alpha1.Filters{
+				IncludeOnlyTables: []string{"public.t4"},
+				ExcludeIndexes:    []string{"public.idx"},
+				ExcludeTableData:  []string{"public.big"},
+			}), ""),
+		// slotName is interpolated into SQL (origin verification, publication
+		// drop guard); the charset pattern is the injection barrier.
+		Entry("slot name with a hyphen", "cel-slot-hyphen", slot("my-slot"), "should match"),
+		Entry("slot name with uppercase", "cel-slot-upper", slot("MySlot"), "should match"),
+		Entry("slot name with a quote", "cel-slot-quote", slot(`pg_'; drop table users;--`), "should match"),
+		Entry("slot name at the 63-byte limit", "cel-slot-63", slot(strings.Repeat("a", 63)), ""),
+		Entry("slot name over the 63-byte limit", "cel-slot-64", slot(strings.Repeat("a", 64)), "Too long"),
+		Entry("skip entry outside the allowlist", "cel-skip-unknown",
+			func(m *v1alpha1.Migration) { m.Spec.Clone.Skip = []v1alpha1.SkipOption{"everything"} },
+			"supported values"),
+		Entry("skip entries from the allowlist", "cel-skip-ok",
+			func(m *v1alpha1.Migration) {
+				m.Spec.Clone.Skip = []v1alpha1.SkipOption{"largeObjects", "analyze"}
+			}, ""),
+		Entry("unknown logical decoding plugin", "cel-plugin-unknown",
+			func(m *v1alpha1.Migration) {
+				m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: "decoderbufs"}
+			}, "supported values"),
+	)
+
+	It("enforces source/target/follow immutability while clone stays tunable", func() {
+		const name = "cel-immutable"
+		m := validMigration(name)
+		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, SlotName: "fixed_slot"}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		fresh := func() *v1alpha1.Migration {
+			got := &v1alpha1.Migration{}
+			ExpectWithOffset(1, k8sClient.Get(ctx,
+				types.NamespacedName{Name: name, Namespace: testNS}, got)).To(Succeed())
+			return got
+		}
+
+		changed := fresh()
+		changed.Spec.Source.Host = "elsewhere.example.com"
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("source is immutable")))
+
+		changed = fresh()
+		changed.Spec.Target.Database = "other"
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("target is immutable")))
+
+		changed = fresh()
+		changed.Spec.Follow.SlotName = "other_slot"
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
+
+		changed = fresh()
+		changed.Spec.Follow.Enabled = false
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("follow is immutable")))
+
+		// Control: clone tuning and the cutover trigger stay mutable.
+		changed = fresh()
+		changed.Spec.Clone.TableJobs = 8
+		changed.Spec.Cutover.Approved = true
+		Expect(k8sClient.Update(ctx, changed)).To(Succeed())
 	})
 })
