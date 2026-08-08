@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -174,7 +175,13 @@ ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_l
 // session_replication_role probe is the silent-loss gate: without that SET,
 // pgcopydb 0.18 applies nothing while reporting success (PREREQUISITES.md).
 // The origin-function list is exactly what pgcopydb's setup/apply/cleanup and
-// the operator's own verify Job execute on the target.
+// the operator's own verify Job execute on the target. The closing
+// replica-identity audit lists tables where pgoutput would reject UPDATE and
+// DELETE at write time on the source (relreplident 'n', or 'd' without a
+// primary key); it deliberately audits all user tables, filters or not,
+// because a table can be filtered out yet still take writes. Offenders in
+// spec.follow.allowMissingReplicaIdentity (or all of them, with "*")
+// downgrade to a warning line.
 const preflightScript = `set -u
 check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
 if ! check "$PGCOPYDB_SOURCE_PGURI" 'select 1' >/dev/null; then
@@ -209,15 +216,64 @@ if ! check "$PGCOPYDB_TARGET_PGURI" "begin; set session_replication_role = 'repl
   echo "preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: GRANT SET ON PARAMETER session_replication_role TO \"$tgt_user\" (PostgreSQL 15+; older targets need a superuser role)"
   fail=1
 fi
+ri_offenders=$(check "$PGCOPYDB_SOURCE_PGURI" "select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'r' and c.relpersistence = 'p' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and (c.relreplident = 'n' or (c.relreplident = 'd' and not exists (select 1 from pg_index i where i.indrelid = c.oid and i.indisprimary))) order by 1")
+if [ -n "$ri_offenders" ]; then
+  printf '%s\n' "$ri_offenders" > /tmp/ri_offenders
+  ri_allow="${PREFLIGHT_ALLOW_MISSING_RI:-}"
+  ack_all=0
+  printf '%s\n' "$ri_allow" | grep -Fxq '*' && ack_all=1
+  while IFS= read -r tbl; do
+    if [ "$ack_all" = 1 ] || printf '%s\n' "$ri_allow" | grep -Fxq "$tbl"; then
+      echo "preflight: warning: acknowledged table $tbl has no usable replica identity; UPDATE and DELETE on it will fail on the source during the migration window"
+    else
+      echo "preflight: table $tbl has no replica identity usable for UPDATE/DELETE (the audit covers all user tables, including ones excluded by clone.filters): ALTER TABLE $tbl REPLICA IDENTITY USING INDEX <unique index>, or ALTER TABLE $tbl REPLICA IDENTITY FULL, or acknowledge it in spec.follow.allowMissingReplicaIdentity"
+      fail=1
+    fi
+  done < /tmp/ri_offenders
+fi`
+
+// preflightScriptFooter closes the check script; conditional blocks (the
+// wal2json note) slot in between.
+const preflightScriptFooter = `
 if [ "$fail" -eq 0 ]; then echo "preflight: all follow-mode checks passed"; fi
 exit "$fail"`
+
+// preflightWal2jsonNote is a note, not a check: wal2json ships as a bare
+// shared library with no extension control file (upstream README: "does not
+// need CREATE EXTENSION"), so neither pg_available_extensions nor
+// pg_available_extension_versions ever lists it and there is no catalog to
+// query. The only positive probe is creating a logical slot with the plugin,
+// which consumes a slot on the source; too invasive for a preflight. The
+// failure mode is caught on attempt 1 at slot creation instead.
+const preflightWal2jsonNote = `
+echo "preflight: note: wal2json presence on the source cannot be verified from SQL (a logical decoding plugin registers no catalog entry); if it is not installed, the first attempt fails at slot creation with: could not access file \"wal2json\""`
 
 // buildPreflightJob probes the follow prerequisites once, before the first
 // worker Job of a follow-enabled Migration. backoffLimit 1 absorbs a single
 // transient blip (pod eviction, connection reset) without failing the
 // Migration; a deterministic check failure fails twice and is terminal.
+// The replica-identity allowlist travels as an env var, not script text: env
+// values are never shell-evaluated, so table names need no quoting rules.
 func buildPreflightJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
-	return scriptJob(m, runnerImage, preflightJobName(m), preflightScript, 1)
+	script := preflightScript
+	if f := m.Spec.Follow; f != nil && f.Plugin == "wal2json" {
+		script += preflightWal2jsonNote
+	}
+	job, err := scriptJob(m, runnerImage, preflightJobName(m), script+preflightScriptFooter, 1)
+	if err != nil {
+		return nil, err
+	}
+	if f := m.Spec.Follow; f != nil && len(f.AllowMissingReplicaIdentity) > 0 {
+		c := &job.Spec.Template.Spec.Containers[0]
+		// Newline-joined: the script matches whole lines (grep -Fx), so an
+		// entry that itself contained a newline degrades into two entries
+		// that match nothing, failing safe.
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  "PREFLIGHT_ALLOW_MISSING_RI",
+			Value: strings.Join(f.AllowMissingReplicaIdentity, "\n"),
+		})
+	}
+	return job, nil
 }
 
 // scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to
