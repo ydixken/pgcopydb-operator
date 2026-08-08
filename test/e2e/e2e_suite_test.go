@@ -25,10 +25,13 @@ package e2e
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,8 +39,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +53,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 )
@@ -82,35 +90,101 @@ const (
 
 	// appDB is the CNPG-bootstrapped database and its owning role.
 	appDB = "app"
+	// passwordKey is the password entry in the CNPG app secrets and their
+	// suite-made copies.
+	passwordKey = "password"
 
-	// clusterReadyTimeout covers CNPG bootstrap incl. initdb data generation.
+	// clusterReadyTimeout covers CNPG bootstrap and volume provisioning;
+	// seeding happens later in its own Job, not at initdb time.
 	clusterReadyTimeout = 5 * time.Minute
-	// migrationTimeout covers a clone (about 1 min) with slack for image pulls
-	// and PVC provisioning; resume runs two attempts inside the same budget.
-	migrationTimeout = 5 * time.Minute
+
+	// seedProfile names the fixture generation; bump it when the schema or
+	// the seeded shapes change so kept clusters get recreated.
+	seedProfile = "v2"
+	// seedJobName and seedConfigMap are the seed Job and its mounted SQL.
+	seedJobName   = "e2e-seed"
+	seedConfigMap = "e2e-fixtures"
+	// seedImage only needs a psql client; the CNPG operand image has one and
+	// is already pulled on any cluster running CNPG fixtures.
+	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
+	// ephemeralStorageClass is the suite-owned Longhorn class for the stress
+	// tier: one replica, reclaim Delete, so ~500Gi of throwaway volumes do
+	// not triple themselves across the cluster.
+	ephemeralStorageClass = "longhorn-e2e-ephemeral"
 )
 
 var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
 
-// fixtureSQL seeds the source database at initdb time. Every object is owned
-// by app: superuser-owned objects break the clone with permission errors when
-// restoring as the app user, and ALTER DEFAULT PRIVILEGES is off limits
-// because pg_dump would capture postgres-role ACLs the app user cannot restore.
-var fixtureSQL = []string{
-	"CREATE TABLE customers (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY," +
-		" name text NOT NULL, created_at timestamptz DEFAULT now())",
-	"CREATE TABLE orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY," +
-		" customer_id bigint REFERENCES customers(id), amount numeric(12,2) NOT NULL, note text)",
-	"CREATE INDEX orders_customer_idx ON orders (customer_id)",
-	"ALTER TABLE customers OWNER TO app",
-	"ALTER TABLE orders OWNER TO app",
-	"CREATE SCHEMA audit AUTHORIZATION app",
-	"CREATE TABLE audit.events (id bigserial PRIMARY KEY, payload jsonb)",
-	"ALTER TABLE audit.events OWNER TO app",
-	"INSERT INTO customers (name) SELECT 'customer-' || g FROM generate_series(1, 50000) g",
-	"INSERT INTO orders (customer_id, amount, note) SELECT (g % 50000) + 1," +
-		" (g % 900)::numeric / 7, 'order ' || g FROM generate_series(1, 200000) g",
-	"INSERT INTO audit.events (payload) SELECT jsonb_build_object('n', g) FROM generate_series(1, 1000) g",
+// fixturesFS carries the fixture SQL (see fixtures/schema.sql and
+// fixtures/seed.sql) into the seed Job via a ConfigMap.
+//
+//go:embed fixtures/schema.sql fixtures/seed.sql
+var fixturesFS embed.FS
+
+// The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes
+// the fixture data (~12GB at scale 1) on 40/40/10Gi volumes with the cluster
+// default StorageClass. Stress (E2E_STRESS=true): scale 10 (~120GB) on
+// 200/150/50Gi volumes backed by the suite-owned single-replica StorageClass,
+// gated by the Longhorn capacity check. E2E_SCALE always wins when set, so
+// the version matrix can run small (0.1) against either tier's sizing.
+var (
+	stress = envTrue("E2E_STRESS")
+	scale  = 1.0
+
+	srcStorageSize      = "40Gi"
+	tgtStorageSize      = "40Gi"
+	workVolumeSize      = "10Gi"
+	fixtureStorageClass = "" // empty: the cluster default StorageClass
+
+	// migrationTimeout covers one clone of the seeded dataset with slack for
+	// image pulls and PVC provisioning; resume runs two attempts inside the
+	// same budget.
+	migrationTimeout = 30 * time.Minute
+	// followTimeout covers an unattended live migration end to end: base
+	// copy, catchup, cutover, drain, cleanup, and any compare Jobs.
+	followTimeout = 45 * time.Minute
+	// seedTimeout bounds the seed Job; seeding is IO-bound on the source
+	// volume.
+	seedTimeout = 30 * time.Minute
+)
+
+// envTrue reports whether the given switch-style environment variable is
+// set to exactly "true".
+func envTrue(name string) bool {
+	return os.Getenv(name) == "true"
+}
+
+func init() {
+	if stress {
+		scale = 10
+		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
+		fixtureStorageClass = ephemeralStorageClass
+		migrationTimeout, followTimeout, seedTimeout = 2*time.Hour, 3*time.Hour, 3*time.Hour
+	}
+	if v := os.Getenv("E2E_SCALE"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			panic("E2E_SCALE must be a positive number, got " + strconv.Quote(v))
+		}
+		scale = f
+	}
+}
+
+// scaled mirrors e2e_scaled() in fixtures/schema.sql: the row count for a
+// base count n at the current scale. The two formulas MUST stay in sync or
+// the scale-derived assertions drift from what the seed wrote.
+func scaled(n int64) int64 {
+	v := int64(math.Round(float64(n) * scale))
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
+// scaleArg renders the scale for psql -v and SQL literals: plain decimal,
+// no exponent, so numeric parses it exactly.
+func scaleArg() string {
+	return strconv.FormatFloat(scale, 'f', -1, 64)
 }
 
 var (
@@ -163,6 +237,12 @@ var _ = BeforeSuite(func() {
 		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
 			" follow controller; upgrade the CRD (chart >= v0.1.0-alpha.6) before running the live scenarios")
 
+	if stress {
+		By("stress tier: ensuring the ephemeral StorageClass and checking Longhorn capacity")
+		ensureEphemeralStorageClass()
+		checkLonghornCapacity()
+	}
+
 	// The suite is single-tenant per cluster: two runs share the release name,
 	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
 	// plus the first AfterSuite silently destroy each other's environment.
@@ -170,7 +250,7 @@ var _ = BeforeSuite(func() {
 	// that a crashed run left behind.
 	By("checking no other e2e run holds the operator release")
 	if err := exec.Command("helm", "status", helmRelease, "-n", nsOperator).Run(); err == nil {
-		if os.Getenv("E2E_FORCE") != "true" {
+		if !envTrue("E2E_FORCE") {
 			Fail("helm release " + helmRelease + " already exists in " + nsOperator +
 				": another e2e run is active, or a crashed run left it behind. The suite is" +
 				" single-tenant per cluster; wait for the other run to finish, or rerun with" +
@@ -212,10 +292,13 @@ var _ = BeforeSuite(func() {
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	By("creating or adopting the CNPG source and target clusters")
-	applyCluster(cnpgCluster(sourceCluster, fixtureSQL))
-	applyCluster(cnpgCluster(targetCluster, nil))
+	applyCluster(cnpgCluster(sourceCluster, srcStorageSize))
+	applyCluster(cnpgCluster(targetCluster, tgtStorageSize))
 	waitClusterReady(sourceCluster)
 	waitClusterReady(targetCluster)
+
+	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile, scaleArg()))
+	ensureSeededSource()
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
 	resetTargetObjects()
@@ -237,7 +320,7 @@ var _ = AfterSuite(func() {
 	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
 	deleteNamespaces(2*time.Minute, nsOperator)
 
-	if os.Getenv("E2E_KEEP_FIXTURES") == "true" {
+	if envTrue("E2E_KEEP_FIXTURES") {
 		_, _ = fmt.Fprintf(GinkgoWriter,
 			"E2E_KEEP_FIXTURES=true: keeping namespaces %s and %s for iteration\n", nsE2E, nsX)
 		return
@@ -298,21 +381,16 @@ func ensureNamespace(name string) {
 	}
 }
 
-// cnpgCluster builds a minimal CNPG Cluster: one instance, 3Gi storage, app
-// database owned by app. initSQL seeds data at initdb time (source only).
-// Built as unstructured on purpose: importing the CNPG API just for two
-// fixtures is not worth a dependency.
-func cnpgCluster(name string, initSQL []string) *unstructured.Unstructured {
-	initdb := map[string]any{
-		"database": appDB,
-		"owner":    appDB,
-	}
-	if len(initSQL) > 0 {
-		stmts := make([]any, len(initSQL))
-		for i, s := range initSQL {
-			stmts[i] = s
-		}
-		initdb["postInitApplicationSQL"] = stmts
+// cnpgCluster builds a minimal CNPG Cluster: one instance, tier-sized
+// storage, app database owned by app. Seeding happens in a separate Job (see
+// ensureSeededSource), not at initdb time: a Job survives pod restarts, its
+// log is inspectable, and re-runs are cheap on kept clusters. Built as
+// unstructured on purpose: importing the CNPG API just for two fixtures is
+// not worth a dependency.
+func cnpgCluster(name, size string) *unstructured.Unstructured {
+	storage := map[string]any{"size": size}
+	if fixtureStorageClass != "" {
+		storage["storageClass"] = fixtureStorageClass
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": cnpgGVK.Group + "/" + cnpgGVK.Version,
@@ -320,8 +398,11 @@ func cnpgCluster(name string, initSQL []string) *unstructured.Unstructured {
 		"metadata":   map[string]any{"name": name, "namespace": nsE2E},
 		"spec": map[string]any{
 			"instances": int64(1),
-			"storage":   map[string]any{"size": "3Gi"},
-			"bootstrap": map[string]any{"initdb": initdb},
+			"storage":   storage,
+			"bootstrap": map[string]any{"initdb": map[string]any{
+				"database": appDB,
+				"owner":    appDB,
+			}},
 			// CNPG defaults wal_sender_timeout to 5s for its own HA streaming;
 			// that terminates pgcopydb's logical-decoding walsender whenever a
 			// standby status update is a few seconds late (observed live). Use
@@ -354,14 +435,221 @@ func waitClusterReady(name string) {
 	}, clusterReadyTimeout, 5*time.Second).Should(Succeed())
 }
 
-// resetTargetObjects drops the fixture objects from the target. Needed because
-// pg_restore --clean only drops objects present in the incoming dump, so a
-// populated target from an earlier run would break the no-dropIfExists clone.
+// resetTargetObjects wipes the fixture objects from the target. Needed
+// because pg_restore --clean only drops objects present in the incoming dump,
+// so a populated target from an earlier run would break the no-dropIfExists
+// clone. Dropping the schemas wholesale (plus the citext extension and the
+// large objects, which live outside any schema) beats keeping a per-object
+// drop list in sync with the fixture set. public is recreated with its stock
+// owner; app is the database owner, so it needs no extra grants.
 func resetTargetObjects() {
 	GinkgoHelper()
+	psql(tgtPod, "DROP EXTENSION IF EXISTS citext CASCADE")
 	psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(tgtPod, "DROP TABLE IF EXISTS public.orders CASCADE")
-	psql(tgtPod, "DROP TABLE IF EXISTS public.customers CASCADE")
+	psql(tgtPod, "DROP SCHEMA IF EXISTS public CASCADE")
+	psql(tgtPod, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	psql(tgtPod, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
+}
+
+// ensureSeededSource brings the source database to the requested fixture
+// profile and scale. A kept cluster whose e2e_seed marker matches costs one
+// early-exiting Job; a mismatching marker (different profile or scale) means
+// the data on disk is wrong in ways reseeding cannot fix (a smaller scale
+// leaves surplus rows), so the cluster is recreated from scratch.
+func ensureSeededSource() {
+	GinkgoHelper()
+	if psql(srcPod, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
+		match := psql(srcPod, fmt.Sprintf(
+			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
+			seedProfile, scaleArg()))
+		if match != "t" {
+			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+			recreateSourceCluster()
+		}
+	}
+	runSeedJob()
+}
+
+// recreateSourceCluster deletes the source CNPG cluster (volumes included)
+// and brings a fresh one up. Also the hook for the version matrix (W-E),
+// which recreates on a PG-major mismatch.
+func recreateSourceCluster() {
+	GinkgoHelper()
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	c.SetNamespace(nsE2E)
+	c.SetName(sourceCluster)
+	if err := k8sClient.Delete(ctx, c); err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "failed to delete CNPG cluster %s", sourceCluster)
+	}
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: sourceCluster},
+			&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": cnpgGVK.Group + "/" + cnpgGVK.Version, "kind": cnpgGVK.Kind}})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "CNPG cluster %s still terminating", sourceCluster)
+	}, 10*time.Minute, 5*time.Second).Should(Succeed())
+	applyCluster(cnpgCluster(sourceCluster, srcStorageSize))
+	waitClusterReady(sourceCluster)
+}
+
+// runSeedJob applies schema.sql and seed.sql to the source database through
+// a Kubernetes Job (psql from the CNPG operand image, fixture SQL mounted
+// from a ConfigMap). A Job instead of exec: it survives suite interruptions,
+// retries transient DB unavailability (backoffLimit 2), and leaves its log
+// behind. On failure the log tail lands in the Ginkgo output.
+func runSeedJob() {
+	GinkgoHelper()
+	schemaSQL, err := fixturesFS.ReadFile("fixtures/schema.sql")
+	Expect(err).NotTo(HaveOccurred())
+	seedSQL, err := fixturesFS.ReadFile("fixtures/seed.sql")
+	Expect(err).NotTo(HaveOccurred())
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}
+	_, err = controllerutil.CreateOrUpdate(ctx, k8sClient, cm, func() error {
+		cm.Data = map[string]string{"schema.sql": string(schemaSQL), "seed.sql": string(seedSQL)}
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to apply the fixture ConfigMap")
+
+	// A finished Job is immutable; drop the previous run's before creating.
+	fg := metav1.DeletePropagationForeground
+	stale := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}}
+	if err := k8sClient.Delete(ctx, stale, &client.DeleteOptions{PropagationPolicy: &fg}); err != nil &&
+		!apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "failed to delete the previous seed Job")
+	}
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: seedJobName}, &batchv1.Job{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "previous seed Job still terminating")
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+	Expect(k8sClient.Create(ctx, buildSeedJob())).To(Succeed(), "failed to create the seed Job")
+	Eventually(func(g Gomega) {
+		job := &batchv1.Job{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: seedJobName}, job)).To(Succeed())
+		for _, c := range job.Status.Conditions {
+			if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs())
+				StopTrying("seed Job exhausted its retries: " + c.Message).Now()
+			}
+		}
+		g.Expect(job.Status.Succeeded).To(BeNumerically(">=", 1), "seed Job still running")
+	}, seedTimeout, 10*time.Second).Should(Succeed())
+}
+
+func buildSeedJob() *batchv1.Job {
+	backoff := int32(2)
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoff,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{{
+						Name:  "seed",
+						Image: seedImage,
+						Command: []string{"psql",
+							"-v", "ON_ERROR_STOP=1",
+							"-v", "scale=" + scaleArg(),
+							"-v", "profile=" + seedProfile,
+							"-f", "/fixtures/schema.sql",
+							"-f", "/fixtures/seed.sql"},
+						Env: []corev1.EnvVar{
+							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
+							{Name: "PGDATABASE", Value: appDB},
+							{Name: "PGUSER", Value: appDB},
+							{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
+									Key:                  passwordKey,
+								},
+							}},
+						},
+						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
+					}},
+					Volumes: []corev1.Volume{{Name: "fixtures", VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: seedConfigMap},
+						},
+					}}},
+				},
+			},
+		},
+	}
+}
+
+// seedJobLogs returns the seed Job's log tail for failure diagnostics.
+// kubectl for the same reason psql uses it: current context, no hand-rolled
+// log streaming.
+func seedJobLogs() string {
+	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName, "--tail=100").CombinedOutput()
+	return string(out)
+}
+
+// ensureEphemeralStorageClass creates the suite-owned single-replica Longhorn
+// StorageClass for the stress tier if it does not exist. It stays behind
+// after the run: it is configuration, not data, and reclaimPolicy Delete
+// means volumes never outlive their claims.
+func ensureEphemeralStorageClass() {
+	GinkgoHelper()
+	reclaim := corev1.PersistentVolumeReclaimDelete
+	sc := &storagev1.StorageClass{
+		ObjectMeta:    metav1.ObjectMeta{Name: ephemeralStorageClass},
+		Provisioner:   "driver.longhorn.io",
+		ReclaimPolicy: &reclaim,
+		Parameters:    map[string]string{"numberOfReplicas": "1", "staleReplicaTimeout": "30"},
+	}
+	if err := k8sClient.Create(ctx, sc); err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred(), "failed to create StorageClass %s", ephemeralStorageClass)
+	}
+}
+
+// checkLonghornCapacity refuses to start a stress run that would fill the
+// shared cluster: it sums storageAvailable over every disk of every
+// nodes.longhorn.io CR (live cluster state, deliberately never hardcoded)
+// and Skips unless the requested fixture volumes fit with 20% headroom.
+func checkLonghornCapacity() {
+	GinkgoHelper()
+	nodes := &unstructured.UnstructuredList{}
+	nodes.SetGroupVersionKind(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: "NodeList"})
+	if err := k8sClient.List(ctx, nodes); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			Skip("stress tier needs Longhorn: no nodes.longhorn.io CRD in this cluster")
+		}
+		Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
+	}
+	var available int64
+	for _, n := range nodes.Items {
+		disks, _, _ := unstructured.NestedMap(n.Object, "status", "diskStatus")
+		for _, d := range disks {
+			dm, ok := d.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch v := dm["storageAvailable"].(type) {
+			case int64:
+				available += v
+			case float64:
+				available += int64(v)
+			}
+		}
+	}
+	var required int64
+	for _, size := range []string{srcStorageSize, tgtStorageSize, workVolumeSize} {
+		q := resource.MustParse(size)
+		required += q.Value()
+	}
+	// numberOfReplicas is 1 on the ephemeral StorageClass, so requested
+	// bytes map 1:1 to consumed bytes; 1.2 leaves headroom for WAL churn
+	// and everything else living on the shared disks.
+	const replicas = 1
+	need := required * replicas * 12 / 10
+	if available < need {
+		Skip(fmt.Sprintf("stress tier needs %dGi available across Longhorn disks"+
+			" (%dGi requested x %d replica x 1.2 headroom) but only %dGi are free;"+
+			" free up space or run the default tier",
+			need>>30, required>>30, replicas, available>>30))
+	}
 }
 
 // ensureFollowPrivileges grants the app role the non-superuser follow
