@@ -92,6 +92,55 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 1. Runner ships PostgreSQL client major 18: pg_dump must be >= the newest server major on either side (new unpinned clusters already run 18), and the work dir moved below the volume mount so `--restart` can remove it.
 1. Open hardening item: classify deterministic pgcopydb failures (permission errors) to stop useless retries. Patch-semantics status updates shipped (de6d651).
 
+## M5: production hardening (2026-08-08, plan approved; user hands-off)
+
+Goal: production posture. Competitive review, Ponytail code reduction, coverage 53% to >=75%, chaos e2e, tiered complex fixtures (~12GB default, E2E_STRESS ~120GB), PG version matrix, v1beta1 API, published mkdocs-material docs site. Full design in the approved plan (see decision log row); execution in isolated worktrees, serial integration, every PR fully gated.
+
+### W-A: Ponytail refactor (wave 1)
+
+- [ ] Collapse the four ensure-child-Job state machines (follow.go ensureCleanup/ensurePreflight/ensureVerify, verification.go ensureVerification) into one ensureJob helper with a single return contract.
+- [ ] One r.fail() for the five terminal-failure boilerplate sites; adopt the createErr==nil event guard everywhere.
+- [ ] Extract preflight-gate and observe-running blocks from the 123-line reconcile(); delete dead code (progress.New, SentinelPort, unreachable budget branch unless proven reachable); shared dir constant for FiltersPath/mount; sentinel.EndposSet(); unify duplicated test helpers. Behavior-identical, coverage must not drop.
+
+### W-B: Unit tests to >=75% total (wave 2, after W-A)
+
+- [ ] podexec via fake clientset (JobLogs newest-pod, RunningPod); conn TLS volume 0400 + passfile escaping with ':' and '\' passwords; progress parser bytes fields (fix omission + test).
+- [ ] Full CEL matrix via envtest: connection one-of both/neither, three filter exclusions, source/target/follow immutability, SlotName pattern+length (SQL-interpolated), allowlist entries.
+- [ ] Reconciler branches: job-vanished resume, follow+suspend SlotRetained, cleanup-failed warning, non-follow deletion, custom maxCatchupLag, runner image override; truncate/failureReason/jobFinished tables.
+
+### W-C: Fixtures v2, tiered complex demo data (wave 2)
+
+- [ ] test/e2e/fixtures/{schema,seed}.sql via go:embed; seed Job (cnpg postgresql:18 image, psql -v scale, backoffLimit 2, log tail on failure); e2e_seed marker table idempotency; profile-mismatch cluster recreate. Schema PG14-clean, all OWNER app: citext, enum+domain+composite, RANGE partitions (8+DEFAULT), TOAST ~24KB rows, arrays, generated STORED, multi-column/partial/expression/GIN indexes, cross-schema FK, custom sequences, matview, trigger, large objects; customers/orders kept for live-write helpers.
+- [ ] E2E_SCALE model (1 = ~12GB), sizes 40/40/10Gi, seedTimeout 30m; scale-derived source==target asserts replace fixtureCounts.
+- [ ] E2E_STRESS=true: scale 10 (~120GB), 200/150/50Gi, task e2e:stress -timeout 8h, Longhorn capacity guard (nodes.longhorn.io storageAvailable >= need*replicas*1.2), suite-owned longhorn-e2e-ephemeral StorageClass numberOfReplicas 1.
+- [ ] Verification (pgcopydb compare) enabled in one clone scenario (closes the open M4 box); uriSecretRef happy-path scenario.
+
+### W-D: Chaos e2e (wave 3, after W-C)
+
+- [ ] Default suite additions: three revoked-grant preflight specs (exact PreflightFailed message asserts, DeferCleanup re-grant); backoffLimit exhaustion to absorbing Failed.
+- [ ] chaos_test.go Label("chaos") + task e2e:chaos (default task e2e gets -ginkgo.label-filter='!chaos'): source-pod kill mid-clone (resume), work-volume disk-full (Failed with space error), two concurrent follow Migrations one source (distinct slots, both complete; psqlDB helper + app2 db), cutover interruption mid-drain (invariant: Completed-with-all-rows XOR DrainIncomplete-with-slot), target-pod kill during apply. Helpers: waitFailed, deletePod, psqlDB.
+
+### W-E: PG version matrix (wave 3)
+
+- [ ] E2E_PG_SOURCE/TARGET envs -> cnpgCluster imageName (default pinned 17); major-mismatch recreate for kept fixtures; task e2e:matrix sequential combos 14->18, 18->18, 15->17 at E2E_SCALE=0.1, !chaos (~100 min). Upgrade-direction only; PG14 sources only.
+
+### W-F: v1beta1 promotion (last code track; v0.2.0-alpha.1)
+
+- [ ] api/v1beta1 byte-copy with storageversion; v1alpha1 deprecatedversion warning, both served, conversion None (schemas identical, verified). Mechanical sed of internals (23 files); Taskfile docs source-path; e2e CRD check by version name; apiVersion flips in examples/samples/chart README; future storage-migration recipe documented. No webhooks.
+
+### W-G: Docs site (wave 1, parallel)
+
+- [ ] mkdocs.yml (material; no pymdownx.emoji, yamllint-clean; exclude research/+superpowers/ except design spec); split usage.md per mapped ranges into index/quickstart/installation/configuration/operations{live-migration,verification,lifecycle}/troubleshooting/reference{api,prerequisites,coverage}/design; PREREQUISITES.md body moves, root stub stays; dual-render page-relative links.
+- [ ] .github/workflows/docs.yml: api.md staleness gate, mkdocs build --strict, actions/deploy-pages (NOT gh-deploy: gh-pages branch would mirror to GitLab and fail yamllint). Optional GitLab docs job for parity. USER ACTION (parked): set repo Pages source to "GitHub Actions".
+
+### W-H: Competitive comparison (wave 1, parallel)
+
+- [ ] docs/design/comparison.md: CNPG, Percona Everest DataImporter, Zalando, mariadb-operator sync; CRD ergonomics, conditions conventions, day-2 ops, docs, testing signals; adopt/reject list; motivated changes become M5 tasks (small ones implemented this push).
+
+### Closing
+
+- [ ] v0.2.0-alpha.x release(s), GitOps pin, live default suite green; task e2e:chaos green; one E2E_STRESS run; one task e2e:matrix run; break/fix findings ledgered; final sweep.
+
 ## Decision log
 
 | Date       | Decision                                                                        | Rationale                                                                                                                                            |
