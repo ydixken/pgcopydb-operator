@@ -70,11 +70,13 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	// alpha.11 adds the cleanup-origin fix (stream cleanup passes
+	// v0.2.0-alpha.1 promotes the API to v1beta1 (storage version) and carries
+	// the M5 hardening: ensureJob refactor, printer columns, progress bytes.
+	// alpha.11 added the cleanup-origin fix (stream cleanup passes
 	// --slot-name/--origin, so a follow migration's generated origin is dropped
 	// on the target) and the preflight extensions (replica-identity audit), on
 	// top of alpha.9's exec-credential fix and alpha.8's drain-verify gate.
-	operatorTag = "v0.1.0-alpha.11"
+	operatorTag = "v0.2.0-alpha.1"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
