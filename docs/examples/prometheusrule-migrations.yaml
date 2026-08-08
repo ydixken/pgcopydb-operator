@@ -1,0 +1,73 @@
+# Alerts on the operator's per-Migration metrics (pgcopydb_migration_*).
+# Needs the Prometheus Operator and a scrape of the manager: set
+# metrics.serviceMonitor.enabled=true in the chart. If your Prometheus
+# selects rules by label (kube-prometheus-stack does), add its matching
+# label to metadata.labels. Thresholds and windows are starting points.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pgcopydb-migrations
+spec:
+  groups:
+    - name: pgcopydb-migration-stuck
+      rules:
+        # Retry churn: an active migration keeps creating worker Jobs.
+        # pgcopydb_migration_attempts only ever rises, so a delta over the
+        # window counts new Jobs in that window.
+        - alert: PgcopydbMigrationRetrying
+          expr: >-
+            (pgcopydb_migration_phase{phase=~"Cloning|Streaming"} == 1)
+            and on (namespace, name)
+            (delta(pgcopydb_migration_attempts[30m]) >= 3)
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              Migration {{ $labels.namespace }}/{{ $labels.name }} burned three
+              or more attempts in 30m
+            description: >-
+              The worker Job keeps failing and the operator keeps retrying with
+              --resume. The Failed condition and the AttemptFailed events on the
+              Migration carry the worker's last error.
+        # Clone without progress. tables_done only moves when a whole table
+        # finishes, so one very large table legitimately holds it flat; that is
+        # all the metric can express, hence the generous window. Widen it if
+        # single tables take longer than an hour to copy.
+        - alert: PgcopydbMigrationCloneStalled
+          expr: >-
+            (pgcopydb_migration_phase{phase="Cloning"} == 1)
+            and on (namespace, name)
+            (delta(pgcopydb_migration_tables_done[1h]) == 0)
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              Migration {{ $labels.namespace }}/{{ $labels.name }} finished no
+              table in 1h of Cloning
+            description: >-
+              The clone is active but tables_done is flat. Check the worker pod
+              logs and the source; a single huge table mid-copy also looks like
+              this.
+    - name: pgcopydb-migration-replication
+      rules:
+        # Streaming lag. The gauge only exists in follow mode, so this never
+        # fires for plain clones. 67108864 is 64Mi: well above the default
+        # follow.maxCatchupLag, so it means "not keeping up", not "catching up".
+        - alert: PgcopydbMigrationReplicationLagHigh
+          expr: pgcopydb_migration_replication_lag_bytes > 67108864
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: >-
+              Migration {{ $labels.namespace }}/{{ $labels.name }} is more than
+              64Mi behind the source for 10m
+            description: >-
+              The target is not applying changes as fast as the source writes
+              them. Sustained lag delays cutover and retains WAL on the source.
+        # Slot retention is deliberately not covered here: while a follow
+        # migration is suspended, failed, or streaming, its replication slot
+        # retains WAL on the SOURCE, and the operator's metrics cannot see the
+        # source's disk. Monitor pg_replication_slots on the source itself
+        # (active, safe_wal_size; postgres_exporter exposes both) and alert on
+        # inactive slots or a shrinking safe_wal_size.

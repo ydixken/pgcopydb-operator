@@ -1,0 +1,12 @@
+# Config for elastic/crd-ref-docs, which generates docs/api.md from the Go
+# types in api/v1alpha1. Regenerate with `task docs`.
+processor:
+  # List boilerplate; nobody writes a MigrationList by hand.
+  ignoreTypes:
+    - "MigrationList$"
+  # Embedded Kubernetes plumbing; its fields belong to the k8s docs, not ours.
+  ignoreFields:
+    - "TypeMeta$"
+render:
+  # Matches k8s.io/api v0.36 in go.mod; used for links to embedded k8s types.
+  kubernetesVersion: "1.36"

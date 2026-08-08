@@ -1,6 +1,6 @@
 # MILESTONES.md
 
-Status: **M1 functional (2026-08-07): first live migration completed end to end on the e2e cluster** (CNPG-to-CNPG, 251k rows, indexes and sequences verified identical; three defects found and fixed through live iteration). Remaining M1: e2e suite (B13), GitOps registration (B12).
+Status: **M1 complete, M2 live migration and M3 verification functional (2026-08-08): full e2e suite 10/10 green on v0.1.0-alpha.9** (first live migration 2026-08-07: CNPG-to-CNPG, 251k rows, indexes and sequences verified identical; defects found live were fixed same day). Remaining: M4 release polish, the open M2 boxes, and spikes S7/S8.
 
 Design: [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md). Research ground truth: [docs/research/](docs/research/). Facts about the private e2e infrastructure are never committed here. This file is the compaction-proof task ledger: every task carries enough context to execute without the original conversation.
 
@@ -17,11 +17,11 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 ### Spikes (verify research gaps, record outcome here)
 
 - [x] S1 (done 2026-08-07, live container run): `clone --follow --host --port` parses and runs (no getopt rejection). TCP sentinel coordinator is the M2 control plane.
-- [x] S2 (source-verified): the sentinel wire protocol has no authentication; the chart MUST ship a NetworkPolicy restricting 5442 to the operator (M2 task below).
+- [x] S2 (source-verified): the sentinel wire protocol has no authentication; any TCP coordinator use MUST come with a NetworkPolicy restricting 5442 to the operator. Superseded by the M2 control plane decision (sentinel via exec, no open port), so the chart ships none today.
 - [x] S3 (done 2026-08-07, live on PG18; CORRECTED same day): GRANT EXECUTE on the six pg_replication_origin_* functions is necessary but NOT sufficient. pgcopydb's apply session also runs SET session_replication_role TO 'replica' (superuser-gated); the full non-superuser target contract is those grants PLUS (PG15+) GRANT SET ON PARAMETER session_replication_role. Without it pgcopydb 0.18 silently applies nothing while advancing replay_lsn (second silent-loss mode, found live).
 - [x] S4 (done 2026-08-07, live check): follow-mode prerequisites (logical wal_level, slot and sender headroom) are met on the e2e cluster out of the box; specifics live in private ops notes.
-- [ ] S5: how to declare a REPLICATION-attribute role via CNPG `managed.roles` for the e2e source fixture.
-- [x] S6 (image built and smoke-tested on arm64 via podman: pgcopydb 0.18, pg_dump 17.10, non-root; amd64 + registry push still pending in CI, see B11): build the runner image (pgcopydb 0.18 + postgresql-client-17) and run a clone against a PG17 target; upstream image ships PG16 client tools and pg_dump must be >= target major.
+- [x] S5 (resolved differently, B13): the e2e fixture grants the attribute directly (`ALTER ROLE app REPLICATION` in the suite setup); CNPG `managed.roles` was never needed.
+- [x] S6 (image built and smoke-tested on arm64 via podman: pgcopydb 0.18, pg_dump 17.10, non-root; amd64 + registry push closed by B11 and the M4 multi-arch release): build the runner image (pgcopydb 0.18 + postgresql-client-17) and run a clone against a PG17 target; upstream image ships PG16 client tools and pg_dump must be >= target major.
 - [ ] S7: capture exact JSON from `pgcopydb list progress --json`, `list progress --summary --json`, `summary.json`, and `stream sentinel get` single-value selectors from a live run; check `sentinel get --json` endpos bug still present; commit samples under `docs/research/samples/`.
 - [ ] S8: SIGTERM a mid-clone run; record exit code and verify `--resume` picks up correctly (drives Job-failure interpretation).
 - [x] S9 (done 2026-08-07, live check): e2e-cluster facts recorded in private ops notes (this repository is public). Project consequence: the runner image targets amd64 first; arm64 in M4.
@@ -37,10 +37,10 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] B6 (done): reconciler: PVC + attempt-numbered Job (`backoffLimit: 0`), `--resume`/`--not-consistent` on retries, operator-counted retry budget, conditions (Validated, CloneCompleted, Complete, Failed), events, suspend, TTL; envtest suite driving Job status transitions.
 - [x] B7 (done, internal/progress): progress polling via `pods/exec` `pgcopydb list progress --json` into `status.progress` (schema from S7).
 - [x] B8 (done, internal/metrics; ServiceMonitor ships with the chart): Prometheus metrics (phase, tables/bytes done, attempts, failures) + chart ServiceMonitor toggle.
-- [x] B9 (Dockerfile done, images/runner/; CI build job + ghcr publish pending, B11): `images/runner/` Dockerfile (Debian + PGDG, pgcopydb 0.18, postgresql-client-17, non-root, digest-pinned) + GitLab CI build job + ghcr publish in release workflow.
-- [x] B10 (done, charts/pgcopydb-operator; helm lint + template verified): Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec, NetworkPolicy toggle) + chart lint in CI.
+- [x] B9 (Dockerfile done, images/runner/; CI build job + ghcr publish landed with B11): `images/runner/` Dockerfile (Debian + PGDG, pgcopydb 0.18, postgresql-client-17, non-root, digest-pinned) + GitLab CI build job + ghcr publish in release workflow.
+- [x] B10 (done, charts/pgcopydb-operator; helm lint + template verified; the NetworkPolicy toggle was dropped when the M2 exec control plane removed the open port): Helm chart `charts/pgcopydb-operator` (templated CRDs, `crds.install`, resource-policy keep, values per spec) + chart lint in CI.
 - [x] B11 (workflow done; verified with the first tag): GitHub release workflow: both images (amd64 first per S9) + OCI chart to ghcr.io on v* tags.
-- [ ] B12: register the operator in the private GitOps repository (recipe lives there; it describes private infrastructure and MUST NOT be documented here).
+- [x] B12 (done 2026-08-07, recipe in the private repo): register the operator in the private GitOps repository; the recipe describes private infrastructure and MUST NOT be documented here.
 - [x] B13 (done 2026-08-07: 6/6 scenarios green live in 148s: fresh clone, dropIfExists re-clone, filters, resume-after-pod-kill, cross-namespace, CEL rejection; suite self-installs a namespace-scoped operator into pgcopydb-e2e-system and always removes it): e2e harness (`test/e2e`, Ginkgo, current-context targeting per `task e2e` contract): fixtures = 2 CNPG clusters in ns `pgcopydb-e2e` + pagila demo data; scenarios: same-cluster clone, cross-namespace clone with secrets (cross-cluster stand-in), filters, resume after runner-pod kill.
 - [x] B14 (done): docs: README install/quickstart, `docs/examples/*.yaml` (minimal, tuned+filters, DBaaS DSN), chart README values reference.
 
@@ -52,18 +52,18 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] Surface the worker's terminal error in status (done): on Job failure the operator reads the failed pod's log tail and appends the last ERROR/FATAL `message` from the structured JSON logs to the AttemptFailed event and the Failed condition; unreadable logs degrade to the Job's own condition message.
 - [x] Retry-after-setup-crash guard (done): retry attempts of follow migrations drop pgcopydb's own leftover publication (`DROP PUBLICATION IF EXISTS "<slot>"` on the source, in the worker prelude before `--resume`), only when `spec.follow.publication` is empty; user-provided publications are never touched. The upstream issue on the non-idempotent CREATE PUBLICATION in `--resume` is still to be filed (needs maintainer sign-off for outward communication).
 - [x] Control plane decision (2026-08-07): sentinel driven via pods/exec in the runner pod (same filesystem, sanctioned by pgcopydb docs; exec plumbing already exists for progress). No PGCOPYDB_HOST set, so no open port and no NetworkPolicy needed yet; the TCP coordinator (S1-verified) stays the documented alternative if exec proves limiting.
-- [x] Conditions Streaming/CaughtUp with lag from sentinel selectors vs the source WAL head, `status.replication` block (done; lag metric still open).
+- [x] Conditions Streaming/CaughtUp with lag from sentinel selectors vs the source WAL head, `status.replication` block (done, incl. the `pgcopydb_migration_replication_lag_bytes` gauge).
 - [x] Cutover `mode: Manual|Automatic` + `approved` gate via `sentinel set endpos --current`; drain = worker exit 0; CutoverCompleted (done, envtest-covered).
 - [x] Cleanup Job + finalizer: `pgcopydb stream cleanup` gates Complete and routes deletion; slot-retention warning on suspend (done, envtest-covered).
 - [ ] Snapshot-holder hardening (separate `pgcopydb snapshot --follow` container for consistent base-copy resume) or documented `--not-consistent` trade-off; decide from S8 evidence.
 - [x] E2e (2026-08-07, 9/9 green in 464s live): follow with live-write burst + Manual cutover + row/sequence equality, Automatic cutover, delete-mid-stream drops the slot. Still open: sustained pgbench-style write load.
 - [x] E2e suspend/resume scenario (2026-08-07): 10th spec written and validated live through resume (suspend under streaming: worker Job gone, work PVC and slot kept, `SlotRetained` warning event, attempt 2 with `--resume`, rows written while suspended replayed to the target). It died at the final Completed wait on the two verify-gate defects it found, both since fixed (missing passfile prelude, exact origin-vs-endpos predicate; see the finding below). Closed by the alpha.9 confirmation run (2026-08-08): full suite 10/10 green in 623s, pinned to v0.1.0-alpha.9 (preflight, spec.verification, and the fixed drain-verify gate in one stack). Both evidenced follow chains kept the order preflight before run-1 and verify before cleanup; timings: clones 17-31s, Manual cutover 102s, Automatic 177s, suspend/resume 95s end to end.
-- [ ] Example PrometheusRule (slot retention, apply crash-loop) under docs/examples.
+- [x] Example PrometheusRule (done 2026-08-08: [docs/examples/prometheusrule-migrations.yaml](docs/examples/prometheusrule-migrations.yaml)): retry-churn, stalled-clone, and replication-lag alerts on the shipped metrics. Slot retention is a source-side fact (`pg_replication_slots`) the operator's metrics cannot see; the example says so and points at monitoring the source.
 
-## M3: verification + service polish
+## M3: verification + service polish (done)
 
 - [x] `spec.verification` (schema/data, both opt-in: even compare schema costs catalog fetches, compare data reads every row twice) running `pgcopydb compare` per enabled check in a Job on the work PVC; Verified condition (SchemaMismatch/DataMismatch), phase Verifying, `pgcopydb_migration_verified` metric. A mismatch reports, it does not fail the Migration: the transfer already happened, and on follow mode post-cutover writes to the target are indistinguishable from real diffs. Follow ordering: after the drain-verify gate (compare on a live target mismatches by design) and after cleanup (the slot retains WAL while it exists; compare needs no replication state). Envtest-covered (done 2026-08-07).
-- [ ] Evaluate `PostgresConnection` kind + `connectionRef` (as-a-service reusable endpoints) based on e2e experience.
+- [x] Evaluate `PostgresConnection` kind + `connectionRef` (evaluated 2026-08-08: deferred): across the whole e2e suite and the live migrations no endpoint was ever reused between Migrations, so a separate kind would add a watch and a lifecycle without a user. The connection struct stays a named one-of type, so the kind can land additively when reuse demand appears.
 - [x] Data-compare guidance for follow mode (quiesce before compare) in docs: see docs/examples/migration-verified.yaml (done 2026-08-07).
 
 ## M4: OSS release polish
@@ -74,7 +74,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 - [x] Multi-arch images (done and verified): release builds manager and runner for linux/amd64 + linux/arm64 via QEMU/buildx. v0.1.0-alpha.9 published both images with both platforms in the index (checked against the ghcr manifest), so S6's arm64 gap and B11's amd64-only note are closed.
 - [x] Artifact Hub metadata (done: `charts/pgcopydb-operator/artifacthub-repo.yml`, Chart.yaml annotations). One manual step remains, listing the repo: on artifacthub.io add a repository of kind "Helm charts (OCI)" with url `oci://ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator`, then push the metadata next to the chart: `oras push ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator:artifacthub.io --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml`; set the assigned repositoryID in the file and re-push for verified-publisher status.
 - [ ] E2e coverage for `spec.verification`: no scenario enables it yet (the alpha.9 confirmation run exercised the drain-verify gate live, not `pgcopydb compare`); enable it on one clone scenario and assert the Verified condition.
-- [ ] CRD reference docs generation, versioned docs.
+- [x] CRD reference docs (done 2026-08-08: [docs/api.md](docs/api.md), generated from the Go types by elastic/crd-ref-docs via `task docs`; committed markdown, regenerated in the CONTRIBUTING loop, not a build step). Versioned docs deferred: single-version alpha with no docs site; revisit at v1.
 - [ ] Public issue templates/community files as adoption warrants (deliberately deferred, see H0 slop-trap decision).
 
 ### Live-iteration findings (2026-08-07, all shipped)
@@ -89,7 +89,7 @@ Target: a `Migration` CR performs `pgcopydb clone` source to target with status,
 1. First attempts pass `--restart`: a fresh Migration once adopted the still-terminating work PVC of a deleted one and choked on foreign catalogs. Owned-object creation also refuses foreign owners now.
 1. Events were silently dropped: the new events API needs `events.k8s.io` RBAC; the chart ClusterRole now mirrors controller-gen output verbatim (which also restored pods/exec for progress polling).
 1. Runner ships PostgreSQL client major 18: pg_dump must be >= the newest server major on either side (new unpinned clusters already run 18), and the work dir moved below the volume mount so `--restart` can remove it.
-1. Open hardening items: classify deterministic pgcopydb failures (permission errors) to stop useless retries; status updates move to patch semantics (in review).
+1. Open hardening item: classify deterministic pgcopydb failures (permission errors) to stop useless retries. Patch-semantics status updates shipped (de6d651).
 
 ## Decision log
 

@@ -3,7 +3,7 @@
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 > [!important]
-> In development. One-shot clone (M1) and live migration with follow and controlled cutover (M2) are functional and e2e-tested; verification (M3) and release polish (M4) are underway. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
+> In development. One-shot clone (M1) and live migration with follow and controlled cutover (M2) are functional and e2e-tested; verification (M3) shipped with envtest coverage, its e2e scenario queued; release polish (M4) is underway. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
 
 ## Install
 
@@ -53,6 +53,7 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 - [Usage guide](docs/usage.md): install, first clone, live migration with cutover, troubleshooting.
 - [PREREQUISITES.md](PREREQUISITES.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.
+- [CRD reference](docs/api.md): every `Migration` field with defaults and validation, generated from the Go types (`task docs`).
 - [docs/coverage.md](docs/coverage.md): every pgcopydb clone/follow option mapped to the Migration spec.
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
