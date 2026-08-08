@@ -47,10 +47,11 @@ func TestFollowArgs_Defaults(t *testing.T) {
 func TestFollowArgs_Full(t *testing.T) {
 	spec := &v1alpha1.MigrationSpec{Follow: &v1alpha1.FollowOptions{
 		Enabled: true, Plugin: "wal2json", SlotName: "my_slot",
-		Publication: "my_pub", ReplayNoOpUpdates: true,
+		Publication: "my_pub", Wal2jsonNumericAsString: true, ReplayNoOpUpdates: true,
 	}}
 	got := strings.Join(FollowArgs(spec, "ns", "m"), " ")
-	want := "--follow --slot-name my_slot --origin my_slot --plugin wal2json --publication my_pub --replay-no-op-updates"
+	want := "--follow --slot-name my_slot --origin my_slot --plugin wal2json" +
+		" --publication my_pub --wal2json-numeric-as-string --replay-no-op-updates"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}

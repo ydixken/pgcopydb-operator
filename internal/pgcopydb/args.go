@@ -47,13 +47,14 @@ const FiltersPath = "/etc/pgcopydb/conf/filters.ini"
 
 // skipFlag maps a SkipOption to its pgcopydb flag.
 var skipFlag = map[v1alpha1.SkipOption]string{
-	v1alpha1.SkipOption("largeObjects"): "--skip-large-objects",
-	v1alpha1.SkipOption("extensions"):   "--skip-extensions",
-	v1alpha1.SkipOption("collations"):   "--skip-collations",
-	v1alpha1.SkipOption("vacuum"):       "--skip-vacuum",
-	v1alpha1.SkipOption("analyze"):      "--skip-analyze",
-	v1alpha1.SkipOption("dbProperties"): "--skip-db-properties",
-	v1alpha1.SkipOption("ctidSplit"):    "--skip-split-by-ctid",
+	v1alpha1.SkipOption("largeObjects"):      "--skip-large-objects",
+	v1alpha1.SkipOption("extensions"):        "--skip-extensions",
+	v1alpha1.SkipOption("extensionComments"): "--skip-ext-comments",
+	v1alpha1.SkipOption("collations"):        "--skip-collations",
+	v1alpha1.SkipOption("vacuum"):            "--skip-vacuum",
+	v1alpha1.SkipOption("analyze"):           "--skip-analyze",
+	v1alpha1.SkipOption("dbProperties"):      "--skip-db-properties",
+	v1alpha1.SkipOption("ctidSplit"):         "--skip-split-by-ctid",
 }
 
 // CloneArgs renders the argv for `pgcopydb clone` from a Migration spec.
@@ -86,6 +87,9 @@ func CloneArgs(spec *v1alpha1.MigrationSpec, restart, resume, notConsistent bool
 	}
 	if c.SplitMaxParts > 0 {
 		args = append(args, "--split-max-parts", itoa(c.SplitMaxParts))
+	}
+	if c.EstimateTableSizes {
+		args = append(args, "--estimate-table-sizes")
 	}
 	if c.DropIfExists {
 		args = append(args, "--drop-if-exists")
@@ -215,6 +219,10 @@ func FollowArgs(spec *v1alpha1.MigrationSpec, namespace, name string) []string {
 	}
 	if f.Publication != "" {
 		args = append(args, "--publication", f.Publication)
+	}
+	// CEL admission restricts this to plugin wal2json, so no plugin check here.
+	if f.Wal2jsonNumericAsString {
+		args = append(args, "--wal2json-numeric-as-string")
 	}
 	if f.ReplayNoOpUpdates {
 		args = append(args, "--replay-no-op-updates")

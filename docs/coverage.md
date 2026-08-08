@@ -1,6 +1,6 @@
 # pgcopydb option coverage
 
-Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb-cli.md](research/pgcopydb-cli.md), sections 2.1 and 2.2, pgcopydb 0.18) mapped to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion. Gaps marked "queued" are tracked as M4 tasks in [MILESTONES.md](../MILESTONES.md).
+Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb-cli.md](research/pgcopydb-cli.md), sections 2.1 and 2.2, pgcopydb 0.18) mapped to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion. The three gaps the audit found are closed; the ledger lives in [MILESTONES.md](../MILESTONES.md).
 
 ## `pgcopydb clone`
 
@@ -15,7 +15,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb
 | `--large-objects-jobs` | `spec.clone.largeObjectsJobs` | |
 | `--split-tables-larger-than` | `spec.clone.splitTablesLargerThan` | Quantity, rendered to plain bytes. |
 | `--split-max-parts` | `spec.clone.splitMaxParts` | |
-| `--estimate-table-sizes` | not exposed (gap, queued) | Tuning knob for huge tables; `skip: analyze` is already exposed but only matters with it. |
+| `--estimate-table-sizes` | `spec.clone.estimateTableSizes` | Runs `vacuumdb --analyze-only` on the source to refresh the estimates, unless `skip: analyze` is also set. |
 | `--drop-if-exists` | `spec.clone.dropIfExists` | |
 | `--roles` | `spec.clone.roles` | |
 | `--no-role-passwords` | `spec.clone.noRolePasswords` | |
@@ -25,7 +25,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb
 | `--no-tablespaces` | `spec.clone.noTablespaces` | |
 | `--skip-large-objects` | `spec.clone.skip: largeObjects` | |
 | `--skip-extensions` | `spec.clone.skip: extensions` | |
-| `--skip-ext-comments` | not exposed (gap, queued) | Fits the skip list; standalone use is rare but real. |
+| `--skip-ext-comments` | `spec.clone.skip: extensionComments` | Already implied by `skip: extensions`; listing it alone installs extensions without their COMMENTs. |
 | `--skip-collations` | `spec.clone.skip: collations` | |
 | `--skip-vacuum` | `spec.clone.skip: vacuum` | |
 | `--skip-analyze` | `spec.clone.skip: analyze` | |
@@ -41,7 +41,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (per [docs/research/pgcopydb
 | `--follow` | `spec.follow.enabled` | |
 | `--plugin` | `spec.follow.plugin` | |
 | `--publication` | `spec.follow.publication` | Empty lets pgcopydb create and drop its own. |
-| `--wal2json-numeric-as-string` | not exposed (gap, queued) | wal2json is selectable via `follow.plugin` but its only tuning knob is not. |
+| `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`; other plugins would silently ignore it. |
 | `--replay-no-op-updates` | `spec.follow.replayNoOpUpdates` | |
 | `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name; a set name is pattern-restricted to PostgreSQL's slot charset. |
 | `--create-slot` | not exposed (deliberate) | `clone --follow` creates the slot during setup; nothing to configure. |

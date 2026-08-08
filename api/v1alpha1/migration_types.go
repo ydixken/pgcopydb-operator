@@ -83,8 +83,10 @@ type TLSSecretRefs struct {
 }
 
 // SkipOption names a section of the base copy to skip. Maps to pgcopydb
-// --skip-* flags; CDC (follow) is unaffected by these.
-// +kubebuilder:validation:Enum=largeObjects;extensions;collations;vacuum;analyze;dbProperties;ctidSplit
+// --skip-* flags; CDC (follow) is unaffected by these. extensionComments
+// (--skip-ext-comments) is already implied by extensions; list it alone to
+// install extensions but drop their COMMENT statements.
+// +kubebuilder:validation:Enum=largeObjects;extensions;extensionComments;collations;vacuum;analyze;dbProperties;ctidSplit
 type SkipOption string
 
 // CloneOptions maps the pgcopydb clone surface. All fields are optional; zero
@@ -119,6 +121,14 @@ type CloneOptions struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	SplitMaxParts int32 `json:"splitMaxParts,omitempty"`
+
+	// estimateTableSizes bases split decisions on pg_class page-count
+	// estimates instead of exact size queries (--estimate-table-sizes). To
+	// refresh those estimates pgcopydb first runs vacuumdb --analyze-only
+	// (with tableJobs workers) on the SOURCE; add "analyze" to skip to leave
+	// the source untouched and trust its existing statistics.
+	// +optional
+	EstimateTableSizes bool `json:"estimateTableSizes,omitempty"`
 
 	// dropIfExists issues pg_restore --clean --if-exists on the target.
 	// +optional
@@ -222,8 +232,14 @@ type RunnerSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
+// PluginWal2json is the one decoding plugin the operator special-cases: it
+// ships outside PostgreSQL, so it carries both the preflight's cannot-verify
+// note and the numeric-as-string knob.
+const PluginWal2json = "wal2json"
+
 // FollowOptions enables live migration: clone under a replication slot, then
 // stream and apply changes until cutover (pgcopydb clone --follow).
+// +kubebuilder:validation:XValidation:rule="!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString) || (has(self.plugin) && self.plugin == 'wal2json')",message="wal2jsonNumericAsString configures the wal2json plugin and does nothing under any other; set plugin: wal2json or drop the field"
 type FollowOptions struct {
 	// enabled turns the migration into a live one.
 	// +optional
@@ -249,6 +265,13 @@ type FollowOptions struct {
 	// pgcopydb create and drop its own.
 	// +optional
 	Publication string `json:"publication,omitempty"`
+
+	// wal2jsonNumericAsString makes wal2json emit numeric values as JSON
+	// strings (--wal2json-numeric-as-string), preserving precision a JSON
+	// number would lose. Only meaningful with plugin wal2json; admission
+	// rejects it under any other plugin.
+	// +optional
+	Wal2jsonNumericAsString bool `json:"wal2jsonNumericAsString,omitempty"`
 
 	// replayNoOpUpdates replays UPDATEs that change no columns
 	// (--replay-no-op-updates), needed when target triggers must fire.

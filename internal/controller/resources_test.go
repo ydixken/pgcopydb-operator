@@ -259,7 +259,7 @@ func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
 		t.Fatalf("allowlist env must be absent without spec entries, got %q", got)
 	}
 
-	m.Spec.Follow.Plugin = "wal2json"
+	m.Spec.Follow.Plugin = v1alpha1.PluginWal2json
 	m.Spec.Follow.AllowMissingReplicaIdentity = []string{"public.audit_log", "stats.rollup"}
 	job, err = buildPreflightJob(m, "img")
 	if err != nil {

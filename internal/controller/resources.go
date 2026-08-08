@@ -256,7 +256,7 @@ echo "preflight: note: wal2json presence on the source cannot be verified from S
 // values are never shell-evaluated, so table names need no quoting rules.
 func buildPreflightJob(m *v1alpha1.Migration, runnerImage string) (*batchv1.Job, error) {
 	script := preflightScript
-	if f := m.Spec.Follow; f != nil && f.Plugin == "wal2json" {
+	if f := m.Spec.Follow; f != nil && f.Plugin == v1alpha1.PluginWal2json {
 		script += preflightWal2jsonNote
 	}
 	job, err := scriptJob(m, runnerImage, preflightJobName(m), script+preflightScriptFooter, 1)
