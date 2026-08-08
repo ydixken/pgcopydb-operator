@@ -36,6 +36,10 @@ import (
 // endpos.
 const ZeroLSN = "0/0"
 
+// EndposSet reports whether lsn names a real cutover endpos: non-empty and
+// not the null LSN.
+func EndposSet(lsn string) bool { return lsn != "" && lsn != ZeroLSN }
+
 // Client reads and drives the sentinel of one running migration pod.
 type Client struct {
 	exec *podexec.Exec
@@ -135,7 +139,7 @@ func (s *State) ToStatus(slotName string) *v1alpha1.ReplicationStatus {
 		WriteLSN:  s.WriteLSN,
 		ReplayLSN: s.ReplayLSN,
 	}
-	if s.Endpos != "" && s.Endpos != ZeroLSN {
+	if EndposSet(s.Endpos) {
 		rs.Endpos = s.Endpos
 	}
 	if lag := s.Lag(); lag >= 0 {

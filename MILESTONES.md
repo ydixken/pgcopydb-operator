@@ -98,9 +98,9 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 ### W-A: Ponytail refactor (wave 1)
 
-- [ ] Collapse the four ensure-child-Job state machines (follow.go ensureCleanup/ensurePreflight/ensureVerify, verification.go ensureVerification) into one ensureJob helper with a single return contract.
-- [ ] One r.fail() for the five terminal-failure boilerplate sites; adopt the createErr==nil event guard everywhere.
-- [ ] Extract preflight-gate and observe-running blocks from the 123-line reconcile(); delete dead code (progress.New, SentinelPort, unreachable budget branch unless proven reachable); shared dir constant for FiltersPath/mount; sentinel.EndposSet(); unify duplicated test helpers. Behavior-identical, coverage must not drop.
+- [x] (done 2026-08-08) Collapse the four ensure-child-Job state machines (follow.go ensureCleanup/ensurePreflight/ensureVerify, verification.go ensureVerification) into one ensureJob helper with a single return contract: all four now call ensureJob(ctx, m, name, build) returning (job, created, err); callers keep their own jobFinished reading and event nuances.
+- [x] (done 2026-08-08) One r.fail() for the five terminal-failure boilerplate sites; adopt the createErr==nil event guard everywhere: r.fail(m, reason, action, msg) covers phase+Failed condition+warning event at all five sites, and every Job-create event now sits behind the created guard (ensureVerify still emits none).
+- [x] (done 2026-08-08) Extract preflight-gate and observe-running blocks from reconcile() (now preflightGate and observeRunningJob); deleted progress.New and SentinelPort; the startAttempt budget branch is REACHABLE (final attempt's Job vanishes, or a suspend cycle clears JobName at the budget) so it stays with a new envtest proving it; filters mount derives from path.Dir(pgcopydb.FiltersPath); sentinel.EndposSet() replaces the duplicated predicate; test helpers unified on fetchJob/finishJob/removeMigration plus one reconcileAndGet(ctx, r, name) and one drainEvents. Net -72 lines; coverage rose (controller 80.8->83.6%, progress 22.2->28.6%, sentinel 39.3->40.4%), no package dropped.
 
 ### W-B: Unit tests to >=75% total (wave 2, after W-A)
 

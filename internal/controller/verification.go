@@ -22,11 +22,8 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -120,27 +117,20 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1alpha
 
 	var mismatched []string
 	for _, check := range enabledChecks(m) {
-		job := &batchv1.Job{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: compareJobName(m, check)}, job)
-		if apierrors.IsNotFound(err) {
-			job, err = buildCompareJob(m, r.RunnerImage, check)
-			if err != nil {
-				return false, err
-			}
-			if err := controllerutil.SetControllerReference(m, job, r.Scheme); err != nil {
-				return false, err
-			}
-			if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-				return false, err
-			}
-			r.setCondition(m, v1alpha1.ConditionVerified, metav1.ConditionUnknown, "VerificationRunning",
-				fmt.Sprintf("pgcopydb compare %s running", check))
-			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "VerificationStarted", "Verify",
-				"running pgcopydb compare %s", check)
-			return false, nil
-		}
+		job, created, err := r.ensureJob(ctx, m, compareJobName(m, check), func() (*batchv1.Job, error) {
+			return buildCompareJob(m, r.RunnerImage, check)
+		})
 		if err != nil {
 			return false, err
+		}
+		if job == nil {
+			r.setCondition(m, v1alpha1.ConditionVerified, metav1.ConditionUnknown, "VerificationRunning",
+				fmt.Sprintf("pgcopydb compare %s running", check))
+			if created {
+				r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "VerificationStarted", "Verify",
+					"running pgcopydb compare %s", check)
+			}
+			return false, nil
 		}
 		done, ok := jobFinished(job)
 		if !done {

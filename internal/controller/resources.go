@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -360,7 +361,7 @@ func jobSkeleton(m *v1alpha1.Migration, runnerImage, name string, args []string,
 			},
 		})
 		mounts = append(mounts, corev1.VolumeMount{
-			Name: "filters", MountPath: "/etc/pgcopydb/conf", ReadOnly: true,
+			Name: "filters", MountPath: path.Dir(pgcopydb.FiltersPath), ReadOnly: true,
 		})
 	}
 
