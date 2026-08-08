@@ -25,11 +25,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
-func inlineConn() *v1alpha1.PostgresConnection {
-	return &v1alpha1.PostgresConnection{
+func inlineConn() *v1beta1.PostgresConnection {
+	return &v1beta1.PostgresConnection{
 		Host:     "db.example.com",
 		Database: "shop",
 		Username: "migrator",
@@ -70,7 +70,7 @@ func TestComposeURI_TLSPaths(t *testing.T) {
 	ref := func(key string) *corev1.SecretKeySelector {
 		return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "certs"}, Key: key}
 	}
-	c.TLS = &v1alpha1.TLSSecretRefs{RootCA: ref("ca.crt"), Cert: ref("tls.crt"), Key: ref("tls.key")}
+	c.TLS = &v1beta1.TLSSecretRefs{RootCA: ref("ca.crt"), Cert: ref("tls.crt"), Key: ref("tls.key")}
 	uri, err := ComposeURI(Source, c)
 	if err != nil {
 		t.Fatal(err)
@@ -88,13 +88,13 @@ func TestComposeURI_TLSPaths(t *testing.T) {
 }
 
 func TestComposeURI_RequiresHostAndUser(t *testing.T) {
-	if _, err := ComposeURI(Source, &v1alpha1.PostgresConnection{Host: "h"}); err == nil {
+	if _, err := ComposeURI(Source, &v1beta1.PostgresConnection{Host: "h"}); err == nil {
 		t.Fatal("want error without username")
 	}
 }
 
 func TestMaterialize_URISecretRef(t *testing.T) {
-	c := &v1alpha1.PostgresConnection{
+	c := &v1beta1.PostgresConnection{
 		URISecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: "dsn"},
 			Key:                  "uri",
@@ -140,7 +140,7 @@ func TestMaterialize_TLSVolume(t *testing.T) {
 	ref := func(name, key string) *corev1.SecretKeySelector {
 		return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
 	}
-	c.TLS = &v1alpha1.TLSSecretRefs{
+	c.TLS = &v1beta1.TLSSecretRefs{
 		RootCA: ref("server-ca", "bundle.pem"),
 		Cert:   ref("client-cert", "cert.pem"),
 		Key:    ref("client-cert", "key.pem"),
@@ -185,7 +185,7 @@ func TestMaterialize_PartialTLS(t *testing.T) {
 	// Server-auth only (the common managed-PG case): just a CA, no client pair.
 	c := inlineConn()
 	c.PasswordSecretRef = nil
-	c.TLS = &v1alpha1.TLSSecretRefs{
+	c.TLS = &v1beta1.TLSSecretRefs{
 		RootCA: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "ca"}, Key: "bundle"},
 	}
 	m, err := Materialize(Source, c)
@@ -199,7 +199,7 @@ func TestMaterialize_PartialTLS(t *testing.T) {
 }
 
 func TestMaterialize_RequiresHostAndUser(t *testing.T) {
-	if _, err := Materialize(Source, &v1alpha1.PostgresConnection{Database: "d"}); err == nil {
+	if _, err := Materialize(Source, &v1beta1.PostgresConnection{Database: "d"}); err == nil {
 		t.Fatal("want error for inline connection without host/username")
 	}
 }

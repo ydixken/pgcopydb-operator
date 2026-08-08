@@ -1,7 +1,7 @@
 # Tuned clone: more parallelism, same-table splitting for big tables,
 # schema filtering, and a larger work volume. Filters render to pgcopydb's
 # --filters INI; table names follow PostgreSQL quoting, ~/regex/ works.
-apiVersion: pgcopydb-operator.io/v1alpha1
+apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
   name: warehouse

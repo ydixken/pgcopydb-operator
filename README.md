@@ -24,7 +24,7 @@ The [quickstart](docs/quickstart.md) walks through the first clone; [live migrat
 ## Structure
 
 ```text
-api/v1alpha1/              # Migration CRD types (CEL validation, no webhooks)
+api/                       # Migration CRD types, v1beta1 storage + deprecated v1alpha1 (CEL validation, no webhooks)
 charts/pgcopydb-operator/  # Helm chart (published as OCI to ghcr.io)
 cmd/, internal/            # manager and controller (kubebuilder go/v4)
 config/                    # kubebuilder-generated kustomize tree

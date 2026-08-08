@@ -22,23 +22,23 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 func TestCloneArgs_Minimal(t *testing.T) {
-	got := CloneArgs(&v1alpha1.MigrationSpec{}, false, false, false)
+	got := CloneArgs(&v1beta1.MigrationSpec{}, false, false, false)
 	assertArgs(t, got, "clone --dir /work/pgcopydb")
 }
 
 func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
-	got := CloneArgs(&v1alpha1.MigrationSpec{}, true, false, false)
+	got := CloneArgs(&v1beta1.MigrationSpec{}, true, false, false)
 	assertArgs(t, got, "clone --dir /work/pgcopydb --restart")
 }
 
 func TestCloneArgs_Full(t *testing.T) {
 	split := resource.MustParse("1Gi")
-	spec := &v1alpha1.MigrationSpec{
-		Clone: v1alpha1.CloneOptions{
+	spec := &v1beta1.MigrationSpec{
+		Clone: v1beta1.CloneOptions{
 			TableJobs:             8,
 			IndexJobs:             4,
 			RestoreJobs:           2,
@@ -55,10 +55,10 @@ func TestCloneArgs_Full(t *testing.T) {
 			NoTablespaces:         true,
 			UseCopyBinary:         true,
 			FailFast:              true,
-			Skip: []v1alpha1.SkipOption{
+			Skip: []v1beta1.SkipOption{
 				"vacuum", "largeObjects", "analyze", "extensionComments",
 			},
-			Filters: &v1alpha1.Filters{ExcludeSchemas: []string{"audit"}},
+			Filters: &v1beta1.Filters{ExcludeSchemas: []string{"audit"}},
 		},
 	}
 	got := CloneArgs(spec, false, true, true)
@@ -75,7 +75,7 @@ func TestCloneArgs_Full(t *testing.T) {
 }
 
 func TestCloneArgs_EmptyFiltersOmitsFlag(t *testing.T) {
-	spec := &v1alpha1.MigrationSpec{Clone: v1alpha1.CloneOptions{Filters: &v1alpha1.Filters{}}}
+	spec := &v1beta1.MigrationSpec{Clone: v1beta1.CloneOptions{Filters: &v1beta1.Filters{}}}
 	for _, a := range CloneArgs(spec, false, false, false) {
 		if a == "--filters" {
 			t.Fatalf("empty filters must not add --filters: %v", CloneArgs(spec, false, false, false))
@@ -85,9 +85,9 @@ func TestCloneArgs_EmptyFiltersOmitsFlag(t *testing.T) {
 
 func TestCloneArgs_NoCredentialsInArgv(t *testing.T) {
 	// The renderer must never emit source/target URIs; they go via env only.
-	spec := &v1alpha1.MigrationSpec{
-		Source: v1alpha1.PostgresConnection{Host: "secret-host", Username: "u"},
-		Target: v1alpha1.PostgresConnection{Host: "t", Username: "u"},
+	spec := &v1beta1.MigrationSpec{
+		Source: v1beta1.PostgresConnection{Host: "secret-host", Username: "u"},
+		Target: v1beta1.PostgresConnection{Host: "t", Username: "u"},
 	}
 	for _, a := range CloneArgs(spec, false, false, false) {
 		if strings.Contains(a, "secret-host") || strings.Contains(a, "--source") || strings.Contains(a, "--target") {
@@ -97,7 +97,7 @@ func TestCloneArgs_NoCredentialsInArgv(t *testing.T) {
 }
 
 func TestRenderFilters_Order(t *testing.T) {
-	f := &v1alpha1.Filters{
+	f := &v1beta1.Filters{
 		IncludeOnlyTables: []string{"public.orders", "public.~/^audit_/"},
 		ExcludeIndexes:    []string{"public.orders_idx"},
 	}
@@ -116,7 +116,7 @@ func TestRenderFilters_Empty(t *testing.T) {
 	if RenderFilters(nil) != "" {
 		t.Fatal("nil filters must render empty")
 	}
-	if RenderFilters(&v1alpha1.Filters{}) != "" {
+	if RenderFilters(&v1beta1.Filters{}) != "" {
 		t.Fatal("empty filters must render empty")
 	}
 }

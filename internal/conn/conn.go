@@ -32,7 +32,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // Side names one end of the migration; it prefixes env vars and mount paths.
@@ -82,7 +82,7 @@ type Materialized struct {
 }
 
 // Materialize renders one side of the migration.
-func Materialize(s Side, c *v1alpha1.PostgresConnection) (*Materialized, error) {
+func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 	if c.URISecretRef != nil {
 		return &Materialized{
 			Env: []corev1.EnvVar{{
@@ -136,7 +136,7 @@ func Materialize(s Side, c *v1alpha1.PostgresConnection) (*Materialized, error) 
 
 // ComposeURI builds a password-free libpq URI for one side. libpq resolves the
 // password from the passfile the runner prelude assembles (PGPASSFILE env).
-func ComposeURI(s Side, c *v1alpha1.PostgresConnection) (string, error) {
+func ComposeURI(s Side, c *v1beta1.PostgresConnection) (string, error) {
 	if c.Host == "" || c.Username == "" {
 		return "", fmt.Errorf("%s: host and username are required without uriSecretRef", s)
 	}
@@ -172,7 +172,7 @@ func ComposeURI(s Side, c *v1alpha1.PostgresConnection) (string, error) {
 
 // tlsVolume projects the referenced TLS secret keys under a per-side path.
 // DefaultMode 0400: libpq refuses group/world-readable client keys.
-func tlsVolume(s Side, tls *v1alpha1.TLSSecretRefs) (corev1.Volume, corev1.VolumeMount) {
+func tlsVolume(s Side, tls *v1beta1.TLSSecretRefs) (corev1.Volume, corev1.VolumeMount) {
 	mode := int32(0o400)
 	var sources []corev1.VolumeProjection
 	add := func(sel *corev1.SecretKeySelector, path string) {

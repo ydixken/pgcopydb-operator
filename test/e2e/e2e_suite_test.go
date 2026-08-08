@@ -56,6 +56,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 const (
@@ -253,6 +254,7 @@ var _ = BeforeSuite(func() {
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
+	Expect(v1beta1.AddToScheme(scheme)).To(Succeed())
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -263,12 +265,22 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "migrations.pgcopydb-operator.io"}, crd)).
 		To(Succeed(), "CRD migrations.pgcopydb-operator.io not found or cluster unreachable;"+
 			" install the CRD first (chart with crds.install=true, or config/crd), the suite will not create it")
+	// The suite talks v1beta1, so that exact version must be served; index 0
+	// is not it once several versions coexist, look the entry up by name.
+	versions, _, _ := unstructured.NestedSlice(crd.Object, "spec", "versions")
+	var served map[string]any
+	for _, v := range versions {
+		if m, ok := v.(map[string]any); ok && m["name"] == v1beta1.SchemeGroupVersion.Version {
+			served = m
+			break
+		}
+	}
+	Expect(served).NotTo(BeNil(),
+		"CRD migrations.pgcopydb-operator.io does not serve "+v1beta1.SchemeGroupVersion.Version+
+			": upgrade the CRD (chart >= v0.2.0) before running the suite")
 	// A pre-follow CRD would silently prune spec.follow at admission and the
 	// live scenarios would run as plain clones; fail fast instead.
-	versions, _, _ := unstructured.NestedSlice(crd.Object, "spec", "versions")
-	Expect(versions).NotTo(BeEmpty(), "CRD has no versions")
-	v0, _ := versions[0].(map[string]any)
-	_, hasFollow, _ := unstructured.NestedMap(v0, "schema", "openAPIV3Schema",
+	_, hasFollow, _ := unstructured.NestedMap(served, "schema", "openAPIV3Schema",
 		"properties", "spec", "properties", "follow")
 	Expect(hasFollow).To(BeTrue(),
 		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
@@ -318,11 +330,11 @@ var _ = BeforeSuite(func() {
 
 	By("deleting leftover Migrations from previous runs")
 	for _, ns := range []string{nsE2E, nsX} {
-		Expect(k8sClient.DeleteAllOf(ctx, &v1alpha1.Migration{}, client.InNamespace(ns))).To(Succeed())
+		Expect(k8sClient.DeleteAllOf(ctx, &v1beta1.Migration{}, client.InNamespace(ns))).To(Succeed())
 	}
 	Eventually(func(g Gomega) {
 		for _, ns := range []string{nsE2E, nsX} {
-			list := &v1alpha1.MigrationList{}
+			list := &v1beta1.MigrationList{}
 			g.Expect(k8sClient.List(ctx, list, client.InNamespace(ns))).To(Succeed())
 			g.Expect(list.Items).To(BeEmpty(), "Migrations still terminating in %s", ns)
 		}
@@ -832,14 +844,14 @@ func psqlDB(pod, db, sql string) string {
 // waitFailed waits until the Migration in nsE2E is terminally Failed with the
 // given Failed-condition reason and returns it. Counterpart to waitPhase,
 // which treats Failed as a hard stop.
-func waitFailed(name, reason string) *v1alpha1.Migration {
+func waitFailed(name, reason string) *v1beta1.Migration {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{}
+	m := &v1beta1.Migration{}
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-		g.Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseFailed),
+		g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed),
 			"migration %s at phase %q, attempts %d", name, m.Status.Phase, m.Status.Attempts)
-		c := apimeta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionFailed)
+		c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		g.Expect(c).NotTo(BeNil(), "Failed condition missing on %s", name)
 		g.Expect(c.Reason).To(Equal(reason), "Failed reason is %q, message: %s", c.Reason, c.Message)
 	}, migrationTimeout, 2*time.Second).Should(Succeed())
@@ -868,12 +880,12 @@ func deletePod(selector client.MatchingLabels) {
 // first), so the next scenario starts without leftovers.
 func deleteMigration(name string) {
 	GinkgoHelper()
-	m := &v1alpha1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
+	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
 	if err := k8sClient.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
 		Expect(err).NotTo(HaveOccurred(), "failed to delete Migration %s", name)
 	}
 	Eventually(func(g Gomega) {
-		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1alpha1.Migration{})
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1beta1.Migration{})
 		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Migration %s still terminating", name)
 	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 }

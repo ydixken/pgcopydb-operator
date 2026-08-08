@@ -21,21 +21,21 @@ import (
 	"strings"
 	"testing"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 func TestFollowArgs_Disabled(t *testing.T) {
-	if got := FollowArgs(&v1alpha1.MigrationSpec{}, "ns", "m"); got != nil {
+	if got := FollowArgs(&v1beta1.MigrationSpec{}, "ns", "m"); got != nil {
 		t.Fatalf("nil expected without follow, got %v", got)
 	}
-	spec := &v1alpha1.MigrationSpec{Follow: &v1alpha1.FollowOptions{Enabled: false}}
+	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{Enabled: false}}
 	if got := FollowArgs(spec, "ns", "m"); got != nil {
 		t.Fatalf("nil expected with follow disabled, got %v", got)
 	}
 }
 
 func TestFollowArgs_Defaults(t *testing.T) {
-	spec := &v1alpha1.MigrationSpec{Follow: &v1alpha1.FollowOptions{Enabled: true, Plugin: "pgoutput"}}
+	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}}
 	got := strings.Join(FollowArgs(spec, "shop", "to-cnpg"), " ")
 	slot := SlotName("shop", "to-cnpg")
 	want := "--follow --slot-name " + slot + " --origin " + slot + " --plugin pgoutput"
@@ -45,7 +45,7 @@ func TestFollowArgs_Defaults(t *testing.T) {
 }
 
 func TestFollowArgs_Full(t *testing.T) {
-	spec := &v1alpha1.MigrationSpec{Follow: &v1alpha1.FollowOptions{
+	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{
 		Enabled: true, Plugin: "wal2json", SlotName: "my_slot",
 		Publication: "my_pub", Wal2jsonNumericAsString: true, ReplayNoOpUpdates: true,
 	}}

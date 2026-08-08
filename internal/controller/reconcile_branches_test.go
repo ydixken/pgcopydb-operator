@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
@@ -46,8 +46,8 @@ import (
 var _ = Describe("Migration Controller resilience", func() {
 	ctx := context.Background()
 
-	getM := func(name string) *v1alpha1.Migration {
-		m := &v1alpha1.Migration{}
+	getM := func(name string) *v1beta1.Migration {
+		m := &v1beta1.Migration{}
 		ExpectWithOffset(1, k8sClient.Get(ctx,
 			types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
 		return m
@@ -82,7 +82,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		args := strings.Join(fetchJob(ctx, name+"-run-2").Spec.Template.Spec.Containers[0].Args, " ")
 		Expect(args).To(ContainSubstring("--resume"))
 		Expect(args).NotTo(ContainSubstring("--restart"))
@@ -93,7 +93,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		m := validMigration(name)
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
 		r := newReconciler()
@@ -109,7 +109,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r2 := newReconciler()
 		r2.Sentinel = fake
 		m = reconcileAndGet(ctx, r2, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseSuspended))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseSuspended))
 		Expect(m.Status.JobName).To(BeEmpty())
 		evts := drainEvents(r2.Recorder.(*events.FakeRecorder))
 		Expect(evts).To(ContainElement(ContainSubstring("Suspended")))
@@ -132,7 +132,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
 
 		m := reconcileAndGet(ctx, newReconciler(), name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseSuspended))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseSuspended))
 		Expect(m.Status.JobName).To(BeEmpty())
 	})
 
@@ -141,9 +141,9 @@ var _ = Describe("Migration Controller resilience", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		m := validMigration(name)
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
-		m.Spec.Cutover = v1alpha1.CutoverSpec{Mode: v1alpha1.CutoverAutomatic}
-		m.Spec.Verification = &v1alpha1.VerificationOptions{Schema: true}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
 		r := newReconciler()
@@ -161,7 +161,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		reconcileAndGet(ctx, r, name) // still running: nothing changes
 		finishJob(ctx, name+"-verify", true)
 		m = reconcileAndGet(ctx, r, name) // cleanup Job created
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCutoverComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
 		reconcileAndGet(ctx, r, name) // cleanup still running
 
 		// Cleanup exhausts its retries: the Migration must not block forever
@@ -172,14 +172,14 @@ var _ = Describe("Migration Controller resilience", func() {
 		m = reconcileAndGet(ctx, r2, name)
 		Expect(drainEvents(r2.Recorder.(*events.FakeRecorder))).To(ContainElement(SatisfyAll(
 			ContainSubstring("CleanupFailed"), ContainSubstring("manual removal"))))
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseVerifying))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
 
 		reconcileAndGet(ctx, r2, name) // compare still running
 		finishJob(ctx, name+"-compare-schema", true)
 		m = reconcileAndGet(ctx, r2, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCompleted))
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionComplete)).To(BeTrue())
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionFailed)).To(BeFalse())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
 	})
 
 	It("deletes a clone-only Migration without running any cleanup Job", func() {
@@ -205,7 +205,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		m.Finalizers = nil
 		Expect(k8sClient.Update(ctx, m)).To(Succeed())
 		Expect(errors.IsNotFound(k8sClient.Get(ctx,
-			types.NamespacedName{Name: name, Namespace: testNS}, &v1alpha1.Migration{}))).To(BeTrue())
+			types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{}))).To(BeTrue())
 	})
 
 	It("honors a custom maxCatchupLag instead of the built-in default", func() {
@@ -214,7 +214,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		fake := &fakeSentinel{}
 		m := validMigration(name)
 		lag := resource.MustParse("1Ki")
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin, MaxCatchupLag: &lag}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin, MaxCatchupLag: &lag}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
 		r := newReconciler()
@@ -228,14 +228,14 @@ var _ = Describe("Migration Controller resilience", func() {
 		const head = "0/4000"
 		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: head, ReplayLSN: "0/2000", SourceHead: head, Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseStreaming))
-		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1alpha1.ConditionCaughtUp)).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 
 		// 256 bytes behind: under the custom threshold.
 		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: head, ReplayLSN: "0/3F00", SourceHead: head, Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
-		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1alpha1.ConditionCaughtUp)).To(BeTrue())
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCutoverPending))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 	})
 
 	It("tolerates sentinel read errors and retries a failed endpos set", func() {
@@ -243,7 +243,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		m := validMigration(name)
-		m.Spec.Follow = &v1alpha1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
 		r := newReconciler()
@@ -256,7 +256,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		// reconcile error: the pass completes and status stays put.
 		fake.readErr = stderrors.New("exec transport down")
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCloning))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(m.Status.Replication).To(BeNil())
 		fake.readErr = nil
 
@@ -271,14 +271,14 @@ var _ = Describe("Migration Controller resilience", func() {
 		r2.Sentinel = fake
 		m = reconcileAndGet(ctx, r2, name)
 		Expect(fake.endposSet).To(BeFalse())
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseStreaming))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 		Expect(drainEvents(r2.Recorder.(*events.FakeRecorder))).To(ContainElement(SatisfyAll(
 			ContainSubstring("CutoverRetry"), ContainSubstring("pod restarting"))))
 
 		fake.setErr = nil
 		m = reconcileAndGet(ctx, r2, name)
 		Expect(fake.endposSet).To(BeTrue())
-		Expect(m.Status.Phase).To(Equal(v1alpha1.PhaseCuttingOver))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 	})
 
 	It("refuses to adopt a work PVC it does not own", func() {

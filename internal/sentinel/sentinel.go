@@ -27,7 +27,7 @@ import (
 	"strconv"
 	"strings"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
@@ -130,11 +130,11 @@ func (c *Client) SetEndposCurrent(ctx context.Context, namespace, jobName string
 }
 
 // ToStatus converts a sample into the CR's replication status block.
-func (s *State) ToStatus(slotName string) *v1alpha1.ReplicationStatus {
+func (s *State) ToStatus(slotName string) *v1beta1.ReplicationStatus {
 	if s == nil {
 		return nil
 	}
-	rs := &v1alpha1.ReplicationStatus{
+	rs := &v1beta1.ReplicationStatus{
 		SlotName:  slotName,
 		WriteLSN:  s.WriteLSN,
 		ReplayLSN: s.ReplayLSN,

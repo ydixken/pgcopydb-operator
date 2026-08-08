@@ -2,7 +2,7 @@
 
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
-**In development.** One-shot clone and live migration with follow and controlled cutover are functional and e2e-tested; verification shipped with envtest coverage. The API is v1alpha1 and may still change.
+**In development.** One-shot clone and live migration with follow and controlled cutover are functional and e2e-tested; verification shipped with envtest coverage. The API is v1beta1 (v1alpha1 stays served but is deprecated) and may still change.
 
 Where to go:
 

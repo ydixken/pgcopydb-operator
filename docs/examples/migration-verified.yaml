@@ -14,7 +14,7 @@
 # state is cleaned up. Keep applications off the target until Verified
 # reports; writes landing on either side during the compare show up as
 # mismatches.
-apiVersion: pgcopydb-operator.io/v1alpha1
+apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
   name: verified-clone

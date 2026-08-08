@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // Label names shared by every metric.
@@ -83,7 +83,7 @@ func init() {
 }
 
 // Record refreshes every gauge for one Migration from its status.
-func Record(m *v1alpha1.Migration) {
+func Record(m *v1beta1.Migration) {
 	// Drop the previous phase series first so exactly one phase is set.
 	phase.DeletePartialMatch(prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name})
 	if m.Status.Phase != "" {
@@ -102,7 +102,7 @@ func Record(m *v1alpha1.Migration) {
 	// Verified maps the condition: True is 1, False is 0, and no series while
 	// there is no result yet (a 0 before the compare ran would read as a
 	// mismatch on a dashboard).
-	switch cond := meta.FindStatusCondition(m.Status.Conditions, v1alpha1.ConditionVerified); {
+	switch cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified); {
 	case cond == nil || cond.Status == metav1.ConditionUnknown:
 		verified.DeletePartialMatch(prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name})
 	case cond.Status == metav1.ConditionTrue:
