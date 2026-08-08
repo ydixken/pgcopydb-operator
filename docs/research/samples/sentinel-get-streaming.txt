@@ -1,0 +1,6 @@
+startpos        0/2B33CDC0
+endpos          0/0
+apply           enabled
+write_lsn       0/2B33CDF8
+flush_lsn       0/2B33CDF8
+replay_lsn      0/2B33CDF8
