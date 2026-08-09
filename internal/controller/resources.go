@@ -108,7 +108,7 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	// Attempt 1 restarts (wipes) the work dir: any state found there is
 	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
 	// failed attempt is gone with its process, so --resume needs
-	// --not-consistent (see docs/research/pgcopydb-cli.md).
+	// --not-consistent (see the pgcopydb resume semantics upstream).
 	resume := attempt > 1
 	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
@@ -178,8 +178,8 @@ ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_l
 
 // preflightScript checks every follow prerequisite the operator can probe via
 // psql before the first worker runs; each failed check prints one line naming
-// the exact GRANT or setting that fixes it. All four live loss/failure modes
-// of 2026-08-07 (see MILESTONES.md) trip one of these checks. The
+// the exact GRANT or setting that fixes it. Every loss and failure mode
+// observed in live testing trips one of these checks. The
 // session_replication_role probe is the silent-loss gate: without that SET,
 // pgcopydb 0.18 applies nothing while reporting success (see
 // docs/reference/prerequisites.md).

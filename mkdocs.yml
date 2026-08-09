@@ -6,15 +6,11 @@ site_name: pgcopydb-operator
 repo_url: https://github.com/ydixken/pgcopydb-operator
 docs_dir: docs
 
-# research/ and superpowers/ are working material, not user docs; the
-# approved design spec is the one page that stays in. Gitignore-style
-# patterns, so re-including a file means re-including its parents first.
+# research/ holds upstream issue drafts and superpowers/ local-only notes;
+# neither is user documentation.
 exclude_docs: |
   research/
-  superpowers/*
-  !superpowers/specs
-  superpowers/specs/*
-  !superpowers/specs/2026-08-07-operator-design.md
+  superpowers/
 
 theme:
   name: material
@@ -53,5 +49,4 @@ nav:
       - Conditions and reasons: reference/conditions.md
       - pgcopydb option coverage: reference/coverage.md
   - Design:
-      - Architecture: superpowers/specs/2026-08-07-operator-design.md
       - Competitive comparison: design/comparison.md

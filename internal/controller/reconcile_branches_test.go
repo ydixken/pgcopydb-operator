@@ -63,8 +63,8 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 
 		// status.progress stays nil: the reconciler no longer polls progress
-		// (the exec is unsafe on pgcopydb 0.18, see the MILESTONES decision
-		// log 2026-08-09); the field is reserved.
+		// (the exec is unsafe on pgcopydb 0.18, see
+		// docs/research/upstream-issues.md); the field is reserved.
 		r := newReconciler()
 
 		reconcileAndGet(ctx, r, name) // creates run-1

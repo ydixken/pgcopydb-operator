@@ -27,11 +27,11 @@ These skills are vendored in this repo and are always-on, not optional, not per-
 ## Hard requirements
 
 - **Unit tests by default**: every package and every behavior change ships tests in the same change. Controller logic uses envtest; pure functions use table or golden tests. No untested merges.
-- **Documentation always current**: any change that alters behavior, API surface, commands, or structure MUST update the affected docs (README, MILESTONES.md, docs/, chart README) in the same change. Concise, no slop; resource examples carry short explanations.
+- **Documentation always current**: any change that alters behavior, API surface, commands, or structure MUST update the affected docs (README, docs/, chart README) in the same change. Concise, no slop; resource examples carry short explanations.
 
 ## What this repo is
 
-pgcopydb-operator is a Go Kubernetes operator that automates PostgreSQL migrations (bulk clone, logical-replication follow, controlled cutover) using [pgcopydb](https://github.com/dimitri/pgcopydb). Development follows [MILESTONES.md](MILESTONES.md); the approved design lives at [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md) and the research ground truth (pgcopydb CLI and CDC internals, dev cluster, prior art) under [docs/research/](docs/research/). Read the design and the relevant research doc before touching controller or API code.
+pgcopydb-operator is a Go Kubernetes operator that automates PostgreSQL migrations (bulk clone, logical-replication follow, controlled cutover) using [pgcopydb](https://github.com/dimitri/pgcopydb). Read the docs site sources under [docs/](docs/) and the existing controller code before touching controller or API code; design notes live outside the repository (see private ops notes).
 
 Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs CI; nobody commits or opens MRs on GitLab.
 
@@ -46,8 +46,8 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 
 ## Architecture key points
 
-- The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, v1alpha1, single namespaced kind `Migration`.
-- File ownership until the scaffold lands (M1/B1): kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`. These MUST NOT be created by hand. The harness owns `.gitignore` and `README.md`; the B1 procedure in [MILESTONES.md](MILESTONES.md) explains how they survive `kubebuilder init`.
+- The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
+- kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
 - CI ([.gitlab-ci.yml](.gitlab-ci.yml)) runs **branch pipelines only**, because merge-request rules never fire on a push mirror. Jobs gate on the files they need (`rules:exists`), so the pipeline is green today and starts linting, testing, and building images automatically in the commit the scaffold lands.
 - E2e tests are **local only** by decision: they target the dev cluster through the developer's own kubeconfig context. There is deliberately no e2e CI job yet.
 
@@ -73,7 +73,5 @@ Some things are **never** cut on the way down: validation, error handling, secur
 ## Further reading
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) for tooling, workflow, commit and PR conventions.
-- [MILESTONES.md](MILESTONES.md) for the task ledger and the decision log.
-- [docs/superpowers/specs/2026-08-07-operator-design.md](docs/superpowers/specs/2026-08-07-operator-design.md) for the approved design.
-- [docs/research/](docs/research/) for pgcopydb, dev cluster, and prior-art references.
 - [README.md](README.md) for repo purpose and structure.
+- [docs/](docs/) for the user documentation sources (published via mkdocs).
