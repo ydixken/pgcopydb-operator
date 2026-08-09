@@ -71,13 +71,13 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	// v0.2.0-alpha.2 drops the list progress poll (it corrupted filtered
-	// catalogs on pgcopydb 0.18) and survives namespace-deletion cleanup.
+	// v0.2.0-alpha.3 bounds every pod exec with a deadline (websocket-first
+	// executor): a wedged API connection froze reconciles mid-phase before.
 	// alpha.11 added the cleanup-origin fix (stream cleanup passes
 	// --slot-name/--origin, so a follow migration's generated origin is dropped
 	// on the target) and the preflight extensions (replica-identity audit), on
 	// top of alpha.9's exec-credential fix and alpha.8's drain-verify gate.
-	operatorTag = "v0.2.0-alpha.2"
+	operatorTag = "v0.2.0-alpha.3"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
