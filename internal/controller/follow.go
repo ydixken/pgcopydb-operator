@@ -221,14 +221,24 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 }
 
 // ensureCleanup creates and observes the cleanup Job. It reports done=true
-// once replication state is dropped, or when cleanup exhausted its retries
-// (then with a loud warning: the slot may leak on the source, and that needs
-// an operator's attention, not an endlessly blocked Migration).
+// once replication state is dropped, or when cleanup cannot run at all: after
+// exhausted retries, and when the namespace is terminating (no Job can ever
+// be created there again, so retrying would only deadlock namespace deletion
+// against the finalizer). Both give-ups carry a loud CleanupFailed warning:
+// the slot may leak on the source, and that needs an operator's attention,
+// not an endlessly blocked Migration.
 func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migration) (bool, error) {
 	job, created, err := r.ensureJob(ctx, m, cleanupJobName(m), func() (*batchv1.Job, error) {
 		return buildCleanupJob(m, r.RunnerImage)
 	})
 	if err != nil {
+		if apierrors.IsForbidden(err) && apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			// A source inside this namespace is deleted with it, nothing to
+			// clean; a source elsewhere keeps its slot, so name it.
+			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup",
+				"namespace %s is terminating, so the cleanup Job could not be created; a source inside this namespace is deleted with it, but a source outside it may retain replication slot %q and needs manual removal", m.Namespace, effectiveSlotName(m))
+			return true, nil
+		}
 		return false, err
 	}
 	if created {

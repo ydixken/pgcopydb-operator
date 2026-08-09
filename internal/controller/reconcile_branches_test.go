@@ -208,6 +208,43 @@ var _ = Describe("Migration Controller resilience", func() {
 			types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{}))).To(BeTrue())
 	})
 
+	It("releases the finalizer when the namespace terminates mid-cleanup", func() {
+		// Live finding 2026-08-09: deleting a whole namespace forbade the
+		// cleanup Job create (Forbidden, cause NamespaceTerminating), the
+		// controller retried forever, and the namespace hung on the
+		// finalizer. envtest reproduces the apiserver side exactly: no
+		// namespace controller ever finishes the termination, and the
+		// NamespaceLifecycle admission plugin rejects new Jobs in the
+		// terminating namespace with that cause.
+		const name = "mig-ns-terminating"
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+
+		m := validMigration(name)
+		m.Namespace = name
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Finalizers = []string{finalizerName}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		// Attempts > 0 makes deletion want cleanup; JobName stays empty so
+		// no worker-stop pass runs first.
+		m.Status.Attempts = 1
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+
+		r := newReconciler()
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: name},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(drainEvents(r.Recorder.(*events.FakeRecorder))).To(ContainElement(SatisfyAll(
+			ContainSubstring("CleanupFailed"), ContainSubstring("terminating"),
+			ContainSubstring(effectiveSlotName(m)))))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name, Namespace: name}, &v1beta1.Migration{}))).To(BeTrue())
+	})
+
 	It("honors a custom maxCatchupLag instead of the built-in default", func() {
 		const name = "mig-custom-lag"
 		defer removeMigration(ctx, name)
