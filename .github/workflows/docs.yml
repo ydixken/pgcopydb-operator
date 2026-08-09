@@ -32,11 +32,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Check the CRD reference is current
-        # Same generation as `task docs`; a diff means api/v1alpha1 changed
-        # without regenerating docs/reference/api.md.
+        # Same generation as `task docs` (keep the source path in sync with
+        # the Taskfile docs task); a diff means the API changed without
+        # regenerating docs/reference/api.md.
         run: |
           GOBIN=$(pwd)/bin go install github.com/elastic/crd-ref-docs@v0.3.0
-          bin/crd-ref-docs --source-path=api/v1alpha1 --config=hack/crd-ref-docs.yaml \
+          bin/crd-ref-docs --source-path=api/v1beta1 --config=hack/crd-ref-docs.yaml \
             --renderer=markdown --output-path=docs/reference/api.md
           git diff --exit-code docs/reference/api.md
       - uses: actions/setup-python@v5
