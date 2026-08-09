@@ -31,7 +31,7 @@ for combo in $combos; do
   echo ""
   if E2E_PG_SOURCE="$src" E2E_PG_TARGET="$tgt" E2E_SCALE=0.1 \
     E2E_KEEP_FIXTURES="$keep" E2E_FORCE="$force" \
-    go test ./test/e2e/... -v -timeout 40m -ginkgo.v -ginkgo.label-filter='!chaos'; then
+    go test ./test/e2e/... -v -timeout 40m -ginkgo.v -ginkgo.timeout=40m -ginkgo.label-filter='!chaos'; then
     summary="${summary}PG ${src} -> PG ${tgt}  PASS\n"
   else
     summary="${summary}PG ${src} -> PG ${tgt}  FAIL\n"
