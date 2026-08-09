@@ -253,7 +253,7 @@ func TestCalls_BoundedByTimeout(t *testing.T) {
 	if _, err := e.RunningPod(context.Background(), "ns", "job"); err == nil {
 		t.Fatal("RunningPod: expected a deadline error, got nil")
 	}
-	if _, err := e.InPod(context.Background(), "ns", "pod", []string{"true"}); err == nil {
+	if _, err := e.InPod(context.Background(), "ns", "pod", []string{"echo"}); err == nil {
 		t.Fatal("InPod: expected a deadline error, got nil")
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {

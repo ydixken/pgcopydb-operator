@@ -29,11 +29,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/streaming/pkg/httpstream"
 )
 
 // callTimeout bounds every API call this package makes. Reconcile contexts
@@ -42,6 +42,9 @@ import (
 // forever, its phase pinned wherever it stood (observed live: Migrations
 // stuck in Cloning and CuttingOver with a healthy worker underneath).
 const callTimeout = 30 * time.Second
+
+// containerName is the worker container every call targets.
+const containerName = "pgcopydb"
 
 // Exec runs commands in a Job's running worker pod.
 type Exec struct {
@@ -113,7 +116,7 @@ func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines
 		}
 	}
 	return e.clientset.CoreV1().Pods(namespace).
-		GetLogs(newest.Name, &corev1.PodLogOptions{Container: "pgcopydb", TailLines: &tailLines}).
+		GetLogs(newest.Name, &corev1.PodLogOptions{Container: containerName, TailLines: &tailLines}).
 		DoRaw(ctx)
 }
 
@@ -124,7 +127,7 @@ func (e *Exec) InPod(ctx context.Context, namespace, pod string, argv []string) 
 	req := e.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Container: "pgcopydb",
+			Container: containerName,
 			Command:   argv,
 			Stdout:    true,
 			Stderr:    true,
