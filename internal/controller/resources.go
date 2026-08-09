@@ -43,6 +43,10 @@ const (
 
 	// shellPath runs the prelude, and doubles as $0 in script Jobs.
 	shellPath = "/bin/sh"
+
+	// workerContainer names the pgcopydb container in every Job this
+	// operator builds; podexec targets it by the same name.
+	workerContainer = "pgcopydb"
 )
 
 func labels(m *v1beta1.Migration) map[string]string {
@@ -402,7 +406,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 					Affinity:     m.Spec.Runner.Affinity,
 					Volumes:      volumes,
 					Containers: []corev1.Container{{
-						Name:  "pgcopydb",
+						Name:  workerContainer,
 						Image: image,
 						// sh -c '<prelude>' pgcopydb <args...>: the prelude
 						// assembles the passfile, runs setup, and execs

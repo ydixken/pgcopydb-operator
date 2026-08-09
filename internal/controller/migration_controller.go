@@ -53,6 +53,11 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the
 	// condition message: one line per failed check plus psql stderr.
 	preflightLogTail = 20
+	// zombieLogTail bounds the log window scanned for the supervisor-death
+	// marker. Wider than workerLogTail because the surviving streaming child
+	// keeps logging LSN reports after the marker and would push it out of a
+	// short tail between two polls.
+	zombieLogTail = 1000
 	// maxDetailLen caps extracted log lines in condition/event messages
 	// (events are server-limited to about 1KiB).
 	maxDetailLen = 700
@@ -60,9 +65,12 @@ const (
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
 // status; nil degrades to the Job's own condition message (envtest has no
-// pods to read).
+// pods to read). The Timestamps variant prefixes the container runtime's
+// RFC3339Nano stamp to every line; the zombie check dates the
+// supervisor-death marker with it.
 type LogReader interface {
 	JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
+	JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
 }
 
 // MigrationReconciler reconciles a Migration object.
@@ -95,7 +103,7 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;configmaps,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
@@ -241,7 +249,88 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: pollInterval}, nil
+	if res, handled, err := r.reapZombieWorker(ctx, m, job); handled || err != nil {
+		return res, err
+	}
+	// Cadence: until the base copy is done, poll at half speed. Every
+	// sentinel read opens pgcopydb's SQLite catalogs, and on 0.18 concurrent
+	// readers can starve its writers: a live clone's index worker died on
+	// "[SQLite 5: database is locked]" (exit 12) under the 30s cadence, see
+	// docs/research/upstream-issues.md. Post-clone the fast cadence returns,
+	// keeping catchup and cutover reactive.
+	interval := pollInterval
+	if followEnabled(m) && !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+		interval = 2 * pollInterval
+	}
+	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// reapZombieWorker handles pgcopydb 0.18's zombie failure mode, proven live:
+// a clone worker dies, pid 1 logs FATAL "Terminating all processes in our
+// process group" and signals the group, but the streaming receive child
+// survives and keeps pid 1 waiting, so the pod stays alive indefinitely. The
+// Job never fails, the Migration reports Cloning forever, and the retry
+// machinery never engages. Follow-only: plain clones have no child that
+// outlives the group termination.
+//
+// Detection is stateless, from observable state only: the supervisor-death
+// marker in the pod log (it cannot un-happen) plus the runtime's timestamp on
+// the marker line. Acting only once the marker is a full pollInterval old is
+// the stateless equivalent of requiring it on two consecutive polls, and
+// keeps an ordinary failure shutdown in progress (marker just logged,
+// container about to exit, Job about to fail on its own) from being misread
+// as a zombie. Clock skew between the runtime's stamp and this process only
+// shifts the grace by seconds either way and converges on the next poll.
+// handled=true ends the pass here: confirm on the next poll, or pod deleted.
+func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, bool, error) {
+	if !followEnabled(m) || r.Logs == nil {
+		return ctrl.Result{}, false, nil
+	}
+	raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
+	if err != nil {
+		// Unreadable logs (pod starting, already gone): nothing to detect.
+		logf.FromContext(ctx).V(1).Info("zombie check skipped, pod log fetch failed", "job", job.Name, "error", err)
+		return ctrl.Result{}, false, nil
+	}
+	died, found := pgcopydb.SupervisorDeath(raw)
+	if !found {
+		return ctrl.Result{}, false, nil
+	}
+	if time.Since(died) < pollInterval {
+		// First sighting: give an ordinary shutdown one poll to fail the Job
+		// on its own before treating the survivor as a zombie.
+		return ctrl.Result{RequeueAfter: pollInterval}, true, nil
+	}
+	if err := r.deleteJobPods(ctx, m.Namespace, job.Name); err != nil {
+		return ctrl.Result{}, true, err
+	}
+	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "WorkerZombie", "Reap",
+		"pgcopydb supervisor died but a child process kept the pod alive (upstream defect); worker pod removed so the normal retry path resumes the migration")
+	return ctrl.Result{RequeueAfter: pollInterval}, true, nil
+}
+
+// deleteJobPods foreground-deletes the Job's live pods. With backoffLimit 0
+// the Job controller then marks the Job failed and handleFailedJob runs its
+// normal retry flow.
+func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobName string) error {
+	pods := &corev1.PodList{}
+	// job-name is the Job controller's own pod label, the same selector the
+	// log reader uses.
+	if err := r.List(ctx, pods, client.InNamespace(namespace),
+		client.MatchingLabels{"job-name": jobName}); err != nil {
+		return err
+	}
+	policy := metav1.DeletePropagationForeground
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if !p.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := r.Delete(ctx, p, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // reconcileSuspended deletes the active worker (keeping the PVC, so a later

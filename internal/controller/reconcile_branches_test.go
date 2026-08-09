@@ -21,6 +21,7 @@ import (
 	"context"
 	stderrors "errors"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -313,6 +314,111 @@ var _ = Describe("Migration Controller resilience", func() {
 		m = reconcileAndGet(ctx, r2, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+	})
+
+	// supervisorDeathAt renders the proven pgcopydb 0.18 supervisor-death
+	// line the way JobLogsTimestamps returns it: runtime stamp, space, JSON.
+	supervisorDeathAt := func(ts time.Time) string {
+		return ts.UTC().Format(time.RFC3339Nano) +
+			` {"timestamp":"t","pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"
+	}
+
+	// createWorkerPod stands in for the Job controller, which envtest does
+	// not run: the worker pod exists with the job-name label the reaper
+	// selects on.
+	createWorkerPod := func(jobName string) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      jobName + "-worker",
+				Namespace: testNS,
+				Labels:    map[string]string{"job-name": jobName},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: workerContainer, Image: testRunnerImage}},
+			},
+		}
+		ExpectWithOffset(1, k8sClient.Create(ctx, pod)).To(Succeed())
+		return pod
+	}
+
+	It("reaps a zombie worker whose supervisor died and resumes the retry path", func() {
+		const name = "mig-zombie"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		m := validMigration(name)
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.BackoffLimit = 1
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		r := newReconciler()
+		r.Sentinel = fake
+		logs := &fakeLogs{}
+		r.Logs = logs
+		rec := r.Recorder.(*events.FakeRecorder)
+		reconcileAndGet(ctx, r, name) // preflight
+		finishJob(ctx, name+"-preflight", true)
+		reconcileAndGet(ctx, r, name) // run-1
+		pod := createWorkerPod(name + "-run-1")
+
+		// Freshly logged marker: the first sighting must not kill the pod,
+		// because an ordinary failure shutdown looks identical for a few
+		// seconds before the Job fails on its own.
+		logs.tsOut = supervisorDeathAt(time.Now())
+		reconcileAndGet(ctx, r, name)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: testNS}, pod)).To(Succeed())
+		Expect(pod.DeletionTimestamp.IsZero()).To(BeTrue())
+		Expect(drainEvents(rec)).NotTo(ContainElement(ContainSubstring("WorkerZombie")))
+
+		// One poll later the marker has aged past the grace and the Job is
+		// still active: that is the zombie, the pod goes.
+		logs.tsOut = supervisorDeathAt(time.Now().Add(-2 * pollInterval))
+		reconcileAndGet(ctx, r, name)
+		// envtest has no kubelet to finish a pod delete; the deletion
+		// timestamp is the observable "being deleted", as in the suspend test.
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: testNS}, pod)
+		if err == nil {
+			Expect(pod.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		}
+		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
+			ContainSubstring("WorkerZombie"), ContainSubstring("upstream defect"))))
+
+		// The pod's failure trips the Job's backoffLimit 0 (scripted here, as
+		// always in envtest); the normal retry path starts attempt 2.
+		finishJob(ctx, name+"-run-1", false)
+		reconcileAndGet(ctx, r, name) // observes the failure, clears jobName
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
+		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
+	})
+
+	It("leaves the worker pod alone when no supervisor-death marker is present", func() {
+		const name = "mig-no-zombie"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		m := validMigration(name)
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		r := newReconciler()
+		r.Sentinel = fake
+		// Old timestamps on healthy lines: only the marker may trigger the
+		// reaper, never age alone.
+		r.Logs = &fakeLogs{tsOut: time.Now().Add(-2*pollInterval).UTC().Format(time.RFC3339Nano) +
+			` {"timestamp":"t","pid":42,"error_severity":"INFO","message":"reported write_lsn 0/5000"}` + "\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+		reconcileAndGet(ctx, r, name) // preflight
+		finishJob(ctx, name+"-preflight", true)
+		reconcileAndGet(ctx, r, name) // run-1
+		pod := createWorkerPod(name + "-run-1")
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: testNS}, pod)).To(Succeed())
+		Expect(pod.DeletionTimestamp.IsZero()).To(BeTrue())
+		Expect(drainEvents(rec)).NotTo(ContainElement(ContainSubstring("WorkerZombie")))
 	})
 
 	It("refuses to adopt a work PVC it does not own", func() {

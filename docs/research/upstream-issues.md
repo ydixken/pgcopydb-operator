@@ -71,3 +71,59 @@ Secondary bug: the progress query reads `sum(bytes)` from `s_table`, which has n
 ### Suggested fix
 
 Set `skipFilterCheck` for `list progress` (it only reads), or keep the adopted filtering in memory instead of writing it back to the catalog in Case 3.
+
+## Concurrent catalog readers (`stream sentinel get`) can starve catalog writers: clone worker dies with `[SQLite 5: database is locked]` (exit 12)
+
+Status: draft, not filed.
+
+### Environment
+
+- pgcopydb 0.18-1.pgdg12+1 (upstream container image)
+- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` in the worker pod every 30 seconds
+
+### What happened
+
+During the base copy of a live migration (observed 2026-08-09), an index-creation worker died on SQLITE_BUSY while the only other catalog users were the periodic sentinel reads. The clone supervisor then tore the run down. Log excerpt shape (JSON logging, fields abbreviated):
+
+```
+{"pid":123,"error_severity":"ERROR","message":"[SQLite 5: database is locked]"}
+...
+{"pid":1,"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}
+{"pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}
+```
+
+### Root cause (suspected)
+
+`stream sentinel get` opens the same SQLite catalog databases the clone workers write to. With SQLite's default rollback journal and no busy timeout, a writer that hits a reader's lock gets SQLITE_BUSY immediately; pgcopydb treats the failed statement as fatal for that worker, and the clone dies with it. Any external reader on the sanctioned CLI surface (sentinel reads are the documented way to watch a migration) can therefore kill a running clone, with a probability that grows with polling frequency.
+
+### Suggested fix
+
+Set `PRAGMA busy_timeout` on catalog connections so writers wait out short reader locks instead of failing, or open the catalogs in WAL journal mode (`PRAGMA journal_mode=WAL`) so readers stop blocking writers entirely. Read-only commands could also open the catalog files read-only.
+
+## Process-group termination on clone failure leaves the streaming receive child running, keeping the container alive indefinitely
+
+Status: draft, not filed.
+
+### Environment
+
+- pgcopydb 0.18-1.pgdg12+1 (upstream container image)
+- `clone --follow` under Kubernetes; pgcopydb is pid 1 of the container
+
+### What happened
+
+A clone worker died (see the SQLITE_BUSY draft above), the supervisor reported it, and pid 1 terminated the process group:
+
+```
+{"pid":1,"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}
+{"pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}
+```
+
+The streaming receive child survived that termination. For more than 40 minutes afterwards it kept reporting write_lsn/flush_lsn progress on the replication stream while no clone or apply work existed anymore. pid 1 never exited, so the container stayed alive, and a supervising Kubernetes Job never saw a failure: from the outside the pod looked healthy while the migration was dead. The run only ended when the pod was deleted externally.
+
+### Root cause (suspected)
+
+The group signal does not stop the receive subprocess (it likely ignores or misses SIGTERM while blocked on the replication connection), and the supervisor then waits for its children without a deadline.
+
+### Suggested fix
+
+After signaling the process group, wait with a bounded timeout and escalate to SIGKILL for children that survive; or have the receive child handle SIGTERM by closing the replication connection and exiting, so a failed clone reliably terminates the whole process tree.

@@ -98,6 +98,18 @@ func (e *Exec) RunningPod(ctx context.Context, namespace, jobName string) (strin
 // error or preflight verdict only exists in the pod log. The newest pod is
 // the right one when the Job's own backoffLimit produced several.
 func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
+	return e.jobLogs(ctx, namespace, jobName, tailLines, false)
+}
+
+// JobLogsTimestamps is JobLogs with the container runtime's timestamp
+// prefixed to every line (PodLogOptions Timestamps, RFC3339Nano). The zombie
+// check dates the supervisor-death marker with it: the runtime's stamp is a
+// fixed format, unlike pgcopydb's own log timestamps.
+func (e *Exec) JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
+	return e.jobLogs(ctx, namespace, jobName, tailLines, true)
+}
+
+func (e *Exec) jobLogs(ctx context.Context, namespace, jobName string, tailLines int64, timestamps bool) ([]byte, error) {
 	ctx, cancel := e.bounded(ctx)
 	defer cancel()
 	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
@@ -116,7 +128,7 @@ func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines
 		}
 	}
 	return e.clientset.CoreV1().Pods(namespace).
-		GetLogs(newest.Name, &corev1.PodLogOptions{Container: containerName, TailLines: &tailLines}).
+		GetLogs(newest.Name, &corev1.PodLogOptions{Container: containerName, TailLines: &tailLines, Timestamps: timestamps}).
 		DoRaw(ctx)
 }
 
