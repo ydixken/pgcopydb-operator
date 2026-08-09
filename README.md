@@ -2,6 +2,8 @@
 
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
+**Documentation:** [ydixken.github.io/pgcopydb-operator](https://ydixken.github.io/pgcopydb-operator/)
+
 > [!important]
 > In development. One-shot clone (M1) and live migration with follow and controlled cutover (M2) are functional and e2e-tested; verification (M3) shipped with envtest coverage, its e2e scenario queued; release polish (M4) is underway. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
 
@@ -66,4 +68,4 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.
 - [MILESTONES.md](MILESTONES.md): where the project stands and why decisions were made.
 - [Design](docs/superpowers/specs/2026-08-07-operator-design.md): the approved operator architecture.
-- [LICENSE](LICENSE): Apache 2.0.
+- [LICENSE](LICENSE): GPL-2.0-only.
