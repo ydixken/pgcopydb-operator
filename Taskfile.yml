@@ -54,7 +54,9 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.label-filter='!chaos'
+      # -ginkgo.timeout must match -timeout: Ginkgo's own suite timeout
+      # defaults to 1h and would abort long tiers mid-run otherwise.
+      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.timeout=3h -ginkgo.label-filter='!chaos'
 
   e2e:chaos:
     desc: >-
@@ -70,7 +72,7 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.label-filter='chaos'
+      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.timeout=3h -ginkgo.label-filter='chaos'
 
   e2e:matrix:
     desc: >-
@@ -108,4 +110,4 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v -ginkgo.label-filter='!chaos'
+      - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v -ginkgo.timeout=8h -ginkgo.label-filter='!chaos'

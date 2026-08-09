@@ -149,7 +149,13 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 - [x] v0.2.0-alpha.1 released 2026-08-08: manager+runner images and chart on ghcr (release workflow green, runner image run-checked), GitOps pin bumped to v0.2.0-alpha.1.
 - [ ] Live default suite green on v0.2.0-alpha.1. Blocked 2026-08-08 evening: kubeconfig OIDC token expired, re-auth needs the maintainer's browser sign-in; suite failed fast in BeforeSuite (CRD check, cluster unreachable), no cluster resources touched.
-- [ ] task e2e:chaos green; one E2E_STRESS run; one task e2e:matrix run; break/fix findings ledgered; final sweep. Same blocker as above.
+- [ ] task e2e:chaos green; one E2E_STRESS run; one task e2e:matrix run; break/fix findings ledgered; final sweep.
+- Live findings, first v0.2.0-alpha.1 run (2026-08-09, run polluted by a missing '!chaos' filter and laptop sleep; scale-1 seed 6m35s, fresh clone+compare spec passed in 14m, PG18-to-17 major recreate worked):
+- [x] Ginkgo's default 1h suite timeout aborts long tiers: -ginkgo.timeout now matches -timeout in every e2e task and the matrix script.
+- [x] Production install watched ALL namespaces, so it and the suite operator both reconciled e2e Migrations (explains duplicate-actor oddities): production values now scope watchNamespaces to pgcopydb-system.
+- [ ] BUG (open): deleting a namespace holding a Migration mid-cleanup deadlocks: the finalizer wants to create a cleanup Job, the terminating namespace forbids Job creation, the namespace waits on the finalizer. Fix: on namespace-terminating Forbidden, warn CleanupFailed and release the finalizer (the in-namespace source dies with the namespace; cross-namespace sources are the case to document). Needs envtest coverage.
+- [ ] FIND (open): re-clone onto populated target (dropIfExists + large objects) took 3 attempts; run-1/run-2 failed, run-3 resumed to success in 6s. Pod logs lost to the namespace deletion; diagnose on the rerun before closing.
+- [ ] Chaos spec fixes needed: disk-full completed instead of failing (200Mi work volume holds catalogs only, needs real spool pressure); source-kill mid-clone missed its window (clone finished first). Redesign both.
 
 ## Decision log
 
