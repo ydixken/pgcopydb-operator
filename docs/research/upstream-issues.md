@@ -4,7 +4,7 @@ Drafts for issues against [pgcopydb](https://github.com/dimitri/pgcopydb) found 
 
 ## `pgcopydb list progress` (no `--filters`) permanently corrupts the stored filtering of a filtered catalog, killing concurrent or resumed `clone --filters` runs
 
-Status: draft, not filed.
+Status: filed as [dimitri/pgcopydb#1038](https://github.com/dimitri/pgcopydb/issues/1038) on 2026-08-09.
 
 ### Environment
 
