@@ -96,18 +96,21 @@ func removeMigration(ctx context.Context, name string) {
 }
 
 // fakeSentinel scripts the sentinel the way envtest scripts Job status: tests
-// set the state (or an error), the reconciler reads it.
+// set the state (or an error), the reconciler reads it. calls counts every
+// exec (reads and endpos sets), so specs can prove copy-phase quiescence.
 type fakeSentinel struct {
 	mu        sync.Mutex
 	state     *sentinel.State
 	endposSet bool
 	readErr   error
 	setErr    error
+	calls     int
 }
 
 func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -121,12 +124,19 @@ func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, er
 func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.setErr != nil {
 		return "", f.setErr
 	}
 	f.endposSet = true
 	f.state.Endpos = f.state.SourceHead
 	return f.state.Endpos, nil
+}
+
+func (f *fakeSentinel) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
@@ -257,15 +267,16 @@ var _ = Describe("Migration Controller follow mode", func() {
 		const name = "mig-clone-cadence"
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
+		// nil Logs: this deliberately exercises the no-log-reader fallback,
+		// where the sentinel stays the clone-done detector.
 		r := followReconciler(fake)
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name) // run-1
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}}
 
-		// Base copy running: every pass costs a sentinel read that competes
-		// with pgcopydb's own catalog writers (the live SQLITE_BUSY kill), so
-		// the requeue stretches to double the poll interval.
+		// Base copy running: nothing time-critical to observe, so the requeue
+		// stretches to double the poll interval.
 		fake.state = &sentinel.State{ApplyEnabled: false, WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
 		res, err := r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
@@ -277,6 +288,45 @@ var _ = Describe("Migration Controller follow mode", func() {
 		res, err = r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(pollInterval))
+	})
+
+	It("derives CloneCompleted from the worker log and keeps the sentinel quiet until then", func() {
+		const name = "mig-clone-quiesce"
+		defer removeMigration(ctx, name)
+		// The scripted sentinel would report a caught-up stream right away;
+		// if the reconciler asked, the phases would move. It must not ask:
+		// on pgcopydb 0.18 every sentinel exec opens the SQLite catalogs the
+		// copy phase is writing to, and concurrent access crashes workers.
+		fake := &fakeSentinel{state: &sentinel.State{
+			ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN,
+			SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN,
+		}}
+		r := followReconciler(fake)
+		const ts = "2026-08-09T10:00:00.000000000Z "
+		logs := &fakeLogs{tsOut: ts +
+			`{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n"}
+		r.Logs = logs
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name) // run-1
+
+		// Copy still running (step banners only in the log): zero sentinel
+		// execs, CloneCompleted stays False whatever the sentinel would say.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeFalse())
+		Expect(fake.callCount()).To(BeZero())
+
+		// The worker logs the clone-done marker: CloneCompleted flips from
+		// the log alone, and only then does the sentinel path engage, with
+		// the usual Streaming/CaughtUp handling.
+		logs.tsOut += ts +
+			`{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(fake.callCount()).To(BeNumerically(">", 0))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming)).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 	})
 
 	It("cuts over automatically once caught up", func() {

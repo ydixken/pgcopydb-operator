@@ -127,3 +127,91 @@ The group signal does not stop the receive subprocess (it likely ignores or miss
 ### Suggested fix
 
 After signaling the process group, wait with a bounded timeout and escalate to SIGKILL for children that survive; or have the receive child handle SIGTERM by closing the replication connection and exiting, so a failed clone reliably terminates the whole process tree.
+
+## `clone --resume` re-vacuums already-copied tables and dies on `vacuum_summary`'s `unique(tableoid)` (exit 12 loop)
+
+Status: draft, not filed.
+
+### Environment
+
+- pgcopydb 0.18-1.pgdg12+1 (upstream container image)
+- observed live during `clone --follow` under Kubernetes (2026-08-09); the vacuum path is shared by all clone runs
+
+### Reproduction (sketch)
+
+Containers, `$SRC`, `$TGT`, `$IMG` as in the `list progress` draft above; seed enough data that the copy phase takes a minute.
+
+```sh
+# 1. Start a clone and kill the container once the log shows VACUUM ANALYZE
+#    running for some tables, but before the run completes.
+podman run --name run1 --network pgnet -v work:/work \
+  $IMG pgcopydb clone --source $SRC --target $TGT --dir /work/m &
+# wait for a "VACUUM ANALYZE" log line, then:
+podman kill run1
+
+# 2. Resume. Tables whose vacuum already ran are vacuumed again, and the
+#    vacuum summary insert collides with the row the killed run left behind.
+podman run --rm --network pgnet -v work:/work \
+  $IMG pgcopydb clone --source $SRC --target $TGT --dir /work/m \
+  --resume --not-consistent
+# exit 12; every further --resume fails the same way
+```
+
+### Evidence
+
+The resumed run's vacuum worker dies on the insert (JSON logging, fields abbreviated):
+
+```
+{"error_severity":"ERROR","message":"Failed to execute statement: insert into vacuum_summary(pid, tableoid, start_time_epoch)values($1, $2, $3)"}
+{"error_severity":"ERROR","message":"[SQLite 19: constraint failed]: UNIQUE constraint failed: vacuum_summary.tableoid"}
+```
+
+followed by the usual supervisor teardown (`clone process ... has terminated`, FATAL group termination) and exit 12. The offending row survives the crash by design (it lives in the work-dir catalog), so every subsequent `--resume` repeats the collision: the run can never get past vacuum again.
+
+### Root cause
+
+`vacuum_analyze_table_by_oid` (vacuum.c:438) registers the vacuum via `summary_add_vacuum` unconditionally before running `VACUUM ANALYZE`. Unlike the COPY and CREATE INDEX paths, which call `summary_lookup_table` / `summary_lookup_index` first and skip work a previous run finished, there is no vacuum lookup on the resume path. `summary_add_vacuum` (summary.c:944) INSERTs into `vacuum_summary`, declared `unique(tableoid)` (catalog.c:198). On `--resume` the previous run's row is still there, the INSERT fails, and the failed statement is fatal for the worker.
+
+### Suggested fix
+
+Look up `vacuum_summary` before vacuuming and skip tables already done, mirroring the COPY and index paths; or make the registration idempotent (`insert or replace`, or delete the stale row first, as the table-summary path does with `summary_delete_table`).
+
+## Repeated resumes accumulate duplicate index rows in `summary`; single-row lookups then fail with `[SQLite 100: another row available]`, wedging every later resume
+
+Status: draft, not filed.
+
+### Environment
+
+- pgcopydb 0.18-1.pgdg12+1 (upstream container image)
+- observed live during `clone --follow` under Kubernetes (2026-08-09), after several crash-and-resume cycles (see the `vacuum_summary` draft above for one reliable crash source)
+
+### Reproduction (sketch)
+
+Containers as above. Crash a clone mid-copy (kill the container while indexes are being built), then resume repeatedly:
+
+```sh
+for i in 1 2 3; do
+  podman run --rm --network pgnet -v work:/work \
+    $IMG pgcopydb clone --source $SRC --target $TGT --dir /work/m \
+    --resume --not-consistent
+done
+```
+
+Each resume that redoes a `CREATE INDEX` inserts another `summary` row for the same index. Once any index has two rows, the next resume fails during its summary lookup, before doing any work, and keeps failing forever.
+
+### Evidence
+
+JSON logging, fields abbreviated:
+
+```
+{"error_severity":"ERROR","message":"Failed to execute statement:   select pid, start_time_epoch, done_time_epoch, duration, command     from summary    where indexoid = $1"}
+{"error_severity":"ERROR","message":"[SQLite 100: another row available]"}
+```
+
+### Root cause
+
+The `summary` table's only uniqueness constraint is `unique(tableoid, partnum)` (catalog.c:185). Index runs insert with `insert into summary(pid, indexoid, start_time_epoch, command)` (summary.c:1369), leaving `tableoid` and `partnum` NULL, and SQLite treats NULLs as distinct in unique indexes, so nothing stops a second row for the same `indexoid`. `summary_lookup_index` (summary.c:1084) then selects `from summary where indexoid = $1` without `LIMIT 1` through `catalog_sql_execute`, which demands exactly one row when a fetch callback is set ("when we have a fetchFunction we expect only one row, and exactly one", catalog.c:11061) and fails on the second SQLITE_ROW. The codebase already knows this trap: `catalog_lookup_filter_by_oid` carries a `LIMIT 1` specifically "to avoid throwing an SQLite error condition about \"another row available\"" (catalog.c:7850).
+
+### Suggested fix
+
+Constrain index summary rows (`unique(indexoid)`) with an idempotent insert, or delete the stale row before re-registering an index run; failing that, add `LIMIT 1` (with an ordering that prefers the latest attempt) to `summary_lookup_index` and its constraint-summary sibling so resumes read a deterministic row instead of erroring.

@@ -27,7 +27,7 @@ Preflight failure is terminal: these are configuration errors on the databases, 
 
 ## Watching the stream
 
-`status.replication` mirrors the pgcopydb sentinel while the worker runs:
+`status.replication` mirrors the pgcopydb sentinel from the moment streaming starts. During the base copy it stays empty on purpose: on pgcopydb 0.18 a sentinel read opens the SQLite catalogs the copy is writing to, and concurrent access can crash workers, so the operator derives the copy phase from the worker log and only starts sentinel reads once `CloneCompleted` is True.
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.replication}' | jq

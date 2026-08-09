@@ -239,27 +239,60 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 // corrupts filtered catalogs and never returns data, see
 // docs/research/upstream-issues.md. status.progress stays in the API,
 // reserved for a fixed upstream.
+//
+// Sentinel execs are quiesced until the base copy is done: every exec opens
+// pgcopydb's SQLite catalogs inside the worker, and 0.18 crashes under
+// concurrent catalog access (a live clone's index worker died on
+// "[SQLite 5: database is locked]", exit 12; see
+// docs/research/upstream-issues.md). So while CloneCompleted is False the
+// operator touches only the pod LOG: the clone-done transition is derived
+// from the markers pgcopydb prints when the copy phase ends
+// (pgcopydb.CloneDone), and the single fetched tail also feeds the zombie
+// check. Only once CloneCompleted is True do sentinel reads begin;
+// Streaming/CaughtUp/cutover logic is unchanged from there.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1beta1.PhaseCloning
-	if followEnabled(m) {
+	follow := followEnabled(m)
+
+	// One log fetch per pass serves both the clone-done and the zombie check.
+	// Unreadable logs (pod starting, already gone) degrade to an empty tail:
+	// no marker seen, nothing to reap, the next poll retries.
+	var logTail []byte
+	if follow && r.Logs != nil {
+		raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
+		if err != nil {
+			logf.FromContext(ctx).V(1).Info("worker log fetch failed", "job", job.Name, "error", err)
+		} else {
+			logTail = raw
+		}
+	}
+
+	cloneDone := meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	if follow && !cloneDone && pgcopydb.CloneDone(logTail) {
+		cloneDone = true
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
+			"base copy finished (worker logged clone completion), replaying changes")
+	}
+	if follow && (cloneDone || r.Logs == nil) {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
-		// trigger the cutover itself; see follow.go.
+		// trigger the cutover itself; see follow.go. With no log reader wired
+		// the clone-done transition cannot be observed, so the sentinel stays
+		// the detector (the pre-quiescence behavior) rather than wedging the
+		// migration in Cloning forever.
 		r.reconcileFollowRunning(ctx, m, job.Name)
 	}
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
-	if res, handled, err := r.reapZombieWorker(ctx, m, job); handled || err != nil {
+	if res, handled, err := r.reapZombieWorker(ctx, m, job, logTail); handled || err != nil {
 		return res, err
 	}
-	// Cadence: until the base copy is done, poll at half speed. Every
-	// sentinel read opens pgcopydb's SQLite catalogs, and on 0.18 concurrent
-	// readers can starve its writers: a live clone's index worker died on
-	// "[SQLite 5: database is locked]" (exit 12) under the 30s cadence, see
-	// docs/research/upstream-issues.md. Post-clone the fast cadence returns,
-	// keeping catchup and cutover reactive.
+	// Cadence: until the base copy is done, poll at half speed; a pass costs
+	// only a pod-log read, but there is nothing time-critical to observe
+	// mid-copy. Post-clone the fast cadence returns, keeping catchup and
+	// cutover reactive.
 	interval := pollInterval
-	if followEnabled(m) && !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+	if follow && !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
 		interval = 2 * pollInterval
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
@@ -275,21 +308,18 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 //
 // Detection is stateless, from observable state only: the supervisor-death
 // marker in the pod log (it cannot un-happen) plus the runtime's timestamp on
-// the marker line. Acting only once the marker is a full pollInterval old is
-// the stateless equivalent of requiring it on two consecutive polls, and
-// keeps an ordinary failure shutdown in progress (marker just logged,
-// container about to exit, Job about to fail on its own) from being misread
-// as a zombie. Clock skew between the runtime's stamp and this process only
-// shifts the grace by seconds either way and converges on the next poll.
-// handled=true ends the pass here: confirm on the next poll, or pod deleted.
-func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, bool, error) {
-	if !followEnabled(m) || r.Logs == nil {
-		return ctrl.Result{}, false, nil
-	}
-	raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
-	if err != nil {
-		// Unreadable logs (pod starting, already gone): nothing to detect.
-		logf.FromContext(ctx).V(1).Info("zombie check skipped, pod log fetch failed", "job", job.Name, "error", err)
+// the marker line. raw is the tail observeRunningJob already fetched for this
+// pass (one fetch serves this check and the clone-done check); empty means
+// the logs were unreadable and there is nothing to detect. Acting only once
+// the marker is a full pollInterval old is the stateless equivalent of
+// requiring it on two consecutive polls, and keeps an ordinary failure
+// shutdown in progress (marker just logged, container about to exit, Job
+// about to fail on its own) from being misread as a zombie. Clock skew
+// between the runtime's stamp and this process only shifts the grace by
+// seconds either way and converges on the next poll. handled=true ends the
+// pass here: confirm on the next poll, or pod deleted.
+func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job, raw []byte) (ctrl.Result, bool, error) {
+	if !followEnabled(m) || len(raw) == 0 {
 		return ctrl.Result{}, false, nil
 	}
 	died, found := pgcopydb.SupervisorDeath(raw)
