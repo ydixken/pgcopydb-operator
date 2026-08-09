@@ -32,7 +32,11 @@ spec:
         # Clone without progress. tables_done only moves when a whole table
         # finishes, so one very large table legitimately holds it flat; that is
         # all the metric can express, hence the generous window. Widen it if
-        # single tables take longer than an hour to copy.
+        # single tables take longer than an hour to copy. Dormant today: the
+        # tables gauges are reserved and unset on pgcopydb 0.18 (the operator
+        # dropped its progress poll, see the project troubleshooting page), so
+        # the series does not exist and the alert cannot fire; it arms itself
+        # once a fixed pgcopydb populates status.progress again.
         - alert: PgcopydbMigrationCloneStalled
           expr: >-
             (pgcopydb_migration_phase{phase="Cloning"} == 1)

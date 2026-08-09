@@ -36,8 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
-	"github.com/ydixken/pgcopydb-operator/internal/podexec"
-	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -64,12 +62,10 @@ var _ = Describe("Migration Controller resilience", func() {
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 
-		// A real progress poller against envtest: no worker pods exist, so a
-		// poll returns no sample and the previous status numbers stand.
+		// status.progress stays nil: the reconciler no longer polls progress
+		// (the exec is unsafe on pgcopydb 0.18, see the MILESTONES decision
+		// log 2026-08-09); the field is reserved.
 		r := newReconciler()
-		e, err := podexec.New(cfg)
-		Expect(err).NotTo(HaveOccurred())
-		r.Poller = progress.NewFromExec(e)
 
 		reconcileAndGet(ctx, r, name) // creates run-1
 		m := reconcileAndGet(ctx, r, name)

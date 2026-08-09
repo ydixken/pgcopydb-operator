@@ -20,7 +20,7 @@ shop   Completed  True       1          3m
 What happens behind the phases:
 
 - The operator creates a work PVC (`<name>-work`, 10Gi by default) and one worker Job per attempt (`<name>-run-<attempt>`), running `pgcopydb clone` from the runner image.
-- `status.progress` mirrors pgcopydb's own progress (tables, indexes, bytes), polled from the running pod. `status.conditions` are authoritative; `phase` is a summary for the printer column.
+- `status.progress` (tables, indexes, bytes) is reserved and stays empty for now: pgcopydb 0.18's `list progress` returns no data and corrupts the stored filtering of a filtered work dir, so the operator deliberately does not run it (see [Troubleshooting](troubleshooting.md)). `status.conditions` are authoritative; `phase` is a summary for the printer column.
 - `Completed` means pgcopydb finished: data copied under one consistent snapshot, sequences synced. The source is left untouched; a plain clone needs no replication privilege and leaves nothing behind on either database.
 
 Tuning (parallelism, same-table splitting, filters, skips) and DBaaS connection forms are covered in [Configuration](configuration.md).
