@@ -232,3 +232,31 @@ func TestInPod_RequestShape(t *testing.T) {
 		t.Fatalf("exec query = %v", q)
 	}
 }
+
+// A wedged API-server connection must not hang a reconcile: every call gets
+// a deadline (the live failure mode was Migrations frozen mid-phase behind a
+// stuck exec stream).
+func TestCalls_BoundedByTimeout(t *testing.T) {
+	blocked := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blocked // hang until the test ends
+	}))
+	defer func() { close(blocked); srv.Close() }()
+
+	e, err := New(&rest.Config{Host: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.timeout = 200 * time.Millisecond
+
+	start := time.Now()
+	if _, err := e.RunningPod(context.Background(), "ns", "job"); err == nil {
+		t.Fatal("RunningPod: expected a deadline error, got nil")
+	}
+	if _, err := e.InPod(context.Background(), "ns", "pod", []string{"true"}); err == nil {
+		t.Fatal("InPod: expected a deadline error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("calls did not respect the timeout: took %s", elapsed)
+	}
+}
