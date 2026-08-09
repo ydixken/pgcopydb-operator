@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -97,14 +98,17 @@ func removeMigration(ctx context.Context, name string) {
 
 // fakeSentinel scripts the sentinel the way envtest scripts Job status: tests
 // set the state (or an error), the reconciler reads it. calls counts every
-// exec (reads and endpos sets), so specs can prove copy-phase quiescence.
+// exec (reads, endpos sets, and nudges), so specs can prove copy-phase
+// quiescence; nudges counts the endpos nudges on their own.
 type fakeSentinel struct {
 	mu        sync.Mutex
 	state     *sentinel.State
 	endposSet bool
 	readErr   error
 	setErr    error
+	nudgeErr  error
 	calls     int
+	nudges    int
 }
 
 func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, error) {
@@ -133,10 +137,24 @@ func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string,
 	return f.state.Endpos, nil
 }
 
+func (f *fakeSentinel) NudgeEndpos(_ context.Context, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.nudges++
+	return f.nudgeErr
+}
+
 func (f *fakeSentinel) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeSentinel) nudgeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nudges
 }
 
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
@@ -228,12 +246,24 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 		Expect(fake.endposSet).To(BeFalse())
 
-		// Approval triggers the endpos.
+		// Approval triggers the endpos, and the same pass nudges the stream:
+		// on an idle source the drain only concludes once some WAL arrives,
+		// so the operator emits a logical message right after setting endpos.
 		m.Spec.Cutover.Approved = true
 		Expect(k8sClient.Update(ctx, m)).To(Succeed())
 		m = reconcileAndGet(ctx, r, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(fake.nudgeCount()).To(Equal(1))
+
+		// Every later CuttingOver pass while the worker still runs re-nudges,
+		// and a failing nudge stays a debug line, never a reconcile failure.
+		fake.nudgeErr = fmt.Errorf("exec transport down")
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
+		Expect(fake.nudgeCount()).To(Equal(2))
+		fake.nudgeErr = nil
 
 		// Worker drains and exits 0: exit code alone is not trusted, a
 		// verify Job must first prove origin progress reached endpos.
@@ -342,6 +372,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		m := reconcileAndGet(ctx, r, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(fake.nudgeCount()).To(Equal(1))
 	})
 
 	It("fails loudly when drain verification is refuted", func() {

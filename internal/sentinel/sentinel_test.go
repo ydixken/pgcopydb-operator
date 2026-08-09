@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -101,11 +102,32 @@ func TestToStatus_EndposSetAndLagUnknown(t *testing.T) {
 	}
 }
 
-// fakeAPI serves a pod list (or an error). Exec requests fail because the
-// server never upgrades to SPDY: for Read that is the not-ready contract
-// under test, for SetEndposCurrent it is a hard error.
-func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) *Client {
+// execRecorder collects the argv of every exec request the fake API saw; the
+// command arrives as repeated `command` query parameters before the upgrade
+// is refused, so tests can allowlist-match what would have run in the pod.
+type execRecorder struct {
+	mu   sync.Mutex
+	cmds [][]string
+}
+
+func (rec *execRecorder) add(argv []string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.cmds = append(rec.cmds, argv)
+}
+
+func (rec *execRecorder) commands() [][]string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return rec.cmds
+}
+
+// fakeAPI serves a pod list (or an error). Exec requests are recorded, then
+// fail because the server never upgrades the connection: for Read that is the
+// not-ready contract under test, for SetEndposCurrent it is a hard error.
+func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) (*Client, *execRecorder) {
 	t.Helper()
+	rec := &execRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case fail:
@@ -114,6 +136,9 @@ func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) *Client {
 			w.Header().Set("Content-Type", "application/json")
 			list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}, Items: pods}
 			_ = json.NewEncoder(w).Encode(list)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			rec.add(r.URL.Query()["command"])
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -123,7 +148,7 @@ func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(e)
+	return New(e), rec
 }
 
 func runningPod() corev1.Pod {
@@ -135,34 +160,75 @@ func runningPod() corev1.Pod {
 
 func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
 	// No running pod: (nil, nil), the previous sample stands.
-	st, err := fakeAPI(t, nil, false).Read(context.Background(), "ns", "j")
+	c, _ := fakeAPI(t, nil, false)
+	st, err := c.Read(context.Background(), "ns", "j")
 	if err != nil || st != nil {
 		t.Fatalf("no pod: want (nil, nil), got (%v, %v)", st, err)
 	}
 	// Pod up but the sentinel query fails (follow setup not done yet, or the
 	// exec transport hiccuped): also (nil, nil), never a reconcile error.
-	st, err = fakeAPI(t, []corev1.Pod{runningPod()}, false).Read(context.Background(), "ns", "j")
+	c, _ = fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	st, err = c.Read(context.Background(), "ns", "j")
 	if err != nil || st != nil {
 		t.Fatalf("sentinel not ready: want (nil, nil), got (%v, %v)", st, err)
 	}
 }
 
 func TestRead_ListError(t *testing.T) {
-	if _, err := fakeAPI(t, nil, true).Read(context.Background(), "ns", "j"); err == nil {
+	c, _ := fakeAPI(t, nil, true)
+	if _, err := c.Read(context.Background(), "ns", "j"); err == nil {
 		t.Fatal("want error when the pod list fails")
 	}
 }
 
 func TestSetEndposCurrent_Errors(t *testing.T) {
 	// Unlike Read, cutover must not silently do nothing: every failure is loud.
-	if _, err := fakeAPI(t, nil, false).SetEndposCurrent(context.Background(), "ns", "j"); err == nil ||
+	c, _ := fakeAPI(t, nil, false)
+	if _, err := c.SetEndposCurrent(context.Background(), "ns", "j"); err == nil ||
 		!strings.Contains(err.Error(), "no running worker pod") {
 		t.Fatalf("no pod must fail loudly, got %v", err)
 	}
-	if _, err := fakeAPI(t, nil, true).SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
+	c, _ = fakeAPI(t, nil, true)
+	if _, err := c.SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
 		t.Fatal("want error when the pod list fails")
 	}
-	if _, err := fakeAPI(t, []corev1.Pod{runningPod()}, false).SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
+	c, _ = fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	if _, err := c.SetEndposCurrent(context.Background(), "ns", "j"); err == nil {
 		t.Fatal("want error when the exec fails")
+	}
+}
+
+func TestNudgeEndpos(t *testing.T) {
+	// No running pod: nothing to nudge, no error (best effort, like Read).
+	c, rec := fakeAPI(t, nil, false)
+	if err := c.NudgeEndpos(context.Background(), "ns", "j"); err != nil {
+		t.Fatalf("no pod must be a no-op, got %v", err)
+	}
+	if len(rec.commands()) != 0 {
+		t.Fatalf("no pod must not exec, got %v", rec.commands())
+	}
+	// Pod-list failure surfaces, same as Read.
+	c, _ = fakeAPI(t, nil, true)
+	if err := c.NudgeEndpos(context.Background(), "ns", "j"); err == nil {
+		t.Fatal("want error when the pod list fails")
+	}
+	// Pod up: the exec must carry the logical-message emit; the refused
+	// upgrade surfaces as an error the caller merely debug-logs.
+	c, rec = fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	if err := c.NudgeEndpos(context.Background(), "ns", "j"); err == nil {
+		t.Fatal("want error when the exec fails")
+	}
+	cmds := rec.commands()
+	if len(cmds) == 0 {
+		t.Fatal("no exec recorded")
+	}
+	argv := strings.Join(cmds[0], " ")
+	for _, want := range []string{
+		`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc`,
+		`pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')`,
+	} {
+		if !strings.Contains(argv, want) {
+			t.Fatalf("exec %q misses %q", argv, want)
+		}
 	}
 }
