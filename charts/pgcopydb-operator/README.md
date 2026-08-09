@@ -68,7 +68,7 @@ The operator spawns a worker Job that runs `pgcopydb clone` from source to
 target, resumable across retries through a work PVC (10Gi by default).
 Passwords come from the referenced Secrets and are written to a libpq
 passfile, never to the command line. Progress appears in
-`kubectl get migrations` (phase, tables copied, attempts).
+`kubectl get migrations` (phase, attempts, completion).
 
 Endpoint requirements (privileges, WAL settings) are in the
 [prerequisites](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/reference/prerequisites.md);

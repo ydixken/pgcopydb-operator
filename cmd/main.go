@@ -42,7 +42,6 @@ import (
 	pgcopydboperatoriov1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
-	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	// +kubebuilder:scaffold:imports
 )
@@ -217,7 +216,6 @@ func main() {
 		Scheme:      mgr.GetScheme(),
 		Recorder:    mgr.GetEventRecorder("pgcopydb-operator"),
 		RunnerImage: runnerImage,
-		Poller:      progress.NewFromExec(podExec),
 		Sentinel:    sentinel.New(podExec),
 		Logs:        podExec,
 	}).SetupWithManager(mgr); err != nil {

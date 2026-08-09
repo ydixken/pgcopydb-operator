@@ -39,11 +39,10 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
-	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
-// pollInterval is how often a running clone is re-checked (progress polling
-// attaches here later).
+// pollInterval is how often a running clone is re-checked (follow state and
+// Job observation; no progress exec, see observeRunningJob).
 const pollInterval = 30 * time.Second
 
 const (
@@ -81,10 +80,6 @@ type MigrationReconciler struct {
 
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
-
-	// Poller reads clone progress from running worker pods; nil disables
-	// polling (envtest has no pods to ask).
-	Poller *progress.Poller
 
 	// Sentinel drives follow migrations; nil disables follow handling.
 	Sentinel SentinelOps
@@ -229,19 +224,15 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 	return ctrl.Result{}, false, nil
 }
 
-// observeRunningJob samples a live worker (clone progress, follow state) and
-// schedules the next look.
+// observeRunningJob samples a live worker (follow state) and schedules the
+// next look.
+//
+// Progress polling is disabled on pgcopydb 0.18: the `list progress` exec
+// corrupts filtered catalogs and never returns data, see the MILESTONES
+// decision log 2026-08-09. status.progress stays in the API, reserved for a
+// fixed upstream.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1beta1.PhaseCloning
-	if r.Poller != nil {
-		// Best effort: a missing sample (pod starting/terminating, catalogs
-		// not ready) keeps the previous numbers instead of failing the pass.
-		if p, err := r.Poller.CloneProgress(ctx, m.Namespace, job.Name); err != nil {
-			logf.FromContext(ctx).V(1).Info("progress poll failed", "error", err)
-		} else if p != nil {
-			m.Status.Progress = p
-		}
-	}
 	if followEnabled(m) {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
 		// trigger the cutover itself; see follow.go.
