@@ -332,16 +332,7 @@ var _ = BeforeSuite(func() {
 	ensureNamespace(nsX)
 
 	By("deleting leftover Migrations from previous runs")
-	for _, ns := range []string{nsE2E, nsX} {
-		Expect(k8sClient.DeleteAllOf(ctx, &v1beta1.Migration{}, client.InNamespace(ns))).To(Succeed())
-	}
-	Eventually(func(g Gomega) {
-		for _, ns := range []string{nsE2E, nsX} {
-			list := &v1beta1.MigrationList{}
-			g.Expect(k8sClient.List(ctx, list, client.InNamespace(ns))).To(Succeed())
-			g.Expect(list.Items).To(BeEmpty(), "Migrations still terminating in %s", ns)
-		}
-	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	purgeMigrations(2 * time.Minute)
 
 	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
 		pgSource, pgTarget))
@@ -369,6 +360,14 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
+	// needs a live controller to run the cleanup Job and release, and that
+	// cleanup is what drops the replication slots. A failed or timed-out
+	// spec can leave Migrations behind; uninstalling first would orphan
+	// them and wedge the namespace deletion below for the full timeout.
+	By("deleting leftover Migrations while the operator still runs")
+	purgeMigrations(5 * time.Minute)
+
 	// The throwaway operator always goes away, keep-fixtures or not: every
 	// run installs a fresh one.
 	By("uninstalling the suite's operator and deleting " + nsOperator)
@@ -881,6 +880,23 @@ func deletePod(selector client.MatchingLabels) {
 // deleteMigration deletes the named Migration in nsE2E and waits until the
 // finalizer released it (deletion of a live migration runs slot cleanup
 // first), so the next scenario starts without leftovers.
+// purgeMigrations deletes every Migration in both fixture namespaces and
+// waits for the finalizers to release. Callers must ensure an operator is
+// still running: without one the wait can only time out.
+func purgeMigrations(timeout time.Duration) {
+	GinkgoHelper()
+	for _, ns := range []string{nsE2E, nsX} {
+		Expect(k8sClient.DeleteAllOf(ctx, &v1beta1.Migration{}, client.InNamespace(ns))).To(Succeed())
+	}
+	Eventually(func(g Gomega) {
+		for _, ns := range []string{nsE2E, nsX} {
+			list := &v1beta1.MigrationList{}
+			g.Expect(k8sClient.List(ctx, list, client.InNamespace(ns))).To(Succeed())
+			g.Expect(list.Items).To(BeEmpty(), "Migrations still terminating in %s", ns)
+		}
+	}, timeout, 2*time.Second).Should(Succeed())
+}
+
 func deleteMigration(name string) {
 	GinkgoHelper()
 	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
