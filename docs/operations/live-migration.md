@@ -56,6 +56,8 @@ Manual is the default mode. Cutover freezes the stream at the source's current L
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin. Then `Complete` goes True, phase `Completed`.
 7. Point the application at the target.
 
+An idle source needs no extra care from you. pgcopydb 0.18 only checks the cutover LSN against WAL it receives, and a source with zero writes sends none, which would leave the drain waiting forever. So while the phase is `CuttingOver` the operator emits a tiny logical message on the source (`pg_logical_emit_message`) on every pass: one WAL record for the stream to deliver, letting the worker reach the LSN promptly. The message carries no data, needs no special privilege, and changes nothing user-visible.
+
 ## Automatic mode
 
 `cutover.mode: Automatic` skips the approval: the operator cuts over the moment `CaughtUp` first goes True. Use it only when the source is already quiesced (a decommissioned system, a maintenance window that started before the Migration). Against a source still taking writes, "caught up" is a moving target crossed at an arbitrary moment, and every write after the freeze is lost to the target. When in doubt, use Manual.

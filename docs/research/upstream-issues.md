@@ -215,3 +215,35 @@ The `summary` table's only uniqueness constraint is `unique(tableoid, partnum)` 
 ### Suggested fix
 
 Constrain index summary rows (`unique(indexoid)`) with an idempotent insert, or delete the stale row before re-registering an index run; failing that, add `LIMIT 1` (with an ordering that prefers the latest attempt) to `summary_lookup_index` and its constraint-summary sibling so resumes read a deterministic row instead of erroring.
+
+## `follow` never reaches a freshly set endpos on an idle source: endpos is only evaluated against received WAL, and keepalives do not conclude the drain
+
+Status: draft, not filed.
+
+### Environment
+
+- pgcopydb 0.18-1.pgdg12+1 (upstream container image)
+- observed live under Kubernetes (2026-08-09/10, three consistent occurrences): follow migrations wedged in their drain forever after `sentinel set endpos --current` against a fully idle source
+
+### What happened
+
+A follow migration fully caught up (write LSN = replay LSN = the source's flushed LSN), then `pgcopydb stream sentinel set endpos --current`. The worker stays healthy and the receive loop keeps running, but the stream never concludes and the worker never exits. Runs where the source happened to produce WAL shortly after the endpos was set (recent seed activity, autovacuum) drained fine; deep-idle sources hang indefinitely.
+
+### Reproduction (sketch)
+
+```sh
+# follow migration caught up against a source with zero write activity
+pgcopydb stream sentinel set endpos --current --dir /work/m
+# the receive loop waits; nothing arrives, endpos is never evaluated, no exit
+# any WAL record releases it, for example:
+psql $SRC -Xqtc "select pg_logical_emit_message(false, 'nudge', '')"
+# the worker now drains and exits 0 promptly
+```
+
+### Root cause (suspected)
+
+The receive loop compares its position against endpos only while processing arriving WAL (copy-data messages). Walsender keepalives do report the server's current WAL position, and on an idle source that position already equals the endpos, but the keepalive path does not perform the endpos check. With no traffic there is nothing to evaluate, so an endpos set at (or past) the idle source's head is unreachable until unrelated WAL happens to arrive.
+
+### Suggested fix
+
+Evaluate endpos on walsender keepalives as well: when the keepalive's reported WAL position has reached endpos, conclude the stream exactly as if a data message had crossed it.

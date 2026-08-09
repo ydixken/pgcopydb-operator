@@ -49,6 +49,7 @@ const defaultMaxCatchupLag = int64(16 << 20)
 type SentinelOps interface {
 	Read(ctx context.Context, namespace, jobName string) (*sentinel.State, error)
 	SetEndposCurrent(ctx context.Context, namespace, jobName string) (string, error)
+	NudgeEndpos(ctx context.Context, namespace, jobName string) error
 }
 
 func followEnabled(m *v1beta1.Migration) bool {
@@ -148,6 +149,17 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	case caughtUp:
 		// Manual mode, waiting for approval.
 		m.Status.Phase = v1beta1.PhaseCutoverPending
+	}
+
+	// Draining: pgcopydb 0.18 evaluates endpos only against WAL it receives,
+	// so a fully idle source would never conclude the drain (see
+	// docs/research/upstream-issues.md). One tiny logical message per pass
+	// gives the receiver a record to evaluate; idempotent, harmless under
+	// real traffic, best effort like the sentinel reads above.
+	if m.Status.Phase == v1beta1.PhaseCuttingOver {
+		if err := r.Sentinel.NudgeEndpos(ctx, m.Namespace, jobName); err != nil {
+			log.V(1).Info("endpos nudge failed", "job", jobName, "error", err)
+		}
 	}
 }
 

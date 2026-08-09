@@ -130,6 +130,25 @@ func (c *Client) SetEndposCurrent(ctx context.Context, namespace, jobName string
 	return strings.TrimSpace(string(out)), nil
 }
 
+// NudgeEndpos emits a tiny non-transactional logical message on the source.
+// pgcopydb 0.18 evaluates endpos only against WAL it receives, so on a fully
+// idle source a freshly set endpos is never reached and the drain hangs; one
+// throwaway record gives the receiver something to evaluate (see
+// docs/research/upstream-issues.md). pg_logical_emit_message carries the
+// default PUBLIC execute grant, so the migration user can always call it.
+// Idempotent and harmless under real traffic. Best effort like Read: no
+// running pod is no error, and callers only debug-log failures.
+func (c *Client) NudgeEndpos(ctx context.Context, namespace, jobName string) error {
+	pod, err := c.exec.RunningPod(ctx, namespace, jobName)
+	if err != nil || pod == "" {
+		return err
+	}
+	_, err = c.exec.InPod(ctx, namespace, pod,
+		[]string{"sh", "-c",
+			`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc "select pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')"`})
+	return err
+}
+
 // ToStatus converts a sample into the CR's replication status block.
 func (s *State) ToStatus(slotName string) *v1beta1.ReplicationStatus {
 	if s == nil {
