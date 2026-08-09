@@ -135,7 +135,7 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 
 ### W-H: Competitive comparison (wave 1, parallel)
 
-- [x] docs/design/comparison.md: CNPG, Percona Everest DataImporter, Zalando, mariadb-operator sync; CRD ergonomics, conditions conventions, day-2 ops, docs, testing signals; adopt/reject list; motivated changes become M5 tasks (small ones implemented this push). Done 2026-08-08: doc landed with per-axis evidence and a 6-project summary table; five adoptions ledgered below, seven rejections recorded with revisit conditions; no adoption blocks v0.2.0. Side finding: the committed LICENSE file is GPL-2.0 while README and all source headers say Apache-2.0; license choice needs a maintainer decision, flagged, not changed.
+- [x] docs/design/comparison.md: CNPG, Percona Everest DataImporter, Zalando, mariadb-operator sync; CRD ergonomics, conditions conventions, day-2 ops, docs, testing signals; adopt/reject list; motivated changes become M5 tasks (small ones implemented this push). Done 2026-08-08: doc landed with per-axis evidence and a 6-project summary table; five adoptions ledgered below, seven rejections recorded with revisit conditions; no adoption blocks v0.2.0. Side finding: the committed LICENSE file is GPL-2.0 while README and all source headers say Apache-2.0; license choice needs a maintainer decision, flagged, not changed. Resolved 2026-08-09: GPL-2.0, see decision log.
 
 #### W-H adoptions
 
@@ -188,3 +188,4 @@ Goal: production posture. Competitive review, Ponytail code reduction, coverage 
 | 2026-08-07 | Unit tests by default; documentation always current; both hard requirements     | User requirement; codified in AGENTS.md.                                                                                                             |
 | 2026-08-07 | MILESTONES.md replaces PROGRESS.md as the single task ledger                    | User requirement; decision log carried over.                                                                                                          |
 | 2026-08-08 | Retries keep `--resume --not-consistent`; no snapshot-holder sidecar            | S8: plain `--resume` hard-fails once the exporting session died; a holder must outlive worker pods (extra pod, same failure mode); verification gates cover divergence. |
+| 2026-08-09 | Project license is GPL-2.0, matching the committed LICENSE; all Apache-2.0 references (source headers, boilerplate, README, chart annotation) aligned to it | Maintainer decision; the Apache headers were kubebuilder scaffold leftovers. Apache-2.0 dependencies keep their own licenses, nothing relicenses them. |
