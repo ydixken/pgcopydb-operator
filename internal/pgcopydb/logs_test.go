@@ -61,6 +61,51 @@ func TestLastErrorLine(t *testing.T) {
 	}
 }
 
+func TestCloneDone(t *testing.T) {
+	// Line shapes as the operator fetches them: the runtime's RFC3339Nano
+	// stamp, a space, then pgcopydb's JSON log line. The markers are the two
+	// lines pgcopydb 0.18 logs when the clone phase of clone --follow ends
+	// (cli_clone_follow.c, copydb_clone_database).
+	const ts = "2026-08-09T10:00:00.000000000Z "
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "sentinel-apply marker means clone done",
+			raw: ts + `{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n" +
+				ts + `{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}`,
+			want: true,
+		},
+		{
+			name: "summary marker means clone done",
+			raw:  ts + `{"error_severity":"INFO","message":"All step are now done, 12m34s elapsed"}`,
+			want: true,
+		},
+		{
+			name: "step banners alone are mid-copy",
+			raw: ts + `{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n" +
+				ts + `{"error_severity":"INFO","message":"reported write_lsn 0/5000"}`,
+			want: false,
+		},
+		{
+			name: "marker split across lines does not match",
+			raw: ts + `{"error_severity":"INFO","message":"Updating the pgcopydb.sen` + "\n" +
+				`tinel to enable applying changes"}`,
+			want: false,
+		},
+		{name: "empty tail", raw: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CloneDone([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("CloneDone() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSupervisorDeath(t *testing.T) {
 	// Line shapes as PodLogOptions Timestamps returns them: the runtime's
 	// RFC3339Nano stamp, a space, then pgcopydb's JSON log line. The marker

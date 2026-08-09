@@ -202,7 +202,10 @@ var _ = Describe("Migration", Ordered, func() {
 	// next one relies on that clean slate for its own slot counting.
 	It("streams live writes and completes a Manual cutover", func() {
 		const name = "e2e-follow-manual"
-		create(newFollowMigration(name, v1beta1.CutoverManual))
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		// 0.18's catalog layer crashes probabilistically at this scale; retries resume from the work dir.
+		mig.Spec.BackoffLimit = 5
+		create(mig)
 
 		By("waiting for the base copy to finish and streaming to start")
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
@@ -256,6 +259,8 @@ var _ = Describe("Migration", Ordered, func() {
 		// must both come out True on one Migration.
 		mig := newFollowMigration(name, v1beta1.CutoverAutomatic)
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
+		// 0.18's catalog layer crashes probabilistically at this scale; retries resume from the work dir.
+		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)

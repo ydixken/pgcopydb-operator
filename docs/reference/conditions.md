@@ -35,7 +35,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished. |
-| `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished and change replay took over. |
+| `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished (detected from the worker's clone-completion log line) and change replay took over. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Replication lag is at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no sentinel sample is available yet. |

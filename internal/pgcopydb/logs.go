@@ -18,6 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 package pgcopydb
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"time"
@@ -55,6 +56,34 @@ func LastErrorLine(raw []byte) string {
 		}
 	}
 	return last
+}
+
+// Clone-done markers in clone --follow mode, from the pgcopydb 0.18 source
+// (src/bin/pgcopydb/copydb_clone_database in cli_clone_follow.c). After the
+// post-data restore (whose banner, "STEP 10: restore the post-data section to
+// the target database", still counts as mid-copy) the clone sub-process logs,
+// in order:
+//
+//	log_info("Updating the pgcopydb.sentinel to enable applying changes");  (line 1061, follow only)
+//	log_info("All step are now done, %s elapsed", timing->ppDuration);      (line 1077)
+//
+// The first line announces exactly the transition the operator wants: base
+// copy finished, change replay may start. The second confirms it once the
+// summary timing is closed. Both strings appear nowhere else in the 0.18
+// source; matching either keeps detection alive if upstream rewords one.
+const (
+	markerSentinelApply = "Updating the pgcopydb.sentinel to enable applying changes"
+	markerAllStepsDone  = "All step are now done"
+)
+
+// CloneDone reports whether a worker log tail shows the clone (base copy)
+// phase of a clone --follow run as finished. Plain substring matching works on
+// both raw and runtime-timestamped JSON log lines; a marker truncated mid-line
+// does not match, so a clipped tail degrades to "not done" and the next poll
+// retries.
+func CloneDone(raw []byte) bool {
+	return bytes.Contains(raw, []byte(markerSentinelApply)) ||
+		bytes.Contains(raw, []byte(markerAllStepsDone))
 }
 
 // Supervisor-death markers, both proven live on pgcopydb 0.18 in follow mode
