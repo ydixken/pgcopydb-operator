@@ -25,19 +25,31 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+// callTimeout bounds every API call this package makes. Reconcile contexts
+// carry no deadline, and a pod exec or log stream that hangs on a wedged
+// API-server connection would otherwise freeze that Migration's reconcile
+// forever, its phase pinned wherever it stood (observed live: Migrations
+// stuck in Cloning and CuttingOver with a healthy worker underneath).
+const callTimeout = 30 * time.Second
+
 // Exec runs commands in a Job's running worker pod.
 type Exec struct {
 	config    *rest.Config
 	clientset kubernetes.Interface
+
+	// timeout bounds each call; tests shorten it. Zero means callTimeout.
+	timeout time.Duration
 }
 
 // New builds an Exec from the manager's rest config.
@@ -49,9 +61,21 @@ func New(config *rest.Config) (*Exec, error) {
 	return &Exec{config: config, clientset: cs}, nil
 }
 
+// bounded derives the per-call context. The parent still wins when it is
+// cancelled first (manager shutdown).
+func (e *Exec) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	t := e.timeout
+	if t == 0 {
+		t = callTimeout
+	}
+	return context.WithTimeout(ctx, t)
+}
+
 // RunningPod returns the name of the Job's running pod, or "" when none is
 // ready to answer (starting, terminating): callers treat that as "no sample".
 func (e *Exec) RunningPod(ctx context.Context, namespace, jobName string) (string, error) {
+	ctx, cancel := e.bounded(ctx)
+	defer cancel()
 	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		// The Job controller labels worker pods with job-name.
 		LabelSelector: "job-name=" + jobName,
@@ -71,6 +95,8 @@ func (e *Exec) RunningPod(ctx context.Context, namespace, jobName string) (strin
 // error or preflight verdict only exists in the pod log. The newest pod is
 // the right one when the Job's own backoffLimit produced several.
 func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
+	ctx, cancel := e.bounded(ctx)
+	defer cancel()
 	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "job-name=" + jobName,
 	})
@@ -93,6 +119,8 @@ func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines
 
 // InPod runs argv in the pod's pgcopydb container and returns stdout.
 func (e *Exec) InPod(ctx context.Context, namespace, pod string, argv []string) ([]byte, error) {
+	ctx, cancel := e.bounded(ctx)
+	defer cancel()
 	req := e.clientset.CoreV1().RESTClient().Post().
 		Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
@@ -101,7 +129,22 @@ func (e *Exec) InPod(ctx context.Context, namespace, pod string, argv []string) 
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
-	exec, err := remotecommand.NewSPDYExecutor(e.config, "POST", req.URL())
+	// WebSocket first: its handshake honors the context, while the SPDY
+	// round tripper reads the upgrade response with no deadline at all (a
+	// wedged API-server connection froze reconciles mid-phase, proven by
+	// the bounded-timeout test). SPDY stays as the fallback for API
+	// servers that refuse the websocket upgrade.
+	ws, err := remotecommand.NewWebSocketExecutor(e.config, "GET", req.URL().String())
+	if err != nil {
+		return nil, err
+	}
+	spdy, err := remotecommand.NewSPDYExecutor(e.config, "POST", req.URL())
+	if err != nil {
+		return nil, err
+	}
+	exec, err := remotecommand.NewFallbackExecutor(ws, spdy, func(err error) bool {
+		return httpstream.IsUpgradeFailure(err) || httpstream.IsHTTPSProxyError(err)
+	})
 	if err != nil {
 		return nil, err
 	}
