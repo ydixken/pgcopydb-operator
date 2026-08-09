@@ -17,7 +17,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 package pgcopydb
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLastErrorLine(t *testing.T) {
 	cases := []struct {
@@ -53,6 +56,64 @@ func TestLastErrorLine(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := LastErrorLine([]byte(tc.raw)); got != tc.want {
 				t.Fatalf("LastErrorLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSupervisorDeath(t *testing.T) {
+	// Line shapes as PodLogOptions Timestamps returns them: the runtime's
+	// RFC3339Nano stamp, a space, then pgcopydb's JSON log line. The marker
+	// messages are the ones proven live on 0.18.
+	stamp := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	ts := stamp.Format(time.RFC3339Nano)
+	cases := []struct {
+		name  string
+		raw   string
+		want  time.Time
+		found bool
+	}{
+		{
+			name: "group termination FATAL is the marker",
+			raw: ts + ` {"timestamp":"t","pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n" +
+				ts + ` {"timestamp":"t","pid":42,"error_severity":"INFO","message":"streamed up to write_lsn 0/5000"}`,
+			want:  stamp,
+			found: true,
+		},
+		{
+			name:  "dead clone worker report is a marker too",
+			raw:   ts + ` {"timestamp":"t","pid":1,"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}`,
+			want:  stamp,
+			found: true,
+		},
+		{
+			name: "first marker line dates the death",
+			raw: ts + ` {"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}` + "\n" +
+				stamp.Add(time.Second).Format(time.RFC3339Nano) + ` {"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want:  stamp,
+			found: true,
+		},
+		{
+			name: "healthy stream has no marker",
+			raw: ts + ` {"error_severity":"INFO","message":"reported write_lsn 0/5000 flush_lsn 0/5000"}` + "\n" +
+				ts + ` {"error_severity":"INFO","message":"apply reached 0/5000"}`,
+			found: false,
+		},
+		{
+			name:  "marker without a parsable timestamp is skipped",
+			raw:   `{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			found: false,
+		},
+		{name: "empty input", raw: "", found: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := SupervisorDeath([]byte(tc.raw))
+			if found != tc.found {
+				t.Fatalf("SupervisorDeath() found = %v, want %v", found, tc.found)
+			}
+			if found && !got.Equal(tc.want) {
+				t.Fatalf("SupervisorDeath() = %v, want %v", got, tc.want)
 			}
 		})
 	}

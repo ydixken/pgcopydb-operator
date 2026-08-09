@@ -20,6 +20,7 @@ package pgcopydb
 import (
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // LastErrorLine extracts the message of the last ERROR-or-worse entry from a
@@ -54,4 +55,48 @@ func LastErrorLine(raw []byte) string {
 		}
 	}
 	return last
+}
+
+// Supervisor-death markers, both proven live on pgcopydb 0.18 in follow mode
+// (see docs/research/upstream-issues.md): the supervisor reports the dead
+// clone worker, then pid 1 logs the FATAL group termination. Plain substring
+// matches keep the detection tolerant of upstream format changes around the
+// message.
+const (
+	markerGroupTermination = "Terminating all processes in our process group"
+	markerCloneProcess     = "clone process"
+	markerHasTerminated    = "has terminated"
+)
+
+// supervisorDeathLine reports whether one log line carries a marker.
+func supervisorDeathLine(line string) bool {
+	if strings.Contains(line, markerGroupTermination) {
+		return true
+	}
+	return strings.Contains(line, markerCloneProcess) && strings.Contains(line, markerHasTerminated)
+}
+
+// SupervisorDeath scans a runtime-timestamped log tail (PodLogOptions
+// Timestamps: every line is "<RFC3339Nano> <message>") for the pgcopydb
+// supervisor-death markers and returns the runtime's timestamp of the first
+// marker line found. The kubelet's stamp dates the death without parsing
+// pgcopydb's own log fields, whose format is upstream's business. Marker
+// lines without a parsable timestamp are skipped, so mixed or truncated
+// input degrades to "not found".
+func SupervisorDeath(raw []byte) (time.Time, bool) {
+	for line := range strings.Lines(string(raw)) {
+		if !supervisorDeathLine(line) {
+			continue
+		}
+		ts, _, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		return t, true
+	}
+	return time.Time{}, false
 }

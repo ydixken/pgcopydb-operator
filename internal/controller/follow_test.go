@@ -130,14 +130,21 @@ func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string,
 }
 
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
-// sentinel: tests choose what a pod "logged".
+// sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
+// and tsErr the timestamped variant the zombie check reads.
 type fakeLogs struct {
-	out string
-	err error
+	out   string
+	err   error
+	tsOut string
+	tsErr error
 }
 
 func (f *fakeLogs) JobLogs(context.Context, string, string, int64) ([]byte, error) {
 	return []byte(f.out), f.err
+}
+
+func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {
+	return []byte(f.tsOut), f.tsErr
 }
 
 var _ = Describe("Migration Controller follow mode", func() {
@@ -244,6 +251,32 @@ var _ = Describe("Migration Controller follow mode", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
+	})
+
+	It("polls at half speed during the base copy and full speed once streaming", func() {
+		const name = "mig-clone-cadence"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name) // run-1
+		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}}
+
+		// Base copy running: every pass costs a sentinel read that competes
+		// with pgcopydb's own catalog writers (the live SQLITE_BUSY kill), so
+		// the requeue stretches to double the poll interval.
+		fake.state = &sentinel.State{ApplyEnabled: false, WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
+		res, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(2 * pollInterval))
+
+		// Apply on (base copy done): the fast cadence returns for cutover.
+		// Manual mode without approval, so being caught up changes nothing.
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		res, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(pollInterval))
 	})
 
 	It("cuts over automatically once caught up", func() {

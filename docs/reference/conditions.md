@@ -61,6 +61,7 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
+| `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The follow preflight Job was created. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
