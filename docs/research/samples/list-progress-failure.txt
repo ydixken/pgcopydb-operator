@@ -1,3 +1,0 @@
-2026-08-08 00:44:58.025 1332 INFO   main.c:150                Running pgcopydb version 0.18-1.pgdg12+1 from "/usr/bin/pgcopydb"
-2026-08-08 00:44:58.040 1332 ERROR  catalog.c:10911           Failed to prepare SQLite statement: select   coalesce((select sum(bytes) from s_table), 0) as total,   coalesce((select sum(bytes) from summary             where tableoid is not null and done_time_epoch is not null), 0)    as done,   coalesce((select sum(bytes) from summary             where tableoid is not null and done_time_epoch is null), 0)    as in_progress
-2026-08-08 00:44:58.040 1332 ERROR  catalog.c:10912           [SQLite] no such column: bytes

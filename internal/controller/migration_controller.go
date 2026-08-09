@@ -228,9 +228,9 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 // next look.
 //
 // Progress polling is disabled on pgcopydb 0.18: the `list progress` exec
-// corrupts filtered catalogs and never returns data, see the MILESTONES
-// decision log 2026-08-09. status.progress stays in the API, reserved for a
-// fixed upstream.
+// corrupts filtered catalogs and never returns data, see
+// docs/research/upstream-issues.md. status.progress stays in the API,
+// reserved for a fixed upstream.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1beta1.PhaseCloning
 	if followEnabled(m) {

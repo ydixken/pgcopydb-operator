@@ -18,4 +18,3 @@ Where to go:
 - [Prerequisites](reference/prerequisites.md): what your endpoints must provide; read this before a live migration.
 - [CRD reference](reference/api.md): every `Migration` field with defaults and validation.
 - [Conditions and reasons](reference/conditions.md): the condition types and reason strings as API contract.
-- [Design](superpowers/specs/2026-08-07-operator-design.md): the approved operator architecture.

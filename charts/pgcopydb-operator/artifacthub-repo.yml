@@ -1,7 +1,6 @@
 # Artifact Hub repository metadata. For an OCI chart repo this file is NOT
 # part of the chart (see .helmignore); it is pushed next to the chart under
-# the fixed `artifacthub.io` tag with oras. The exact command and the manual
-# listing step live in MILESTONES.md (M4).
+# the fixed `artifacthub.io` tag with oras.
 #
 # repositoryID is assigned by Artifact Hub when the repository is added there;
 # set it and re-push for verified-publisher status.

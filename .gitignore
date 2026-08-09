@@ -37,3 +37,6 @@ kubeconfig/
 
 # mkdocs build output (mkdocs.yml), served by GitHub Pages, never committed.
 site/
+
+# Local-only design notes, kept out of the public repo.
+docs/superpowers/

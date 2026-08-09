@@ -26,7 +26,7 @@ import (
 )
 
 func TestParseListProgress(t *testing.T) {
-	// Shape per docs/research/pgcopydb-cli.md section 10 and upstream
+	// Shape per upstream
 	// progress.c (top-level bytes object); in-progress entries and unknown
 	// keys must be ignored.
 	raw := []byte(`{

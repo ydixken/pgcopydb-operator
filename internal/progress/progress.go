@@ -18,8 +18,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // Package progress parses pgcopydb's JSON progress reporting (`pgcopydb list
 // progress --json`) into status. The parser is all that remains: the exec
 // that fed it was removed because on pgcopydb 0.18 the command corrupts
-// filtered catalogs and never returns data (see the MILESTONES decision log
-// 2026-08-09). It stays for the day a fixed upstream makes polling safe.
+// filtered catalogs and never returns data (see
+// docs/research/upstream-issues.md). It stays for the day a fixed upstream
+// makes polling safe.
 package progress
 
 import (
@@ -32,8 +33,8 @@ import (
 )
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
-// (docs/research/pgcopydb-cli.md section 10; bytes object per upstream
-// progress.c). Unknown fields are ignored so schema drift degrades to missing
+// (bytes object per upstream progress.c). Unknown fields are ignored so
+// schema drift degrades to missing
 // numbers, never to a failure. Bytes is a pointer so an output without the
 // object (older pgcopydb) yields no byte counters instead of fake zeros.
 type listProgress struct {

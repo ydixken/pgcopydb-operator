@@ -5,7 +5,7 @@ A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb)
 **Documentation:** [ydixken.github.io/pgcopydb-operator](https://ydixken.github.io/pgcopydb-operator/)
 
 > [!important]
-> In development. One-shot clone (M1) and live migration with follow and controlled cutover (M2) are functional and e2e-tested; verification (M3) shipped with envtest coverage, its e2e scenario queued; release polish (M4) is underway. See [MILESTONES.md](MILESTONES.md) for the task ledger and the [design](docs/superpowers/specs/2026-08-07-operator-design.md) for the architecture.
+> In development, pre-1.0. One-shot clone, live migration with follow and controlled cutover, and verification are functional and e2e-tested against real clusters.
 
 ## Install
 
@@ -32,8 +32,6 @@ cmd/, internal/            # manager and controller (kubebuilder go/v4)
 config/                    # kubebuilder-generated kustomize tree
 docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
-docs/research/             # pgcopydb CLI + CDC references, prior art
-docs/superpowers/specs/    # approved design documents
 images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
 test/e2e/                  # e2e suite (local only, current kubectl context)
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
@@ -66,6 +64,4 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.
-- [MILESTONES.md](MILESTONES.md): where the project stands and why decisions were made.
-- [Design](docs/superpowers/specs/2026-08-07-operator-design.md): the approved operator architecture.
 - [LICENSE](LICENSE): GPL-2.0-only.
