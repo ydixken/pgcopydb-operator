@@ -39,6 +39,14 @@ import (
 var _ = Describe("Migration chaos", Label("chaos"), func() {
 	It("recovers a clone after the source primary dies mid-copy", func() {
 		const name = "e2e-chaos-srckill"
+		// The kill has to land inside the COPY of documents, the biggest
+		// table (scale x ~8.5GB of TOAST). Below scale 0.05 (~425MB) that
+		// COPY can finish within a few kubectl-exec poll round trips, so the
+		// window is no longer guaranteed; Skip instead of flaking.
+		if scale < 0.05 {
+			Skip("source-kill needs the documents COPY to outlast the poll round trip;" +
+				" E2E_SCALE=" + scaleArg() + " is below 0.05")
+		}
 		DeferCleanup(func() {
 			deleteMigration(name)
 			waitClusterReady(sourceCluster)
@@ -46,20 +54,21 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 
 		create(newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true}))
 
-		By("waiting for attempt 1 to be mid-copy")
+		By("waiting for the documents COPY to run on the target")
+		// Committed rows cannot time this kill: COPY is transactional, so
+		// count(*) on the target stays 0 until the copy commits and then
+		// jumps to the full count (the first live run polled for rows and
+		// the clone finished before the trigger fired). pg_stat_progress_copy
+		// instead shows the running COPY's live tuple counter: any progress
+		// on documents means the data copy is happening right now, with most
+		// of its minutes still ahead at the asserted scale.
 		Eventually(func(g Gomega) {
-			m := &v1beta1.Migration{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-			g.Expect(m.Status.Attempts).To(Equal(int32(1)))
-			g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
-			// Table presence on the target means the pre-data restore is done
-			// and the data copy is running or imminent: mid-clone, not
-			// pre-clone. At tiny E2E_SCALE values the copy window shrinks and
-			// the kill below may miss it; chaos assumes the default scale.
-			g.Expect(psql(tgtPod, "SELECT to_regclass('public.documents') IS NOT NULL")).To(Equal("t"))
-		}, migrationTimeout, time.Second).Should(Succeed())
+			g.Expect(psql(tgtPod, "SELECT coalesce(sum(tuples_processed), 0) > 0"+
+				" FROM pg_stat_progress_copy WHERE relid = to_regclass('public.documents')")).
+				To(Equal("t"), "no COPY on documents in progress yet")
+		}, migrationTimeout, 500*time.Millisecond).Should(Succeed())
 
-		By("killing the source primary")
+		By("killing the source primary mid-copy")
 		deletePod(client.MatchingLabels{"cnpg.io/cluster": sourceCluster, "cnpg.io/instanceRole": "primary"})
 
 		By("waiting for the resumed clone to complete")
@@ -73,22 +82,58 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
 	})
 
-	It("fails a clone whose work volume runs out of space", func() {
+	// Disk pressure needs follow mode: a clone's work dir holds catalogs and
+	// schema dumps only, a few MB that never fill the volume (the first live
+	// run completed on 200Mi with room to spare). Follow mode spools every
+	// decoded change under the work dir as JSON plus transformed SQL and does
+	// not prune the files while the migration runs, so sustained source
+	// writes grow the spool without bound.
+	It("fails a follow migration when the change spool fills the work volume", func() {
 		const name = "e2e-chaos-diskfull"
-		DeferCleanup(func() { deleteMigration(name) })
+		DeferCleanup(func() {
+			deleteMigration(name)
+			resetSourceReplication()
+			resetTargetReplication()
+		})
 
-		m := newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true})
+		m := newFollowMigration(name, v1beta1.CutoverManual)
+		// 200Mi carries the clone-phase catalogs comfortably (proven live)
+		// and leaves a handful of burst batches as spool headroom.
 		m.Spec.WorkVolume.Size = resource.MustParse("200Mi")
-		// ENOSPC is deterministic on a full volume; a bigger budget would just
-		// fail the same way more times.
+		// ENOSPC persists on a full volume, so the --resume attempt fails
+		// the same way; backoffLimit 1 keeps that to one extra attempt
+		// before the absorbing Failed.
 		m.Spec.BackoffLimit = 1
 		create(m)
 
+		By("waiting for the base copy to finish and streaming to start")
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+
+		By("bursting TOAST rewrites until the spool overflows the work volume")
+		// documents carries the chunkiest rows the fixture has: each touched
+		// row re-logs a ~16KiB body, which lands on the spool twice (JSON
+		// and SQL), roughly 30MiB per 1000-row batch. The value changes per
+		// batch because logical decoding skips unchanged TOAST datums, and
+		// the loop keeps writing until the operator reports Failed, so a
+		// scale too small for 1000 distinct ids just needs more batches.
+		batch := 0
+		Eventually(func(g Gomega) {
+			cur := &v1beta1.Migration{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
+			if cur.Status.Phase != v1beta1.PhaseFailed {
+				batch++
+				psql(srcPod, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
+					" WHERE id <= 1000", batch))
+			}
+			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		}, migrationTimeout, time.Second).Should(Succeed())
+
 		failed := waitFailed(name, "BackoffLimitExceeded")
 		// The controller has no disk-specific wording; the failure surfaces
-		// through the generic Job-failure path, which appends the worker's
-		// last pgcopydb error line ("No space left on device") to the Failed
-		// condition message. That line is what carries "space".
+		// through the generic Job-failure path (handleFailedJob), which
+		// appends the worker's last pgcopydb error line ("No space left on
+		// device") to the Failed condition message. That line is what
+		// carries "space".
 		Expect(failureMessage(failed)).To(ContainSubstring("space"),
 			"Failed message does not surface the out-of-space error")
 	})
