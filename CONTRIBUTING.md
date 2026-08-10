@@ -63,11 +63,13 @@ Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`
 A release is one push of an annotated tag matching `v*`:
 
 ```sh
-git tag -a v0.2.0-alpha.9 -m "v0.2.0-alpha.9: short subject"
-git push origin v0.2.0-alpha.9
+git tag -a v0.3.0 -m "v0.3.0: short subject"
+git push origin v0.3.0
 ```
 
-`release.yml` publishes the manager and runner images (multi-arch, tagged with the tag and `latest`), then the Helm chart as OCI, then a GitHub release whose notes GitHub generates from the merged PRs. The chart job waits on both image jobs, so a published chart never points at an image that failed to build. A tag containing a hyphen is a SemVer prerelease and is marked as one on GitHub and on Artifact Hub.
+Versions are plain SemVer. The `-alpha.N` prereleases ran up to `v0.2.0-alpha.8` and stop there; `v0.3.0` is the first ordinary release. Pre-1.0 still means the API can change, which is what the major version zero says.
+
+`release.yml` publishes the manager and runner images (multi-arch, tagged with the tag and `latest`), then the Helm chart as OCI, then a GitHub release whose notes GitHub generates from the merged PRs. The chart job waits on both image jobs, so a published chart never points at an image that failed to build. A tag containing a hyphen is still treated as a SemVer prerelease and marked as one on GitHub and Artifact Hub, so the machinery is there if a release ever needs it.
 
 Chart `version` and `appVersion` come from the tag, which is why the values committed in `Chart.yaml` are placeholders. `hack/stamp-chart.sh` runs just before packaging and fills in the three Artifact Hub annotations that only make sense per release: the image tags, the prerelease flag, and a changelog built from the `feat:`, `fix:`, `perf:` and `refactor:` commit subjects since the previous tag. It edits the checkout and commits nothing.
 
