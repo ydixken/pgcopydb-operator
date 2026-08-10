@@ -10,7 +10,7 @@
   <a href="https://github.com/ydixken/pgcopydb-operator/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ydixken/pgcopydb-operator?sort=semver"></a>
   <a href="https://artifacthub.io/packages/search?repo=pgcopydb-operator"><img alt="Artifact Hub" src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator"></a>
   <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/ydixken/pgcopydb-operator"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ydixken/pgcopydb-operator"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
