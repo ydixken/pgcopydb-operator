@@ -3,6 +3,14 @@ name: Release
 # Publishes the public artifacts to ghcr.io on version tags:
 # manager image, runner image, and the Helm chart as OCI.
 # Images are multi-arch (linux/amd64 + linux/arm64) via QEMU/buildx (M4).
+#
+# The two image jobs run on the cluster's own runner scale set
+# (github-runner-pgcopydb-operator, an Actions Runner Controller install
+# managed from the app-of-apps repo). The arm64 half is QEMU-emulated on
+# either runner, so the win is core count: the cluster nodes have 20 against
+# a GitHub-hosted runner's 2. That makes releases depend on the cluster being
+# reachable; if it is down the jobs queue rather than fail. The chart job
+# stays hosted because helm packaging gains nothing from the move.
 
 on:
   push:
@@ -18,7 +26,7 @@ env:
 
 jobs:
   manager-image:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
@@ -38,7 +46,7 @@ jobs:
             ${{ env.IMAGE }}:latest
 
   runner-image:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
