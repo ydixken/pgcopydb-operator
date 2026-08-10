@@ -2,31 +2,100 @@ apiVersion: v2
 name: pgcopydb-operator
 description: Kubernetes operator that migrates PostgreSQL databases with pgcopydb.
 type: application
+# Placeholders. The release workflow overrides both from the git tag
+# (helm package --version --app-version), so no published chart carries 0.1.0.
 version: 0.1.0
 appVersion: "0.1.0"
+icon: https://ydixken.github.io/pgcopydb-operator/assets/logo.svg
 home: https://github.com/ydixken/pgcopydb-operator
 sources:
   - https://github.com/ydixken/pgcopydb-operator
 keywords:
   - postgresql
+  - postgres
   - migration
+  - database-migration
+  - logical-replication
+  - cutover
   - pgcopydb
   - operator
 maintainers:
   - name: Yannick Dixken
-    email: ydixken@googlemail.com
+    email: ydixken@gmail.com
 annotations:
   # Chart.yaml has no first-class license field; Artifact Hub reads this one.
   artifacthub.io/license: GPL-2.0-only
   artifacthub.io/operator: "true"
+  artifacthub.io/category: database
+  # Level I. The ladder is cumulative, and level II ("seamless upgrades") is
+  # about upgrading a managed operand, which a migration operator does not have.
+  artifacthub.io/operatorCapabilities: basic install
+  # People search for the tool they know, not for the operator wrapping it.
+  artifacthub.io/alternativeName: pgcopydb
   artifacthub.io/crds: |
     - kind: Migration
       version: v1beta1
       name: migrations.pgcopydb-operator.io
       displayName: Migration
       description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."
+  # Trimmed copies of docs/examples/migration-minimal.yaml and
+  # migration-follow.yaml. Kept in sync by hand; Artifact Hub reparses these as
+  # YAML and drops comments, so the explanations stay in docs/examples/.
+  artifacthub.io/crdsExamples: |
+    - apiVersion: pgcopydb-operator.io/v1beta1
+      kind: Migration
+      metadata:
+        name: shop
+      spec:
+        source:
+          host: db.old-datacenter.example.com
+          database: shop
+          username: migrator
+          passwordSecretRef: {name: shop-source, key: password}
+          sslMode: require
+        target:
+          host: shop-pg-rw.shop.svc
+          database: shop
+          username: app
+          passwordSecretRef: {name: shop-pg-app, key: password}
+    - apiVersion: pgcopydb-operator.io/v1beta1
+      kind: Migration
+      metadata:
+        name: billing
+      spec:
+        source:
+          host: billing.old-datacenter.example.com
+          database: billing
+          username: migrator
+          passwordSecretRef: {name: billing-source, key: password}
+          sslMode: require
+        target:
+          host: billing-pg-rw.billing.svc
+          database: billing
+          username: app
+          passwordSecretRef: {name: billing-pg-app, key: password}
+        follow:
+          enabled: true
+        cutover:
+          mode: Manual
+        workVolume:
+          size: 50Gi
+  # The runner reaches the cluster as a --runner-image flag rather than as a
+  # container in any manifest, so Artifact Hub cannot discover it and would
+  # never scan it. hack/stamp-chart.sh replaces the placeholder below with the
+  # tag at release time.
+  artifacthub.io/images: |
+    - name: manager
+      image: ghcr.io/ydixken/pgcopydb-operator:__TAG__
+    - name: runner
+      image: ghcr.io/ydixken/pgcopydb-operator/runner:__TAG__
+  # A link named "support" gets its own button on the package page.
   artifacthub.io/links: |
+    - name: Documentation
+      url: https://ydixken.github.io/pgcopydb-operator/
     - name: Quickstart
-      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/quickstart.md
+      url: https://ydixken.github.io/pgcopydb-operator/quickstart/
     - name: Prerequisites
-      url: https://github.com/ydixken/pgcopydb-operator/blob/main/docs/reference/prerequisites.md
+      url: https://ydixken.github.io/pgcopydb-operator/reference/prerequisites/
+    - name: support
+      url: https://github.com/ydixken/pgcopydb-operator/issues

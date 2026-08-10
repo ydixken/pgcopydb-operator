@@ -58,6 +58,32 @@ The stress tier (`task e2e:stress`) requires Longhorn. The suite creates a `long
 
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
+## Releasing
+
+A release is one push of an annotated tag matching `v*`:
+
+```sh
+git tag -a v0.2.0-alpha.9 -m "v0.2.0-alpha.9: short subject"
+git push origin v0.2.0-alpha.9
+```
+
+`release.yml` publishes the manager and runner images (multi-arch, tagged with the tag and `latest`), then the Helm chart as OCI, then a GitHub release whose notes GitHub generates from the merged PRs. The chart job waits on both image jobs, so a published chart never points at an image that failed to build. A tag containing a hyphen is a SemVer prerelease and is marked as one on GitHub and on Artifact Hub.
+
+Chart `version` and `appVersion` come from the tag, which is why the values committed in `Chart.yaml` are placeholders. `hack/stamp-chart.sh` runs just before packaging and fills in the three Artifact Hub annotations that only make sense per release: the image tags, the prerelease flag, and a changelog built from the `feat:`, `fix:`, `perf:` and `refactor:` commit subjects since the previous tag. It edits the checkout and commits nothing.
+
+After a release, pin the e2e install to the new tag in `test/e2e/e2e_suite_test.go` with a `chore:` commit.
+
+### Artifact Hub
+
+The chart is listed at [artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator). Artifact Hub reads the OCI repository directly, so a release needs no extra step to show up there.
+
+Ownership is proved by `charts/pgcopydb-operator/artifacthub-repo.yml`, pushed to the chart's OCI repository under the fixed `artifacthub.io` tag. That tag is not SemVer, so neither Helm nor Artifact Hub mistakes it for a chart version. `.github/workflows/artifacthub-metadata.yml` pushes it on any change to the file and on manual dispatch. `.helmignore` keeps it out of the packaged chart: it is a sibling artifact, not chart content.
+
+The rest of the listing comes from `Chart.yaml` annotations. Two are hand-maintained and worth knowing about:
+
+- `artifacthub.io/crdsExamples` duplicates `docs/examples/migration-minimal.yaml` and `migration-follow.yaml` with the comments stripped. Nothing enforces the copy, so update it when those examples change.
+- `artifacthub.io/images` lists the runner image explicitly. The runner reaches the cluster as a `--runner-image` flag rather than as a container in a manifest, so Artifact Hub cannot discover it, and without the annotation it is never scanned for vulnerabilities.
+
 ## Commits and pull requests
 
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.

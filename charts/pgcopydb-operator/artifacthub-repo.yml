@@ -2,9 +2,10 @@
 # part of the chart (see .helmignore); it is pushed next to the chart under
 # the fixed `artifacthub.io` tag with oras.
 #
-# repositoryID is assigned by Artifact Hub when the repository is added there;
-# set it and re-push for verified-publisher status.
-# repositoryID: <assigned-by-artifact-hub>
+# repositoryID identifies the repository registered at artifacthub.io and is
+# what earns the verified-publisher badge. The owners email MUST stay equal to
+# the address that account signs in with, or the claim is rejected silently.
+repositoryID: 72a99502-4a6c-41db-aa1d-0ba647f8aef1
 owners:
   - name: Yannick Dixken
-    email: ydixken@googlemail.com
+    email: ydixken@gmail.com

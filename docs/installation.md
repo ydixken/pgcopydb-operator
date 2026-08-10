@@ -7,7 +7,7 @@ helm install pgcopydb-operator oci://ghcr.io/ydixken/pgcopydb-operator/charts/pg
   --namespace pgcopydb-system --create-namespace
 ```
 
-The chart installs the `Migration` CRD, the controller manager, and its RBAC. The full values reference is the [chart README](https://github.com/ydixken/pgcopydb-operator/blob/main/charts/pgcopydb-operator/README.md). Check it is up:
+The chart installs the `Migration` CRD, the controller manager, and its RBAC. The full values reference is the [chart README](https://github.com/ydixken/pgcopydb-operator/blob/main/charts/pgcopydb-operator/README.md), also rendered on the chart's [Artifact Hub page](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator) alongside the CRD and example resources. Check it is up:
 
 ```sh
 kubectl get crd migrations.pgcopydb-operator.io
