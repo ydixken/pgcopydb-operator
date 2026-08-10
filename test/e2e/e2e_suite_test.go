@@ -159,6 +159,11 @@ var (
 	seedTimeout = 30 * time.Minute
 )
 
+// runnerTag is the tag for the worker image. It defaults to the same release
+// as the manager and is overridable with E2E_RUNNER_TAG so an unreleased
+// runner can be tested against real servers.
+var runnerTag = operatorTag
+
 // envTrue reports whether the given switch-style environment variable is
 // set to exactly "true".
 func envTrue(name string) bool {
@@ -178,6 +183,14 @@ func init() {
 			panic("E2E_SCALE must be a positive number, got " + strconv.Quote(v))
 		}
 		scale = f
+	}
+	// E2E_RUNNER_TAG points the worker Jobs at a runner image other than the
+	// pinned release, so a change to images/runner can be exercised against
+	// real servers before it merges. Without it the suite would install the
+	// published runner and report green regardless of what the branch does to
+	// that image.
+	if v := os.Getenv("E2E_RUNNER_TAG"); v != "" {
+		runnerTag = v
 	}
 	pgSource = pgMajorEnv("E2E_PG_SOURCE")
 	pgTarget = pgMajorEnv("E2E_PG_TARGET")
@@ -323,7 +336,7 @@ var _ = BeforeSuite(func() {
 		"-n", nsOperator, "--create-namespace",
 		"--set", "crds.install=false",
 		"--set", "image.tag="+operatorTag,
-		"--set", "runner.image.tag="+operatorTag,
+		"--set", "runner.image.tag="+runnerTag,
 		"--set", "watchNamespaces={"+nsE2E+","+nsX+"}",
 		"--set", "leaderElection.enabled=false",
 		"--wait")
