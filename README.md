@@ -1,5 +1,7 @@
 # pgcopydb-operator
 
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator)](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator)
+
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 **Documentation:** [ydixken.github.io/pgcopydb-operator](https://ydixken.github.io/pgcopydb-operator/)
@@ -13,6 +15,8 @@ A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb)
 helm install pgcopydb-operator oci://ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator \
   --namespace pgcopydb-system --create-namespace
 ```
+
+The chart is also listed on [Artifact Hub](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator), with the values reference, the `Migration` CRD and example resources.
 
 Then create a `Migration` (full examples with explanations in [docs/examples/](docs/examples/)):
 
@@ -35,7 +39,7 @@ docs/examples/             # Migration resources with short explanations
 images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
 test/e2e/                  # e2e suite (local only, current kubectl context)
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
-.github/workflows/         # GitHub->GitLab mirror, ghcr release, docs deploy
+.github/workflows/         # GitHub->GitLab mirror, ghcr release, docs deploy, Artifact Hub metadata
 .gitlab-ci.yml             # branch pipelines: yamllint, golangci-lint, envtest, image build
 Taskfile.yml               # task help | lint | test | e2e
 ```

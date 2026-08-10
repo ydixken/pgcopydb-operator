@@ -1,0 +1,35 @@
+name: Artifact Hub metadata
+
+# Publishes charts/pgcopydb-operator/artifacthub-repo.yml to the chart's OCI
+# repository under the fixed `artifacthub.io` tag. That is how Artifact Hub
+# verifies who owns the repository; without it there is no verified-publisher
+# badge. The tag is not SemVer, so neither Helm nor Artifact Hub mistakes it
+# for a chart version.
+#
+# Separate from release.yml deliberately: this artifact is a single mutable tag
+# with its own lifecycle, and it has to be publishable the moment Artifact Hub
+# assigns a repositoryID, without waiting for a release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["charts/pgcopydb-operator/artifacthub-repo.yml"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oras-project/setup-oras@v1
+      - name: Push repository metadata
+        working-directory: charts/pgcopydb-operator
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          oras push "ghcr.io/${{ github.repository }}/charts/pgcopydb-operator:artifacthub.io" \
+            --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+            artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml

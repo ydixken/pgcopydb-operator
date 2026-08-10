@@ -14,6 +14,9 @@ exclude_docs: |
 
 theme:
   name: material
+  # Also the chart's Artifact Hub icon, served from this site because GitHub
+  # Pages returns image/svg+xml where raw.githubusercontent.com returns text.
+  favicon: assets/logo.svg
   features:
     - navigation.sections
     - navigation.top

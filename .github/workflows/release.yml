@@ -77,12 +77,40 @@ jobs:
     needs: [manager-image, runner-image]
     steps:
       - uses: actions/checkout@v5
+        with:
+          # hack/stamp-chart.sh reads the tag history to build the changelog.
+          fetch-depth: 0
       - uses: azure/setup-helm@v4
       - name: Push chart as OCI
         # Chart version and appVersion both track the git tag (without the
-        # leading v, Helm requires SemVer).
+        # leading v, Helm requires SemVer). stamp-chart.sh fills in the
+        # Artifact Hub annotations that only make sense per release.
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          helm lint charts/pgcopydb-operator
+          ./hack/stamp-chart.sh "$GITHUB_REF_NAME"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
           helm package charts/pgcopydb-operator --version "$VERSION" --app-version "$GITHUB_REF_NAME"
           helm push "pgcopydb-operator-$VERSION.tgz" "oci://$IMAGE/charts"
+
+  release-notes:
+    # Last, so a release only appears once its artifacts are actually published.
+    runs-on: ubuntu-latest
+    needs: [chart]
+    permissions:
+      contents: write  # the workflow default is read-only
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Every tag with a hyphen is a SemVer prerelease; marking it keeps
+          # GitHub's "Latest release" pointing at a stable tag once one exists.
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes $prerelease
