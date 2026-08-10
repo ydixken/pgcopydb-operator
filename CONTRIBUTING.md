@@ -22,7 +22,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. Run `task lint` (and `task test` once Go code exists). Both MUST be clean before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
 
-The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline. Watch it, but never commit or open MRs there.
+Two pipelines run the same checks. `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, so a PR carries its own status; the GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline and additionally validates the image build on `main`. Watch either, but never commit or open MRs on GitLab. The two are expected to agree: a change to what one checks MUST change the other.
 
 ## Self-hosted runner
 

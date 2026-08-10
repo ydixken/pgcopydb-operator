@@ -1,0 +1,70 @@
+name: CI
+
+# Lint, test and build the docs on every push and pull request.
+#
+# This duplicates what .gitlab-ci.yml already runs, and that is the point:
+# pull requests live on GitHub while the GitLab project is private, so without
+# this a reviewer sees no checks at all on the PR they are reading. The GitLab
+# pipeline stays as it is; the two are expected to agree, and a change to one
+# should change the other.
+#
+# Deliberately not here: the image build (the release workflow owns publishing,
+# and GitLab does a build-validation pass on main) and e2e, which needs a real
+# cluster and a human at the keyboard.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+      - name: yamllint
+        run: pipx install yamllint && yamllint --strict .
+      - name: Chart CRD is current
+        # The chart embeds controller-gen output; this fails on drift.
+        run: ./hack/sync-chart-crd.sh --check
+      - name: helm lint
+        run: helm lint charts/pgcopydb-operator
+      - name: golangci-lint
+        run: make lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Unit and envtest suites
+        # make test downloads the envtest control-plane binaries itself.
+        run: make test
+      - name: Coverage total
+        run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
+      - uses: codecov/codecov-action@v5
+        with:
+          files: ./cover.out
+          # Public repo: Codecov accepts the upload without a token. A failed
+          # upload must not fail the build; the tests already passed.
+          fail_ci_if_error: false
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: mkdocs build --strict
+        # Pinned to match .gitlab-ci.yml and the docs deploy workflow.
+        run: pip install mkdocs-material==9.7.7 && mkdocs build --strict
