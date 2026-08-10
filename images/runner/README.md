@@ -1,27 +1,37 @@
 # Runner image
 
-Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql). The client tools come from Wolfi's `postgresql-18-client`; pgcopydb is compiled from its `v0.18` tag in a builder stage, because no Wolfi package exists. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
+Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql), both from the PGDG apt repo on `debian:trixie-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
 
-The image runs as uid 65532 (`nonroot`, which Wolfi already provides) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
+The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
 
-## Why Wolfi
+## Why it removes packages
 
-The image used to be `debian:bookworm-slim` with the PGDG apt repo. It reported 241 vulnerabilities, 16 of them critical, and **none had a fixed version available in Debian**, so no amount of patching moved it. Most of them were perl, which `postgresql-client-common` depends on and which the runner never executes. Rebasing onto trixie changed the total by nothing and cleared a single critical.
+Debian ships no fixed version for most of what a scanner reports here, so patching cannot help. Removal can, for the parts a migration never executes:
 
-The same image on Wolfi reports zero. That zero is a real one: the apk database is intact, so a scanner still enumerates every package. Building from binaries copied onto `scratch` would also have reported near zero, but only because no package metadata would survive to be scanned, which is a different thing entirely.
+| | findings | critical | high |
+|---|---|---|---|
+| stock trixie install | 241 | 16 | 30 |
+| perl removed | 177 | 0 | 14 |
+| plus util-linux, login, gzip | 92 | 0 | 3 |
 
-## Why not Alpine
+perl accounted for every critical. It arrives as a dependency of `postgresql-client-common`, whose only contribution is the pg_wrapper perl scripts in `/usr/bin`; `PATH` already prefers the real binaries in `/usr/lib/postgresql/18/bin`, so purging it removes a scripting language the image never runs. util-linux, `login` and gzip are likewise untouched by any migration.
 
-Alpine was tried first and is smaller still, at 37 MB against 111 MB. It does not work.
+The three remaining are genuinely needed: `libacl1` because GNU sed links it, `libtinfo6` and `ncurses-base` because psql links readline. An earlier attempt purged libacl1 as well and broke sed outright, which the build canary caught.
 
-pgcopydb's CLI depends on GNU `getopt_long` permuting argv, which is what lets `pgcopydb clone --dir /work --not-consistent` parse options written after the subcommand. musl's getopt does not permute; it stops at the first non-option argument. Every worker Job died immediately with `pgcopydb: unrecognized option: dir`, and the migration failed its backoff limit before touching a database. Upstream fixed the Alpine *build* in [dimitri/pgcopydb#193](https://github.com/dimitri/pgcopydb/pull/193), which says nothing about runtime argument handling.
+The removals happen inside the same `RUN` as the install. Files deleted in a later layer still occupy the earlier one, so splitting them would leave the image the same size; done in one layer it drops from 176 MB to 122 MB.
 
-Wolfi is glibc, so argument handling matches the Debian image it replaces, while still being apk-based with a near-zero CVE baseline. The build-time canary now asserts this directly: it runs a `clone` with options after the subcommand and requires the "Options --source and --target are mandatory" error, so a libc that stops permuting fails the build instead of every migration on the cluster.
+The cost is honest to state: `dpkg --purge --force-depends --force-remove-essential --force-remove-protected` leaves a package database that no longer satisfies its own dependencies. In an image that never runs apt again this is inert, but anything later added that expects perl or util-linux will not work.
 
-## Other notes
+## Why not Alpine or Wolfi
 
-GNU `sed` is installed on purpose. The Job's prelude escapes passwords into `.pgpass` with sed, and the busybox applet's behaviour on that escaping is close but not guaranteed identical.
+Both were built, measured and rejected.
 
-Build parallelism is capped at `-j4` rather than `-j$(nproc)`. The release builds arm64 under QEMU, where each `cc1` costs far more memory than it does natively, and one job per core is enough to get the compiler OOM-killed.
+**Alpine** reported zero findings at 37 MB and does not work. pgcopydb's CLI relies on GNU `getopt_long` permuting argv, which is what lets `pgcopydb clone --dir /work --not-consistent` parse options written after the subcommand. musl's getopt does not permute; every worker Job died with `pgcopydb: unrecognized option: dir` and the migration burned its backoff limit without touching a database. Upstream fixed the Alpine *build* in [dimitri/pgcopydb#193](https://github.com/dimitri/pgcopydb/pull/193), which says nothing about runtime argument handling.
 
-The base image is pinned by digest, because Chainguard rebuilds the floating tag constantly; Renovate bumps it and tracks the pgcopydb tag through the `PGCOPYDB_VERSION` build argument. apk package versions float, and the canary fails the build if pgcopydb drifts off 0.18, the client tools off 18, `sed` turns out not to be GNU, or option permutation stops working.
+**Wolfi** is glibc and worked correctly, at zero findings and 111 MB. It was rejected because `cgr.dev` images sit behind Chainguard's catalog tiers, where the public tier serves only `:latest`, so the base would be a dependency on a vendor's pricing terms. Wolfi's packages are Apache-2.0, but the images are a product.
+
+Staying on Debian keeps glibc, a free base, and an intact package database, so a scanner reports the truth rather than the absence of anything to enumerate. A `scratch` image assembled from copied binaries would also report near zero, while still containing openssl, krb5 and readline.
+
+## Canary
+
+Every assertion in the build-time canary stands for a way this image has actually broken: version drift off pgcopydb 0.18 or client 18; a purge that takes GNU sed with it; a libc whose getopt stops permuting; and perl surviving the purge. The base image is pinned by tag and digest, and Renovate bumps both together.

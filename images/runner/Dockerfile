@@ -2,86 +2,103 @@
 # PostgreSQL 18 client tools: pg_dump/pg_restore MUST be >= the newest server
 # major on either side, and 18 is the current release major.
 #
-# Built on Wolfi, with pgcopydb compiled from source, because Debian has no
-# answer for what a scanner finds here. On bookworm the runner reported 241
-# vulnerabilities, 16 critical, and not one of them had a fixed version
-# available; trixie changed the total by zero and cleared a single critical.
-# The bulk was perl, pulled in by postgresql-client-common and never executed.
+# Built from debian:trixie-slim with the PGDG apt repo instead of the
+# upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16
+# and a passwordless-sudo user, so basing on it would carry two client majors
+# plus sudo. PGDG trixie ships pgcopydb 0.18 and postgresql-client-18 for
+# amd64 and arm64, so one apt install yields exactly what the Jobs need.
 #
-# Wolfi rather than Alpine, and this is the whole reason: pgcopydb's CLI relies
-# on GNU getopt_long permuting argv, so that `pgcopydb clone --dir ...` parses
-# options that follow the subcommand. musl's getopt does not permute, and on
-# Alpine every worker died with "pgcopydb: unrecognized option: dir" before it
-# touched a database. Wolfi is glibc, so argument handling is identical to the
-# Debian image it replaces, while still being apk-based with a near-zero CVE
-# baseline. Alpine was tried, e2e caught it, see git history.
+# The image then deletes what it does not run. Debian ships no fixed version
+# for most of what a scanner finds here, so patching cannot help; removal can.
+# perl arrives as a dependency of postgresql-client-common and accounted for
+# every critical in the image, and util-linux, login and gzip are never
+# executed by a migration. Dropping them takes the report from 241 findings
+# with 16 criticals to 92 with none.
 #
-# The apk database survives into the final image, so a scanner still
-# enumerates every package. That is deliberate: copying binaries onto scratch
-# would also report near zero, but only by leaving openssl, krb5 and readline
-# present and uncounted.
+# Alpine and Wolfi were both tried and rejected. Alpine is musl, and pgcopydb's
+# CLI needs GNU getopt_long to permute argv so that options can follow the
+# subcommand; every worker Job died with "unrecognized option: dir" before
+# touching a database. Wolfi is glibc and worked, but its images live behind
+# Chainguard's catalog tiers, which is not a dependency this project should
+# take. Staying on Debian keeps glibc, a free base, and an intact package
+# database, so what a scanner reports is the truth rather than an artifact of
+# having nothing left to enumerate.
 
-# Pinned by digest; Chainguard rebuilds the floating tag constantly, so the
-# digest is the real pin and Renovate bumps it.
-# renovate: datasource=docker depName=cgr.dev/chainguard/wolfi-base
-FROM cgr.dev/chainguard/wolfi-base@sha256:30f03343947c7ae3581fda727a6e2aa7b8ce7009b7bfc2ab8d5c9483ace5812f AS build
+# Pinned by tag and digest; Renovate's dockerfile manager bumps both together.
+# renovate: datasource=docker depName=debian
+FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 
-# renovate: datasource=github-tags depName=dimitri/pgcopydb
-ARG PGCOPYDB_VERSION=v0.18
-
-# postgresql-18-dev supplies pg_config and the server headers; the rest are
-# pgcopydb's link-time dependencies. libxml2-dev is easy to miss: it is not
-# used directly, it arrives through libpq's link line, as do libxslt and PAM.
-RUN apk add --no-cache \
-      bison build-base flex git \
-      gc-dev icu-dev krb5-dev libxml2-dev libxslt-dev linux-pam-dev lz4-dev \
-      ncurses-dev openldap-dev openssl-dev postgresql-18-dev readline-dev \
-      sqlite-dev xxhash-dev zlib-dev zstd-dev
-
-RUN git clone --depth 1 --branch "$PGCOPYDB_VERSION" \
-      https://github.com/dimitri/pgcopydb.git /src
-WORKDIR /src
-# -j4 rather than -j$(nproc) on purpose. The release builds arm64 under QEMU,
-# where each cc1 costs far more memory than it does natively, and one job per
-# core is enough to OOM the builder: -j$(nproc) on a 9-core machine dies with
-# "cc: fatal error: Killed signal terminated program cc1". Raise it only with
-# a measurement.
-RUN make -j4 USE_PGXS=1
-
-FROM cgr.dev/chainguard/wolfi-base@sha256:30f03343947c7ae3581fda727a6e2aa7b8ce7009b7bfc2ab8d5c9483ace5812f
-
-# GNU sed rather than the busybox applet: conn.PreludeScript escapes passwords
-# into .pgpass with sed, and a mis-escaped password fails authentication in a
-# way that is thankless to debug. ca-certificates stays for libpq TLS
-# (sslmode=verify-*).
-RUN apk add --no-cache \
-      ca-certificates gc icu krb5 libpq-18 libxml2 libxslt linux-pam lz4 \
-      ncurses openldap postgresql-18-client readline sed xxhash zstd
-
-# Copied from the build tree rather than `make install`, so the path does not
-# depend on what pg_config reports as its bindir.
-COPY --from=build /src/src/bin/pgcopydb/pgcopydb /usr/bin/pgcopydb
-
-# Version canary: fail the build if pgcopydb or the client drifts off 0.18/18,
-# if sed is not GNU, or if option parsing stops permuting. That last check is
-# the one that would have caught Alpine: it asserts that an option written
-# after the subcommand is understood, so the failure mode is a red build
-# rather than every migration Job dying on the cluster.
+# DL3008: apt versions deliberately float within their majors (PGDG rotates
+# point releases); the version canary below fails the build on a major drift.
+# hadolint ignore=DL3008
 RUN set -eux; \
-    pgcopydb --version; \
-    pg_dump --version; \
+    apt-get update; \
+    # curl fetches the PGDG key; ca-certificates stays for libpq TLS (sslmode=verify-*)
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    # /etc/apt/keyrings is the Debian convention for third-party repo keys
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
+    echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    # Client major 18 covers every supported server major on either side:
+    # pg_dump/pg_restore must be >= the newest server they talk to, and 18
+    # reads servers back to 9.2.
+    apt-get install -y --no-install-recommends pgcopydb postgresql-client-18; \
+    # curl was build-time only; drop it to shrink the attack surface
+    apt-get purge -y --auto-remove curl; \
+    # Everything below runs in this layer on purpose: files deleted in a later
+    # layer still occupy the earlier one, so the image would not shrink.
+    #
+    # perl is matched rather than named because the package names carry the
+    # version (perl-modules-5.40, libperl5.40) and would silently stop matching
+    # on the next perl major. postgresql-client-common is what pulls it in; its
+    # only contribution is the pg_wrapper perl scripts in /usr/bin, which the
+    # PATH below already bypasses.
+    perl_pkgs="$(dpkg-query -Wf '${Package}\n' \
+      | grep -E '^(perl|perl-base|libperl[0-9.]+|perl-modules-[0-9.]+)$')"; \
+    # libacl1 is NOT in this list: GNU sed links it, and the prelude escapes
+    # passwords with sed. ncurses-base and libtinfo6 stay for psql's readline.
+    # login needs --force-remove-protected: modern dpkg protects it beyond
+    # Essential, and nothing in a migration Job logs anyone in.
+    # shellcheck disable=SC2086
+    dpkg --purge --force-depends --force-remove-essential --force-remove-protected \
+      $perl_pkgs postgresql-client-common \
+      bsdutils gzip libblkid1 liblastlog2-2 libmount1 libsmartcols1 \
+      libuuid1 login mount ncurses-bin util-linux; \
+    rm -rf /var/lib/apt/lists/*
+
+# Version-18 binaries ahead of Debian's pg_wrapper, so pg_dump and pg_restore
+# resolve to 18.x deterministically even if another client major lands later.
+# With postgresql-client-common purged the wrappers are gone entirely, which
+# makes this the only path to the client tools.
+ENV PATH=/usr/lib/postgresql/18/bin:$PATH
+
+# Canary: every assertion here stands for a way the image has actually broken.
+# Version drift (PGDG moving off 0.18 or client 18); a purge that took GNU sed
+# with it (removing libacl1 did exactly that, and the prelude escapes passwords
+# with sed); a libc whose getopt does not permute, which is how Alpine failed
+# with "unrecognized option: dir" only once Jobs ran on a cluster; and perl
+# surviving the purge, which would mean the report never improved.
+RUN set -eux; \
     pgcopydb --version | grep -qF '0.18'; \
     pg_dump --version | grep -qE ' 18\.'; \
+    pg_restore --version >/dev/null; \
+    psql --version >/dev/null; \
     sed --version | grep -qF 'GNU sed'; \
+    printf 'a:b' | sed -e 's/:/\\:/g' | grep -qF 'a\:b'; \
     pgcopydb clone --dir /tmp/canary --not-consistent 2>&1 \
-      | grep -qF 'Options --source and --target are mandatory'
+      | grep -qF 'Options --source and --target are mandatory'; \
+    ! command -v perl
 
 # Uid 65532 follows the distroless nonroot convention; a numeric uid lets
-# Kubernetes verify runAsNonRoot without a user lookup in the image. Wolfi
-# already ships that uid as `nonroot`, so there is no user to add here, only
-# /work to create: it is where Jobs mount the migration work volume, owned by
-# the running uid so the image also works without a mount.
-RUN install -d -o 65532 -g 65532 /work
+# Kubernetes verify runAsNonRoot without a user lookup in the image. useradd
+# came from the purged login package, so the entries are written directly.
+RUN set -eux; \
+    echo 'runner:x:65532:65532::/home/runner:/usr/sbin/nologin' >> /etc/passwd; \
+    echo 'runner:x:65532:' >> /etc/group; \
+    # /work is where Jobs mount the migration work volume; owned by the
+    # runner so the image also works without a mount
+    install -d -o 65532 -g 65532 /work /home/runner
 
 USER 65532:65532
 WORKDIR /work
