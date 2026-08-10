@@ -918,6 +918,9 @@ func transientExecError(stderr string) bool {
 		"Unable to connect to the server",
 		"error dialing backend",
 		"connection refused",
+		// The kubelet occasionally drops an exec stream mid-request on the
+		// shared cluster; the apiserver surfaces it as this internal error.
+		"error sending request",
 	} {
 		if strings.Contains(stderr, marker) {
 			return true
