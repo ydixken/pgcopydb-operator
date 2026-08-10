@@ -38,9 +38,11 @@ annotations:
       name: migrations.pgcopydb-operator.io
       displayName: Migration
       description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."
-  # Trimmed copies of docs/examples/migration-minimal.yaml and
-  # migration-follow.yaml. Kept in sync by hand; Artifact Hub reparses these as
-  # YAML and drops comments, so the explanations stay in docs/examples/.
+  # Trimmed copy of docs/examples/migration-minimal.yaml, kept in sync by hand;
+  # Artifact Hub reparses it as YAML and drops comments, so the explanations
+  # stay in docs/examples/. Only one entry per CRD kind is worth listing:
+  # Artifact Hub matches an example to a CRD by kind and renders the first
+  # match, so a second Migration entry would never be displayed.
   artifacthub.io/crdsExamples: |
     - apiVersion: pgcopydb-operator.io/v1beta1
       kind: Migration
@@ -58,28 +60,6 @@ annotations:
           database: shop
           username: app
           passwordSecretRef: {name: shop-pg-app, key: password}
-    - apiVersion: pgcopydb-operator.io/v1beta1
-      kind: Migration
-      metadata:
-        name: billing
-      spec:
-        source:
-          host: billing.old-datacenter.example.com
-          database: billing
-          username: migrator
-          passwordSecretRef: {name: billing-source, key: password}
-          sslMode: require
-        target:
-          host: billing-pg-rw.billing.svc
-          database: billing
-          username: app
-          passwordSecretRef: {name: billing-pg-app, key: password}
-        follow:
-          enabled: true
-        cutover:
-          mode: Manual
-        workVolume:
-          size: 50Gi
   # The runner reaches the cluster as a --runner-image flag rather than as a
   # container in any manifest, so Artifact Hub cannot discover it and would
   # never scan it. hack/stamp-chart.sh replaces the placeholder below with the

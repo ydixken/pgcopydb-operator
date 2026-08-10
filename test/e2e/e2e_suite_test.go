@@ -71,13 +71,14 @@ const (
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
 	// operatorTag pins the manager and runner images for the throwaway install.
-	// v0.2.0-alpha.7 arbitrates the cutover drain with pgcopydb compare
-	// data when the origin trails endpos (idle sources park it legitimately).
-	// alpha.11 added the cleanup-origin fix (stream cleanup passes
+	// v0.3.0 is the first release off the plain SemVer scheme; it carries the
+	// same controller as v0.2.0-alpha.8, which arbitrates the cutover drain with
+	// pgcopydb compare data when the origin trails endpos (idle sources park it
+	// legitimately), the cleanup-origin fix (stream cleanup passes
 	// --slot-name/--origin, so a follow migration's generated origin is dropped
-	// on the target) and the preflight extensions (replica-identity audit), on
-	// top of alpha.9's exec-credential fix and alpha.8's drain-verify gate.
-	operatorTag = "v0.2.0-alpha.7"
+	// on the target), the preflight extensions (replica-identity audit), the
+	// exec-credential fix and the drain-verify gate.
+	operatorTag = "v0.3.0"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
