@@ -156,24 +156,54 @@ func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, er
 // applied everything up to endpos. Exit code 0 is not proof of a complete
 // drain: a crash between endpos-set and drain-complete makes pgcopydb's
 // --resume short-circuit on the receive-side "endpos previously reached" and
-// exit 0 without replaying pending WAL (found live, silent data loss). The
-// durable truth is the target's replication origin progress, compared against
-// the endpos recorded in the work-dir sentinel.
+// exit 0 without replaying pending WAL (found live, silent data loss).
 func buildVerifyJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
-	// The origin parks at the last applied COMMIT record, which can trail
-	// endpos (the source WAL head at approval) by a few non-data records
-	// even on a fully drained, quiesced source (observed live: 56 bytes).
-	// The tolerance below one WAL page still catches both real loss modes
-	// (they gap by the size of the skipped data, hundreds of KB and up);
-	// a hypothetical lost transaction smaller than the tolerance is the
-	// residual risk, and spec.verification.data is the airtight check.
+	// The gate has a fast path and a content path, because no LSN can prove
+	// the drain on its own.
+	//
+	// Fast path: the target's replication origin progress within one WAL page
+	// of the endpos recorded in the work-dir sentinel. The origin parks at
+	// the last applied COMMIT record, which trails endpos by a few non-data
+	// records on an active source (observed live: 56 bytes). A larger gap is
+	// NOT loss evidence: on an idle source the WAL between the last applied
+	// commit and endpos is publication-filtered traffic (autovacuum on
+	// unpublished tables, catalog churn) that pgcopydb never applies, so the
+	// gap grows with idle time and refuted healthy drains live. The
+	// sentinel's replay_lsn cannot gate in the other direction either:
+	// pgcopydb advances it past records it never applies (keepalives,
+	// filtered transactions) and it advanced normally in the live
+	// session_replication_role incident where nothing was applied at all.
+	//
+	// Content path: when the origin cannot prove the drain, pgcopydb compare
+	// data checksums the migrated tables and refuses only on a difference.
+	// Both live-found loss modes stay caught, on this path, by content:
+	// resume-skips-replay and silent-apply both leave rows missing on the
+	// target, and neither can push the origin near endpos (the origin only
+	// advances inside successfully committed apply transactions). Idle-source
+	// drains and the upstream boundary case (a clean drain parks replay_lsn
+	// at the last real commit below endpos) now pass instead of refusing.
+	// replay_lsn is printed for diagnosis only: below endpos means the stream
+	// was never consumed up to endpos. A loss smaller than the tolerance on
+	// an active source remains the residual risk; spec.verification.data is
+	// the airtight check.
 	script := `set -eu
 endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
 progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
-echo "endpos=$endpos origin_progress=$progress"
-ok=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select (pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn) <= 8192)::int")
-[ "$ok" = "1" ]`
+gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
+echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
+if [ "$gap" -le 8192 ]; then
+  echo "drain verified: origin progress reached endpos within one WAL page"
+  exit 0
+fi
+echo "origin gap exceeds one WAL page; on an idle source that is publication-filtered WAL, not loss. Deciding by content."
+if pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + `; then
+  echo "drain verified: pgcopydb compare data found all migrated tables matching"
+  exit 0
+fi
+echo "drain refuted: pgcopydb compare data found differences; do not switch applications to the target (the replication slot is kept)"
+exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely
 	// refuted every password-based drain (found live).

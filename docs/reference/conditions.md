@@ -18,7 +18,7 @@ Each type is named for what `True` means. Seven are normal-true (True is the des
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Replication lag is at or below `spec.follow.maxCatchupLag`. |
-| `CutoverCompleted` | normal-true | The drain is proven: the target's origin progress reached the cutover LSN. |
+| `CutoverCompleted` | normal-true | The drain is proven: origin progress at the cutover LSN, or a clean data compare when the origin alone cannot decide. |
 | `Verified` | normal-true | The requested `pgcopydb compare` checks found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
 | `Failed` | abnormal-true | The migration failed for good. Terminal and absorbing. |
@@ -39,8 +39,8 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Replication lag is at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no sentinel sample is available yet. |
-| `CutoverCompleted` | `True` | `DrainVerified` | The target's origin progress reached the cutover LSN; changes applied, sequences synced. |
-| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification refuted completeness; the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
+| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress reached the cutover LSN within one WAL page, or `pgcopydb compare data` found every migrated table matching (an idle source leaves the origin behind by publication-filtered WAL, which is not loss). Changes applied, sequences synced. |
+| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification found changes missing on the target (`pgcopydb compare data` backed the refusal); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
 | `Verified` | `Unknown` | `VerificationRunning` | A `pgcopydb compare` Job is running. |
 | `Verified` | `True` | `ComparePassed` | Every requested compare found source and target matching. |
 | `Verified` | `False` | `SchemaMismatch` | `pgcopydb compare schema` reported differences. |

@@ -266,7 +266,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		fake.nudgeErr = nil
 
 		// Worker drains and exits 0: exit code alone is not trusted, a
-		// verify Job must first prove origin progress reached endpos.
+		// verify Job must first prove the drain (origin progress, or a
+		// data compare when the origin alone cannot decide).
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
 		verifyJob := fetchJob(ctx, name+"-verify")

@@ -90,11 +90,13 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 	}
 }
 
-// TestBuildVerifyJob_AuthAndTolerance covers the two live-found verify-gate
+// TestBuildVerifyJob_AuthAndPredicate covers the live-found verify-gate
 // defects: the script must run behind the passfile prelude (bare /bin/sh
-// failed auth and falsely refuted every drain), and the predicate must
-// tolerate the origin trailing endpos by non-data WAL records.
-func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
+// failed auth and falsely refuted every drain), the fast path must tolerate
+// the origin trailing endpos by non-data WAL records, and an origin gap above
+// the tolerance must escalate to pgcopydb compare data instead of refusing
+// (idle sources grow the gap with publication-filtered WAL, no loss).
+func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	m := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
 		Spec: v1beta1.MigrationSpec{
@@ -129,10 +131,28 @@ func TestBuildVerifyJob_AuthAndTolerance(t *testing.T) {
 	if len(c.Args) != 2 || c.Args[0] != "-c" {
 		t.Fatalf("verify job must pass the script as sh -c args, got %v", c.Args)
 	}
-	for _, want := range []string{"pg_replication_origin_progress", "<= 8192"} {
+	for _, want := range []string{
+		// Fast path: origin progress within one WAL page of endpos.
+		"pg_replication_origin_progress",
+		`[ "$gap" -le 8192 ]`,
+		// Diagnosis line: replay_lsn tells consumed-but-filtered apart from
+		// never-consumed in the Job log; it does not gate.
+		"--replay-lsn",
+		// Content path: an origin gap above the tolerance is decided by
+		// compare data, never refused on distance alone.
+		"compare data --dir /work/pgcopydb",
+	} {
 		if !strings.Contains(c.Args[1], want) {
 			t.Fatalf("verify script missing %q:\n%s", want, c.Args[1])
 		}
+	}
+	// The refusal must come from the compare, not from the origin gap: the
+	// gap check chooses between the fast pass and the escalation, so the
+	// script's only failure exit follows the compare invocation.
+	if !strings.HasSuffix(c.Args[1], "exit 1") ||
+		strings.Count(c.Args[1], "exit 1") != 1 ||
+		strings.Index(c.Args[1], "compare data") > strings.Index(c.Args[1], "exit 1") {
+		t.Fatalf("verify script must refuse only after compare data:\n%s", c.Args[1])
 	}
 }
 
