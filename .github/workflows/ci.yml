@@ -51,12 +51,20 @@ jobs:
         run: make test
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
-      - uses: codecov/codecov-action@v5
+      # Codecov requires a token even for a public repo: a tokenless upload is
+      # rejected with "Token required - not valid tokenless upload". Skipped
+      # outright when no CODECOV_TOKEN secret is set, so the absence is visible
+      # as a skipped step rather than a green job that uploaded nothing; when
+      # the secret is set, a failed upload fails the job rather than lying.
+      - name: Upload coverage
+        if: env.CODECOV_TOKEN != ''
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: ./cover.out
-          # Public repo: Codecov accepts the upload without a token. A failed
-          # upload must not fail the build; the tests already passed.
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   docs:
     runs-on: ubuntu-latest

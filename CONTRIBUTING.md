@@ -24,6 +24,8 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 Two pipelines run the same checks. `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, so a PR carries its own status; the GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline and additionally validates the image build on `main`. Watch either, but never commit or open MRs on GitLab. The two are expected to agree: a change to what one checks MUST change the other.
 
+Coverage upload is optional and off unless a `CODECOV_TOKEN` repository secret exists. Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips and the coverage badge stays absent; with it set, a failed upload fails the job rather than passing quietly.
+
 ## Self-hosted runner
 
 The release workflow's two image jobs run on `github-runner-pgcopydb-operator`, a runner scale set backed by Actions Runner Controller on the dev cluster. Everything else stays on GitHub-hosted runners. The scale set, its GitHub App credentials and its Helm values are declared outside this repository (see private ops notes); nothing here configures it beyond the `runs-on:` label.
