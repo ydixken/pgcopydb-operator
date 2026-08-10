@@ -1,6 +1,6 @@
 # pgcopydb-operator
 
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator)](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator)](https://artifacthub.io/packages/search?repo=pgcopydb-operator)
 
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
