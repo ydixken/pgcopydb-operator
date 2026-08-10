@@ -24,7 +24,7 @@ maintainers:
     email: ydixken@gmail.com
 annotations:
   # Chart.yaml has no first-class license field; Artifact Hub reads this one.
-  artifacthub.io/license: GPL-2.0-only
+  artifacthub.io/license: Apache-2.0
   artifacthub.io/operator: "true"
   artifacthub.io/category: database
   # Level I. The ladder is cumulative, and level II ("seamless upgrades") is

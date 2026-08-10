@@ -79,4 +79,4 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
 - [AGENTS.md](AGENTS.md): rules for AI agents, including the mandatory skills.
-- [LICENSE](LICENSE): GPL-2.0-only.
+- [LICENSE](LICENSE): Apache-2.0.
