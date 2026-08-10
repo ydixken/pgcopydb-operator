@@ -83,7 +83,7 @@ Ownership is proved by `charts/pgcopydb-operator/artifacthub-repo.yml`, pushed t
 
 The rest of the listing comes from `Chart.yaml` annotations. Two are hand-maintained and worth knowing about:
 
-- `artifacthub.io/crdsExamples` duplicates `docs/examples/migration-minimal.yaml` and `migration-follow.yaml` with the comments stripped. Nothing enforces the copy, so update it when those examples change.
+- `artifacthub.io/crdsExamples` duplicates `docs/examples/migration-minimal.yaml` with the comments stripped. Nothing enforces the copy, so update it when that example changes. List one entry per CRD kind and no more: Artifact Hub matches an example to a CRD by kind and renders the first match, so extra `Migration` entries are dead weight.
 - `artifacthub.io/images` lists the runner image explicitly. The runner reaches the cluster as a `--runner-image` flag rather than as a container in a manifest, so Artifact Hub cannot discover it, and without the annotation it is never scanned for vulnerabilities.
 
 ## Commits and pull requests
