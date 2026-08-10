@@ -24,6 +24,17 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline. Watch it, but never commit or open MRs there.
 
+## Self-hosted runner
+
+The release workflow's two image jobs run on `github-runner-pgcopydb-operator`, a runner scale set backed by Actions Runner Controller on the dev cluster. Everything else stays on GitHub-hosted runners. The scale set, its GitHub App credentials and its Helm values are declared outside this repository (see private ops notes); nothing here configures it beyond the `runs-on:` label.
+
+Two rules hold because this repository is public and that runner is a real machine on a private cluster:
+
+- No workflow that can be triggered by a fork MAY target it. Today only tag pushes (`release.yml`) and manual dispatch (`runner-smoke.yml`) do.
+- Jobs on it get no Kubernetes API access, so they cannot reach the cluster they run on.
+
+`runner-smoke.yml` is a `workflow_dispatch` build that exercises the runner and its Docker daemon without publishing anything. Run it after any change to the scale set.
+
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)). The suite installs a throwaway operator, creates two CNPG clusters, and seeds the source through a Kubernetes Job running psql with the SQL under `test/e2e/fixtures/`. Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.

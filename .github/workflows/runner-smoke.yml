@@ -1,0 +1,29 @@
+name: Runner smoke
+
+# Proves the cluster runner scale set is registered and can build images,
+# without cutting a release tag. Manual only: the runner is a self-hosted
+# machine on a private cluster and this repository is public, so nothing
+# a fork can trigger may ever reach it.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - uses: actions/checkout@v5
+      - name: Report the daemon the dind sidecar provides
+        run: |
+          docker version
+          docker buildx version
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build both platforms without pushing
+        # Same emulation path the release images take, on a trivial context,
+        # so a broken QEMU/binfmt setup surfaces here instead of mid-release.
+        uses: docker/build-push-action@v6
+        with:
+          context: images/runner
+          platforms: linux/amd64,linux/arm64
+          push: false
