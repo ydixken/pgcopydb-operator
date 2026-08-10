@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <rect width="1280" height="640" fill="#0d1117"/>
+  <g transform="translate(468 132) scale(5.375)">
+    <path fill="#336791" d="M10 12h44v40a22 8 0 0 1-44 0z"/>
+    <ellipse cx="32" cy="12" rx="22" ry="8" fill="#4a7fa8"/>
+    <g fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M22 28l9 9-9 9"/>
+      <path d="M36 28l9 9-9 9"/>
+    </g>
+  </g>
+  <text x="640" y="536" text-anchor="middle" font-family="Helvetica, Arial, sans-serif"
+        font-size="62" font-weight="700" fill="#e6edf3">pgcopydb-operator</text>
+  <text x="640" y="586" text-anchor="middle" font-family="Helvetica, Arial, sans-serif"
+        font-size="27" fill="#8b949e">PostgreSQL migrations on Kubernetes: clone, follow, cutover</text>
+</svg>
