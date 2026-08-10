@@ -247,3 +247,7 @@ The receive loop compares its position against endpos only while processing arri
 ### Suggested fix
 
 Evaluate endpos on walsender keepalives as well: when the keepalive's reported WAL position has reached endpos, conclude the stream exactly as if a data message had crossed it.
+
+### Related: no LSN distance works as a post-drain criterion under filtered traffic
+
+The same idle windows break the obvious external drain check, comparing the target's `pg_replication_origin_progress` against endpos after the worker exits. The origin only advances on commits the apply executes, and the WAL between the last applied commit and an idle-set endpos is publication-filtered traffic (autovacuum on unpublished tables, catalog churn) that never reaches the apply. The distance therefore grows with idle time without any loss behind it: observed live, 56 bytes right after write activity, beyond one WAL page (8192 bytes, two refusals on record) after deep idle. The sentinel's `replay_lsn` cannot serve either, in the opposite direction: the apply advances it past records it never executes (keepalives, filtered transactions; `ld_apply.c` publishes endpos as `replay_lsn` once the stream is consumed), and it advanced normally in the `session_replication_role` incident where nothing was applied at all. After an idle-set endpos, only a content comparison (`pgcopydb compare data`) distinguishes a drained stream from a lost one.

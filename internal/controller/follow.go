@@ -166,10 +166,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // finishFollow runs after the worker Job exited 0. Exit 0 alone is NOT
 // trusted: after a crash inside the drain window, pgcopydb --resume exits 0
 // without replaying pending WAL ("endpos previously reached" tracks the
-// receive side). A verify Job compares the target's replication origin
-// progress, the durable apply truth, against the recorded endpos; only proof
-// gates CutoverCompleted and the cleanup. On refuted drain the Migration
-// fails loudly with the slot intact, so the data stays recoverable (at the
+// receive side). A verify Job proves the drain on the target: origin progress
+// near the recorded endpos passes directly, anything else is decided by
+// pgcopydb compare data (see buildVerifyJob); only proof gates
+// CutoverCompleted and the cleanup. On refuted drain the Migration fails
+// loudly with the slot intact, so the data stays recoverable (at the
 // documented cost of WAL retention on the source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
@@ -181,7 +182,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	}
 	if failedVerify {
 		r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
-			"the worker exited before applying all changes up to endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
+			"drain verification found changes missing on the target below endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
 		r.fail(m, "DrainIncomplete", "Verify",
 			"cutover drain verification refuted completeness; do not switch applications to the target")
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
@@ -194,7 +195,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	}
 
 	r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",
-		"target origin progress reached endpos; changes applied, sequences synced")
+		"drain verified on the target; changes applied up to endpos, sequences synced")
 
 	done, err := r.ensureCleanup(ctx, m)
 	if err != nil {
