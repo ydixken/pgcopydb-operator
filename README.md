@@ -4,7 +4,14 @@
 
 # pgcopydb-operator
 
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator)](https://artifacthub.io/packages/search?repo=pgcopydb-operator)
+<p align="center">
+  <a href="https://github.com/ydixken/pgcopydb-operator/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ydixken/pgcopydb-operator/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://codecov.io/gh/ydixken/pgcopydb-operator"><img alt="Coverage" src="https://codecov.io/gh/ydixken/pgcopydb-operator/branch/main/graph/badge.svg"></a>
+  <a href="https://github.com/ydixken/pgcopydb-operator/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ydixken/pgcopydb-operator?sort=semver"></a>
+  <a href="https://artifacthub.io/packages/search?repo=pgcopydb-operator"><img alt="Artifact Hub" src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator"></a>
+  <a href="go.mod"><img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/ydixken/pgcopydb-operator"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/ydixken/pgcopydb-operator"></a>
+</p>
 
 A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
@@ -43,7 +50,7 @@ docs/examples/             # Migration resources with short explanations
 images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
 test/e2e/                  # e2e suite (local only, current kubectl context)
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
-.github/workflows/         # GitHub->GitLab mirror, ghcr release, docs deploy, Artifact Hub metadata
+.github/workflows/         # CI, GitHub->GitLab mirror, ghcr release, docs deploy, Artifact Hub metadata
 .gitlab-ci.yml             # branch pipelines: yamllint, golangci-lint, envtest, image build
 Taskfile.yml               # task help | lint | test | e2e
 ```
