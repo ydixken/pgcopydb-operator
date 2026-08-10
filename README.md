@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="pgcopydb-operator" width="640">
+</p>
+
 # pgcopydb-operator
 
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/pgcopydb-operator)](https://artifacthub.io/packages/search?repo=pgcopydb-operator)
