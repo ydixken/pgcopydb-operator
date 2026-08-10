@@ -47,7 +47,7 @@ cmd/, internal/            # manager and controller (kubebuilder go/v4)
 config/                    # kubebuilder-generated kustomize tree
 docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
-images/runner/             # worker image: pgcopydb + PostgreSQL 17 client tools
+images/runner/             # worker image: Alpine, pgcopydb built from source + PostgreSQL 18 client tools
 test/e2e/                  # e2e suite (local only, current kubectl context)
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # CI, GitHub->GitLab mirror, ghcr release, docs deploy, Artifact Hub metadata
