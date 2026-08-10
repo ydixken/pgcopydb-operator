@@ -21,7 +21,7 @@ keywords:
   - operator
 maintainers:
   - name: Yannick Dixken
-    email: ydixken@googlemail.com
+    email: ydixken@gmail.com
 annotations:
   # Chart.yaml has no first-class license field; Artifact Hub reads this one.
   artifacthub.io/license: GPL-2.0-only
