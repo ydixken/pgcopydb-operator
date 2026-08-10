@@ -1,7 +1,37 @@
 # Runner image
 
-Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql), both from the PGDG apt repo on `debian:bookworm-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version (our targets run PostgreSQL 17).
+Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql), both from the PGDG apt repo on `debian:trixie-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
 
 The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
 
-The base image is pinned by tag and digest; Renovate bumps both together. apt package versions float within their majors, and a build-time canary fails the build if pgcopydb drifts off 0.18 or the client tools off 17.
+## Why it removes packages
+
+Debian ships no fixed version for most of what a scanner reports here, so patching cannot help. Removal can, for the parts a migration never executes:
+
+| | findings | critical | high |
+|---|---|---|---|
+| stock trixie install | 241 | 16 | 30 |
+| perl removed | 177 | 0 | 14 |
+| plus util-linux, login, gzip | 92 | 0 | 3 |
+
+perl accounted for every critical. It arrives as a dependency of `postgresql-client-common`, whose only contribution is the pg_wrapper perl scripts in `/usr/bin`; `PATH` already prefers the real binaries in `/usr/lib/postgresql/18/bin`, so purging it removes a scripting language the image never runs. util-linux, `login` and gzip are likewise untouched by any migration.
+
+The three remaining are genuinely needed: `libacl1` because GNU sed links it, `libtinfo6` and `ncurses-base` because psql links readline. An earlier attempt purged libacl1 as well and broke sed outright, which the build canary caught.
+
+The removals happen inside the same `RUN` as the install. Files deleted in a later layer still occupy the earlier one, so splitting them would leave the image the same size; done in one layer it drops from 176 MB to 122 MB.
+
+The cost is honest to state: `dpkg --purge --force-depends --force-remove-essential --force-remove-protected` leaves a package database that no longer satisfies its own dependencies. In an image that never runs apt again this is inert, but anything later added that expects perl or util-linux will not work.
+
+## Why not Alpine or Wolfi
+
+Both were built, measured and rejected.
+
+**Alpine** reported zero findings at 37 MB and does not work. pgcopydb's CLI relies on GNU `getopt_long` permuting argv, which is what lets `pgcopydb clone --dir /work --not-consistent` parse options written after the subcommand. musl's getopt does not permute; every worker Job died with `pgcopydb: unrecognized option: dir` and the migration burned its backoff limit without touching a database. Upstream fixed the Alpine *build* in [dimitri/pgcopydb#193](https://github.com/dimitri/pgcopydb/pull/193), which says nothing about runtime argument handling.
+
+**Wolfi** is glibc and worked correctly, at zero findings and 111 MB. It was rejected because `cgr.dev` images sit behind Chainguard's catalog tiers, where the public tier serves only `:latest`, so the base would be a dependency on a vendor's pricing terms. Wolfi's packages are Apache-2.0, but the images are a product.
+
+Staying on Debian keeps glibc, a free base, and an intact package database, so a scanner reports the truth rather than the absence of anything to enumerate. A `scratch` image assembled from copied binaries would also report near zero, while still containing openssl, krb5 and readline.
+
+## Canary
+
+Every assertion in the build-time canary stands for a way this image has actually broken: version drift off pgcopydb 0.18 or client 18; a purge that takes GNU sed with it; a libc whose getopt stops permuting; and perl surviving the purge. The base image is pinned by tag and digest, and Renovate bumps both together.
