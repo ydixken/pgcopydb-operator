@@ -2,15 +2,27 @@
 # PostgreSQL 18 client tools: pg_dump/pg_restore MUST be >= the newest server
 # major on either side, and 18 is the current release major.
 #
-# Built from debian:bookworm-slim with the PGDG apt repo instead of the
+# Built from debian:trixie-slim with the PGDG apt repo instead of the
 # upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16
 # and a passwordless-sudo user, so basing on it would carry two client majors
-# plus sudo. PGDG bookworm ships pgcopydb 0.18 and postgresql-client-18 for
+# plus sudo. PGDG trixie ships pgcopydb 0.18 and postgresql-client-18 for
 # amd64 and arm64, so one apt install yields exactly what the Jobs need.
+#
+# Trixie rather than bookworm because bookworm is oldstable and loses regular
+# security support first. This is hygiene, not a vulnerability fix: scanned
+# side by side the two bases report the same total, and trixie clears exactly
+# one critical (zlib1g CVE-2023-45853).
+#
+# Most of what a scanner reports here is perl, which Debian ships unfixed in
+# both releases. perl arrives through postgresql-client-common and is never
+# executed: PATH below puts /usr/lib/postgresql/18/bin first, so pg_dump,
+# pg_restore and psql resolve to the real binaries, not the pg_wrapper perl
+# scripts in /usr/bin. Removing perl would need dpkg --force-depends and leave
+# a broken package state, which is not worth a lower scanner count.
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps both together.
 # renovate: datasource=docker depName=debian
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 
 # DL3008: apt versions deliberately float within their majors (PGDG rotates
 # point releases); the version canary below fails the build on a major drift.
@@ -19,10 +31,10 @@ RUN set -eux; \
     apt-get update; \
     # curl fetches the PGDG key; ca-certificates stays for libpq TLS (sslmode=verify-*)
     apt-get install -y --no-install-recommends ca-certificates curl; \
-    # /etc/apt/keyrings is the bookworm convention for third-party repo keys
+    # /etc/apt/keyrings is the Debian convention for third-party repo keys
     install -d -m 0755 /etc/apt/keyrings; \
     curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
-    echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+    echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
     # Client major 18 covers every supported server major on either side:
     # pg_dump/pg_restore must be >= the newest server they talk to, and 18
