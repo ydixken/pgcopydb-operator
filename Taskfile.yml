@@ -44,8 +44,9 @@ tasks:
   e2e:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
-      Local only, never wired into CI. Confirms the context before running.
-      E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures. Chaos
+      This task is local only; CI runs the same specs itself, on a release
+      candidate. Confirms the context before running. E2E_SCALE (default 1,
+      ~12GB seeded data) sizes the fixtures and their volumes. Chaos
       scenarios are excluded; use e2e:chaos for those.
     vars:
       KUBE_CONTEXT:

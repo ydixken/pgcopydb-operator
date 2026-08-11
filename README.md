@@ -48,7 +48,7 @@ config/                    # kubebuilder-generated kustomize tree
 docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
 images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
-test/e2e/                  # e2e suite (local only, current kubectl context)
+test/e2e/                  # e2e suite: locally against your kubectl context, in CI against a release candidate
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # CI, weekly release and promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata
 Taskfile.yml               # task help | lint | test | e2e
