@@ -1,9 +1,9 @@
 name: Docs
 
 # Builds the mkdocs site and deploys it to GitHub Pages through the Pages
-# API (actions/deploy-pages). Deliberately NOT `mkdocs gh-deploy`: a
-# gh-pages branch would be push-mirrored to GitLab and fail its strict
-# yamllint on every deploy. Requires the repo's Pages source set to
+# API (actions/deploy-pages). Deliberately NOT `mkdocs gh-deploy`: that
+# commits the built site to a gh-pages branch, which the mirror would then
+# carry to GitLab on every deploy. Requires the repo's Pages source set to
 # "GitHub Actions" (one-time setting).
 
 on:

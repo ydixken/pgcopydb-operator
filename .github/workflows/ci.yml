@@ -1,16 +1,13 @@
 name: CI
 
-# Lint, test and build the docs on every push and pull request.
+# Lint, test and build the docs on every push and pull request. These three
+# jobs are the required checks on main, so this is the gate a pull request has
+# to pass.
 #
-# This duplicates what .gitlab-ci.yml already runs, and that is the point:
-# pull requests live on GitHub while the GitLab project is private, so without
-# this a reviewer sees no checks at all on the PR they are reading. The GitLab
-# pipeline stays as it is; the two are expected to agree, and a change to one
-# should change the other.
-#
-# Deliberately not here: the image build (the release workflow owns publishing,
-# and GitLab does a build-validation pass on main) and e2e, which needs a real
-# cluster and a human at the keyboard.
+# Deliberately not here: the image build, which release.yml owns, and the e2e
+# suite. E2e does run in CI, but on a release candidate rather than per
+# commit: it needs the published images to install, it takes the better part
+# of an hour, and it drives real workloads on a shared cluster.
 
 on:
   push:
@@ -74,5 +71,6 @@ jobs:
         with:
           python-version: "3.x"
       - name: mkdocs build --strict
-        # Pinned to match .gitlab-ci.yml and the docs deploy workflow.
+        # Pinned to match the docs deploy workflow; a Renovate custom manager
+        # bumps both together.
         run: pip install mkdocs-material==9.7.7 && mkdocs build --strict
