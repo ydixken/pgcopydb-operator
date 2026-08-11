@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read  # the tag goes out under RELEASE_TAG_TOKEN, see below
+  contents: read  # the tag goes out under RELEASE_TAG_KEY, see below
 
 concurrency:
   group: auto-release
@@ -30,10 +30,14 @@ jobs:
           fetch-depth: 0
           # A tag pushed with GITHUB_TOKEN starts no other workflow, so
           # release.yml would never see this one and the candidate would sit
-          # there unbuilt. Checking out with the PAT leaves it in the remote's
-          # credentials, which is what the push below uses. Do not "simplify"
-          # this back to GITHUB_TOKEN.
-          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+          # there unbuilt. A deploy key is not the workflow token, so the push
+          # below does trigger it. Checking out with the key points the remote
+          # at SSH and leaves the key in the agent for that push. Do not
+          # "simplify" this back to GITHUB_TOKEN.
+          #
+          # A deploy key rather than a personal access token: it grants this
+          # one repository, belongs to no user account, and does not expire.
+          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
       - name: Tag the next release candidate
         run: |
           # --exclude '*-*' skips the prereleases: -rc.N and the -alpha.N tags
