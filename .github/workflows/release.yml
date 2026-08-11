@@ -4,6 +4,11 @@ name: Release
 # manager image, runner image, and the Helm chart as OCI.
 # Images are multi-arch (linux/amd64 + linux/arm64) via QEMU/buildx (M4).
 #
+# A tag carrying an -rc.N suffix publishes the same artifacts, then runs e2e
+# against them on the cluster and pushes the stable tag when that passes. So
+# the workflow runs twice per release, once for the candidate and once for
+# what it promoted, and only the second run moves `latest`.
+#
 # The two image jobs run on the cluster's own runner scale set
 # (github-runner-pgcopydb-operator, an Actions Runner Controller install
 # managed from the app-of-apps repo). The arm64 half is QEMU-emulated on
@@ -36,14 +41,28 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decide whether this tag also moves :latest
+        id: tags
+        # A release candidate publishes under its own tag only: `latest` has
+        # to keep pointing at the last stable image until e2e promotes one.
+        # Same test release-notes makes for --prerelease, a hyphen is SemVer
+        # for "prerelease".
+        run: |
+          {
+            echo "list<<EOF"
+            echo "$IMAGE:$GITHUB_REF_NAME"
+            case "$GITHUB_REF_NAME" in
+              *-*) ;;
+              *) echo "$IMAGE:latest" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.list }}
 
   runner-image:
     runs-on: github-runner-pgcopydb-operator
@@ -56,14 +75,26 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decide whether this tag also moves :latest
+        id: tags
+        # See manager-image: an rc must not move the tag a `helm install`
+        # without an explicit version lands on.
+        run: |
+          {
+            echo "list<<EOF"
+            echo "$IMAGE/runner:$GITHUB_REF_NAME"
+            case "$GITHUB_REF_NAME" in
+              *-*) ;;
+              *) echo "$IMAGE/runner:latest" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: images/runner
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE }}/runner:${{ github.ref_name }}
-            ${{ env.IMAGE }}/runner:latest
+          tags: ${{ steps.tags.outputs.list }}
       - name: Smoke-test pgcopydb and pg_dump versions
         # The build canary already asserts majors on both platforms; this
         # proves the pushed image actually runs. Native amd64 pull on the
@@ -114,3 +145,128 @@ jobs:
             *) prerelease= ;;
           esac
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes $prerelease
+
+  e2e:
+    # Release candidates only. A stable tag reaches this workflow because the
+    # promote job below pushed it, which only happens once this job passed on
+    # the candidate that built the very same images.
+    #
+    # `environment` is the security control: its deployment branch and tag
+    # policy allows main and v* only, and GitHub evaluates that before the job
+    # is dispatched to a runner. A fork pull request runs at refs/pull/N/merge,
+    # which matches neither, so it never reaches a machine that can talk to the
+    # cluster. The repository and fork checks below are belt and braces, not
+    # the control: a fork owns its copy of this file and can delete them. They
+    # earn their place because what GitHub documents for a rejected ref is only
+    # that "the job will fail and the run will stop", not that it fails before
+    # a self-hosted runner is assigned.
+    if: >-
+      contains(github.ref_name, '-rc.')
+      && github.repository == 'ydixken/pgcopydb-operator'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: [chart]
+    runs-on: github-runner-pgcopydb-e2e
+    environment: e2e-cluster
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      # The scale set runs a bare actions-runner image: git and node are all
+      # it ships, so every tool the suite shells out to is installed here.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+      - name: Run the suite against the published candidate
+        # Not `task e2e`: that target prompts for confirmation because it can
+        # point at any cluster, and AGENTS.md forbids answering the prompt with
+        # `task --yes`. This runner has exactly one cluster and no prompt to
+        # answer, so it calls go test with the same flags the task passes.
+        env:
+          E2E_OPERATOR_TAG: ${{ github.ref_name }}
+          E2E_SCALE: "0.1"
+          E2E_MANAGE_NAMESPACES: "false"
+          E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
+        run: go test ./test/e2e/... -timeout 1h -ginkgo.timeout=1h -ginkgo.label-filter='!chaos'
+      - name: Empty the e2e namespaces
+        # AfterSuite already does this when the suite exits cleanly; this is
+        # for the run that crashed or hit the timeout. The namespaces
+        # themselves stay: GitOps owns them, and the CI identity has no
+        # permission to delete a namespace anyway.
+        if: always()
+        run: |
+          # Migrations first, while the operator that owns their cleanup
+          # finalizer is still installed. Uninstalling ahead of them wedges
+          # the delete until the finalizer is forced off by hand.
+          for ns in pgcopydb-e2e pgcopydb-e2e-x; do
+            kubectl delete migrations.pgcopydb-operator.io --all -n "$ns" --ignore-not-found --timeout=5m
+          done
+          helm uninstall pgcopydb-e2e -n pgcopydb-e2e-system --ignore-not-found --wait
+          for ns in pgcopydb-e2e pgcopydb-e2e-x pgcopydb-e2e-system; do
+            kubectl delete clusters.postgresql.cnpg.io,jobs,pvc --all -n "$ns" --ignore-not-found --timeout=5m
+          done
+
+  promote:
+    # Turning v0.4.1-rc.2 into v0.4.1. Nothing is rebuilt: the stable tag
+    # points at the commit the candidate was cut from, so the second run
+    # produces byte-identical images from the same context and the chart from
+    # the same sources.
+    #
+    # The recursion stops one level down. The tag pushed here has no -rc., so
+    # in that run the e2e job's `if` skips, and promote skips with it.
+    needs: [e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Tags come with the full history only, and the check below has to
+          # see an existing stable tag rather than tag over it.
+          fetch-depth: 0
+          # Pushing under the PAT is what makes this tag start another release
+          # run; see the same note in auto-release.yml. It also carries the
+          # write, which is why this job needs no contents: write of its own.
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - name: Push the stable tag
+        run: |
+          stable="${GITHUB_REF_NAME%-rc.*}"
+          if git rev-parse -q --verify "refs/tags/$stable" >/dev/null; then
+            echo "$stable already exists, nothing to promote." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$stable" -m "$stable: promoted from $GITHUB_REF_NAME"
+          git push origin "$stable"
+          echo "Promoted $GITHUB_REF_NAME to $stable." >> "$GITHUB_STEP_SUMMARY"
+
+  e2e-failed:
+    # A failed candidate is otherwise silent: its artifacts stay published, the
+    # GitHub release stays a prerelease, `latest` never moved, and the next
+    # Monday would just cut -rc.N+1 over the same bug. The issue is the signal.
+    needs: [e2e]
+    # failure() is what gets this job evaluated at all once a dependency went
+    # red; the result check keeps it to an e2e failure, rather than firing on
+    # a chart job that failed before e2e ever ran.
+    if: failure() && needs.e2e.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write  # the workflow default is read-only
+    steps:
+      - name: Open an issue against the candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # There is no checkout here, so gh cannot infer the repository.
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --title "e2e failed for $GITHUB_REF_NAME" --body-file - <<EOF
+          The candidate \`$GITHUB_REF_NAME\` did not pass e2e and was not promoted.
+
+          Run: $RUN_URL
+
+          Its images and chart are published, the GitHub release stays marked as
+          a prerelease, and the \`latest\` tags still point at the last stable
+          release. Fix forward on main: the next run cuts the following
+          candidate.
+          EOF
