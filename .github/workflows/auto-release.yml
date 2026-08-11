@@ -1,0 +1,70 @@
+name: Auto release
+
+# Cuts the weekly release candidate on Monday morning, after Renovate's
+# grouped update PR has landed on main. Nothing here decides a release is
+# good: the candidate is what release.yml verifies against the cluster and
+# promotes to a stable tag once e2e passes.
+#
+# A week with no commits since the last stable tag ends with no tag and a
+# green run. There is nothing to release, which is not a failure.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read  # the tag goes out under RELEASE_TAG_TOKEN, see below
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The bump reads the tag history back to the last stable release.
+          fetch-depth: 0
+          # A tag pushed with GITHUB_TOKEN starts no other workflow, so
+          # release.yml would never see this one and the candidate would sit
+          # there unbuilt. Checking out with the PAT leaves it in the remote's
+          # credentials, which is what the push below uses. Do not "simplify"
+          # this back to GITHUB_TOKEN.
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - name: Tag the next release candidate
+        run: |
+          # --exclude '*-*' skips the prereleases: -rc.N and the -alpha.N tags
+          # that ran up to v0.2.0-alpha.8 are not something to count from.
+          latest=$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*')
+          if [ "$(git rev-list --count "$latest..HEAD")" -eq 0 ]; then
+            echo "No commits since $latest, nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          # Same conventional-commit dialect hack/stamp-chart.sh reads: the
+          # type is the leading run of lowercase letters, so a scope survives
+          # (feat(api): becomes feat). Only a feature earns a minor bump.
+          if git log --no-merges --pretty=%s "$latest..HEAD" | sed 's/[^a-z].*//' | grep -qx feat; then
+            minor=$((minor + 1))
+            patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          # An existing candidate means an earlier one failed e2e; count up
+          # rather than reuse a tag whose images are already published.
+          n=1
+          while git rev-parse -q --verify "refs/tags/v$major.$minor.$patch-rc.$n" >/dev/null; do
+            n=$((n + 1))
+          done
+          tag="v$major.$minor.$patch-rc.$n"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag: weekly release candidate"
+          git push origin "$tag"
+          echo "Tagged $tag, $(git rev-list --count "$latest..HEAD") commits since $latest." >> "$GITHUB_STEP_SUMMARY"
