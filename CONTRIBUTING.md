@@ -22,7 +22,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. Run `task lint` (and `task test` once Go code exists). Both MUST be clean before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
 
-Two pipelines run the same checks. `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, so a PR carries its own status; the GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs the pipeline and additionally validates the image build on `main`. Watch either, but never commit or open MRs on GitLab. The two are expected to agree: a change to what one checks MUST change the other.
+`.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret. Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job. The coverage total is printed in the job summary either way.
 

@@ -33,7 +33,7 @@ These skills are vendored in this repo and are always-on, not optional, not per-
 
 pgcopydb-operator is a Go Kubernetes operator that automates PostgreSQL migrations (bulk clone, logical-replication follow, controlled cutover) using [pgcopydb](https://github.com/dimitri/pgcopydb). Read the docs site sources under [docs/](docs/) and the existing controller code before touching controller or API code; design notes live outside the repository (see private ops notes).
 
-Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror that runs CI; nobody commits or opens MRs on GitLab.
+Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and takes no commits or MRs.
 
 ## Common commands
 
@@ -48,7 +48,7 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 
 - The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
 - kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
-- CI ([.gitlab-ci.yml](.gitlab-ci.yml)) runs **branch pipelines only**, because merge-request rules never fire on a push mirror. Jobs gate on the files they need (`rules:exists`), so the pipeline is green today and starts linting, testing, and building images automatically in the commit the scaffold lands.
+- CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)). [ci.yml](.github/workflows/ci.yml) runs lint, tests and the docs build on every push and pull request, and those three are the required checks on `main`. [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, and [auto-release.yml](.github/workflows/auto-release.yml) cuts that tag once a week.
 - E2e tests are **local only** by decision: they target the dev cluster through the developer's own kubeconfig context. There is deliberately no e2e CI job yet.
 
 ## The solution ladder ("ponytail")
