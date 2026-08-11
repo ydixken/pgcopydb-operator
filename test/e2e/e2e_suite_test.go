@@ -69,12 +69,9 @@ const (
 	// helmRelease prefixes every rendered resource name, keeping the install
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
-	// operatorTag pins the manager and runner images for the throwaway install.
-	// v0.4.0 is the first Apache-2.0 release and the first with the slimmed
-	// runner: perl, util-linux, login and gzip are gone, since a migration never
-	// executes them and Debian ships no fixed version for what they carry.
-	// Controller behaviour is unchanged from v0.3.0.
-	operatorTag = "v0.4.0"
+	// managerServiceAccount is the ServiceAccount the install binds to when it
+	// may not create RBAC itself; whoever owns the namespaces provides it.
+	managerServiceAccount = "pgcopydb-e2e-manager"
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
@@ -122,15 +119,20 @@ var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1"
 //go:embed fixtures/schema.sql fixtures/seed.sql
 var fixturesFS embed.FS
 
-// The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes
-// the fixture data (~12GB at scale 1) on 40/40/10Gi volumes with the cluster
-// default StorageClass. Stress (E2E_STRESS=true): scale 10 (~120GB) on
-// 200/150/50Gi volumes backed by the suite-owned single-replica StorageClass,
-// gated by the Longhorn capacity check. E2E_SCALE always wins when set, so
-// the version matrix can run small (0.1) against either tier's sizing.
+// The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
+// fixture data (~12GB at scale 1) and with it the volumes (40/40/10Gi at
+// scale 1) on the cluster default StorageClass. Stress (E2E_STRESS=true):
+// scale 10 (~120GB) on fixed 200/150/50Gi volumes backed by the suite-owned
+// single-replica StorageClass, gated by the Longhorn capacity check. E2E_SCALE
+// always wins when set, so the version matrix can run small (0.1) against
+// either tier's sizing.
 var (
 	stress = envTrue("E2E_STRESS")
 	scale  = 1.0
+
+	// Only the literal "false" leaves the fixture namespaces to their owner
+	// (GitOps in CI): the suite then works inside them and creates none.
+	manageNamespaces = os.Getenv("E2E_MANAGE_NAMESPACES") != "false"
 
 	// pgSource and pgTarget pick the PostgreSQL major for each fixture
 	// cluster's operand image (E2E_PG_SOURCE/E2E_PG_TARGET, default 17).
@@ -138,10 +140,11 @@ var (
 	pgSource = 17
 	pgTarget = 17
 
-	srcStorageSize      = "40Gi"
-	tgtStorageSize      = "40Gi"
-	workVolumeSize      = "10Gi"
-	fixtureStorageClass = "" // empty: the cluster default StorageClass
+	// Volume sizes are tier-dependent, so init sets them.
+	srcStorageSize      string
+	tgtStorageSize      string
+	workVolumeSize      string
+	fixtureStorageClass string // empty: the cluster default StorageClass
 
 	// migrationTimeout covers one clone of the seeded dataset with slack for
 	// image pulls and PVC provisioning; resume runs two attempts inside the
@@ -154,6 +157,13 @@ var (
 	// volume.
 	seedTimeout = 30 * time.Minute
 )
+
+// operatorTag pins the manager and runner images for the throwaway install and
+// is overridable with E2E_OPERATOR_TAG. v0.4.0 is the first Apache-2.0 release
+// and the first with the slimmed runner: perl, util-linux, login and gzip are
+// gone, since a migration never executes them and Debian ships no fixed version
+// for what they carry. Controller behaviour is unchanged from v0.3.0.
+var operatorTag = "v0.4.0"
 
 // runnerTag is the tag for the worker image. It defaults to the same release
 // as the manager and is overridable with E2E_RUNNER_TAG so an unreleased
@@ -179,6 +189,24 @@ func init() {
 			panic("E2E_SCALE must be a positive number, got " + strconv.Quote(v))
 		}
 		scale = f
+	}
+	if !stress {
+		// Volumes follow the scale: a 0.1 run seeds ~1.2GB and has no business
+		// parking 90Gi of PVCs on the shared cluster. The stress tier keeps the
+		// fixed sizes its capacity check was written around.
+		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(40), scaledSize(40), scaledSize(10)
+	}
+	// E2E_STORAGE_CLASS pins the fixture volumes to one class, for clusters
+	// where several are marked default and binding is otherwise a coin flip.
+	// Set, it wins over the stress tier's ephemeral class too.
+	if v := os.Getenv("E2E_STORAGE_CLASS"); v != "" {
+		fixtureStorageClass = v
+	}
+	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
+	// so a branch's controller can be exercised against real servers before it
+	// merges. The runner follows unless E2E_RUNNER_TAG below moves it alone.
+	if v := os.Getenv("E2E_OPERATOR_TAG"); v != "" {
+		operatorTag, runnerTag = v, v
 	}
 	// E2E_RUNNER_TAG points the worker Jobs at a runner image other than the
 	// pinned release, so a change to images/runner can be exercised against
@@ -230,6 +258,17 @@ func scaled(n int64) int64 {
 		return 1
 	}
 	return v
+}
+
+// scaledSize sizes a fixture volume for the current scale, from the size the
+// same volume gets at scale 1. It never goes below an eighth of that: WAL,
+// indexes and the change spool need headroom that the row counts do not size.
+func scaledSize(fullScaleGi int) string {
+	gi := int(math.Round(float64(fullScaleGi) * scale))
+	if floor := (fullScaleGi + 7) / 8; gi < floor {
+		gi = floor
+	}
+	return strconv.Itoa(gi) + "Gi"
 }
 
 // scaleArg renders the scale for psql -v and SQL literals: plain decimal,
@@ -328,18 +367,33 @@ var _ = BeforeSuite(func() {
 	// Job creation tolerates AlreadyExists), so the specs assert terminal
 	// phase, attempts, Jobs, and data, never event counts or timing.
 	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
-	helmRun("install", helmRelease, chartPath,
-		"-n", nsOperator, "--create-namespace",
-		"--set", "crds.install=false",
-		"--set", "image.tag="+operatorTag,
-		"--set", "runner.image.tag="+runnerTag,
-		"--set", "watchNamespaces={"+nsE2E+","+nsX+"}",
-		"--set", "leaderElection.enabled=false",
-		"--wait")
+	values := []string{
+		"crds.install=false",
+		"image.tag=" + operatorTag,
+		"runner.image.tag=" + runnerTag,
+		"watchNamespaces={" + nsE2E + "," + nsX + "}",
+		"leaderElection.enabled=false",
+	}
+	args := []string{"install", helmRelease, chartPath, "-n", nsOperator, "--wait"}
+	if manageNamespaces {
+		args = append(args, "--create-namespace")
+	} else {
+		// The chart gates its ClusterRole and binding on rbac.create, and an
+		// identity that may not create namespaces may not create cluster RBAC
+		// either: the ServiceAccount and its bindings come with the namespaces.
+		values = append(values, "rbac.create=false", "serviceAccount.create=false",
+			"serviceAccount.name="+managerServiceAccount)
+	}
+	for _, v := range values {
+		args = append(args, "--set", v)
+	}
+	helmRun(args...)
 
-	By("creating or adopting the fixture namespaces")
-	ensureNamespace(nsE2E)
-	ensureNamespace(nsX)
+	if manageNamespaces {
+		By("creating or adopting the fixture namespaces")
+		ensureNamespace(nsE2E)
+		ensureNamespace(nsX)
+	}
 
 	By("deleting leftover Migrations from previous runs")
 	purgeMigrations(2 * time.Minute)
@@ -380,19 +434,59 @@ var _ = AfterSuite(func() {
 
 	// The throwaway operator always goes away, keep-fixtures or not: every
 	// run installs a fresh one.
-	By("uninstalling the suite's operator and deleting " + nsOperator)
+	By("uninstalling the suite's operator")
 	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
-	deleteNamespaces(2*time.Minute, nsOperator)
+	if manageNamespaces {
+		By("deleting " + nsOperator)
+		deleteNamespaces(2*time.Minute, nsOperator)
+	}
 
 	if envTrue("E2E_KEEP_FIXTURES") {
 		_, _ = fmt.Fprintf(GinkgoWriter,
 			"E2E_KEEP_FIXTURES=true: keeping namespaces %s and %s for iteration\n", nsE2E, nsX)
 		return
 	}
+	if !manageNamespaces {
+		By("deleting the fixtures inside " + nsE2E + " and " + nsX)
+		deleteFixtures(10 * time.Minute)
+		return
+	}
 	By("deleting the fixture namespaces")
 	// CNPG teardown plus volume deletion takes a while on the shared cluster.
 	deleteNamespaces(10*time.Minute, nsX, nsE2E)
 })
+
+// deleteFixtures empties the fixture namespaces instead of deleting them, for
+// runs that do not own them. Migrations are gone by here; a deleted CNPG
+// Cluster leaves its instance volumes behind, so those go explicitly.
+func deleteFixtures(timeout time.Duration) {
+	GinkgoHelper()
+	deleteCluster(sourceCluster)
+	deleteCluster(targetCluster)
+	fg := metav1.DeletePropagationForeground
+	for _, obj := range []client.Object{
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	} {
+		err := k8sClient.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &fg})
+		if err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete %s", obj.GetName())
+		}
+	}
+	for _, ns := range []string{nsE2E, nsX} {
+		Expect(k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, client.InNamespace(ns))).
+			To(Succeed(), "failed to delete the volumes in %s", ns)
+	}
+	// The next run recreates the clusters under the same volume names, so the
+	// old volumes have to be gone before this one reports done.
+	Eventually(func(g Gomega) {
+		for _, ns := range []string{nsE2E, nsX} {
+			pvcs := &corev1.PersistentVolumeClaimList{}
+			g.Expect(k8sClient.List(ctx, pvcs, client.InNamespace(ns))).To(Succeed())
+			g.Expect(pvcs.Items).To(BeEmpty(), "volumes still terminating in %s", ns)
+		}
+	}, timeout, 5*time.Second).Should(Succeed())
+}
 
 // helmRun executes helm against the current kubectl context, echoes its
 // output, and fails the suite on error. Transient API-server hiccups (TLS
