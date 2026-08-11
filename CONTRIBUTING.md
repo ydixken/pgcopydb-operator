@@ -35,7 +35,7 @@ Two runner scale sets serve this repository, both backed by Actions Runner Contr
 Two rules hold because this repository is public and both scale sets are real machines on a private cluster:
 
 - No workflow that can be triggered by a fork MAY target them. Today only tag pushes (`release.yml`) and manual dispatch (`runner-smoke.yml`) do.
-- `pull_request_target` MUST NOT be used in any workflow. It runs the base branch's copy of the workflow with the base branch's secrets, which is fork approval skipped by design.
+- `pull_request_target` MUST NOT be used in any workflow. It runs the base branch's copy of the workflow, with the base branch's secrets, against a fork's code, so the approval that gates a fork's first run never gets asked for.
 
 The e2e job backs the first rule with something GitHub enforces rather than something we remember. Its `environment: e2e-cluster` carries a deployment branch and tag policy that permits `main` and `v*` and nothing else, evaluated before the job is dispatched. A fork pull request runs at `refs/pull/N/merge`, matches neither, and never reaches a machine that can talk to the cluster.
 
@@ -76,7 +76,9 @@ Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`
 
 Releases cut themselves. Every Monday at 08:00 UTC `auto-release.yml` reads what landed since the last stable tag and pushes a release candidate: `vX.Y.Z-rc.1`, a patch bump unless a `feat:` commit is in the range, in which case a minor one. A week with nothing merged ends with no tag and a green run, which is not a failure. When a candidate for the same version already exists the number counts up, rather than reusing a tag whose images are published.
 
-That tag starts `release.yml`, which publishes the manager and runner images (multi-arch) and the Helm chart as OCI, creates the GitHub release whose notes GitHub generates from the merged PRs, and runs the e2e suite against exactly those artifacts on the cluster. Pass, and the workflow pushes the stable tag `vX.Y.Z`, which starts the same workflow once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease. Fail, and nothing is promoted. The candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main` and the next candidate carries the fix.
+That tag starts `release.yml`, which publishes the manager and runner images (multi-arch) and the Helm chart as OCI, creates the GitHub release whose notes GitHub generates from the merged PRs, and runs the e2e suite against exactly those artifacts on the cluster.
+
+Pass, and the workflow pushes the stable tag `vX.Y.Z`, which starts the same workflow once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease. Fail, and nothing is promoted: the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main`, and the next candidate carries the fix.
 
 > [!important]
 > A release candidate publishes under its own tag and never moves `latest`.
