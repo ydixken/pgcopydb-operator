@@ -1,4 +1,114 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"]
+  "description": [
+    "One grouped PR per week for everything non-major; majors arrive on their own and wait for a human.",
+    "Some version strings in this repo are deliberately left unmanaged, and a rule for any of them would do harm rather than nothing:",
+    "ENVTEST_VERSION and ENVTEST_K8S_VERSION in the Makefile derive themselves from go.mod through a shell function, so a Renovate rule would fight the Makefile and lose on the next go.mod bump.",
+    "The pgcopydb and postgresql-client-18 apt packages in images/runner/Dockerfile float inside their majors on purpose (hadolint ignore=DL3008), and a build-time canary fails the image on major drift.",
+    "GitHub Actions pins float on major tags on purpose, so no digest pinning: config:recommended leaves pinDigests off, which is what we want.",
+    "ignorePaths repeats the config:recommended default minus **/test/**, because that glob hides the e2e operator pin in test/e2e/e2e_suite_test.go and a custom manager that matches nothing fails silently. Everything else under test/ is Go tests and SQL fixtures, so nothing new becomes visible."
+  ],
+  "extends": [
+    "config:recommended",
+    "schedule:weekly",
+    "group:allNonMajor",
+    ":semanticCommitTypeAll(chore)"
+  ],
+  "timezone": "Europe/Berlin",
+  "platformAutomerge": true,
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/tests/**",
+    "**/__fixtures__/**"
+  ],
+  "packageRules": [
+    {
+      "description": "Low-risk updates land on their own once CI is green.",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "automerge": true
+    },
+    {
+      "description": "Majors need a human to read the changelog, so label them and leave them.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["dependencies/major"]
+    },
+    {
+      "description": "The chart points at our own images, whose tags come from the release tag via appVersion. Scoped to helm-values so the e2e pin below, which shares a depName, keeps updating.",
+      "matchManagers": ["helm-values"],
+      "matchFileNames": ["charts/pgcopydb-operator/values.yaml"],
+      "matchDepNames": [
+        "ghcr.io/ydixken/pgcopydb-operator",
+        "ghcr.io/ydixken/pgcopydb-operator/runner"
+      ],
+      "enabled": false
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "mkdocs-material is pinned in two workflows and both builds must agree.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/docs.yml"
+      ],
+      "matchStrings": ["mkdocs-material==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "mkdocs-material",
+      "datasourceTemplate": "pypi",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "description": "crd-ref-docs generates docs/reference/api.md; the Taskfile and the docs workflow MUST install the same version or the staleness gate fails on a rendering diff.",
+      "customType": "regex",
+      "managerFilePatterns": ["Taskfile.yml", ".github/workflows/docs.yml"],
+      "matchStrings": [
+        "github\\.com/elastic/crd-ref-docs@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/elastic/crd-ref-docs",
+      "datasourceTemplate": "go"
+    },
+    {
+      "description": "golangci-lint: the Makefile installs it, .custom-gcl.yml rebuilds it with plugins, and a mismatch fails the custom build.",
+      "customType": "regex",
+      "managerFilePatterns": ["Makefile", ".custom-gcl.yml"],
+      "matchStrings": [
+        "GOLANGCI_LINT_VERSION \\?= (?<currentValue>v\\d+\\.\\d+\\.\\d+)",
+        "(^|\\n)version: (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/golangci/golangci-lint/v2",
+      "datasourceTemplate": "go"
+    },
+    {
+      "description": "kustomize tags releases as kustomize/vX.Y.Z, so the go datasource is the one that reports a bare v5.8.1: the module lives in a subdirectory and the proxy already strips the prefix.",
+      "customType": "regex",
+      "managerFilePatterns": ["Makefile"],
+      "matchStrings": [
+        "KUSTOMIZE_VERSION \\?= (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "sigs.k8s.io/kustomize/kustomize/v5",
+      "datasourceTemplate": "go"
+    },
+    {
+      "description": "controller-gen ships from kubernetes-sigs/controller-tools.",
+      "customType": "regex",
+      "managerFilePatterns": ["Makefile"],
+      "matchStrings": [
+        "CONTROLLER_TOOLS_VERSION \\?= (?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "sigs.k8s.io/controller-tools",
+      "datasourceTemplate": "go"
+    },
+    {
+      "description": "The e2e suite installs a released operator image. Bumping this by hand after every release is the chore this rule retires.",
+      "customType": "regex",
+      "managerFilePatterns": ["test/e2e/e2e_suite_test.go"],
+      "matchStrings": ["operatorTag = \"(?<currentValue>v[^\"]+)\""],
+      "depNameTemplate": "ghcr.io/ydixken/pgcopydb-operator",
+      "datasourceTemplate": "docker"
+    }
+  ]
 }
