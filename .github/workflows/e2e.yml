@@ -1,6 +1,11 @@
-name: E2e (manual)
+name: E2e
 
-# Runs the e2e suite against an already published release, on demand.
+# Runs the e2e suite against an already published release.
+#
+# Automatically on a stable tag, because promote rebuilds rather than retags:
+# the images a stable release ships are not the ones e2e checked on the
+# candidate. This run checks what users actually pull, and its result is what
+# the E2e badge reports.
 #
 # release.yml runs e2e once, against the candidate it just built. That answers
 # "is this candidate good" but cannot answer "which release did this start
@@ -9,15 +14,20 @@ name: E2e (manual)
 # ref and varies only the images, so two runs differing by one tag isolate the
 # image as the cause.
 #
-# Manual only. Nothing a fork can trigger may reach a runner that can talk to
-# the cluster, and workflow_dispatch requires write access.
+# Nothing a fork can trigger may reach a runner that can talk to the cluster:
+# a tag push and workflow_dispatch both require write access.
 
 on:
+  push:
+    # Stable tags only. A candidate is already covered by release.yml, and
+    # running both would queue a second job against a single-tenant suite for
+    # no new information.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:
         description: Published release tag to install, for example v0.5.0
-        required: true
+        required: false
         type: string
       scale:
         description: E2E_SCALE, the fixture size multiplier
@@ -53,12 +63,33 @@ jobs:
           go-version-file: go.mod
       - uses: azure/setup-helm@v4
       - uses: azure/setup-kubectl@v4
-      - name: Run the suite against ${{ inputs.tag }}
+      - name: Wait for the release images to be published
+        # A tag push starts this workflow and release.yml at the same time, and
+        # release.yml still has to build and push the images this run installs.
+        # Poll the registry rather than guess a sleep.
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          for image in pgcopydb-operator pgcopydb-operator/runner; do
+            for i in $(seq 1 60); do
+              # sed, not jq: the runner image ships git and node and little else.
+              token=$(curl -fsS "https://ghcr.io/token?scope=repository:ydixken/$image:pull" \
+                | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+                -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+                "https://ghcr.io/v2/ydixken/$image/manifests/$TAG")
+              [ "$code" = "200" ] && { echo "$image:$TAG published"; break; }
+              [ "$i" = "60" ] && { echo "::error::$image:$TAG never appeared"; exit 1; }
+              sleep 30
+            done
+          done
+      - name: Run the suite against ${{ inputs.tag || github.ref_name }}
         # -v and -ginkgo.v stream the output; without them go test buffers the
         # whole package and a run that hits the timeout prints nothing at all.
         env:
-          E2E_OPERATOR_TAG: ${{ inputs.tag }}
-          E2E_SCALE: ${{ inputs.scale }}
+          # A tag push has no inputs, so fall back to the tag that triggered it.
+          E2E_OPERATOR_TAG: ${{ inputs.tag || github.ref_name }}
+          E2E_SCALE: ${{ inputs.scale || '0.1' }}
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
         run: |
