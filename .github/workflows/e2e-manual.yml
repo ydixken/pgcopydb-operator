@@ -1,0 +1,80 @@
+name: E2e (manual)
+
+# Runs the e2e suite against an already published release, on demand.
+#
+# release.yml runs e2e once, against the candidate it just built. That answers
+# "is this candidate good" but cannot answer "which release did this start
+# failing in", because the suite, the chart and the images all move together
+# with the tag. This workflow holds the suite and the chart at the checked out
+# ref and varies only the images, so two runs differing by one tag isolate the
+# image as the cause.
+#
+# Manual only. Nothing a fork can trigger may reach a runner that can talk to
+# the cluster, and workflow_dispatch requires write access.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to install, for example v0.5.0
+        required: true
+        type: string
+      scale:
+        description: E2E_SCALE, the fixture size multiplier
+        required: false
+        default: "0.1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # The suite is single tenant on a shared cluster: two runs destroy each
+  # other's fixtures. Queue rather than cancel, so a run already touching the
+  # cluster is allowed to finish and clean up after itself.
+  group: e2e-cluster
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    # environment is the security control, matching release.yml: its deployment
+    # policy admits only main and v*, and that is evaluated before any runner
+    # is assigned. The repository check below is belt and braces.
+    if: github.repository == 'ydixken/pgcopydb-operator'
+    runs-on: github-runner-pgcopydb-e2e
+    environment: e2e-cluster
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      # The scale set runs a bare actions-runner image: git and node are all it
+      # ships, so every tool the suite shells out to is installed here.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+      - uses: azure/setup-kubectl@v4
+      - name: Run the suite against ${{ inputs.tag }}
+        # -v and -ginkgo.v stream the output; without them go test buffers the
+        # whole package and a run that hits the timeout prints nothing at all.
+        env:
+          E2E_OPERATOR_TAG: ${{ inputs.tag }}
+          E2E_SCALE: ${{ inputs.scale }}
+          E2E_MANAGE_NAMESPACES: "false"
+          E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
+        run: |
+          go test ./test/e2e/... -v -timeout 1h \
+            -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
+            -ginkgo.label-filter='!chaos'
+      - name: Empty the e2e namespaces
+        # The namespaces are GitOps owned and the CI identity cannot delete
+        # them, so clean the contents. Migrations first, while the operator
+        # that owns their cleanup finalizer is still installed.
+        if: always()
+        run: |
+          for ns in pgcopydb-e2e pgcopydb-e2e-x; do
+            kubectl delete migrations.pgcopydb-operator.io --all -n "$ns" --ignore-not-found --timeout=5m
+          done
+          helm uninstall pgcopydb-e2e -n pgcopydb-e2e-system --ignore-not-found --wait || true
+          for ns in pgcopydb-e2e pgcopydb-e2e-x pgcopydb-e2e-system; do
+            kubectl delete clusters.postgresql.cnpg.io,jobs,pvc --all -n "$ns" --ignore-not-found --timeout=5m
+          done
