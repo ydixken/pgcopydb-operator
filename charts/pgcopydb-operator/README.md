@@ -35,10 +35,21 @@ Migration CRs) in place.
 | `crds.install` | `true` | Render the Migration CRD. |
 | `crds.keep` | `true` | Annotate the CRD so uninstall keeps it. |
 | `resources` | requests 100m/128Mi, limit 256Mi | Manager resources; no cpu limit by design. |
-| `metrics.enabled` | `true` | Serve HTTPS metrics on :8443 and create the Service. |
+| `metrics.enabled` | `true` | Serve HTTPS metrics on :8443 and create the Service; see [Metrics](#metrics). |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor; needs the Prometheus Operator CRDs. |
 | `networkPolicy.enabled` | `false` | Placeholder; renders nothing yet. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
+
+## Metrics
+
+The manager serves metrics over HTTPS and authenticates the scraper itself, sending each caller's token to the API server as a TokenReview and its access as a SubjectAccessReview.
+`metrics.enabled` therefore also grants the manager `create` on `tokenreviews` and `subjectaccessreviews`, because without those it cannot check anyone and rejects every scrape.
+
+The other half is the scraper's, and the chart does not grant it: whichever ServiceAccount does the scraping needs `get` on the `/metrics` nonResourceURL.
+kube-prometheus-stack already binds that rule to its own Prometheus, so `metrics.serviceMonitor.enabled=true` is enough there.
+On another stack, bind it yourself.
+
+With `rbac.create=false` you supply the manager's RBAC, which includes the two review permissions above.
 
 ## First Migration
 
