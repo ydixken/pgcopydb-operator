@@ -7,7 +7,12 @@
 set -eu
 
 # Sources the chart deliberately does not ship, so a new file under
-# config/rbac fails the check instead of being silently left out.
+# config/rbac fails the check instead of being silently left out. Each entry
+# states why, because a skip nobody can account for reads the same as the
+# oversight this check exists to catch. metrics_reader grants get on /metrics
+# to the scraper rather than to the operator, and the chart binds no scraper.
+# migration_{admin,editor,viewer} are helpers kubebuilder scaffolds for a
+# cluster admin to hand to their own users; the operator never binds them.
 skip='metrics_reader_role.yaml migration_admin_role.yaml migration_editor_role.yaml migration_viewer_role.yaml'
 
 tmp=$(mktemp)
