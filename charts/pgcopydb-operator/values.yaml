@@ -54,6 +54,9 @@ resources:
 
 metrics:
   # Serves HTTPS metrics on :8443; disabling passes --metrics-bind-address=0.
+  # The endpoint authenticates its scrapers, so this also grants the operator
+  # create on tokenreviews and subjectaccessreviews. A scraper needs get on
+  # the /metrics nonResourceURL to get past it.
   enabled: true
   serviceMonitor:
     # Needs the Prometheus Operator CRDs; the template also skips itself when
