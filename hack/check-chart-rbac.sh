@@ -84,6 +84,28 @@ expect_match '^      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceacco
   --set metrics.serviceMonitor.enabled=true --api-versions monitoring.coreos.com/v1
 expect_absent --api-versions monitoring.coreos.com/v1
 
+# The bindings are the last hand-written RBAC in the chart: sync-chart-rbac.sh
+# generates the rules, but nothing generates what binds them to the
+# ServiceAccount. A rule nobody is bound to grants nothing, so losing a binding
+# takes every permission away at once and leaves the rules looking correct.
+tpl=templates/clusterrolebinding.yaml
+expect_match '^  name: rel-pgcopydb-operator-manager$'
+expect_match '^  kind: ClusterRole$'
+expect_match '^    name: rel-pgcopydb-operator$'
+expect_match '^    namespace: ns$'
+expect_match '^    name: custom$' --set serviceAccount.create=false --set serviceAccount.name=custom
+expect_absent --set rbac.create=false
+
+# Leader election owns its own Role, and the Role, this binding and the
+# --leader-elect flag all key on the same value, so they appear and disappear
+# together.
+tpl=templates/rolebinding.yaml
+expect_match '^  name: rel-pgcopydb-operator-leader-election$'
+expect_match '^  kind: Role$'
+expect_match '^    name: rel-pgcopydb-operator$'
+expect_absent --set leaderElection.enabled=false
+expect_absent --set rbac.create=false
+
 if [ "$fail" -ne 0 ]; then
   echo "chart RBAC check failed" >&2
   exit 1
