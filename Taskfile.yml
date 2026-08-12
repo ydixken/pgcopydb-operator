@@ -18,8 +18,9 @@ tasks:
     desc: Lint everything (yamllint, then kubebuilder's make lint for Go).
     cmds:
       - yamllint --strict .
-      # The chart embeds generated artifacts (CRD); this fails on drift.
+      # The chart embeds generated artifacts (CRD, RBAC); these fail on drift.
       - ./hack/sync-chart-crd.sh --check
+      - ./hack/sync-chart-rbac.sh --check
       # yamllint skips charts/*/templates/ (Go template syntax); helm covers it.
       # helm lint only renders the defaults, so the RBAC check renders the
       # value combinations that decide what the chart grants.
