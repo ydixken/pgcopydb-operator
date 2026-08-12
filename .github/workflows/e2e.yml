@@ -1,11 +1,11 @@
-name: E2e
+name: E2E
 
 # Runs the e2e suite against an already published release.
 #
 # Automatically on a stable tag, because promote rebuilds rather than retags:
 # the images a stable release ships are not the ones e2e checked on the
 # candidate. This run checks what users actually pull, and its result is what
-# the E2e badge reports.
+# the E2E badge reports.
 #
 # release.yml runs e2e once, against the candidate it just built. That answers
 # "is this candidate good" but cannot answer "which release did this start
