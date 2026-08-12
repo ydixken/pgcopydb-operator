@@ -4,6 +4,10 @@
 # binds, and the token the ServiceMonitor sends. helm lint only ever renders
 # the defaults, so a template gated on the wrong value would otherwise ship
 # green and every scrape would be rejected.
+#
+# Scope: this asserts gating and wiring only. Whether the rules themselves
+# still match config/rbac is hack/sync-chart-rbac.sh --check, which runs
+# beside this one.
 set -eu
 
 chart=charts/pgcopydb-operator
