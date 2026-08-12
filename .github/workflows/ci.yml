@@ -33,6 +33,10 @@ jobs:
         run: ./hack/sync-chart-crd.sh --check
       - name: helm lint
         run: helm lint charts/pgcopydb-operator
+      - name: Chart RBAC renders as expected
+        # helm lint renders the defaults only; this renders the combinations
+        # that decide what the chart grants.
+        run: ./hack/check-chart-rbac.sh
       - name: golangci-lint
         run: make lint
 

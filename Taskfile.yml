@@ -21,8 +21,14 @@ tasks:
       # The chart embeds generated artifacts (CRD); this fails on drift.
       - ./hack/sync-chart-crd.sh --check
       # yamllint skips charts/*/templates/ (Go template syntax); helm covers it.
+      # helm lint only renders the defaults, so the RBAC check renders the
+      # value combinations that decide what the chart grants.
       - cmd: |-
-          if command -v helm >/dev/null; then helm lint charts/pgcopydb-operator; else echo "lint: no helm, skipping chart lint"; fi
+          if command -v helm >/dev/null; then
+            helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh
+          else
+            echo "lint: no helm, skipping chart lint"
+          fi
       - cmd: |-
           if [ -f Makefile ]; then make lint; else echo "lint: no Makefile yet, skipping Go lint"; fi
 
