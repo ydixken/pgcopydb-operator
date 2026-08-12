@@ -1,9 +1,9 @@
 #!/bin/sh
-# Renders the chart in the value combinations that decide whether the
-# metrics-auth RBAC exists and whom it binds, then asserts the result.
-# helm lint only ever renders the defaults, so a template gated on the wrong
-# value would otherwise ship green: the operator loses the permission it needs
-# to authenticate a metrics scraper, and every scrape is rejected.
+# Renders the chart in the value combinations that decide whether an
+# authenticated metrics scrape can work at all: the metrics-auth RBAC, whom it
+# binds, and the token the ServiceMonitor sends. helm lint only ever renders
+# the defaults, so a template gated on the wrong value would otherwise ship
+# green and every scrape would be rejected.
 set -eu
 
 chart=charts/pgcopydb-operator
@@ -34,11 +34,11 @@ render() {
 expect_absent() {
   render "$@"
   if [ -n "$out" ]; then
-    echo "FAIL: metrics-auth RBAC rendered with '$*' but must not" >&2
+    echo "FAIL: $tpl rendered with '$*' but must not" >&2
     fail=1
     return 0
   fi
-  echo "ok: no metrics-auth RBAC with '$*'"
+  echo "ok: nothing from $tpl with '$*'"
 }
 
 expect_match() {
@@ -46,10 +46,10 @@ expect_match() {
   shift
   render "$@"
   if printf '%s\n' "$out" | grep -q "$needle"; then
-    echo "ok: '$needle' with '${*:-defaults}'"
+    echo "ok: $tpl has '$needle' with '${*:-defaults}'"
     return 0
   fi
-  echo "FAIL: '$needle' missing from the metrics-auth RBAC with '${*:-defaults}':" >&2
+  echo "FAIL: $tpl lacks '$needle' with '${*:-defaults}':" >&2
   printf '%s\n' "$out" >&2
   fail=1
 }
@@ -70,6 +70,15 @@ expect_absent --set rbac.create=false
 
 # A ServiceAccount the chart does not create must still be the bound subject.
 expect_match '^    name: custom$' --set serviceAccount.create=false --set serviceAccount.name=custom
+
+# The other half of the same story: the manager refuses an anonymous scrape
+# with 401, so dropping the token file breaks scraping just as thoroughly as
+# dropping the RBAC above. --api-versions stands in for the Prometheus
+# Operator CRDs, which the template checks for.
+tpl=templates/servicemonitor.yaml
+expect_match '^      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token$' \
+  --set metrics.serviceMonitor.enabled=true --api-versions monitoring.coreos.com/v1
+expect_absent --api-versions monitoring.coreos.com/v1
 
 if [ "$fail" -ne 0 ]; then
   echo "chart RBAC check failed" >&2
