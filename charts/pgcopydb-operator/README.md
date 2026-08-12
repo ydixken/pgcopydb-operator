@@ -44,6 +44,7 @@ Migration CRs) in place.
 
 The manager serves metrics over HTTPS and authenticates the scraper itself, sending each caller's token to the API server as a TokenReview and its access as a SubjectAccessReview.
 `metrics.enabled` therefore also grants the manager `create` on `tokenreviews` and `subjectaccessreviews`, because without those it cannot check anyone and rejects every scrape.
+An anonymous scrape is refused with 401 before any of that, so the ServiceMonitor points Prometheus at its own ServiceAccount token file.
 
 The other half is the scraper's, and the chart does not grant it: whichever ServiceAccount does the scraping needs `get` on the `/metrics` nonResourceURL.
 kube-prometheus-stack already binds that rule to its own Prometheus, so `metrics.serviceMonitor.enabled=true` is enough there.

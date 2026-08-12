@@ -31,6 +31,9 @@ jobs:
       - name: Chart CRD is current
         # The chart embeds controller-gen output; this fails on drift.
         run: ./hack/sync-chart-crd.sh --check
+      - name: Chart RBAC is current
+        # The chart's rules come from config/rbac; this fails on drift.
+        run: ./hack/sync-chart-rbac.sh --check
       - name: helm lint
         run: helm lint charts/pgcopydb-operator
       - name: Chart RBAC renders as expected
