@@ -10,6 +10,17 @@ spec:
     - port: https-metrics
       scheme: https
       honorLabels: false
+      # The endpoint authenticates every scrape, so a scrape carrying no
+      # credential is rejected with 401 before authorization is ever reached.
+      # Prometheus attaches nothing on its own, so point it at its own
+      # ServiceAccount token.
+      #
+      # bearerTokenFile is deprecated upstream in favour of authorization,
+      # but authorization takes only a Secret reference and has no file form,
+      # so it cannot read a projected ServiceAccount token. kube-prometheus
+      # -stack's own ServiceMonitors still use bearerTokenFile for the same
+      # reason. Move to authorization once it grows a credentialsFile.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
         # The manager serves metrics with a self-signed certificate.
         insecureSkipVerify: true
