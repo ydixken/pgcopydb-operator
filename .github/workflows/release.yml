@@ -188,7 +188,15 @@ jobs:
           E2E_SCALE: "0.1"
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
-        run: go test ./test/e2e/... -timeout 1h -ginkgo.timeout=1h -ginkgo.label-filter='!chaos'
+        # -v and -ginkgo.v are what make this readable while it runs. Without
+        # -v, go test buffers the whole package and prints nothing until it
+        # exits, so a 40 minute run looks hung and a run that hits the job
+        # timeout produces no output at all. poll-progress-after turns a spec
+        # that wedges into a stack dump rather than silence.
+        run: |
+          go test ./test/e2e/... -v -timeout 1h \
+            -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
+            -ginkgo.label-filter='!chaos'
       - name: Empty the e2e namespaces
         # AfterSuite already does this when the suite exits cleanly; this is
         # for the run that crashed or hit the timeout. The namespaces
