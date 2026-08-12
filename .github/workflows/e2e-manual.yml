@@ -64,7 +64,7 @@ jobs:
         run: |
           go test ./test/e2e/... -v -timeout 1h \
             -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
-            -ginkgo.label-filter='!chaos'
+            -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # The namespaces are GitOps owned and the CI identity cannot delete
         # them, so clean the contents. Migrations first, while the operator

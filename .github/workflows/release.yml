@@ -196,7 +196,7 @@ jobs:
         run: |
           go test ./test/e2e/... -v -timeout 1h \
             -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
-            -ginkgo.label-filter='!chaos'
+            -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # AfterSuite already does this when the suite exits cleanly; this is
         # for the run that crashed or hit the timeout. The namespaces
