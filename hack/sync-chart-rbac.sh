@@ -98,14 +98,18 @@ sync role.yaml clusterrole.yaml
 sync leader_election_role.yaml role.yaml
 sync metrics_auth_role.yaml metrics-auth-rbac.yaml
 
-# Any role in config/rbac that is neither synced above nor deliberately
-# skipped is drift waiting to happen, so name it now.
-for f in config/rbac/*_role.yaml; do
+# Every Role and ClusterRole under config/rbac has to be generated above or
+# named in $skip. Keyed on kind rather than on kubebuilder's *_role.yaml
+# filename, so a role that arrives in a differently named file still has to be
+# accounted for. This is the assertion the original omission needed: a role
+# nobody ported fails here instead of shipping missing.
+for f in config/rbac/*.yaml; do
+  grep -qE '^kind: (Cluster)?Role$' "$f" || continue
   base=${f##*/}
   case " role.yaml leader_election_role.yaml metrics_auth_role.yaml $skip " in
   *" $base "*) continue ;;
   esac
-  echo "$f is neither rendered by the chart nor listed as skipped in $0" >&2
+  echo "$f defines a role the chart neither renders nor lists as skipped in $0" >&2
   fail=1
 done
 
