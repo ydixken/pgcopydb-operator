@@ -163,7 +163,7 @@ var (
 // and the first with the slimmed runner: perl, util-linux, login and gzip are
 // gone, since a migration never executes them and Debian ships no fixed version
 // for what they carry. Controller behaviour is unchanged from v0.3.0.
-var operatorTag = "v0.4.0"
+var operatorTag = "v0.5.0"
 
 // runnerTag is the tag for the worker image. It defaults to the same release
 // as the manager and is overridable with E2E_RUNNER_TAG so an unreleased
