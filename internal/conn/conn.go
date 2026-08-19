@@ -272,8 +272,15 @@ func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) (*Materialized,
 		return nil, nil
 	}
 	keys := effectiveKeys(sr.Keys)
+	// The super host key follows the primary's endpoint choice when the
+	// primary is the secretRef form: both name the same server, so the
+	// internal/external pick must agree or the sameness check misfires.
+	endpoint := sr.Endpoint
+	if c.SecretRef != nil {
+		endpoint = c.SecretRef.Endpoint
+	}
 	hostKey := keys.URL
-	if sr.Endpoint == endpointExternal {
+	if endpoint == endpointExternal {
 		hostKey = keys.URLExternal
 	}
 	optional := true
@@ -309,7 +316,9 @@ case "$sup_hostpart" in *@*) sup_hostport=${sup_hostpart##*@} ;; *) sup_hostport
 sup_host=${sup_hostport%%:*}
 sup_want=${@HOST@-}
 if [ -n "$sup_want" ]; then
-  [ "${sup_want%%:*}" = "$sup_host" ] || { echo "@SIDE@ superuser secret: url key '$sup_want' does not match the connection endpoint '$sup_host'; the superuser secret URL keys MUST name the same endpoint" >&2; exit 1; }
+  case "$sup_hostport" in *:*) sup_hpd=$sup_hostport ;; *) sup_hpd=$sup_hostport:5432 ;; esac
+  case "$sup_want" in *:*) sup_cmp=$sup_hpd ;; *) sup_cmp=$sup_host ;; esac
+  [ "$sup_want" = "$sup_cmp" ] || { echo "@SIDE@ superuser secret: url key '$sup_want' does not match the connection endpoint '$sup_cmp'; the superuser secret URL keys MUST name the same endpoint" >&2; exit 1; }
 fi
 sup_uri="${sup_base%%://*}://$sup_user@$sup_hostport${sup_rest#"$sup_hostpart"}"
 export @SUPERURI@="$sup_uri"

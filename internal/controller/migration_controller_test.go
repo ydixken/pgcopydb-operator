@@ -38,6 +38,11 @@ import (
 
 const testRunnerImage = "ghcr.io/example/runner:test"
 
+// testPodImage and testPodContainer fill test-fabricated pods; envtest runs
+// no kubelet, so neither value ever resolves.
+const testPodImage = "img"
+const testPodContainer = "runner"
+
 // testNS is where every test Migration lives; envtest ships the namespace.
 const testNS = "default"
 
@@ -342,6 +347,38 @@ var _ = Describe("Migration Controller", func() {
 		Expect(args).To(ContainSubstring("--resume"))
 	})
 
+	It("suspends during the gate by deleting the preflight and re-runs it on resume", func() {
+		const name = "mig-suspend-gate"
+		defer removeMigration(ctx, name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		// First pass creates the preflight; it is NOT finished: the Migration
+		// sits mid-gate, where remediation may be writing to the databases.
+		reconcileAndGet(ctx, newReconciler(), name)
+		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
+
+		m := getMigration(name)
+		m.Spec.Suspend = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, newReconciler(), name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseSuspended))
+		job := &batchv1.Job{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-preflight", Namespace: testNS}, job)
+		if err == nil {
+			Expect(job.DeletionTimestamp.IsZero()).To(BeFalse())
+		} else {
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		}
+
+		m.Spec.Suspend = false
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, newReconciler(), name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
+		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
+		finishJob(ctx, name+"-preflight", true)
+		m = reconcileAndGet(ctx, newReconciler(), name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+	})
+
 	It("converges without error or duplicate events when a pass holds a stale object", func() {
 		const name = "mig-stale"
 		defer removeMigration(ctx, name)
@@ -380,5 +417,73 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated)).To(BeTrue())
 		Expect(fetchJob(ctx, name+"-run-1")).NotTo(BeNil())
+	})
+
+	It("distills the preflight pod state into a wait detail", func() {
+		const jobName = "wait-detail-job"
+		r := newReconciler()
+
+		// makePod fabricates one labeled pod and stamps the given status;
+		// envtest runs no kubelet, so tests own the status subresource.
+		makePod := func(name string, status corev1.PodStatus) *corev1.Pod {
+			GinkgoHelper()
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: testNS,
+					Labels: map[string]string{jobNameLabel: jobName},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: testPodContainer, Image: testPodImage}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)) })
+			pod.Status = status
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+			return pod
+		}
+
+		By("returning nothing while no pod exists")
+		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).To(Equal(""))
+
+		By("returning nothing for the transient ContainerCreating state")
+		pod := makePod("wd-creating", corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: testPodContainer, Image: testPodImage,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+			}},
+		})
+		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).To(Equal(""))
+		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+
+		By("surfacing an unschedulable pod with the scheduler's message")
+		pod = makePod("wd-unsched", corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable, Message: "0/3 nodes match the selector",
+			}},
+		})
+		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).
+			To(Equal("pod unschedulable: 0/3 nodes match the selector"))
+		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+
+		By("surfacing a message-less init-container waiting reason bare")
+		pod = makePod("wd-initwait", corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "init", Image: testPodImage,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}},
+		})
+		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).To(Equal("ImagePullBackOff"))
+		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+
+		By("degrading to nothing when the pod list itself fails")
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		Expect(r.preflightWaitDetail(cancelled, testNS, jobName)).To(Equal(""))
 	})
 })

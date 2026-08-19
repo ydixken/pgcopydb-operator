@@ -52,9 +52,11 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the
 	// condition message: one line per failed check plus psql stderr.
 	preflightLogTail = 20
-	// preflightOkLogTail bounds the success-path parse for ok/remediated
-	// lines: one per check and per applied grant, warnings included.
-	preflightOkLogTail = 60
+	// preflightOkLogTail is effectively the whole preflight log: the
+	// success-path parse must see every remediated: line even under a long
+	// replica-identity audit, or applied grants lose their audit events.
+	// A number only because the log API wants a TailLines value.
+	preflightOkLogTail = 10000
 	// zombieLogTail bounds the log window scanned for the supervisor-death
 	// marker. Wider than workerLogTail because the surviving streaming child
 	// keeps logging LSN reports after the marker and would push it out of a
@@ -241,7 +243,12 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 		}
 		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
 	}
-	r.emitPreflightOutcome(ctx, m)
+	// Emit once per gate outcome: after Validated=True is persisted this is
+	// skipped. At-least-once on purpose: a pass losing every status write
+	// re-emits, and duplicate events beat a silent audit trail of grants.
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated) {
+		r.emitPreflightOutcome(ctx, m)
+	}
 	return ctrl.Result{}, false, nil
 }
 
@@ -464,6 +471,22 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 			return ctrl.Result{}, err
 		}
 		m.Status.JobName = ""
+	}
+	// A gate-stage suspend must stop the preflight too: it may be applying
+	// superuser remediation, and Suspended promises no further database
+	// writes. The gate recreates the Job on resume.
+	if m.Status.Attempts == 0 {
+		pf := &batchv1.Job{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: preflightJobName(m)}, pf)
+		if err == nil {
+			policy := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, pf, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Suspended", "Suspend", "preflight Job deleted; the gate re-runs on resume")
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
 	}
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)

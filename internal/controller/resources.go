@@ -148,7 +148,12 @@ func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, er
 	slot := effectiveSlotName(m)
 	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir,
 		"--slot-name", slot, "--origin", slot}
-	return jobSkeleton(m, runnerImage, cleanupJobName(m), args, "", 2)
+	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), args, "", 2)
+	if err != nil {
+		return nil, err
+	}
+	addConnectTimeout(job)
+	return job, nil
 }
 
 // buildVerifyJob checks, after the worker exited 0, that the target really
@@ -222,41 +227,55 @@ exit 1`
 // emitPreflightOutcome parses into events.
 
 // preflightHeader opens every preflight: general connectivity is validated
-// first, for clone and follow alike, and logged. A failed connect is a
-// configuration error; nothing else is worth probing after it.
+// first, for clone and follow alike, and logged. Connects are retried so a
+// failover blip does not terminal-fail an otherwise sound Migration; six
+// misses over ~1 minute is a configuration error, and nothing else is worth
+// probing after it. note buffers failure lines and hint the field pointers,
+// so the footer can re-print both inside the log tail the condition carries.
+// PREFLIGHT_RETRY_SLEEP is a test seam; env values are never shell-evaluated.
 const preflightHeader = `set -u
 fail=0
+fails=''
+hints=''
 check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
-if ! check "$PGCOPYDB_SOURCE_PGURI" 'select 1' >/dev/null; then
-  echo "preflight: cannot connect to the source database"; exit 1
-fi
+note() { echo "$1"; fails="$fails$1
+"; fail=1; }
+hint() { hints="$hints$1
+"; }
+connect_retry() {
+  n=1
+  while ! check "$1" 'select 1' >/dev/null; do
+    if [ "$n" -ge 6 ]; then echo "$3"; exit 1; fi
+    echo "retry: $2 connectivity attempt $n failed"
+    n=$((n+1))
+    sleep "${PREFLIGHT_RETRY_SLEEP:-10}"
+  done
+}
+connect_retry "$PGCOPYDB_SOURCE_PGURI" source "preflight: cannot connect to the source database"
 echo "ok: connectivity source"
-if ! check "$PGCOPYDB_TARGET_PGURI" 'select 1' >/dev/null; then
-  echo "preflight: cannot connect to the target database"; exit 1
-fi
+connect_retry "$PGCOPYDB_TARGET_PGURI" target "preflight: cannot connect to the target database"
 echo "ok: connectivity target"
 `
 
-// superVerifyBlock probes a configured superuser connection: it must connect,
-// and it must actually be a superuser, or remediation would fail later with a
-// worse message.
+// superVerifyBlock probes a configured superuser connection: it must connect
+// (retried like the primaries). rolsuper=false only warns: managed-Postgres
+// admin roles (rds_superuser and friends) can run the grants without the
+// attribute, and an apply that truly lacks rights still fails by name.
 func superVerifyBlock(s conn.Side) string {
 	return strings.NewReplacer("@SIDE@", string(s), "@URI@", conn.SuperURIEnv(s)).Replace(
-		`if ! check "$@URI@" 'select 1' >/dev/null; then
-  echo "preflight: cannot connect to the @SIDE@ database as the superuserSecretRef user"; exit 1
-fi
+		`connect_retry "$@URI@" "superuser @SIDE@" "preflight: cannot connect to the @SIDE@ database as the superuserSecretRef user"
 echo "ok: superuser @SIDE@ connected"
 if [ "$(check "$@URI@" 'select rolsuper::int from pg_roles where rolname = current_user')" != 1 ]; then
-  echo "preflight: the @SIDE@ superuserSecretRef user is not a superuser (rolsuper is false)"; exit 1
+  echo "warn: @SIDE@ superuserSecretRef user lacks rolsuper; attempting remediation anyway"
+else
+  echo "ok: superuser @SIDE@ verified"
 fi
-echo "ok: superuser @SIDE@ verified"
 `)
 }
 
 const walLevelBlock = `wal_level=$(check "$PGCOPYDB_SOURCE_PGURI" 'show wal_level')
 if [ "$wal_level" != logical ]; then
-  echo "preflight: source wal_level is '$wal_level', follow needs 'logical': set wal_level = logical on the source and restart it"
-  fail=1
+  note "preflight: source wal_level is '$wal_level', follow needs 'logical': set wal_level = logical on the source and restart it"
 else
   echo "ok: source wal_level logical"
 fi
@@ -264,8 +283,7 @@ fi
 
 const slotHeadroomBlock = `free_slots=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('max_replication_slots')::int - count(*) from pg_replication_slots")
 if [ "${free_slots:-0}" -lt 1 ]; then
-  echo "preflight: no free replication slot on the source: raise max_replication_slots or drop an unused slot from pg_replication_slots"
-  fail=1
+  note "preflight: no free replication slot on the source: raise max_replication_slots or drop an unused slot from pg_replication_slots"
 else
   echo "ok: replication slot headroom"
 fi
@@ -274,6 +292,11 @@ fi
 // replicationAttrCheck is the probe both variants of the block share.
 const replicationAttrCheck = `check "$PGCOPYDB_SOURCE_PGURI" 'select (rolreplication or rolsuper)::int from pg_roles where rolname = current_user'`
 
+// replicationAttrStmt composes the exact ALTER ROLE server-side: the server
+// escapes its own role name, so a quote-bearing name cannot break out of the
+// identifier when the statement later runs over the superuser connection.
+const replicationAttrStmt = `check "$PGCOPYDB_SOURCE_PGURI" "select format('ALTER ROLE \"%s\" REPLICATION', replace(current_user::text, '\"', '\"\"'))"`
+
 // replicationAttrBlock checks the source role's REPLICATION attribute. With a
 // source superuser the exact ALTER ROLE is applied and re-checked; without one
 // the hint names the field that would let the operator do it.
@@ -281,18 +304,16 @@ func replicationAttrBlock(super bool) string {
 	if super {
 		return `src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user')
 if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-  stmt="ALTER ROLE \"$src_user\" REPLICATION"
+  stmt=$(` + replicationAttrStmt + `)
   if check "$` + conn.SuperURIEnv(conn.Source) + `" "$stmt" >/dev/null; then
     echo "remediated: $stmt"
     if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-      echo "preflight: source role \"$src_user\" still lacks the REPLICATION attribute after remediation ($stmt)"
-      fail=1
+      note "preflight: source role \"$src_user\" still lacks the REPLICATION attribute after remediation ($stmt)"
     else
       echo "ok: source replication attribute"
     fi
   else
-    echo "preflight: source role \"$src_user\" lacks the REPLICATION attribute and applying $stmt via superuserSecretRef failed"
-    fail=1
+    note "preflight: source role \"$src_user\" lacks the REPLICATION attribute and applying $stmt via superuserSecretRef failed"
   fi
 else
   echo "ok: source replication attribute"
@@ -301,9 +322,9 @@ fi
 	}
 	return `src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user')
 if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-  echo "preflight: source role \"$src_user\" lacks the REPLICATION attribute: ALTER ROLE \"$src_user\" REPLICATION"
-  echo "hint: spec.source.superuserSecretRef lets the operator apply this itself"
-  fail=1
+  stmt=$(` + replicationAttrStmt + `)
+  note "preflight: source role \"$src_user\" lacks the REPLICATION attribute: $stmt"
+  hint "hint: spec.source.superuserSecretRef lets the operator apply this itself"
 else
   echo "ok: source replication attribute"
 fi
@@ -325,14 +346,12 @@ if [ -n "$origin_grants" ]; then
     printf '%s\n' "$origin_grants" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "remediated: $g;"; done
     origin_grants=$(` + originGrantsQuery + `)
     if [ -n "$origin_grants" ]; then
-      echo "preflight: target role still lacks EXECUTE on replication origin functions after remediation, run on the target: $origin_grants"
-      fail=1
+      note "preflight: target role still lacks EXECUTE on replication origin functions after remediation, run on the target: $origin_grants"
     else
       echo "ok: target origin function grants"
     fi
   else
-    echo "preflight: target role lacks EXECUTE on replication origin functions and applying the grants via superuserSecretRef failed: $origin_grants"
-    fail=1
+    note "preflight: target role lacks EXECUTE on replication origin functions and applying the grants via superuserSecretRef failed: $origin_grants"
   fi
 else
   echo "ok: target origin function grants"
@@ -341,9 +360,8 @@ fi
 	}
 	return `origin_grants=$(` + originGrantsQuery + `)
 if [ -n "$origin_grants" ]; then
-  echo "preflight: target role lacks EXECUTE on replication origin functions, run on the target: $origin_grants"
-  echo "hint: spec.target.superuserSecretRef lets the operator apply this itself"
-  fail=1
+  note "preflight: target role lacks EXECUTE on replication origin functions, run on the target: $origin_grants"
+  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
 else
   echo "ok: target origin function grants"
 fi
@@ -354,6 +372,10 @@ fi
 // privilege test.
 const srrProbe = `check "$PGCOPYDB_TARGET_PGURI" "begin; set session_replication_role = 'replica'; rollback;"`
 
+// srrStmt composes the GRANT SET server-side, same escaping rationale as
+// replicationAttrStmt.
+const srrStmt = `check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT SET ON PARAMETER session_replication_role TO \"%s\"', replace(current_user::text, '\"', '\"\"'))"`
+
 // srrBlock checks the silent-loss gate. The GRANT exists on PostgreSQL 15+
 // only; on older targets remediation fails loudly, which is still better than
 // pgcopydb applying nothing.
@@ -361,18 +383,16 @@ func srrBlock(super bool) string {
 	if super {
 		return `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
 if ! ` + srrProbe + ` >/dev/null; then
-  stmt="GRANT SET ON PARAMETER session_replication_role TO \"$tgt_user\""
+  stmt=$(` + srrStmt + `)
   if check "$` + conn.SuperURIEnv(conn.Target) + `" "$stmt" >/dev/null; then
     echo "remediated: $stmt"
     if ! ` + srrProbe + ` >/dev/null; then
-      echo "preflight: target role \"$tgt_user\" still cannot SET session_replication_role after remediation ($stmt)"
-      fail=1
+      note "preflight: target role \"$tgt_user\" still cannot SET session_replication_role after remediation ($stmt)"
     else
       echo "ok: target session_replication_role"
     fi
   else
-    echo "preflight: target role \"$tgt_user\" cannot SET session_replication_role and applying $stmt via superuserSecretRef failed (the GRANT exists on PostgreSQL 15+ only)"
-    fail=1
+    note "preflight: target role \"$tgt_user\" cannot SET session_replication_role and applying $stmt via superuserSecretRef failed (the GRANT exists on PostgreSQL 15+ only)"
   fi
 else
   echo "ok: target session_replication_role"
@@ -381,9 +401,9 @@ fi
 	}
 	return `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
 if ! ` + srrProbe + ` >/dev/null; then
-  echo "preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: GRANT SET ON PARAMETER session_replication_role TO \"$tgt_user\" (PostgreSQL 15+; older targets need a superuser role)"
-  echo "hint: spec.target.superuserSecretRef lets the operator apply this itself"
-  fail=1
+  stmt=$(` + srrStmt + `)
+  note "preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: $stmt (PostgreSQL 15+; older targets need a superuser role)"
+  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
 else
   echo "ok: target session_replication_role"
 fi
@@ -406,8 +426,7 @@ if [ -n "$ri_offenders" ]; then
     if [ "$ack_all" = 1 ] || printf '%s\n' "$ri_allow" | grep -Fxq "$tbl"; then
       echo "preflight: warning: acknowledged table $tbl has no usable replica identity; UPDATE and DELETE on it will fail on the source during the migration window"
     else
-      echo "preflight: table $tbl has no replica identity usable for UPDATE/DELETE (the audit covers all user tables, including ones excluded by clone.filters): ALTER TABLE $tbl REPLICA IDENTITY USING INDEX <unique index>, or ALTER TABLE $tbl REPLICA IDENTITY FULL, or acknowledge it in spec.follow.allowMissingReplicaIdentity"
-      fail=1
+      note "preflight: table $tbl has no replica identity usable for UPDATE/DELETE (the audit covers all user tables, including ones excluded by clone.filters): ALTER TABLE $tbl REPLICA IDENTITY USING INDEX <unique index>, or ALTER TABLE $tbl REPLICA IDENTITY FULL, or acknowledge it in spec.follow.allowMissingReplicaIdentity"
     fi
   done < /tmp/ri_offenders
 else
@@ -415,9 +434,15 @@ else
 fi`
 
 // preflightScriptFooter closes the check script; conditional blocks (the
-// wal2json note) slot in between.
+// wal2json note) slot in between. Failures re-print as a closing summary with
+// the hints last: the Failed condition carries only the log tail, and the
+// field pointers must never scroll out under a long audit.
 const preflightScriptFooter = `
-if [ "$fail" -eq 0 ]; then echo "preflight: all checks passed"; fi
+if [ "$fail" -eq 0 ]; then
+  echo "preflight: all checks passed"
+else
+  printf 'preflight failed:\n%s%s' "$fails" "$hints"
+fi
 exit "$fail"`
 
 // preflightScriptFor assembles the per-Migration check script: connectivity
@@ -486,11 +511,16 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	if err != nil {
 		return nil, err
 	}
-	// Bounds hung checks AND pods that never start (unschedulable, missing
-	// Secret): the deadline fails the Job, which terminal-fails the Migration
+	// Bounds true wedges: hung checks and pods that never start. Slow pulls
+	// and autoscaling surface via PreflightRunning long before 30 minutes;
+	// the deadline fails the Job, which terminal-fails the Migration
 	// instead of looping in Validating.
-	deadline := int64(600)
+	deadline := int64(1800)
 	job.Spec.ActiveDeadlineSeconds = &deadline
+	// The finished preflight is the remediation audit trail and the gate's
+	// completion memory; spec TTL must not garbage-collect it. It lives
+	// until the Migration is deleted via ownership.
+	job.Spec.TTLSecondsAfterFinished = nil
 	if f := m.Spec.Follow; f != nil && len(f.AllowMissingReplicaIdentity) > 0 {
 		c := &job.Spec.Template.Spec.Containers[0]
 		// Newline-joined: the script matches whole lines (grep -Fx), so an
@@ -514,7 +544,18 @@ func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, backoff i
 	}
 	cmd := job.Spec.Template.Spec.Containers[0].Command
 	cmd[len(cmd)-1] = shellPath
+	addConnectTimeout(job)
 	return job, nil
+}
+
+// addConnectTimeout bounds libpq connects for the operator's own control
+// Jobs (scripts, cleanup, compare); libpq's default is unlimited, which
+// wedged a customer's preflight. The worker is exempt: pgcopydb's many
+// data-path handshakes under load must not race a 10s cap, and a wedged
+// worker surfaces via zombie detection instead.
+func addConnectTimeout(job *batchv1.Job) {
+	c := &job.Spec.Template.Spec.Containers[0]
+	c.Env = append(c.Env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 }
 
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
@@ -539,9 +580,6 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 	}
 	// Structured runner logs for humans and future machine parsing.
 	env = append(env, corev1.EnvVar{Name: "PGCOPYDB_LOG_JSON", Value: "on"})
-	// libpq's default connect timeout is unlimited; a black-holed endpoint
-	// would hang psql and pgcopydb forever (wedged a customer's preflight).
-	env = append(env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 
 	var passfiles []conn.Passfile
 	var preludes []string

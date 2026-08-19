@@ -888,6 +888,29 @@ func TestMaterializeSuperuser_EndpointAndKeys(t *testing.T) {
 	if got := m.Volumes[0].Secret.Items[0].Key; got != "adminpw" {
 		t.Fatalf("password volume reads key %q, want the remapped one", got)
 	}
+
+	// A secretRef primary's endpoint choice governs the super host key: both
+	// name the same server, so internal/external must agree.
+	c = secretConn()
+	c.SecretRef.Endpoint = endpointExternal
+	c.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
+	m, err = MaterializeSuperuser(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
+		t.Fatalf("super host key %q, want the primary's external choice inherited", got)
+	}
+
+	// Even an explicit internal on the super ref loses to the primary.
+	c.SuperuserSecretRef.Endpoint = "internal"
+	m, err = MaterializeSuperuser(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
+		t.Fatalf("super host key %q, the primary's endpoint must win over the super ref's", got)
+	}
 }
 
 // runSuperPrelude executes a primary prelude (when the connection has one)
@@ -989,9 +1012,20 @@ func TestSuperPrelude(t *testing.T) {
 			wantLines: []string{tSuperLine},
 		},
 		{
-			name:      "matching url key with port passes",
-			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":9999"},
+			name:      "matching url key with the primary's port passes",
+			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":6432"},
 			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
+			wantLines: []string{tSuperLine},
+		},
+		{
+			name:    "port-mismatched url key fails",
+			env:     map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":9999"},
+			wantErr: "does not match the connection endpoint",
+		},
+		{
+			name:      "portless primary compares against the 5432 default",
+			env:       map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB, envSrcSuperHost: tHost + ":5432"},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + "/" + tDB,
 			wantLines: []string{tSuperLine},
 		},
 		{
