@@ -131,6 +131,17 @@ var _ = Describe("Migration CRD validation", func() {
 				m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "src-conn"}}
 				m.Spec.Target = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "tgt-conn"}}
 			}, ""),
+		Entry("superuserSecretRef next to an inline connection", "cel-conn-superuser-inline",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "src-admin"}
+			}, ""),
+		Entry("superuserSecretRef next to a secretRef connection", "cel-conn-superuser-secretref",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{
+					SecretRef:          &v1beta1.ConnectionSecret{Name: "super-conn"},
+					SuperuserSecretRef: &v1beta1.ConnectionSecret{Name: "conn-admin"},
+				}
+			}, ""),
 		Entry("includeOnlyTables with excludeTables", "cel-filter-tables",
 			filters(&v1beta1.Filters{IncludeOnlyTables: []string{"public.t1"}, ExcludeTables: []string{"public.t2"}}),
 			"includeOnlyTables cannot be combined with excludeTables or excludeSchemas"),
@@ -174,6 +185,10 @@ var _ = Describe("Migration CRD validation", func() {
 	It("persists secretRef defaults for endpoint and partial keys", func() {
 		m := validMigration("cel-secretref-defaults")
 		m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "src-conn"}}
+		m.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{
+			Name: "src-admin",
+			Keys: &v1beta1.ConnectionSecretKeys{Username: "root"},
+		}
 		m.Spec.Target = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{
 			Name: "tgt-conn",
 			Keys: &v1beta1.ConnectionSecretKeys{Database: "custom"},
@@ -191,6 +206,12 @@ var _ = Describe("Migration CRD validation", func() {
 		wantKeys := conn.DefaultKeys()
 		wantKeys.Database = "custom"
 		Expect(got.Spec.Target.SecretRef.Keys).To(Equal(&wantKeys))
+		// superuserSecretRef is the same ConnectionSecret type and must default
+		// identically.
+		Expect(got.Spec.Source.SuperuserSecretRef.Endpoint).To(Equal("internal"))
+		wantSuper := conn.DefaultKeys()
+		wantSuper.Username = "root"
+		Expect(got.Spec.Source.SuperuserSecretRef.Keys).To(Equal(&wantSuper))
 	})
 
 	It("enforces source/target/follow immutability while clone stays tunable", func() {
@@ -214,6 +235,10 @@ var _ = Describe("Migration CRD validation", func() {
 		changed = fresh()
 		changed.Spec.Target.Database = "other"
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("target is immutable")))
+
+		changed = fresh()
+		changed.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "late-admin"}
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("source is immutable")))
 
 		changed = fresh()
 		changed.Spec.Follow.SlotName = "other_slot"

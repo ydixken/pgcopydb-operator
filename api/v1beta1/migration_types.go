@@ -75,6 +75,13 @@ type PostgresConnection struct {
 	// Mutually exclusive with the inline fields and uriSecretRef.
 	// +optional
 	SecretRef *ConnectionSecret `json:"secretRef,omitempty"`
+
+	// superuserSecretRef names a superuser on this same endpoint, in the same
+	// Secret convention (USER/PW; URL keys, when present, must match this
+	// connection). The preflight uses it to verify and apply missing grants;
+	// applied statements are logged and kept, never reverted.
+	// +optional
+	SuperuserSecretRef *ConnectionSecret `json:"superuserSecretRef,omitempty"`
 }
 
 // ConnectionSecret points at a Secret whose keys hold the parts of a

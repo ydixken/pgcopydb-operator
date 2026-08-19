@@ -317,6 +317,7 @@ _Appears in:_
 | `tls` _[TLSSecretRefs](#tlssecretrefs)_ | tls references client certificate material, mounted 0600 for libpq. |  | Optional: \{\} <br /> |
 | `uriSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | uriSecretRef selects a full libpq connection URI/DSN (with credentials).<br />Mutually exclusive with the inline fields; useful for DBaaS sources. |  | Optional: \{\} <br /> |
 | `secretRef` _[ConnectionSecret](#connectionsecret)_ | secretRef references one Secret carrying the connection details as<br />individual keys, the way platform provisioners hand them out.<br />Mutually exclusive with the inline fields and uriSecretRef. |  | Optional: \{\} <br /> |
+| `superuserSecretRef` _[ConnectionSecret](#connectionsecret)_ | superuserSecretRef names a superuser on this same endpoint, in the same<br />Secret convention (USER/PW; URL keys, when present, must match this<br />connection). The preflight uses it to verify and apply missing grants;<br />applied statements are logged and kept, never reverted. |  | Optional: \{\} <br /> |
 
 
 #### ReplicationStatus

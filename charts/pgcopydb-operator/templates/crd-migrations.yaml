@@ -1458,6 +1458,61 @@ spec:
                     - verify-ca
                     - verify-full
                     type: string
+                  superuserSecretRef:
+                    description: |-
+                      superuserSecretRef names a superuser on this same endpoint, in the same
+                      Secret convention (USER/PW; URL keys, when present, must match this
+                      connection). The preflight uses it to verify and apply missing grants;
+                      applied statements are logged and kept, never reverted.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -1689,6 +1744,61 @@ spec:
                     - verify-ca
                     - verify-full
                     type: string
+                  superuserSecretRef:
+                    description: |-
+                      superuserSecretRef names a superuser on this same endpoint, in the same
+                      Secret convention (USER/PW; URL keys, when present, must match this
+                      connection). The preflight uses it to verify and apply missing grants;
+                      applied statements are logged and kept, never reverted.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -3441,6 +3551,61 @@ spec:
                     - verify-ca
                     - verify-full
                     type: string
+                  superuserSecretRef:
+                    description: |-
+                      superuserSecretRef names a superuser on this same endpoint, in the same
+                      Secret convention (USER/PW; URL keys, when present, must match this
+                      connection). The preflight uses it to verify and apply missing grants;
+                      applied statements are logged and kept, never reverted.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -3672,6 +3837,61 @@ spec:
                     - verify-ca
                     - verify-full
                     type: string
+                  superuserSecretRef:
+                    description: |-
+                      superuserSecretRef names a superuser on this same endpoint, in the same
+                      Secret convention (USER/PW; URL keys, when present, must match this
+                      connection). The preflight uses it to verify and apply missing grants;
+                      applied statements are logged and kept, never reverted.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
