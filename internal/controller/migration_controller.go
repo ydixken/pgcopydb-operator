@@ -52,6 +52,11 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the
 	// condition message: one line per failed check plus psql stderr.
 	preflightLogTail = 20
+	// preflightOkLogTail is effectively the whole preflight log: the
+	// success-path parse must see every remediated: line even under a long
+	// replica-identity audit, or applied grants lose their audit events.
+	// A number only because the log API wants a TailLines value.
+	preflightOkLogTail = 10000
 	// zombieLogTail bounds the log window scanned for the supervisor-death
 	// marker. Wider than workerLogTail because the surviving streaming child
 	// keeps logging LSN reports after the marker and would push it out of a
@@ -155,8 +160,6 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		r.fail(m, "InvalidSpec", "Validate", err.Error())
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
-	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
-
 	if err := r.ensureFinalizer(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -167,6 +170,10 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	if res, handled, err := r.preflightGate(ctx, m, base); handled || err != nil {
 		return res, err
 	}
+	// Validated turns True only once the gate is clear: while the preflight
+	// runs the condition is Unknown/PreflightRunning, so nobody reads a
+	// stuck gate as a validated migration.
+	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly and the preflight passed")
 
 	// Job orchestration: observe the current attempt or start the next one.
 	if m.Status.JobName == "" {
@@ -202,15 +209,18 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	return r.observeRunningJob(ctx, m, base, job)
 }
 
-// preflightGate probes the follow prerequisites before any worker runs: a
-// one-shot Job checks wal_level, slot headroom, the REPLICATION attribute,
-// origin-function EXECUTE, and the session_replication_role SET gate. Every
-// one of these failed live before it failed loudly; two of them lose data
-// silently. Failure is absorbing: these are configuration errors on the
-// databases, retrying the migration cannot fix them. handled=true means this
-// pass ends here; false lets the caller proceed to Job orchestration.
+// preflightGate probes the databases before any worker runs: a one-shot Job
+// validates connectivity first for every Migration, verifies configured
+// superuser credentials, and for follow migrations checks wal_level, slot
+// headroom, the REPLICATION attribute, origin-function EXECUTE, and the
+// session_replication_role SET gate, remediating the grantable ones when a
+// superuser connection is provided. Every follow check failed live before it
+// failed loudly; two of them lose data silently. Failure is absorbing: these
+// are configuration errors on the databases, retrying the migration cannot
+// fix them. handled=true means this pass ends here; false lets the caller
+// proceed to Job orchestration.
 func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, bool, error) {
-	if !followEnabled(m) || m.Status.Attempts != 0 {
+	if m.Status.Attempts != 0 {
 		return ctrl.Result{}, false, nil
 	}
 	passed, failMsg, err := r.ensurePreflight(ctx, m)
@@ -222,13 +232,92 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 		r.fail(m, "PreflightFailed", "Preflight", failMsg)
 		return ctrl.Result{}, true, r.updateStatus(ctx, m, base)
 	case !passed:
+		msg := "preflight Job " + preflightJobName(m) + " is running"
+		if detail := r.preflightWaitDetail(ctx, m.Namespace, preflightJobName(m)); detail != "" {
+			msg = "preflight Job " + preflightJobName(m) + " cannot start: " + truncate(detail, maxDetailLen)
+		}
+		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionUnknown, "PreflightRunning", msg)
 		m.Status.Phase = v1beta1.PhaseValidating
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, true, err
 		}
 		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
 	}
+	// Emit once per gate outcome: after Validated=True is persisted this is
+	// skipped. At-least-once on purpose: a pass losing every status write
+	// re-emits, and duplicate events beat a silent audit trail of grants.
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated) {
+		r.emitPreflightOutcome(ctx, m)
+	}
 	return ctrl.Result{}, false, nil
+}
+
+// emitPreflightOutcome turns the finished preflight's log into events: one
+// PreflightRemediated per applied statement, then the PreflightPassed summary.
+// The "ok: " and "remediated: " line prefixes are the script's log contract.
+func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
+	checks := 0
+	var remediated []string
+	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
+	for line := range strings.SplitSeq(tail, "\n") {
+		switch {
+		case strings.HasPrefix(line, "ok: "):
+			checks++
+		case strings.HasPrefix(line, "remediated: "):
+			remediated = append(remediated, strings.TrimPrefix(line, "remediated: "))
+		}
+	}
+	for _, stmt := range remediated {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight", "%s", stmt)
+	}
+	msg := "all preflight checks passed"
+	if checks > 0 || len(remediated) > 0 {
+		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, len(remediated))
+	}
+	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "%s", msg)
+}
+
+// jobNameLabel is the Job controller's own pod label, the selector both the
+// log reader and the pod inspectors use.
+const jobNameLabel = "job-name"
+
+// preflightWaitDetail reports why the preflight pod is not progressing, or ""
+// while it starts normally. A pod that cannot start (missing Secret, image
+// pull, unschedulable) would otherwise show a bare Validating phase with the
+// cause buried in pod events; found live at a customer.
+func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace, jobName string) string {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(namespace),
+		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		for _, cond := range p.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse &&
+				cond.Reason == corev1.PodReasonUnschedulable {
+				return "pod unschedulable: " + cond.Message
+			}
+		}
+		statuses := append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...),
+			p.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			w := cs.State.Waiting
+			if w == nil {
+				continue
+			}
+			switch w.Reason {
+			// The transient reasons every healthy start passes through.
+			case "", "ContainerCreating", "PodInitializing":
+			default:
+				if w.Message != "" {
+					return w.Reason + ": " + w.Message
+				}
+				return w.Reason
+			}
+		}
+	}
+	return ""
 }
 
 // observeRunningJob samples a live worker (follow state) and schedules the
@@ -343,10 +432,8 @@ func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.M
 // normal retry flow.
 func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobName string) error {
 	pods := &corev1.PodList{}
-	// job-name is the Job controller's own pod label, the same selector the
-	// log reader uses.
 	if err := r.List(ctx, pods, client.InNamespace(namespace),
-		client.MatchingLabels{"job-name": jobName}); err != nil {
+		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
 		return err
 	}
 	policy := metav1.DeletePropagationForeground
@@ -384,6 +471,22 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 			return ctrl.Result{}, err
 		}
 		m.Status.JobName = ""
+	}
+	// A gate-stage suspend must stop the preflight too: it may be applying
+	// superuser remediation, and Suspended promises no further database
+	// writes. The gate recreates the Job on resume.
+	if m.Status.Attempts == 0 {
+		pf := &batchv1.Job{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: preflightJobName(m)}, pf)
+		if err == nil {
+			policy := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, pf, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Suspended", "Suspend", "preflight Job deleted; the gate re-runs on resume")
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
 	}
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)

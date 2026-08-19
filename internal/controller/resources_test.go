@@ -17,15 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -243,7 +247,9 @@ func TestPublicationDropGuard(t *testing.T) {
 // the passfile prelude intact) probing every follow prerequisite, one
 // fix-me line per check.
 func TestBuildPreflightJob(t *testing.T) {
-	job, err := buildPreflightJob(passwordMigration(), "img")
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	job, err := buildPreflightJob(m, "img")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +380,7 @@ esac
 
 	t.Run("no offenders passes", func(t *testing.T) {
 		out, code := run(t, pgoutputPlugin, "", nil)
-		if code != 0 || !strings.Contains(out, "all follow-mode checks passed") {
+		if code != 0 || !strings.Contains(out, "all checks passed") {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
@@ -382,7 +388,7 @@ esac
 		out, code := run(t, "wal2json", "", nil)
 		if code != 0 ||
 			!strings.Contains(out, `slot creation with: could not access file "wal2json"`) ||
-			!strings.Contains(out, "all follow-mode checks passed") {
+			!strings.Contains(out, "all checks passed") {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
@@ -433,5 +439,468 @@ func TestBuildVerifyJob_KeepsPassfilePrelude(t *testing.T) {
 	}
 	if !strings.Contains(c.Args[1], "pg_replication_origin_progress") {
 		t.Fatalf("verify script lost the origin-progress check:\n%s", c.Args[1])
+	}
+}
+
+// TestJobEnv_ConnectTimeout: the operator's control Jobs carry a bounded
+// libpq connect timeout (a black-holed endpoint must fail a check, not hang
+// it), while the worker stays exempt: pgcopydb's data-path handshakes under
+// load must not race a 10s cap.
+func TestJobEnv_ConnectTimeout(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	builders := map[string]func() (*batchv1.Job, error){
+		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		"verify":      func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+	}
+	for name, build := range builders {
+		job, err := build()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := envValue(job.Spec.Template.Spec.Containers[0].Env, "PGCONNECT_TIMEOUT"); got != "10" {
+			t.Fatalf("%s: PGCONNECT_TIMEOUT = %q, want \"10\"", name, got)
+		}
+	}
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(worker.Spec.Template.Spec.Containers[0].Env, "PGCONNECT_TIMEOUT"); got != "" {
+		t.Fatalf("worker must not carry PGCONNECT_TIMEOUT, got %q", got)
+	}
+}
+
+// TestPreflightJob_ActiveDeadline: the deadline is what turns a preflight pod
+// that can never start into a terminal failure; the worker must not have one,
+// a long clone is not a hang. The preflight also sheds the spec TTL: it is
+// the remediation audit trail and the gate's completion memory.
+func TestPreflightJob_ActiveDeadline(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	ttl := int32(0)
+	m.Spec.TTLSecondsAfterFinished = &ttl
+	pf, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.Spec.ActiveDeadlineSeconds == nil || *pf.Spec.ActiveDeadlineSeconds != 1800 {
+		t.Fatalf("preflight ActiveDeadlineSeconds = %v, want 1800", pf.Spec.ActiveDeadlineSeconds)
+	}
+	if pf.Spec.TTLSecondsAfterFinished != nil {
+		t.Fatalf("preflight must shed the spec TTL, got %v", *pf.Spec.TTLSecondsAfterFinished)
+	}
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Spec.ActiveDeadlineSeconds != nil {
+		t.Fatalf("worker must not carry a deadline, got %v", *worker.Spec.ActiveDeadlineSeconds)
+	}
+	if worker.Spec.TTLSecondsAfterFinished == nil {
+		t.Fatal("worker keeps the spec TTL")
+	}
+}
+
+// superMigration is passwordMigration with follow and superuser refs on both
+// sides; subtests strip what they do not need.
+func superMigration() *v1beta1.Migration {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	m.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "pf-src-admin"}
+	m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "pf-tgt-admin"}
+	return m
+}
+
+// mustPrecede fails unless a appears before b in s; the preflight ordering
+// contract (connectivity first, then superuser verify, then the battery) is
+// user-visible log output, so it is pinned.
+func mustPrecede(t *testing.T, s, a, b string) {
+	t.Helper()
+	ia, ib := strings.Index(s, a), strings.Index(s, b)
+	if ia < 0 || ib < 0 || ia >= ib {
+		t.Fatalf("want %q before %q (idx %d, %d):\n%s", a, b, ia, ib, s)
+	}
+}
+
+// TestPreflightScriptFor_Structure pins which blocks each Migration shape
+// gets, and their order.
+func TestPreflightScriptFor_Structure(t *testing.T) {
+	t.Run("clone-only gets connectivity and nothing else", func(t *testing.T) {
+		s := preflightScriptFor(passwordMigration())
+		for _, want := range []string{`echo "ok: connectivity source"`, `echo "ok: connectivity target"`, "all checks passed"} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("missing %q:\n%s", want, s)
+			}
+		}
+		for _, absent := range []string{"wal_level", "rolreplication", "relreplident", "SUPER_PGURI"} {
+			if strings.Contains(s, absent) {
+				t.Fatalf("clone-only script must not contain %q:\n%s", absent, s)
+			}
+		}
+	})
+	t.Run("follow without super hints instead of remediating", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.Source.SuperuserSecretRef = nil
+		m.Spec.Target.SuperuserSecretRef = nil
+		s := preflightScriptFor(m)
+		if got := strings.Count(s, "hint: spec."); got != 3 {
+			t.Fatalf("want 3 hint lines, got %d:\n%s", got, s)
+		}
+		for _, want := range []string{
+			"hint: spec.source.superuserSecretRef lets the operator apply this itself",
+			"hint: spec.target.superuserSecretRef lets the operator apply this itself",
+		} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("missing %q", want)
+			}
+		}
+		if strings.Contains(s, "remediated:") || strings.Contains(s, "SUPER_PGURI") {
+			t.Fatalf("no-super script must not remediate:\n%s", s)
+		}
+	})
+	t.Run("super on both sides remediates without hints", func(t *testing.T) {
+		s := preflightScriptFor(superMigration())
+		if strings.Contains(s, "hint: spec.") {
+			t.Fatalf("hints must vanish when super is configured:\n%s", s)
+		}
+		for _, want := range []string{"$PGM_SOURCE_SUPER_PGURI", "$PGM_TARGET_SUPER_PGURI", `remediated: $stmt`, `format('ALTER ROLE`, "GRANT SET ON PARAMETER session_replication_role"} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("missing %q:\n%s", want, s)
+			}
+		}
+		mustPrecede(t, s, `echo "ok: connectivity source"`, `echo "ok: superuser source connected"`)
+		mustPrecede(t, s, `echo "ok: superuser source verified"`, `echo "ok: superuser target connected"`)
+		mustPrecede(t, s, `echo "ok: superuser target verified"`, "wal_level")
+	})
+	t.Run("super on one side mixes remediation and hint", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.Target.SuperuserSecretRef = nil
+		s := preflightScriptFor(m)
+		if strings.Contains(s, "hint: spec.source.superuserSecretRef") {
+			t.Fatalf("source has super, its hint must vanish:\n%s", s)
+		}
+		if !strings.Contains(s, "hint: spec.target.superuserSecretRef") {
+			t.Fatalf("target has no super, its checks keep the hint:\n%s", s)
+		}
+		if !strings.Contains(s, "$PGM_SOURCE_SUPER_PGURI") || strings.Contains(s, "$PGM_TARGET_SUPER_PGURI") {
+			t.Fatalf("only the source may remediate:\n%s", s)
+		}
+	})
+}
+
+// TestBuildPreflightJob_SuperuserWiring pins that superuser credentials ride
+// only in the preflight Job: env refs, PW volume, and the super prelude after
+// the primary one.
+func TestBuildPreflightJob_SuperuserWiring(t *testing.T) {
+	m := superMigration()
+	m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "conn-sec"}}
+	m.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "pf-src-admin"}
+	job, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	for _, name := range []string{"PGM_SOURCE_SUPER_USER", "PGM_SOURCE_SUPER_HOST", "PGM_TARGET_SUPER_USER", "PGM_TARGET_SUPER_HOST"} {
+		found := false
+		for _, e := range c.Env {
+			if e.Name == name {
+				found = e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil
+			}
+		}
+		if !found {
+			t.Fatalf("preflight env missing secret ref %s", name)
+		}
+	}
+	volumes := map[string]bool{}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		volumes[v.Name] = true
+	}
+	if !volumes["source-super-password"] || !volumes["target-super-password"] {
+		t.Fatalf("super PW volumes missing, have %v", volumes)
+	}
+	// The super prelude derives its URI from the primary's, so it must run
+	// after the primary secretRef snippet.
+	mustPrecede(t, c.Command[2], "connection secret", "superuser secret")
+
+	// The worker Job never carries the super credentials.
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range worker.Spec.Template.Spec.Containers[0].Env {
+		if strings.Contains(e.Name, "SUPER") {
+			t.Fatalf("worker env leaked %s", e.Name)
+		}
+	}
+}
+
+// TestPreflightScript_Remediation executes the generated script under /bin/sh
+// with a stateful psql stub: checks fail until the corresponding grant is
+// applied through the superuser URI, exactly like a live database would.
+func TestPreflightScript_Remediation(t *testing.T) {
+	dir := t.TempDir()
+	// Compose cases (format(...)) precede the apply cases: the script now
+	// builds role-bearing statements server-side, and the stub emulates the
+	// server's identifier escaping so the injection subtest is faithful.
+	stub := `#!/bin/sh
+uri="$1"; q="$6"
+role="${ROLE_NAME:-app}"
+qrole=$(printf '%s' "$role" | sed 's/"/""/g')
+apply() {
+  [ "${REMEDY_MODE:-}" = reject ] && exit 1
+  case "$uri" in src-super|tgt-super) ;; *) exit 1 ;; esac
+  printf '%s' "$q" > "$STATE/applied-$1"
+  [ "${REMEDY_MODE:-}" = nostick ] || : > "$STATE/$1"
+  exit 0
+}
+case "$q" in
+  'select 1')
+    n=$(cat "$STATE/conn-$uri" 2>/dev/null || echo 0)
+    n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
+    [ "$n" -gt "${CONN_FAIL_N:-0}" ] || exit 1
+    exit 0 ;;
+  *format*ALTER*) echo "ALTER ROLE \"$qrole\" REPLICATION" ;;
+  *format*GRANT\ SET*) echo "GRANT SET ON PARAMETER session_replication_role TO \"$qrole\"" ;;
+  *rolreplication*) if [ -f "$STATE/repl" ]; then echo 1; else echo 0; fi ;;
+  *"ALTER ROLE"*) apply repl ;;
+  *string_agg*) if [ -f "$STATE/origin" ]; then echo ""; else printf '%s' "GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_oid(text) TO \"app\"; GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_progress(text,boolean) TO \"app\";"; fi ;;
+  *"GRANT EXECUTE"*) apply origin ;;
+  *"GRANT SET ON PARAMETER"*) apply srr ;;
+  *session_replication_role*) if [ -f "$STATE/srr" ]; then exit 0; else exit 1; fi ;;
+  *rolsuper*) echo "${ROLSUPER:-1}" ;;
+  *wal_level*) echo logical ;;
+  *max_replication_slots*) echo 5 ;;
+  *relreplident*) printf '' ;;
+  *current_user*) echo "$role" ;;
+  *) echo 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(t *testing.T, script, mode string, extra ...string) (string, int, string) {
+		t.Helper()
+		state := t.TempDir()
+		cmd := exec.Command(shellPath, "-c", script)
+		cmd.Env = append(os.Environ(),
+			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PGCOPYDB_SOURCE_PGURI=src",
+			"PGCOPYDB_TARGET_PGURI=tgt",
+			"PGM_SOURCE_SUPER_PGURI=src-super",
+			"PGM_TARGET_SUPER_PGURI=tgt-super",
+			"STATE="+state,
+			"REMEDY_MODE="+mode,
+			"PREFLIGHT_RETRY_SLEEP=0",
+		)
+		cmd.Env = append(cmd.Env, extra...)
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			return string(out), 0, state
+		case errors.As(err, &exitErr):
+			return string(out), exitErr.ExitCode(), state
+		default:
+			t.Fatalf("running preflight script: %v\n%s", err, out)
+			return "", 0, state
+		}
+	}
+
+	t.Run("super remediates all three and passes", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(superMigration()), "")
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{
+			`remediated: ALTER ROLE "app" REPLICATION`,
+			`remediated: GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_oid(text) TO "app";`,
+			`remediated: GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_progress(text,boolean) TO "app";`,
+			`remediated: GRANT SET ON PARAMETER session_replication_role TO "app"`,
+			"ok: source replication attribute",
+			"ok: target origin function grants",
+			"ok: target session_replication_role",
+			"all checks passed",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+		mustPrecede(t, out, "ok: connectivity source", "ok: superuser source connected")
+		mustPrecede(t, out, "ok: superuser target verified", "ok: source wal_level logical")
+	})
+	t.Run("no super fails with hints", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.Source.SuperuserSecretRef = nil
+		m.Spec.Target.SuperuserSecretRef = nil
+		out, code, _ := run(t, preflightScriptFor(m), "")
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if got := strings.Count(out, "hint: spec."); got != 3 {
+			t.Fatalf("want 3 hint lines, got %d:\n%s", got, out)
+		}
+		if strings.Contains(out, "remediated:") {
+			t.Fatalf("nothing may be remediated without super:\n%s", out)
+		}
+		// The failure summary re-prints the failures with the hints last, so
+		// the log tail the condition carries always ends with the pointers.
+		mustPrecede(t, out, "preflight failed:", "hint: spec.target.superuserSecretRef")
+	})
+	t.Run("failed apply fails by name", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(superMigration()), "reject")
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "via superuserSecretRef failed") {
+			t.Fatalf("missing apply-failure line:\n%s", out)
+		}
+	})
+	t.Run("remediation that does not stick fails the re-check", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(superMigration()), "nostick")
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		for _, want := range []string{
+			"still lacks the REPLICATION attribute after remediation",
+			"after remediation, run on the target",
+			"still cannot SET session_replication_role after remediation",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("quote-bearing role name stays one identifier", func(t *testing.T) {
+		out, code, state := run(t, preflightScriptFor(superMigration()), "",
+			`ROLE_NAME=we"ird`)
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		// The server-composed statement escapes the quote; the apply must
+		// receive it verbatim, one identifier, nothing smuggled behind it.
+		want := `ALTER ROLE "we""ird" REPLICATION`
+		if !strings.Contains(out, "remediated: "+want) {
+			t.Fatalf("missing remediated statement %q:\n%s", want, out)
+		}
+		applied, err := os.ReadFile(filepath.Join(state, "applied-repl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(applied) != want {
+			t.Fatalf("applied %q, want %q", applied, want)
+		}
+		if !strings.Contains(out, `remediated: GRANT SET ON PARAMETER session_replication_role TO "we""ird"`) {
+			t.Fatalf("missing composed GRANT SET:\n%s", out)
+		}
+	})
+	t.Run("not a superuser downgrades to a warning", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(superMigration()), "", "ROLSUPER=0")
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "warn: source superuserSecretRef user lacks rolsuper; attempting remediation anyway") {
+			t.Fatalf("missing rolsuper warning:\n%s", out)
+		}
+		if strings.Contains(out, "ok: superuser source verified") {
+			t.Fatalf("verified line must vanish when rolsuper is false:\n%s", out)
+		}
+	})
+	t.Run("connectivity retries then succeeds", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=2")
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{
+			"retry: source connectivity attempt 1 failed",
+			"retry: source connectivity attempt 2 failed",
+			"ok: connectivity source",
+			"ok: connectivity target",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("connectivity exhausts six attempts and fails by name", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=99")
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "preflight: cannot connect to the source database") {
+			t.Fatalf("missing named failure:\n%s", out)
+		}
+		if got := strings.Count(out, "retry: source connectivity attempt"); got != 5 {
+			t.Fatalf("want 5 retry lines before the sixth probe fails, got %d:\n%s", got, out)
+		}
+	})
+}
+
+// TestEmitPreflightOutcome pins the log contract: ok/remediated prefixes
+// become the event trail, everything else is ignored.
+func TestEmitPreflightOutcome(t *testing.T) {
+	r := &MigrationReconciler{
+		Recorder: events.NewFakeRecorder(20),
+		Logs: &fakeLogs{out: "ok: connectivity source\n" +
+			"ok: connectivity target\n" +
+			`remediated: ALTER ROLE "app" REPLICATION` + "\n" +
+			"ok: source replication attribute\n" +
+			"preflight: warning: acknowledged table public.a has no usable replica identity\n" +
+			"preflight: all checks passed\n"},
+	}
+	r.emitPreflightOutcome(context.Background(), passwordMigration())
+	rec := r.Recorder.(*events.FakeRecorder)
+	var got []string
+	for {
+		select {
+		case e := <-rec.Events:
+			got = append(got, e)
+		default:
+			if len(got) != 2 {
+				t.Fatalf("want 2 events, got %v", got)
+			}
+			if !strings.Contains(got[0], "PreflightRemediated") || !strings.Contains(got[0], `ALTER ROLE "app" REPLICATION`) {
+				t.Fatalf("first event must carry the statement: %s", got[0])
+			}
+			if !strings.Contains(got[1], "PreflightPassed") || !strings.Contains(got[1], "3 checks passed, 1 grants applied") {
+				t.Fatalf("summary event wrong: %s", got[1])
+			}
+			return
+		}
+	}
+}
+
+// TestEmitPreflightOutcome_LongAudit: remediated lines printed before a long
+// replica-identity audit must still surface as events, which requires the
+// parse to read effectively the whole log, not a short tail.
+func TestEmitPreflightOutcome_LongAudit(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`remediated: ALTER ROLE "app" REPLICATION` + "\n")
+	sb.WriteString("ok: source replication attribute\n")
+	for i := range 200 {
+		fmt.Fprintf(&sb, "preflight: warning: acknowledged table public.t%d has no usable replica identity\n", i)
+	}
+	sb.WriteString("preflight: all checks passed\n")
+	logs := &fakeLogs{out: sb.String()}
+	r := &MigrationReconciler{Recorder: events.NewFakeRecorder(20), Logs: logs}
+	r.emitPreflightOutcome(context.Background(), passwordMigration())
+	if logs.gotLines < 10000 {
+		t.Fatalf("success-path parse asked for %d lines, want the whole log (>= 10000)", logs.gotLines)
+	}
+	rec := r.Recorder.(*events.FakeRecorder)
+	var got []string
+	for {
+		select {
+		case e := <-rec.Events:
+			got = append(got, e)
+		default:
+			if len(got) != 2 || !strings.Contains(got[0], "PreflightRemediated") {
+				t.Fatalf("remediation event lost under the audit: %v", got)
+			}
+			return
+		}
 	}
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package conn
 
 import (
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -792,5 +793,356 @@ func TestSecretRefPrelude(t *testing.T) {
 				t.Fatalf("passfile line %q, want %q", got, tc.wantLine)
 			}
 		})
+	}
+}
+
+// Fixture literals for the superuser tests.
+const (
+	tSuperBundle    = "admin-bundle"
+	tSuperUser      = "root"
+	tSuperPass      = "spw"
+	envSrcSuperUser = "PGM_SOURCE_SUPER_USER"
+	envSrcSuperHost = "PGM_SOURCE_SUPER_HOST"
+	envSrcPGURI     = "PGCOPYDB_SOURCE_PGURI"
+	tSuperLine      = tHost + ":*:*:" + tSuperUser + ":" + tSuperPass
+)
+
+func superConn() *v1beta1.PostgresConnection {
+	c := inlineConn()
+	c.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
+	return c
+}
+
+func TestMaterializeSuperuser_NilRef(t *testing.T) {
+	m, err := MaterializeSuperuser(Source, inlineConn())
+	if err != nil || m != nil {
+		t.Fatalf("want nil no-op without superuserSecretRef, got %+v, %v", m, err)
+	}
+}
+
+func TestMaterializeSuperuser(t *testing.T) {
+	m, err := MaterializeSuperuser(Source, superConn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		env, key string
+		optional bool
+	}{
+		{envSrcSuperUser, "USER", false},
+		{envSrcSuperHost, "URL", true},
+	} {
+		e := findEnv(m.Env, want.env)
+		if e == nil || e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("missing valueFrom env %s in %+v", want.env, m.Env)
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		if ref.Name != tSuperBundle || ref.Key != want.key {
+			t.Fatalf("%s references %s/%s, want %s/%s", want.env, ref.Name, ref.Key, tSuperBundle, want.key)
+		}
+		if got := ref.Optional != nil && *ref.Optional; got != want.optional {
+			t.Fatalf("%s optional = %v, want %v", want.env, got, want.optional)
+		}
+	}
+	if e := findEnv(m.Env, "PGM_SOURCE_SUPER_PGURI"); e != nil {
+		t.Fatal("the super URI is composed by the prelude, never spec env")
+	}
+	if m.Passfile != nil {
+		t.Fatal("superuser sides append their passfile line from the prelude")
+	}
+	if m.Prelude == "" {
+		t.Fatal("superuser side must carry a prelude snippet")
+	}
+	if len(m.Volumes) != 1 || m.Volumes[0].Name != "source-super-password" ||
+		m.Volumes[0].Secret.SecretName != tSuperBundle ||
+		m.Volumes[0].Secret.Items[0].Key != "PW" ||
+		*m.Volumes[0].Secret.DefaultMode != 0o400 ||
+		m.Volumes[0].Secret.Optional == nil || !*m.Volumes[0].Secret.Optional {
+		t.Fatalf("want one optional 0400 source-super-password volume, got %+v", m.Volumes)
+	}
+	if m.Mounts[0].MountPath != credsDir+"/source-super-mnt" {
+		t.Fatalf("super mount path %q", m.Mounts[0].MountPath)
+	}
+}
+
+func TestMaterializeSuperuser_EndpointAndKeys(t *testing.T) {
+	c := superConn()
+	c.SuperuserSecretRef.Endpoint = endpointExternal
+	m, err := MaterializeSuperuser(Target, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, "PGM_TARGET_SUPER_HOST").ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
+		t.Fatalf("external endpoint reads key %q, want URL_EXTERNAL", got)
+	}
+
+	c = superConn()
+	c.SuperuserSecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: "adminpw", Username: "adminrole"}
+	m, err = MaterializeSuperuser(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcSuperUser).ValueFrom.SecretKeyRef.Key; got != "adminrole" {
+		t.Fatalf("remapped username key ignored, got %q", got)
+	}
+	if got := m.Volumes[0].Secret.Items[0].Key; got != "adminpw" {
+		t.Fatalf("password volume reads key %q, want the remapped one", got)
+	}
+
+	// A secretRef primary's endpoint choice governs the super host key: both
+	// name the same server, so internal/external must agree.
+	c = secretConn()
+	c.SecretRef.Endpoint = endpointExternal
+	c.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
+	m, err = MaterializeSuperuser(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
+		t.Fatalf("super host key %q, want the primary's external choice inherited", got)
+	}
+
+	// Even an explicit internal on the super ref loses to the primary.
+	c.SuperuserSecretRef.Endpoint = "internal"
+	m, err = MaterializeSuperuser(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
+		t.Fatalf("super host key %q, the primary's endpoint must win over the super ref's", got)
+	}
+}
+
+// runSuperPrelude executes a primary prelude (when the connection has one)
+// followed by the superuser snippet under sh, and returns the super URI the
+// exec'd process sees plus the passfile, super URI file, and raw output.
+func runSuperPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string]string, primaryPassword, superPassword string) (superURI, passfile, urifile, out string, err error) {
+	t.Helper()
+	var preludes []string
+	if c.SecretRef != nil {
+		pm, merr := Materialize(Source, c)
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		preludes = append(preludes, pm.Prelude)
+	}
+	sm, merr := MaterializeSuperuser(Source, c)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	preludes = append(preludes, sm.Prelude)
+
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if content != "" {
+			if werr := os.WriteFile(p, []byte(content), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+		}
+		return p
+	}
+	pwFile := write("source-password", primaryPassword)
+	superPwFile := write("source-super-password", superPassword)
+	pgpass := filepath.Join(dir, "pgpass")
+	uriFile := filepath.Join(dir, "super-uri")
+
+	script := PreludeScript(preludes, nil, "")
+	script = strings.ReplaceAll(script, PgpassPath, pgpass)
+	script = strings.ReplaceAll(script, URIFile(Source), filepath.Join(dir, "uri"))
+	script = strings.ReplaceAll(script, SuperURIFile(Source), uriFile)
+	script = strings.ReplaceAll(script, credsDir+"/source-super-mnt/source-super-password", superPwFile)
+	script = strings.ReplaceAll(script, credsDir+"/source-mnt/source-password", pwFile)
+
+	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$PGM_SOURCE_SUPER_PGURI"`)
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	raw, err := cmd.CombinedOutput()
+	out = string(raw)
+	if err == nil {
+		superURI = out
+	}
+	if b, rerr := os.ReadFile(pgpass); rerr == nil {
+		passfile = string(b)
+	}
+	if b, rerr := os.ReadFile(uriFile); rerr == nil {
+		urifile = string(b)
+	}
+	return superURI, passfile, urifile, out, err
+}
+
+// TestSuperPrelude runs the generated superuser snippet for real, over every
+// primary shape it must piggyback on.
+func TestSuperPrelude(t *testing.T) {
+	superEnv := map[string]string{envSrcSuperUser: tSuperUser}
+	cases := []struct {
+		name      string
+		secretRef bool
+		env       map[string]string
+		wantURI   string
+		wantLines []string
+		wantErr   string
+	}{
+		{
+			name:      "inline primary with port and query",
+			env:       map[string]string{envSrcPGURI: tURI6432 + "?sslmode=require"},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB + "?sslmode=require",
+			wantLines: []string{tHost + ":*:*:" + tSuperUser + ":" + tSuperPass},
+		},
+		{
+			name:      "secretRef primary with DB as URI",
+			secretRef: true,
+			env:       map[string]string{envSrcDB: tURI6432},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
+			wantLines: []string{tLine, tHost + ":*:*:" + tSuperUser + ":" + tSuperPass},
+		},
+		{
+			name:      "secretRef primary with bare name",
+			secretRef: true,
+			env:       map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":5432/" + tDB,
+			wantLines: []string{tLine, tSuperLine},
+		},
+		{
+			name:      "matching url key passes",
+			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
+			wantLines: []string{tSuperLine},
+		},
+		{
+			name:      "matching url key with the primary's port passes",
+			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":6432"},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
+			wantLines: []string{tSuperLine},
+		},
+		{
+			name:    "port-mismatched url key fails",
+			env:     map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":9999"},
+			wantErr: "does not match the connection endpoint",
+		},
+		{
+			name:      "portless primary compares against the 5432 default",
+			env:       map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB, envSrcSuperHost: tHost + ":5432"},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + "/" + tDB,
+			wantLines: []string{tSuperLine},
+		},
+		{
+			name:    "mismatched url key fails",
+			env:     map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: "other.example.com"},
+			wantErr: "does not match the connection endpoint",
+		},
+		{
+			name:    "missing username key fails",
+			env:     map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: ""},
+			wantErr: "username key empty",
+		},
+		{
+			name:    "username with URI syntax fails",
+			env:     map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: "root@corp"},
+			wantErr: "username key holds URI syntax",
+		},
+		{
+			name:    "non-URI primary fails",
+			env:     map[string]string{envSrcPGURI: "host=x dbname=y"},
+			wantErr: "key=value DSNs are unsupported",
+		},
+		{
+			name:    "unset primary URI fails as ordering bug",
+			env:     map[string]string{},
+			wantErr: "prelude ordering bug",
+		},
+		{
+			name:      "password-bearing primary never leaks into the super URI",
+			env:       map[string]string{envSrcPGURI: "postgresql://" + tUser + ":s3cret@" + tHost + "/" + tDB},
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + "/" + tDB,
+			wantLines: []string{tSuperLine},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := superConn()
+			if tc.secretRef {
+				c = secretConn()
+				c.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
+			}
+			env := map[string]string{}
+			maps.Copy(env, superEnv)
+			maps.Copy(env, tc.env)
+			superURI, passfile, urifile, out, err := runSuperPrelude(t, c, env, tPass, tSuperPass)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("want failure %q, got success with %q", tc.wantErr, superURI)
+				}
+				if !strings.Contains(out, tc.wantErr) {
+					t.Fatalf("failure output %q misses %q", out, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("prelude failed: %v\n%s", err, out)
+			}
+			if superURI != tc.wantURI {
+				t.Fatalf("super URI %q, want %q", superURI, tc.wantURI)
+			}
+			if strings.Contains(superURI, "s3cret") || strings.Contains(urifile, "s3cret") {
+				t.Fatalf("primary password leaked into the super URI: %q", superURI)
+			}
+			if urifile != tc.wantURI {
+				t.Fatalf("super URI file holds %q, want %q", urifile, tc.wantURI)
+			}
+			lines := strings.Split(strings.TrimSuffix(passfile, "\n"), "\n")
+			if len(lines) != len(tc.wantLines) {
+				t.Fatalf("passfile has %d lines %q, want %d", len(lines), lines, len(tc.wantLines))
+			}
+			for i, want := range tc.wantLines {
+				if lines[i] != want {
+					t.Fatalf("passfile line %d = %q, want %q", i, lines[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestSuperPrelude_MissingPasswordFile(t *testing.T) {
+	_, _, _, out, err := runSuperPrelude(t, superConn(),
+		map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: tSuperUser}, tPass, "")
+	if err == nil {
+		t.Fatal("want failure for a missing super password file")
+	}
+	if !strings.Contains(out, "password key PW missing") {
+		t.Fatalf("failure output %q misses the named error", out)
+	}
+}
+
+func TestURIRecover_Superuser(t *testing.T) {
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "src-super-uri")
+	script := URIRecover()
+	for _, s := range []Side{Source, Target} {
+		script = strings.ReplaceAll(script, URIFile(s), filepath.Join(dir, "absent-"+string(s)))
+	}
+	script = strings.ReplaceAll(script, SuperURIFile(Source), srcFile)
+	script = strings.ReplaceAll(script, SuperURIFile(Target), filepath.Join(dir, "absent-tgt-super"))
+	probe := script + `printf '%s|%s' "$PGM_SOURCE_SUPER_PGURI" "${PGM_TARGET_SUPER_PGURI-}"`
+
+	out, err := exec.Command(shellPath(t), "-c", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery without files failed: %v: %s", err, out)
+	}
+	if got := string(out); got != "|" {
+		t.Fatalf("recovery without files changed the env: %q", got)
+	}
+
+	if werr := os.WriteFile(srcFile, []byte("postgresql://r@s/db1"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	out, err = exec.Command(shellPath(t), "-c", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery failed: %v: %s", err, out)
+	}
+	if got := string(out); got != "postgresql://r@s/db1|" {
+		t.Fatalf("recovered %q, want only the present super URI restored", got)
 	}
 }

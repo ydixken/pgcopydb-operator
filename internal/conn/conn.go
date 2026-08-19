@@ -25,6 +25,8 @@ limitations under the License.
 // which keeps the literal out of the pod spec as well. The secretRef path
 // injects the non-credential keys via env valueFrom, mounts the password key
 // as a file, and leaves URI composition to the prelude (see secretRefPrelude).
+// Superuser credentials follow the secretRef pattern (USER env, PW file) and
+// reuse the side's primary URI for everything else (see superPrelude).
 package conn
 
 import (
@@ -102,6 +104,13 @@ type Materialized struct {
 // exec'd into the pod can recover what the spec env cannot carry.
 func URIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-uri" }
 
+// SuperURIFile is the superuser counterpart of URIFile.
+func SuperURIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-super-uri" }
+
+// SuperURIEnv names the env var carrying a side's superuser URI, so the
+// preflight script generator and the prelude agree on one name.
+func SuperURIEnv(s Side) string { return pgmEnv(s, "SUPER_PGURI") }
+
 // pgmEnv names the side-scoped env vars the secretRef form injects; the
 // PGCOPYDB_* namespace belongs to pgcopydb itself.
 func pgmEnv(s Side, part string) string {
@@ -135,7 +144,7 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 	}
 
 	if c.PasswordSecretRef != nil {
-		vol, mount, file := passwordVolume(s, c.PasswordSecretRef.Name, c.PasswordSecretRef.Key, false)
+		vol, mount, file := passwordVolume(string(s), c.PasswordSecretRef.Name, c.PasswordSecretRef.Key, false)
 		m.Volumes = append(m.Volumes, vol)
 		m.Mounts = append(m.Mounts, mount)
 		m.Passfile = &Passfile{Host: c.Host, User: c.Username, File: file}
@@ -143,19 +152,20 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 	return m, nil
 }
 
-// passwordVolume projects one Secret key as the side's 0400 password file and
-// returns the in-container path of that file. optional tolerates a missing
-// key at mount time so the prelude can fail with a named error instead of the
-// pod hanging in ContainerCreating; the inline form keeps kubelet fail-fast
-// because its spec names the key explicitly.
-func passwordVolume(s Side, secretName, key string, optional bool) (corev1.Volume, corev1.VolumeMount, string) {
+// passwordVolume projects one Secret key as a 0400 password file named after
+// prefix ("source", "target-super", ...) and returns the in-container path of
+// that file. optional tolerates a missing key at mount time so the prelude can
+// fail with a named error instead of the pod hanging in ContainerCreating; the
+// inline form keeps kubelet fail-fast because its spec names the key
+// explicitly.
+func passwordVolume(prefix, secretName, key string, optional bool) (corev1.Volume, corev1.VolumeMount, string) {
 	mode := int32(0o400)
-	name := string(s) + "-password"
+	name := prefix + "-password"
 	src := &corev1.SecretVolumeSource{
 		SecretName: secretName,
 		Items: []corev1.KeyToPath{{
 			Key:  key,
-			Path: string(s) + "-password",
+			Path: prefix + "-password",
 		}},
 		DefaultMode: &mode,
 	}
@@ -168,10 +178,10 @@ func passwordVolume(s Side, secretName, key string, optional bool) (corev1.Volum
 	}
 	mount := corev1.VolumeMount{
 		Name:      name,
-		MountPath: credsDir + "/" + string(s) + "-mnt",
+		MountPath: credsDir + "/" + prefix + "-mnt",
 		ReadOnly:  true,
 	}
-	return vol, mount, credsDir + "/" + string(s) + "-mnt/" + string(s) + "-password"
+	return vol, mount, credsDir + "/" + prefix + "-mnt/" + prefix + "-password"
 }
 
 // DefaultKeys returns the convention key names the secretRef form falls back
@@ -221,30 +231,112 @@ func materializeSecretRef(s Side, c *v1beta1.PostgresConnection) *Materialized {
 		hostKey = keys.URLExternal
 	}
 	optional := true
-	ref := func(key string, opt *bool) *corev1.EnvVarSource {
-		return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: sr.Name},
-			Key:                  key,
-			Optional:             opt,
-		}}
-	}
 	m := &Materialized{Env: []corev1.EnvVar{
 		// The database key must exist (the kubelet refuses to start the pod
 		// otherwise); USER and HOST are legitimately absent when DB is a URI.
-		{Name: pgmEnv(s, "DB"), ValueFrom: ref(keys.Database, nil)},
-		{Name: pgmEnv(s, "USER"), ValueFrom: ref(keys.Username, &optional)},
-		{Name: pgmEnv(s, "HOST"), ValueFrom: ref(hostKey, &optional)},
+		{Name: pgmEnv(s, "DB"), ValueFrom: secretEnvRef(sr.Name, keys.Database, nil)},
+		{Name: pgmEnv(s, "USER"), ValueFrom: secretEnvRef(sr.Name, keys.Username, &optional)},
+		{Name: pgmEnv(s, "HOST"), ValueFrom: secretEnvRef(sr.Name, hostKey, &optional)},
 	}}
 	if c.TLS != nil {
 		vol, mount := tlsVolume(s, c.TLS)
 		m.Volumes = append(m.Volumes, vol)
 		m.Mounts = append(m.Mounts, mount)
 	}
-	vol, mount, file := passwordVolume(s, sr.Name, keys.Password, true)
+	vol, mount, file := passwordVolume(string(s), sr.Name, keys.Password, true)
 	m.Volumes = append(m.Volumes, vol)
 	m.Mounts = append(m.Mounts, mount)
 	m.Prelude = secretRefPrelude(s, sslParam(c), tlsParams(s, c), file, keys.Password)
 	return m
+}
+
+// secretEnvRef selects one Secret key as an env var source.
+func secretEnvRef(secretName, key string, opt *bool) *corev1.EnvVarSource {
+	return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+		Key:                  key,
+		Optional:             opt,
+	}}
+}
+
+// MaterializeSuperuser renders one side's optional superuser credentials for
+// the preflight Job. The prelude swaps the userinfo of the side's primary URI,
+// so host, port, database, sslmode, and TLS paths are inherited and the
+// superuser Secret contributes only USER and PW; its URL keys, when present,
+// are verified at start to name the same endpoint. The snippet MUST run after
+// the side's primary snippet (it reads the composed URI and fails by name
+// otherwise). Returns nil when the side has no superuserSecretRef.
+func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
+	sr := c.SuperuserSecretRef
+	if sr == nil {
+		return nil, nil
+	}
+	keys := effectiveKeys(sr.Keys)
+	// The super host key follows the primary's endpoint choice when the
+	// primary is the secretRef form: both name the same server, so the
+	// internal/external pick must agree or the sameness check misfires.
+	endpoint := sr.Endpoint
+	if c.SecretRef != nil {
+		endpoint = c.SecretRef.Endpoint
+	}
+	hostKey := keys.URL
+	if endpoint == endpointExternal {
+		hostKey = keys.URLExternal
+	}
+	optional := true
+	m := &Materialized{Env: []corev1.EnvVar{
+		// The URL key only verifies endpoint sameness; absent is fine.
+		{Name: pgmEnv(s, "SUPER_USER"), ValueFrom: secretEnvRef(sr.Name, keys.Username, nil)},
+		{Name: pgmEnv(s, "SUPER_HOST"), ValueFrom: secretEnvRef(sr.Name, hostKey, &optional)},
+	}}
+	vol, mount, file := passwordVolume(string(s)+"-super", sr.Name, keys.Password, true)
+	m.Volumes = append(m.Volumes, vol)
+	m.Mounts = append(m.Mounts, mount)
+	m.Prelude = superPrelude(s, file, keys.Password)
+	return m, nil
+}
+
+// superPrelude renders the shell that derives a side's superuser URI from the
+// already-composed primary URI: same endpoint, database, and query params,
+// userinfo swapped for the superuser (password-free; the PW file feeds the
+// passfile). A passfile line whose user matches the primary's is first-line-
+// wins and harmless. Non-URI primaries (key=value DSNs via uriSecretRef) are
+// rejected by name; brackets/IPv6 stay out of scope like the primary parser.
+func superPrelude(s Side, pwFile, pwKey string) string {
+	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
+[ -n "${@BASE@-}" ] || { echo "@SIDE@ superuser secret: primary connection URI is not composed; prelude ordering bug" >&2; exit 1; }
+sup_base=$@BASE@
+case "$sup_base" in postgresql://*|postgres://*) ;; *) echo "@SIDE@ superuser secret: the primary connection is not a postgresql:// URI; key=value DSNs are unsupported here" >&2; exit 1 ;; esac
+sup_user=${@USER@-}
+[ -n "$sup_user" ] || { echo "@SIDE@ superuser secret: username key empty" >&2; exit 1; }
+case "$sup_user" in *@*|*:*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ superuser secret: the username key holds URI syntax; unsupported for superuserSecretRef" >&2; exit 1 ;; esac
+sup_rest=${sup_base#*://}
+sup_hp=${sup_rest%%\?*}; sup_hostpart=${sup_hp%%/*}
+case "$sup_hostpart" in *@*) sup_hostport=${sup_hostpart##*@} ;; *) sup_hostport=$sup_hostpart ;; esac
+sup_host=${sup_hostport%%:*}
+sup_want=${@HOST@-}
+if [ -n "$sup_want" ]; then
+  case "$sup_hostport" in *:*) sup_hpd=$sup_hostport ;; *) sup_hpd=$sup_hostport:5432 ;; esac
+  case "$sup_want" in *:*) sup_cmp=$sup_hpd ;; *) sup_cmp=$sup_host ;; esac
+  [ "$sup_want" = "$sup_cmp" ] || { echo "@SIDE@ superuser secret: url key '$sup_want' does not match the connection endpoint '$sup_cmp'; the superuser secret URL keys MUST name the same endpoint" >&2; exit 1; }
+fi
+sup_uri="${sup_base%%://*}://$sup_user@$sup_hostport${sup_rest#"$sup_hostpart"}"
+export @SUPERURI@="$sup_uri"
+printf '%s' "$sup_uri" > @URIFILE@
+[ -f @PWFILE@ ] || { echo "@SIDE@ superuser secret: password key @PWKEY@ missing" >&2; exit 1; }
+printf '%s:*:*:%s:%s\n' "$(pf_esc "$sup_host")" "$(pf_esc "$sup_user")" "$(pf_esc "$(cat @PWFILE@)")" >> @PGPASS@
+`
+	return strings.NewReplacer(
+		"@BASE@", uriEnv(s),
+		"@USER@", pgmEnv(s, "SUPER_USER"),
+		"@HOST@", pgmEnv(s, "SUPER_HOST"),
+		"@SUPERURI@", SuperURIEnv(s),
+		"@URIFILE@", SuperURIFile(s),
+		"@PWFILE@", pwFile,
+		"@PWKEY@", pwKey,
+		"@PGPASS@", PgpassPath,
+		"@SIDE@", string(s),
+	).Replace(template)
 }
 
 // ComposeURI builds a password-free libpq URI for one side. libpq resolves the
@@ -393,6 +485,8 @@ func URIRecover() string {
 	var b strings.Builder
 	for _, s := range []Side{Source, Target} {
 		fmt.Fprintf(&b, "[ -f %[1]s ] && { %[2]s=$(cat %[1]s); export %[2]s; }; ", URIFile(s), uriEnv(s))
+		fmt.Fprintf(&b, "[ -f %[1]s ] && { %[2]s=$(cat %[1]s); export %[2]s; }; ",
+			SuperURIFile(s), pgmEnv(s, "SUPER_PGURI"))
 	}
 	return b.String()
 }

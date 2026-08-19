@@ -272,11 +272,12 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 	return true, nil
 }
 
-// ensurePreflight creates and observes the follow preflight Job. Returns
-// (passed, failureMessage, err); passed=false with an empty failureMessage
-// means the check is still running. The failure message carries the pod's own
-// check output (one line per failed prerequisite, with the exact GRANT or
-// setting to fix it) so nobody has to chase pod logs of a finished Job.
+// ensurePreflight creates and observes the preflight Job every Migration's
+// first attempt gates on. Returns (passed, failureMessage, err); passed=false
+// with an empty failureMessage means the check is still running. The failure
+// message carries the pod's own check output (one line per failed
+// prerequisite, with the exact GRANT or setting to fix it) so nobody has to
+// chase pod logs of a finished Job.
 func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Migration) (bool, string, error) {
 	job, created, err := r.ensureJob(ctx, m, preflightJobName(m), func() (*batchv1.Job, error) {
 		return buildPreflightJob(m, r.RunnerImage)
@@ -286,7 +287,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 	}
 	if created {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightStarted", "Preflight",
-			"checking follow-mode prerequisites as Job %s", preflightJobName(m))
+			"running preflight checks as Job %s", preflightJobName(m))
 	}
 	if job == nil {
 		return false, "", nil
@@ -298,7 +299,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 	case ok:
 		return true, "", nil
 	}
-	msg := "follow preflight failed"
+	msg := "preflight failed"
 	if tail := r.jobLogTail(ctx, m.Namespace, job.Name, preflightLogTail); tail != "" {
 		msg += ":\n" + tail
 	} else {

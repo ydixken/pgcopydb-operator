@@ -1,0 +1,22 @@
+# Clone with post-migration verification: one Job per enabled pgcopydb
+# compare check, result in the Verified condition and the
+# pgcopydb_migration_verified metric. A mismatch never rolls anything back.
+# Scope, cost, and follow-mode timing: docs/operations/verification.md.
+apiVersion: pgcopydb-operator.io/v1beta1
+kind: Migration
+metadata:
+  name: verified-clone
+spec:
+  source:
+    host: shop.example.com
+    database: shop
+    username: migrator
+    passwordSecretRef: {name: shop-source, key: password}
+  target:
+    host: shop-pg-rw.shop.svc
+    database: shop
+    username: app
+    passwordSecretRef: {name: shop-pg-app, key: password}
+  verification:
+    schema: true
+    data: true  # full-table checksums on both sides; enable deliberately

@@ -1,6 +1,6 @@
 # Verification
 
-`spec.verification` runs `pgcopydb compare` after the migration completes, one Job per enabled check ([migration-verified.yaml](../examples/migration-verified.yaml)):
+`spec.verification` runs `pgcopydb compare` after the migration completes, one Job per enabled check ([07-verified.yaml](../examples/07-verified.yaml)):
 
 ```yaml
 spec:

@@ -1,13 +1,13 @@
-# Tuned clone: more parallelism, same-table splitting for big tables,
-# schema filtering, and a larger work volume. Filters render to pgcopydb's
+# Tuned clone: parallelism, same-table splitting, filtering, a re-runnable
+# target, runner placement, and lifecycle knobs. Filters render to pgcopydb's
 # --filters INI; table names follow PostgreSQL quoting, ~/regex/ works.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
-  name: warehouse
+  name: clone-tuned
 spec:
   source:
-    host: warehouse.internal.example.com
+    host: warehouse.example.com
     database: warehouse
     username: migrator
     passwordSecretRef: {name: warehouse-source, key: password}
@@ -21,9 +21,15 @@ spec:
     indexJobs: 8
     splitTablesLargerThan: 2Gi  # tables above this copy in parallel parts
     skip: [largeObjects]        # no large objects in this database
+    dropIfExists: true          # re-runnable onto a populated target
     filters:
       excludeSchemas: ["audit", "scratch"]
       excludeTableData: ["public.event_log"]  # schema yes, rows no
   workVolume:
     size: 50Gi  # holds dumps and catalogs; size it near the database size
+  runner:
+    nodeSelector: {workload: batch}  # keep the copy off latency-sensitive nodes
+    resources:
+      requests: {cpu: "2", memory: 4Gi}
   backoffLimit: 5
+  ttlSecondsAfterFinished: 86400  # keep finished Jobs a day for log reading

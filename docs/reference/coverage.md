@@ -56,7 +56,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 
 The standalone `follow` command advertises a subset of the clone options (research section 2.2) with identical semantics; every one of them is covered by the rows above. The operator never runs standalone `follow`: it always runs `clone --follow`, so the base copy and the replication slot share one snapshot, which is the whole consistency point.
 
-`spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.backoffLimit`, and `spec.ttlSecondsAfterFinished` are operator-level controls with no pgcopydb flag behind them.
+`spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
 
 ## `pgcopydb compare`
 

@@ -14,7 +14,7 @@ Each type is named for what `True` means. Seven are normal-true (True is the des
 
 | Type | Polarity | True means |
 |---|---|---|
-| `Validated` | normal-true | The spec materializes cleanly; for live migrations, the preflight also passed. |
+| `Validated` | normal-true | The spec materializes cleanly and the preflight passed. |
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Replication lag is at or below `spec.follow.maxCatchupLag`. |
@@ -29,9 +29,10 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 
 | Condition | Status | Reason | Appears when |
 |---|---|---|---|
-| `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly; refreshed on every reconcile of an active Migration. |
+| `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly and the preflight passed; refreshed on every reconcile of an active Migration. |
+| `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unbound PVC, unschedulable). |
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
-| `Validated` | `False` | `PreflightFailed` | The follow preflight found a missing prerequisite; the message carries the check output with the exact `GRANT` or setting to fix. Terminal. |
+| `Validated` | `False` | `PreflightFailed` | The preflight found a failed check: connectivity on any migration, or a missing follow prerequisite; the message carries the check output with the exact `GRANT` or setting to fix, plus a `superuserSecretRef` hint when that field could apply it. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished. |
@@ -47,7 +48,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Verified` | `False` | `DataMismatch` | `pgcopydb compare data` reported differences while the schema matched (or was not checked). |
 | `Complete` | `True` | `MigrationSucceeded` | The migration finished; on live migrations, set after cleanup and verification. |
 | `Failed` | `True` | `InvalidSpec` | Spec validation failed; retrying cannot help (source and target are immutable). |
-| `Failed` | `True` | `PreflightFailed` | The follow preflight failed before any data moved. |
+| `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
 
@@ -62,7 +63,9 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream 0.18 defect); the operator removed the pod so the normal retry could resume. |
-| `PreflightStarted` | Normal | The follow preflight Job was created. |
+| `PreflightStarted` | Normal | The preflight Job was created. |
+| `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |
+| `PreflightRemediated` | Normal | The preflight applied one missing grant through `superuserSecretRef`; the message is the exact statement. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |

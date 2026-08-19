@@ -1,12 +1,12 @@
 # Live migration
 
-`spec.follow.enabled: true` turns the clone into a live migration: the base copy runs under a replication slot, then logical replication streams and applies every change until you cut over. Start from [migration-follow.yaml](../examples/migration-follow.yaml). The [follow-specific prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) (wal_level, REPLICATION attribute, target grants, replica identities) are strict, and two of them fail silently when missed, so the operator checks the ones it can reach before any data moves (see [preflight](#preflight) below).
+`spec.follow.enabled: true` turns the clone into a live migration: the base copy runs under a replication slot, then logical replication streams and applies every change until you cut over. Start from [05-live-migration.yaml](../examples/05-live-migration.yaml). The [follow-specific prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) (wal_level, REPLICATION attribute, target grants, replica identities) are strict, and two of them fail silently when missed, so the operator checks the ones it can reach before any data moves (see [preflight](#preflight) below).
 
 The phases of a live migration:
 
 | Phase            | Meaning                                                                                        |
 |------------------|------------------------------------------------------------------------------------------------|
-| `Validating`     | Preflight Job probing the replication prerequisites; no worker has started yet.                 |
+| `Validating`     | Preflight Job probing connectivity and the replication prerequisites; no worker has started yet. |
 | `Cloning`        | Base copy running; changes are already being received into the work volume.                     |
 | `Streaming`      | Base copy done; changes are replayed onto the target continuously.                              |
 | `CutoverPending` | Caught up (`CaughtUp` condition True) and waiting for approval (Manual mode).                   |
@@ -15,15 +15,27 @@ The phases of a live migration:
 
 ## Preflight
 
-The first attempt of a follow migration is gated by a `<name>-preflight` Job. It probes, over plain psql, what the databases must provide: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, and the `session_replication_role` SET privilege. Every one of these has failed a live run, and the last two lose data quietly rather than loudly.
+Every Migration's first attempt is gated by a `<name>-preflight` Job; for a follow migration it carries the full battery.
+The checks run over plain psql, in a fixed order, and each success prints an `ok:` line in the Job log, so the log reads as an audit trail.
+Connectivity to both endpoints always comes first, and each connect is retried up to six times ten seconds apart, one logged `retry:` line per miss, so a failover blip does not fail an otherwise sound Migration.
+Then, per side with a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref), the superuser connection is probed the same way; a role without `rolsuper` only logs a warning and remediation proceeds, since managed-Postgres admin roles hold the grant rights without the attribute.
+Then the follow prerequisites: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
+Every one of these has failed a live run, and two lose data quietly rather than loudly.
 
-A failed check names the exact `GRANT` or setting that fixes it, in the `Validated` and `Failed` condition messages:
+A failed rights check names the exact `GRANT` or setting that fixes it, in the `Validated` and `Failed` condition messages, and adds a hint naming `superuserSecretRef` when that field could have applied it:
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.conditions[?(@.type=="Validated")].message}'
 ```
 
-Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them. Fix the endpoint, then create a new Migration. The schema and workload contract (replica identity, no DDL during the migration) is NOT preflighted and stays your responsibility.
+With `superuserSecretRef` set, the preflight applies the grantable rights itself, re-checks them, and emits one `PreflightRemediated` event per applied statement; on success a `PreflightPassed` event counts checks and applied grants.
+The finished preflight Job is kept as that audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
+Setting `spec.suspend` while the gate runs deletes the preflight Job, stopping remediation with it; the gate re-runs the preflight on resume.
+
+While the gate runs, the `Validated` condition is `Unknown` with reason `PreflightRunning`; if the preflight pod cannot start (a misnamed Secret, an unbound work PVC, an unschedulable node), the kubelet's reason lands verbatim in the condition message.
+The Job is bounded: connections time out after 10 seconds (`PGCONNECT_TIMEOUT`, set on every operator control Job but never on the pgcopydb worker, whose data path must not race a connect cap) and the whole preflight after 30 minutes, so a black-holed endpoint fails instead of waiting forever.
+
+Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them. Fix the endpoint, then create a new Migration. The workload contract (no DDL during the migration, no large-object changes, wal2json presence) is not preflighted and stays your responsibility.
 
 ## Watching the stream
 

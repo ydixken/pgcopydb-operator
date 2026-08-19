@@ -77,7 +77,12 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 	if check == compareData {
 		args = pgcopydb.CompareDataArgs()
 	}
-	return jobSkeleton(m, runnerImage, compareJobName(m, check), args, "", 1)
+	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), args, "", 1)
+	if err != nil {
+		return nil, err
+	}
+	addConnectTimeout(job)
+	return job, nil
 }
 
 // finishClone ends a clone-only migration: CloneCompleted, then verification

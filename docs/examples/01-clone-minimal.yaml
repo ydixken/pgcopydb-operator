@@ -1,13 +1,13 @@
-# Minimal one-shot clone: copy everything from source to target.
+# The shortest correct Migration: a one-shot clone of everything.
 # Passwords come from Secrets and never appear in the CR, Job spec, or logs.
-# Watch it: kubectl get pgm -w; details: kubectl describe migration shop
+# Watch it: kubectl get pgm -w; details: kubectl describe migration clone-minimal
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
-  name: shop
+  name: clone-minimal
 spec:
   source:
-    host: db.old-datacenter.example.com
+    host: shop.example.com
     database: shop
     username: migrator
     passwordSecretRef: {name: shop-source, key: password}

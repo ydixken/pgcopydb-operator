@@ -67,7 +67,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		// docs/research/upstream-issues.md); the field is reserved.
 		r := newReconciler()
 
-		reconcileAndGet(ctx, r, name) // creates run-1
+		passGate(ctx, r, name) // creates run-1
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
@@ -120,7 +120,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		const name = "mig-suspend-nojob"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name) // run-1
+		passGate(ctx, newReconciler(), name) // run-1
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 
@@ -183,7 +183,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		const name = "mig-clone-delete"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name) // run-1
+		passGate(ctx, newReconciler(), name) // run-1
 
 		// A test finalizer keeps the terminating CR observable (envtest has no
 		// garbage collector); the operator's own finalizer is follow-only.

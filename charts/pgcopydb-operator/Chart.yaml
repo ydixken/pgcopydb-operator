@@ -39,8 +39,8 @@ annotations:
       displayName: Migration
       description: "One PostgreSQL migration: bulk clone, optional logical-replication follow, controlled cutover."
   # Trimmed copies kept in sync by hand: the first mirrors
-  # docs/examples/migration-minimal.yaml, the second
-  # docs/examples/migration-details-secret.yaml. Artifact Hub reparses the
+  # docs/examples/01-clone-minimal.yaml, the second
+  # docs/examples/03-clone-platform-secret.yaml. Artifact Hub reparses the
   # YAML and drops comments, so the explanations stay in docs/examples/, and
   # it renders only the first match per CRD kind: the secretRef entry serves
   # readers of the annotation itself (helm show chart, this file).
@@ -48,10 +48,10 @@ annotations:
     - apiVersion: pgcopydb-operator.io/v1beta1
       kind: Migration
       metadata:
-        name: shop
+        name: clone-minimal
       spec:
         source:
-          host: db.old-datacenter.example.com
+          host: shop.example.com
           database: shop
           username: migrator
           passwordSecretRef: {name: shop-source, key: password}
@@ -64,7 +64,7 @@ annotations:
     - apiVersion: pgcopydb-operator.io/v1beta1
       kind: Migration
       metadata:
-        name: from-platform
+        name: clone-platform-secret
       spec:
         source:
           secretRef:

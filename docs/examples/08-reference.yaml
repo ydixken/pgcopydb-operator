@@ -1,0 +1,108 @@
+# Annotated reference: one valid Migration carrying every spec knob that can
+# legally coexist. Copy the lines you need, not the file. Connection forms
+# are mutually exclusive per endpoint (admission enforces exactly one), so
+# the alternatives appear commented next to the active inline form.
+# Field-by-field contract: docs/reference/api.md.
+apiVersion: pgcopydb-operator.io/v1beta1
+kind: Migration
+metadata:
+  name: reference
+spec:
+  source:
+    # Active: the inline form.
+    host: payroll.example.com
+    port: 5432                  # default 5432
+    database: payroll
+    username: migrator
+    passwordSecretRef: {name: payroll-source, key: password}
+    sslMode: verify-full        # disable|allow|prefer|require|verify-ca|verify-full
+    tls:
+      rootCA: {name: payroll-ca, key: ca.crt}   # server verification
+      cert: {name: payroll-client, key: tls.crt}  # client certificate auth
+      key: {name: payroll-client, key: tls.key}
+    # Alternative: a Secret holding one complete libpq URI (credentials included).
+    # uriSecretRef: {name: payroll-dsn, key: uri}
+    # Alternative: a platform Secret with one key per part, convention:
+    #   DB (bare database name or password-free URI), PW (the password),
+    #   URL (internal host[:port]), URL_EXTERNAL (external host[:port]),
+    #   USER (the role). Full story: 03-clone-platform-secret.yaml.
+    # secretRef:
+    #   name: payroll-bundle
+    #   endpoint: internal      # or external: take the host from URL_EXTERNAL
+    #   keys: {database: DB, password: PW, url: URL, urlExternal: URL_EXTERNAL, username: USER}  # remap deviating names
+    # Optional with any form: a superuser on the same endpoint; the preflight
+    # applies missing follow grants with it (06-live-superuser.yaml). Prefer
+    # password auth here when the server maps client certificates to roles.
+    superuserSecretRef:
+      name: payroll-source-admin
+  target:
+    host: payroll-pg-rw.payroll.svc
+    database: payroll
+    username: app
+    passwordSecretRef: {name: payroll-pg-app, key: password}
+    superuserSecretRef:
+      name: payroll-pg-superuser
+      keys: {username: username, password: password}  # remap deviating key names
+  clone:
+    # Parallelism.
+    tableJobs: 8                # concurrent table copies
+    indexJobs: 8                # concurrent index builds
+    restoreJobs: 4              # concurrent pg_restore workers
+    largeObjectsJobs: 2         # concurrent large-object copies
+    splitTablesLargerThan: 2Gi  # copy bigger tables in parallel parts
+    splitMaxParts: 8            # cap the parts per split table
+    estimateTableSizes: true    # plan splits from estimates, skip exact sizing
+    # Target preparation and restore shaping.
+    dropIfExists: true          # re-runnable onto a populated target
+    roles: true                 # copy roles first (pg_dumpall --roles-only)
+    noRolePasswords: true       # with roles: skip pg_authid, no superuser needed
+    noOwner: true               # skip ALTER OWNER; restore as the connecting role
+    noACL: true                 # skip GRANT/REVOKE replay
+    noComments: true            # skip COMMENT statements
+    noTablespaces: true         # ignore source tablespace assignments
+    useCopyBinary: true         # COPY BINARY: faster, same-version endpoints only
+    failFast: true              # abort on the first error instead of collecting
+    # Sections to skip entirely; also: extensions, collations, dbProperties, ctidSplit.
+    skip: [largeObjects, extensionComments, vacuum, analyze]
+    filters:
+      # The include-only and exclude families conflict; admission rejects
+      # includeOnlyTables with excludeTables/excludeSchemas, and the
+      # include-only/exclude pairs for schemas and extensions.
+      excludeSchemas: ["audit", "scratch"]
+      excludeTables: ["public.shadow_copy"]
+      excludeIndexes: ["public.idx_bloated"]
+      excludeTableData: ["public.event_log"]  # schema yes, rows no
+      # includeOnlySchemas: ["public"]
+      # includeOnlyTables: ["public.orders"]
+      # includeOnlyExtensions: ["pg_trgm"]
+      # excludeExtensions: ["postgis"]
+  follow:
+    enabled: true               # live migration; drop the block for a plain clone
+    plugin: wal2json            # pgoutput (default) | wal2json | test_decoding
+    slotName: payroll_migration  # fixed slot name; empty generates one per Migration
+    publication: payroll_pub    # pre-created publication; skips create/drop rights
+    wal2jsonNumericAsString: true  # wal2json only: keep numeric precision in JSON
+    replayNoOpUpdates: true     # replay empty UPDATEs so target triggers fire
+    allowMissingReplicaIdentity: ["public.audit_log"]  # read-only tables only, or "*"
+    maxCatchupLag: 16Mi         # lag under which CaughtUp goes True
+  cutover:
+    mode: Manual                # Manual (default) | Automatic (cut over at CaughtUp)
+    approved: false             # Manual mode: flip to true to freeze and drain
+  verification:
+    schema: true                # pgcopydb compare schema after completion
+    data: true                  # full-table checksums on both sides; enable deliberately
+  workVolume:
+    size: 100Gi                 # dumps, catalogs, and (follow) the change stream
+    storageClassName: fast-ssd  # empty uses the cluster default
+  runner:
+    # image: ghcr.io/example/runner:v1  # override the release runner image
+    resources:
+      requests: {cpu: "2", memory: 4Gi}
+      limits: {memory: 8Gi}
+    nodeSelector: {workload: batch}
+    # affinity: standard corev1.Affinity; omitted here for brevity
+    tolerations:
+      - {key: workload, operator: Equal, value: batch, effect: NoSchedule}
+  suspend: false                # true pauses between attempts; a follow slot keeps retaining WAL
+  backoffLimit: 3               # worker retries after the first attempt
+  ttlSecondsAfterFinished: 86400  # keep finished worker Jobs a day for log reading

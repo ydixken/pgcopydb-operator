@@ -2,7 +2,7 @@
 
 What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes cluster before the operator can run it. The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
-Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone --follow`), cutover, and cleanup. Ground truth for the pgcopydb behavior behind each rule: [pgcopydb-cli.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/pgcopydb-cli.md) and [pgcopydb-follow.md](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/pgcopydb-follow.md). The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply exactly the grants below.
+Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone --follow`), cutover, and cleanup. Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/). The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply exactly the grants below.
 
 ## Summary
 
@@ -30,6 +30,11 @@ The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg
 
 ## Base clone (every Migration)
 
+Every Migration is gated by a `<name>-preflight` Job before the first attempt.
+Its first check, always, is connectivity: `select 1` against both endpoints, each result logged in the Job output.
+Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns.
+The clone privileges below are not probed; they surface in the first attempt's logs.
+
 Source role:
 
 - SELECT on every table and sequence being copied and USAGE on their schemas. Owning the objects covers all of it.
@@ -48,7 +53,10 @@ Superuser is required only for:
 
 ## Live migration (`spec.follow.enabled: true`)
 
-The operator preflights the requirements of this section before the first attempt: a `<name>-preflight` Job checks `wal_level`, free-slot headroom, the source role's REPLICATION attribute, EXECUTE on the origin functions, the `session_replication_role` SET privilege, and audits every user table for a usable replica identity. A failed check fails the Migration with the exact missing GRANT, setting, or table list in the `Validated` condition message, before any data moves. The rest of the workload contract (no DDL, large objects, wal2json presence) is not preflighted; checking it stays your job.
+The preflight Job additionally checks the requirements of this section before the first attempt, after the connectivity probes: `wal_level`, free-slot headroom, the source role's REPLICATION attribute, EXECUTE on the origin functions, the `session_replication_role` SET privilege, and an audit of every user table for a usable replica identity.
+A failed check fails the Migration with the exact missing GRANT, setting, or table list in the `Validated` condition message, before any data moves; when the failing side has no `superuserSecretRef`, the message adds a hint naming that field.
+With `superuserSecretRef` set, the three grantable rights are [applied by the preflight itself](#superuser-remediation-superusersecretref) instead of failing.
+The rest of the workload contract (no DDL, large objects, wal2json presence) is not preflighted; checking it stays your job.
 
 Source instance:
 
@@ -89,6 +97,24 @@ Schema and workload contract:
 - Every table that receives UPDATE or DELETE during the migration window MUST have a primary key or a replica identity (`REPLICA IDENTITY USING INDEX ...` or `REPLICA IDENTITY FULL`). With `pgoutput`, DML on a published table without one fails on the source at write time, breaking the application, not just the migration. The preflight audits all user tables for this and fails on offenders; it deliberately ignores `clone.filters`, since a filtered table can still take writes. Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
 - Large-object changes during the window are not replicated (base copy only). Sequences need no handling: pgcopydb re-syncs them automatically after cutover.
+
+## Superuser remediation (`superuserSecretRef`)
+
+Each side of the Migration MAY carry `superuserSecretRef`, a Secret in the same convention as [`secretRef`](../configuration.md#credentials): the `USER` and `PW` keys name a superuser on that same endpoint.
+The `URL`/`URL_EXTERNAL` keys, when present, MUST match the connection's endpoint; a mismatch fails the preflight by name, and a value carrying `:port` is compared port and all.
+With a `secretRef` primary, the internal/external choice follows the primary's `endpoint` field, so both connections always name the same server.
+The preflight probes the superuser connection (with the same retries as the primaries) and checks `rolsuper`; a role without it only logs a warning, because managed-Postgres admin roles (`rds_superuser` and friends) can hold the grant rights without the attribute.
+It then applies the follow rights the regular role is missing, exactly these statements:
+
+- `ALTER ROLE <role> REPLICATION` on the source.
+- `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function.
+- `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly).
+
+Every applied statement is re-checked, logged in the preflight output, and emitted as a `PreflightRemediated` event on the Migration.
+Applied grants are kept, never reverted: they are the same grants you would run by hand.
+Remediation never touches replica identity, `wal_level`, plugin installation, or your schema, and pgcopydb itself never runs as the superuser.
+One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.
+The reuse extends to TLS transport settings, including any client certificate; when the server maps certificate identities to roles, the certificate cannot present the superuser, so use password auth for it.
 
 ## Retries and snapshot consistency
 
