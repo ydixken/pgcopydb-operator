@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -433,5 +434,51 @@ func TestBuildVerifyJob_KeepsPassfilePrelude(t *testing.T) {
 	}
 	if !strings.Contains(c.Args[1], "pg_replication_origin_progress") {
 		t.Fatalf("verify script lost the origin-progress check:\n%s", c.Args[1])
+	}
+}
+
+// TestJobEnv_ConnectTimeout: every Job the operator builds carries a bounded
+// libpq connect timeout; without one a black-holed endpoint hangs psql and
+// pgcopydb forever instead of failing a check.
+func TestJobEnv_ConnectTimeout(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	builders := map[string]func() (*batchv1.Job, error){
+		"worker":      func() (*batchv1.Job, error) { return buildJob(m, "img", 1) },
+		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		"verify":      func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+	}
+	for name, build := range builders {
+		job, err := build()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := envValue(job.Spec.Template.Spec.Containers[0].Env, "PGCONNECT_TIMEOUT"); got != "10" {
+			t.Fatalf("%s: PGCONNECT_TIMEOUT = %q, want \"10\"", name, got)
+		}
+	}
+}
+
+// TestPreflightJob_ActiveDeadline: the deadline is what turns a preflight pod
+// that can never start into a terminal failure; the worker must not have one,
+// a long clone is not a hang.
+func TestPreflightJob_ActiveDeadline(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+	pf, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.Spec.ActiveDeadlineSeconds == nil || *pf.Spec.ActiveDeadlineSeconds != 600 {
+		t.Fatalf("preflight ActiveDeadlineSeconds = %v, want 600", pf.Spec.ActiveDeadlineSeconds)
+	}
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Spec.ActiveDeadlineSeconds != nil {
+		t.Fatalf("worker must not carry a deadline, got %v", *worker.Spec.ActiveDeadlineSeconds)
 	}
 }

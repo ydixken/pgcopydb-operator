@@ -305,6 +305,11 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	if err != nil {
 		return nil, err
 	}
+	// Bounds hung checks AND pods that never start (unschedulable, missing
+	// Secret): the deadline fails the Job, which terminal-fails the Migration
+	// instead of looping in Validating.
+	deadline := int64(600)
+	job.Spec.ActiveDeadlineSeconds = &deadline
 	if f := m.Spec.Follow; f != nil && len(f.AllowMissingReplicaIdentity) > 0 {
 		c := &job.Spec.Template.Spec.Containers[0]
 		// Newline-joined: the script matches whole lines (grep -Fx), so an
@@ -347,6 +352,9 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 	env := append(src.Env, tgt.Env...)
 	// Structured runner logs for humans and future machine parsing.
 	env = append(env, corev1.EnvVar{Name: "PGCOPYDB_LOG_JSON", Value: "on"})
+	// libpq's default connect timeout is unlimited; a black-holed endpoint
+	// would hang psql and pgcopydb forever (wedged a customer's preflight).
+	env = append(env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 
 	var passfiles []conn.Passfile
 	var preludes []string

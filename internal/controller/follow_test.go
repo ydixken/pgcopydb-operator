@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -479,5 +480,70 @@ var _ = Describe("Migration Controller follow mode", func() {
 		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("PreflightFailed"))
 		Expect(failed.Message).To(ContainSubstring("inspect the logs of Job " + name + "-preflight"))
+	})
+
+	It("surfaces why the preflight pod cannot start", func() {
+		const name = "mig-preflight-stuck"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		// Pass 1 creates the preflight Job; nothing runs it in envtest, so
+		// the gate reports a running preflight.
+		m := reconcileAndGet(ctx, r, name)
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(validated.Reason).To(Equal("PreflightRunning"))
+		Expect(validated.Message).To(ContainSubstring("is running"))
+
+		// envtest runs no kubelet: fabricate the Job's pod in the state a
+		// misnamed credentials Secret produces on a real cluster.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name + "-preflight-pod",
+				Namespace: testNS,
+				Labels:    map[string]string{jobNameLabel: name + "-preflight"},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: "runner", Image: "img"}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, pod) }()
+		pod.Status = corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "runner",
+				Image: "img",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "CreateContainerConfigError",
+					Message: `secret "shop-source" not found`,
+				}},
+			}},
+		}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
+		validated = meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(validated.Reason).To(Equal("PreflightRunning"))
+		Expect(validated.Message).To(ContainSubstring("CreateContainerConfigError"))
+		Expect(validated.Message).To(ContainSubstring(`secret "shop-source" not found`))
+	})
+
+	It("validates only after the gate and emits PreflightPassed", func() {
+		const name = "mig-preflight-pass"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		passPreflight(r, name)
+		m := reconcileAndGet(ctx, r, name)
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated.Status).To(Equal(metav1.ConditionTrue))
+		Expect(validated.Reason).To(Equal("SpecValid"))
+		Expect(drainEvents(r.Recorder.(*events.FakeRecorder))).To(ContainElement(ContainSubstring("PreflightPassed")))
 	})
 })

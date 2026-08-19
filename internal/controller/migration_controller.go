@@ -155,8 +155,6 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		r.fail(m, "InvalidSpec", "Validate", err.Error())
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
-	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
-
 	if err := r.ensureFinalizer(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -167,6 +165,10 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	if res, handled, err := r.preflightGate(ctx, m, base); handled || err != nil {
 		return res, err
 	}
+	// Validated turns True only once the gate is clear: while the preflight
+	// runs the condition is Unknown/PreflightRunning, so nobody reads a
+	// stuck gate as a validated migration.
+	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
 
 	// Job orchestration: observe the current attempt or start the next one.
 	if m.Status.JobName == "" {
@@ -222,13 +224,62 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 		r.fail(m, "PreflightFailed", "Preflight", failMsg)
 		return ctrl.Result{}, true, r.updateStatus(ctx, m, base)
 	case !passed:
+		msg := "preflight Job " + preflightJobName(m) + " is running"
+		if detail := r.preflightWaitDetail(ctx, m.Namespace, preflightJobName(m)); detail != "" {
+			msg = "preflight Job " + preflightJobName(m) + " cannot start: " + truncate(detail, maxDetailLen)
+		}
+		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionUnknown, "PreflightRunning", msg)
 		m.Status.Phase = v1beta1.PhaseValidating
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, true, err
 		}
 		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
 	}
+	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "all preflight checks passed")
 	return ctrl.Result{}, false, nil
+}
+
+// jobNameLabel is the Job controller's own pod label, the selector both the
+// log reader and the pod inspectors use.
+const jobNameLabel = "job-name"
+
+// preflightWaitDetail reports why the preflight pod is not progressing, or ""
+// while it starts normally. A pod that cannot start (missing Secret, image
+// pull, unschedulable) would otherwise show a bare Validating phase with the
+// cause buried in pod events; found live at a customer.
+func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace, jobName string) string {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(namespace),
+		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+		return ""
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		for _, cond := range p.Status.Conditions {
+			if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse &&
+				cond.Reason == corev1.PodReasonUnschedulable {
+				return "pod unschedulable: " + cond.Message
+			}
+		}
+		statuses := append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...),
+			p.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			w := cs.State.Waiting
+			if w == nil {
+				continue
+			}
+			switch w.Reason {
+			// The transient reasons every healthy start passes through.
+			case "", "ContainerCreating", "PodInitializing":
+			default:
+				if w.Message != "" {
+					return w.Reason + ": " + w.Message
+				}
+				return w.Reason
+			}
+		}
+	}
+	return ""
 }
 
 // observeRunningJob samples a live worker (follow state) and schedules the
@@ -343,10 +394,8 @@ func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.M
 // normal retry flow.
 func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobName string) error {
 	pods := &corev1.PodList{}
-	// job-name is the Job controller's own pod label, the same selector the
-	// log reader uses.
 	if err := r.List(ctx, pods, client.InNamespace(namespace),
-		client.MatchingLabels{"job-name": jobName}); err != nil {
+		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
 		return err
 	}
 	policy := metav1.DeletePropagationForeground
