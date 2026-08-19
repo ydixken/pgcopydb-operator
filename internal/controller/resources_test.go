@@ -844,16 +844,27 @@ esac
 }
 
 // TestEmitPreflightOutcome pins the log contract: ok/remediated prefixes
-// become the event trail, everything else is ignored.
+// become the event trail, everything else is ignored. All statements ride in
+// ONE PreflightRemediated event: the events recorder correlates by reason and
+// collapses same-reason events into a counter that keeps only the first
+// message, which is exactly how the rc.1 gate lost the grant audit trail.
 func TestEmitPreflightOutcome(t *testing.T) {
+	// Statement shapes as the server really composes them: %I leaves the
+	// unremarkable role name unquoted and regprocedure drops pg_catalog.
+	stmts := []string{
+		`ALTER ROLE "app" REPLICATION`,
+		`GRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO app;`,
+		`GRANT EXECUTE ON FUNCTION pg_replication_origin_progress(text,boolean) TO app;`,
+		`GRANT SET ON PARAMETER session_replication_role TO "app"`,
+	}
+	log := "ok: connectivity source\nok: connectivity target\n" +
+		"remediated: " + strings.Join(stmts, "\nremediated: ") + "\n" +
+		"ok: source replication attribute\n" +
+		"preflight: warning: acknowledged table public.a has no usable replica identity\n" +
+		"preflight: all checks passed\n"
 	r := &MigrationReconciler{
 		Recorder: events.NewFakeRecorder(20),
-		Logs: &fakeLogs{out: "ok: connectivity source\n" +
-			"ok: connectivity target\n" +
-			`remediated: ALTER ROLE "app" REPLICATION` + "\n" +
-			"ok: source replication attribute\n" +
-			"preflight: warning: acknowledged table public.a has no usable replica identity\n" +
-			"preflight: all checks passed\n"},
+		Logs:     &fakeLogs{out: log},
 	}
 	r.emitPreflightOutcome(context.Background(), passwordMigration())
 	rec := r.Recorder.(*events.FakeRecorder)
@@ -864,12 +875,17 @@ func TestEmitPreflightOutcome(t *testing.T) {
 			got = append(got, e)
 		default:
 			if len(got) != 2 {
-				t.Fatalf("want 2 events, got %v", got)
+				t.Fatalf("want exactly 2 events (bundled remediation + summary), got %v", got)
 			}
-			if !strings.Contains(got[0], "PreflightRemediated") || !strings.Contains(got[0], `ALTER ROLE "app" REPLICATION`) {
-				t.Fatalf("first event must carry the statement: %s", got[0])
+			if !strings.Contains(got[0], "PreflightRemediated") {
+				t.Fatalf("first event must be the remediation bundle: %s", got[0])
 			}
-			if !strings.Contains(got[1], "PreflightPassed") || !strings.Contains(got[1], "3 checks passed, 1 grants applied") {
+			for _, s := range stmts {
+				if !strings.Contains(got[0], s) {
+					t.Fatalf("bundle lost statement %q: %s", s, got[0])
+				}
+			}
+			if !strings.Contains(got[1], "PreflightPassed") || !strings.Contains(got[1], "3 checks passed, 4 grants applied") {
 				t.Fatalf("summary event wrong: %s", got[1])
 			}
 			return
@@ -883,6 +899,7 @@ func TestEmitPreflightOutcome(t *testing.T) {
 func TestEmitPreflightOutcome_LongAudit(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString(`remediated: ALTER ROLE "app" REPLICATION` + "\n")
+	sb.WriteString(`remediated: GRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO app;` + "\n")
 	sb.WriteString("ok: source replication attribute\n")
 	for i := range 200 {
 		fmt.Fprintf(&sb, "preflight: warning: acknowledged table public.t%d has no usable replica identity\n", i)
@@ -901,8 +918,9 @@ func TestEmitPreflightOutcome_LongAudit(t *testing.T) {
 		case e := <-rec.Events:
 			got = append(got, e)
 		default:
-			if len(got) != 2 || !strings.Contains(got[0], "PreflightRemediated") {
-				t.Fatalf("remediation event lost under the audit: %v", got)
+			if len(got) != 2 || !strings.Contains(got[0], "PreflightRemediated") ||
+				!strings.Contains(got[0], "GRANT EXECUTE ON FUNCTION") {
+				t.Fatalf("remediation bundle lost under the audit: %v", got)
 			}
 			return
 		}
