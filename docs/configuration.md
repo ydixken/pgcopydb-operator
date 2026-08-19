@@ -1,10 +1,10 @@
 # Configuration
 
-The knobs you reach for after the first clone works. Every field, with defaults and validation, is in the [CRD reference](reference/api.md); complete commented resources live in [examples/](https://github.com/ydixken/pgcopydb-operator/tree/main/docs/examples).
+The knobs you reach for after the first clone works. Every field, with defaults and validation, is in the [CRD reference](reference/api.md); complete commented resources live in the [examples index](examples.md).
 
 ## Clone tuning
 
-Tuning (parallelism, same-table splitting, skips) is the `clone` block; see [migration-tuned.yaml](examples/migration-tuned.yaml) for the full commented version:
+Tuning (parallelism, same-table splitting, skips) is the `clone` block; see [04-clone-tuned.yaml](examples/04-clone-tuned.yaml) for the full commented version:
 
 ```yaml
 spec:
@@ -74,7 +74,7 @@ spec:
     uriSecretRef: {name: rds-target, key: uri}
 ```
 
-The DSN form fits DBaaS endpoints (RDS, Neon, ...) that hand you a complete connection URI; [migration-dsn-secret.yaml](examples/migration-dsn-secret.yaml) shows it together with TLS verification against a provider CA bundle.
+The DSN form fits DBaaS endpoints (RDS, Neon, ...) that hand you a complete connection URI; [02-clone-dsn-secret.yaml](examples/02-clone-dsn-secret.yaml) shows it together with TLS verification against a provider CA bundle.
 
 The third form, `secretRef`, points at one Secret whose keys hold the connection parts, the way platform provisioners hand them out:
 
@@ -97,7 +97,7 @@ Values are used literally: anything containing URI syntax (`@`, `:`, `/`, `%`, a
 With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: external`) as `host` or `host:port` with 5432 as the default port, and the user from `USER`.
 `keys` remaps any of the five key names; `sslMode` fills the gap when the URI sets none, and the `tls` file paths always apply.
 The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
-[migration-details-secret.yaml](examples/migration-details-secret.yaml) is the complete example.
+[03-clone-platform-secret.yaml](examples/03-clone-platform-secret.yaml) is the complete example.
 
 Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
-The preflight checks it and applies the follow grants the regular role is missing, logging each statement as an event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [migration-superuser.yaml](examples/migration-superuser.yaml) the example.
+The preflight checks it and applies the follow grants the regular role is missing, logging each statement as an event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.

@@ -33,7 +33,7 @@ The chart is also listed on [Artifact Hub](https://artifacthub.io/packages/helm/
 Then create a `Migration` (full examples with explanations in [docs/examples/](docs/examples/)):
 
 ```sh
-kubectl apply -f docs/examples/migration-minimal.yaml
+kubectl apply -f docs/examples/01-clone-minimal.yaml
 kubectl get pgm -w
 ```
 

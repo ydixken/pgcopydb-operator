@@ -1,17 +1,16 @@
 # Live migration where the preflight applies the follow grants itself.
-# Each superuserSecretRef names a Secret in the secretRef convention whose
-# USER/PW keys hold a superuser on the SAME endpoint; preflight checks it,
-# then runs the missing grants (ALTER ROLE ... REPLICATION on the source,
-# GRANT EXECUTE on the origin functions and GRANT SET ON PARAMETER
-# session_replication_role on the target), logging each as an event.
-# Contract: docs/reference/prerequisites.md, "Superuser remediation".
+# Each superuserSecretRef names a Secret in the same DB/PW/URL/URL_EXTERNAL/
+# USER convention as secretRef (03-clone-platform-secret.yaml): USER/PW are
+# consumed, and URL keys, when present, must match this side's endpoint.
+# The preflight checks the superuser, applies the missing grants, and logs
+# each statement as an event: docs/reference/prerequisites.md has the contract.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
-  name: billing
+  name: live-superuser
 spec:
   source:
-    host: billing.old-datacenter.example.com
+    host: billing.example.com
     database: billing
     username: migrator  # gets ALTER ROLE "migrator" REPLICATION if missing
     passwordSecretRef: {name: billing-source, key: password}

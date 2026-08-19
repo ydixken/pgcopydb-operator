@@ -39,6 +39,7 @@ nav:
   - Quickstart: quickstart.md
   - Installation: installation.md
   - Configuration: configuration.md
+  - Examples: examples.md
   - Operations:
       - Live migration: operations/live-migration.md
       - Verification: operations/verification.md

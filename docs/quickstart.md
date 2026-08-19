@@ -2,10 +2,10 @@
 
 A first clone, end to end. What your PostgreSQL endpoints must provide beforehand (privileges, WAL settings, replica identities) lives in the [prerequisites](reference/prerequisites.md); read it first, most of the failures in the [troubleshooting table](troubleshooting.md) trace back to it. [Install the operator](installation.md), then continue here.
 
-A `Migration` without `follow` is a one-shot bulk copy: schema, data, indexes, constraints, sequences. Put the passwords in Secrets in the Migration's namespace, then apply the minimal example ([migration-minimal.yaml](examples/migration-minimal.yaml)):
+A `Migration` without `follow` is a one-shot bulk copy: schema, data, indexes, constraints, sequences. Put the passwords in Secrets in the Migration's namespace, then apply the minimal example ([01-clone-minimal.yaml](examples/01-clone-minimal.yaml)):
 
 ```sh
-kubectl apply -f docs/examples/migration-minimal.yaml
+kubectl apply -f docs/examples/01-clone-minimal.yaml
 kubectl get pgm -w
 ```
 

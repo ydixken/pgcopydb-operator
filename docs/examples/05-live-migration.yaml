@@ -1,16 +1,15 @@
-# Live migration: base copy under a replication slot, then logical replication
-# until you approve the cutover. Follow mode has strict source and target
-# prerequisites (wal_level, REPLICATION attribute, target grants, replica
-# identities); read docs/reference/prerequisites.md first. Runbook:
-# docs/operations/live-migration.md. To have the preflight apply the grants
-# itself, see migration-superuser.yaml.
+# Live migration: base copy under a replication slot, then logical
+# replication until you approve the cutover. The follow prerequisites are
+# strict; read docs/reference/prerequisites.md first, and see
+# 06-live-superuser.yaml to have the preflight apply the grants itself.
+# Runbook: docs/operations/live-migration.md.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
-  name: billing
+  name: live-migration
 spec:
   source:
-    host: billing.old-datacenter.example.com
+    host: billing.example.com
     database: billing
     username: migrator  # MUST have the REPLICATION role attribute
     passwordSecretRef: {name: billing-source, key: password}
@@ -19,8 +18,7 @@ spec:
     host: billing-pg-rw.billing.svc
     database: billing
     # Needs EXECUTE on pg_replication_origin_* and (PG15+) GRANT SET ON
-    # PARAMETER session_replication_role; docs/reference/prerequisites.md
-    # covers both.
+    # PARAMETER session_replication_role; see prerequisites.
     username: app
     passwordSecretRef: {name: billing-pg-app, key: password}
   follow:
@@ -28,9 +26,13 @@ spec:
     # Defaults: plugin pgoutput; slot, origin, and publication names generated
     # per Migration, so several migrations can share one source instance.
     # maxCatchupLag: 16Mi  # lag under which the CaughtUp condition goes True
+    # publication: billing_pub  # pre-created publication; skips create/drop rights
+    # allowMissingReplicaIdentity: ["public.audit_log"]  # read-only tables only
   cutover:
     mode: Manual  # the default: stop writes to the source, then approve
     # approved: true  # flip this to freeze the stream and drain
+    # mode: Automatic  # instead: cut over unattended once CaughtUp holds
+  # suspend: true  # pauses between attempts; the slot keeps retaining WAL
   workVolume:
     # Holds the base-copy dumps AND the change stream: streamed changes
     # accumulate here for the whole migration window. Budget the clone's
