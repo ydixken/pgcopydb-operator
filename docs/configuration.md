@@ -98,3 +98,6 @@ With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: 
 `keys` remaps any of the five key names; `sslMode` fills the gap when the URI sets none, and the `tls` file paths always apply.
 The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
 [migration-details-secret.yaml](examples/migration-details-secret.yaml) is the complete example.
+
+Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
+The preflight verifies it and applies the follow grants the regular role is missing, logging each statement as an event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [migration-superuser.yaml](examples/migration-superuser.yaml) the example.

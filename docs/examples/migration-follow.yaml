@@ -2,7 +2,8 @@
 # until you approve the cutover. Follow mode has strict source and target
 # prerequisites (wal_level, REPLICATION attribute, target grants, replica
 # identities); read docs/reference/prerequisites.md first. Runbook:
-# docs/operations/live-migration.md.
+# docs/operations/live-migration.md. To have the preflight apply the grants
+# itself, see migration-superuser.yaml.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
