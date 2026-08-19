@@ -74,6 +74,16 @@ func reconcileAndGet(ctx context.Context, r *MigrationReconciler, name string) *
 	return m
 }
 
+// passGate drives a fresh Migration through the universal preflight gate:
+// the first pass creates only the preflight Job, its success unlocks the
+// worker. Shared by every suite in this package.
+func passGate(ctx context.Context, r *MigrationReconciler, name string) {
+	GinkgoHelper()
+	reconcileAndGet(ctx, r, name)
+	finishJob(ctx, name+"-preflight", true)
+	reconcileAndGet(ctx, r, name)
+}
+
 // drainEvents empties the fake recorder so each phase of a test only sees the
 // events it caused.
 func drainEvents(rec *events.FakeRecorder) []string {
@@ -120,15 +130,24 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-first-attempt"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		m := reconcileAndGet(ctx, newReconciler(), name)
 
 		pvc := &corev1.PersistentVolumeClaim{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-work", Namespace: testNS}, pvc)).To(Succeed())
 		Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal("10Gi"))
 
-		// Preflight is a follow-mode gate; a plain clone starts directly.
-		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-preflight", Namespace: testNS}, &batchv1.Job{})
+		// The gate is universal: even a plain clone starts with the preflight
+		// (connectivity tier), and the worker waits for it.
+		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated.Status).To(Equal(metav1.ConditionUnknown))
+		Expect(validated.Reason).To(Equal("PreflightRunning"))
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{})
 		Expect(errors.IsNotFound(err)).To(BeTrue())
+
+		finishJob(ctx, name+"-preflight", true)
+		reconcileAndGet(ctx, newReconciler(), name)
 
 		job := fetchJob(ctx, name+"-run-1")
 		c := job.Spec.Template.Spec.Containers[0]
@@ -146,7 +165,7 @@ var _ = Describe("Migration Controller", func() {
 		Expect(*job.Spec.BackoffLimit).To(Equal(int32(0)))
 		Expect(*job.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(int64(65532)))
 
-		m := getMigration(name)
+		m = getMigration(name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-1"))
@@ -159,7 +178,7 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-complete"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 		finishJob(ctx, name+"-run-1", true)
 
 		m := reconcileAndGet(ctx, newReconciler(), name)
@@ -179,7 +198,7 @@ var _ = Describe("Migration Controller", func() {
 		m := validMigration(name)
 		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, newReconciler(), name)     // observes failure, clears jobName
@@ -203,7 +222,7 @@ var _ = Describe("Migration Controller", func() {
 		m := validMigration(name)
 		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name) // run-1
+		passGate(ctx, newReconciler(), name) // run-1
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, newReconciler(), name) // observes failure, clears jobName
 		reconcileAndGet(ctx, newReconciler(), name) // run-2, the final attempt
@@ -237,7 +256,7 @@ var _ = Describe("Migration Controller", func() {
 			`{"error_severity":"ERROR","message":"` + lastError + `"}` + "\n"}
 		rec := r.Recorder.(*events.FakeRecorder)
 
-		reconcileAndGet(ctx, r, name) // run-1
+		passGate(ctx, r, name) // run-1
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, r, name) // failure observed: the retry event carries the log detail
 		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
@@ -262,7 +281,7 @@ var _ = Describe("Migration Controller", func() {
 
 		r := newReconciler()
 		r.Logs = &fakeLogs{err: fmt.Errorf("pods \"gone\" not found")}
-		reconcileAndGet(ctx, r, name) // run-1
+		passGate(ctx, r, name) // run-1
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, r, name) // retry scheduled
 		reconcileAndGet(ctx, r, name) // run-2
@@ -281,7 +300,7 @@ var _ = Describe("Migration Controller", func() {
 		m := validMigration(name)
 		m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeSchemas: []string{"audit"}}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		cm := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-filters", Namespace: testNS}, cm)).To(Succeed())
@@ -296,7 +315,7 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-suspend"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		m := getMigration(name)
 		m.Spec.Suspend = true
@@ -327,6 +346,10 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-stale"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+
+		// Clear the universal gate first so pass A starts the worker attempt.
+		reconcileAndGet(ctx, newReconciler(), name)
+		finishJob(ctx, name+"-preflight", true)
 
 		// Pass B's view of the world: fetched before pass A writes status.
 		stale := getMigration(name)

@@ -52,6 +52,9 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the
 	// condition message: one line per failed check plus psql stderr.
 	preflightLogTail = 20
+	// preflightOkLogTail bounds the success-path parse for ok/remediated
+	// lines: one per check and per applied grant, warnings included.
+	preflightOkLogTail = 60
 	// zombieLogTail bounds the log window scanned for the supervisor-death
 	// marker. Wider than workerLogTail because the surviving streaming child
 	// keeps logging LSN reports after the marker and would push it out of a
@@ -204,15 +207,18 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	return r.observeRunningJob(ctx, m, base, job)
 }
 
-// preflightGate probes the follow prerequisites before any worker runs: a
-// one-shot Job checks wal_level, slot headroom, the REPLICATION attribute,
-// origin-function EXECUTE, and the session_replication_role SET gate. Every
-// one of these failed live before it failed loudly; two of them lose data
-// silently. Failure is absorbing: these are configuration errors on the
-// databases, retrying the migration cannot fix them. handled=true means this
-// pass ends here; false lets the caller proceed to Job orchestration.
+// preflightGate probes the databases before any worker runs: a one-shot Job
+// validates connectivity first for every Migration, verifies configured
+// superuser credentials, and for follow migrations checks wal_level, slot
+// headroom, the REPLICATION attribute, origin-function EXECUTE, and the
+// session_replication_role SET gate, remediating the grantable ones when a
+// superuser connection is provided. Every follow check failed live before it
+// failed loudly; two of them lose data silently. Failure is absorbing: these
+// are configuration errors on the databases, retrying the migration cannot
+// fix them. handled=true means this pass ends here; false lets the caller
+// proceed to Job orchestration.
 func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, bool, error) {
-	if !followEnabled(m) || m.Status.Attempts != 0 {
+	if m.Status.Attempts != 0 {
 		return ctrl.Result{}, false, nil
 	}
 	passed, failMsg, err := r.ensurePreflight(ctx, m)
@@ -235,8 +241,33 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 		}
 		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
 	}
-	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "all preflight checks passed")
+	r.emitPreflightOutcome(ctx, m)
 	return ctrl.Result{}, false, nil
+}
+
+// emitPreflightOutcome turns the finished preflight's log into events: one
+// PreflightRemediated per applied statement, then the PreflightPassed summary.
+// The "ok: " and "remediated: " line prefixes are the script's log contract.
+func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
+	checks := 0
+	var remediated []string
+	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
+	for line := range strings.SplitSeq(tail, "\n") {
+		switch {
+		case strings.HasPrefix(line, "ok: "):
+			checks++
+		case strings.HasPrefix(line, "remediated: "):
+			remediated = append(remediated, strings.TrimPrefix(line, "remediated: "))
+		}
+	}
+	for _, stmt := range remediated {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight", "%s", stmt)
+	}
+	msg := "all preflight checks passed"
+	if checks > 0 || len(remediated) > 0 {
+		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, len(remediated))
+	}
+	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "%s", msg)
 }
 
 // jobNameLabel is the Job controller's own pod label, the selector both the

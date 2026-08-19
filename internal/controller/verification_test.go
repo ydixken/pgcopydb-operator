@@ -46,7 +46,7 @@ var _ = Describe("Migration Controller verification", func() {
 		m := validMigration(name)
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		// Worker done: verification starts with the cheap schema check; the
 		// data Job must not exist yet and Complete must wait.
@@ -85,7 +85,7 @@ var _ = Describe("Migration Controller verification", func() {
 		m := validMigration(name)
 		m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		finishJob(ctx, name+"-run-1", true)
 		reconcileAndGet(ctx, newReconciler(), name)
@@ -110,7 +110,7 @@ var _ = Describe("Migration Controller verification", func() {
 		m := validMigration(name)
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		reconcileAndGet(ctx, newReconciler(), name)
+		passGate(ctx, newReconciler(), name)
 
 		finishJob(ctx, name+"-run-1", true)
 		reconcileAndGet(ctx, newReconciler(), name)

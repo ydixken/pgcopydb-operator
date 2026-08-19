@@ -107,6 +107,10 @@ func URIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-uri" }
 // SuperURIFile is the superuser counterpart of URIFile.
 func SuperURIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-super-uri" }
 
+// SuperURIEnv names the env var carrying a side's superuser URI, so the
+// preflight script generator and the prelude agree on one name.
+func SuperURIEnv(s Side) string { return pgmEnv(s, "SUPER_PGURI") }
+
 // pgmEnv names the side-scoped env vars the secretRef form injects; the
 // PGCOPYDB_* namespace belongs to pgcopydb itself.
 func pgmEnv(s Side, part string) string {
@@ -317,7 +321,7 @@ printf '%s:*:*:%s:%s\n' "$(pf_esc "$sup_host")" "$(pf_esc "$sup_user")" "$(pf_es
 		"@BASE@", uriEnv(s),
 		"@USER@", pgmEnv(s, "SUPER_USER"),
 		"@HOST@", pgmEnv(s, "SUPER_HOST"),
-		"@SUPERURI@", pgmEnv(s, "SUPER_PGURI"),
+		"@SUPERURI@", SuperURIEnv(s),
 		"@URIFILE@", SuperURIFile(s),
 		"@PWFILE@", pwFile,
 		"@PWKEY@", pwKey,
