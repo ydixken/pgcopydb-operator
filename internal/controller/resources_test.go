@@ -87,6 +87,29 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 	if got := envValue(job.Spec.Template.Spec.Containers[0].Env, "PGPASSFILE"); got != "" {
 		t.Fatalf("PGPASSFILE must be absent without password secrets, got %q", got)
 	}
+
+	// secretRef sides assemble their passfile line in the prelude, so the
+	// spec env must carry PGPASSFILE for exec'd commands here too.
+	secretRef := &v1beta1.Migration{
+		ObjectMeta: metav1.ObjectMeta{Name: "m3", Namespace: "ns"},
+		Spec: v1beta1.MigrationSpec{
+			Source: v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "bundle"}},
+			Target: v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "bundle2"}},
+		},
+	}
+	job, err = buildJob(secretRef, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	if got := envValue(c.Env, "PGPASSFILE"); got != "/tmp/pgpass" {
+		t.Fatalf("PGPASSFILE must be in the spec env for secretRef connections, got %q", got)
+	}
+	for _, want := range []string{"PGM_SOURCE_DB", "PGM_TARGET_DB", "PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI"} {
+		if !strings.Contains(c.Command[2], want) {
+			t.Fatalf("prelude misses %q:\n%s", want, c.Command[2])
+		}
+	}
 }
 
 // TestBuildVerifyJob_AuthAndPredicate covers the live-found verify-gate

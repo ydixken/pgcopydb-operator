@@ -223,6 +223,9 @@ func TestNudgeEndpos(t *testing.T) {
 	}
 	argv := strings.Join(cmds[0], " ")
 	for _, want := range []string{
+		// The recovery prefix restores the URI for secretRef connections,
+		// where the spec env cannot carry it.
+		`[ -f /tmp/pgm-source-uri ]`,
 		`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc`,
 		`pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')`,
 	} {

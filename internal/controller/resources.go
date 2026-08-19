@@ -349,17 +349,22 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 	env = append(env, corev1.EnvVar{Name: "PGCOPYDB_LOG_JSON", Value: "on"})
 
 	var passfiles []conn.Passfile
+	var preludes []string
 	for _, mat := range []*conn.Materialized{src, tgt} {
 		if mat.Passfile != nil {
 			passfiles = append(passfiles, *mat.Passfile)
 		}
+		if mat.Prelude != "" {
+			preludes = append(preludes, mat.Prelude)
+		}
 	}
-	if len(passfiles) > 0 {
+	if len(passfiles) > 0 || len(preludes) > 0 {
 		// PGPASSFILE must live in the container spec, not only in the
 		// prelude shell: commands the operator execs into the pod (sentinel
 		// reads, the WAL-head query, endpos setting) inherit the spec env,
 		// and without it they fail password authentication. Found live by
 		// the follow e2e suite; the prelude's own export stays for pid 1.
+		// secretRef sides (preludes) always assemble a passfile line too.
 		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
 	}
 
@@ -441,7 +446,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 						// assembles the passfile, runs setup, and execs
 						// "$0" "$@", where $0 is "pgcopydb" (scriptJob swaps
 						// it for /bin/sh) and $@ are the Args below.
-						Command:      []string{shellPath, "-c", conn.PreludeScript(passfiles, setup), "pgcopydb"},
+						Command:      []string{shellPath, "-c", conn.PreludeScript(preludes, passfiles, setup), "pgcopydb"},
 						Args:         args,
 						Env:          env,
 						VolumeMounts: mounts,

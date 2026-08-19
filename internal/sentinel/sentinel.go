@@ -28,9 +28,15 @@ import (
 	"strings"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
+
+// srcURIRecover restores PGCOPYDB_SOURCE_PGURI for exec'd shells when the
+// runner composed it at startup from a secretRef connection; the spec env
+// only carries it for the other connection forms. No-op otherwise.
+var srcURIRecover = `[ -f ` + conn.URIFile(conn.Source) + ` ] && { PGCOPYDB_SOURCE_PGURI=$(cat ` + conn.URIFile(conn.Source) + `); export PGCOPYDB_SOURCE_PGURI; }; `
 
 // ZeroLSN is PostgreSQL's null LSN; the sentinel reports it for an unset
 // endpos.
@@ -102,7 +108,7 @@ func (c *Client) Read(ctx context.Context, namespace, jobName string) (*State, e
 	}
 	// The runner env carries the source URI; psql ships in the runner image.
 	head, err := c.exec.InPod(ctx, namespace, pod,
-		[]string{"sh", "-c", `psql "$PGCOPYDB_SOURCE_PGURI" -tAc "select pg_current_wal_flush_lsn()"`})
+		[]string{"sh", "-c", srcURIRecover + `psql "$PGCOPYDB_SOURCE_PGURI" -tAc "select pg_current_wal_flush_lsn()"`})
 	if err == nil {
 		st.SourceHead = strings.TrimSpace(string(head))
 	}
@@ -122,7 +128,7 @@ func (c *Client) SetEndposCurrent(ctx context.Context, namespace, jobName string
 	}
 	out, err := c.exec.InPod(ctx, namespace, pod,
 		[]string{"sh", "-c",
-			`pgcopydb stream sentinel set endpos --current --source "$PGCOPYDB_SOURCE_PGURI" --dir ` + pgcopydb.WorkDir})
+			srcURIRecover + `pgcopydb stream sentinel set endpos --current --source "$PGCOPYDB_SOURCE_PGURI" --dir ` + pgcopydb.WorkDir})
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +150,7 @@ func (c *Client) NudgeEndpos(ctx context.Context, namespace, jobName string) err
 	}
 	_, err = c.exec.InPod(ctx, namespace, pod,
 		[]string{"sh", "-c",
-			`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc "select pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')"`})
+			srcURIRecover + `psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc "select pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')"`})
 	return err
 }
 
