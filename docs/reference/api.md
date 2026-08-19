@@ -68,6 +68,46 @@ _Appears in:_
 | `bytesDone` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesDone is the bytes copied so far. |  | Optional: \{\} <br /> |
 
 
+#### ConnectionSecret
+
+
+
+ConnectionSecret points at a Secret whose keys hold the parts of a
+connection. Key names are remappable; defaults match the common platform
+convention (DB, PW, URL, URL_EXTERNAL, USER).
+
+
+
+_Appears in:_
+- [PostgresConnection](#postgresconnection)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the Secret in the Migration's namespace. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `endpoint` _string_ | endpoint picks which URL key supplies the host when the database key<br />holds a bare name: internal (url key) or external (urlExternal key). | internal | Enum: [internal external] <br />Optional: \{\} <br /> |
+| `keys` _[ConnectionSecretKeys](#connectionsecretkeys)_ | keys remaps the Secret key names. |  | Optional: \{\} <br /> |
+
+
+#### ConnectionSecretKeys
+
+
+
+ConnectionSecretKeys names the Secret keys the connection parts come from.
+
+
+
+_Appears in:_
+- [ConnectionSecret](#connectionsecret)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `database` _string_ | database holds a bare database name or a full password-free libpq URI.<br />A URI is authoritative for user, host, port, and database name. | DB | Optional: \{\} <br /> |
+| `password` _string_ | password holds the password; projected as a file, never env or argv. | PW | Optional: \{\} <br /> |
+| `url` _string_ | url holds the internal hostname, optionally host:port. | URL | Optional: \{\} <br /> |
+| `urlExternal` _string_ | urlExternal holds the externally reachable hostname, optionally host:port. | URL_EXTERNAL | Optional: \{\} <br /> |
+| `username` _string_ | username holds the role to connect as. | USER | Optional: \{\} <br /> |
+
+
 #### CutoverMode
 
 _Underlying type:_ _string_
@@ -257,8 +297,9 @@ _Appears in:_
 
 PostgresConnection describes how to reach one PostgreSQL endpoint. It is a
 self-contained type so a reusable connection kind can reference it later.
-Provide either the inline fields (host/database/username plus a password
-secret) or uriSecretRef (a full libpq URI/DSN), never both.
+Provide exactly one form: the inline fields (host/database/username plus a
+password secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one
+Secret holding the parts as individual keys).
 
 
 
@@ -275,6 +316,7 @@ _Appears in:_
 | `sslMode` _string_ | sslMode is the libpq sslmode. | prefer | Enum: [disable allow prefer require verify-ca verify-full] <br />Optional: \{\} <br /> |
 | `tls` _[TLSSecretRefs](#tlssecretrefs)_ | tls references client certificate material, mounted 0600 for libpq. |  | Optional: \{\} <br /> |
 | `uriSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | uriSecretRef selects a full libpq connection URI/DSN (with credentials).<br />Mutually exclusive with the inline fields; useful for DBaaS sources. |  | Optional: \{\} <br /> |
+| `secretRef` _[ConnectionSecret](#connectionsecret)_ | secretRef references one Secret carrying the connection details as<br />individual keys, the way platform provisioners hand them out.<br />Mutually exclusive with the inline fields and uriSecretRef. |  | Optional: \{\} <br /> |
 
 
 #### ReplicationStatus

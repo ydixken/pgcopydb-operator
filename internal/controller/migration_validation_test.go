@@ -82,11 +82,11 @@ var _ = Describe("Migration CRD validation", func() {
 				m.Spec.Source.URISecretRef = &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "dsn"}, Key: "value",
 				}
-			}, "not both"),
+			}, "set exactly one of secretRef, uriSecretRef"),
 		Entry("connection with neither inline fields nor uriSecretRef", "cel-conn-neither",
 			func(m *v1beta1.Migration) {
 				m.Spec.Source = v1beta1.PostgresConnection{Database: testDB}
-			}, "set either uriSecretRef or the inline host/username fields"),
+			}, "set exactly one of secretRef, uriSecretRef"),
 		Entry("uriSecretRef-only connections on both sides", "cel-conn-uri-only",
 			func(m *v1beta1.Migration) {
 				uri := func(name string) v1beta1.PostgresConnection {
