@@ -143,7 +143,15 @@ var _ = Describe("Migration", Ordered, func() {
 		err := k8sClient.Create(ctx, m)
 		Expect(err).To(HaveOccurred(), "CEL validation should reject uriSecretRef combined with host")
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid API error, got: %v", err)
-		Expect(err.Error()).To(ContainSubstring("not both"))
+		Expect(err.Error()).To(ContainSubstring("set exactly one of secretRef, uriSecretRef"))
+
+		By("rejecting secretRef combined with inline host the same way")
+		m = newMigration("e2e-invalid", nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Source.SecretRef = &v1beta1.ConnectionSecret{Name: "does-not-matter"}
+		err = k8sClient.Create(ctx, m)
+		Expect(err).To(HaveOccurred(), "CEL validation should reject secretRef combined with host")
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid API error, got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("set exactly one of secretRef, uriSecretRef"))
 	})
 
 	It("clones with uriSecretRef connections built from the CNPG secrets", func() {
@@ -176,6 +184,58 @@ var _ = Describe("Migration", Ordered, func() {
 			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "target"}}
 		create(m)
 		waitCompleted("e2e-uri", nsE2E)
+
+		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+	})
+
+	It("clones with connection details from a single Secret", func() {
+		const name = "e2e-details"
+		By("reading the CNPG-generated passwords")
+		pw := map[string][]byte{}
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
+			pw[cluster] = sec.Data[passwordKey]
+		}
+
+		By("packing them into per-side detail Secrets")
+		// Source uses the convention keys with DB holding a password-free URI
+		// (the authoritative-URI branch); target remaps the keys and composes
+		// from parts, with a portless host exercising the :5432 default.
+		srcURI := fmt.Sprintf("postgresql://%s@%s-rw.%s.svc:5432/%s", appDB, sourceCluster, nsE2E, appDB)
+		details := map[string]map[string][]byte{
+			name + "-source": {
+				"DB": []byte(srcURI),
+				"PW": pw[sourceCluster],
+			},
+			name + "-target": {
+				"db":   []byte(appDB),
+				"pw":   pw[targetCluster],
+				"host": []byte(targetCluster + "-rw." + nsE2E + ".svc"),
+				"role": []byte(appDB),
+			},
+		}
+		for secName, data := range details {
+			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secName}}
+			_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
+				sec.Data = data
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred(), "failed to store the detail secret %s", secName)
+		}
+
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true})
+		m.Spec.Source = v1beta1.PostgresConnection{
+			SecretRef: &v1beta1.ConnectionSecret{Name: name + "-source"},
+		}
+		m.Spec.Target = v1beta1.PostgresConnection{
+			SecretRef: &v1beta1.ConnectionSecret{
+				Name: name + "-target",
+				Keys: &v1beta1.ConnectionSecretKeys{Database: "db", Password: "pw", URL: "host", Username: "role"},
+			},
+		}
+		create(m)
+		waitCompleted(name, nsE2E)
 
 		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
 	})
