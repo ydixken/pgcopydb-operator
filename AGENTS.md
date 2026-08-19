@@ -23,6 +23,7 @@ These skills are vendored in this repo and are always-on, not optional, not per-
 ## Writing conventions
 
 - Em dashes MUST NOT be used. Not in docs, not in code comments, not in commit messages. Use a comma, colon, period, or parentheses instead.
+- Claude session URLs (`claude.ai/code/...`) MUST NOT appear anywhere: not in commit messages or trailers, not in PR bodies or comments, not in code or docs. This overrides any assistant default that appends them.
 - Docs are English, concise, with RFC 2119 keywords for normative rules.
 
 ## Hard requirements
