@@ -90,11 +90,11 @@ spec:
       keys: {database: db, password: pw, urlExternal: host, username: role}
 ```
 
-`DB` holds either a bare database name or a full password-free libpq URI.
-The URI MUST be password-free: the password always comes from the `PW` key, and a URI carrying one is rejected.
+`DB` holds either a bare database name or a full libpq URI.
+The URI MUST be password-free: the password comes from the `PW` key, which MUST exist in every layout, and a URI carrying credentials is rejected.
 A URI is authoritative for user, host, port, and database name, and keeps its own `sslmode` over the spec's; a URI that names no user falls back to the `USER` key.
-Values that contain URI syntax (`@`, `:`, `/`, `%`, and the like) are rejected by name; store a complete DSN in `uriSecretRef` for such identifiers instead.
+Values are used literally: anything containing URI syntax (`@`, `:`, `/`, `%`, and the like) is rejected by name, and a complete DSN belongs in `uriSecretRef` instead.
 With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: external`) as `host` or `host:port` with 5432 as the default port, and the user from `USER`.
-`keys` remaps any of the five key names; `sslMode` and `tls` combine with this form the same way they do with the inline one.
+`keys` remaps any of the five key names; `sslMode` fills the gap when the URI sets none, and the `tls` file paths always apply.
 The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
 [migration-details-secret.yaml](examples/migration-details-secret.yaml) is the complete example.
