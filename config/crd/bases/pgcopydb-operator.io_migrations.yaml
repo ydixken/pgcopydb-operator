@@ -1409,13 +1409,16 @@ spec:
                           database:
                             default: DB
                             description: |-
-                              database holds a bare database name or a full password-free libpq URI.
-                              A URI is authoritative for user, host, port, and database name.
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
                             type: string
                           password:
                             default: PW
-                            description: password holds the password; projected as
-                              a file, never env or argv.
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
                             type: string
                           url:
                             default: URL
@@ -1637,13 +1640,16 @@ spec:
                           database:
                             default: DB
                             description: |-
-                              database holds a bare database name or a full password-free libpq URI.
-                              A URI is authoritative for user, host, port, and database name.
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
                             type: string
                           password:
                             default: PW
-                            description: password holds the password; projected as
-                              a file, never env or argv.
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
                             type: string
                           url:
                             default: URL
@@ -3386,13 +3392,16 @@ spec:
                           database:
                             default: DB
                             description: |-
-                              database holds a bare database name or a full password-free libpq URI.
-                              A URI is authoritative for user, host, port, and database name.
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
                             type: string
                           password:
                             default: PW
-                            description: password holds the password; projected as
-                              a file, never env or argv.
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
                             type: string
                           url:
                             default: URL
@@ -3614,13 +3623,16 @@ spec:
                           database:
                             default: DB
                             description: |-
-                              database holds a bare database name or a full password-free libpq URI.
-                              A URI is authoritative for user, host, port, and database name.
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
                             type: string
                           password:
                             default: PW
-                            description: password holds the password; projected as
-                              a file, never env or argv.
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
                             type: string
                           url:
                             default: URL

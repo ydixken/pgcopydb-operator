@@ -100,13 +100,16 @@ type ConnectionSecret struct {
 
 // ConnectionSecretKeys names the Secret keys the connection parts come from.
 type ConnectionSecretKeys struct {
-	// database holds a bare database name or a full password-free libpq URI.
-	// A URI is authoritative for user, host, port, and database name.
+	// database is a bare database name or a libpq URI that MUST be
+	// password-free (the password key carries it); a URI is authoritative for
+	// user, host, port, and database name. Values are used literally: special
+	// characters need uriSecretRef.
 	// +kubebuilder:default=DB
 	// +optional
 	Database string `json:"database,omitempty"`
 
 	// password holds the password; projected as a file, never env or argv.
+	// The key MUST exist even when the database key holds a URI.
 	// +kubebuilder:default=PW
 	// +optional
 	Password string `json:"password,omitempty"`

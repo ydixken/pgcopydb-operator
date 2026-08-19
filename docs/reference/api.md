@@ -101,8 +101,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `database` _string_ | database holds a bare database name or a full password-free libpq URI.<br />A URI is authoritative for user, host, port, and database name. | DB | Optional: \{\} <br /> |
-| `password` _string_ | password holds the password; projected as a file, never env or argv. | PW | Optional: \{\} <br /> |
+| `database` _string_ | database is a bare database name or a libpq URI that MUST be<br />password-free (the password key carries it); a URI is authoritative for<br />user, host, port, and database name. Values are used literally: special<br />characters need uriSecretRef. | DB | Optional: \{\} <br /> |
+| `password` _string_ | password holds the password; projected as a file, never env or argv.<br />The key MUST exist even when the database key holds a URI. | PW | Optional: \{\} <br /> |
 | `url` _string_ | url holds the internal hostname, optionally host:port. | URL | Optional: \{\} <br /> |
 | `urlExternal` _string_ | urlExternal holds the externally reachable hostname, optionally host:port. | URL_EXTERNAL | Optional: \{\} <br /> |
 | `username` _string_ | username holds the role to connect as. | USER | Optional: \{\} <br /> |
