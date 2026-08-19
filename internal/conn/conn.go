@@ -392,7 +392,7 @@ printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(pf_esc "$(cat
 func URIRecover() string {
 	var b strings.Builder
 	for _, s := range []Side{Source, Target} {
-		b.WriteString("[ -f " + URIFile(s) + " ] && { " + uriEnv(s) + "=$(cat " + URIFile(s) + "); export " + uriEnv(s) + "; }; ")
+		fmt.Fprintf(&b, "[ -f %[1]s ] && { %[2]s=$(cat %[1]s); export %[2]s; }; ", URIFile(s), uriEnv(s))
 	}
 	return b.String()
 }
