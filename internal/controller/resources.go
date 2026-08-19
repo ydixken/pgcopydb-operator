@@ -337,7 +337,7 @@ const originGrantsQuery = `check "$PGCOPYDB_TARGET_PGURI" "select string_agg(for
 
 // originGrantsBlock audits EXECUTE on the origin functions. The remediation
 // runs the aggregated statements in one psql call, then prints them one per
-// line so each becomes its own PreflightRemediated event.
+// line for the log contract; the event bundles them (see emitPreflightOutcome).
 func originGrantsBlock(super bool) string {
 	if super {
 		return `origin_grants=$(` + originGrantsQuery + `)
