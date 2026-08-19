@@ -814,17 +814,13 @@ func superConn() *v1beta1.PostgresConnection {
 }
 
 func TestMaterializeSuperuser_NilRef(t *testing.T) {
-	m, err := MaterializeSuperuser(Source, inlineConn())
-	if err != nil || m != nil {
-		t.Fatalf("want nil no-op without superuserSecretRef, got %+v, %v", m, err)
+	if m := MaterializeSuperuser(Source, inlineConn()); m != nil {
+		t.Fatalf("want nil no-op without superuserSecretRef, got %+v", m)
 	}
 }
 
 func TestMaterializeSuperuser(t *testing.T) {
-	m, err := MaterializeSuperuser(Source, superConn())
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := MaterializeSuperuser(Source, superConn())
 	for _, want := range []struct {
 		env, key string
 		optional bool
@@ -868,20 +864,14 @@ func TestMaterializeSuperuser(t *testing.T) {
 func TestMaterializeSuperuser_EndpointAndKeys(t *testing.T) {
 	c := superConn()
 	c.SuperuserSecretRef.Endpoint = endpointExternal
-	m, err := MaterializeSuperuser(Target, c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := MaterializeSuperuser(Target, c)
 	if got := findEnv(m.Env, "PGM_TARGET_SUPER_HOST").ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
 		t.Fatalf("external endpoint reads key %q, want URL_EXTERNAL", got)
 	}
 
 	c = superConn()
 	c.SuperuserSecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: "adminpw", Username: "adminrole"}
-	m, err = MaterializeSuperuser(Source, c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m = MaterializeSuperuser(Source, c)
 	if got := findEnv(m.Env, envSrcSuperUser).ValueFrom.SecretKeyRef.Key; got != "adminrole" {
 		t.Fatalf("remapped username key ignored, got %q", got)
 	}
@@ -894,20 +884,14 @@ func TestMaterializeSuperuser_EndpointAndKeys(t *testing.T) {
 	c = secretConn()
 	c.SecretRef.Endpoint = endpointExternal
 	c.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
-	m, err = MaterializeSuperuser(Source, c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m = MaterializeSuperuser(Source, c)
 	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
 		t.Fatalf("super host key %q, want the primary's external choice inherited", got)
 	}
 
 	// Even an explicit internal on the super ref loses to the primary.
 	c.SuperuserSecretRef.Endpoint = "internal"
-	m, err = MaterializeSuperuser(Source, c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m = MaterializeSuperuser(Source, c)
 	if got := findEnv(m.Env, envSrcSuperHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
 		t.Fatalf("super host key %q, the primary's endpoint must win over the super ref's", got)
 	}
@@ -926,10 +910,7 @@ func runSuperPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string
 		}
 		preludes = append(preludes, pm.Prelude)
 	}
-	sm, merr := MaterializeSuperuser(Source, c)
-	if merr != nil {
-		t.Fatal(merr)
-	}
+	sm := MaterializeSuperuser(Source, c)
 	preludes = append(preludes, sm.Prelude)
 
 	dir := t.TempDir()
