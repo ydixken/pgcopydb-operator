@@ -97,6 +97,24 @@ var _ = Describe("Migration CRD validation", func() {
 				m.Spec.Source = uri("src-dsn")
 				m.Spec.Target = uri("tgt-dsn")
 			}, ""),
+		Entry("connection with both inline fields and secretRef", "cel-conn-secretref-inline",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source.SecretRef = &v1beta1.ConnectionSecret{Name: "conn"}
+			}, "set exactly one of secretRef, uriSecretRef"),
+		Entry("connection with both secretRef and uriSecretRef", "cel-conn-secretref-uri",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{
+					SecretRef: &v1beta1.ConnectionSecret{Name: "conn"},
+					URISecretRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "conn-dsn"}, Key: "conninfo",
+					},
+				}
+			}, "set exactly one of secretRef, uriSecretRef"),
+		Entry("secretRef-only connections on both sides", "cel-conn-secretref-only",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "src-conn"}}
+				m.Spec.Target = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "tgt-conn"}}
+			}, ""),
 		Entry("includeOnlyTables with excludeTables", "cel-filter-tables",
 			filters(&v1beta1.Filters{IncludeOnlyTables: []string{"public.t1"}, ExcludeTables: []string{"public.t2"}}),
 			"includeOnlyTables cannot be combined with excludeTables or excludeSchemas"),
@@ -134,6 +152,32 @@ var _ = Describe("Migration CRD validation", func() {
 				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "decoderbufs"}
 			}, "supported values"),
 	)
+
+	// The CRD defaults are what Materialize relies on for partial keys; a bare
+	// secretRef keeps keys unset and the Go-side fallback covers it instead.
+	It("persists secretRef defaults for endpoint and partial keys", func() {
+		m := validMigration("cel-secretref-defaults")
+		m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "src-conn"}}
+		m.Spec.Target = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{
+			Name: "tgt-conn",
+			Keys: &v1beta1.ConnectionSecretKeys{Database: "custom"},
+		}}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx,
+			types.NamespacedName{Name: "cel-secretref-defaults", Namespace: testNS}, got)).To(Succeed())
+		Expect(got.Spec.Source.SecretRef.Endpoint).To(Equal("internal"))
+		Expect(got.Spec.Source.SecretRef.Keys).To(BeNil())
+		Expect(got.Spec.Target.SecretRef.Keys).To(Equal(&v1beta1.ConnectionSecretKeys{
+			Database:    "custom",
+			Password:    "PW",
+			URL:         "URL",
+			URLExternal: "URL_EXTERNAL",
+			Username:    "USER",
+		}))
+	})
 
 	It("enforces source/target/follow immutability while clone stays tunable", func() {
 		const name = "cel-immutable"
