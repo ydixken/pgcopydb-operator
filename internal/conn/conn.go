@@ -266,10 +266,10 @@ func secretEnvRef(secretName, key string, opt *bool) *corev1.EnvVarSource {
 // are verified at start to name the same endpoint. The snippet MUST run after
 // the side's primary snippet (it reads the composed URI and fails by name
 // otherwise). Returns nil when the side has no superuserSecretRef.
-func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
+func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) *Materialized {
 	sr := c.SuperuserSecretRef
 	if sr == nil {
-		return nil, nil
+		return nil
 	}
 	keys := effectiveKeys(sr.Keys)
 	// The super host key follows the primary's endpoint choice when the
@@ -293,7 +293,7 @@ func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) (*Materialized,
 	m.Volumes = append(m.Volumes, vol)
 	m.Mounts = append(m.Mounts, mount)
 	m.Prelude = superPrelude(s, file, keys.Password)
-	return m, nil
+	return m
 }
 
 // superPrelude renders the shell that derives a side's superuser URI from the

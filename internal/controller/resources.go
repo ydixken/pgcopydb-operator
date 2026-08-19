@@ -499,11 +499,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		s conn.Side
 		c *v1beta1.PostgresConnection
 	}{{conn.Source, &m.Spec.Source}, {conn.Target, &m.Spec.Target}} {
-		mat, err := conn.MaterializeSuperuser(sc.s, sc.c)
-		if err != nil {
-			return nil, err
-		}
-		if mat != nil {
+		if mat := conn.MaterializeSuperuser(sc.s, sc.c); mat != nil {
 			extras = append(extras, mat)
 		}
 	}

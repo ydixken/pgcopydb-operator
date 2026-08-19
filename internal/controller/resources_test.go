@@ -29,7 +29,11 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -902,5 +906,61 @@ func TestEmitPreflightOutcome_LongAudit(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// TestReconcileSuspended_PreflightErrors covers the two error legs of the
+// gate-stage preflight deletion; envtest cannot inject either failure.
+func TestReconcileSuspended_PreflightErrors(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{v1beta1.AddToScheme, batchv1.AddToScheme, corev1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := passwordMigration()
+	pf := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: preflightJobName(m), Namespace: m.Namespace}}
+	boom := errors.New("boom")
+
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(m, pf).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return boom
+			},
+		}).Build()
+	r := &MigrationReconciler{Client: c, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+	if _, err := r.reconcileSuspended(context.Background(), m, m.DeepCopy()); !errors.Is(err, boom) {
+		t.Fatalf("a preflight Delete failure must propagate, got %v", err)
+	}
+
+	c = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(m).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if key.Name == preflightJobName(m) {
+					return boom
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	r = &MigrationReconciler{Client: c, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+	if _, err := r.reconcileSuspended(context.Background(), m, m.DeepCopy()); !errors.Is(err, boom) {
+		t.Fatalf("a non-NotFound preflight Get failure must propagate, got %v", err)
+	}
+}
+
+// TestBuilders_InvalidConnection: cleanup and compare route through
+// jobSkeleton too, so a connection the materializer rejects must surface as
+// their error instead of a half-built Job.
+func TestBuilders_InvalidConnection(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Source = v1beta1.PostgresConnection{Username: "u"}
+	if _, err := buildCleanupJob(m, testRunnerImage); err == nil {
+		t.Fatal("cleanup builder must reject an invalid connection")
+	}
+	if _, err := buildCompareJob(m, testRunnerImage, compareSchema); err == nil {
+		t.Fatal("compare builder must reject an invalid connection")
+	}
+	if _, err := buildPreflightJob(m, testRunnerImage); err == nil {
+		t.Fatal("preflight builder must reject an invalid connection")
 	}
 }

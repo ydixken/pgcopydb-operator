@@ -56,6 +56,10 @@ func fullMigration() *Migration {
 					Cert:   secretRef("client", "tls.crt"),
 					Key:    secretRef("client", "tls.key"),
 				},
+				SuperuserSecretRef: &ConnectionSecret{
+					Name: "src-admin", Endpoint: "internal",
+					Keys: &ConnectionSecretKeys{Username: "admin", Password: "adminpw"},
+				},
 			},
 			Target: PostgresConnection{URISecretRef: secretRef("dsn", "uri")},
 			Clone: CloneOptions{

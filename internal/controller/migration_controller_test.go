@@ -481,9 +481,25 @@ var _ = Describe("Migration Controller", func() {
 		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).To(Equal("ImagePullBackOff"))
 		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
 
+		By("skipping running containers to reach the waiting one")
+		pod = makePod("wd-mixed", corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "sidecar", Image: testPodImage,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				{Name: testPodContainer, Image: testPodImage,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}},
+			},
+		})
+		Expect(r.preflightWaitDetail(ctx, testNS, jobName)).To(Equal("CrashLoopBackOff"))
+		Expect(k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0))).To(Succeed())
+
 		By("degrading to nothing when the pod list itself fails")
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
 		Expect(r.preflightWaitDetail(cancelled, testNS, jobName)).To(Equal(""))
+
+		By("propagating the same list failure from deleteJobPods, which must not eat it")
+		Expect(r.deleteJobPods(cancelled, testNS, jobName)).To(HaveOccurred())
 	})
 })
