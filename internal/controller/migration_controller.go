@@ -171,7 +171,7 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// Validated turns True only once the gate is clear: while the preflight
 	// runs the condition is Unknown/PreflightRunning, so nobody reads a
 	// stuck gate as a validated migration.
-	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly")
+	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly and the preflight passed")
 
 	// Job orchestration: observe the current attempt or start the next one.
 	if m.Status.JobName == "" {

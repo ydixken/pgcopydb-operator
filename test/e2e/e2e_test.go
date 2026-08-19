@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -240,6 +241,51 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
 	})
 
+	It("fails preflight fast on wrong credentials", func() {
+		const name = "e2e-badpw"
+		DeferCleanup(func() { deleteMigration(name) })
+
+		By("pointing the source at a Secret holding a wrong password")
+		copySecret(nsE2E, name, []byte("not-the-password"))
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Source.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Key:                  passwordKey,
+		}
+		create(m)
+
+		By("waiting for the connectivity tier to fail the Migration before any attempt")
+		failed := waitFailed(name, "PreflightFailed")
+		Expect(failureMessage(failed)).To(ContainSubstring("cannot connect to the source database"))
+		Expect(failed.Status.Attempts).To(Equal(int32(0)), "a worker attempt started despite the failed preflight")
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, &batchv1.Job{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "worker Job exists despite the failed preflight")
+	})
+
+	It("surfaces why the preflight cannot start", func() {
+		const name = "e2e-ghost"
+		DeferCleanup(func() { deleteMigration(name) })
+
+		By("referencing a connection Secret that does not exist")
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Source = v1beta1.PostgresConnection{
+			SecretRef: &v1beta1.ConnectionSecret{Name: name + "-missing"},
+		}
+		create(m)
+
+		By("waiting for the gate to report the pod-level reason on the Validated condition")
+		Eventually(func(g Gomega) {
+			cur := &v1beta1.Migration{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
+			c := apimeta.FindStatusCondition(cur.Status.Conditions, v1beta1.ConditionValidated)
+			g.Expect(c).NotTo(BeNil(), "Validated condition missing")
+			g.Expect(c.Status).To(Equal(metav1.ConditionUnknown))
+			g.Expect(c.Reason).To(Equal("PreflightRunning"))
+			g.Expect(c.Message).To(ContainSubstring("CreateContainerConfigError"),
+				"the kubelet's reason for the stuck pod must reach the condition")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+	})
+
 	It("verifies a clone with pgcopydb compare and sets Verified", func() {
 		m := newMigration("e2e-verified", nsE2E, v1beta1.CloneOptions{DropIfExists: true})
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
@@ -437,8 +483,9 @@ var _ = Describe("Migration", Ordered, func() {
 		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
 	})
 
-	// The failure-path specs close the ordered container: each one breaks a
-	// prerequisite on purpose and restores it in DeferCleanup, and running
+	// The rights-manipulation specs close the ordered container: each one
+	// breaks a prerequisite on purpose and restores it (via DeferCleanup or,
+	// for the remediation scenario, through the operator itself), and running
 	// them after every live scenario keeps a missed restore from poisoning
 	// anything downstream. The asserted hints are substrings of the message
 	// constants in internal/controller/resources.go (preflightScript).
@@ -501,14 +548,131 @@ var _ = Describe("Migration", Ordered, func() {
 			"preflight verdict must carry the exact re-grant hint")
 	})
 
-	It("exhausts the retry budget against an unreachable source and stays Failed", func() {
+	It("hints at superuserSecretRef when follow rights are missing", func() {
+		const name = "e2e-hint"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			ensureFollowPrivileges()
+			resetSourceReplication()
+			resetTargetReplication()
+		})
+
+		By("revoking all three grantable follow rights from the app role")
+		psql(srcPod, "ALTER ROLE app NOREPLICATION")
+		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
+			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
+		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+
+		create(newFollowMigration(name, v1beta1.CutoverManual))
+		m := waitFailed(name, "PreflightFailed")
+		Expect(failureMessage(m)).To(ContainSubstring("hint: spec.source.superuserSecretRef"),
+			"a failed source right without a superuser ref must hint at the field")
+		Expect(failureMessage(m)).To(ContainSubstring("hint: spec.target.superuserSecretRef"),
+			"a failed target right without a superuser ref must hint at the field")
+	})
+
+	It("remediates follow rights through superuserSecretRef and completes", func() {
+		const name = "e2e-remediate"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			psql(srcPod, "ALTER ROLE postgres PASSWORD NULL")
+			psql(tgtPod, "ALTER ROLE postgres PASSWORD NULL")
+			ensureFollowPrivileges()
+			resetSourceReplication()
+			resetTargetReplication()
+		})
+
+		By("giving postgres a password on both clusters and packing superuser Secrets")
+		// CNPG's generated pg_hba ends in a host-all scram rule, so a
+		// password-enabled postgres authenticates over the rw service exactly
+		// like the app role does.
+		for secName, pod := range map[string]string{name + "-super-src": srcPod, name + "-super-tgt": tgtPod} {
+			pw := secName + "-pw"
+			psql(pod, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secName}}
+			_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
+				sec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(pw)}
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret %s", secName)
+		}
+
+		By("revoking all three grantable follow rights from the app role")
+		psql(srcPod, "ALTER ROLE app NOREPLICATION")
+		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
+			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
+		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		mig.Spec.BackoffLimit = 5
+		mig.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super-src"}
+		mig.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super-tgt"}
+		create(mig)
+
+		By("waiting for the remediated preflight to clear and streaming to start")
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+
+		By("checking the applied grants were re-granted and recorded as events")
+		Expect(psql(srcPod, "SELECT rolreplication::int FROM pg_roles WHERE rolname = 'app'")).To(Equal("1"),
+			"remediation must restore the REPLICATION attribute")
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, got)).To(Succeed())
+		Eventually(func(g Gomega) {
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(ctx, events, client.InNamespace(nsE2E))).To(Succeed())
+			var alterRole, grantExec bool
+			for _, e := range events.Items {
+				if e.InvolvedObject.UID != got.UID || e.Reason != "PreflightRemediated" {
+					continue
+				}
+				if strings.Contains(e.Message, `ALTER ROLE "app" REPLICATION`) {
+					alterRole = true
+				}
+				if strings.Contains(e.Message, "GRANT EXECUTE ON FUNCTION") {
+					grantExec = true
+				}
+			}
+			g.Expect(alterRole).To(BeTrue(), "no PreflightRemediated event for the REPLICATION attribute")
+			g.Expect(grantExec).To(BeTrue(), "no PreflightRemediated event for the origin grants")
+		}, time.Minute, 2*time.Second).Should(Succeed())
+
+		By("driving the Manual cutover to completion")
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		approveCutover(name)
+		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
+		expectCleanupSucceeded(name)
+		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
+		Expect(targetOriginCount()).To(Equal("0"), "replication origin left behind on the target")
+	})
+
+	It("exhausts the retry budget when the clone cannot read the source and stays Failed", func() {
 		const name = "e2e-backoff"
-		DeferCleanup(func() { deleteMigration(name) })
+		DeferCleanup(func() {
+			deleteMigration(name)
+			psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
+		})
+
+		By("creating a source role that can connect but not read")
+		// The universal preflight only probes connectivity for clone-only
+		// migrations, so a role without SELECT passes the gate and fails the
+		// copy itself: exactly the deterministic mid-run failure this spec
+		// needs to exercise the retry budget.
+		psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
+		psql(srcPod, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
+		copySecret(nsE2E, name, []byte("e2e-noselect-pw"))
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
-		// .invalid never resolves (RFC 2606), so every attempt fails fast at
-		// connect time; backoffLimit 1 buys exactly two attempts.
-		m.Spec.Source.Host = "e2e-no-such-host.invalid"
+		m.Spec.Source.Username = "e2e_noselect"
+		m.Spec.Source.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Key:                  passwordKey,
+		}
 		m.Spec.BackoffLimit = 1
 		create(m)
 
