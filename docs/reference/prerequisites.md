@@ -101,8 +101,10 @@ Schema and workload contract:
 ## Superuser remediation (`superuserSecretRef`)
 
 Each side of the Migration MAY carry `superuserSecretRef`, a Secret in the same convention as [`secretRef`](../configuration.md#credentials): the `USER` and `PW` keys name a superuser on that same endpoint.
-The `URL`/`URL_EXTERNAL` keys, when present, MUST match the connection's endpoint; a mismatch fails the preflight by name.
-The preflight verifies the role actually is a superuser (`rolsuper`), then applies the follow rights the regular role is missing, exactly these statements:
+The `URL`/`URL_EXTERNAL` keys, when present, MUST match the connection's endpoint; a mismatch fails the preflight by name, and a value carrying `:port` is compared port and all.
+With a `secretRef` primary, the internal/external choice follows the primary's `endpoint` field, so both connections always name the same server.
+The preflight probes the superuser connection (with the same retries as the primaries) and checks `rolsuper`; a role without it only logs a warning, because managed-Postgres admin roles (`rds_superuser` and friends) can hold the grant rights without the attribute.
+It then applies the follow rights the regular role is missing, exactly these statements:
 
 - `ALTER ROLE <role> REPLICATION` on the source.
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function.
@@ -112,6 +114,7 @@ Every applied statement is re-checked, logged in the preflight output, and emitt
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never touches replica identity, `wal_level`, plugin installation, or your schema, and pgcopydb itself never runs as the superuser.
 One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.
+The reuse extends to TLS transport settings, including any client certificate; when the server maps certificate identities to roles, the certificate cannot present the superuser, so use password auth for it.
 
 ## Retries and snapshot consistency
 

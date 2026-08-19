@@ -100,4 +100,4 @@ The password stays a projected file feeding the passfile, with the same guarante
 [migration-details-secret.yaml](examples/migration-details-secret.yaml) is the complete example.
 
 Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
-The preflight verifies it and applies the follow grants the regular role is missing, logging each statement as an event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [migration-superuser.yaml](examples/migration-superuser.yaml) the example.
+The preflight checks it and applies the follow grants the regular role is missing, logging each statement as an event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [migration-superuser.yaml](examples/migration-superuser.yaml) the example.

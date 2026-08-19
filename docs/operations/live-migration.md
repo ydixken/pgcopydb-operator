@@ -17,8 +17,8 @@ The phases of a live migration:
 
 Every Migration's first attempt is gated by a `<name>-preflight` Job; for a follow migration it carries the full battery.
 The checks run over plain psql, in a fixed order, and each success prints an `ok:` line in the Job log, so the log reads as an audit trail.
-Connectivity to both endpoints always comes first.
-Then, per side with a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref), the superuser connection is verified (`rolsuper` must be true).
+Connectivity to both endpoints always comes first, and each connect is retried up to six times ten seconds apart, one logged `retry:` line per miss, so a failover blip does not fail an otherwise sound Migration.
+Then, per side with a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref), the superuser connection is probed the same way; a role without `rolsuper` only logs a warning and remediation proceeds, since managed-Postgres admin roles hold the grant rights without the attribute.
 Then the follow prerequisites: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
 Every one of these has failed a live run, and two lose data quietly rather than loudly.
 
@@ -29,9 +29,11 @@ kubectl get pgm billing -o jsonpath='{.status.conditions[?(@.type=="Validated")]
 ```
 
 With `superuserSecretRef` set, the preflight applies the grantable rights itself, re-checks them, and emits one `PreflightRemediated` event per applied statement; on success a `PreflightPassed` event counts checks and applied grants.
+The finished preflight Job is kept as that audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
+Setting `spec.suspend` while the gate runs deletes the preflight Job, stopping remediation with it; the gate re-runs the preflight on resume.
 
 While the gate runs, the `Validated` condition is `Unknown` with reason `PreflightRunning`; if the preflight pod cannot start (a misnamed Secret, an unbound work PVC, an unschedulable node), the kubelet's reason lands verbatim in the condition message.
-The Job is bounded: connections time out after 10 seconds (`PGCONNECT_TIMEOUT`) and the whole preflight after 10 minutes, so a black-holed endpoint fails instead of waiting forever.
+The Job is bounded: connections time out after 10 seconds (`PGCONNECT_TIMEOUT`, set on every operator control Job but never on the pgcopydb worker, whose data path must not race a connect cap) and the whole preflight after 30 minutes, so a black-holed endpoint fails instead of waiting forever.
 
 Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them. Fix the endpoint, then create a new Migration. The workload contract (no DDL during the migration, no large-object changes, wal2json presence) is not preflighted and stays your responsibility.
 

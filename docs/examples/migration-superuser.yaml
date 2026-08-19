@@ -1,6 +1,6 @@
 # Live migration where the preflight applies the follow grants itself.
 # Each superuserSecretRef names a Secret in the secretRef convention whose
-# USER/PW keys hold a superuser on the SAME endpoint; preflight verifies it,
+# USER/PW keys hold a superuser on the SAME endpoint; preflight checks it,
 # then runs the missing grants (ALTER ROLE ... REPLICATION on the source,
 # GRANT EXECUTE on the origin functions and GRANT SET ON PARAMETER
 # session_replication_role on the target), logging each as an event.
