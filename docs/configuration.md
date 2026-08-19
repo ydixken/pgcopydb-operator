@@ -60,7 +60,7 @@ spec:
 
 ## Credentials
 
-Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile. Two forms, mutually exclusive per endpoint:
+Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile. Three forms, mutually exclusive per endpoint:
 
 ```yaml
 spec:
@@ -75,3 +75,26 @@ spec:
 ```
 
 The DSN form fits DBaaS endpoints (RDS, Neon, ...) that hand you a complete connection URI; [migration-dsn-secret.yaml](examples/migration-dsn-secret.yaml) shows it together with TLS verification against a provider CA bundle.
+
+The third form, `secretRef`, points at one Secret whose keys hold the connection parts, the way platform provisioners hand them out:
+
+```yaml
+spec:
+  source:                         # details form: one Secret, one key per part
+    secretRef:
+      name: clouddb-app           # expects keys DB, PW, URL, URL_EXTERNAL, USER
+  target:
+    secretRef:
+      name: platform-db
+      endpoint: external          # take the host from the external URL key
+      keys: {database: db, password: pw, urlExternal: host, username: role}
+```
+
+`DB` holds either a bare database name or a full libpq URI.
+The URI MUST be password-free: the password comes from the `PW` key, which MUST exist in every layout, and a URI carrying credentials is rejected.
+A URI is authoritative for user, host, port, and database name, and keeps its own `sslmode` over the spec's; a URI that names no user falls back to the `USER` key.
+Values are used literally: anything containing URI syntax (`@`, `:`, `/`, `%`, and the like) is rejected by name, and a complete DSN belongs in `uriSecretRef` instead.
+With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: external`) as `host` or `host:port` with 5432 as the default port, and the user from `USER`.
+`keys` remaps any of the five key names; `sslMode` fills the gap when the URI sets none, and the `tls` file paths always apply.
+The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
+[migration-details-secret.yaml](examples/migration-details-secret.yaml) is the complete example.

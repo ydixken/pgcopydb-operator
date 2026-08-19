@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
@@ -46,6 +47,13 @@ type Client struct {
 }
 
 func New(exec *podexec.Exec) *Client { return &Client{exec: exec} }
+
+// inPodSh runs one shell command in the worker pod with conn.URIRecover
+// prefixed. Every exec in this package routes through here so no call site
+// can forget the recovery secretRef connections depend on.
+func (c *Client) inPodSh(ctx context.Context, namespace, pod, script string) ([]byte, error) {
+	return c.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + script})
+}
 
 // State is one sentinel sample plus the source WAL head.
 type State struct {
@@ -80,8 +88,8 @@ func (c *Client) Read(ctx context.Context, namespace, jobName string) (*State, e
 		return nil, nil
 	}
 	get := func(selector string) (string, error) {
-		out, err := c.exec.InPod(ctx, namespace, pod,
-			[]string{"pgcopydb", "stream", "sentinel", "get", selector, "--dir", pgcopydb.WorkDir})
+		out, err := c.inPodSh(ctx, namespace, pod,
+			"pgcopydb stream sentinel get "+selector+" --dir "+pgcopydb.WorkDir)
 		return strings.TrimSpace(string(out)), err
 	}
 	st := &State{}
@@ -101,8 +109,8 @@ func (c *Client) Read(ctx context.Context, namespace, jobName string) (*State, e
 		return nil, nil
 	}
 	// The runner env carries the source URI; psql ships in the runner image.
-	head, err := c.exec.InPod(ctx, namespace, pod,
-		[]string{"sh", "-c", `psql "$PGCOPYDB_SOURCE_PGURI" -tAc "select pg_current_wal_flush_lsn()"`})
+	head, err := c.inPodSh(ctx, namespace, pod,
+		`psql "$PGCOPYDB_SOURCE_PGURI" -tAc "select pg_current_wal_flush_lsn()"`)
 	if err == nil {
 		st.SourceHead = strings.TrimSpace(string(head))
 	}
@@ -120,9 +128,8 @@ func (c *Client) SetEndposCurrent(ctx context.Context, namespace, jobName string
 	if pod == "" {
 		return "", fmt.Errorf("no running worker pod for Job %s", jobName)
 	}
-	out, err := c.exec.InPod(ctx, namespace, pod,
-		[]string{"sh", "-c",
-			`pgcopydb stream sentinel set endpos --current --source "$PGCOPYDB_SOURCE_PGURI" --dir ` + pgcopydb.WorkDir})
+	out, err := c.inPodSh(ctx, namespace, pod,
+		`pgcopydb stream sentinel set endpos --current --source "$PGCOPYDB_SOURCE_PGURI" --dir `+pgcopydb.WorkDir)
 	if err != nil {
 		return "", err
 	}
@@ -142,9 +149,8 @@ func (c *Client) NudgeEndpos(ctx context.Context, namespace, jobName string) err
 	if err != nil || pod == "" {
 		return err
 	}
-	_, err = c.exec.InPod(ctx, namespace, pod,
-		[]string{"sh", "-c",
-			`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc "select pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')"`})
+	_, err = c.inPodSh(ctx, namespace, pod,
+		`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc "select pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')"`)
 	return err
 }
 

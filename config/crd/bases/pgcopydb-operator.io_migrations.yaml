@@ -1348,12 +1348,12 @@ spec:
                 description: source is the PostgreSQL endpoint to migrate from. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -1388,6 +1388,60 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  secretRef:
+                    description: |-
+                      secretRef references one Secret carrying the connection details as
+                      individual keys, the way platform provisioners hand them out.
+                      Mutually exclusive with the inline fields and uriSecretRef.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   sslMode:
                     default: prefer
                     description: sslMode is the libpq sslmode.
@@ -1503,17 +1557,21 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
-                - message: set either uriSecretRef or the inline host/username fields,
-                    not both
-                  rule: 'has(self.uriSecretRef) ? !has(self.host) && !has(self.username)
-                    : has(self.host) && has(self.username)'
+                - message: set exactly one of secretRef, uriSecretRef, or the inline
+                    connection fields
+                  rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
+                - message: inline form needs both host and username
+                  rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
+                    && has(self.username))
               suspend:
                 description: suspend stops the worker while preserving the work volume.
                 type: boolean
@@ -1521,12 +1579,12 @@ spec:
                 description: target is the PostgreSQL endpoint to migrate to. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -1561,6 +1619,60 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  secretRef:
+                    description: |-
+                      secretRef references one Secret carrying the connection details as
+                      individual keys, the way platform provisioners hand them out.
+                      Mutually exclusive with the inline fields and uriSecretRef.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   sslMode:
                     default: prefer
                     description: sslMode is the libpq sslmode.
@@ -1676,17 +1788,21 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: target is immutable
                   rule: self == oldSelf
-                - message: set either uriSecretRef or the inline host/username fields,
-                    not both
-                  rule: 'has(self.uriSecretRef) ? !has(self.host) && !has(self.username)
-                    : has(self.host) && has(self.username)'
+                - message: set exactly one of secretRef, uriSecretRef, or the inline
+                    connection fields
+                  rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
+                - message: inline form needs both host and username
+                  rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
+                    && has(self.username))
               ttlSecondsAfterFinished:
                 description: ttlSecondsAfterFinished deletes owned Jobs this long
                   after completion.
@@ -3215,12 +3331,12 @@ spec:
                 description: source is the PostgreSQL endpoint to migrate from. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -3255,6 +3371,60 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  secretRef:
+                    description: |-
+                      secretRef references one Secret carrying the connection details as
+                      individual keys, the way platform provisioners hand them out.
+                      Mutually exclusive with the inline fields and uriSecretRef.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   sslMode:
                     default: prefer
                     description: sslMode is the libpq sslmode.
@@ -3370,17 +3540,21 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
-                - message: set either uriSecretRef or the inline host/username fields,
-                    not both
-                  rule: 'has(self.uriSecretRef) ? !has(self.host) && !has(self.username)
-                    : has(self.host) && has(self.username)'
+                - message: set exactly one of secretRef, uriSecretRef, or the inline
+                    connection fields
+                  rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
+                - message: inline form needs both host and username
+                  rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
+                    && has(self.username))
               suspend:
                 description: suspend stops the worker while preserving the work volume.
                 type: boolean
@@ -3388,12 +3562,12 @@ spec:
                 description: target is the PostgreSQL endpoint to migrate to. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -3428,6 +3602,60 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  secretRef:
+                    description: |-
+                      secretRef references one Secret carrying the connection details as
+                      individual keys, the way platform provisioners hand them out.
+                      Mutually exclusive with the inline fields and uriSecretRef.
+                    properties:
+                      endpoint:
+                        default: internal
+                        description: |-
+                          endpoint picks which URL key supplies the host when the database key
+                          holds a bare name: internal (url key) or external (urlExternal key).
+                        enum:
+                        - internal
+                        - external
+                        type: string
+                      keys:
+                        description: keys remaps the Secret key names.
+                        properties:
+                          database:
+                            default: DB
+                            description: |-
+                              database is a bare database name or a libpq URI that MUST be
+                              password-free (the password key carries it); a URI is authoritative for
+                              user, host, port, and database name. Values are used literally: special
+                              characters need uriSecretRef.
+                            type: string
+                          password:
+                            default: PW
+                            description: |-
+                              password holds the password; projected as a file, never env or argv.
+                              The key MUST exist even when the database key holds a URI.
+                            type: string
+                          url:
+                            default: URL
+                            description: url holds the internal hostname, optionally
+                              host:port.
+                            type: string
+                          urlExternal:
+                            default: URL_EXTERNAL
+                            description: urlExternal holds the externally reachable
+                              hostname, optionally host:port.
+                            type: string
+                          username:
+                            default: USER
+                            description: username holds the role to connect as.
+                            type: string
+                        type: object
+                      name:
+                        description: name is the Secret in the Migration's namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
                   sslMode:
                     default: prefer
                     description: sslMode is the libpq sslmode.
@@ -3543,17 +3771,21 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: target is immutable
                   rule: self == oldSelf
-                - message: set either uriSecretRef or the inline host/username fields,
-                    not both
-                  rule: 'has(self.uriSecretRef) ? !has(self.host) && !has(self.username)
-                    : has(self.host) && has(self.username)'
+                - message: set exactly one of secretRef, uriSecretRef, or the inline
+                    connection fields
+                  rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
+                - message: inline form needs both host and username
+                  rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
+                    && has(self.username))
               ttlSecondsAfterFinished:
                 description: ttlSecondsAfterFinished deletes owned Jobs this long
                   after completion.

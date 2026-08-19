@@ -25,11 +25,13 @@ import (
 
 // PostgresConnection describes how to reach one PostgreSQL endpoint. It is a
 // self-contained type so a reusable connection kind can reference it later.
-// Provide either the inline fields (host/database/username plus a password
-// secret) or uriSecretRef (a full libpq URI/DSN), never both.
-// +kubebuilder:validation:XValidation:rule="has(self.uriSecretRef) ? !has(self.host) && !has(self.username) : has(self.host) && has(self.username)",message="set either uriSecretRef or the inline host/username fields, not both"
+// Provide exactly one form: the inline fields (host/database/username plus a
+// password secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one
+// Secret holding the parts as individual keys).
+// +kubebuilder:validation:XValidation:rule="(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ? 1 : 0) + ((has(self.host) || has(self.username) || has(self.database) || has(self.passwordSecretRef)) ? 1 : 0) == 1",message="set exactly one of secretRef, uriSecretRef, or the inline connection fields"
+// +kubebuilder:validation:XValidation:rule="has(self.secretRef) || has(self.uriSecretRef) || (has(self.host) && has(self.username))",message="inline form needs both host and username"
 type PostgresConnection struct {
-	// host is the server hostname or IP. Required unless uriSecretRef is set.
+	// host is the server hostname or IP, for the inline form.
 	// +optional
 	Host string `json:"host,omitempty"`
 
@@ -40,11 +42,11 @@ type PostgresConnection struct {
 	// +optional
 	Port int32 `json:"port,omitempty"`
 
-	// database is the database name to connect to. Required unless uriSecretRef is set.
+	// database is the database name to connect to, for the inline form.
 	// +optional
 	Database string `json:"database,omitempty"`
 
-	// username is the role to connect as. Required unless uriSecretRef is set.
+	// username is the role to connect as, for the inline form.
 	// +optional
 	Username string `json:"username,omitempty"`
 
@@ -67,6 +69,65 @@ type PostgresConnection struct {
 	// Mutually exclusive with the inline fields; useful for DBaaS sources.
 	// +optional
 	URISecretRef *corev1.SecretKeySelector `json:"uriSecretRef,omitempty"`
+
+	// secretRef references one Secret carrying the connection details as
+	// individual keys, the way platform provisioners hand them out.
+	// Mutually exclusive with the inline fields and uriSecretRef.
+	// +optional
+	SecretRef *ConnectionSecret `json:"secretRef,omitempty"`
+}
+
+// ConnectionSecret points at a Secret whose keys hold the parts of a
+// connection. Key names are remappable; defaults match the common platform
+// convention (DB, PW, URL, URL_EXTERNAL, USER).
+type ConnectionSecret struct {
+	// name is the Secret in the Migration's namespace.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Name string `json:"name"`
+
+	// endpoint picks which URL key supplies the host when the database key
+	// holds a bare name: internal (url key) or external (urlExternal key).
+	// +kubebuilder:validation:Enum=internal;external
+	// +kubebuilder:default=internal
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// keys remaps the Secret key names.
+	// +optional
+	Keys *ConnectionSecretKeys `json:"keys,omitempty"`
+}
+
+// ConnectionSecretKeys names the Secret keys the connection parts come from.
+type ConnectionSecretKeys struct {
+	// database is a bare database name or a libpq URI that MUST be
+	// password-free (the password key carries it); a URI is authoritative for
+	// user, host, port, and database name. Values are used literally: special
+	// characters need uriSecretRef.
+	// +kubebuilder:default=DB
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// password holds the password; projected as a file, never env or argv.
+	// The key MUST exist even when the database key holds a URI.
+	// +kubebuilder:default=PW
+	// +optional
+	Password string `json:"password,omitempty"`
+
+	// url holds the internal hostname, optionally host:port.
+	// +kubebuilder:default=URL
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// urlExternal holds the externally reachable hostname, optionally host:port.
+	// +kubebuilder:default=URL_EXTERNAL
+	// +optional
+	URLExternal string `json:"urlExternal,omitempty"`
+
+	// username holds the role to connect as.
+	// +kubebuilder:default=USER
+	// +optional
+	Username string `json:"username,omitempty"`
 }
 
 // TLSSecretRefs points at client certificate material for a connection.

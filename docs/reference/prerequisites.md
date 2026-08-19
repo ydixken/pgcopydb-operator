@@ -20,7 +20,7 @@ Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone -
 ## Kubernetes
 
 - The `migrations.pgcopydb-operator.io` CRD MUST be installed (chart `crds.install=true`, or `config/crd`).
-- Credentials MUST live in Secrets in the Migration's namespace: a password Secret for the inline connection form, or a full libpq URI Secret for `uriSecretRef`. TLS client material, if used, likewise.
+- Credentials MUST live in Secrets in the Migration's namespace: a password Secret for the inline connection form, a full libpq URI Secret for `uriSecretRef`, or one details Secret for `secretRef`. TLS client material, if used, likewise.
 - A StorageClass MUST be able to provision the work-volume PVC (`spec.workVolume`); it is the unit of resumability.
 - Runner pods MUST be able to reach both endpoints on their PostgreSQL port. Both endpoints are plain libpq targets; they do not have to run on Kubernetes.
 
