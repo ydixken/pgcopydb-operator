@@ -135,7 +135,7 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 	}
 
 	if c.PasswordSecretRef != nil {
-		vol, mount, file := passwordVolume(s, c.PasswordSecretRef.Name, c.PasswordSecretRef.Key)
+		vol, mount, file := passwordVolume(s, c.PasswordSecretRef.Name, c.PasswordSecretRef.Key, false)
 		m.Volumes = append(m.Volumes, vol)
 		m.Mounts = append(m.Mounts, mount)
 		m.Passfile = &Passfile{Host: c.Host, User: c.Username, File: file}
@@ -144,22 +144,27 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 }
 
 // passwordVolume projects one Secret key as the side's 0400 password file and
-// returns the in-container path of that file.
-func passwordVolume(s Side, secretName, key string) (corev1.Volume, corev1.VolumeMount, string) {
+// returns the in-container path of that file. optional tolerates a missing
+// key at mount time so the prelude can fail with a named error instead of the
+// pod hanging in ContainerCreating; the inline form keeps kubelet fail-fast
+// because its spec names the key explicitly.
+func passwordVolume(s Side, secretName, key string, optional bool) (corev1.Volume, corev1.VolumeMount, string) {
 	mode := int32(0o400)
 	name := string(s) + "-password"
+	src := &corev1.SecretVolumeSource{
+		SecretName: secretName,
+		Items: []corev1.KeyToPath{{
+			Key:  key,
+			Path: string(s) + "-password",
+		}},
+		DefaultMode: &mode,
+	}
+	if optional {
+		src.Optional = &optional
+	}
 	vol := corev1.Volume{
-		Name: name,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: secretName,
-				Items: []corev1.KeyToPath{{
-					Key:  key,
-					Path: string(s) + "-password",
-				}},
-				DefaultMode: &mode,
-			},
-		},
+		Name:         name,
+		VolumeSource: corev1.VolumeSource{Secret: src},
 	}
 	mount := corev1.VolumeMount{
 		Name:      name,
@@ -169,14 +174,21 @@ func passwordVolume(s Side, secretName, key string) (corev1.Volume, corev1.Volum
 	return vol, mount, credsDir + "/" + string(s) + "-mnt/" + string(s) + "-password"
 }
 
+// DefaultKeys returns the convention key names the secretRef form falls back
+// to; the CRD's ConnectionSecretKeys defaults must stay equal to these, which
+// an envtest assertion pins.
+func DefaultKeys() v1beta1.ConnectionSecretKeys {
+	return v1beta1.ConnectionSecretKeys{
+		Database: keyDatabase, Password: keyPassword, URL: keyURL,
+		URLExternal: keyURLExternal, Username: keyUsername,
+	}
+}
+
 // effectiveKeys fills the convention defaults for a nil or partial keys
 // object; apiserver defaulting covers the partial case at admission, the Go
 // fallback covers specs that never passed through it (unit tests, dry runs).
 func effectiveKeys(k *v1beta1.ConnectionSecretKeys) v1beta1.ConnectionSecretKeys {
-	eff := v1beta1.ConnectionSecretKeys{
-		Database: keyDatabase, Password: keyPassword, URL: keyURL,
-		URLExternal: keyURLExternal, Username: keyUsername,
-	}
+	eff := DefaultKeys()
 	if k == nil {
 		return eff
 	}
@@ -228,10 +240,10 @@ func materializeSecretRef(s Side, c *v1beta1.PostgresConnection) *Materialized {
 		m.Volumes = append(m.Volumes, vol)
 		m.Mounts = append(m.Mounts, mount)
 	}
-	vol, mount, file := passwordVolume(s, sr.Name, keys.Password)
+	vol, mount, file := passwordVolume(s, sr.Name, keys.Password, true)
 	m.Volumes = append(m.Volumes, vol)
 	m.Mounts = append(m.Mounts, mount)
-	m.Prelude = secretRefPrelude(s, querySuffix(s, c), file)
+	m.Prelude = secretRefPrelude(s, sslParam(c), tlsParams(s, c), file, keys.Password)
 	return m
 }
 
@@ -255,56 +267,92 @@ func ComposeURI(s Side, c *v1beta1.PostgresConnection) (string, error) {
 	return u.String(), nil
 }
 
-// querySuffix renders the spec-side libpq query params (sslmode, TLS file
-// paths); url.Values.Encode keeps the result shell-single-quote safe.
-func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
-	q := url.Values{}
-	if c.SSLMode != "" {
-		q.Set("sslmode", c.SSLMode)
+// sslParam renders the spec's sslmode as one libpq query param, or "".
+func sslParam(c *v1beta1.PostgresConnection) string {
+	if c.SSLMode == "" {
+		return ""
 	}
-	if c.TLS != nil {
-		base := tlsMountPath(s)
-		if c.TLS.RootCA != nil {
-			q.Set("sslrootcert", base+"/ca.crt")
-		}
-		if c.TLS.Cert != nil {
-			q.Set("sslcert", base+"/tls.crt")
-		}
-		if c.TLS.Key != nil {
-			q.Set("sslkey", base+"/tls.key")
-		}
+	q := url.Values{}
+	q.Set("sslmode", c.SSLMode)
+	return q.Encode()
+}
+
+// tlsParams renders the spec's TLS file paths as libpq query params, or "".
+// Split from sslParam because the secretRef prelude gates only sslmode on the
+// DB URI; the mounted cert paths always apply.
+func tlsParams(s Side, c *v1beta1.PostgresConnection) string {
+	if c.TLS == nil {
+		return ""
+	}
+	q := url.Values{}
+	base := tlsMountPath(s)
+	if c.TLS.RootCA != nil {
+		q.Set("sslrootcert", base+"/ca.crt")
+	}
+	if c.TLS.Cert != nil {
+		q.Set("sslcert", base+"/tls.crt")
+	}
+	if c.TLS.Key != nil {
+		q.Set("sslkey", base+"/tls.key")
 	}
 	return q.Encode()
+}
+
+// querySuffix joins the spec-side query params for the inline form's URI;
+// url.Values.Encode keeps the result shell-single-quote safe.
+func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
+	ssl, tls := sslParam(c), tlsParams(s, c)
+	switch {
+	case ssl == "":
+		return tls
+	case tls == "":
+		return ssl
+	default:
+		return ssl + "&" + tls
+	}
 }
 
 // secretRefPrelude renders the shell that turns one side's injected Secret
 // keys into the PGCOPYDB_*_PGURI env var and a passfile line. A DB value that
 // parses as a URI is authoritative (its user/host/port/database win); a bare
-// value composes from the HOST and USER envs. Every field is escaped for the
-// passfile because none of them come from the validated spec here.
+// value composes from the HOST and USER envs. Values carrying URI syntax or
+// percent-encoding are rejected by name (they would compose a wrong URI or a
+// passfile line libpq never matches); uriSecretRef is the escape hatch, and
+// the DB URI must be password-free (the PW key carries the password).
 // ponytail: host parsing assumes host or host:port; bracketed IPv6 literals
 // are out of scope until someone needs them.
-func secretRefPrelude(s Side, suffix, pwFile string) string {
-	const template = `case "$@DB@" in
+func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string) string {
+	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
+db=$@DB@
+case "$db" in
 postgresql://*|postgres://*)
-  uri=$@DB@
+  uri=$db
   rest=${uri#*://}; hp=${rest%%\?*}; hostpart=${hp%%/*}
   case "$hostpart" in
-  *@*) user=${hostpart%%@*}; user=${user%%:*}; hostport=${hostpart##*@} ;;
+  *@*)
+    user=${hostpart%%@*}; hostport=${hostpart##*@}
+    case "$user" in *:*) echo "@SIDE@ connection secret: the DB URI must be password-free; the password belongs in the @PWKEY@ key, or use uriSecretRef" >&2; exit 1 ;; esac
+    [ "$user@$hostport" = "$hostpart" ] || { echo "@SIDE@ connection secret: unparseable userinfo in the DB URI; use uriSecretRef" >&2; exit 1; }
+    ;;
   *)
     user=${@USER@-}
     [ -n "$user" ] || { echo "@SIDE@ connection secret: no user in the DB URI and the username key is empty" >&2; exit 1; }
+    case "$user" in *@*|*:*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ connection secret: the username key holds URI syntax; use uriSecretRef for such values" >&2; exit 1 ;; esac
     hostport=$hostpart
     uri="postgresql://$user@$rest"
     ;;
   esac
+  case "$user$hostport" in *%*) echo "@SIDE@ connection secret: percent-encoded user or host in the DB URI never matches the passfile; use plain values or uriSecretRef" >&2; exit 1 ;; esac
   ;;
 *)
   host=${@HOST@-}; user=${@USER@-}
   [ -n "$host" ] || { echo "@SIDE@ connection secret: url key empty and DB is not a URI" >&2; exit 1; }
   [ -n "$user" ] || { echo "@SIDE@ connection secret: username key empty and DB is not a URI" >&2; exit 1; }
+  case "$user" in *@*|*:*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ connection secret: the username key holds URI syntax; use uriSecretRef for such values" >&2; exit 1 ;; esac
+  case "$db" in *@*|*:*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ connection secret: the database key holds URI syntax; use uriSecretRef for such values" >&2; exit 1 ;; esac
+  case "$host" in *@*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ connection secret: the url key holds URI syntax; use uriSecretRef for such values" >&2; exit 1 ;; esac
   case "$host" in *:*) hostport=$host ;; *) hostport=$host:5432 ;; esac
-  uri="postgresql://$user@$hostport/$@DB@"
+  uri="postgresql://$user@$hostport/$db"
   ;;
 esac
 host=${hostport%%:*}
@@ -314,23 +362,39 @@ host=${hostport%%:*}
 		"@USER@", pgmEnv(s, "USER"),
 		"@HOST@", pgmEnv(s, "HOST"),
 		"@SIDE@", string(s),
+		"@PWKEY@", pwKey,
 	).Replace(template)
-	if suffix != "" {
-		// The DB URI keeps its own sslmode when it has one; the spec-side
-		// params only fill the gap.
-		b += `case "$uri" in
-*sslmode=*) ;;
-*\?*) uri="$uri&` + suffix + `" ;;
-*) uri="$uri?` + suffix + `" ;;
-esac
+	if tls != "" {
+		// The mounted cert paths come from the spec, never the Secret, so
+		// they always apply.
+		b += `case "$uri" in *\?*) uri="$uri&` + tls + `" ;; *) uri="$uri?` + tls + `" ;; esac
+`
+	}
+	if sslmode != "" {
+		// The DB URI keeps its own sslmode; the spec's only fills the gap.
+		// Anchored to ? or & so a value merely containing the text does not
+		// suppress the append.
+		b += `case "$uri" in *"?sslmode="*|*"&sslmode="*) ;; *\?*) uri="$uri&` + sslmode + `" ;; *) uri="$uri?` + sslmode + `" ;; esac
 `
 	}
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
-pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
-printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(sed -e 's/\\/\\\\/g' -e 's/:/\\:/g' ` + pwFile + `)" >> ` + PgpassPath + `
+[ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }
+printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + PgpassPath + `
 `
 	return b
+}
+
+// URIRecover returns the shell prefix that restores the PGCOPYDB_*_PGURI env
+// vars in commands exec'd into the runner: secretRef preludes compose them at
+// container start, where the pod spec env cannot carry them. No-op for the
+// other connection forms.
+func URIRecover() string {
+	var b strings.Builder
+	for _, s := range []Side{Source, Target} {
+		b.WriteString("[ -f " + URIFile(s) + " ] && { " + uriEnv(s) + "=$(cat " + URIFile(s) + "); export " + uriEnv(s) + "; }; ")
+	}
+	return b.String()
 }
 
 // tlsVolume projects the referenced TLS secret keys under a per-side path.

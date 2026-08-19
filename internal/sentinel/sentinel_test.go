@@ -166,10 +166,29 @@ func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
 	}
 	// Pod up but the sentinel query fails (follow setup not done yet, or the
 	// exec transport hiccuped): also (nil, nil), never a reconcile error.
-	c, _ = fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	var rec *execRecorder
+	c, rec = fakeAPI(t, []corev1.Pod{runningPod()}, false)
 	st, err = c.Read(context.Background(), "ns", "j")
 	if err != nil || st != nil {
 		t.Fatalf("sentinel not ready: want (nil, nil), got (%v, %v)", st, err)
+	}
+	// Every exec routes through the shared shell wrapper with the URI
+	// recovery for both sides; a bare argv would break only on secretRef
+	// migrations, which no unit fake catches later.
+	cmds := rec.commands()
+	if len(cmds) == 0 {
+		t.Fatal("no exec recorded")
+	}
+	argv := strings.Join(cmds[0], " ")
+	for _, want := range []string{
+		"sh -c",
+		"[ -f /tmp/pgm-source-uri ]",
+		"[ -f /tmp/pgm-target-uri ]",
+		"pgcopydb stream sentinel get --apply",
+	} {
+		if !strings.Contains(argv, want) {
+			t.Fatalf("exec %q misses %q", argv, want)
+		}
 	}
 }
 
@@ -223,9 +242,10 @@ func TestNudgeEndpos(t *testing.T) {
 	}
 	argv := strings.Join(cmds[0], " ")
 	for _, want := range []string{
-		// The recovery prefix restores the URI for secretRef connections,
-		// where the spec env cannot carry it.
+		// The recovery prefix restores the URIs for secretRef connections,
+		// where the spec env cannot carry them.
 		`[ -f /tmp/pgm-source-uri ]`,
+		`[ -f /tmp/pgm-target-uri ]`,
 		`psql "$PGCOPYDB_SOURCE_PGURI" -Xqtc`,
 		`pg_logical_emit_message(false, 'pgcopydb-operator', 'endpos-nudge')`,
 	} {

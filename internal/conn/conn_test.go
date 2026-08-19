@@ -132,6 +132,10 @@ func TestMaterialize_InlineWithPassword(t *testing.T) {
 	if len(m.Volumes) != 1 || m.Volumes[0].Secret == nil || *m.Volumes[0].Secret.DefaultMode != 0o400 {
 		t.Fatalf("want one 0400 secret volume, got %+v", m.Volumes)
 	}
+	// Inline keeps kubelet fail-fast: the spec names the key explicitly.
+	if m.Volumes[0].Secret.Optional != nil {
+		t.Fatalf("inline password volume must stay required, got %+v", m.Volumes[0].Secret)
+	}
 }
 
 func TestMaterialize_TLSVolume(t *testing.T) {
@@ -347,6 +351,21 @@ func TestPreludeScript_PassfileEscaping(t *testing.T) {
 	}
 }
 
+// TestSecretRefPrelude_PasswordURINeverLeaks proves a rejected password-bearing
+// DB URI leaves the credential in no output, no URI file, and no passfile.
+func TestSecretRefPrelude_PasswordURINeverLeaks(t *testing.T) {
+	_, passfile, urifile, out, err := runSecretRefPrelude(t, secretConn(),
+		map[string]string{envSrcDB: "postgresql://alice:s3cret@db.example.com/app"}, "")
+	if err == nil {
+		t.Fatal("want rejection of a password-bearing DB URI")
+	}
+	for name, got := range map[string]string{"output": out, "URI file": urifile, "passfile": passfile} {
+		if strings.Contains(got, "s3cret") {
+			t.Fatalf("%s leaks the URI password: %q", name, got)
+		}
+	}
+}
+
 // shellPath returns a POSIX shell for executing the prelude in tests.
 func shellPath(t *testing.T) string {
 	t.Helper()
@@ -427,6 +446,11 @@ func TestMaterialize_SecretRef(t *testing.T) {
 		*m.Volumes[0].Secret.DefaultMode != 0o400 {
 		t.Fatalf("want one 0400 PW volume from the bundle, got %+v", m.Volumes)
 	}
+	// Optional mount: a bundle without the PW key must reach the prelude's
+	// named error instead of hanging the pod in ContainerCreating.
+	if opt := m.Volumes[0].Secret.Optional; opt == nil || !*opt {
+		t.Fatalf("PW volume must be optional, got %+v", m.Volumes[0].Secret)
+	}
 }
 
 func TestMaterialize_SecretRef_EndpointAndKeys(t *testing.T) {
@@ -500,8 +524,12 @@ func runSecretRefPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[st
 	}
 	dir := t.TempDir()
 	pwFile := filepath.Join(dir, "source-password")
-	if werr := os.WriteFile(pwFile, []byte(password), 0o600); werr != nil {
-		t.Fatal(werr)
+	// An empty password stands for "PW key absent": the optional mount then
+	// projects no file at all, which the prelude must catch by name.
+	if password != "" {
+		if werr := os.WriteFile(pwFile, []byte(password), 0o600); werr != nil {
+			t.Fatal(werr)
+		}
 	}
 	pgpass := filepath.Join(dir, "pgpass")
 	uriFile := filepath.Join(dir, "uri")
@@ -535,6 +563,7 @@ func TestSecretRefPrelude(t *testing.T) {
 	cases := []struct {
 		name     string
 		sslMode  string
+		tls      bool
 		env      map[string]string
 		password string
 		wantURI  string
@@ -615,11 +644,72 @@ func TestSecretRefPrelude(t *testing.T) {
 			wantURI:  "postgresql://alice@db.example.com:5432/app",
 			wantLine: `db.example.com:*:*:alice:p\:a\\ss\:`,
 		},
+		{
+			name:     "uri with sslmode keeps the spec tls params",
+			sslMode:  tRequire,
+			tls:      true,
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?sslmode=verify-full"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt",
+			wantLine: tLine,
+		},
+		{
+			name:     "bare name appends tls params and sslmode",
+			sslMode:  tRequire,
+			tls:      true,
+			env:      map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com:5432/app?sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt&sslmode=require",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri value merely containing sslmode text still gains it",
+			sslMode:  tRequire,
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=fake_sslmode=1"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=fake_sslmode=1&sslmode=require",
+			wantLine: tLine,
+		},
+		{
+			name:    "password-bearing uri fails",
+			env:     map[string]string{envSrcDB: "postgresql://alice:s3cret@db.example.com/app"},
+			wantErr: "must be password-free",
+		},
+		{
+			name:    "percent-encoded uri user fails",
+			env:     map[string]string{envSrcDB: "postgresql://alice%40corp@db.example.com/app"},
+			wantErr: "percent-encoded",
+		},
+		{
+			name:    "unparseable double-at userinfo fails",
+			env:     map[string]string{envSrcDB: "postgresql://a@b@c.example.com/app"},
+			wantErr: "unparseable userinfo",
+		},
+		{
+			name:    "bare username with an at-sign fails",
+			env:     map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: "alice@corp"},
+			wantErr: "username key holds URI syntax",
+		},
+		{
+			name:    "bare database with a slash fails",
+			env:     map[string]string{envSrcDB: "app/extra", envSrcHost: tHost, envSrcUser: tUser},
+			wantErr: "database key holds URI syntax",
+		},
+		{
+			name:    "missing password key fails by name",
+			env:     map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
+			wantErr: "password key PW missing",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := secretConn()
 			c.SSLMode = tc.sslMode
+			if tc.tls {
+				c.TLS = &v1beta1.TLSSecretRefs{RootCA: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "ca"}, Key: "root.pem",
+				}}
+			}
 			uri, passfile, urifile, out, err := runSecretRefPrelude(t, c, tc.env, tc.password)
 			if tc.wantErr != "" {
 				if err == nil {

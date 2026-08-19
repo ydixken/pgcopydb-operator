@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
 
 // Exercises the CRD CEL rules through the envtest apiserver: the schema in
@@ -185,13 +186,11 @@ var _ = Describe("Migration CRD validation", func() {
 			types.NamespacedName{Name: "cel-secretref-defaults", Namespace: testNS}, got)).To(Succeed())
 		Expect(got.Spec.Source.SecretRef.Endpoint).To(Equal("internal"))
 		Expect(got.Spec.Source.SecretRef.Keys).To(BeNil())
-		Expect(got.Spec.Target.SecretRef.Keys).To(Equal(&v1beta1.ConnectionSecretKeys{
-			Database:    "custom",
-			Password:    "PW",
-			URL:         "URL",
-			URLExternal: "URL_EXTERNAL",
-			Username:    "USER",
-		}))
+		// Tied to conn.DefaultKeys: the CRD defaults and the Go fallback for
+		// an absent keys object must never drift apart.
+		wantKeys := conn.DefaultKeys()
+		wantKeys.Database = "custom"
+		Expect(got.Spec.Target.SecretRef.Keys).To(Equal(&wantKeys))
 	})
 
 	It("enforces source/target/follow immutability while clone stays tunable", func() {

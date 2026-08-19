@@ -91,7 +91,9 @@ spec:
 ```
 
 `DB` holds either a bare database name or a full password-free libpq URI.
+The URI MUST be password-free: the password always comes from the `PW` key, and a URI carrying one is rejected.
 A URI is authoritative for user, host, port, and database name, and keeps its own `sslmode` over the spec's; a URI that names no user falls back to the `USER` key.
+Values that contain URI syntax (`@`, `:`, `/`, `%`, and the like) are rejected by name; store a complete DSN in `uriSecretRef` for such identifiers instead.
 With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: external`) as `host` or `host:port` with 5432 as the default port, and the user from `USER`.
 `keys` remaps any of the five key names; `sslMode` and `tls` combine with this form the same way they do with the inline one.
 The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
