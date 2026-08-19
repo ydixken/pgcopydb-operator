@@ -87,6 +87,24 @@ func TestComposeURI_TLSPaths(t *testing.T) {
 	}
 }
 
+func TestComposeURI_TLSWithoutSSLMode(t *testing.T) {
+	c := inlineConn()
+	c.SSLMode = ""
+	c.TLS = &v1beta1.TLSSecretRefs{
+		RootCA: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "certs"}, Key: "bundle.pem"},
+	}
+	uri, err := ComposeURI(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(uri, "sslrootcert=") {
+		t.Fatalf("URI %q missing sslrootcert", uri)
+	}
+	if strings.Contains(uri, "sslmode=") {
+		t.Fatalf("URI %q carries an sslmode nobody set", uri)
+	}
+}
+
 func TestComposeURI_RequiresHostAndUser(t *testing.T) {
 	if _, err := ComposeURI(Source, &v1beta1.PostgresConnection{Host: "h"}); err == nil {
 		t.Fatal("want error without username")
@@ -491,6 +509,16 @@ func TestMaterialize_SecretRef_EndpointAndKeys(t *testing.T) {
 	if got := findEnv(m.Env, envSrcHost).ValueFrom.SecretKeyRef.Key; got != keyURLExternal {
 		t.Fatalf("partial keys lost the urlExternal default, got %q", got)
 	}
+
+	// A remapped urlExternal key wins over the convention default.
+	c.SecretRef.Keys.URLExternal = "ext_host"
+	m, err = Materialize(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findEnv(m.Env, envSrcHost).ValueFrom.SecretKeyRef.Key; got != "ext_host" {
+		t.Fatalf("remapped urlExternal key ignored, got %q", got)
+	}
 }
 
 func TestMaterialize_SecretRef_TLS(t *testing.T) {
@@ -516,6 +544,37 @@ func TestMaterialize_SecretRef_TLS(t *testing.T) {
 // runSecretRefPrelude executes the generated prelude for one secretRef source
 // under sh with the given env and password file, and returns the URI the
 // exec'd process sees, the passfile and URI-file contents, and the raw output.
+func TestURIRecover(t *testing.T) {
+	dir := t.TempDir()
+	srcFile := filepath.Join(dir, "src-uri")
+	tgtFile := filepath.Join(dir, "tgt-uri")
+	script := strings.ReplaceAll(URIRecover(), URIFile(Source), srcFile)
+	script = strings.ReplaceAll(script, URIFile(Target), tgtFile)
+	probe := script + `printf '%s|%s' "$PGCOPYDB_SOURCE_PGURI" "$PGCOPYDB_TARGET_PGURI"`
+
+	// Without URI files the prefix must be a no-op with a zero exit.
+	out, err := exec.Command(shellPath(t), "-c", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery without files failed: %v: %s", err, out)
+	}
+	if got := string(out); got != "|" {
+		t.Fatalf("recovery without files changed the env: %q", got)
+	}
+
+	for f, uri := range map[string]string{srcFile: "postgresql://u@s/db1", tgtFile: "postgresql://u@t/db2"} {
+		if werr := os.WriteFile(f, []byte(uri), 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	out, err = exec.Command(shellPath(t), "-c", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("recovery failed: %v: %s", err, out)
+	}
+	if got := string(out); got != "postgresql://u@s/db1|postgresql://u@t/db2" {
+		t.Fatalf("recovered %q, want both URIs restored", got)
+	}
+}
+
 func runSecretRefPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string]string, password string) (uri, passfile, urifile, out string, err error) {
 	t.Helper()
 	m, merr := Materialize(Source, c)
