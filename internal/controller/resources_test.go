@@ -843,6 +843,46 @@ esac
 	})
 }
 
+// TestEmitPreflightOutcome_OneEventForAllStatements pins the coalescing fix:
+// every applied statement lands in ONE PreflightRemediated note. Per-statement
+// events would be collapsed by the events/v1 correlator (its key excludes the
+// note), which silently dropped all but the first statement on a live cluster.
+func TestEmitPreflightOutcome_OneEventForAllStatements(t *testing.T) {
+	r := &MigrationReconciler{
+		Recorder: events.NewFakeRecorder(20),
+		Logs: &fakeLogs{out: `remediated: ALTER ROLE "app" REPLICATION` + "\n" +
+			"ok: source replication attribute\n" +
+			`remediated: GRANT EXECUTE ON FUNCTION pg_replication_origin_oid(text) TO app;` + "\n" +
+			"ok: target origin function grants\n" +
+			`remediated: GRANT SET ON PARAMETER session_replication_role TO "app"` + "\n" +
+			"ok: target session_replication_role\n" +
+			"preflight: all checks passed\n"},
+	}
+	r.emitPreflightOutcome(context.Background(), passwordMigration())
+	rec := r.Recorder.(*events.FakeRecorder)
+	var got []string
+	for {
+		select {
+		case e := <-rec.Events:
+			got = append(got, e)
+		default:
+			if len(got) != 2 {
+				t.Fatalf("want exactly 2 events (one remediation note, one summary), got %v", got)
+			}
+			for _, want := range []string{"PreflightRemediated", `ALTER ROLE "app" REPLICATION`,
+				"GRANT EXECUTE ON FUNCTION", `GRANT SET ON PARAMETER session_replication_role TO "app"`} {
+				if !strings.Contains(got[0], want) {
+					t.Fatalf("remediation note must carry %q: %s", want, got[0])
+				}
+			}
+			if !strings.Contains(got[1], "3 checks passed, 3 grants applied") {
+				t.Fatalf("summary event wrong: %s", got[1])
+			}
+			return
+		}
+	}
+}
+
 // TestEmitPreflightOutcome pins the log contract: ok/remediated prefixes
 // become the event trail, everything else is ignored.
 func TestEmitPreflightOutcome(t *testing.T) {

@@ -57,7 +57,7 @@ GRANT SET ON PARAMETER session_replication_role TO app;
 
 Skipping the second grant is the dangerous one: pgcopydb 0.18 reports success while applying nothing. The [preflight](live-migration.md#preflight) probes both before any data moves.
 
-The manual step has an alternative: set `spec.target.superuserSecretRef` to a Secret carrying superuser credentials (CNPG creates `<cluster>-superuser` when `enableSuperuserAccess` is on), and the preflight applies exactly these grants itself, logging each one as a `PreflightRemediated` event; see the [prerequisites](../reference/prerequisites.md#superuser-remediation-superusersecretref).
+The manual step has an alternative: set `spec.target.superuserSecretRef` to a Secret carrying superuser credentials (CNPG creates `<cluster>-superuser` when `enableSuperuserAccess` is on), and the preflight applies exactly these grants itself, logging them in one `PreflightRemediated` event; see the [prerequisites](../reference/prerequisites.md#superuser-remediation-superusersecretref).
 
 ## 4. CNPG as the source
 

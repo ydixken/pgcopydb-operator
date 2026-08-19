@@ -65,7 +65,7 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |
-| `PreflightRemediated` | Normal | The preflight applied one missing grant through `superuserSecretRef`; the message is the exact statement. |
+| `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; the message lists the exact statements. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |

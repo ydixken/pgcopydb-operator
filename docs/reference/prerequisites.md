@@ -110,7 +110,7 @@ It then applies the follow rights the regular role is missing, exactly these sta
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function.
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly).
 
-Every applied statement is re-checked, logged in the preflight output, and emitted as a `PreflightRemediated` event on the Migration.
+Every applied statement is re-checked, logged in the preflight output, and listed in a `PreflightRemediated` event on the Migration.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never touches replica identity, `wal_level`, plugin installation, or your schema, and pgcopydb itself never runs as the superuser.
 One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.

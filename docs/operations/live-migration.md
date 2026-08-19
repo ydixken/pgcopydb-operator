@@ -28,7 +28,7 @@ A failed rights check names the exact `GRANT` or setting that fixes it, in the `
 kubectl get pgm billing -o jsonpath='{.status.conditions[?(@.type=="Validated")].message}'
 ```
 
-With `superuserSecretRef` set, the preflight applies the grantable rights itself, re-checks them, and emits one `PreflightRemediated` event per applied statement; on success a `PreflightPassed` event counts checks and applied grants.
+With `superuserSecretRef` set, the preflight applies the grantable rights itself, re-checks them, and emits one `PreflightRemediated` event listing every applied statement; on success a `PreflightPassed` event counts checks and applied grants.
 The finished preflight Job is kept as that audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
 Setting `spec.suspend` while the gate runs deletes the preflight Job, stopping remediation with it; the gate re-runs the preflight on resume.
 

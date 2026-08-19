@@ -253,7 +253,10 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 }
 
 // emitPreflightOutcome turns the finished preflight's log into events: one
-// PreflightRemediated per applied statement, then the PreflightPassed summary.
+// PreflightRemediated listing every applied statement, then the
+// PreflightPassed summary. One event, not one per statement: the events/v1
+// correlator keys events without the note, so a burst of same-reason events
+// collapses into a series that keeps only the first statement.
 // The "ok: " and "remediated: " line prefixes are the script's log contract.
 func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
 	checks := 0
@@ -267,8 +270,9 @@ func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1bet
 			remediated = append(remediated, strings.TrimPrefix(line, "remediated: "))
 		}
 	}
-	for _, stmt := range remediated {
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight", "%s", stmt)
+	if len(remediated) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight",
+			"%s", truncate(strings.Join(remediated, "\n"), maxDetailLen))
 	}
 	msg := "all preflight checks passed"
 	if checks > 0 || len(remediated) > 0 {
