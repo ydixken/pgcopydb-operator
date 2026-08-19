@@ -308,10 +308,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `host` _string_ | host is the server hostname or IP. Required unless uriSecretRef is set. |  | Optional: \{\} <br /> |
+| `host` _string_ | host is the server hostname or IP, for the inline form. |  | Optional: \{\} <br /> |
 | `port` _integer_ | port is the server port. | 5432 | Maximum: 65535 <br />Minimum: 1 <br />Optional: \{\} <br /> |
-| `database` _string_ | database is the database name to connect to. Required unless uriSecretRef is set. |  | Optional: \{\} <br /> |
-| `username` _string_ | username is the role to connect as. Required unless uriSecretRef is set. |  | Optional: \{\} <br /> |
+| `database` _string_ | database is the database name to connect to, for the inline form. |  | Optional: \{\} <br /> |
+| `username` _string_ | username is the role to connect as, for the inline form. |  | Optional: \{\} <br /> |
 | `passwordSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | passwordSecretRef selects the password. Rendered into a libpq passfile,<br />never into argv or CR status. |  | Optional: \{\} <br /> |
 | `sslMode` _string_ | sslMode is the libpq sslmode. | prefer | Enum: [disable allow prefer require verify-ca verify-full] <br />Optional: \{\} <br /> |
 | `tls` _[TLSSecretRefs](#tlssecretrefs)_ | tls references client certificate material, mounted 0600 for libpq. |  | Optional: \{\} <br /> |

@@ -83,10 +83,18 @@ var _ = Describe("Migration CRD validation", func() {
 					LocalObjectReference: corev1.LocalObjectReference{Name: "dsn"}, Key: "value",
 				}
 			}, "set exactly one of secretRef, uriSecretRef"),
-		Entry("connection with neither inline fields nor uriSecretRef", "cel-conn-neither",
+		Entry("connection with only a database field", "cel-conn-neither",
 			func(m *v1beta1.Migration) {
 				m.Spec.Source = v1beta1.PostgresConnection{Database: testDB}
+			}, "inline form needs both host and username"),
+		Entry("connection with no fields at all", "cel-conn-empty",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{}
 			}, "set exactly one of secretRef, uriSecretRef"),
+		Entry("connection with host but no username", "cel-conn-inline-partial",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{Host: "partial.example.com"}
+			}, "inline form needs both host and username"),
 		Entry("uriSecretRef-only connections on both sides", "cel-conn-uri-only",
 			func(m *v1beta1.Migration) {
 				uri := func(name string) v1beta1.PostgresConnection {
@@ -108,6 +116,13 @@ var _ = Describe("Migration CRD validation", func() {
 					URISecretRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "conn-dsn"}, Key: "conninfo",
 					},
+				}
+			}, "set exactly one of secretRef, uriSecretRef"),
+		Entry("connection with secretRef and a stray inline database", "cel-conn-secretref-stray-inline",
+			func(m *v1beta1.Migration) {
+				m.Spec.Source = v1beta1.PostgresConnection{
+					SecretRef: &v1beta1.ConnectionSecret{Name: "stray-conn"},
+					Database:  testDB,
 				}
 			}, "set exactly one of secretRef, uriSecretRef"),
 		Entry("secretRef-only connections on both sides", "cel-conn-secretref-only",

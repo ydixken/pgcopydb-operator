@@ -1348,12 +1348,12 @@ spec:
                 description: source is the PostgreSQL endpoint to migrate from. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -1554,17 +1554,18 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
-                    host/username fields
+                    connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
-                    1 : 0) + ((has(self.host) || has(self.username)) ? 1 : 0) == 1'
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
                 - message: inline form needs both host and username
                   rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
                     && has(self.username))
@@ -1575,12 +1576,12 @@ spec:
                 description: target is the PostgreSQL endpoint to migrate to. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -1781,17 +1782,18 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: target is immutable
                   rule: self == oldSelf
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
-                    host/username fields
+                    connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
-                    1 : 0) + ((has(self.host) || has(self.username)) ? 1 : 0) == 1'
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
                 - message: inline form needs both host and username
                   rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
                     && has(self.username))
@@ -3323,12 +3325,12 @@ spec:
                 description: source is the PostgreSQL endpoint to migrate from. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -3529,17 +3531,18 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
-                    host/username fields
+                    connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
-                    1 : 0) + ((has(self.host) || has(self.username)) ? 1 : 0) == 1'
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
                 - message: inline form needs both host and username
                   rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
                     && has(self.username))
@@ -3550,12 +3553,12 @@ spec:
                 description: target is the PostgreSQL endpoint to migrate to. Immutable.
                 properties:
                   database:
-                    description: database is the database name to connect to. Required
-                      unless uriSecretRef is set.
+                    description: database is the database name to connect to, for
+                      the inline form.
                     type: string
                   host:
-                    description: host is the server hostname or IP. Required unless
-                      uriSecretRef is set.
+                    description: host is the server hostname or IP, for the inline
+                      form.
                     type: string
                   passwordSecretRef:
                     description: |-
@@ -3756,17 +3759,18 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   username:
-                    description: username is the role to connect as. Required unless
-                      uriSecretRef is set.
+                    description: username is the role to connect as, for the inline
+                      form.
                     type: string
                 type: object
                 x-kubernetes-validations:
                 - message: target is immutable
                   rule: self == oldSelf
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
-                    host/username fields
+                    connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
-                    1 : 0) + ((has(self.host) || has(self.username)) ? 1 : 0) == 1'
+                    1 : 0) + ((has(self.host) || has(self.username) || has(self.database)
+                    || has(self.passwordSecretRef)) ? 1 : 0) == 1'
                 - message: inline form needs both host and username
                   rule: has(self.secretRef) || has(self.uriSecretRef) || (has(self.host)
                     && has(self.username))

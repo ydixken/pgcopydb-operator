@@ -28,10 +28,10 @@ import (
 // Provide exactly one form: the inline fields (host/database/username plus a
 // password secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one
 // Secret holding the parts as individual keys).
-// +kubebuilder:validation:XValidation:rule="(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ? 1 : 0) + ((has(self.host) || has(self.username)) ? 1 : 0) == 1",message="set exactly one of secretRef, uriSecretRef, or the inline host/username fields"
+// +kubebuilder:validation:XValidation:rule="(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ? 1 : 0) + ((has(self.host) || has(self.username) || has(self.database) || has(self.passwordSecretRef)) ? 1 : 0) == 1",message="set exactly one of secretRef, uriSecretRef, or the inline connection fields"
 // +kubebuilder:validation:XValidation:rule="has(self.secretRef) || has(self.uriSecretRef) || (has(self.host) && has(self.username))",message="inline form needs both host and username"
 type PostgresConnection struct {
-	// host is the server hostname or IP. Required unless uriSecretRef is set.
+	// host is the server hostname or IP, for the inline form.
 	// +optional
 	Host string `json:"host,omitempty"`
 
@@ -42,11 +42,11 @@ type PostgresConnection struct {
 	// +optional
 	Port int32 `json:"port,omitempty"`
 
-	// database is the database name to connect to. Required unless uriSecretRef is set.
+	// database is the database name to connect to, for the inline form.
 	// +optional
 	Database string `json:"database,omitempty"`
 
-	// username is the role to connect as. Required unless uriSecretRef is set.
+	// username is the role to connect as, for the inline form.
 	// +optional
 	Username string `json:"username,omitempty"`
 
