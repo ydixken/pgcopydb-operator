@@ -4,7 +4,7 @@ Drafts for issues against [pgcopydb](https://github.com/dimitri/pgcopydb) found 
 
 ## `pgcopydb list progress` (no `--filters`) permanently corrupts the stored filtering of a filtered catalog, killing concurrent or resumed `clone --filters` runs
 
-Status: filed as [dimitri/pgcopydb#1038](https://github.com/dimitri/pgcopydb/issues/1038) on 2026-08-09.
+Status: filed as [dimitri/pgcopydb#1038](https://github.com/dimitri/pgcopydb/issues/1038) on 2026-08-09; fix proposed in [dimitri/pgcopydb#1042](https://github.com/dimitri/pgcopydb/pull/1042) on 2026-08-22.
 
 ### Environment
 
@@ -66,7 +66,7 @@ The work dir is poisoned for good: every later `clone --filters` run against it 
 
 `list progress` takes no `--filters` option, so it opens the catalogs with the bare filtering. The catalog setup check handles "Case 3: the catalogs carry a different filtering" by adopting the caller's filtering and writing it back into the catalog (`catalog_update_filters` write-back, catalog.c:1336). `cli_list_progress` does not set `skipFilterCheck`, so a read-only listing command runs that write path and overwrites the stored record with its own empty filtering. Commands that set `skipFilterCheck` (the sentinel commands) are unaffected.
 
-Secondary bug: the progress query reads `sum(bytes)` from `s_table`, which has no `bytes` column (catalog.c:10911), so `list progress` always fails outright on 0.18 (with and without `--json`, see [#1036](https://github.com/dimitri/pgcopydb/issues/1036)). The corruption happens regardless of that failure.
+Secondary bug: the progress query reads `sum(bytes)` from `s_table`, which has no `bytes` column (catalog.c:10911), so `list progress` always fails outright on 0.18 (with and without `--json`, see [#1036](https://github.com/dimitri/pgcopydb/issues/1036), fix proposed in [#1041](https://github.com/dimitri/pgcopydb/pull/1041) on 2026-08-22). The corruption happens regardless of that failure.
 
 ### Suggested fix
 
