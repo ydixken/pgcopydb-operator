@@ -32,7 +32,7 @@ The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg
 
 Every Migration is gated by a `<name>-preflight` Job before the first attempt.
 Its first check, always, is connectivity: `select 1` against both endpoints, each result logged in the Job output.
-Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns.
+Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns; a permanent error such as a failed password authentication skips the retry ladder and fails on the first probe.
 Three target-side probes run next, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
 Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).

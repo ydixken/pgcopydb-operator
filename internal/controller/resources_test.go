@@ -656,10 +656,11 @@ func TestBuildPreflightJob_SuperuserWiring(t *testing.T) {
 	}
 }
 
-// TestPreflightScript_Remediation executes the generated script under /bin/sh
-// with a stateful psql stub: checks fail until the corresponding grant is
-// applied through the superuser URI, exactly like a live database would.
-func TestPreflightScript_Remediation(t *testing.T) {
+// followPreflightHarness writes the stateful follow-battery psql stub and
+// returns the runner TestPreflightScript_Remediation and
+// TestPreflightScript_Connectivity share; splitting keeps gocyclo quiet.
+func followPreflightHarness(t *testing.T) func(*testing.T, string, string, ...string) (string, int, string) {
+	t.Helper()
 	dir := t.TempDir()
 	// Compose cases (format(...)) precede the apply cases: the script now
 	// builds role-bearing statements server-side, and the stub emulates the
@@ -680,8 +681,13 @@ case "$q" in
   'select 1')
     n=$(cat "$STATE/conn-$uri" 2>/dev/null || echo 0)
     n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
-    [ "$n" -gt "${CONN_FAIL_N:-0}" ] || exit 1
-    exit 0 ;;
+    if [ "$n" -gt "${CONN_FAIL_N:-0}" ]; then exit 0; fi
+    if [ -n "${CONN_ERR_LATE:-}" ] && [ "$n" -gt "${CONN_ERR_SWITCH:-0}" ]; then
+      echo "$CONN_ERR_LATE" >&2
+    elif [ -n "${CONN_ERR:-}" ]; then
+      echo "$CONN_ERR" >&2
+    fi
+    exit 1 ;;
   *has_schema_privilege*) printf '%s' "${PSQL_SCHEMA_GRANTS:-}" ;;
   *has_database_privilege*) echo "${PSQL_DB_CREATE:-1}" ;;
   *datdba*) echo "${PSQL_DBPROPS:-1}" ;;
@@ -706,7 +712,7 @@ esac
 		t.Fatal(err)
 	}
 
-	run := func(t *testing.T, script, mode string, extra ...string) (string, int, string) {
+	return func(t *testing.T, script, mode string, extra ...string) (string, int, string) {
 		t.Helper()
 		state := t.TempDir()
 		cmd := exec.Command(shellPath, "-c", script)
@@ -733,6 +739,13 @@ esac
 			return "", 0, state
 		}
 	}
+}
+
+// TestPreflightScript_Remediation executes the generated script under /bin/sh
+// with a stateful psql stub: checks fail until the corresponding grant is
+// applied through the superuser URI, exactly like a live database would.
+func TestPreflightScript_Remediation(t *testing.T) {
+	run := followPreflightHarness(t)
 
 	t.Run("super remediates all three and passes", func(t *testing.T) {
 		out, code, _ := run(t, preflightScriptFor(superMigration()), "")
@@ -833,6 +846,17 @@ esac
 			t.Fatalf("verified line must vanish when rolsuper is false:\n%s", out)
 		}
 	})
+	t.Run("failure footer keeps grant notes inside the tail window", func(t *testing.T) {
+		footerOrderCheck(t, run)
+	})
+}
+
+// TestPreflightScript_Connectivity drives the connect_retry ladder under
+// /bin/sh: transient misses walk the six-probe ladder, permanent classes
+// (auth failure, unknown role or database) exit on the probe that saw them.
+func TestPreflightScript_Connectivity(t *testing.T) {
+	run := followPreflightHarness(t)
+
 	t.Run("connectivity retries then succeeds", func(t *testing.T) {
 		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=2")
 		if code != 0 {
@@ -861,8 +885,59 @@ esac
 			t.Fatalf("want 5 retry lines before the sixth probe fails, got %d:\n%s", got, out)
 		}
 	})
-	t.Run("failure footer keeps grant notes inside the tail window", func(t *testing.T) {
-		footerOrderCheck(t, run)
+	t.Run("auth failure skips the ladder and names the server line", func(t *testing.T) {
+		const line = `psql: error: FATAL:  password authentication failed for user "app"`
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
+			"CONN_FAIL_N=99", "CONN_ERR="+line)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "preflight: cannot connect to the source database: "+line) {
+			t.Fatalf("missing named failure with the server line:\n%s", out)
+		}
+		if strings.Contains(out, "retry: source connectivity attempt") {
+			t.Fatalf("permanent error must not retry:\n%s", out)
+		}
+	})
+	t.Run("unknown database skips the ladder", func(t *testing.T) {
+		const line = `psql: error: FATAL:  database "shop" does not exist`
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
+			"CONN_FAIL_N=99", "CONN_ERR="+line)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "preflight: cannot connect to the source database: "+line) {
+			t.Fatalf("missing named failure with the server line:\n%s", out)
+		}
+		if strings.Contains(out, "retry:") {
+			t.Fatalf("permanent error must not retry:\n%s", out)
+		}
+	})
+	t.Run("refused twice then auth failure exits on the auth failure", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
+			"CONN_FAIL_N=99",
+			`CONN_ERR=connection to server at "src" failed: Connection refused`,
+			"CONN_ERR_SWITCH=2",
+			`CONN_ERR_LATE=FATAL:  password authentication failed for user "app"`)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if got := strings.Count(out, "retry: source connectivity attempt"); got != 2 {
+			t.Fatalf("want 2 retry lines before the auth verdict, got %d:\n%s", got, out)
+		}
+		if !strings.Contains(out, "password authentication failed") {
+			t.Fatalf("missing auth failure line:\n%s", out)
+		}
+	})
+	t.Run("empty stderr keeps the full ladder", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=99")
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		// No stderr means no class to judge; only the exhausted ladder fails.
+		if got := strings.Count(out, "retry: source connectivity attempt"); got != 5 {
+			t.Fatalf("want the full ladder, got %d retries:\n%s", got, out)
+		}
 	})
 }
 

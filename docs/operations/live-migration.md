@@ -18,6 +18,7 @@ The phases of a live migration:
 Every Migration's first attempt is gated by a `<name>-preflight` Job; for a follow migration it carries the full battery.
 The checks run over plain psql, in a fixed order, and each success prints an `ok:` line in the Job log, so the log reads as an audit trail.
 Connectivity to both endpoints always comes first, and each connect is retried up to six times ten seconds apart, one logged `retry:` line per miss, so a failover blip does not fail an otherwise sound Migration.
+Permanent connection errors (wrong password, unknown role or database) skip the retries and fail immediately, with the server's error line in the condition message, so that verdict lands in seconds.
 Then, per side with a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref), the superuser connection is probed the same way; a role without `rolsuper` only logs a warning and remediation proceeds, since managed-Postgres admin roles hold the grant rights without the attribute.
 Then the clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe ([prerequisites](../reference/prerequisites.md#base-clone-every-migration) has the details).
 Then the follow prerequisites: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
