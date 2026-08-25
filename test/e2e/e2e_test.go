@@ -252,18 +252,18 @@ var _ = Describe("Migration", Ordered, func() {
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
 			Key:                  passwordKey,
 		}
-		created := time.Now()
 		create(m)
 
 		By("waiting for the connectivity tier to fail the Migration before any attempt")
 		failed := waitFailed(name, "PreflightFailed")
-		// Auth failure is a permanent class: both preflight pods (the Job
-		// retries once) fail on their first probe, so the budget is two fast
-		// pods plus Job backoff plus the operator poll. 90s is generous CI
-		// headroom and still under half the old six-probe two-pod path.
-		Expect(time.Since(created)).To(BeNumerically("<", 90*time.Second),
-			"the wrong-credentials verdict must land fast")
-		Expect(failureMessage(failed)).To(ContainSubstring("cannot connect to the source database"))
+		msg := failureMessage(failed)
+		Expect(msg).To(ContainSubstring("cannot connect to the source database"))
+		// A stopwatch here would time the node's warmth and the image pull,
+		// not the ladder. The log tail the condition carries measures the
+		// thing itself: an auth failure repeated on the second probe ends it
+		// after one retry, where the six-probe ladder would leave five.
+		Expect(strings.Count(msg, "retry: source connectivity attempt")).To(BeNumerically("<=", 1),
+			"the connectivity ladder was walked instead of ending on the repeated auth failure:\n%s", msg)
 		Expect(failed.Status.Attempts).To(Equal(int32(0)), "a worker attempt started despite the failed preflight")
 		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, &batchv1.Job{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "worker Job exists despite the failed preflight")

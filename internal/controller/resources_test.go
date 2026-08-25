@@ -681,7 +681,11 @@ case "$q" in
   'select 1')
     n=$(cat "$STATE/conn-$uri" 2>/dev/null || echo 0)
     n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
-    if [ "$n" -gt "${CONN_FAIL_N:-0}" ]; then exit 0; fi
+    case "${CONN_URI:-$uri}" in "$uri") ;; *) exit 0 ;; esac
+    if [ "$n" -gt "${CONN_FAIL_N:-0}" ]; then
+      [ -n "${CONN_WARN:-}" ] && echo "$CONN_WARN" >&2
+      exit 0
+    fi
     if [ -n "${CONN_ERR_LATE:-}" ] && [ "$n" -gt "${CONN_ERR_SWITCH:-0}" ]; then
       echo "$CONN_ERR_LATE" >&2
     elif [ -n "${CONN_ERR:-}" ]; then
@@ -852,8 +856,9 @@ func TestPreflightScript_Remediation(t *testing.T) {
 }
 
 // TestPreflightScript_Connectivity drives the connect_retry ladder under
-// /bin/sh: transient misses walk the six-probe ladder, permanent classes
-// (auth failure, unknown role or database) exit on the probe that saw them.
+// /bin/sh: transient misses walk the six-probe ladder, and a permanent class
+// (auth failure, unknown role or database) ends it once a second probe in a
+// row reports it.
 func TestPreflightScript_Connectivity(t *testing.T) {
 	run := followPreflightHarness(t)
 
@@ -873,47 +878,83 @@ func TestPreflightScript_Connectivity(t *testing.T) {
 			}
 		}
 	})
-	t.Run("connectivity exhausts six attempts and fails by name", func(t *testing.T) {
+	t.Run("a silent failure exhausts six attempts and fails cleanly by name", func(t *testing.T) {
 		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=99")
 		if code != 1 {
 			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
 		}
-		if !strings.Contains(out, "preflight: cannot connect to the source database") {
-			t.Fatalf("missing named failure:\n%s", out)
+		// A probe killed by a signal writes nothing: no class to judge, and
+		// no line for the verdict's colon to introduce either.
+		if !strings.Contains(out, "preflight: cannot connect to the source database\n") {
+			t.Fatalf("the verdict must not trail a colon it has no line for:\n%s", out)
 		}
 		if got := strings.Count(out, "retry: source connectivity attempt"); got != 5 {
 			t.Fatalf("want 5 retry lines before the sixth probe fails, got %d:\n%s", got, out)
 		}
 	})
-	t.Run("auth failure skips the ladder and names the server line", func(t *testing.T) {
-		const line = `psql: error: FATAL:  password authentication failed for user "app"`
+	for _, tc := range []struct{ name, line string }{
+		{"auth failure", `psql: error: FATAL:  password authentication failed for user "app"`},
+		{"unknown role", `psql: error: FATAL:  role "app" does not exist`},
+		{"unknown database", `psql: error: FATAL:  database "shop" does not exist`},
+	} {
+		t.Run(tc.name+" twice ends the ladder and names the server line", func(t *testing.T) {
+			out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
+				"CONN_FAIL_N=99", "CONN_ERR="+tc.line)
+			if code != 1 {
+				t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+			}
+			if !strings.Contains(out, "preflight: cannot connect to the source database: "+tc.line) {
+				t.Fatalf("missing named failure with the server line:\n%s", out)
+			}
+			if got := strings.Count(out, "retry: source connectivity attempt"); got != 1 {
+				t.Fatalf("want the verdict on the second permanent probe, got %d retries:\n%s", got, out)
+			}
+		})
+	}
+	t.Run("the target side ends the ladder on its own permanent pair", func(t *testing.T) {
+		const line = `psql: error: FATAL:  role "app" does not exist`
 		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
-			"CONN_FAIL_N=99", "CONN_ERR="+line)
+			"CONN_URI=tgt", "CONN_FAIL_N=99", "CONN_ERR="+line)
 		if code != 1 {
 			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
 		}
-		if !strings.Contains(out, "preflight: cannot connect to the source database: "+line) {
-			t.Fatalf("missing named failure with the server line:\n%s", out)
+		if !strings.Contains(out, "ok: connectivity source") {
+			t.Fatalf("the source probe must pass before the target one runs:\n%s", out)
 		}
-		if strings.Contains(out, "retry: source connectivity attempt") {
-			t.Fatalf("permanent error must not retry:\n%s", out)
+		if !strings.Contains(out, "preflight: cannot connect to the target database: "+line) {
+			t.Fatalf("missing named target failure with the server line:\n%s", out)
+		}
+		if got := strings.Count(out, "retry: target connectivity attempt"); got != 1 {
+			t.Fatalf("want the verdict on the second permanent probe, got %d retries:\n%s", got, out)
 		}
 	})
-	t.Run("unknown database skips the ladder", func(t *testing.T) {
-		const line = `psql: error: FATAL:  database "shop" does not exist`
+	t.Run("a lone auth failure is a blip, not a verdict", func(t *testing.T) {
 		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
-			"CONN_FAIL_N=99", "CONN_ERR="+line)
+			"CONN_FAIL_N=1", `CONN_ERR=FATAL:  password authentication failed for user "app"`)
+		if code != 0 {
+			t.Fatalf("code=%d, want 0; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "ok: connectivity source") {
+			t.Fatalf("a pooler's single auth failure must not fail the preflight:\n%s", out)
+		}
+	})
+	t.Run("an auth failure among transients keeps the full ladder", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
+			"CONN_FAIL_N=99",
+			`CONN_ERR=FATAL:  password authentication failed for user "app"`,
+			"CONN_ERR_SWITCH=1",
+			`CONN_ERR_LATE=connection to server at "src" failed: Connection refused`)
 		if code != 1 {
 			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
 		}
-		if !strings.Contains(out, "preflight: cannot connect to the source database: "+line) {
-			t.Fatalf("missing named failure with the server line:\n%s", out)
+		if got := strings.Count(out, "retry: source connectivity attempt"); got != 5 {
+			t.Fatalf("a transient must reset the run, got %d retries:\n%s", got, out)
 		}
-		if strings.Contains(out, "retry:") {
-			t.Fatalf("permanent error must not retry:\n%s", out)
+		if !strings.Contains(out, "Connection refused") {
+			t.Fatalf("the verdict must carry the error the last probe saw:\n%s", out)
 		}
 	})
-	t.Run("refused twice then auth failure exits on the auth failure", func(t *testing.T) {
+	t.Run("transients then an auth pair end the ladder", func(t *testing.T) {
 		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "",
 			"CONN_FAIL_N=99",
 			`CONN_ERR=connection to server at "src" failed: Connection refused`,
@@ -922,21 +963,23 @@ func TestPreflightScript_Connectivity(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
 		}
-		if got := strings.Count(out, "retry: source connectivity attempt"); got != 2 {
-			t.Fatalf("want 2 retry lines before the auth verdict, got %d:\n%s", got, out)
+		if got := strings.Count(out, "retry: source connectivity attempt"); got != 3 {
+			t.Fatalf("want 3 retry lines before the auth verdict, got %d:\n%s", got, out)
 		}
 		if !strings.Contains(out, "password authentication failed") {
 			t.Fatalf("missing auth failure line:\n%s", out)
 		}
 	})
-	t.Run("empty stderr keeps the full ladder", func(t *testing.T) {
-		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_FAIL_N=99")
-		if code != 1 {
-			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+	t.Run("a successful probe still passes libpq warnings through", func(t *testing.T) {
+		const warn = "psql: warning: password file has group or world access"
+		out, code, _ := run(t, preflightScriptFor(passwordMigration()), "", "CONN_WARN="+warn)
+		if code != 0 {
+			t.Fatalf("code=%d, want 0; out:\n%s", code, out)
 		}
-		// No stderr means no class to judge; only the exhausted ladder fails.
-		if got := strings.Count(out, "retry: source connectivity attempt"); got != 5 {
-			t.Fatalf("want the full ladder, got %d retries:\n%s", got, out)
+		// The preflight log is the audit trail; a connect that succeeds with
+		// a warning must not lose it.
+		if !strings.Contains(out, warn) {
+			t.Fatalf("the warning from a successful connect never reached the log:\n%s", out)
 		}
 	})
 }
