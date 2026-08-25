@@ -278,9 +278,15 @@ fi
 }
 
 // cloneRightsHint is the pointer printed when a clone probe fails without a
-// target superuser configured; remediation itself lands with the super path.
+// target superuser configured; with one configured the probes remediate.
 const cloneRightsHint = `  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
 `
+
+// cloneDBCreateCheck and cloneDBCreateStmt are shared by both block variants;
+// the statement is composed server-side (%I) like every remediation statement.
+const cloneDBCreateCheck = `check "$PGCOPYDB_TARGET_PGURI" "select has_database_privilege(current_user, current_database(), 'CREATE')::int"`
+
+const cloneDBCreateStmt = `check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT CREATE ON DATABASE %I TO %I', current_database(), current_user)"`
 
 // cloneSchemasQuery lists the source's non-system schemas; the shell filters
 // them against the spec's schema filters (grep -Fx, so filter values never
@@ -297,20 +303,40 @@ const cloneSchemaGrantsQuery = `checkv "$PGCOPYDB_TARGET_PGURI" "select string_a
 // present there, and, unless skipped, the ownership db-properties needs.
 // The schema probe is the load-bearing one: managed platforms grant database
 // CREATE while the PostgreSQL 15+ pg_database_owner split withholds the
-// schema right, and every attempt then dies in pg_restore (#119).
+// schema right, and every attempt then dies in pg_restore (#119). With a
+// target superuser the db and schema grants apply and re-check like the
+// follow grants; db-properties needs ownership, not a grant, so it never
+// remediates.
 func cloneRightsBlock(superTgt, dbProperties bool) string {
-	hint := cloneRightsHint
-	if superTgt {
-		hint = ""
-	}
 	b := `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
-if [ "$(check "$PGCOPYDB_TARGET_PGURI" "select has_database_privilege(current_user, current_database(), 'CREATE')::int")" != 1 ]; then
-  stmt=$(check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT CREATE ON DATABASE %I TO %I', current_database(), current_user)")
-  note "preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt"
-` + hint + `else
+`
+	if superTgt {
+		b += `if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
+  stmt=$(` + cloneDBCreateStmt + `)
+  if check "$` + conn.SuperURIEnv(conn.Target) + `" "$stmt" >/dev/null; then
+    echo "remediated: $stmt"
+    if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
+      note "preflight: target role \"$tgt_user\" still lacks CREATE on the target database after remediation ($stmt)"
+    else
+      echo "ok: clone rights database"
+    fi
+  else
+    note "preflight: target role \"$tgt_user\" lacks CREATE on the target database and applying $stmt via superuserSecretRef failed"
+  fi
+else
   echo "ok: clone rights database"
 fi
-clone_schemas=$(` + cloneSchemasQuery + `)
+`
+	} else {
+		b += `if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
+  stmt=$(` + cloneDBCreateStmt + `)
+  note "preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt"
+` + cloneRightsHint + `else
+  echo "ok: clone rights database"
+fi
+`
+	}
+	b += `clone_schemas=$(` + cloneSchemasQuery + `)
 sc_inc="${PREFLIGHT_SCHEMA_INCLUDE:-}"
 sc_exc="${PREFLIGHT_SCHEMA_EXCLUDE:-}"
 sc_list=''
@@ -323,17 +349,45 @@ while IFS= read -r s; do
 done <<PF_SCHEMAS
 $clone_schemas
 PF_SCHEMAS
-if [ -n "$sc_list" ]; then
+`
+	if superTgt {
+		// The re-echo splits on ';' for the log contract; unlike the origin
+		// grants the composed statements carry no terminator, so none is
+		// re-appended.
+		b += `if [ -n "$sc_list" ]; then
   schema_grants=$(` + cloneSchemaGrantsQuery + `)
   if [ -n "$schema_grants" ]; then
-    note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $schema_grants"
-` + indent(hint) + `  else
+    if check "$` + conn.SuperURIEnv(conn.Target) + `" "$schema_grants" >/dev/null; then
+      printf '%s\n' "$schema_grants" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "remediated: $g"; done
+      schema_grants=$(` + cloneSchemaGrantsQuery + `)
+      if [ -n "$schema_grants" ]; then
+        note "preflight: target role \"$tgt_user\" still lacks CREATE on schemas the restore targets after remediation, run on the target: $schema_grants"
+      else
+        echo "ok: clone rights schemas"
+      fi
+    else
+      note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets and applying the grants via superuserSecretRef failed: $schema_grants"
+    fi
+  else
     echo "ok: clone rights schemas"
   fi
 else
   echo "ok: clone rights schemas"
 fi
 `
+	} else {
+		b += `if [ -n "$sc_list" ]; then
+  schema_grants=$(` + cloneSchemaGrantsQuery + `)
+  if [ -n "$schema_grants" ]; then
+    note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $schema_grants"
+` + indent(cloneRightsHint) + `  else
+    echo "ok: clone rights schemas"
+  fi
+else
+  echo "ok: clone rights schemas"
+fi
+`
+	}
 	if dbProperties {
 		b += `if [ "$(check "$PGCOPYDB_TARGET_PGURI" "select (pg_has_role(current_user, (select datdba from pg_database where datname = current_database()), 'USAGE') or (select rolsuper from pg_roles where rolname = current_user))::int")" != 1 ]; then
   note "preflight: target role \"$tgt_user\" cannot run ALTER DATABASE ... SET (the db-properties step needs ownership): make the role a member of the owning role, or set clone.skip: [dbProperties]"
