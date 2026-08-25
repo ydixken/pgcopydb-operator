@@ -149,7 +149,7 @@ var _ = Describe("Migration CRD validation", func() {
 			filters(&v1beta1.Filters{IncludeOnlyTables: []string{"public.t3"}, ExcludeSchemas: []string{"legacy"}}),
 			"includeOnlyTables cannot be combined with excludeTables or excludeSchemas"),
 		Entry("includeOnlySchemas with excludeSchemas", "cel-filter-schemas",
-			filters(&v1beta1.Filters{IncludeOnlySchemas: []string{"public"}, ExcludeSchemas: []string{"scratch"}}),
+			filters(&v1beta1.Filters{IncludeOnlySchemas: []string{publicSchema}, ExcludeSchemas: []string{"scratch"}}),
 			"includeOnlySchemas cannot be combined with excludeSchemas"),
 		Entry("includeOnlyExtensions with excludeExtensions", "cel-filter-extensions",
 			filters(&v1beta1.Filters{IncludeOnlyExtensions: []string{"citext"}, ExcludeExtensions: []string{"postgis"}}),

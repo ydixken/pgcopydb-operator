@@ -33,7 +33,9 @@ The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg
 Every Migration is gated by a `<name>-preflight` Job before the first attempt.
 Its first check, always, is connectivity: `select 1` against both endpoints, each result logged in the Job output.
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns.
-The clone privileges below are not probed; they surface in the first attempt's logs.
+Three target-side probes run next, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
+A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
+Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).
 
 Source role:
 
@@ -104,16 +106,19 @@ Each side of the Migration MAY carry `superuserSecretRef`, a Secret in the same 
 The `URL`/`URL_EXTERNAL` keys, when present, MUST match the connection's endpoint; a mismatch fails the preflight by name, and a value carrying `:port` is compared port and all.
 With a `secretRef` primary, the internal/external choice follows the primary's `endpoint` field, so both connections always name the same server.
 The preflight probes the superuser connection (with the same retries as the primaries) and checks `rolsuper`; a role without it only logs a warning, because managed-Postgres admin roles (`rds_superuser` and friends) can hold the grant rights without the attribute.
-It then applies the follow rights the regular role is missing, exactly these statements:
+It then applies the rights the regular role is missing, exactly these statements:
 
-- `ALTER ROLE <role> REPLICATION` on the source.
-- `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function.
-- `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly).
+- `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (every migration).
+- `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (every migration).
+- `ALTER ROLE <role> REPLICATION` on the source (follow only).
+- `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
+- `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).
 
-Every applied statement is re-checked and logged in the preflight output, and one `PreflightRemediated` event on the Migration lists them all.
+Every applied statement is re-checked and logged in the preflight output, and one `PreflightRemediated` event per tier (clone rights, follow rights) on the Migration lists that tier's statements.
 One event rather than one per statement, because the events API folds same-reason events into a counter that keeps only the first message.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
-Remediation never touches replica identity, `wal_level`, plugin installation, or your schema, and pgcopydb itself never runs as the superuser.
+Remediation never alters schema objects or data; it only grants rights.
+It never touches replica identity, `wal_level`, plugin installation, or database ownership (the db-properties probe stays hint-only), and pgcopydb itself never runs as the superuser.
 One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.
 The reuse extends to TLS transport settings, including any client certificate; when the server maps certificate identities to roles, the certificate cannot present the superuser, so use password auth for it.
 

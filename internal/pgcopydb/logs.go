@@ -31,30 +31,91 @@ import (
 // output, partial writes) are skipped, so mixed or truncated input degrades
 // to "" and the caller falls back to the Job's own failure message.
 func LastErrorLine(raw []byte) string {
-	type entry struct {
-		Severity string `json:"error_severity"`
-		Message  string `json:"message"`
-	}
 	var last string
 	for line := range strings.Lines(string(raw)) {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var e entry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue
-		}
-		switch e.Severity {
-		// pgcopydb's log levels above WARN; CRITICAL/PANIC accepted in case
-		// the naming ever shifts toward the PostgreSQL severities.
-		case "ERROR", "FATAL", "CRITICAL", "PANIC":
-			if e.Message != "" {
-				last = e.Message
-			}
+		e, ok := parseLogLine(line)
+		if ok && isErrorSeverity(e.Severity) && e.Message != "" {
+			last = e.Message
 		}
 	}
 	return last
+}
+
+// logEntry is one PGCOPYDB_LOG_JSON=on line's relevant fields.
+type logEntry struct {
+	Severity string `json:"error_severity"`
+	Message  string `json:"message"`
+}
+
+func parseLogLine(line string) (logEntry, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "{") {
+		return logEntry{}, false
+	}
+	var e logEntry
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		return logEntry{}, false
+	}
+	return e, true
+}
+
+// isErrorSeverity: pgcopydb's log levels above WARN; CRITICAL/PANIC accepted
+// in case the naming ever shifts toward the PostgreSQL severities.
+func isErrorSeverity(s string) bool {
+	switch s {
+	case "ERROR", "FATAL", "CRITICAL", "PANIC":
+		return true
+	}
+	return false
+}
+
+// permissionWindow bounds how far from the end of the tail a permission line
+// may sit and still count as the attempt's terminal cause. pg_restore without
+// --exit-on-error tolerates per-object permission errors and keeps going, so
+// an old tolerated line must not classify an attempt that later died of
+// something else; the genuine terminal chain (error, ignored-count, process
+// termination) is a handful of lines.
+const permissionWindow = 40
+
+// PermissionDeniedLine returns a log line showing a PostgreSQL permission
+// error as the attempt's terminal cause, or "". The class is deliberately
+// tiny and severity-gated: an error-severity entry carrying "permission
+// denied" or an explicit "SQLSTATE 42501", within the last permissionWindow
+// lines. JSON-wrapped lines count as severe on real severity or a quoted
+// libpq "FATAL:" passthrough; a quoted "ERROR:" alone does not, because that
+// is how pg_restore relays tolerated per-object errors while continuing.
+// Bare 42501 is not matched (row data could contain it). A miss only means
+// the caller keeps its normal retry behavior; extend the class only with
+// evidence that it is always deterministic and terminal.
+func PermissionDeniedLine(raw []byte) string {
+	var window []string
+	for line := range strings.Lines(string(raw)) {
+		msg := strings.TrimSpace(line)
+		if msg == "" {
+			continue
+		}
+		window = append(window, msg)
+		if len(window) > permissionWindow {
+			window = window[1:]
+		}
+	}
+	for _, msg := range window {
+		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
+		if e, ok := parseLogLine(msg); ok {
+			if e.Message == "" {
+				continue
+			}
+			msg = e.Message
+			severe = isErrorSeverity(e.Severity) || strings.Contains(msg, "FATAL:")
+		}
+		if !severe {
+			continue
+		}
+		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") {
+			return msg
+		}
+	}
+	return ""
 }
 
 // Clone-done markers in clone --follow mode, from the pgcopydb 0.18 source

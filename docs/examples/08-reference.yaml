@@ -31,8 +31,9 @@ spec:
     #   endpoint: internal      # or external: take the host from URL_EXTERNAL
     #   keys: {database: DB, password: PW, url: URL, urlExternal: URL_EXTERNAL, username: USER}  # remap deviating names
     # Optional with any form: a superuser on the same endpoint; the preflight
-    # applies missing follow grants with it (06-live-superuser.yaml). Prefer
-    # password auth here when the server maps client certificates to roles.
+    # applies missing grants with it, clone CREATE rights and follow rights
+    # alike (06-live-superuser.yaml). Prefer password auth here when the
+    # server maps client certificates to roles.
     superuserSecretRef:
       name: payroll-source-admin
   target:

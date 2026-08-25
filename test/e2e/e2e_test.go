@@ -651,18 +651,111 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(targetOriginCount()).To(Equal("0"), "replication origin left behind on the target")
 	})
 
-	It("exhausts the retry budget when the clone cannot read the source and stays Failed", func() {
-		const name = "e2e-backoff"
+	It("fails preflight naming the missing schema grant", func() {
+		const name = "e2e-clonegrant"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			dropLimitedRole()
+			resetTargetObjects()
+		})
+
+		By("recreating the managed-Postgres matrix: db CREATE granted, schema CREATE missing")
+		makeLimitedTarget(name)
+
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Target.Username = limitedRole
+		m.Spec.Target.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Key:                  passwordKey,
+		}
+		create(m)
+
+		By("waiting for the clone tier to fail the Migration before any attempt")
+		failed := waitFailed(name, "PreflightFailed")
+		// format %I leaves simple identifiers unquoted, so the statement
+		// reads exactly as an operator would type it.
+		Expect(failureMessage(failed)).To(ContainSubstring("GRANT CREATE ON SCHEMA public TO "+limitedRole),
+			"the exact missing grant must reach the condition")
+		Expect(failureMessage(failed)).To(ContainSubstring("hint: spec.target.superuserSecretRef"),
+			"a failed clone right without a superuser ref must hint at the field")
+		Expect(failureMessage(failed)).To(ContainSubstring("clone.skip: [dbProperties]"),
+			"the non-owner role must also trip the db-properties probe with its way out")
+		Expect(failed.Status.Attempts).To(Equal(int32(0)), "a worker attempt started despite the failed preflight")
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, &batchv1.Job{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "worker Job exists despite the failed preflight")
+	})
+
+	It("remediates the clone schema grant and completes", func() {
+		const name = "e2e-clonegrant-fix"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			psql(tgtPod, "ALTER ROLE postgres PASSWORD NULL")
+			dropLimitedRole()
+			resetTargetObjects()
+		})
+
+		By("recreating the managed-Postgres matrix plus a target superuser Secret")
+		makeLimitedTarget(name)
+		superPW := name + "-super-pw"
+		psql(tgtPod, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", superPW))
+		superSec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name + "-super"}}
+		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, superSec, func() error {
+			superSec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(superPW)}
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret")
+
+		// noOwner/noACL is the documented non-superuser restore shape, and the
+		// db-properties step stays skipped because a grant cannot confer
+		// database ownership.
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{
+			NoOwner: true,
+			NoACL:   true,
+			Skip:    []v1beta1.SkipOption{"dbProperties"},
+		})
+		m.Spec.Target.Username = limitedRole
+		m.Spec.Target.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Key:                  passwordKey,
+		}
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super"}
+		create(m)
+
+		By("waiting for the remediated clone to complete")
+		waitCompleted(name, nsE2E)
+		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(psql(tgtPod, "SELECT has_schema_privilege('"+limitedRole+"', 'public', 'CREATE')::int")).To(Equal("1"),
+			"remediation must leave the schema grant in place")
+
+		By("checking the applied grant was recorded as a PreflightRemediated event")
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, got)).To(Succeed())
+		Eventually(func(g Gomega) {
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(ctx, events, client.InNamespace(nsE2E))).To(Succeed())
+			var schemaGrant bool
+			for _, e := range events.Items {
+				if e.InvolvedObject.UID == got.UID && e.Reason == "PreflightRemediated" &&
+					strings.Contains(e.Message, "GRANT CREATE ON SCHEMA public TO "+limitedRole) {
+					schemaGrant = true
+				}
+			}
+			g.Expect(schemaGrant).To(BeTrue(), "no PreflightRemediated event for the schema grant")
+		}, time.Minute, 2*time.Second).Should(Succeed())
+	})
+
+	It("fails fast when the clone hits a permission error it cannot fix", func() {
+		const name = "e2e-permdenied"
 		DeferCleanup(func() {
 			deleteMigration(name)
 			psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
 		})
 
 		By("creating a source role that can connect but not read")
-		// The universal preflight only probes connectivity for clone-only
-		// migrations, so a role without SELECT passes the gate and fails the
-		// copy itself: exactly the deterministic mid-run failure this spec
-		// needs to exercise the retry budget.
+		// The clone tier probes target rights only, so a source role without
+		// SELECT still passes the gate and fails the copy itself: exactly the
+		// deterministic permission error the classifier must terminate on the
+		// first attempt instead of burning the budget.
 		psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
 		psql(srcPod, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
 		copySecret(nsE2E, name, []byte("e2e-noselect-pw"))
@@ -673,12 +766,52 @@ var _ = Describe("Migration", Ordered, func() {
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
 			Key:                  passwordKey,
 		}
+		m.Spec.BackoffLimit = 3
+		create(m)
+
+		By("waiting for the terminal permission failure after a single attempt")
+		failed := waitFailed(name, "PermissionDenied")
+		Expect(failed.Status.Attempts).To(Equal(int32(1)), "the classifier must stop after the first attempt")
+		Expect(failureMessage(failed)).To(ContainSubstring("permission denied"))
+
+		By("checking the budget stays unspent: no second attempt within a full poll interval")
+		Consistently(func(g Gomega) {
+			cur := &v1beta1.Migration{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
+			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+			g.Expect(cur.Status.Attempts).To(Equal(int32(1)))
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"a second attempt Job appeared despite the permission classification")
+		}, 45*time.Second, 5*time.Second).Should(Succeed())
+	})
+
+	It("exhausts the retry budget on a failure the classifier does not know", func() {
+		const name = "e2e-backoff"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			resetTargetObjects()
+		})
+
+		By("planting a conflicting target table so pg_restore fails outside the permission class")
+		// Without dropIfExists pg_restore cannot replace an existing table,
+		// and the incompatible definition keeps every retry failing the same
+		// way; "already exists" is outside the classifier's class, so the
+		// budget burns exactly as before the classifier existed. A tiny work
+		// volume cannot carry this spec: a clone's work dir holds only
+		// catalogs and schema dumps (see the chaos suite's spool note).
+		resetTargetObjects()
+		psql(tgtPod, "CREATE TABLE public.customers (mismatch int)")
+
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		m.Spec.BackoffLimit = 1
 		create(m)
 
 		By("waiting for the terminal failure after exactly two attempts")
 		failed := waitFailed(name, "BackoffLimitExceeded")
 		Expect(failed.Status.Attempts).To(Equal(int32(2)))
+		Expect(failureMessage(failed)).NotTo(ContainSubstring("permission denied"),
+			"the budget carrier must fail on a class the classifier ignores")
 
 		By("checking Failed is absorbing: no third attempt within a full poll interval")
 		Consistently(func(g Gomega) {
@@ -692,6 +825,38 @@ var _ = Describe("Migration", Ordered, func() {
 		}, 45*time.Second, 5*time.Second).Should(Succeed())
 	})
 })
+
+// limitedRole mirrors the managed-Postgres application role from issue #119:
+// LOGIN and CONNECT, CREATE on the database, USAGE but not CREATE on public.
+const limitedRole = "e2e_limited"
+
+// makeLimitedTarget rebuilds the target's public schema in the PostgreSQL 15+
+// managed shape (owned by pg_database_owner, USAGE for PUBLIC, no CREATE) and
+// creates the limited role with its password Secret. The audit schema is
+// dropped so only public exists on the target for the schema probe.
+func makeLimitedTarget(secretName string) {
+	GinkgoHelper()
+	dropLimitedRole()
+	// The canonical reset also unlinks large objects: earlier completed
+	// migrations leave OID-preserved blobs that would collide with the
+	// no-dropIfExists remediation clone (pg_restore only drops what the
+	// incoming dump carries).
+	resetTargetObjects()
+	psql(tgtPod, "GRANT USAGE ON SCHEMA public TO PUBLIC")
+	pw := secretName + "-pw"
+	psql(tgtPod, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
+	psql(tgtPod, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
+	copySecret(nsE2E, secretName, []byte(pw))
+}
+
+// dropLimitedRole removes the limited role and everything it restored. The
+// DO block guards DROP OWNED, which unlike DROP ROLE has no IF EXISTS.
+func dropLimitedRole() {
+	GinkgoHelper()
+	psql(tgtPod, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
+		" THEN EXECUTE 'DROP OWNED BY %s CASCADE'; END IF; END $$", limitedRole, limitedRole))
+	psql(tgtPod, "DROP ROLE IF EXISTS "+limitedRole)
+}
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
 // so the same spec works from pgcopydb-e2e-x.

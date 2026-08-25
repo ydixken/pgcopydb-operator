@@ -50,8 +50,11 @@ const (
 	// follow it.
 	workerLogTail = 200
 	// preflightLogTail bounds the preflight verdict carried into the
-	// condition message: one line per failed check plus psql stderr.
-	preflightLogTail = 20
+	// condition message. 60, not 20: the failure footer re-prints the audit
+	// list first, then the notes carrying exact GRANT statements, then the
+	// hints, and the fix lines must survive the window even when a long
+	// replica-identity audit precedes them.
+	preflightLogTail = 60
 	// preflightOkLogTail is effectively the whole preflight log: the
 	// success-path parse must see every remediated: line even under a long
 	// replica-identity audit, or applied grants lose their audit events.
@@ -65,6 +68,10 @@ const (
 	// maxDetailLen caps extracted log lines in condition/event messages
 	// (events are server-limited to about 1KiB).
 	maxDetailLen = 700
+	// remediatedNoteLen caps the per-tier PreflightRemediated bundle just
+	// under the events API's 1KiB note limit: the full follow battery is
+	// ~620 bytes and must never truncate out of the audit trail.
+	remediatedNoteLen = 950
 )
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
@@ -253,30 +260,39 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 }
 
 // emitPreflightOutcome turns the finished preflight's log into events: one
-// PreflightRemediated listing every applied statement, then the
-// PreflightPassed summary. One event, not one per statement: the events
-// recorder correlates by reason and drops differing messages into a counter,
-// which silently ate all but the first statement (found by the rc.1 gate).
-// The "ok: " and "remediated: " line prefixes are the script's log contract.
+// PreflightRemediated per tier listing that tier's applied statements, then
+// the PreflightPassed summary. Bundled, not one per statement: the events
+// recorder correlates by reason and action and drops differing messages into
+// a counter, which silently ate all but the first statement (found by the
+// rc.1 gate); the distinct per-tier actions are what keep the two bundles
+// apart. The "ok: ", "remediated: ", and "remediated-clone: " line prefixes
+// are the script's log contract.
 func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
 	checks := 0
-	var remediated []string
+	var clone, follow []string
 	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
 		switch {
 		case strings.HasPrefix(line, "ok: "):
 			checks++
-		case strings.HasPrefix(line, "remediated: "):
-			remediated = append(remediated, strings.TrimPrefix(line, "remediated: "))
+		case strings.HasPrefix(line, remPrefixClone):
+			clone = append(clone, strings.TrimPrefix(line, remPrefixClone))
+		case strings.HasPrefix(line, remPrefixFollow):
+			follow = append(follow, strings.TrimPrefix(line, remPrefixFollow))
 		}
 	}
-	if len(remediated) > 0 {
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight",
-			"%s", truncate(strings.Join(remediated, "\n"), maxDetailLen))
+	if len(clone) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateClone",
+			"%s", truncate(strings.Join(clone, "\n"), remediatedNoteLen))
 	}
+	if len(follow) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateFollow",
+			"%s", truncate(strings.Join(follow, "\n"), remediatedNoteLen))
+	}
+	grants := len(clone) + len(follow)
 	msg := "all preflight checks passed"
-	if checks > 0 || len(remediated) > 0 {
-		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, len(remediated))
+	if checks > 0 || grants > 0 {
+		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, grants)
 	}
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "%s", msg)
 }
@@ -549,9 +565,24 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 // line is appended when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
-	if detail := r.workerErrorDetail(ctx, m.Namespace, job.Name); detail != "" {
+	tail := r.jobLogTail(ctx, m.Namespace, job.Name, workerLogTail)
+	if detail := truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen); detail != "" {
 		reason += "; last error: " + detail
 	}
+
+	// A permission error is database configuration: a retry replays the same
+	// statements as the same role and refuses identically, so the budget only
+	// delays the verdict. The preflight probes the known grants before attempt
+	// 1; this catches what it cannot see (rights revoked mid-run, unprobed
+	// classes like source-side SELECT).
+	if line := pgcopydb.PermissionDeniedLine([]byte(tail)); line != "" {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
+		r.fail(m, "PermissionDenied", "Fail", fmt.Sprintf(
+			"attempt %d failed on a permission error retries cannot fix: %s",
+			m.Status.Attempts, truncate(line, maxDetailLen)))
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
+	}
+
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
 		r.fail(m, "BackoffLimitExceeded", "Fail",
@@ -681,14 +712,6 @@ func (r *MigrationReconciler) jobLogTail(ctx context.Context, namespace, jobName
 		return ""
 	}
 	return strings.TrimSpace(string(raw))
-}
-
-// workerErrorDetail pulls the last pgcopydb ERROR/FATAL message out of a
-// failed worker's structured logs (PGCOPYDB_LOG_JSON=on); "" when no parsable
-// error line is available.
-func (r *MigrationReconciler) workerErrorDetail(ctx context.Context, namespace, jobName string) string {
-	tail := r.jobLogTail(ctx, namespace, jobName, workerLogTail)
-	return truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen)
 }
 
 // truncate caps s for contexts with server-side size limits (event notes).

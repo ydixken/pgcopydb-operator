@@ -17,6 +17,7 @@ limitations under the License.
 package pgcopydb
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,6 +159,98 @@ func TestSupervisorDeath(t *testing.T) {
 			}
 			if found && !got.Equal(tc.want) {
 				t.Fatalf("SupervisorDeath() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPermissionDeniedLine(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "pg_restore passthrough inside a structured line",
+			raw: `{"error_severity":"INFO","message":"STEP 4: restore schema"}
+{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  permission denied for schema public"}
+{"error_severity":"ERROR","message":"Failed to prepare schema on the target database, see above for details"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  permission denied for schema public",
+		},
+		{
+			name: "pgcopydb wrapping a libpq error keeps no ERROR prefix",
+			raw:  `{"error_severity":"ERROR","message":"permission denied for function pg_replication_origin_drop"}`,
+			want: "permission denied for function pg_replication_origin_drop",
+		},
+		{
+			name: "plain psql line without JSON wrapping",
+			raw:  "ERROR:  permission denied for schema public\n",
+			want: "ERROR:  permission denied for schema public",
+		},
+		{
+			name: "sqlstate form matches on an error-severity line",
+			raw:  `{"error_severity":"ERROR","message":"query failed: SQLSTATE 42501"}`,
+			want: "query failed: SQLSTATE 42501",
+		},
+		{
+			name: "sqlstate on a mild line does not classify",
+			raw:  `{"error_severity":"INFO","message":"note: SQLSTATE 42501 seen earlier"}`,
+			want: "",
+		},
+		{
+			name: "info severity quoting the text is not a failure",
+			raw:  `{"error_severity":"INFO","message":"will fail with permission denied unless granted"}`,
+			want: "",
+		},
+		{
+			name: "bare 42501 in data is not a permission error",
+			raw:  `{"error_severity":"ERROR","message":"row 42501 rejected: value out of range"}`,
+			want: "",
+		},
+		{
+			name: "first match wins",
+			raw: `{"error_severity":"ERROR","message":"ERROR:  permission denied for schema audit"}
+{"error_severity":"ERROR","message":"ERROR:  permission denied for schema public"}`,
+			want: "ERROR:  permission denied for schema audit",
+		},
+		{name: "unrelated error", raw: `{"error_severity":"ERROR","message":"deadlock detected"}`, want: ""},
+		{
+			// pg_restore relays tolerated per-object errors this way while
+			// continuing; classifying them would kill retryable attempts.
+			name: "warning quoting ERROR text does not classify",
+			raw:  `{"error_severity":"WARNING","message":"subprocess said: ERROR:  permission denied for schema public"}`,
+			want: "",
+		},
+		{
+			// libpq connect-time refusals arrive FATAL under a mild wrapper
+			// severity and are deterministic.
+			name: "warning quoting a FATAL libpq passthrough classifies",
+			raw:  `{"error_severity":"WARNING","message":"connection attempt failed: FATAL:  permission denied for database app"}`,
+			want: "connection attempt failed: FATAL:  permission denied for database app",
+		},
+		{
+			name: "tolerated line outside the terminal window does not classify",
+			raw: `{"error_severity":"ERROR","message":"ERROR:  permission denied for schema public"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"worker was killed: out of memory"}`,
+			want: "",
+		},
+		{
+			name: "terminal permission chain classifies end to end",
+			raw: strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  permission denied for schema public"}` + "\n" +
+				`{"error_severity":"WARNING","message":"pg_restore: warning: errors ignored on restore: 6"}` + "\n" +
+				`{"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  permission denied for schema public",
+		},
+		{name: "structured line without a message is skipped", raw: `{"error_severity":"ERROR"}` + "\npermission denied\n", want: ""},
+		{name: "blank lines are skipped", raw: "\n\nERROR:  permission denied for schema public", want: "ERROR:  permission denied for schema public"},
+		{name: "no input at all", raw: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PermissionDeniedLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("PermissionDeniedLine() = %q, want %q", got, tc.want)
 			}
 		})
 	}
