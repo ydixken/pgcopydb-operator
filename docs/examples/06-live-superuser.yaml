@@ -1,9 +1,9 @@
-# Live migration where the preflight applies the follow grants itself.
+# Live migration where the preflight applies the missing grants itself,
+# clone CREATE rights and the follow rights alike.
 # Each superuserSecretRef names a Secret in the same DB/PW/URL/URL_EXTERNAL/
 # USER convention as secretRef (03-clone-platform-secret.yaml): USER/PW are
 # consumed, and URL keys, when present, must match this side's endpoint.
-# The preflight checks the superuser, applies the missing grants, and logs
-# each statement as an event: docs/reference/prerequisites.md has the contract.
+# Applied statements are logged as one event; prerequisites.md has the contract.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:

@@ -100,4 +100,4 @@ The password stays a projected file feeding the passfile, with the same guarante
 [03-clone-platform-secret.yaml](examples/03-clone-platform-secret.yaml) is the complete example.
 
 Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
-The preflight checks it and applies the follow grants the regular role is missing, logging every statement in one `PreflightRemediated` event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.
+The preflight checks it and applies the grants the regular role is missing, for the base clone (`GRANT CREATE` on the target database and schemas) and for follow alike, logging every statement in one `PreflightRemediated` event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.
