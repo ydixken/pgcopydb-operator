@@ -215,9 +215,10 @@ exit 1`
 }
 
 // The preflight script is assembled per Migration by preflightScriptFor.
-// Connectivity leads unconditionally for every migration; the follow battery
+// Connectivity leads unconditionally for every migration, the clone-rights
+// tier probes what the base copy needs on the target, and the follow battery
 // checks every prerequisite the operator can probe via psql before the first
-// worker runs, and each failed check prints one line naming the exact GRANT or
+// worker runs; each failed check prints one line naming the exact GRANT or
 // setting that fixes it. Every loss and failure mode observed in live testing
 // trips one of these checks. The session_replication_role probe is the
 // silent-loss gate: without that SET, pgcopydb 0.18 applies nothing while
@@ -233,11 +234,14 @@ exit 1`
 // probing after it. note buffers failure lines and hint the field pointers,
 // so the footer can re-print both inside the log tail the condition carries.
 // PREFLIGHT_RETRY_SLEEP is a test seam; env values are never shell-evaluated.
+// checkv feeds the query via stdin because psql interpolates :'list' only in
+// file input, never in -c commands.
 const preflightHeader = `set -u
 fail=0
 fails=''
 hints=''
 check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
+checkv() { printf '%s' "$2" | psql "$1" -XAtq -v ON_ERROR_STOP=1 -v list="$3" -f -; }
 note() { echo "$1"; fails="$fails$1
 "; fail=1; }
 hint() { hints="$hints$1
@@ -271,6 +275,83 @@ else
   echo "ok: superuser @SIDE@ verified"
 fi
 `)
+}
+
+// cloneRightsHint is the pointer printed when a clone probe fails without a
+// target superuser configured; remediation itself lands with the super path.
+const cloneRightsHint = `  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
+`
+
+// cloneSchemasQuery lists the source's non-system schemas; the shell filters
+// them against the spec's schema filters (grep -Fx, so filter values never
+// reach SQL) before the target probe.
+const cloneSchemasQuery = `check "$PGCOPYDB_SOURCE_PGURI" "select n.nspname from pg_namespace n where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' order by 1"`
+
+// cloneSchemaGrantsQuery aggregates the missing GRANT CREATE statements for
+// the probed schemas that exist on the target; names come from catalogs and
+// are composed server-side (%I), never from the spec.
+const cloneSchemaGrantsQuery = `checkv "$PGCOPYDB_TARGET_PGURI" "select string_agg(format('GRANT CREATE ON SCHEMA %I TO %I', n.nspname, current_user), '; ') from pg_namespace n where n.nspname = any(string_to_array(:'list', chr(10))) and not has_schema_privilege(current_user, n.oid, 'CREATE')" "$sc_list"`
+
+// cloneRightsBlock probes what the base copy needs on the target: CREATE on
+// the database, CREATE on every source schema (filter-honoring) already
+// present there, and, unless skipped, the ownership db-properties needs.
+// The schema probe is the load-bearing one: managed platforms grant database
+// CREATE while the PostgreSQL 15+ pg_database_owner split withholds the
+// schema right, and every attempt then dies in pg_restore (#119).
+func cloneRightsBlock(superTgt, dbProperties bool) string {
+	hint := cloneRightsHint
+	if superTgt {
+		hint = ""
+	}
+	b := `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
+if [ "$(check "$PGCOPYDB_TARGET_PGURI" "select has_database_privilege(current_user, current_database(), 'CREATE')::int")" != 1 ]; then
+  stmt=$(check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT CREATE ON DATABASE %I TO %I', current_database(), current_user)")
+  note "preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt"
+` + hint + `else
+  echo "ok: clone rights database"
+fi
+clone_schemas=$(` + cloneSchemasQuery + `)
+sc_inc="${PREFLIGHT_SCHEMA_INCLUDE:-}"
+sc_exc="${PREFLIGHT_SCHEMA_EXCLUDE:-}"
+sc_list=''
+while IFS= read -r s; do
+  [ -n "$s" ] || continue
+  if [ -n "$sc_inc" ] && ! printf '%s\n' "$sc_inc" | grep -Fxq "$s"; then continue; fi
+  if printf '%s\n' "$sc_exc" | grep -Fxq "$s"; then continue; fi
+  sc_list="$sc_list$s
+"
+done <<PF_SCHEMAS
+$clone_schemas
+PF_SCHEMAS
+if [ -n "$sc_list" ]; then
+  schema_grants=$(` + cloneSchemaGrantsQuery + `)
+  if [ -n "$schema_grants" ]; then
+    note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $schema_grants"
+` + indent(hint) + `  else
+    echo "ok: clone rights schemas"
+  fi
+else
+  echo "ok: clone rights schemas"
+fi
+`
+	if dbProperties {
+		b += `if [ "$(check "$PGCOPYDB_TARGET_PGURI" "select (pg_has_role(current_user, (select datdba from pg_database where datname = current_database()), 'USAGE') or (select rolsuper from pg_roles where rolname = current_user))::int")" != 1 ]; then
+  note "preflight: target role \"$tgt_user\" cannot run ALTER DATABASE ... SET (the db-properties step needs ownership): make the role a member of the owning role, or set clone.skip: [dbProperties]"
+else
+  echo "ok: clone rights db-properties"
+fi
+`
+	}
+	return b
+}
+
+// indent shifts a hint line to sit inside a nested branch; an empty hint
+// stays empty so the emitted script carries no stray blank lines.
+func indent(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "  " + s
 }
 
 const walLevelBlock = `wal_level=$(check "$PGCOPYDB_SOURCE_PGURI" 'show wal_level')
@@ -446,8 +527,8 @@ fi
 exit "$fail"`
 
 // preflightScriptFor assembles the per-Migration check script: connectivity
-// always and first, superuser verification when configured, and the follow
-// battery only for follow migrations.
+// always and first, superuser verification when configured, the clone-rights
+// tier for every migration, and the follow battery only for follow migrations.
 func preflightScriptFor(m *v1beta1.Migration) string {
 	var b strings.Builder
 	b.WriteString(preflightHeader)
@@ -459,6 +540,13 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	if superTgt {
 		b.WriteString(superVerifyBlock(conn.Target))
 	}
+	dbProps := true
+	for _, s := range m.Spec.Clone.Skip {
+		if s == v1beta1.SkipOption("dbProperties") {
+			dbProps = false
+		}
+	}
+	b.WriteString(cloneRightsBlock(superTgt, dbProps))
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
 		b.WriteString(slotHeadroomBlock)
@@ -526,6 +614,23 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 			Name:  "PREFLIGHT_ALLOW_MISSING_RI",
 			Value: strings.Join(f.AllowMissingReplicaIdentity, "\n"),
 		})
+	}
+	// The schema filters travel the same way for the clone-rights probe: the
+	// shell matches them with grep -Fx, so filter values never reach SQL.
+	if f := m.Spec.Clone.Filters; f != nil {
+		c := &job.Spec.Template.Spec.Containers[0]
+		if len(f.IncludeOnlySchemas) > 0 {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name:  "PREFLIGHT_SCHEMA_INCLUDE",
+				Value: strings.Join(f.IncludeOnlySchemas, "\n"),
+			})
+		}
+		if len(f.ExcludeSchemas) > 0 {
+			c.Env = append(c.Env, corev1.EnvVar{
+				Name:  "PREFLIGHT_SCHEMA_EXCLUDE",
+				Value: strings.Join(f.ExcludeSchemas, "\n"),
+			})
+		}
 	}
 	return job, nil
 }

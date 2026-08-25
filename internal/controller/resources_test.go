@@ -42,6 +42,12 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const pgoutputPlugin = "pgoutput"
 
+// Schema fixtures for the clone-rights filter tests, hoisted for goconst.
+const (
+	testSchemaInc = "sales"
+	testSchemaExc = "scratch"
+)
+
 // passwordMigration is the canned inline-credentials spec the builder tests
 // share; callers mutate follow/cutover as needed.
 func passwordMigration() *v1beta1.Migration {
@@ -337,11 +343,16 @@ func TestPreflightScript_ReplicaIdentityAudit(t *testing.T) {
 	dir := t.TempDir()
 	stub := `#!/bin/sh
 q="$6"
+for a in "$@"; do [ "$a" = "-f" ] && q=$(cat); done
 case "$q" in
   *relreplident*) printf '%s' "${PSQL_RI:-}" ;;
+  *has_schema_privilege*) echo "" ;;
+  *has_database_privilege*) echo 1 ;;
+  *datdba*) echo 1 ;;
   *max_replication_slots*) echo 5 ;;
   *rolreplication*) echo 1 ;;
   *string_agg*) echo "" ;;
+  *pg_namespace*) echo public ;;
   *session_replication_role*) exit 0 ;;
   *wal_level*) echo logical ;;
   *current_user*) echo u ;;
@@ -550,8 +561,10 @@ func TestPreflightScriptFor_Structure(t *testing.T) {
 		m.Spec.Source.SuperuserSecretRef = nil
 		m.Spec.Target.SuperuserSecretRef = nil
 		s := preflightScriptFor(m)
-		if got := strings.Count(s, "hint: spec."); got != 3 {
-			t.Fatalf("want 3 hint lines, got %d:\n%s", got, s)
+		// Three follow hints plus the clone tier's two (database and schema
+		// CREATE); db-properties is not superuser-remediable and hints none.
+		if got := strings.Count(s, "hint: spec."); got != 5 {
+			t.Fatalf("want 5 hint lines, got %d:\n%s", got, s)
 		}
 		for _, want := range []string{
 			"hint: spec.source.superuserSecretRef lets the operator apply this itself",
@@ -651,6 +664,7 @@ func TestPreflightScript_Remediation(t *testing.T) {
 	// server's identifier escaping so the injection subtest is faithful.
 	stub := `#!/bin/sh
 uri="$1"; q="$6"
+for a in "$@"; do [ "$a" = "-f" ] && q=$(cat); done
 role="${ROLE_NAME:-app}"
 qrole=$(printf '%s' "$role" | sed 's/"/""/g')
 apply() {
@@ -666,6 +680,9 @@ case "$q" in
     n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
     [ "$n" -gt "${CONN_FAIL_N:-0}" ] || exit 1
     exit 0 ;;
+  *has_schema_privilege*) printf '%s' "${PSQL_SCHEMA_GRANTS:-}" ;;
+  *has_database_privilege*) echo "${PSQL_DB_CREATE:-1}" ;;
+  *datdba*) echo "${PSQL_DBPROPS:-1}" ;;
   *format*ALTER*) echo "ALTER ROLE \"$qrole\" REPLICATION" ;;
   *format*GRANT\ SET*) echo "GRANT SET ON PARAMETER session_replication_role TO \"$qrole\"" ;;
   *rolreplication*) if [ -f "$STATE/repl" ]; then echo 1; else echo 0; fi ;;
@@ -678,6 +695,7 @@ case "$q" in
   *wal_level*) echo logical ;;
   *max_replication_slots*) echo 5 ;;
   *relreplident*) printf '' ;;
+  *pg_namespace*) printf '%s' "${PSQL_SCHEMAS:-public}" ;;
   *current_user*) echo "$role" ;;
   *) echo 1 ;;
 esac
@@ -981,4 +999,220 @@ func TestBuilders_InvalidConnection(t *testing.T) {
 	if _, err := buildPreflightJob(m, testRunnerImage); err == nil {
 		t.Fatal("preflight builder must reject an invalid connection")
 	}
+}
+
+// TestPreflightScriptFor_CloneTier pins the clone-rights tier's structure: it
+// runs for every migration shape, sits between superuser verification and the
+// follow battery, honours the dbProperties skip, and drops the hint lines
+// when a target superuser is configured.
+func TestPreflightScriptFor_CloneTier(t *testing.T) {
+	t.Run("clone-only carries the tier", func(t *testing.T) {
+		s := preflightScriptFor(passwordMigration())
+		for _, want := range []string{
+			"has_database_privilege(current_user, current_database(), 'CREATE')",
+			"has_schema_privilege(current_user, n.oid, 'CREATE')",
+			"datdba",
+			"hint: spec.target.superuserSecretRef",
+		} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("clone-only script missing %q:\n%s", want, s)
+			}
+		}
+		mustPrecede(t, s, `ok: connectivity target`, `ok: clone rights database`)
+	})
+	t.Run("follow runs the tier before its battery", func(t *testing.T) {
+		s := preflightScriptFor(superMigration())
+		mustPrecede(t, s, "ok: superuser target verified", "ok: clone rights database")
+		mustPrecede(t, s, "ok: clone rights db-properties", "wal_level")
+	})
+	t.Run("dbProperties skip drops that probe", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Clone.Skip = []v1beta1.SkipOption{"vacuum", "dbProperties"}
+		s := preflightScriptFor(m)
+		if strings.Contains(s, "datdba") {
+			t.Fatalf("skipped db-properties still probed:\n%s", s)
+		}
+		if !strings.Contains(s, "has_schema_privilege") {
+			t.Fatal("schema probe must survive the dbProperties skip")
+		}
+	})
+	t.Run("target superuser drops the clone hints", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "adm"}
+		s := preflightScriptFor(m)
+		if strings.Contains(s, "hint: spec.target.superuserSecretRef") {
+			t.Fatalf("clone hints must vanish with a target superuser:\n%s", s)
+		}
+	})
+	t.Run("schema filters ride as env", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Clone.Filters = &v1beta1.Filters{
+			IncludeOnlySchemas: []string{"public", testSchemaInc},
+			ExcludeSchemas:     []string{testSchemaExc},
+		}
+		job, err := buildPreflightJob(m, "img")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if got := envValue(c.Env, "PREFLIGHT_SCHEMA_INCLUDE"); got != "public\n"+testSchemaInc {
+			t.Fatalf("include env = %q", got)
+		}
+		if got := envValue(c.Env, "PREFLIGHT_SCHEMA_EXCLUDE"); got != testSchemaExc {
+			t.Fatalf("exclude env = %q", got)
+		}
+	})
+}
+
+// TestPreflightScript_CloneRights executes the generated script under /bin/sh
+// with a stub psql, proving the clone tier end to end: the customer matrix
+// (database CREATE true, schema CREATE false) fails with the exact schema
+// GRANT, the shell filter keeps spec values out of the probe list, and the
+// db-properties failure names both ways out.
+func TestPreflightScript_CloneRights(t *testing.T) {
+	dir := t.TempDir()
+	stub := `#!/bin/sh
+q="$6"
+for a in "$@"; do
+  case "$a" in
+    list=*) printf '%s' "${a#list=}" > "${LIST_OUT:-/dev/null}" ;;
+    -f) q=$(cat) ;;
+  esac
+done
+case "$q" in
+  *has_schema_privilege*) printf '%s' "${PSQL_SCHEMA_GRANTS:-}" ;;
+  *has_database_privilege*) echo "${PSQL_DB_CREATE:-1}" ;;
+  *'GRANT CREATE ON DATABASE'*) echo "GRANT CREATE ON DATABASE \"app\" TO \"limited\"" ;;
+  *datdba*) echo "${PSQL_DBPROPS:-1}" ;;
+  *rolsuper*) echo 1 ;;
+  *pg_namespace*) printf '%s\n' "${PSQL_SCHEMAS:-public}" | tr ',' '\n' ;;
+  *current_user*) echo limited ;;
+  *) echo 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(t *testing.T, m *v1beta1.Migration, extra ...string) (string, int, string) {
+		t.Helper()
+		listOut := filepath.Join(t.TempDir(), "list")
+		job, err := buildPreflightJob(m, "img")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		cmd := exec.Command(shellPath, "-c", c.Args[1])
+		cmd.Env = append(os.Environ(),
+			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PGCOPYDB_SOURCE_PGURI=src",
+			"PGCOPYDB_TARGET_PGURI=tgt",
+			"PGM_TARGET_SUPER_PGURI=tgt-super",
+			"LIST_OUT="+listOut,
+			"PREFLIGHT_RETRY_SLEEP=0",
+			"PREFLIGHT_SCHEMA_INCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_INCLUDE"),
+			"PREFLIGHT_SCHEMA_EXCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_EXCLUDE"),
+		)
+		cmd.Env = append(cmd.Env, extra...)
+		out, err := cmd.CombinedOutput()
+		list, _ := os.ReadFile(listOut)
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			return string(out), 0, string(list)
+		case errors.As(err, &exitErr):
+			return string(out), exitErr.ExitCode(), string(list)
+		default:
+			t.Fatalf("running preflight script: %v\n%s", err, out)
+			return "", 0, ""
+		}
+	}
+
+	t.Run("customer matrix fails with the schema grant", func(t *testing.T) {
+		out, code, _ := run(t, passwordMigration(),
+			`PSQL_SCHEMA_GRANTS=GRANT CREATE ON SCHEMA public TO "limited"`)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "ok: clone rights database") {
+			t.Fatalf("db-level CREATE was true and must pass:\n%s", out)
+		}
+		if !strings.Contains(out, `GRANT CREATE ON SCHEMA public TO "limited"`) ||
+			!strings.Contains(out, "hint: spec.target.superuserSecretRef") {
+			t.Fatalf("missing schema grant or hint:\n%s", out)
+		}
+	})
+	t.Run("database CREATE failure names its grant", func(t *testing.T) {
+		out, code, _ := run(t, passwordMigration(), "PSQL_DB_CREATE=0")
+		if code != 1 || !strings.Contains(out, `GRANT CREATE ON DATABASE "app" TO "limited"`) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("all rights pass", func(t *testing.T) {
+		out, code, _ := run(t, passwordMigration())
+		if code != 0 || !strings.Contains(out, "all checks passed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{"ok: clone rights database", "ok: clone rights schemas", "ok: clone rights db-properties"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("excluded schema never reaches the probe", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeSchemas: []string{testSchemaExc}}
+		out, code, list := run(t, m, "PSQL_SCHEMAS=public,"+testSchemaExc)
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.Contains(list, testSchemaExc) || !strings.Contains(list, "public") {
+			t.Fatalf("probe list = %q, want public without scratch", list)
+		}
+	})
+	t.Run("includeOnly keeps just its schemas", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlySchemas: []string{testSchemaInc}}
+		out, code, list := run(t, m, "PSQL_SCHEMAS=public,"+testSchemaInc+","+testSchemaExc)
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.TrimSpace(list) != testSchemaInc {
+			t.Fatalf("probe list = %q, want sales only", list)
+		}
+	})
+	t.Run("source-only schema passes through to SQL existence", func(t *testing.T) {
+		// A schema absent on the target is filtered by the pg_namespace join
+		// server-side, not by the shell: the list still carries it.
+		out, code, list := run(t, passwordMigration(), "PSQL_SCHEMAS=public,newschema")
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if !strings.Contains(list, "newschema") {
+			t.Fatalf("probe list = %q, must include newschema", list)
+		}
+	})
+	t.Run("db-properties failure names both outs", func(t *testing.T) {
+		out, code, _ := run(t, passwordMigration(), "PSQL_DBPROPS=0")
+		if code != 1 ||
+			!strings.Contains(out, "member of the owning role") ||
+			!strings.Contains(out, "clone.skip: [dbProperties]") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.Contains(out, "hint: spec.") {
+			t.Fatalf("db-properties is not superuser-remediable, no hint expected:\n%s", out)
+		}
+	})
+	t.Run("target superuser silences the hint but still fails", func(t *testing.T) {
+		m := passwordMigration()
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "adm"}
+		out, code, _ := run(t, m,
+			`PSQL_SCHEMA_GRANTS=GRANT CREATE ON SCHEMA public TO "limited"`)
+		if code != 1 {
+			t.Fatalf("code=%d, want 1; out:\n%s", code, out)
+		}
+		if strings.Contains(out, "hint: spec.") {
+			t.Fatalf("hint must vanish with a super conn:\n%s", out)
+		}
+	})
 }
