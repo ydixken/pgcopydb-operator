@@ -255,7 +255,9 @@ var _ = Describe("Migration Controller", func() {
 		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
-		const lastError = "permission denied for function pg_replication_origin_drop"
+		// Neutral text: a permission-denied fixture would now trip the
+		// fast-fail classifier and never reach the retry this spec pins.
+		const lastError = "deadlock detected while restoring indexes"
 		r := newReconciler()
 		r.Logs = &fakeLogs{out: `{"error_severity":"INFO","message":"STEP 1: setup"}` + "\n" +
 			`{"error_severity":"ERROR","message":"` + lastError + `"}` + "\n"}
@@ -275,6 +277,36 @@ var _ = Describe("Migration Controller", func() {
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
 		Expect(failed.Message).To(ContainSubstring(lastError))
+	})
+
+	It("fails fast when the worker hits a permission error", func() {
+		const name = "mig-permission-denied"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 3 // budget must stay unspent
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		const denied = "pg_restore: error: could not execute query: ERROR:  permission denied for schema public"
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: `{"error_severity":"ERROR","message":"` + denied + `"}` + "\n" +
+			`{"error_severity":"ERROR","message":"Failed to prepare schema on the target database, see above for details"}` + "\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+
+		passGate(ctx, r, name) // run-1
+		finishJob(ctx, name+"-run-1", false)
+		final := reconcileAndGet(ctx, r, name)
+
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("PermissionDenied"))
+		Expect(failed.Message).To(SatisfyAll(
+			ContainSubstring("attempt 1"), ContainSubstring("permission denied for schema public")))
+		clone := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionCloneCompleted)
+		Expect(clone.Reason).To(Equal("CloneFailed"))
+		Expect(final.Status.Attempts).To(Equal(int32(1)))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("PermissionDenied")))
 	})
 
 	It("keeps the Job's failure message when worker logs are unreadable", func() {

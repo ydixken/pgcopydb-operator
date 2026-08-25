@@ -549,9 +549,24 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 // line is appended when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
-	if detail := r.workerErrorDetail(ctx, m.Namespace, job.Name); detail != "" {
+	tail := r.jobLogTail(ctx, m.Namespace, job.Name, workerLogTail)
+	if detail := truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen); detail != "" {
 		reason += "; last error: " + detail
 	}
+
+	// A permission error is database configuration: a retry replays the same
+	// statements as the same role and refuses identically, so the budget only
+	// delays the verdict. The preflight probes the known grants before attempt
+	// 1; this catches what it cannot see (rights revoked mid-run, unprobed
+	// classes like source-side SELECT).
+	if line := pgcopydb.PermissionDeniedLine([]byte(tail)); line != "" {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
+		r.fail(m, "PermissionDenied", "Fail", fmt.Sprintf(
+			"attempt %d failed on a permission error retries cannot fix: %s",
+			m.Status.Attempts, truncate(line, maxDetailLen)))
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
+	}
+
 	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
 		r.fail(m, "BackoffLimitExceeded", "Fail",
@@ -681,14 +696,6 @@ func (r *MigrationReconciler) jobLogTail(ctx context.Context, namespace, jobName
 		return ""
 	}
 	return strings.TrimSpace(string(raw))
-}
-
-// workerErrorDetail pulls the last pgcopydb ERROR/FATAL message out of a
-// failed worker's structured logs (PGCOPYDB_LOG_JSON=on); "" when no parsable
-// error line is available.
-func (r *MigrationReconciler) workerErrorDetail(ctx context.Context, namespace, jobName string) string {
-	tail := r.jobLogTail(ctx, namespace, jobName, workerLogTail)
-	return truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen)
 }
 
 // truncate caps s for contexts with server-side size limits (event notes).

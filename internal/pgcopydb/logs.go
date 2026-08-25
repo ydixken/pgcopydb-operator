@@ -31,30 +31,73 @@ import (
 // output, partial writes) are skipped, so mixed or truncated input degrades
 // to "" and the caller falls back to the Job's own failure message.
 func LastErrorLine(raw []byte) string {
-	type entry struct {
-		Severity string `json:"error_severity"`
-		Message  string `json:"message"`
-	}
 	var last string
 	for line := range strings.Lines(string(raw)) {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
-			continue
-		}
-		var e entry
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue
-		}
-		switch e.Severity {
-		// pgcopydb's log levels above WARN; CRITICAL/PANIC accepted in case
-		// the naming ever shifts toward the PostgreSQL severities.
-		case "ERROR", "FATAL", "CRITICAL", "PANIC":
-			if e.Message != "" {
-				last = e.Message
-			}
+		e, ok := parseLogLine(line)
+		if ok && isErrorSeverity(e.Severity) && e.Message != "" {
+			last = e.Message
 		}
 	}
 	return last
+}
+
+// logEntry is one PGCOPYDB_LOG_JSON=on line's relevant fields.
+type logEntry struct {
+	Severity string `json:"error_severity"`
+	Message  string `json:"message"`
+}
+
+func parseLogLine(line string) (logEntry, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "{") {
+		return logEntry{}, false
+	}
+	var e logEntry
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		return logEntry{}, false
+	}
+	return e, true
+}
+
+// isErrorSeverity: pgcopydb's log levels above WARN; CRITICAL/PANIC accepted
+// in case the naming ever shifts toward the PostgreSQL severities.
+func isErrorSeverity(s string) bool {
+	switch s {
+	case "ERROR", "FATAL", "CRITICAL", "PANIC":
+		return true
+	}
+	return false
+}
+
+// PermissionDeniedLine returns the first log line showing a PostgreSQL
+// permission error, or "". The class is deliberately tiny: an error-severity
+// entry whose message carries "permission denied" (pgcopydb wrapping a libpq
+// error, or a passed-through "ERROR:  permission denied" from pg_restore),
+// or an explicit "SQLSTATE 42501". Bare 42501 is not matched (row data could
+// contain it). A miss only means the caller keeps its normal retry behavior;
+// extend the class only with evidence that it is always deterministic.
+func PermissionDeniedLine(raw []byte) string {
+	for line := range strings.Lines(string(raw)) {
+		msg := strings.TrimSpace(line)
+		if msg == "" {
+			continue
+		}
+		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
+		if e, ok := parseLogLine(msg); ok {
+			if e.Message == "" {
+				continue
+			}
+			msg = e.Message
+			severe = isErrorSeverity(e.Severity) || strings.Contains(msg, "ERROR:")
+		}
+		if strings.Contains(msg, "SQLSTATE 42501") {
+			return msg
+		}
+		if severe && strings.Contains(msg, "permission denied") {
+			return msg
+		}
+	}
+	return ""
 }
 
 // Clone-done markers in clone --follow mode, from the pgcopydb 0.18 source

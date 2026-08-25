@@ -162,3 +162,66 @@ func TestSupervisorDeath(t *testing.T) {
 		})
 	}
 }
+
+func TestPermissionDeniedLine(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "pg_restore passthrough inside a structured line",
+			raw: `{"error_severity":"INFO","message":"STEP 4: restore schema"}
+{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  permission denied for schema public"}
+{"error_severity":"ERROR","message":"Failed to prepare schema on the target database, see above for details"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  permission denied for schema public",
+		},
+		{
+			name: "pgcopydb wrapping a libpq error keeps no ERROR prefix",
+			raw:  `{"error_severity":"ERROR","message":"permission denied for function pg_replication_origin_drop"}`,
+			want: "permission denied for function pg_replication_origin_drop",
+		},
+		{
+			name: "plain psql line without JSON wrapping",
+			raw:  "ERROR:  permission denied for schema public\n",
+			want: "ERROR:  permission denied for schema public",
+		},
+		{
+			name: "sqlstate form matches regardless of severity text",
+			raw:  `{"error_severity":"ERROR","message":"query failed: SQLSTATE 42501"}`,
+			want: "query failed: SQLSTATE 42501",
+		},
+		{
+			name: "info severity quoting the text is not a failure",
+			raw:  `{"error_severity":"INFO","message":"will fail with permission denied unless granted"}`,
+			want: "",
+		},
+		{
+			name: "bare 42501 in data is not a permission error",
+			raw:  `{"error_severity":"ERROR","message":"row 42501 rejected: value out of range"}`,
+			want: "",
+		},
+		{
+			name: "first match wins",
+			raw: `{"error_severity":"ERROR","message":"ERROR:  permission denied for schema audit"}
+{"error_severity":"ERROR","message":"ERROR:  permission denied for schema public"}`,
+			want: "ERROR:  permission denied for schema audit",
+		},
+		{name: "unrelated error", raw: `{"error_severity":"ERROR","message":"deadlock detected"}`, want: ""},
+		{
+			name: "passthrough text marks severity even under a mild level",
+			raw:  `{"error_severity":"WARNING","message":"subprocess said: ERROR:  permission denied for schema public"}`,
+			want: "subprocess said: ERROR:  permission denied for schema public",
+		},
+		{name: "structured line without a message is skipped", raw: `{"error_severity":"ERROR"}` + "\npermission denied\n", want: ""},
+		{name: "blank lines are skipped", raw: "\n\nERROR:  permission denied for schema public", want: "ERROR:  permission denied for schema public"},
+		{name: "no input at all", raw: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PermissionDeniedLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("PermissionDeniedLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
