@@ -33,9 +33,9 @@ The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg
 Every Migration is gated by a `<name>-preflight` Job before the first attempt.
 Its first check, always, is connectivity: `select 1` against both endpoints, each result logged in the Job output.
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns.
-Three target-side probes run next, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
+Three target-side probes run next, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
-Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget.
+Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).
 
 Source role:
 
@@ -114,7 +114,7 @@ It then applies the rights the regular role is missing, exactly these statements
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).
 
-Every applied statement is re-checked and logged in the preflight output, and one `PreflightRemediated` event on the Migration lists them all.
+Every applied statement is re-checked and logged in the preflight output, and one `PreflightRemediated` event per tier (clone rights, follow rights) on the Migration lists that tier's statements.
 One event rather than one per statement, because the events API folds same-reason events into a counter that keeps only the first message.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never alters schema objects or data; it only grants rights.

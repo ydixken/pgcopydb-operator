@@ -50,7 +50,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `InvalidSpec` | Spec validation failed; retrying cannot help (source and target are immutable). |
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
-| `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix; the message carries the matched log line, and the remaining retry budget stays unspent. |
+| `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
 
 A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call. `Complete` is set either way; see [Verification](../operations/verification.md).
@@ -66,7 +66,7 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |
-| `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; the message lists every exact statement. |
+| `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |
