@@ -233,8 +233,15 @@ exit 1`
 // first, for clone and follow alike, and logged. Connects are retried so a
 // failover blip does not terminal-fail an otherwise sound Migration; six
 // misses over ~1 minute is a configuration error, and nothing else is worth
-// probing after it. note buffers failure lines and hint the field pointers,
-// so the footer can re-print both inside the log tail the condition carries.
+// probing after it. Two consecutive permanent-class errors end the ladder
+// early. Two, not one: PgBouncer with auth_query and the managed proxies
+// answer "password authentication failed" from a cold auth backend after a
+// failover, and a preflight failure is terminal. The pattern set is tiny,
+// connect-phase messages libpq spells identically on every attempt (auth
+// failure 28P01, unknown role/database 3D000 family); extend it only with
+// evidence that a class is permanent, a miss just keeps the normal ladder.
+// note buffers failure lines and hint the field pointers, so the footer can
+// re-print both inside the log tail the condition carries.
 // PREFLIGHT_RETRY_SLEEP is a test seam; env values are never shell-evaluated.
 // checkv feeds the query via stdin because psql interpolates :'list' only in
 // file input, never in -c commands.
@@ -253,8 +260,17 @@ hint() { hints="$hints$1
 "; }
 connect_retry() {
   n=1
-  while ! check "$1" 'select 1' >/dev/null; do
-    if [ "$n" -ge 6 ]; then echo "$3"; exit 1; fi
+  perm=0
+  while :; do
+    err=$(check "$1" 'select 1' 2>&1 >/dev/null); rc=$?
+    [ -n "$err" ] && printf '%s\n' "$err" >&2
+    [ "$rc" -eq 0 ] && break
+    case "$err" in
+    *'password authentication failed'*|*'role "'*'" does not exist'*|*'database "'*'" does not exist'*)
+      perm=$((perm+1)) ;;
+    *) perm=0 ;;
+    esac
+    if [ "$perm" -ge 2 ] || [ "$n" -ge 6 ]; then echo "$3${err:+: $err}"; exit 1; fi
     echo "retry: $2 connectivity attempt $n failed"
     n=$((n+1))
     sleep "${PREFLIGHT_RETRY_SLEEP:-10}"
