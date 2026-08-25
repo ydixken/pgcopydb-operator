@@ -50,8 +50,11 @@ const (
 	// follow it.
 	workerLogTail = 200
 	// preflightLogTail bounds the preflight verdict carried into the
-	// condition message: one line per failed check plus psql stderr.
-	preflightLogTail = 20
+	// condition message. 60, not 20: the failure footer re-prints the audit
+	// list first, then the notes carrying exact GRANT statements, then the
+	// hints, and the fix lines must survive the window even when a long
+	// replica-identity audit precedes them.
+	preflightLogTail = 60
 	// preflightOkLogTail is effectively the whole preflight log: the
 	// success-path parse must see every remediated: line even under a long
 	// replica-identity audit, or applied grants lose their audit events.
@@ -65,6 +68,10 @@ const (
 	// maxDetailLen caps extracted log lines in condition/event messages
 	// (events are server-limited to about 1KiB).
 	maxDetailLen = 700
+	// remediatedNoteLen caps the per-tier PreflightRemediated bundle just
+	// under the events API's 1KiB note limit: the full follow battery is
+	// ~620 bytes and must never truncate out of the audit trail.
+	remediatedNoteLen = 950
 )
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
@@ -253,30 +260,39 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 }
 
 // emitPreflightOutcome turns the finished preflight's log into events: one
-// PreflightRemediated listing every applied statement, then the
-// PreflightPassed summary. One event, not one per statement: the events
-// recorder correlates by reason and drops differing messages into a counter,
-// which silently ate all but the first statement (found by the rc.1 gate).
-// The "ok: " and "remediated: " line prefixes are the script's log contract.
+// PreflightRemediated per tier listing that tier's applied statements, then
+// the PreflightPassed summary. Bundled, not one per statement: the events
+// recorder correlates by reason and action and drops differing messages into
+// a counter, which silently ate all but the first statement (found by the
+// rc.1 gate); the distinct per-tier actions are what keep the two bundles
+// apart. The "ok: ", "remediated: ", and "remediated-clone: " line prefixes
+// are the script's log contract.
 func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
 	checks := 0
-	var remediated []string
+	var clone, follow []string
 	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
 		switch {
 		case strings.HasPrefix(line, "ok: "):
 			checks++
-		case strings.HasPrefix(line, "remediated: "):
-			remediated = append(remediated, strings.TrimPrefix(line, "remediated: "))
+		case strings.HasPrefix(line, remPrefixClone):
+			clone = append(clone, strings.TrimPrefix(line, remPrefixClone))
+		case strings.HasPrefix(line, remPrefixFollow):
+			follow = append(follow, strings.TrimPrefix(line, remPrefixFollow))
 		}
 	}
-	if len(remediated) > 0 {
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "Preflight",
-			"%s", truncate(strings.Join(remediated, "\n"), maxDetailLen))
+	if len(clone) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateClone",
+			"%s", truncate(strings.Join(clone, "\n"), remediatedNoteLen))
 	}
+	if len(follow) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateFollow",
+			"%s", truncate(strings.Join(follow, "\n"), remediatedNoteLen))
+	}
+	grants := len(clone) + len(follow)
 	msg := "all preflight checks passed"
-	if checks > 0 || len(remediated) > 0 {
-		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, len(remediated))
+	if checks > 0 || grants > 0 {
+		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, grants)
 	}
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "%s", msg)
 }

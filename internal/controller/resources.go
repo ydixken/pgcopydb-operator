@@ -19,6 +19,7 @@ package controller
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -224,8 +225,9 @@ exit 1`
 // silent-loss gate: without that SET, pgcopydb 0.18 applies nothing while
 // reporting success (see docs/reference/prerequisites.md).
 // Successful checks print "ok: <check>" and applied grants print
-// "remediated: <statement>"; those two prefixes are the log contract
-// emitPreflightOutcome parses into events.
+// "remediated: <statement>" (follow tier) or "remediated-clone: <statement>"
+// (clone tier); those prefixes are the log contract emitPreflightOutcome
+// parses into per-tier events.
 
 // preflightHeader opens every preflight: general connectivity is validated
 // first, for clone and follow alike, and logged. Connects are retried so a
@@ -239,10 +241,13 @@ exit 1`
 const preflightHeader = `set -u
 fail=0
 fails=''
+fails_audit=''
 hints=''
 check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
 checkv() { printf '%s' "$2" | psql "$1" -XAtq -v ON_ERROR_STOP=1 -v list="$3" -f -; }
 note() { echo "$1"; fails="$fails$1
+"; fail=1; }
+note_audit() { echo "$1"; fails_audit="$fails_audit$1
 "; fail=1; }
 hint() { hints="$hints$1
 "; }
@@ -277,10 +282,178 @@ fi
 `)
 }
 
-// cloneRightsHint is the pointer printed when a clone probe fails without a
-// target superuser configured; with one configured the probes remediate.
-const cloneRightsHint = `  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
+// remPrefixFollow and remPrefixClone open the remediated lines of the two
+// preflight tiers. Distinct prefixes let emitPreflightOutcome bundle each
+// tier into its own event; they are one half of the log contract, the parse
+// in emitPreflightOutcome is the other.
+const (
+	remPrefixFollow = "remediated: "
+	remPrefixClone  = "remediated-clone: "
+)
+
+// tgtSuperHint is the pointer printed when a target-side right is missing and
+// no target superuser is configured; with one configured the block remediates.
+const tgtSuperHint = "hint: spec.target.superuserSecretRef lets the operator apply this itself"
+
+// remSingle describes one probe/remediate/re-check block for a right fixed by
+// a single composed statement. Every capture is fail-closed: a psql failure
+// in the probe or the compose is its own named failure, never an ok line.
+// Messages are script-ready text and may reference $v, $stmt, and any
+// caller-captured context variables.
+type remSingle struct {
+	probe    string // command printing 1 when the right is present
+	cmdProbe string // alternative: command whose success IS the privilege test
+	compose  string // command printing the fixing statement; empty = probe-only block
+	superURI string // super env name; empty emits the note+hint variant
+	prefix   string // remediated-line prefix (log contract)
+	ok       string
+	missing  string // note when the right is missing and no super applies
+	apply    string // note when the super apply fails
+	still    string // note when the re-check still fails after remediation
+	onProbe  string // note when the probe itself cannot run
+	onComp   string // note when composing the statement fails
+	hint     string // hint line for the no-super variant; empty = none
+}
+
+// remSingleBlock emits the shared scaffold for remSingle. One generator for
+// every single-statement block keeps the fail-closure, the remediated-line
+// contract, and the note/hint shape from drifting apart per block.
+func remSingleBlock(c remSingle) string {
+	missing := `    if stmt=$(` + c.compose + `); then
+      note "` + c.missing + `"
 `
+	if c.hint != "" {
+		missing += `      hint "` + c.hint + `"
+`
+	}
+	missing += `    else
+      note "` + c.onComp + `"
+    fi
+`
+	if c.superURI != "" {
+		missing = `    if stmt=$(` + c.compose + `); then
+      if check "$` + c.superURI + `" "$stmt" >/dev/null; then
+        echo "` + c.prefix + `$stmt"
+` + remRecheck(c) + `      else
+        note "` + c.apply + `"
+      fi
+    else
+      note "` + c.onComp + `"
+    fi
+`
+	}
+	if c.compose == "" {
+		// Probe-only: nothing composes and nothing remediates (db-properties
+		// needs ownership, not a grant), the note carries the ways out.
+		missing = `    note "` + c.missing + `"
+`
+	}
+	if c.cmdProbe != "" {
+		// The probe is the privilege test itself, so its failure IS the
+		// missing right; a connection error is indistinguishable and lands on
+		// the same note, which still fails closed.
+		return `if ` + c.cmdProbe + ` >/dev/null; then
+  echo "ok: ` + c.ok + `"
+else
+` + shiftLeft(missing) + `fi
+`
+	}
+	return `if v=$(` + c.probe + `); then
+  if [ "$v" != 1 ]; then
+` + missing + `  else
+    echo "ok: ` + c.ok + `"
+  fi
+else
+  note "` + c.onProbe + `"
+fi
+`
+}
+
+// remRecheck emits the post-apply re-probe for remSingleBlock.
+func remRecheck(c remSingle) string {
+	if c.cmdProbe != "" {
+		return `        if ` + c.cmdProbe + ` >/dev/null; then
+          echo "ok: ` + c.ok + `"
+        else
+          note "` + c.still + `"
+        fi
+`
+	}
+	return `        if v=$(` + c.probe + `); then
+          if [ "$v" != 1 ]; then
+            note "` + c.still + `"
+          else
+            echo "ok: ` + c.ok + `"
+          fi
+        else
+          note "` + c.onProbe + `"
+        fi
+`
+}
+
+// shiftLeft drops two leading spaces per line: the cmd-probe scaffold nests
+// one level less than the value-probe one.
+func shiftLeft(s string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(s, "\n") {
+		b.WriteString(strings.TrimPrefix(line, "  "))
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// remAggregate describes a block whose probe query composes the missing-grant
+// statements itself: empty output means nothing is missing. Messages may
+// reference $agg and caller-captured context.
+type remAggregate struct {
+	query    string
+	superURI string
+	prefix   string
+	term     string // per-statement terminator the re-echo restores
+	ok       string
+	missing  string
+	apply    string
+	still    string
+	onProbe  string
+	hint     string
+}
+
+// remAggBlock emits the shared scaffold for remAggregate; the re-echo
+// pipeline that feeds the remediated-line contract exists only here.
+func remAggBlock(c remAggregate) string {
+	missing := `    note "` + c.missing + `"
+`
+	if c.hint != "" {
+		missing += `    hint "` + c.hint + `"
+`
+	}
+	if c.superURI != "" {
+		missing = `    if check "$` + c.superURI + `" "$agg" >/dev/null; then
+      printf '%s\n' "$agg" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "` + c.prefix + `$g` + c.term + `"; done
+      if agg=$(` + c.query + `); then
+        if [ -n "$agg" ]; then
+          note "` + c.still + `"
+        else
+          echo "ok: ` + c.ok + `"
+        fi
+      else
+        note "` + c.onProbe + `"
+      fi
+    else
+      note "` + c.apply + `"
+    fi
+`
+	}
+	return `if agg=$(` + c.query + `); then
+  if [ -n "$agg" ]; then
+` + missing + `  else
+    echo "ok: ` + c.ok + `"
+  fi
+else
+  note "` + c.onProbe + `"
+fi
+`
+}
 
 // cloneDBCreateCheck and cloneDBCreateStmt are shared by both block variants;
 // the statement is composed server-side (%I) like every remediation statement.
@@ -308,104 +481,70 @@ const cloneSchemaGrantsQuery = `checkv "$PGCOPYDB_TARGET_PGURI" "select string_a
 // follow grants; db-properties needs ownership, not a grant, so it never
 // remediates.
 func cloneRightsBlock(superTgt, dbProperties bool) string {
-	b := `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
-`
+	superURI := ""
+	hint := tgtSuperHint
 	if superTgt {
-		b += `if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
-  stmt=$(` + cloneDBCreateStmt + `)
-  if check "$` + conn.SuperURIEnv(conn.Target) + `" "$stmt" >/dev/null; then
-    echo "remediated: $stmt"
-    if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
-      note "preflight: target role \"$tgt_user\" still lacks CREATE on the target database after remediation ($stmt)"
-    else
-      echo "ok: clone rights database"
-    fi
-  else
-    note "preflight: target role \"$tgt_user\" lacks CREATE on the target database and applying $stmt via superuserSecretRef failed"
-  fi
-else
-  echo "ok: clone rights database"
-fi
-`
-	} else {
-		b += `if [ "$(` + cloneDBCreateCheck + `)" != 1 ]; then
-  stmt=$(` + cloneDBCreateStmt + `)
-  note "preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt"
-` + cloneRightsHint + `else
-  echo "ok: clone rights database"
-fi
-`
+		superURI = conn.SuperURIEnv(conn.Target)
+		hint = ""
 	}
-	b += `clone_schemas=$(` + cloneSchemasQuery + `)
+	b := `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user') || note "preflight: could not resolve the target role"
+`
+	b += remSingleBlock(remSingle{
+		probe:    cloneDBCreateCheck,
+		compose:  cloneDBCreateStmt,
+		superURI: superURI,
+		prefix:   remPrefixClone,
+		ok:       "clone rights database",
+		missing:  `preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt`,
+		apply:    `preflight: target role \"$tgt_user\" lacks CREATE on the target database and applying $stmt via superuserSecretRef failed`,
+		still:    `preflight: target role \"$tgt_user\" still lacks CREATE on the target database after remediation ($stmt)`,
+		onProbe:  `preflight: probing CREATE on the target database failed`,
+		onComp:   `preflight: composing the database GRANT failed`,
+		hint:     hint,
+	})
+	// The schema list is captured fail-closed too, then filtered in shell
+	// only (grep -Fx with an explicit operand guard, so spec values never
+	// reach SQL and option-looking schema names stay data).
+	b += `if clone_schemas=$(` + cloneSchemasQuery + `); then
 sc_inc="${PREFLIGHT_SCHEMA_INCLUDE:-}"
 sc_exc="${PREFLIGHT_SCHEMA_EXCLUDE:-}"
 sc_list=''
 while IFS= read -r s; do
   [ -n "$s" ] || continue
-  if [ -n "$sc_inc" ] && ! printf '%s\n' "$sc_inc" | grep -Fxq "$s"; then continue; fi
-  if printf '%s\n' "$sc_exc" | grep -Fxq "$s"; then continue; fi
+  if [ -n "$sc_inc" ] && ! printf '%s\n' "$sc_inc" | grep -Fxq -- "$s"; then continue; fi
+  if printf '%s\n' "$sc_exc" | grep -Fxq -- "$s"; then continue; fi
   sc_list="$sc_list$s
 "
 done <<PF_SCHEMAS
 $clone_schemas
 PF_SCHEMAS
-`
-	if superTgt {
-		// The re-echo splits on ';' for the log contract; unlike the origin
-		// grants the composed statements carry no terminator, so none is
-		// re-appended.
-		b += `if [ -n "$sc_list" ]; then
-  schema_grants=$(` + cloneSchemaGrantsQuery + `)
-  if [ -n "$schema_grants" ]; then
-    if check "$` + conn.SuperURIEnv(conn.Target) + `" "$schema_grants" >/dev/null; then
-      printf '%s\n' "$schema_grants" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "remediated: $g"; done
-      schema_grants=$(` + cloneSchemaGrantsQuery + `)
-      if [ -n "$schema_grants" ]; then
-        note "preflight: target role \"$tgt_user\" still lacks CREATE on schemas the restore targets after remediation, run on the target: $schema_grants"
-      else
-        echo "ok: clone rights schemas"
-      fi
-    else
-      note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets and applying the grants via superuserSecretRef failed: $schema_grants"
-    fi
-  else
-    echo "ok: clone rights schemas"
-  fi
-else
+if [ -n "$sc_list" ]; then
+` + remAggBlock(remAggregate{
+		query:    cloneSchemaGrantsQuery,
+		superURI: superURI,
+		prefix:   remPrefixClone,
+		ok:       "clone rights schemas",
+		missing:  `preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $agg`,
+		apply:    `preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets and applying the grants via superuserSecretRef failed: $agg`,
+		still:    `preflight: target role \"$tgt_user\" still lacks CREATE on schemas the restore targets after remediation, run on the target: $agg`,
+		onProbe:  `preflight: probing CREATE on the restore's target schemas failed`,
+		hint:     hint,
+	}) + `else
   echo "ok: clone rights schemas"
 fi
-`
-	} else {
-		b += `if [ -n "$sc_list" ]; then
-  schema_grants=$(` + cloneSchemaGrantsQuery + `)
-  if [ -n "$schema_grants" ]; then
-    note "preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $schema_grants"
-` + indent(cloneRightsHint) + `  else
-    echo "ok: clone rights schemas"
-  fi
 else
-  echo "ok: clone rights schemas"
+note "preflight: listing the source schemas for the clone-rights probe failed"
 fi
 `
-	}
 	if dbProperties {
-		b += `if [ "$(check "$PGCOPYDB_TARGET_PGURI" "select (pg_has_role(current_user, (select datdba from pg_database where datname = current_database()), 'USAGE') or (select rolsuper from pg_roles where rolname = current_user))::int")" != 1 ]; then
-  note "preflight: target role \"$tgt_user\" cannot run ALTER DATABASE ... SET (the db-properties step needs ownership): make the role a member of the owning role, or set clone.skip: [dbProperties]"
-else
-  echo "ok: clone rights db-properties"
-fi
-`
+		b += remSingleBlock(remSingle{
+			probe:   `check "$PGCOPYDB_TARGET_PGURI" "select (pg_has_role(current_user, (select datdba from pg_database where datname = current_database()), 'USAGE') or (select rolsuper from pg_roles where rolname = current_user))::int"`,
+			ok:      "clone rights db-properties",
+			missing: `preflight: target role \"$tgt_user\" cannot run ALTER DATABASE ... SET (the db-properties step needs ownership): make the role a member of the owning role, or set clone.skip: [dbProperties]`,
+			onProbe: `preflight: probing database ownership for the db-properties step failed`,
+		})
 	}
 	return b
-}
-
-// indent shifts a hint line to sit inside a nested branch; an empty hint
-// stays empty so the emitted script carries no stray blank lines.
-func indent(s string) string {
-	if s == "" {
-		return ""
-	}
-	return "  " + s
 }
 
 const walLevelBlock = `wal_level=$(check "$PGCOPYDB_SOURCE_PGURI" 'show wal_level')
@@ -436,34 +575,26 @@ const replicationAttrStmt = `check "$PGCOPYDB_SOURCE_PGURI" "select format('ALTE
 // source superuser the exact ALTER ROLE is applied and re-checked; without one
 // the hint names the field that would let the operator do it.
 func replicationAttrBlock(super bool) string {
+	superURI := ""
+	hint := "hint: spec.source.superuserSecretRef lets the operator apply this itself"
 	if super {
-		return `src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user')
-if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-  stmt=$(` + replicationAttrStmt + `)
-  if check "$` + conn.SuperURIEnv(conn.Source) + `" "$stmt" >/dev/null; then
-    echo "remediated: $stmt"
-    if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-      note "preflight: source role \"$src_user\" still lacks the REPLICATION attribute after remediation ($stmt)"
-    else
-      echo "ok: source replication attribute"
-    fi
-  else
-    note "preflight: source role \"$src_user\" lacks the REPLICATION attribute and applying $stmt via superuserSecretRef failed"
-  fi
-else
-  echo "ok: source replication attribute"
-fi
-`
+		superURI = conn.SuperURIEnv(conn.Source)
+		hint = ""
 	}
-	return `src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user')
-if [ "$(` + replicationAttrCheck + `)" != 1 ]; then
-  stmt=$(` + replicationAttrStmt + `)
-  note "preflight: source role \"$src_user\" lacks the REPLICATION attribute: $stmt"
-  hint "hint: spec.source.superuserSecretRef lets the operator apply this itself"
-else
-  echo "ok: source replication attribute"
-fi
-`
+	return `src_user=$(check "$PGCOPYDB_SOURCE_PGURI" 'select current_user') || note "preflight: could not resolve the source role"
+` + remSingleBlock(remSingle{
+		probe:    replicationAttrCheck,
+		compose:  replicationAttrStmt,
+		superURI: superURI,
+		prefix:   remPrefixFollow,
+		ok:       "source replication attribute",
+		missing:  `preflight: source role \"$src_user\" lacks the REPLICATION attribute: $stmt`,
+		apply:    `preflight: source role \"$src_user\" lacks the REPLICATION attribute and applying $stmt via superuserSecretRef failed`,
+		still:    `preflight: source role \"$src_user\" still lacks the REPLICATION attribute after remediation ($stmt)`,
+		onProbe:  `preflight: probing the source REPLICATION attribute failed`,
+		onComp:   `preflight: composing the ALTER ROLE failed`,
+		hint:     hint,
+	})
 }
 
 // originGrantsQuery aggregates the missing GRANT EXECUTE statements for the
@@ -474,33 +605,26 @@ const originGrantsQuery = `check "$PGCOPYDB_TARGET_PGURI" "select string_agg(for
 // runs the aggregated statements in one psql call, then prints them one per
 // line for the log contract; the event bundles them (see emitPreflightOutcome).
 func originGrantsBlock(super bool) string {
+	superURI := ""
+	hint := tgtSuperHint
 	if super {
-		return `origin_grants=$(` + originGrantsQuery + `)
-if [ -n "$origin_grants" ]; then
-  if check "$` + conn.SuperURIEnv(conn.Target) + `" "$origin_grants" >/dev/null; then
-    printf '%s\n' "$origin_grants" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "remediated: $g;"; done
-    origin_grants=$(` + originGrantsQuery + `)
-    if [ -n "$origin_grants" ]; then
-      note "preflight: target role still lacks EXECUTE on replication origin functions after remediation, run on the target: $origin_grants"
-    else
-      echo "ok: target origin function grants"
-    fi
-  else
-    note "preflight: target role lacks EXECUTE on replication origin functions and applying the grants via superuserSecretRef failed: $origin_grants"
-  fi
-else
-  echo "ok: target origin function grants"
-fi
-`
+		superURI = conn.SuperURIEnv(conn.Target)
+		hint = ""
 	}
-	return `origin_grants=$(` + originGrantsQuery + `)
-if [ -n "$origin_grants" ]; then
-  note "preflight: target role lacks EXECUTE on replication origin functions, run on the target: $origin_grants"
-  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
-else
-  echo "ok: target origin function grants"
-fi
-`
+	// The composed statements carry their own ';' terminator that the tr
+	// split strips, so the re-echo restores it.
+	return remAggBlock(remAggregate{
+		query:    originGrantsQuery,
+		superURI: superURI,
+		prefix:   remPrefixFollow,
+		term:     ";",
+		ok:       "target origin function grants",
+		missing:  `preflight: target role lacks EXECUTE on replication origin functions, run on the target: $agg`,
+		apply:    `preflight: target role lacks EXECUTE on replication origin functions and applying the grants via superuserSecretRef failed: $agg`,
+		still:    `preflight: target role still lacks EXECUTE on replication origin functions after remediation, run on the target: $agg`,
+		onProbe:  `preflight: probing the origin function grants failed`,
+		hint:     hint,
+	})
 }
 
 // srrProbe is the rollback-wrapped SET both variants share: the probe IS the
@@ -515,34 +639,25 @@ const srrStmt = `check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT SET ON PAR
 // only; on older targets remediation fails loudly, which is still better than
 // pgcopydb applying nothing.
 func srrBlock(super bool) string {
+	superURI := ""
+	hint := tgtSuperHint
 	if super {
-		return `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
-if ! ` + srrProbe + ` >/dev/null; then
-  stmt=$(` + srrStmt + `)
-  if check "$` + conn.SuperURIEnv(conn.Target) + `" "$stmt" >/dev/null; then
-    echo "remediated: $stmt"
-    if ! ` + srrProbe + ` >/dev/null; then
-      note "preflight: target role \"$tgt_user\" still cannot SET session_replication_role after remediation ($stmt)"
-    else
-      echo "ok: target session_replication_role"
-    fi
-  else
-    note "preflight: target role \"$tgt_user\" cannot SET session_replication_role and applying $stmt via superuserSecretRef failed (the GRANT exists on PostgreSQL 15+ only)"
-  fi
-else
-  echo "ok: target session_replication_role"
-fi
-`
+		superURI = conn.SuperURIEnv(conn.Target)
+		hint = ""
 	}
-	return `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user')
-if ! ` + srrProbe + ` >/dev/null; then
-  stmt=$(` + srrStmt + `)
-  note "preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: $stmt (PostgreSQL 15+; older targets need a superuser role)"
-  hint "hint: spec.target.superuserSecretRef lets the operator apply this itself"
-else
-  echo "ok: target session_replication_role"
-fi
-`
+	return `tgt_user=$(check "$PGCOPYDB_TARGET_PGURI" 'select current_user') || note "preflight: could not resolve the target role"
+` + remSingleBlock(remSingle{
+		cmdProbe: srrProbe,
+		compose:  srrStmt,
+		superURI: superURI,
+		prefix:   remPrefixFollow,
+		ok:       "target session_replication_role",
+		missing:  `preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: $stmt (PostgreSQL 15+; older targets need a superuser role)`,
+		apply:    `preflight: target role \"$tgt_user\" cannot SET session_replication_role and applying $stmt via superuserSecretRef failed (the GRANT exists on PostgreSQL 15+ only)`,
+		still:    `preflight: target role \"$tgt_user\" still cannot SET session_replication_role after remediation ($stmt)`,
+		onComp:   `preflight: composing the GRANT SET failed`,
+		hint:     hint,
+	})
 }
 
 // riAuditBlock lists tables where pgoutput would reject UPDATE and DELETE at
@@ -558,10 +673,10 @@ if [ -n "$ri_offenders" ]; then
   ack_all=0
   printf '%s\n' "$ri_allow" | grep -Fxq '*' && ack_all=1
   while IFS= read -r tbl; do
-    if [ "$ack_all" = 1 ] || printf '%s\n' "$ri_allow" | grep -Fxq "$tbl"; then
+    if [ "$ack_all" = 1 ] || printf '%s\n' "$ri_allow" | grep -Fxq -- "$tbl"; then
       echo "preflight: warning: acknowledged table $tbl has no usable replica identity; UPDATE and DELETE on it will fail on the source during the migration window"
     else
-      note "preflight: table $tbl has no replica identity usable for UPDATE/DELETE (the audit covers all user tables, including ones excluded by clone.filters): ALTER TABLE $tbl REPLICA IDENTITY USING INDEX <unique index>, or ALTER TABLE $tbl REPLICA IDENTITY FULL, or acknowledge it in spec.follow.allowMissingReplicaIdentity"
+      note_audit "preflight: table $tbl has no replica identity usable for UPDATE/DELETE (the audit covers all user tables, including ones excluded by clone.filters): ALTER TABLE $tbl REPLICA IDENTITY USING INDEX <unique index>, or ALTER TABLE $tbl REPLICA IDENTITY FULL, or acknowledge it in spec.follow.allowMissingReplicaIdentity"
     fi
   done < /tmp/ri_offenders
 else
@@ -569,14 +684,16 @@ else
 fi`
 
 // preflightScriptFooter closes the check script; conditional blocks (the
-// wal2json note) slot in between. Failures re-print as a closing summary with
-// the hints last: the Failed condition carries only the log tail, and the
-// field pointers must never scroll out under a long audit.
+// wal2json note) slot in between. Failures re-print as a closing summary in
+// tail-survival order: the replica-identity audit first (it can run long),
+// then the notes carrying exact GRANT statements, hints last. The Failed
+// condition carries only the log tail, and the fix lines and field pointers
+// must never scroll out under a long audit.
 const preflightScriptFooter = `
 if [ "$fail" -eq 0 ]; then
   echo "preflight: all checks passed"
 else
-  printf 'preflight failed:\n%s%s' "$fails" "$hints"
+  printf 'preflight failed:\n%s%s%s' "$fails_audit" "$fails" "$hints"
 fi
 exit "$fail"`
 
@@ -594,12 +711,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	if superTgt {
 		b.WriteString(superVerifyBlock(conn.Target))
 	}
-	dbProps := true
-	for _, s := range m.Spec.Clone.Skip {
-		if s == v1beta1.SkipOption("dbProperties") {
-			dbProps = false
-		}
-	}
+	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
 	b.WriteString(cloneRightsBlock(superTgt, dbProps))
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
@@ -671,12 +783,26 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	}
 	// The schema filters travel the same way for the clone-rights probe: the
 	// shell matches them with grep -Fx, so filter values never reach SQL.
+	// includeOnlyTables narrows the probe set to its tables' schemas: the
+	// restore touches nothing else, and demanding CREATE on bystander schemas
+	// terminally failed specs that migrated fine before the probe existed.
 	if f := m.Spec.Clone.Filters; f != nil {
 		c := &job.Spec.Template.Spec.Containers[0]
-		if len(f.IncludeOnlySchemas) > 0 {
+		include := f.IncludeOnlySchemas
+		if len(f.IncludeOnlyTables) > 0 {
+			if derived, ok := probeSchemasFromTables(f.IncludeOnlyTables); ok {
+				if len(include) > 0 {
+					derived = slices.DeleteFunc(derived, func(s string) bool {
+						return !slices.Contains(include, s)
+					})
+				}
+				include = derived
+			}
+		}
+		if len(include) > 0 {
 			c.Env = append(c.Env, corev1.EnvVar{
 				Name:  "PREFLIGHT_SCHEMA_INCLUDE",
-				Value: strings.Join(f.IncludeOnlySchemas, "\n"),
+				Value: strings.Join(include, "\n"),
 			})
 		}
 		if len(f.ExcludeSchemas) > 0 {
@@ -687,6 +813,32 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		}
 	}
 	return job, nil
+}
+
+// publicSchema is the schema an unqualified table name lands in.
+const publicSchema = "public"
+
+// probeSchemasFromTables maps includeOnlyTables entries to their schemas:
+// "schema.table" contributes its schema, an unqualified name means public.
+// Regex (~/.../) and quoted entries are beyond a faithful shell-side parse,
+// so any such entry reports !ok and the caller keeps the wider schema list:
+// over-probing fails closed, under-probing would green-light a missing grant.
+func probeSchemasFromTables(tables []string) ([]string, bool) {
+	var out []string
+	for _, t := range tables {
+		if strings.HasPrefix(t, "~") || strings.Contains(t, `"`) {
+			return nil, false
+		}
+		s := publicSchema
+		if before, _, found := strings.Cut(t, "."); found {
+			s = before
+		}
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out, true
 }
 
 // scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to

@@ -17,6 +17,7 @@ limitations under the License.
 package pgcopydb
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -187,9 +188,14 @@ func TestPermissionDeniedLine(t *testing.T) {
 			want: "ERROR:  permission denied for schema public",
 		},
 		{
-			name: "sqlstate form matches regardless of severity text",
+			name: "sqlstate form matches on an error-severity line",
 			raw:  `{"error_severity":"ERROR","message":"query failed: SQLSTATE 42501"}`,
 			want: "query failed: SQLSTATE 42501",
+		},
+		{
+			name: "sqlstate on a mild line does not classify",
+			raw:  `{"error_severity":"INFO","message":"note: SQLSTATE 42501 seen earlier"}`,
+			want: "",
 		},
 		{
 			name: "info severity quoting the text is not a failure",
@@ -209,9 +215,33 @@ func TestPermissionDeniedLine(t *testing.T) {
 		},
 		{name: "unrelated error", raw: `{"error_severity":"ERROR","message":"deadlock detected"}`, want: ""},
 		{
-			name: "passthrough text marks severity even under a mild level",
+			// pg_restore relays tolerated per-object errors this way while
+			// continuing; classifying them would kill retryable attempts.
+			name: "warning quoting ERROR text does not classify",
 			raw:  `{"error_severity":"WARNING","message":"subprocess said: ERROR:  permission denied for schema public"}`,
-			want: "subprocess said: ERROR:  permission denied for schema public",
+			want: "",
+		},
+		{
+			// libpq connect-time refusals arrive FATAL under a mild wrapper
+			// severity and are deterministic.
+			name: "warning quoting a FATAL libpq passthrough classifies",
+			raw:  `{"error_severity":"WARNING","message":"connection attempt failed: FATAL:  permission denied for database app"}`,
+			want: "connection attempt failed: FATAL:  permission denied for database app",
+		},
+		{
+			name: "tolerated line outside the terminal window does not classify",
+			raw: `{"error_severity":"ERROR","message":"ERROR:  permission denied for schema public"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"worker was killed: out of memory"}`,
+			want: "",
+		},
+		{
+			name: "terminal permission chain classifies end to end",
+			raw: strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  permission denied for schema public"}` + "\n" +
+				`{"error_severity":"WARNING","message":"pg_restore: warning: errors ignored on restore: 6"}` + "\n" +
+				`{"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  permission denied for schema public",
 		},
 		{name: "structured line without a message is skipped", raw: `{"error_severity":"ERROR"}` + "\npermission denied\n", want: ""},
 		{name: "blank lines are skipped", raw: "\n\nERROR:  permission denied for schema public", want: "ERROR:  permission denied for schema public"},

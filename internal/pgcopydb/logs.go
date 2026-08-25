@@ -69,31 +69,49 @@ func isErrorSeverity(s string) bool {
 	return false
 }
 
-// PermissionDeniedLine returns the first log line showing a PostgreSQL
-// permission error, or "". The class is deliberately tiny: an error-severity
-// entry whose message carries "permission denied" (pgcopydb wrapping a libpq
-// error, or a passed-through "ERROR:  permission denied" from pg_restore),
-// or an explicit "SQLSTATE 42501". Bare 42501 is not matched (row data could
-// contain it). A miss only means the caller keeps its normal retry behavior;
-// extend the class only with evidence that it is always deterministic.
+// permissionWindow bounds how far from the end of the tail a permission line
+// may sit and still count as the attempt's terminal cause. pg_restore without
+// --exit-on-error tolerates per-object permission errors and keeps going, so
+// an old tolerated line must not classify an attempt that later died of
+// something else; the genuine terminal chain (error, ignored-count, process
+// termination) is a handful of lines.
+const permissionWindow = 40
+
+// PermissionDeniedLine returns a log line showing a PostgreSQL permission
+// error as the attempt's terminal cause, or "". The class is deliberately
+// tiny and severity-gated: an error-severity entry carrying "permission
+// denied" or an explicit "SQLSTATE 42501", within the last permissionWindow
+// lines. JSON-wrapped lines count as severe on real severity or a quoted
+// libpq "FATAL:" passthrough; a quoted "ERROR:" alone does not, because that
+// is how pg_restore relays tolerated per-object errors while continuing.
+// Bare 42501 is not matched (row data could contain it). A miss only means
+// the caller keeps its normal retry behavior; extend the class only with
+// evidence that it is always deterministic and terminal.
 func PermissionDeniedLine(raw []byte) string {
+	var window []string
 	for line := range strings.Lines(string(raw)) {
 		msg := strings.TrimSpace(line)
 		if msg == "" {
 			continue
 		}
+		window = append(window, msg)
+		if len(window) > permissionWindow {
+			window = window[1:]
+		}
+	}
+	for _, msg := range window {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
 		if e, ok := parseLogLine(msg); ok {
 			if e.Message == "" {
 				continue
 			}
 			msg = e.Message
-			severe = isErrorSeverity(e.Severity) || strings.Contains(msg, "ERROR:")
+			severe = isErrorSeverity(e.Severity) || strings.Contains(msg, "FATAL:")
 		}
-		if strings.Contains(msg, "SQLSTATE 42501") {
-			return msg
+		if !severe {
+			continue
 		}
-		if severe && strings.Contains(msg, "permission denied") {
+		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") {
 			return msg
 		}
 	}
