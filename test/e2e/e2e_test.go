@@ -656,7 +656,7 @@ var _ = Describe("Migration", Ordered, func() {
 		DeferCleanup(func() {
 			deleteMigration(name)
 			dropLimitedRole()
-			resetTargetPublicSchema()
+			resetTargetObjects()
 		})
 
 		By("recreating the managed-Postgres matrix: db CREATE granted, schema CREATE missing")
@@ -691,7 +691,7 @@ var _ = Describe("Migration", Ordered, func() {
 			deleteMigration(name)
 			psql(tgtPod, "ALTER ROLE postgres PASSWORD NULL")
 			dropLimitedRole()
-			resetTargetPublicSchema()
+			resetTargetObjects()
 		})
 
 		By("recreating the managed-Postgres matrix plus a target superuser Secret")
@@ -788,15 +788,22 @@ var _ = Describe("Migration", Ordered, func() {
 
 	It("exhausts the retry budget on a failure the classifier does not know", func() {
 		const name = "e2e-backoff"
-		DeferCleanup(func() { deleteMigration(name) })
+		DeferCleanup(func() {
+			deleteMigration(name)
+			resetTargetObjects()
+		})
 
-		By("forcing a deterministic non-permission failure through a full work volume")
-		// A work volume far below the dump size fails every attempt with
-		// ENOSPC, which the permission classifier must not match, so the
-		// budget burns exactly as before the classifier existed. The chaos
-		// suite uses the same mechanism for its spool-full scenario.
-		m := newMigration(name, nsE2E, v1beta1.CloneOptions{DropIfExists: true})
-		m.Spec.WorkVolume.Size = resource.MustParse("256Mi")
+		By("planting a conflicting target table so pg_restore fails outside the permission class")
+		// Without dropIfExists pg_restore cannot replace an existing table,
+		// and the incompatible definition keeps every retry failing the same
+		// way; "already exists" is outside the classifier's class, so the
+		// budget burns exactly as before the classifier existed. A tiny work
+		// volume cannot carry this spec: a clone's work dir holds only
+		// catalogs and schema dumps (see the chaos suite's spool note).
+		resetTargetObjects()
+		psql(tgtPod, "CREATE TABLE public.customers (mismatch int)")
+
+		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		m.Spec.BackoffLimit = 1
 		create(m)
 
@@ -830,9 +837,11 @@ const limitedRole = "e2e_limited"
 func makeLimitedTarget(secretName string) {
 	GinkgoHelper()
 	dropLimitedRole()
-	psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(tgtPod, "DROP SCHEMA public CASCADE")
-	psql(tgtPod, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	// The canonical reset also unlinks large objects: earlier completed
+	// migrations leave OID-preserved blobs that would collide with the
+	// no-dropIfExists remediation clone (pg_restore only drops what the
+	// incoming dump carries).
+	resetTargetObjects()
 	psql(tgtPod, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 	pw := secretName + "-pw"
 	psql(tgtPod, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
@@ -847,15 +856,6 @@ func dropLimitedRole() {
 	psql(tgtPod, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
 		" THEN EXECUTE 'DROP OWNED BY %s CASCADE'; END IF; END $$", limitedRole, limitedRole))
 	psql(tgtPod, "DROP ROLE IF EXISTS "+limitedRole)
-}
-
-// resetTargetPublicSchema returns the target to an empty default public
-// schema, the state a fresh clone spec expects on a rerun.
-func resetTargetPublicSchema() {
-	GinkgoHelper()
-	psql(tgtPod, "DROP SCHEMA IF EXISTS public CASCADE")
-	psql(tgtPod, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
-	psql(tgtPod, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 }
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
