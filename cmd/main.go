@@ -40,7 +40,9 @@ import (
 	pgcopydboperatoriov1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	pgcopydboperatoriov1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
+	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	// +kubebuilder:scaffold:imports
 )
@@ -49,6 +51,21 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// version is stamped by -ldflags "-X main.version=..." (Makefile, Dockerfile);
+// "dev" covers go run and unstamped builds.
+var version = "dev"
+
+// splitList turns a comma-separated flag value into its non-empty entries.
+func splitList(s string) []string {
+	var out []string
+	for v := range strings.SplitSeq(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -69,6 +86,7 @@ func main() {
 	var probeAddr string
 	var runnerImage string
 	var watchNamespaces string
+	var progressPollVersions string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -79,6 +97,9 @@ func main() {
 		"Default image for migration worker Jobs; spec.runner.image overrides per Migration.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to watch; empty watches the whole cluster.")
+	flag.StringVar(&progressPollVersions, "progress-poll-versions", "0.18.2.gea87951",
+		"Comma-separated exact pgcopydb versions allowed to run the in-pod progress poll; "+
+			"empty disables the poll (database sizes are sampled regardless).")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -191,10 +212,8 @@ func main() {
 	// the chart stays cluster-scoped, only the watch narrows. Empty = all.
 	if watchNamespaces != "" {
 		namespaces := map[string]cache.Config{}
-		for ns := range strings.SplitSeq(watchNamespaces, ",") {
-			if ns = strings.TrimSpace(ns); ns != "" {
-				namespaces[ns] = cache.Config{}
-			}
+		for _, ns := range splitList(watchNamespaces) {
+			namespaces[ns] = cache.Config{}
 		}
 		managerOptions.Cache = cache.Options{DefaultNamespaces: namespaces}
 	}
@@ -217,10 +236,12 @@ func main() {
 		RunnerImage: runnerImage,
 		Sentinel:    sentinel.New(podExec),
 		Logs:        podExec,
+		Progress:    progress.NewFromExec(podExec, splitList(progressPollVersions)),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "migration")
 		os.Exit(1)
 	}
+	metrics.RecordBuildInfo(version)
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
