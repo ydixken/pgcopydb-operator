@@ -26,10 +26,15 @@ tasks:
       # value combinations that decide what the chart grants.
       - cmd: |-
           if command -v helm >/dev/null; then
-            helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh
+            helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh && ./hack/check-chart-monitoring.sh
           else
             echo "lint: no helm, skipping chart lint"
           fi
+      # The alert rules are checked and unit-tested with the promtool of the
+      # Prometheus version they are written for.
+      - ./hack/ensure-promtool.sh
+      - bin/promtool check rules charts/pgcopydb-operator/rules/migrations.yaml
+      - bin/promtool test rules test/alerts/migrations_test.yaml
       - cmd: |-
           if [ -f Makefile ]; then make lint; else echo "lint: no Makefile yet, skipping Go lint"; fi
 

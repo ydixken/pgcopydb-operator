@@ -40,6 +40,13 @@ jobs:
         # helm lint renders the defaults only; this renders the combinations
         # that decide what the chart grants.
         run: ./hack/check-chart-rbac.sh
+      - name: Chart monitoring renders as expected
+        run: ./hack/check-chart-monitoring.sh
+      - name: promtool checks and unit-tests the alert rules
+        run: |
+          ./hack/ensure-promtool.sh
+          bin/promtool check rules charts/pgcopydb-operator/rules/migrations.yaml
+          bin/promtool test rules test/alerts/migrations_test.yaml
       - name: golangci-lint
         run: make lint
 

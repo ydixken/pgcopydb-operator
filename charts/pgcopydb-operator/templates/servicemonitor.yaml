@@ -5,11 +5,20 @@ metadata:
   name: {{ include "pgcopydb-operator.fullname" . }}
   labels:
     {{- include "pgcopydb-operator.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   endpoints:
     - port: https-metrics
       scheme: https
       honorLabels: false
+      {{- with .Values.metrics.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
       # The endpoint authenticates every scrape, so a scrape carrying no
       # credential is rejected with 401 before authorization is ever reached.
       # Prometheus attaches nothing on its own, so point it at its own
@@ -24,6 +33,14 @@ spec:
       tlsConfig:
         # The manager serves metrics with a self-signed certificate.
         insecureSkipVerify: true
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   selector:
     matchLabels:
       {{- include "pgcopydb-operator.selectorLabels" . | nindent 6 }}

@@ -65,6 +65,22 @@ metrics:
     # Needs the Prometheus Operator CRDs; the template also skips itself when
     # monitoring.coreos.com/v1 is absent from the cluster.
     enabled: false
+    # Extra metadata labels, for a Prometheus that selects monitors by label.
+    additionalLabels: {}
+    # Scrape interval and timeout; empty leaves the Prometheus defaults.
+    interval: ""
+    scrapeTimeout: ""
+    # Verbatim ServiceMonitor syntax: relabelings rewrite the target before
+    # the scrape, metricRelabelings rewrite samples before ingestion.
+    relabelings: []
+    metricRelabelings: []
+  prometheusRule:
+    # Ship the bundled alert rules (rules/migrations.yaml) as a
+    # PrometheusRule; also needs the Prometheus Operator CRDs.
+    enabled: false
+    # Extra metadata labels, for a Prometheus that selects rules by label
+    # (kube-prometheus-stack does).
+    additionalLabels: {}
 
 networkPolicy:
   # Placeholder; renders nothing yet. The exec-based sentinel control plane

@@ -1,0 +1,117 @@
+# Alerts on the operator's per-Migration metrics. The chart embeds this file
+# verbatim as its PrometheusRule (templates/prometheusrule.yaml); it stays
+# plain YAML so promtool checks and unit-tests it without rendering the chart.
+# Thresholds and windows are starting points.
+groups:
+  - name: pgcopydb-migration-outcome
+    rules:
+      # Failed is terminal: retries are exhausted or the error is permanent,
+      # so nothing recovers without action on the Migration.
+      - alert: PgcopydbMigrationFailed
+        expr: pgcopydb_migration_phase{phase="Failed"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} is Failed
+          description: >-
+            The operator stopped retrying. The Failed condition and the
+            AttemptFailed events on the Migration carry the worker's last
+            error.
+      # verified is 1 on pass, 0 on mismatch, and absent before a result, so
+      # this fires only on a real compare mismatch.
+      - alert: PgcopydbMigrationVerificationFailed
+        expr: pgcopydb_migration_verified == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} failed
+            verification
+          description: >-
+            pgcopydb compare found a schema or data mismatch between source
+            and target. Do not cut applications over until the difference is
+            explained.
+  - name: pgcopydb-migration-stuck
+    rules:
+      # Retry churn: an active migration keeps creating worker Jobs.
+      # pgcopydb_migration_attempts only ever rises, so a delta over the
+      # window counts new Jobs in that window.
+      - alert: PgcopydbMigrationRetrying
+        expr: >-
+          (pgcopydb_migration_phase{phase=~"Cloning|Streaming"} == 1)
+          and on (namespace, name)
+          (delta(pgcopydb_migration_attempts[30m]) >= 3)
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} burned three
+            or more attempts in 30m
+          description: >-
+            The worker Job keeps failing and the operator keeps retrying with
+            --resume. The Failed condition and the AttemptFailed events on the
+            Migration carry the worker's last error.
+      # Clone without progress: the target database stopped growing. The size
+      # gauge is sampled from the running worker pod, so the series fades out
+      # with the worker and a crash-looping one cannot fire this;
+      # PgcopydbMigrationRetrying covers that case instead.
+      - alert: PgcopydbMigrationCloneStalled
+        expr: >-
+          (pgcopydb_migration_phase{phase="Cloning"} == 1)
+          and on (namespace, name)
+          (delta(pgcopydb_migration_target_database_size_bytes[1h]) == 0)
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} target grew
+            by nothing in 1h of Cloning
+          description: >-
+            The clone is active but the target database size is flat. Check
+            the worker pod logs and the source; a phase that writes little,
+            like analyze, also looks like this.
+  - name: pgcopydb-migration-replication
+    rules:
+      # Streaming lag. The gauge only exists in follow mode, so this never
+      # fires for plain clones. 67108864 is 64Mi: well above the default
+      # follow.maxCatchupLag, so it means "not keeping up", not "catching up".
+      - alert: PgcopydbMigrationReplicationLagHigh
+        expr: pgcopydb_migration_replication_lag_bytes > 67108864
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} is more than
+            64Mi behind the source for 10m
+          description: >-
+            The target is not applying changes as fast as the source writes
+            them. Sustained lag delays cutover and retains WAL on the source.
+      # Cutover drain. endpos only exists once cutover has set it, and the
+      # trailing filter drops the series when replay reaches endpos, so a
+      # healthy drain resolves this on its own.
+      - alert: PgcopydbMigrationCutoverStalled
+        expr: >-
+          (pgcopydb_migration_endpos_lsn_bytes > 0)
+          - on (namespace, name)
+          pgcopydb_migration_replay_lsn_bytes > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} has not
+            reached endpos 15m into cutover
+          description: >-
+            Cutover set an endpos but the target has not replayed up to it,
+            so the migration cannot complete. Check the worker logs and the
+            target's apply rate.
+      # Slot retention is deliberately not covered here: while a follow
+      # migration is suspended, failed, or streaming, its replication slot
+      # retains WAL on the SOURCE, and the operator's metrics cannot see the
+      # source's disk. Monitor pg_replication_slots on the source itself
+      # (active, safe_wal_size; postgres_exporter exposes both) and alert on
+      # inactive slots or a shrinking safe_wal_size.

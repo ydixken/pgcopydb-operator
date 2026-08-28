@@ -38,6 +38,13 @@ Migration CRs) in place.
 | `resources` | requests 100m/128Mi, limit 256Mi | Manager resources; no cpu limit by design. |
 | `metrics.enabled` | `true` | Serve HTTPS metrics on :8443 and create the Service; see [Metrics](#metrics). |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor; needs the Prometheus Operator CRDs. |
+| `metrics.serviceMonitor.additionalLabels` | `{}` | Extra ServiceMonitor labels, for a Prometheus that selects monitors by label. |
+| `metrics.serviceMonitor.interval` | `""` | Scrape interval; empty leaves the Prometheus default. |
+| `metrics.serviceMonitor.scrapeTimeout` | `""` | Scrape timeout; empty leaves the Prometheus default. |
+| `metrics.serviceMonitor.relabelings` | `[]` | Target relabelings, verbatim ServiceMonitor syntax. |
+| `metrics.serviceMonitor.metricRelabelings` | `[]` | Sample relabelings applied before ingestion. |
+| `metrics.prometheusRule.enabled` | `false` | Install the bundled alert rules as a PrometheusRule; see [Alerts](#alerts). |
+| `metrics.prometheusRule.additionalLabels` | `{}` | Extra PrometheusRule labels, for a Prometheus that selects rules by label. |
 | `networkPolicy.enabled` | `false` | Placeholder; renders nothing yet. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
 
@@ -52,6 +59,12 @@ kube-prometheus-stack already binds that rule to its own Prometheus, so `metrics
 On another stack, bind it yourself.
 
 With `rbac.create=false` you supply the manager's RBAC, which includes the two review permissions above.
+
+## Alerts
+
+`metrics.prometheusRule.enabled=true` installs the alert rules from [rules/migrations.yaml](rules/migrations.yaml) as a PrometheusRule: failed and verification-failed migrations, retry churn, a stalled clone, high replication lag, and a stalled cutover drain.
+If your Prometheus selects rules by label (kube-prometheus-stack does), add its matching label via `metrics.prometheusRule.additionalLabels`.
+Thresholds and windows are starting points; promtool unit tests in the repository pin each one, so check there before retuning.
 
 ## First Migration
 
