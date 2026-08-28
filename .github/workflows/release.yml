@@ -96,11 +96,12 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.list }}
       - name: Smoke-test pgcopydb and pg_dump versions
-        # The build canary already asserts majors on both platforms; this
-        # proves the pushed image actually runs. Native amd64 pull on the
+        # The build canary already asserts versions on both platforms; this
+        # proves the pushed image actually runs and carries the fork-built
+        # pgcopydb (see images/runner/Dockerfile). Native amd64 pull on the
         # amd64 runner; the arm64 half was validated by spike S6 (podman).
         run: |
-          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.2.gea87951'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
 
   chart:

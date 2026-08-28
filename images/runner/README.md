@@ -1,6 +1,13 @@
 # Runner image
 
-Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql), both from the PGDG apt repo on `debian:trixie-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
+Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18 built from source (see below) and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql) from the PGDG apt repo on `debian:trixie-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
+
+## Why pgcopydb is built from source
+
+Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
+The operator needs that command, so a build stage compiles pgcopydb from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit `ea87951753f06361550c0a1357da7b42c3c55034`: upstream v0.18 plus the two fixes, sent upstream as [#1041](https://github.com/dimitri/pgcopydb/pull/1041) and [#1042](https://github.com/dimitri/pgcopydb/pull/1042).
+The version string is `0.18.2.gea87951`, what `git describe` prints for that commit with dashes as dots, and the build canary and the release smoke test both assert it exactly.
+Once an upstream release ships both fixes, revert to the single-stage PGDG install: drop the build stage, swap `libgc1` for the `pgcopydb` package in the install line, and point the version greps back at the release.
 
 The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
 
@@ -34,4 +41,4 @@ Staying on Debian keeps glibc, a free base, and an intact package database, so a
 
 ## Canary
 
-Every assertion in the build-time canary stands for a way this image has actually broken: version drift off pgcopydb 0.18 or client 18; a purge that takes GNU sed with it; a libc whose getopt stops permuting; and perl surviving the purge. The base image is pinned by tag and digest, and Renovate bumps both together.
+Every assertion in the build-time canary stands for a way this image has actually broken: version drift off the pinned pgcopydb build or client 18; a purge that takes GNU sed with it; a libc whose getopt stops permuting; and perl surviving the purge. The base image is pinned by tag and digest, and Renovate bumps both together.
