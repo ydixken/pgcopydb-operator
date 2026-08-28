@@ -12,6 +12,9 @@ runner:
     repository: ghcr.io/ydixken/pgcopydb-operator/runner
     # Empty tag falls back to the chart appVersion.
     tag: ""
+  # Exact pgcopydb versions allowed to run the in-pod progress poll. Fail
+  # closed: any other runner version never runs it, an empty list disables it.
+  progressPollVersions: ["0.18.2.gea87951"]
 
 imagePullSecrets: []
 

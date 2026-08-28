@@ -20,11 +20,11 @@ shop   Completed  True       1          3m
 What happens behind the phases:
 
 - The operator creates a work PVC (`<name>-work`, 10Gi by default) and one worker Job per attempt (`<name>-run-<attempt>`), running `pgcopydb clone` from the runner image.
-- `status.progress` (tables, indexes, bytes) is reserved and stays empty for now: pgcopydb 0.18's `list progress` returns no data and corrupts the stored filtering of a filtered work dir, so the operator deliberately does not run it (see [Troubleshooting](troubleshooting.md)). `status.conditions` are authoritative; `phase` is a summary for the printer column.
+- `status.progress` (tables, indexes, bytes) fills while the clone runs, fed by a `pgcopydb list progress` poll that only runs on runner versions the operator's allowlist names; the bundled runner qualifies. On any other runner, such as a custom stock 0.18 image, the gate stays closed and the fields stay empty, because that pgcopydb returns no data and corrupts the stored filtering of a filtered work dir (see [Troubleshooting](troubleshooting.md)). `status.conditions` are authoritative; `phase` is a summary for the printer column.
 - `Completed` means pgcopydb finished: data copied under one consistent snapshot, sequences synced. The source is left untouched; a plain clone needs no replication privilege and leaves nothing behind on either database.
 
 Tuning (parallelism, same-table splitting, filters, skips) and DBaaS connection forms are covered in [Configuration](configuration.md).
 
-The manager also exports Prometheus metrics per Migration (`pgcopydb_migration_phase`, `_attempts`, `_tables_done`, `_tables_total`, `_indexes_done`, `_indexes_total`, `_replication_lag_bytes`, `_verified`) on HTTPS :8443; `metrics.serviceMonitor.enabled=true` in the chart wires them into the Prometheus Operator.
+The manager also exports Prometheus metrics per Migration on HTTPS :8443 (all `pgcopydb_migration_*`): phase, attempts, table/index/byte progress, database sizes on both ends, LSN positions and replication lag, start and completion timestamps, verification outcome, and a mode-labeled info series, plus `pgcopydb_operator_build_info` for the operator itself. `metrics.serviceMonitor.enabled=true` in the chart wires them into the Prometheus Operator.
 
 Next: [Live migration](operations/live-migration.md) for the follow-and-cutover walkthrough.

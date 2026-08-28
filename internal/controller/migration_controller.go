@@ -84,6 +84,15 @@ type LogReader interface {
 	JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
 }
 
+// ProgressOps samples a running worker: clone progress for status and
+// metrics, database sizes for metrics only. Nil disables sampling (envtest
+// injects a fake). Both are best effort: a nil sample keeps the previous
+// value and an error never fails the pass.
+type ProgressOps interface {
+	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
+	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
+}
+
 // MigrationReconciler reconciles a Migration object.
 //
 // Everything is derived from observable state (the owned Job's status and the
@@ -105,6 +114,9 @@ type MigrationReconciler struct {
 
 	// Logs reads worker pod logs for failure surfacing; nil disables it.
 	Logs LogReader
+
+	// Progress samples clone progress and database sizes; nil disables it.
+	Progress ProgressOps
 }
 
 // +kubebuilder:rbac:groups=pgcopydb-operator.io,resources=migrations,verbs=get;list;watch;create;update;patch;delete
@@ -136,6 +148,11 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	m := &v1beta1.Migration{}
 	if err := r.Get(ctx, req.NamespacedName, m); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Clone-only Migrations skip reconcileDeletion (no finalizer), so
+			// this is where their series must die.
+			metrics.Forget(req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	// base is the object as fetched; status writes patch against it so a
@@ -149,9 +166,12 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Terminal states are absorbing: a finished migration is history, not a
-	// process to restart (source/target are immutable anyway).
+	// process to restart (source/target are immutable anyway). Still record:
+	// a restarted operator's empty registry regains these series on its
+	// startup pass.
 	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete) ||
 		meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed) {
+		metrics.Record(m)
 		return ctrl.Result{}, nil
 	}
 
@@ -340,13 +360,14 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 	return ""
 }
 
-// observeRunningJob samples a live worker (follow state) and schedules the
-// next look.
+// observeRunningJob samples a live worker (progress, sizes, follow state)
+// and schedules the next look.
 //
-// Progress polling is disabled on pgcopydb 0.18: the `list progress` exec
-// corrupts filtered catalogs and never returns data, see
-// docs/research/upstream-issues.md. status.progress stays in the API,
-// reserved for a fixed upstream.
+// Progress polling is gated: the sampler runs `list progress` only on
+// runner versions its allowlist names, because on stock pgcopydb 0.18 the
+// exec corrupts filtered catalogs and never returns data, see
+// docs/research/upstream-issues.md. Database sizes come from psql, which
+// touches no catalog and is safe on any runner.
 //
 // Sentinel execs are quiesced until the base copy is done: every exec opens
 // pgcopydb's SQLite catalogs inside the worker, and 0.18 crashes under
@@ -389,6 +410,7 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		// migration in Cloning forever.
 		r.reconcileFollowRunning(ctx, m, job.Name)
 	}
+	r.sampleProgress(ctx, m, job.Name)
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -404,6 +426,30 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		interval = 2 * pollInterval
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// sampleProgress best-effort feeds the size gauges and status.progress from
+// the running worker. Errors V(1)-log and never flip a condition or fail
+// the pass; a nil progress sample keeps the previous one.
+func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+	if r.Progress == nil {
+		return
+	}
+	log := logf.FromContext(ctx)
+	src, tgt, err := r.Progress.DatabaseSizes(ctx, m.Namespace, jobName)
+	if err != nil {
+		log.V(1).Info("database size sample failed", "job", jobName, "error", err)
+	} else {
+		// Metrics only, by design: sizes are observability, not state.
+		metrics.RecordDatabaseSizes(m.Namespace, m.Name, src, tgt)
+	}
+	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)
+	switch {
+	case err != nil:
+		log.V(1).Info("progress sample failed", "job", jobName, "error", err)
+	case cp != nil:
+		m.Status.Progress = cp
+	}
 }
 
 // reapZombieWorker handles pgcopydb 0.18's zombie failure mode, proven live:

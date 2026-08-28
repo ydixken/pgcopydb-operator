@@ -23,6 +23,7 @@ Migration CRs) in place.
 | `image.pullPolicy` | `IfNotPresent` | Manager pull policy. |
 | `runner.image.repository` | `ghcr.io/ydixken/pgcopydb-operator/runner` | Worker Job image, passed as `--runner-image`. |
 | `runner.image.tag` | `""` | Runner tag; empty uses the chart appVersion. |
+| `runner.progressPollVersions` | `["0.18.2.gea87951"]` | Exact pgcopydb versions allowed to run the in-pod progress poll; fail closed, `[]` disables it. |
 | `imagePullSecrets` | `[]` | Pull secrets for the manager pod. |
 | `nameOverride` | `""` | Overrides the chart name in resource names. |
 | `fullnameOverride` | `""` | Overrides the full resource name. |
