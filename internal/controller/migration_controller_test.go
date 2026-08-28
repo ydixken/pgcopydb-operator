@@ -29,8 +29,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -533,5 +536,24 @@ var _ = Describe("Migration Controller", func() {
 
 		By("propagating the same list failure from deleteJobPods, which must not eat it")
 		Expect(r.deleteJobPods(cancelled, testNS, jobName)).To(HaveOccurred())
+	})
+})
+
+// The one place the watch topology is declared: a manager built against the
+// envtest API server must accept it, or the operator could not start at all.
+// The manager is never started, so nothing needs tearing down.
+var _ = Describe("SetupWithManager", func() {
+	It("registers the Migration controller with its owned watches", func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  kscheme.Scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		r := &MigrationReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: events.NewFakeRecorder(10),
+		}
+		Expect(r.SetupWithManager(mgr)).To(Succeed())
 	})
 })
