@@ -159,6 +159,17 @@ func (f *fakeSentinel) nudgeCount() int {
 	return f.nudges
 }
 
+// failingPatchClient fails every Patch, so specs can prove a failed
+// metadata write surfaces as an error instead of reading as success.
+type failingPatchClient struct {
+	client.Client
+	err error
+}
+
+func (c failingPatchClient) Patch(context.Context, client.Object, client.Patch, ...client.PatchOption) error {
+	return c.err
+}
+
 // fakeLogs scripts the pod-log reader the way fakeSentinel scripts the
 // sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
 // and tsErr the timestamped variant the zombie check reads.
@@ -474,6 +485,36 @@ var _ = Describe("Migration Controller follow mode", func() {
 		// and the CR is gone; asserting the pass keeps a regression's 422
 		// in the failure output instead of a bare timeout.
 		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		_, err = r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{}))).To(BeTrue())
+	})
+
+	It("surfaces a failed finalizer-removal patch as an error", func() {
+		const name = "mig-follow-patch-fail"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Finalizers).To(ContainElement(finalizerName))
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+
+		// The deletion pass hits the injected failure and reports it.
+		boom := fmt.Errorf("patch refused")
+		failing := followReconciler(&fakeSentinel{})
+		failing.Client = failingPatchClient{Client: k8sClient, err: boom}
+		_, err := failing.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+		})
+		Expect(err).To(MatchError(boom))
+
+		// The finalizer survived the failed pass; a clean pass recovers.
+		still := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, still)).To(Succeed())
+		Expect(still.Finalizers).To(ContainElement(finalizerName))
 		_, err = r.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
 		})
