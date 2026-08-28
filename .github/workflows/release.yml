@@ -63,6 +63,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.list }}
+          # The manager stamps VERSION into pgcopydb_operator_build_info;
+          # without it a released image reports "dev".
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
   runner-image:
     runs-on: github-runner-pgcopydb-operator
