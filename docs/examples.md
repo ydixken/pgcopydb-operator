@@ -15,4 +15,4 @@ They build on each other in order; `08-reference.yaml` is the annotated map of t
 | [08-reference](examples/08-reference.yaml) | Every spec knob, annotated | You are looking for a specific field |
 
 Alert rules for unattended migrations ship in the Helm chart rather than as an example here: set `metrics.prometheusRule.enabled=true` to install them.
-The rules live in [rules/migrations.yaml](https://github.com/ydixken/pgcopydb-operator/blob/main/charts/pgcopydb-operator/rules/migrations.yaml).
+The [monitoring guide](operations/monitoring.md) documents them alongside the metrics and dashboards.

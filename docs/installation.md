@@ -14,6 +14,8 @@ kubectl get crd migrations.pgcopydb-operator.io
 kubectl -n pgcopydb-system get deploy
 ```
 
+The chart can also wire the operator into a monitoring stack: a ServiceMonitor for the scrape, alert rules, and Grafana dashboards, each behind its own value; see [Monitoring](operations/monitoring.md).
+
 ## CRD lifecycle
 
 The CRD renders as a regular chart template, so `helm upgrade` updates it in place. Two values control it:

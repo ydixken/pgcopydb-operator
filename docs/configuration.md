@@ -58,6 +58,10 @@ spec:
 
 `pg_dump` in the image must be at least the target's major version; see [client tool versions](reference/prerequisites.md#client-tool-versions).
 
+The runner version also gates the in-pod progress poll that fills `status.progress` and the byte-progress metrics.
+The chart value `runner.progressPollVersions` (manager flag `--progress-poll-versions`) lists the exact pgcopydb versions allowed to run it, and it fails closed: an unlisted version, such as a custom stock 0.18 image, never runs the poll and keeps the clone byte metrics dark, while everything else keeps working.
+The [monitoring guide](operations/monitoring.md) lists which metrics that gate affects.
+
 ## Credentials
 
 Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile. Three forms, mutually exclusive per endpoint:

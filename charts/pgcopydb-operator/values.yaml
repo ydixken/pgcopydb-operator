@@ -82,6 +82,20 @@ metrics:
     # (kube-prometheus-stack does).
     additionalLabels: {}
 
+grafana:
+  dashboards:
+    # Ship the Grafana dashboards in dashboards/ as ConfigMaps labeled
+    # grafana_dashboard: "1" for the sidecar to pick up.
+    enabled: false
+    # Namespace for the ConfigMaps; empty uses the release namespace. The
+    # sidecar usually watches only Grafana's own namespace, so point it there.
+    namespace: ""
+    # Grafana folder, via the grafana_folder annotation; needs the sidecar's
+    # folderAnnotation setting. Empty skips the annotation.
+    folder: "pgcopydb"
+    additionalLabels: {}
+    additionalAnnotations: {}
+
 networkPolicy:
   # Placeholder; renders nothing yet. The exec-based sentinel control plane
   # opens no port, so there is nothing to restrict so far.
