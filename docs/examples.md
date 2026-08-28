@@ -13,4 +13,6 @@ They build on each other in order; `08-reference.yaml` is the annotated map of t
 | [06-live-superuser](examples/06-live-superuser.yaml) | Preflight applies the missing grants itself | You have superuser credentials but no DBA time |
 | [07-verified](examples/07-verified.yaml) | Post-migration `pgcopydb compare` checks | The result must be proven, not assumed |
 | [08-reference](examples/08-reference.yaml) | Every spec knob, annotated | You are looking for a specific field |
-| [prometheusrule-migrations](examples/prometheusrule-migrations.yaml) | Alerts on the operator's metrics | Migrations run unattended |
+
+Alert rules for unattended migrations ship in the Helm chart rather than as an example here: set `metrics.prometheusRule.enabled=true` to install them.
+The rules live in [rules/migrations.yaml](https://github.com/ydixken/pgcopydb-operator/blob/main/charts/pgcopydb-operator/rules/migrations.yaml).

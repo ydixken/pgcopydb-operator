@@ -1,0 +1,14 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "pgcopydb-operator.fullname" . }}
+  labels:
+    {{- include "pgcopydb-operator.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Embedded verbatim; the file's own header explains why it lives there.
+  {{- .Files.Get "rules/migrations.yaml" | trim | nindent 2 }}
+{{- end }}
