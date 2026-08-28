@@ -25,7 +25,22 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
+
+// TestAddToScheme pins the registration cmd/main depends on: both kinds
+// land in a fresh scheme under this group-version.
+func TestAddToScheme(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	for _, kind := range []string{"Migration", "MigrationList"} {
+		if !s.Recognizes(GroupVersion.WithKind(kind)) {
+			t.Errorf("scheme does not recognize %s", kind)
+		}
+	}
+}
 
 func secretRef(name, key string) *corev1.SecretKeySelector {
 	return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
