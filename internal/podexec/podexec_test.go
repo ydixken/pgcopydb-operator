@@ -29,7 +29,31 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/streaming/pkg/httpstream/wsstream"
 )
+
+// execChannels is the remotecommand channel layout the client multiplexes
+// over one websocket: stdin, stdout, stderr, error, resize.
+var execChannels = []wsstream.ChannelType{
+	wsstream.ReadChannel, wsstream.WriteChannel, wsstream.WriteChannel,
+	wsstream.WriteChannel, wsstream.ReadChannel,
+}
+
+// serveExecSuccess answers one exec request over the v5 websocket protocol:
+// out goes to the stdout channel, then the connection closes normally with the
+// error channel empty, which the client reads as a successful exec.
+func serveExecSuccess(w http.ResponseWriter, r *http.Request, out []byte) {
+	conn := wsstream.NewConn(map[string]wsstream.ChannelProtocolConfig{
+		"v5.channel.k8s.io": {Binary: true, Channels: execChannels},
+	})
+	conn.SetIdleTimeout(time.Minute)
+	_, streams, err := conn.Open(w, r)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck
+	_, _ = streams[1].Write(out)
+}
 
 // apiServer fakes the parts of the Kubernetes API this package talks to: pod
 // lists, pod logs, and the exec subresource (which never upgrades to SPDY, so
@@ -41,11 +65,17 @@ type apiServer struct {
 	pods     []corev1.Pod
 	fail     bool
 	requests []*url.URL
+	// execOut, when set, makes the exec subresource succeed over the v5
+	// websocket protocol with this stdout instead of refusing the upgrade.
+	execOut []byte
 }
 
 // runnerContainer pins the container name requests must target; deliberately
 // a test-local copy so a rename in the source fails here.
 const runnerContainer = "pgcopydb"
+
+// paramTrue is the query-parameter value boolean options serialize to.
+const paramTrue = "true"
 
 func newAPIServer(t *testing.T) *apiServer {
 	t.Helper()
@@ -64,6 +94,8 @@ func newAPIServer(t *testing.T) *apiServer {
 			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/log"):
 			_, _ = w.Write([]byte("clone step 9/9 done\n"))
+		case strings.HasSuffix(r.URL.Path, "/exec") && s.execOut != nil:
+			serveExecSuccess(w, r, s.execOut)
 		default:
 			http.NotFound(w, r)
 		}
@@ -185,6 +217,27 @@ func TestJobLogs_PicksNewestPod(t *testing.T) {
 	}
 }
 
+// TestJobLogsTimestamps pins the one thing the variant adds: the request asks
+// the runtime to stamp every line, which is what the zombie check dates the
+// supervisor-death marker with.
+func TestJobLogsTimestamps(t *testing.T) {
+	srv := newAPIServer(t)
+	srv.pods = []corev1.Pod{workerPod("mig-run-1-abc", time.Now())}
+	e := newExec(t, srv.URL)
+
+	out, err := e.JobLogsTimestamps(context.Background(), "ns", "mig-run-1", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "clone step 9/9 done\n" {
+		t.Fatalf("logs = %q", out)
+	}
+	q := srv.lastRequest(t).Query()
+	if q.Get("timestamps") != paramTrue || q.Get("tailLines") != "7" {
+		t.Fatalf("log query = %v, want timestamps=true tailLines=7", q)
+	}
+}
+
 func TestJobLogs_NoPods(t *testing.T) {
 	srv := newAPIServer(t)
 	e := newExec(t, srv.URL)
@@ -227,8 +280,43 @@ func TestInPod_RequestShape(t *testing.T) {
 	if got := q["command"]; len(got) != 4 || got[0] != runnerContainer || got[3] != "--json" {
 		t.Fatalf("command params = %v", got)
 	}
-	if q.Get("container") != runnerContainer || q.Get("stdout") != "true" || q.Get("stderr") != "true" {
+	if q.Get("container") != runnerContainer || q.Get("stdout") != paramTrue || q.Get("stderr") != paramTrue {
 		t.Fatalf("exec query = %v", q)
+	}
+}
+
+// TestInPod_Success drives the whole websocket exec path: the fake API
+// upgrades the connection, streams stdout, and closes cleanly, so the bytes
+// the "pod" wrote come back with a nil error.
+func TestInPod_Success(t *testing.T) {
+	srv := newAPIServer(t)
+	srv.execOut = []byte("0/5000000\n")
+	e := newExec(t, srv.URL)
+
+	out, err := e.InPod(context.Background(), "ns", "worker-0", []string{"pgcopydb", "stream", "sentinel", "get"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "0/5000000\n" {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+// TestInPod_BrokenTransportConfig hits the executor-construction error leg: a
+// rest config whose CA bytes do not parse fails before any request is sent.
+// The Exec is assembled by hand because New rejects such a config up front.
+func TestInPod_BrokenTransportConfig(t *testing.T) {
+	srv := newAPIServer(t)
+	e := newExec(t, srv.URL)
+	e.config = &rest.Config{
+		Host:            srv.URL,
+		TLSClientConfig: rest.TLSClientConfig{CAData: []byte("not a certificate")},
+	}
+	if _, err := e.InPod(context.Background(), "ns", "worker-0", []string{"id"}); err == nil {
+		t.Fatal("want executor construction error for unusable transport config")
+	}
+	if len(srv.requests) != 0 {
+		t.Fatalf("no request must leave the client, saw %v", srv.requests)
 	}
 }
 
