@@ -1225,7 +1225,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_endpos_lsn_bytes{namespace=\"$namespace\", name=\"$name\"} - on(namespace, name) pgcopydb_migration_replay_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "pgcopydb_migration_endpos_lsn_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_replay_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

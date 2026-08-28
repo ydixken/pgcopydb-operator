@@ -373,6 +373,11 @@ var _ = BeforeSuite(func() {
 		"runner.image.tag=" + runnerTag,
 		"watchNamespaces={" + nsE2E + "," + nsX + "}",
 		"leaderElection.enabled=false",
+		// Always on so the metrics specs get their scrape; the template
+		// renders nothing on a cluster without the Prometheus Operator CRDs.
+		// PrometheusRule and the dashboard ConfigMaps stay off: real alert
+		// config on a shared cluster, and no sidecar watches this namespace.
+		"metrics.serviceMonitor.enabled=true",
 	}
 	args := []string{"install", helmRelease, chartPath, "-n", nsOperator, "--wait"}
 	if manageNamespaces {

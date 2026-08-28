@@ -48,20 +48,24 @@ The e2e job backs the first rule with something GitHub enforces rather than some
 
 Two tiers, and the environment variables a run reads:
 
-| Variable                | Default | Effect                                                                                                             |
-|-------------------------|---------|--------------------------------------------------------------------------------------------------------------------|
-| `E2E_SCALE`             | `1`     | Fixture size multiplier. 1 seeds roughly 12GB; row counts scale linearly, so 0.1 gives a ~1.2GB quick run.          |
-| `E2E_STRESS`            | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes, longer budgets. Use `task e2e:stress`.     |
-| `E2E_KEEP_FIXTURES`     | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed. |
-| `E2E_FORCE`             | unset   | `true` takes over the helm release a crashed run left behind.                                                       |
-| `E2E_PG_SOURCE`         | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                            |
-| `E2E_PG_TARGET`         | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).            |
-| `E2E_OPERATOR_TAG`      | unset   | Manager image tag to install instead of the pinned release; the runner follows it.                                  |
-| `E2E_RUNNER_TAG`        | unset   | Worker image tag on its own, for an unreleased `images/runner` build.                                               |
-| `E2E_STORAGE_CLASS`     | unset   | Pins the fixture volumes to one StorageClass, and wins over the stress tier's own.                                  |
-| `E2E_MANAGE_NAMESPACES` | `true`  | `false` works inside namespaces someone else owns: creates and deletes none, installs with `rbac.create=false`.     |
+| Variable                      | Default | Effect                                                                                                             |
+|-------------------------------|---------|--------------------------------------------------------------------------------------------------------------------|
+| `E2E_SCALE`                   | `1`     | Fixture size multiplier. 1 seeds roughly 12GB; row counts scale linearly, so 0.1 gives a ~1.2GB quick run.          |
+| `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes, longer budgets. Use `task e2e:stress`.     |
+| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed. |
+| `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                       |
+| `E2E_PG_SOURCE`               | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                            |
+| `E2E_PG_TARGET`               | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).            |
+| `E2E_OPERATOR_TAG`            | unset   | Manager image tag to install instead of the pinned release; the runner follows it.                                  |
+| `E2E_RUNNER_TAG`              | unset   | Worker image tag on its own, for an unreleased `images/runner` build.                                               |
+| `E2E_STORAGE_CLASS`           | unset   | Pins the fixture volumes to one StorageClass, and wins over the stress tier's own.                                  |
+| `E2E_MANAGE_NAMESPACES`       | `true`  | `false` works inside namespaces someone else owns: creates and deletes none, installs with `rbac.create=false`.     |
+| `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                      |
+| `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.         |
 
 Outside the stress tier the fixture volumes follow the scale, down from 40/40/10Gi at scale 1, with a floor at an eighth of that: a 0.1 run gets 5/5/2Gi. The floor is there because WAL, indexes and the change spool need headroom that the row counts alone do not size.
+
+The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion. They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target. Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl. With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red. They assert metrics of the installed operator, so point `E2E_OPERATOR_TAG` at a build that exports them when the pinned default predates the metrics work.
 
 A kept cluster whose server runs a different major than `E2E_PG_SOURCE`/`E2E_PG_TARGET` request is deleted and recreated before the suite proceeds: CNPG cannot change majors in place.
 
@@ -71,7 +75,7 @@ The stress tier (`task e2e:stress`) requires Longhorn. The suite creates a `long
 
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
-`release.yml` runs this suite too, against a release candidate rather than a branch: `E2E_SCALE=0.1`, chaos excluded, `E2E_OPERATOR_TAG` set to the candidate so it installs the images that run was built from, and `E2E_MANAGE_NAMESPACES=false` because there the namespaces belong to GitOps and the CI identity may not create one. It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
+`release.yml` runs this suite too, against a release candidate rather than a branch: `E2E_SCALE=0.1`, chaos excluded, `E2E_OPERATOR_TAG` set to the candidate so it installs the images that run was built from, and `E2E_MANAGE_NAMESPACES=false` because there the namespaces belong to GitOps and the CI identity may not create one. It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden. `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
 
 ## Releasing
 
