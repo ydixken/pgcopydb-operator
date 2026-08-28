@@ -1,0 +1,5 @@
+# Statuses stay at Codecov's defaults on purpose: a hard project target
+# would gate PRs on code they never touched.
+ignore:
+  # controller-gen output; exercised indirectly, not hand-written code.
+  - "**/zz_generated*.go"
