@@ -83,12 +83,16 @@ func cutoverWanted(m *v1beta1.Migration, caughtUp bool) bool {
 
 // ensureFinalizer adds the cleanup finalizer to follow migrations before any
 // worker runs, so a deletion at any later point routes through cleanup.
+// Metadata-only patch, never Update: a full Update round-trips the spec
+// through omitempty, stripping stored zero values (an explicit [] or ""),
+// and the spec's immutability CEL rules reject that as a spec change.
 func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Migration) error {
 	if !followEnabled(m) || controllerutil.ContainsFinalizer(m, finalizerName) {
 		return nil
 	}
+	base := m.DeepCopy()
 	controllerutil.AddFinalizer(m, finalizerName)
-	return r.Update(ctx, m)
+	return r.Patch(ctx, m, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // reconcileFollowRunning handles the streaming and cutover phases while the
@@ -354,8 +358,11 @@ func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1beta1.
 			return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
 		}
 	}
+	// Metadata-only patch for the same reason as ensureFinalizer: an Update
+	// here would strip stored zero values from the spec and wedge deletion.
+	base := m.DeepCopy()
 	controllerutil.RemoveFinalizer(m, finalizerName)
-	if err := r.Update(ctx, m); err != nil {
+	if err := r.Patch(ctx, m, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
 	metrics.Forget(m.Namespace, m.Name)

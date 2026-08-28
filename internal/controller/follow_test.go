@@ -30,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -436,6 +438,48 @@ var _ = Describe("Migration Controller follow mode", func() {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{})
 			return errors.IsNotFound(err)
 		}).WithTimeout(deletionDriveTimeout).Should(BeTrue())
+	})
+
+	It("reconciles a follow spec that spells allowMissingReplicaIdentity as []", func() {
+		const name = "mig-follow-empty-list"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+
+		// The typed client's own omitempty marshal would strip the empty
+		// list, so the CR goes in as unstructured, the way a rendered
+		// manifest (an Argo Workflows template, say) spells it.
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(followMigration(name, v1beta1.CutoverManual))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unstructured.SetNestedSlice(obj, []any{}, "spec", "follow", "allowMissingReplicaIdentity")).To(Succeed())
+		u := &unstructured.Unstructured{Object: obj}
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("Migration"))
+		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+
+		// Pass 1 must survive the stored []: finalizer on, status written.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Finalizers).To(ContainElement(finalizerName))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
+
+		// The stored spelling survives the controller's write untouched.
+		stored := &unstructured.Unstructured{}
+		stored.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("Migration"))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, stored)).To(Succeed())
+		list, found, err := unstructured.NestedSlice(stored.Object, "spec", "follow", "allowMissingReplicaIdentity")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(list).To(BeEmpty())
+
+		// Deletion removes the finalizer with the same constraint. Nothing
+		// ran yet (attempts 0), so a single pass goes straight to removal
+		// and the CR is gone; asserting the pass keeps a regression's 422
+		// in the failure output instead of a bare timeout.
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		_, err = r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{}))).To(BeTrue())
 	})
 
 	It("absorbs a preflight failure with the check output in the conditions", func() {
