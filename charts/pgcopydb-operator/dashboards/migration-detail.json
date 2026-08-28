@@ -129,7 +129,18 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "unknown",
+          "noValue": "n/a",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": " ",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -227,7 +238,7 @@
           "values": false
         },
         "orientation": "auto",
-        "textMode": "name",
+        "textMode": "value_and_name",
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
@@ -268,7 +279,18 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "unknown",
+          "noValue": "n/a",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": " ",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -290,7 +312,7 @@
           "values": false
         },
         "orientation": "auto",
-        "textMode": "name",
+        "textMode": "value_and_name",
         "colorMode": "none",
         "graphMode": "none",
         "justifyMode": "auto",
@@ -511,7 +533,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{phase}}"
+          "legendFormat": "{{phase}}",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
         }
       ],
       "fieldConfig": {
@@ -839,7 +864,6 @@
             "mode": "thresholds"
           },
           "unit": "percent",
-          "noValue": "n/a",
           "min": 0,
           "max": 100,
           "thresholds": {
@@ -875,7 +899,7 @@
         "minVizWidth": 8,
         "maxVizHeight": 300
       },
-      "description": "Size ratio overshoots when the target carries other data; tables, indexes and clone bytes need the bundled (patched) runner."
+      "description": "Size ratio overshoots when the target carries other data; tables, indexes and clone bytes need the bundled (patched) runner. Absent series simply show no bar."
     },
     {
       "id": 12,

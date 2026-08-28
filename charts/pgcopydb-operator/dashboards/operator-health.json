@@ -381,7 +381,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(controller_runtime_reconcile_errors_total{job=\"$job\", controller=\"migration\"}[$__rate_interval])",
+          "expr": "sum(rate(controller_runtime_reconcile_errors_total{job=\"$job\", controller=\"migration\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -522,7 +522,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "controller_runtime_active_workers{job=\"$job\", controller=\"migration\"}",
+          "expr": "max(controller_runtime_active_workers{job=\"$job\", controller=\"migration\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -531,7 +531,7 @@
         },
         {
           "refId": "B",
-          "expr": "controller_runtime_max_concurrent_reconciles{job=\"$job\", controller=\"migration\"}",
+          "expr": "max(controller_runtime_max_concurrent_reconciles{job=\"$job\", controller=\"migration\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -605,7 +605,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "workqueue_depth{job=\"$job\", name=\"migration\"}",
+          "expr": "max(workqueue_depth{job=\"$job\", name=\"migration\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -789,7 +789,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(workqueue_retries_total{job=\"$job\", name=\"migration\"}[$__rate_interval])",
+          "expr": "sum(rate(workqueue_retries_total{job=\"$job\", name=\"migration\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
