@@ -12,7 +12,10 @@ spec:
   endpoints:
     - port: https-metrics
       scheme: https
-      honorLabels: false
+      # Migration metrics carry the Migration's own namespace label; without
+      # honor_labels Prometheus renames it exported_namespace, and the bundled
+      # alerts and dashboards would group on the operator's namespace instead.
+      honorLabels: true
       {{- with .Values.metrics.serviceMonitor.interval }}
       interval: {{ . }}
       {{- end }}

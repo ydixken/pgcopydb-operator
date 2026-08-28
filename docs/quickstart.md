@@ -25,6 +25,6 @@ What happens behind the phases:
 
 Tuning (parallelism, same-table splitting, filters, skips) and DBaaS connection forms are covered in [Configuration](configuration.md).
 
-The manager also exports Prometheus metrics per Migration on HTTPS :8443 (all `pgcopydb_migration_*`): phase, attempts, table/index/byte progress, database sizes on both ends, LSN positions and replication lag, start and completion timestamps, verification outcome, and a mode-labeled info series, plus `pgcopydb_operator_build_info` for the operator itself. `metrics.serviceMonitor.enabled=true` in the chart wires them into the Prometheus Operator.
+The manager also exports Prometheus metrics per Migration on HTTPS :8443 (all `pgcopydb_migration_*`): phase, attempts, table/index/byte progress, database sizes on both ends, LSN positions and replication lag, start and completion timestamps, verification outcome, and a mode-labeled info series, plus `pgcopydb_operator_build_info` for the operator itself. `metrics.serviceMonitor.enabled=true` in the chart wires them into the Prometheus Operator; the [monitoring guide](operations/monitoring.md) has the full metric reference, the bundled Grafana dashboards, and the alert rules.
 
 Next: [Live migration](operations/live-migration.md) for the follow-and-cutover walkthrough.

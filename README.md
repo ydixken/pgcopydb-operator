@@ -71,6 +71,7 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 
 - [Quickstart](docs/quickstart.md), [installation](docs/installation.md), [configuration](docs/configuration.md): getting a Migration running and tuned.
 - [Live migration](docs/operations/live-migration.md), [verification](docs/operations/verification.md), [lifecycle](docs/operations/lifecycle.md): the operations runbooks.
+- [Monitoring](docs/operations/monitoring.md): the metric reference, Grafana dashboards, and alert rules.
 - [Troubleshooting](docs/troubleshooting.md): symptoms mapped to causes and fixes.
 - [Prerequisites](docs/reference/prerequisites.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.

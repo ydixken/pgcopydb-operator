@@ -45,6 +45,11 @@ Migration CRs) in place.
 | `metrics.serviceMonitor.metricRelabelings` | `[]` | Sample relabelings applied before ingestion. |
 | `metrics.prometheusRule.enabled` | `false` | Install the bundled alert rules as a PrometheusRule; see [Alerts](#alerts). |
 | `metrics.prometheusRule.additionalLabels` | `{}` | Extra PrometheusRule labels, for a Prometheus that selects rules by label. |
+| `grafana.dashboards.enabled` | `false` | Ship the Grafana dashboards as sidecar ConfigMaps; see [Dashboards](#dashboards). |
+| `grafana.dashboards.namespace` | `""` | Namespace for the dashboard ConfigMaps; empty uses the release namespace. |
+| `grafana.dashboards.folder` | `"pgcopydb"` | Grafana folder via the `grafana_folder` annotation; empty skips it. |
+| `grafana.dashboards.additionalLabels` | `{}` | Extra labels on the dashboard ConfigMaps. |
+| `grafana.dashboards.additionalAnnotations` | `{}` | Extra annotations on the dashboard ConfigMaps. |
 | `networkPolicy.enabled` | `false` | Placeholder; renders nothing yet. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
 
@@ -58,6 +63,8 @@ The other half is the scraper's, and the chart does not grant it: whichever Serv
 kube-prometheus-stack already binds that rule to its own Prometheus, so `metrics.serviceMonitor.enabled=true` is enough there.
 On another stack, bind it yourself.
 
+The ServiceMonitor sets `honorLabels: true` so the `namespace` label on the per-Migration metrics stays the Migration's own; without it Prometheus renames the label to `exported_namespace` and the bundled alerts and dashboards group on the operator's namespace instead.
+
 With `rbac.create=false` you supply the manager's RBAC, which includes the two review permissions above.
 
 ## Alerts
@@ -65,6 +72,13 @@ With `rbac.create=false` you supply the manager's RBAC, which includes the two r
 `metrics.prometheusRule.enabled=true` installs the alert rules from [rules/migrations.yaml](rules/migrations.yaml) as a PrometheusRule: failed and verification-failed migrations, retry churn, a stalled clone, high replication lag, and a stalled cutover drain.
 If your Prometheus selects rules by label (kube-prometheus-stack does), add its matching label via `metrics.prometheusRule.additionalLabels`.
 Thresholds and windows are starting points; promtool unit tests in the repository pin each one, so check there before retuning.
+
+## Dashboards
+
+`grafana.dashboards.enabled=true` ships the three dashboards in [dashboards/](dashboards/) (migration detail, fleet overview, operator health) as ConfigMaps labeled `grafana_dashboard: "1"` for Grafana's dashboard sidecar.
+The sidecar usually watches only Grafana's own namespace, so set `grafana.dashboards.namespace` to it.
+The `grafana_folder` annotation takes effect only when the sidecar's `folderAnnotation` setting names it.
+The [monitoring guide](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/operations/monitoring.md) covers the panels, the metric reference, and manual import.
 
 ## First Migration
 

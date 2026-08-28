@@ -1,0 +1,30 @@
+{{- if .Values.grafana.dashboards.enabled }}
+{{- range $path, $file := .Files.Glob "dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pgcopydb-operator.fullname" $ }}-{{ base $path | trimSuffix ".json" }}
+  # Grafana's sidecar usually watches only its own namespace; the override
+  # points the ConfigMaps there.
+  namespace: {{ default $.Release.Namespace $.Values.grafana.dashboards.namespace }}
+  labels:
+    {{- include "pgcopydb-operator.labels" $ | nindent 4 }}
+    grafana_dashboard: "1"
+    {{- with $.Values.grafana.dashboards.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or $.Values.grafana.dashboards.folder $.Values.grafana.dashboards.additionalAnnotations }}
+  annotations:
+    {{- with $.Values.grafana.dashboards.folder }}
+    grafana_folder: {{ . | quote }}
+    {{- end }}
+    {{- with $.Values.grafana.dashboards.additionalAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+data:
+  {{ base $path }}: |-
+{{ $file | toString | indent 4 }}
+{{- end }}
+{{- end }}

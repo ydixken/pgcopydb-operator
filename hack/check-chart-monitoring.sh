@@ -96,6 +96,9 @@ done
 tpl=templates/servicemonitor.yaml
 set -- --set metrics.serviceMonitor.enabled=true --api-versions monitoring.coreos.com/v1
 expect_match '^kind: ServiceMonitor$' "$@"
+# Without honor_labels the Migration's namespace label would be renamed
+# exported_namespace and the alerts and dashboards would group wrongly.
+expect_match '^      honorLabels: true$' "$@"
 expect_no_match '^      interval:' "$@"
 expect_no_match '^      scrapeTimeout:' "$@"
 expect_no_match '^      relabelings:' "$@"
@@ -114,6 +117,33 @@ expect_match '^      scrapeTimeout: 10s$' "$@"
 expect_match '^      relabelings:$' "$@"
 expect_match '^      metricRelabelings:$' "$@"
 expect_match '^        - action: labeldrop$' "$@"
+
+# The dashboards are opt-in ConfigMaps for Grafana's sidecar: off by default,
+# each labeled for pickup, namespace and folder overridable, and one sentinel
+# panel per file proves the right JSON landed in the right ConfigMap.
+tpl=templates/grafana-dashboards.yaml
+expect_absent
+set -- --set grafana.dashboards.enabled=true
+expect_match '^  name: rel-pgcopydb-operator-migration-detail$' "$@"
+expect_match '^  name: rel-pgcopydb-operator-fleet-overview$' "$@"
+expect_match '^  name: rel-pgcopydb-operator-operator-health$' "$@"
+expect_match '^  namespace: ns$' "$@"
+expect_match '^    grafana_dashboard: "1"$' "$@"
+expect_match '^    grafana_folder: "pgcopydb"$' "$@"
+expect_match '"title": "Phase timeline"' "$@"
+expect_match '"title": "Migrations by phase"' "$@"
+expect_match '"title": "Reconcile rate"' "$@"
+render "$@"
+cms=$(printf '%s\n' "$out" | grep -c '^kind: ConfigMap$' || true)
+labels=$(printf '%s\n' "$out" | grep -c '^    grafana_dashboard: "1"$' || true)
+if [ "$cms" -eq 3 ] && [ "$labels" -eq 3 ]; then
+  echo "ok: $tpl renders 3 labeled ConfigMaps"
+else
+  echo "FAIL: $tpl renders $cms ConfigMaps with $labels sidecar labels, want 3/3" >&2
+  fail=1
+fi
+expect_match '^  namespace: monitoring$' "$@" --set grafana.dashboards.namespace=monitoring
+expect_no_match 'grafana_folder' "$@" --set grafana.dashboards.folder=
 
 # Every shipped alert keeps its promtool unit test.
 for a in $alerts; do

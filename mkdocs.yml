@@ -44,6 +44,7 @@ nav:
       - Live migration: operations/live-migration.md
       - Verification: operations/verification.md
       - Suspend, retries, deletion: operations/lifecycle.md
+      - Monitoring: operations/monitoring.md
       - Migrating into CloudNativePG: operations/cloudnativepg.md
       - Argo CD health checks: operations/argocd.md
   - Troubleshooting: troubleshooting.md
