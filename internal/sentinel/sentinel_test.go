@@ -24,13 +24,35 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/streaming/pkg/httpstream/wsstream"
 
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 )
+
+// serveExecSuccess answers one exec request over the v5 websocket protocol:
+// out goes to the stdout channel (index 1 of stdin, stdout, stderr, error,
+// resize), then the connection closes normally with the error channel empty,
+// which the client reads as a successful exec.
+func serveExecSuccess(w http.ResponseWriter, r *http.Request, out []byte) {
+	conn := wsstream.NewConn(map[string]wsstream.ChannelProtocolConfig{
+		"v5.channel.k8s.io": {Binary: true, Channels: []wsstream.ChannelType{
+			wsstream.ReadChannel, wsstream.WriteChannel, wsstream.WriteChannel,
+			wsstream.WriteChannel, wsstream.ReadChannel,
+		}},
+	})
+	conn.SetIdleTimeout(time.Minute)
+	_, streams, err := conn.Open(w, r)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck
+	_, _ = streams[1].Write(out)
+}
 
 func TestParseLSN(t *testing.T) {
 	cases := map[string]uint64{
@@ -107,6 +129,10 @@ func TestToStatus_EndposSetAndLagUnknown(t *testing.T) {
 type execRecorder struct {
 	mu   sync.Mutex
 	cmds [][]string
+	// outputs scripts successful execs: the first entry whose key is a
+	// substring of the joined argv is served as that exec's stdout; anything
+	// unscripted keeps the refused-upgrade failure.
+	outputs map[string]string
 }
 
 func (rec *execRecorder) add(argv []string) {
@@ -119,6 +145,24 @@ func (rec *execRecorder) commands() [][]string {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	return rec.cmds
+}
+
+func (rec *execRecorder) script(outputs map[string]string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.outputs = outputs
+}
+
+func (rec *execRecorder) respond(argv []string) (string, bool) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	joined := strings.Join(argv, " ")
+	for key, out := range rec.outputs {
+		if strings.Contains(joined, key) {
+			return out, true
+		}
+	}
+	return "", false
 }
 
 // fakeAPI serves a pod list (or an error). Exec requests are recorded, then
@@ -136,7 +180,12 @@ func fakeAPI(t *testing.T, pods []corev1.Pod, fail bool) (*Client, *execRecorder
 			list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}, Items: pods}
 			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
-			rec.add(r.URL.Query()["command"])
+			argv := r.URL.Query()["command"]
+			rec.add(argv)
+			if out, ok := rec.respond(argv); ok {
+				serveExecSuccess(w, r, []byte(out))
+				return
+			}
 			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
@@ -196,6 +245,77 @@ func TestRead_ListError(t *testing.T) {
 	c, _ := fakeAPI(t, nil, true)
 	if _, err := c.Read(context.Background(), "ns", "j"); err == nil {
 		t.Fatal("want error when the pod list fails")
+	}
+}
+
+// sentinelOutputs scripts one full healthy sample; tests copy and prune it.
+func sentinelOutputs() map[string]string {
+	return map[string]string{
+		"sentinel get --apply":      "enabled\n",
+		"sentinel get --write-lsn":  "0/2000\n",
+		"sentinel get --replay-lsn": "0/1000\n",
+		"sentinel get --endpos":     "0/0\n",
+		"pg_current_wal_flush_lsn":  "0/3000\n",
+	}
+}
+
+func TestRead_FullSample(t *testing.T) {
+	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	rec.script(sentinelOutputs())
+	st, err := c.Read(context.Background(), "ns", "j")
+	if err != nil || st == nil {
+		t.Fatalf("want a sample, got (%v, %v)", st, err)
+	}
+	want := State{ApplyEnabled: true, WriteLSN: "0/2000", ReplayLSN: "0/1000", Endpos: "0/0", SourceHead: "0/3000"}
+	if *st != want {
+		t.Fatalf("sample = %+v, want %+v", *st, want)
+	}
+}
+
+// TestRead_SelectorFailureIsNoSample: any selector failing after the sentinel
+// answered once still yields (nil, nil), never a partial sample: the caller
+// keeps the previous one.
+func TestRead_SelectorFailureIsNoSample(t *testing.T) {
+	for _, broken := range []string{"--write-lsn", "--replay-lsn", "--endpos"} {
+		c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
+		outputs := sentinelOutputs()
+		delete(outputs, "sentinel get "+broken)
+		rec.script(outputs)
+		st, err := c.Read(context.Background(), "ns", "j")
+		if err != nil || st != nil {
+			t.Fatalf("%s failing: want (nil, nil), got (%v, %v)", broken, st, err)
+		}
+	}
+}
+
+// TestRead_SourceHeadBestEffort: the WAL-head query failing must not lose the
+// sentinel sample; lag simply reads as unknown until the next pass.
+func TestRead_SourceHeadBestEffort(t *testing.T) {
+	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	outputs := sentinelOutputs()
+	delete(outputs, "pg_current_wal_flush_lsn")
+	rec.script(outputs)
+	st, err := c.Read(context.Background(), "ns", "j")
+	if err != nil || st == nil {
+		t.Fatalf("want a sample, got (%v, %v)", st, err)
+	}
+	if st.SourceHead != "" {
+		t.Fatalf("source head must stay empty when psql fails, got %q", st.SourceHead)
+	}
+	if st.WriteLSN != "0/2000" || !st.ApplyEnabled {
+		t.Fatalf("sentinel fields lost: %+v", st)
+	}
+}
+
+func TestSetEndposCurrent_Success(t *testing.T) {
+	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
+	rec.script(map[string]string{"sentinel set endpos": "0/5000\n"})
+	lsn, err := c.SetEndposCurrent(context.Background(), "ns", "j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lsn != "0/5000" {
+		t.Fatalf("endpos = %q, want the trimmed CLI output", lsn)
 	}
 }
 
