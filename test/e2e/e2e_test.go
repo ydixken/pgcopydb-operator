@@ -40,6 +40,17 @@ import (
 // The scenarios share the two CNPG fixtures and run in order: later ones
 // build on the populated target that earlier ones leave behind.
 var _ = Describe("Migration", Ordered, func() {
+	// Ginkgo randomizes top-level container order per seed, so another
+	// container may have populated the target or may still be dropping its
+	// replication state; restore the clean slate the specs assume.
+	BeforeAll(func() {
+		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication slot left on the source by an earlier container")
+		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin left on the target by an earlier container")
+		resetTargetObjects()
+	})
+
 	It("completes a fresh clone with matching rows and sequences", func() {
 		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
