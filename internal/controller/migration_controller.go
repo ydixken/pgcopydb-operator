@@ -40,8 +40,9 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
-// pollInterval is how often a running clone is re-checked (follow state and
-// Job observation; no progress exec, see observeRunningJob).
+// pollInterval is how often a running clone is re-checked (Job observation,
+// follow state, and the progress samples; catalog execs are quiesced
+// mid-copy, see observeRunningJob).
 const pollInterval = 30 * time.Second
 
 const (
@@ -363,22 +364,21 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // observeRunningJob samples a live worker (progress, sizes, follow state)
 // and schedules the next look.
 //
-// Progress polling is gated: the sampler runs `list progress` only on
-// runner versions its allowlist names, because on stock pgcopydb 0.18 the
-// exec corrupts filtered catalogs and never returns data, see
-// docs/research/upstream-issues.md. Database sizes come from psql, which
-// touches no catalog and is safe on any runner.
-//
-// Sentinel execs are quiesced until the base copy is done: every exec opens
-// pgcopydb's SQLite catalogs inside the worker, and 0.18 crashes under
-// concurrent catalog access (a live clone's index worker died on
-// "[SQLite 5: database is locked]", exit 12; see
-// docs/research/upstream-issues.md). So while CloneCompleted is False the
-// operator touches only the pod LOG: the clone-done transition is derived
-// from the markers pgcopydb prints when the copy phase ends
-// (pgcopydb.CloneDone), and the single fetched tail also feeds the zombie
-// check. Only once CloneCompleted is True do sentinel reads begin;
-// Streaming/CaughtUp/cutover logic is unchanged from there.
+// Catalog-opening execs (sentinel reads AND the `list progress` poll) are
+// quiesced until the base copy is done: every one opens pgcopydb's SQLite
+// catalogs inside the worker, and 0.18 crashes under concurrent catalog
+// access (a live clone's index worker died on "[SQLite 5: database is
+// locked]", exit 12, and polling into a fresh resume pod kills it during
+// catalog init; see docs/research/upstream-issues.md). So while
+// CloneCompleted is False the operator touches only the pod LOG and the
+// catalog-free psql size sample: the clone-done transition is derived from
+// the markers pgcopydb prints when the copy phase ends (pgcopydb.CloneDone),
+// and the single fetched tail also feeds the zombie check. Only once
+// CloneCompleted is True do sentinel reads and the progress poll begin;
+// the poll additionally runs only on runner versions its allowlist names,
+// because stock 0.18's `list progress` corrupts filtered catalogs and never
+// returns data. Plain clones never reach CloneCompleted while the worker
+// runs; finishClone takes their one sample after pgcopydb exits.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1beta1.PhaseCloning
 	follow := followEnabled(m)
@@ -402,15 +402,17 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
 			"base copy finished (worker logged clone completion), replaying changes")
 	}
-	if follow && (cloneDone || r.Logs == nil) {
+	// One rule for every catalog-opening exec, sentinel and progress poll
+	// alike. With no log reader wired the clone-done transition cannot be
+	// observed, so the execs stay on (the pre-quiescence behavior) rather
+	// than wedging the migration in Cloning forever.
+	catalogExecsOK := follow && (cloneDone || r.Logs == nil)
+	if catalogExecsOK {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
-		// trigger the cutover itself; see follow.go. With no log reader wired
-		// the clone-done transition cannot be observed, so the sentinel stays
-		// the detector (the pre-quiescence behavior) rather than wedging the
-		// migration in Cloning forever.
+		// trigger the cutover itself; see follow.go.
 		r.reconcileFollowRunning(ctx, m, job.Name)
 	}
-	r.sampleProgress(ctx, m, job.Name)
+	r.sampleProgress(ctx, m, job.Name, catalogExecsOK)
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -428,25 +430,36 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
-// sampleProgress best-effort feeds the size gauges and status.progress from
-// the running worker. Errors V(1)-log and never flip a condition or fail
-// the pass; a nil progress sample keeps the previous one.
-func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+// sampleProgress best-effort feeds the size gauges every pass (psql, no
+// catalog) and, only when catalog execs are safe, status.progress. Errors
+// V(1)-log and never flip a condition or fail the pass.
+func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string, catalogExecsOK bool) {
 	if r.Progress == nil {
 		return
 	}
-	log := logf.FromContext(ctx)
 	src, tgt, err := r.Progress.DatabaseSizes(ctx, m.Namespace, jobName)
 	if err != nil {
-		log.V(1).Info("database size sample failed", "job", jobName, "error", err)
+		logf.FromContext(ctx).V(1).Info("database size sample failed", "job", jobName, "error", err)
 	} else {
 		// Metrics only, by design: sizes are observability, not state.
 		metrics.RecordDatabaseSizes(m.Namespace, m.Name, src, tgt)
 	}
+	if catalogExecsOK {
+		r.sampleCloneProgress(ctx, m, jobName)
+	}
+}
+
+// sampleCloneProgress best-effort refreshes status.progress from the
+// worker's `list progress`; an error or a nil sample keeps the previous
+// value.
+func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+	if r.Progress == nil {
+		return
+	}
 	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)
 	switch {
 	case err != nil:
-		log.V(1).Info("progress sample failed", "job", jobName, "error", err)
+		logf.FromContext(ctx).V(1).Info("progress sample failed", "job", jobName, "error", err)
 	case cp != nil:
 		m.Status.Progress = cp
 	}

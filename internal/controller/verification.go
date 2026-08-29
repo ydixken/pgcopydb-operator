@@ -22,6 +22,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -89,6 +90,14 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 // when requested, then Complete. It runs on every pass while the worker Job
 // reads succeeded, so it must stay idempotent.
 func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+		// The one progress sample a plain clone gets: the poll is quiesced
+		// while pgcopydb writes its catalogs (see observeRunningJob), and only
+		// now, with the worker exited, are they quiet. Best effort: the pod
+		// usually leaves Running along with the Job, and then there is nothing
+		// to sample, which is acceptable for a finished clone.
+		r.sampleCloneProgress(ctx, m, m.Status.JobName)
+	}
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
 
 	done, err := r.ensureVerification(ctx, m)

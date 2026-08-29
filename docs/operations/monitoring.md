@@ -42,6 +42,8 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **patched runner**: the in-pod progress poll runs only on allowlisted runner versions; the bundled runner qualifies, a custom stock 0.18 image keeps these series dark (see the [troubleshooting row](../troubleshooting.md)).
+  The poll also waits out the base copy, because opening pgcopydb 0.18's catalogs mid-copy crashes the worker.
+  On a follow migration these series appear once `CloneCompleted` is True; a plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
 - **follow, streaming**: plain clones never produce these; in follow mode they start once streaming does.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
@@ -92,4 +94,5 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - The database sizes are live samples from the worker pod.
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
+- The tables, indexes, and clone byte series hold still during the base copy itself: the poll that feeds them waits for `CloneCompleted`, so the size panels are the live view mid-copy and the percent-done panel fills in from clone completion onward.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `n/a` for them and the size-based panels keep working.
