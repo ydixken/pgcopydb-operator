@@ -268,6 +268,18 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), "Prometheus buildinfo probe at %s", promBase)
 	})
 
+	// The container must hand the shared fixtures back the way it found them:
+	// a mid-spec failure leaks a streaming Migration whose target data breaks
+	// the no-dropIfExists fresh clone and whose slot breaks the follow specs.
+	AfterAll(func() {
+		deleteMigration(metricsMigration)
+		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication slot still on the source after the metrics container")
+		Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin still on the target after the metrics container")
+		resetTargetObjects()
+	})
+
 	It("has a healthy scrape of the suite's operator", func() {
 		// One crisp failure here beats forty empty-series timeouts later: a
 		// broken scrape (ServiceMonitor missing, scraper RBAC, network) makes
