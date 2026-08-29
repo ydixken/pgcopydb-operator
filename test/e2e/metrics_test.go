@@ -311,7 +311,12 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			copied := promValue(g, e2eSeries("pgcopydb_migration_clone_copied_bytes"))
 			planned := promValue(g, e2eSeries("pgcopydb_migration_clone_planned_bytes"))
 			g.Expect(copied).To(BeNumerically(">", 0))
-			g.Expect(copied).To(BeNumerically("<=", planned))
+			g.Expect(planned).To(BeNumerically(">", 0))
+			// planned is pgcopydb's table-size estimate and the copy routinely
+			// overshoots it (a gate measured copied at 1.19x planned), so only
+			// a generous sanity bound is stable.
+			g.Expect(copied).To(BeNumerically("<", 3*planned),
+				"copied bytes out of all proportion to the planned estimate")
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("asserting table progress")

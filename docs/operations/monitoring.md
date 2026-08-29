@@ -95,4 +95,6 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
 - The tables, indexes, and clone byte series hold still during the base copy itself: the poll that feeds them waits for `CloneCompleted`, so the size panels are the live view mid-copy and the percent-done panel fills in from clone completion onward.
+- The planned clone bytes come from pgcopydb's table-size statistics, an estimate the actual copy routinely overshoots.
+  A copied/planned ratio can therefore pass 100 percent; the detail dashboard's bar gauge clamps it there.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `n/a` for them and the size-based panels keep working.
