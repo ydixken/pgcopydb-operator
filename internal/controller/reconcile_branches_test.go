@@ -62,9 +62,9 @@ var _ = Describe("Migration Controller resilience", func() {
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 
-		// status.progress stays nil: the reconciler no longer polls progress
-		// (the exec is unsafe on pgcopydb 0.18, see
-		// docs/research/upstream-issues.md); the field is reserved.
+		// status.progress stays nil here: no ProgressOps is wired, and a
+		// plain clone's catalog poll is quiesced mid-copy anyway (see
+		// observeRunningJob).
 		r := newReconciler()
 
 		passGate(ctx, r, name) // creates run-1

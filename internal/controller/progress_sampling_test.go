@@ -36,17 +36,22 @@ import (
 
 // fakeProgress scripts the sampler the way fakeSentinel scripts the
 // sentinel: tests choose the samples (or errors), the reconciler reads them.
+// The call counters let specs prove copy-phase quiescence of the catalog
+// poll while the size sampler keeps running.
 type fakeProgress struct {
-	mu       sync.Mutex
-	cp       *v1beta1.CloneProgress
-	cpErr    error
-	src, tgt *int64
-	sizesErr error
+	mu        sync.Mutex
+	cp        *v1beta1.CloneProgress
+	cpErr     error
+	src, tgt  *int64
+	sizesErr  error
+	cpCalls   int
+	sizeCalls int
 }
 
 func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.CloneProgress, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.cpCalls++
 	if f.cpErr != nil {
 		return nil, f.cpErr
 	}
@@ -60,7 +65,15 @@ func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.
 func (f *fakeProgress) DatabaseSizes(context.Context, string, string) (src, tgt *int64, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sizeCalls++
 	return f.src, f.tgt, f.sizesErr
+}
+
+// counts returns (catalog polls, size samples) seen so far.
+func (f *fakeProgress) counts() (cp, sizes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cpCalls, f.sizeCalls
 }
 
 // gaugeValue reads one series from the controller-runtime registry, the same
@@ -96,6 +109,15 @@ var _ = Describe("Migration Controller progress sampling", func() {
 	migLabels := func(name string) map[string]string {
 		return map[string]string{"namespace": testNS, "name": name}
 	}
+	// The catalog poll runs mid-attempt only on follow migrations past
+	// CloneCompleted; with no log reader wired (as here) the transition is
+	// unobservable and the poll stays on, mirroring the sentinel fallback.
+	followMigration := func(name string) *v1beta1.Migration {
+		m := validMigration(name)
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverManual}
+		return m
+	}
 
 	It("persists a sample to status.progress and the gauges", func() {
 		const name = "mig-progress-sample"
@@ -111,7 +133,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		r := newReconciler()
 		r.Progress = fake
-		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		m := reconcileAndGet(ctx, r, name)
@@ -139,7 +161,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 2}}
 		r := newReconciler()
 		r.Progress = fake
-		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 		reconcileAndGet(ctx, r, name)
 
@@ -159,7 +181,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		fake := &fakeProgress{cpErr: errors.New("exec wedged"), sizesErr: errors.New("psql refused")}
 		r := newReconciler()
 		r.Progress = fake
-		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// reconcileAndGet already asserts a nil reconcile error.
@@ -168,6 +190,74 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress).To(BeNil())
 		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+
+	It("quiesces the catalog poll until the base copy is done", func() {
+		const name = "mig-progress-quiesce"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{
+			cp:  &v1beta1.CloneProgress{TablesTotal: 5, TablesDone: 5},
+			src: int64p(9000), tgt: int64p(100),
+		}
+		r := newReconciler()
+		r.Progress = fake
+		// A log reader is wired, so the fallback above does not apply: the
+		// poll must wait for the clone-done marker.
+		const ts = "2026-08-28T10:00:00.000000000Z "
+		logs := &fakeLogs{tsOut: ts +
+			`{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n"}
+		r.Logs = logs
+		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		// Copy still running (step banners only in the log): the sizes flow
+		// (psql, no catalog), the catalog poll does not.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		cp, sizes := fake.counts()
+		Expect(cp).To(BeZero())
+		Expect(sizes).To(Equal(1))
+
+		// The worker logs the clone-done marker: the poll starts and the
+		// sizes keep flowing.
+		logs.tsOut += ts +
+			`{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(5)))
+		cp, sizes = fake.counts()
+		Expect(cp).To(Equal(1))
+		Expect(sizes).To(Equal(2))
+	})
+
+	It("gives a plain clone its one sample when the worker succeeds", func() {
+		const name = "mig-progress-finish"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 4, TablesDone: 4}, src: int64p(7000)}
+		r := newReconciler()
+		r.Progress = fake
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		// Mid-run pass: a plain clone never opens the catalogs, only psql.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		cp, sizes := fake.counts()
+		Expect(cp).To(BeZero())
+		Expect(sizes).To(Equal(1))
+
+		// Worker succeeded: pgcopydb exited, the catalogs are quiet, and the
+		// finish path takes the final sample.
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(4)))
+		cp, _ = fake.counts()
+		Expect(cp).To(Equal(1))
 	})
 
 	It("re-emits a terminal Migration's series after a registry wipe", func() {
