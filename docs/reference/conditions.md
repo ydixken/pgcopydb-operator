@@ -90,7 +90,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished (detected from the worker's clone-completion log line) and change replay took over. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Replication lag is at or below `spec.follow.maxCatchupLag`. |
-| `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no sentinel sample is available yet. |
+| `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
 | `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress reached the cutover LSN within one WAL page, or `pgcopydb compare data` found every migrated table matching (an idle source leaves the origin behind by publication-filtered WAL, which is not loss). Changes applied, sequences synced. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification found changes missing on the target (`pgcopydb compare data` backed the refusal); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
 | `Verified` | `Unknown` | `VerificationRunning` | A `pgcopydb compare` Job is running. |

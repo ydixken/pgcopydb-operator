@@ -43,7 +43,7 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **patched runner**: the in-pod progress poll runs only on allowlisted runner versions; the bundled runner qualifies, a custom stock 0.18 image keeps these series dark (see the [troubleshooting row](../troubleshooting.md)).
-  The poll also waits out the base copy, because opening pgcopydb 0.18's catalogs mid-copy crashes the worker.
+  The poll never runs against a live worker, because opening pgcopydb 0.18's catalogs while the copy writes them crashes it.
   On a follow migration these series arrive with the drain verification, after cutover: the worker pod is gone by then, so the counters are read out of the verify Job's log instead.
   A plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
@@ -170,7 +170,7 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - The database sizes are live samples from the worker pod.
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
-- The tables, indexes, and clone byte series hold still during the base copy itself: the poll that feeds them waits for `CloneCompleted`, so the size panels are the live view mid-copy and the percent-done panel fills in from clone completion onward.
+- The tables, indexes, and clone byte series hold still during the base copy itself: nothing polls a live worker, so the size panels are the live view mid-copy and the percent-done panel fills in when the counters land, at clone completion for a plain clone and at drain verification for a live migration.
 - The `by size` percent-done series can read above 100 during `Finalizing`: index builds and pre-vacuum bloat put the target ahead of the source in bytes before space is reclaimed.
   The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.
 - The planned clone bytes come from pgcopydb's table-size statistics.

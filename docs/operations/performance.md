@@ -185,3 +185,4 @@ Subtracting them gives the duration, which is the number to compare.
 [Monitoring](monitoring.md) has the full metric reference.
 
 For per-table detail, `pgcopydb list progress --summary --json` inside the worker's work directory reports per-step and per-table timings, which is the only way to answer which table was slow.
+Run it only against a finished migration's work volume, and not at all when the Migration used filters: every pgcopydb invocation writes to the catalog, so one landing while a worker is mid-cursor kills that worker, and `list progress` additionally overwrites a filtered work dir's stored filtering (both in the [upstream drafts](../research/upstream-issues.md)).
