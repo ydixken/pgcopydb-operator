@@ -316,8 +316,10 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 		{pollerTest, regexp.MustCompile(`const patchedVersion = "` + q + `"`),
 			"the gate-script assertion's fixture constant"},
 		// Anchored to the start of the line so a comment mentioning the same
-		// pin and pipe elsewhere in the file cannot satisfy this.
-		{pollerTest, regexp.MustCompile(`(?m)^\s*"` + q + `\|`),
+		// pin and pipe elsewhere in the file cannot satisfy this, and to the
+		// parenthesis the pattern list has to open with (see GateScript), so
+		// the pin and that form are pinned by one expression.
+		{pollerTest, regexp.MustCompile(`(?m)^\s*"\\n\(` + q + `\|`),
 			"the gate-script assertion's case pattern"},
 		// Anchored to the sentence that introduces the value, not just any
 		// backticked mention, so a decoy mention elsewhere cannot satisfy this.
