@@ -26,6 +26,17 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: azure/setup-helm@v4
+      # golangci-lint keeps an analysis cache that setup-go's GOCACHE does not
+      # cover, and it is what makes the step expensive: measured locally, a cold
+      # run costs 132s of CPU against 5.6s warm, and this runner has two cores.
+      # Kept outside the workspace so `yamllint --strict .` never walks into it.
+      # Restore-keys are safe because golangci-lint hash-validates its entries.
+      - name: Cache golangci-lint analysis
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}
+          restore-keys: golangci-${{ runner.os }}-
       - name: yamllint
         run: pipx install yamllint && yamllint --strict .
       - name: Chart CRD is current
