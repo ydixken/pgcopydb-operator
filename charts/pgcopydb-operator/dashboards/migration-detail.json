@@ -567,6 +567,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
+          "titleSize": 20,
           "valueSize": 20
         }
       },
@@ -712,6 +713,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
+          "titleSize": 20,
           "valueSize": 20
         }
       }
@@ -778,6 +780,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
+          "titleSize": 20,
           "valueSize": 20
         }
       },
@@ -845,6 +848,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
+          "titleSize": 20,
           "valueSize": 20
         }
       }
@@ -1339,6 +1343,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
+          "titleSize": 20,
           "valueSize": 20
         }
       },

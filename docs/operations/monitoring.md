@@ -52,7 +52,7 @@ Derived quantities stay in PromQL rather than becoming metrics: receive lag is `
 
 The chart ships three dashboards, linked to each other through their shared `pgcopydb` tag:
 
-- **Migration detail** (uid `pgcopydb-migration`): one migration end to end; phase, what the worker is doing inside it, and their timeline, database sizes and copy throughput, percent done, a naive ETA that only estimates during `Cloning`, LSN positions with the lag split, the cutover drain, and the verification outcome.
+- **Migration detail** (uid `pgcopydb-migration`): one migration end to end; a status row (phase, what the worker is doing inside it, a naive ETA that only estimates during `Cloning`) and its timeline, then percent done, database sizes and copy throughput, LSN positions with the lag split, the cutover drain, and the verification outcome.
 - **Fleet overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
