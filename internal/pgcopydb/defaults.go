@@ -76,10 +76,9 @@ func EffectiveRunnerResources(r corev1.ResourceRequirements) corev1.ResourceRequ
 // COPY spends most of its time on the network and on the servers, so a worker
 // with fewer cores than that still has something to overlap.
 func tableJobsFor(r corev1.ResourceRequirements) int32 {
-	cpu, ok := EffectiveRunnerResources(r).Requests[corev1.ResourceCPU]
-	if !ok {
-		return 4
-	}
+	// Requests always carries a CPU entry: EffectiveRunnerResources supplies
+	// one when the Migration did not, so there is no absent case to handle.
+	cpu := EffectiveRunnerResources(r).Requests[corev1.ResourceCPU]
 	// Round up: 1500m is closer to two useful COPY processes than to one.
 	cores := int32((cpu.MilliValue() + 999) / 1000)
 	if cores < 4 {
