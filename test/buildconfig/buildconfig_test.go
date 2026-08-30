@@ -140,20 +140,17 @@ func TestRunnerPullsThePinnedBuilder(t *testing.T) {
 		t.Error("the runner's builder FROM must interpolate ${PGCOPYDB_SHA}, not repeat the literal")
 	}
 
-	// PGCOPYDB_VERSION now exists in both files and can drift independently of
-	// the SHA check above; if it does, the runner's canary asserts a version
-	// the builder never produced.
+	// PGCOPYDB_VERSION can drift independently of the SHA check above; if it
+	// does, the runner's canary asserts a version the builder never produced.
 	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
 	if got := pin(t, runnerDockerfile, "PGCOPYDB_VERSION"); got != wantVersion {
 		t.Errorf("builder pins version %s, runner pins %s", wantVersion, got)
 	}
 }
 
-// A --platform on this FROM copies an amd64 binary into the arm64 image. The
-// canary at the end of the runner Dockerfile does NOT catch it: binfmt is
-// registered per kernel, so the amd64 ELF runs natively on the build host and
-// passes `pgcopydb --version`. It fails as exec format error on a real arm64
-// node, at migration time.
+// A --platform here would copy an amd64 binary into the arm64 image, and the
+// canary below cannot catch it: binfmt runs the amd64 ELF natively on the
+// build host, so `pgcopydb --version` passes anyway.
 func TestBuilderReferenceIsNotPlatformPinned(t *testing.T) {
 	re := regexp.MustCompile(`(?m)^FROM\s+(.*pgcopydb-builder.*)$`)
 	m := re.FindStringSubmatch(read(t, runnerDockerfile))
