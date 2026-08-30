@@ -78,6 +78,7 @@ task e2e    # e2e against your CURRENT kubectl context (local only; prompts firs
 - [Prerequisites](docs/reference/prerequisites.md): what your PostgreSQL endpoints and cluster must provide before a Migration can run.
 - [docs/examples/](docs/examples/): Migration resources for common scenarios.
 - [CRD reference](docs/reference/api.md): every `Migration` field with defaults and validation, generated from the Go types (`task docs`).
+- [Authors](AUTHORS.md): who wrote this.
 - [Option coverage](docs/reference/coverage.md): every pgcopydb clone/follow option mapped to the Migration spec.
 - [Chart README](charts/pgcopydb-operator/README.md): values reference.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to work here.
