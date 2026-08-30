@@ -257,10 +257,18 @@ func TestCloneStage(t *testing.T) {
 			finalizing: true,
 		},
 		{
-			// Both counts zero is a worker that holds no active backend on the
-			// target: between statements, or not connected yet. Neither state.
-			name: "no active backends",
+			// Both counts zero is a worker that holds no backend the query
+			// counts: not connected yet, or already gone. Neither state.
+			name: "no counted backends",
 			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
+		},
+		{
+			// The measured shape of the false Finalizing: four copy workers
+			// connected but between statements while a vacuum runs. Copying,
+			// and the count says so because it follows connections.
+			name:    "copy workers connected, only the tail active",
+			exec:    &fakeExec{pod: "w", out: []byte("4 1\n")},
+			copying: true,
 		},
 		{
 			// The copy is winding down while the tail has started. Still
@@ -305,5 +313,28 @@ func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
 	}
 	if !strings.Contains(joined, "client_addr = inet_client_addr()") {
 		t.Errorf("probe is not scoped to this worker's own backends: %s", joined)
+	}
+}
+
+// The two counts are asked differently on purpose, so the predicate is pinned
+// here: on a live worker all four copy workers stayed connected for the whole
+// base copy, and counting only the active ones read as the tail while data was
+// still moving. Whitespace is normalized, the shape is what matters.
+func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
+	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
+	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+	flat := strings.Join(strings.Fields(strings.Join(f.argv, " ")), " ")
+
+	for _, want := range []string{
+		// Copy workers by connection: the name alone decides, no state test.
+		"count(*) filter (where application_name ilike '%copy worker%' or (",
+		// The tail only counts what is running now.
+		"count(*) filter (where state = 'active' and application_name not ilike",
+		// And nothing narrows every row to the active ones any more.
+		"from pg_stat_activity where application_name like 'pgcopydb%' and client_addr",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("probe query lost %q:\n%s", want, flat)
+		}
 	}
 }
