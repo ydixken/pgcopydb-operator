@@ -224,10 +224,9 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	}
 }
 
-// builderPlatforms returns the platforms list of the docker/build-push-action
-// step that builds the images/pgcopydb-builder context. Fatal, not empty,
-// when no such step exists: a silent miss would let the comparison below
-// pass vacuously instead of catching a divergence.
+// Matches by context, not position: release.yml has three build-push-action
+// steps and only one builds images/pgcopydb-builder. Fatal on a miss, so a
+// missing step cannot read as an empty platform list to the caller.
 func builderPlatforms(t *testing.T, path string) string {
 	t.Helper()
 	var wf workflow
