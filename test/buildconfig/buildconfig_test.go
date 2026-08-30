@@ -42,6 +42,7 @@ const (
 	mainGo            = "../../cmd/main.go"
 	mainTest          = "../../cmd/main_test.go"
 	pollerTest        = "../../internal/progress/poller_test.go"
+	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
 )
 
 func read(t *testing.T, path string) string {
@@ -111,18 +112,70 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 	}
 }
 
-// pgcopydb is ~67 translation units. Serial `make` was the runner image's
-// critical path; upstream's own Dockerfile for this tree runs -j$(nproc).
-func TestRunnerCompilesInParallel(t *testing.T) {
-	src := read(t, runnerDockerfile)
+// pgcopydb is ~67 translation units, of which the vendored 9 MB sqlite3.c is
+// one and cannot be split. Upstream's own Dockerfile for this tree runs
+// -j$(nproc); this matters on every SHA bump.
+func TestBuilderCompilesInParallel(t *testing.T) {
+	src := read(t, builderDockerfile)
 
 	makeLine := regexp.MustCompile(`(?m)^.*\bmake\b.*\binstall\b.*$`)
 	line := makeLine.FindString(src)
 	if line == "" {
-		t.Fatal("no `make ... install` line in the runner Dockerfile")
+		t.Fatal("no `make ... install` line in the builder Dockerfile")
 	}
 	if !regexp.MustCompile(`\s-j`).MatchString(line) {
 		t.Errorf("pgcopydb compiles serially; pass -j:\n %s", strings.TrimSpace(line))
+	}
+}
+
+// The split puts the compile in one file and the tag that consumes it in
+// another. If they disagree and the old tag still exists in the registry, the
+// build succeeds and the release ships the previous pgcopydb.
+func TestRunnerPullsThePinnedBuilder(t *testing.T) {
+	wantSHA := pin(t, builderDockerfile, "PGCOPYDB_SHA")
+	if got := pin(t, runnerDockerfile, "PGCOPYDB_SHA"); got != wantSHA {
+		t.Errorf("builder pins %s, runner pins %s", wantSHA, got)
+	}
+	if !strings.Contains(read(t, runnerDockerfile), "pgcopydb-builder:${PGCOPYDB_SHA}") {
+		t.Error("the runner's builder FROM must interpolate ${PGCOPYDB_SHA}, not repeat the literal")
+	}
+
+	// PGCOPYDB_VERSION now exists in both files and can drift independently of
+	// the SHA check above; if it does, the runner's canary asserts a version
+	// the builder never produced.
+	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
+	if got := pin(t, runnerDockerfile, "PGCOPYDB_VERSION"); got != wantVersion {
+		t.Errorf("builder pins version %s, runner pins %s", wantVersion, got)
+	}
+}
+
+// A --platform on this FROM copies an amd64 binary into the arm64 image. The
+// canary at the end of the runner Dockerfile does NOT catch it: binfmt is
+// registered per kernel, so the amd64 ELF runs natively on the build host and
+// passes `pgcopydb --version`. It fails as exec format error on a real arm64
+// node, at migration time.
+func TestBuilderReferenceIsNotPlatformPinned(t *testing.T) {
+	re := regexp.MustCompile(`(?m)^FROM\s+(.*pgcopydb-builder.*)$`)
+	m := re.FindStringSubmatch(read(t, runnerDockerfile))
+	if m == nil {
+		t.Fatal("no FROM referencing pgcopydb-builder in the runner Dockerfile")
+	}
+	if strings.Contains(m[1], "--platform") {
+		t.Errorf("the pgcopydb-builder FROM must not pin a platform:\n  FROM %s", m[1])
+	}
+}
+
+// The whole point of the split. Restoring the compile here raises no error,
+// because the image still builds correctly, just twenty minutes slower.
+func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
+	src := read(t, runnerDockerfile)
+	for _, banned := range []string{"codeload.github.com", "postgresql-server-dev-18"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("the runner Dockerfile still compiles pgcopydb: found %q", banned)
+		}
+	}
+	if regexp.MustCompile(`(?m)^.*\bmake\b.*\binstall\b.*$`).MatchString(src) {
+		t.Error("the runner Dockerfile still runs `make ... install`")
 	}
 }
 

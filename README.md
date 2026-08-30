@@ -48,6 +48,7 @@ cmd/, internal/            # manager and controller (kubebuilder go/v4)
 config/                    # kubebuilder-generated kustomize tree
 docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml)
 docs/examples/             # Migration resources with short explanations
+images/pgcopydb-builder/   # publishes the pgcopydb binary the runner image copies in, keyed on its source commit
 images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
 test/e2e/                  # e2e suite: locally against your kubectl context, in CI against a release candidate
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
