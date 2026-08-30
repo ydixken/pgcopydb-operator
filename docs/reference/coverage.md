@@ -47,7 +47,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--create-slot` | not exposed (deliberate) | `clone --follow` creates the slot during setup; nothing to configure. |
 | `--origin` | operator-managed | Always the same generated per-Migration name as the slot; unique, so fan-in stays safe. |
 | `--endpos` | operator-managed | Cutover sets it at runtime via `stream sentinel set endpos --current`. |
-| `--use-copy-binary` | `spec.clone.useCopyBinary` | |
+| `--use-copy-binary` | `spec.clone.useCopyBinary` | On by default. pgcopydb falls back to text per table when a column's binary encoding is unsafe. |
 | `--all-databases` | not exposed (deliberate) | A Migration migrates one database; create one Migration per database. |
 | `--host` / `--port` | not exposed (deliberate) | The operator drives the sentinel via `pods/exec`; the TCP coordinator stays the documented alternative if exec proves limiting. |
 | `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed (deliberate) | Runner logs are structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level; a verbosity knob can come with demand. |

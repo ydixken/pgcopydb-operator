@@ -100,6 +100,34 @@ func TestTableJobsFor(t *testing.T) {
 	}
 }
 
+// useCopyBinary is defaulted by the API server, not here, because false is its
+// zero value. What this pins is that the operator forwards the field either
+// way: a Migration that says false must get text COPY, not the default.
+func TestUseCopyBinaryIsForwardedBothWays(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  bool
+		want bool
+	}{
+		{name: "true renders the flag", set: true, want: true},
+		{name: "false renders nothing", set: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := &v1beta1.MigrationSpec{}
+			spec.Clone.UseCopyBinary = tc.set
+			var found bool
+			for _, a := range CloneArgs(spec, false, false, false) {
+				if a == "--use-copy-binary" {
+					found = true
+				}
+			}
+			if found != tc.want {
+				t.Errorf("--use-copy-binary present = %v, want %v", found, tc.want)
+			}
+		})
+	}
+}
+
 func TestSplitDefaults(t *testing.T) {
 	empty := &v1beta1.CloneOptions{}
 	if got := splitTablesLargerThan(empty); got.Value() != 512<<20 {

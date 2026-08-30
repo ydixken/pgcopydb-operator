@@ -244,9 +244,20 @@ type CloneOptions struct {
 	// +optional
 	NoTablespaces bool `json:"noTablespaces,omitempty"`
 
-	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
+	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which
+	// is on by default. Text COPY encodes bytea as hex, two wire bytes per
+	// data byte, and the worker relays every row between source and target, so
+	// the cost lands on both legs. pgcopydb checks each table against the
+	// source catalog and falls back to text for any table with a column whose
+	// binary encoding is not safe, so this is per table rather than all or
+	// nothing. Set it false to force text everywhere.
+	//
+	// Defaulted by the API server rather than by the operator: false is this
+	// field's zero value, so a default applied in Go could not tell "unset"
+	// from "the user asked for text".
+	// +kubebuilder:default=true
 	// +optional
-	UseCopyBinary bool `json:"useCopyBinary,omitempty"`
+	UseCopyBinary bool `json:"useCopyBinary"`
 
 	// failFast stops the whole run on the first failed child (--fail-fast).
 	// +optional

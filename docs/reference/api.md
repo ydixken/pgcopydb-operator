@@ -45,7 +45,7 @@ _Appears in:_
 | `noACL` _boolean_ | noACL skips GRANT/REVOKE on restore (--no-acl). |  | Optional: \{\} <br /> |
 | `noComments` _boolean_ | noComments skips COMMENT statements (--no-comments). |  | Optional: \{\} <br /> |
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |
-| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary). |  | Optional: \{\} <br /> |
+| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which<br />is on by default. Text COPY encodes bytea as hex, two wire bytes per<br />data byte, and the worker relays every row between source and target, so<br />the cost lands on both legs. pgcopydb checks each table against the<br />source catalog and falls back to text for any table with a column whose<br />binary encoding is not safe, so this is per table rather than all or<br />nothing. Set it false to force text everywhere.<br />Defaulted by the API server rather than by the operator: false is this<br />field's zero value, so a default applied in Go could not tell "unset"<br />from "the user asked for text". | true | Optional: \{\} <br /> |
 | `failFast` _boolean_ | failFast stops the whole run on the first failed child (--fail-fast). |  | Optional: \{\} <br /> |
 | `skip` _[SkipOption](#skipoption) array_ | skip lists base-copy sections to skip. |  | Enum: [largeObjects extensions extensionComments collations vacuum analyze dbProperties ctidSplit] <br />Optional: \{\} <br /> |
 | `filters` _[Filters](#filters)_ | filters is rendered to the pgcopydb --filters INI file. |  | Optional: \{\} <br /> |

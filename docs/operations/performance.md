@@ -19,8 +19,9 @@ Three it overrides, because pgcopydb's defaults are wrong for a migration rather
 | `clone.tableJobs` | Follows the worker's CPU request, minimum 4 | One knob instead of two: raise the worker and the copy concurrency follows. |
 | `clone.splitTablesLargerThan` | `512Mi` | pgcopydb ships this disabled, which leaves one large table to one worker however many table jobs are running. |
 | `clone.splitMaxParts` | `8` | Without a cap, a very large table fans out into hundreds of parts and catalog rows. |
+| `clone.useCopyBinary` | `true` | Text COPY doubles `bytea` on the wire, and the worker relays every row, so the cost lands on both legs. |
 
-Everything else is pgcopydb's default: four index jobs, restore jobs following index jobs, four large-object jobs, text-format COPY.
+Everything else is pgcopydb's default: four index jobs, restore jobs following index jobs, four large-object jobs.
 
 > [!important]
 > Raising `spec.runner.resources.requests.cpu` is the single knob most migrations need.
@@ -75,10 +76,25 @@ The default of four opens four connection pairs whether or not there is anything
 
 ## Binary COPY
 
-`clone.useCopyBinary` sends `COPY WITH (FORMAT BINARY)`.
+`clone.useCopyBinary` sends `COPY WITH (FORMAT BINARY)`, and it is on by default.
 Text-format COPY encodes `bytea` as hex, two wire bytes per data byte, and the worker relays every row between source and target, so the cost is paid on both legs.
 On a database whose bytes are mostly `bytea`, this is a large saving; on one that is mostly narrow rows, it is close to nothing.
-pgcopydb guards it per table and falls back to text where a type is not safe in binary.
+
+It is safe to leave on because the choice is made per table, not once for the migration.
+pgcopydb checks every column of a table against the source catalog and falls back to text COPY for that table when any column's binary encoding is not safe, logging a notice when it does.
+Set `useCopyBinary: false` to force text everywhere.
+
+## Knobs left at pgcopydb's default, and why
+
+`clone.largeObjectsJobs` stays at four.
+One is better for a database with few large objects, because the default opens four connection pairs whether or not there is anything to move through them, and four is better for one that is genuinely blob-heavy.
+The operator cannot tell which it is looking at, so it does not guess.
+Set it to 1, or use `skip: [largeObjects]`, when the database has no blobs worth parallelising.
+
+`clone.restoreJobs` follows `indexJobs` unless you set it, which is pgcopydb's behaviour and not the operator's.
+That coupling is worth knowing about: lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
+Whether that is a problem depends on whether the target is short of memory or short of cores, which again is not something the operator can see.
+Set both explicitly when they should differ.
 
 ## Tuning the target
 
