@@ -942,7 +942,20 @@
                 "value": null
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": 86400,
+                "to": null,
+                "result": {
+                  "text": "Calculating",
+                  "index": 0
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -963,7 +976,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false
       },
-      "description": "Remaining size over how fast the target is currently growing. Both halves are clamped, for different reasons. The numerator, because a finished target is routinely LARGER than its source: index builds, WAL and page bloat mean the copy does not land byte for byte, and an unclamped subtraction then reads as a negative ETA. The denominator, because the target stops growing during index builds and analyze, and dividing by nothing is an infinite estimate. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. It remains an estimate. Trust the trend, not the digit."
+      "description": "Remaining size over how fast the target is currently growing. Anything past a day renders as Calculating, because at that point the number is the denominator clamp rather than an estimate: the target stops growing during index builds and analyze, deriv falls to zero, and a few GB divided by the one byte per second floor is a century. Both halves of the division are clamped. The numerator because a finished target is routinely larger than its source, since index builds, WAL and page bloat mean the copy never lands byte for byte, and the subtraction then reads as a negative ETA. The denominator because dividing by nothing is an infinity. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing."
     },
     {
       "id": 13,
