@@ -150,9 +150,9 @@ tests:
                 Migration default/bad is more than 64Mi behind the source for
                 10m
               description: >-
-                The target is not applying changes as fast as the source
-                writes them. Sustained lag delays cutover and retains WAL on
-                the source.
+                The target is not consuming the stream as fast as the source
+                writes it. Sustained lag delays cutover and retains WAL on the
+                source.
 
   # A Manual cutover parks in CutoverPending until a human approves, sometimes
   # for hours, which is when a growing lag is most worth a page. The other arm
@@ -176,9 +176,9 @@ tests:
                 Migration default/waiting is more than 64Mi behind the source
                 for 10m
               description: >-
-                The target is not applying changes as fast as the source
-                writes them. Sustained lag delays cutover and retains WAL on
-                the source.
+                The target is not consuming the stream as fast as the source
+                writes it. Sustained lag delays cutover and retains WAL on the
+                source.
 
   # The base copy: replication status is sampled from the first pass now, so a
   # lagging Cloning migration has a lag gauge and must still stay quiet. There

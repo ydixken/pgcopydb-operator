@@ -67,7 +67,7 @@ Each type is named for what `True` means. Seven are normal-true (True is the des
 | `Validated` | normal-true | The spec materializes cleanly and the preflight passed. |
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
-| `CaughtUp` | normal-true | Replication lag is at or below `spec.follow.maxCatchupLag`. |
+| `CaughtUp` | normal-true | Replication lag has been at or below `spec.follow.maxCatchupLag` on two consecutive samples. |
 | `CutoverCompleted` | normal-true | The drain is proven: origin progress at the cutover LSN, or a clean data compare when the origin alone cannot decide. |
 | `Verified` | normal-true | The requested `pgcopydb compare` checks found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
@@ -89,8 +89,9 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished. |
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished (detected from the worker's clone-completion log line) and change replay took over. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
-| `CaughtUp` | `True` | `LagBelowThreshold` | Replication lag is at or below `spec.follow.maxCatchupLag`. |
+| `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
+| `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator wants a second consecutive one before turning `CaughtUp` True: a single sample can land while the worker is still confirming its raw receive position, where the lag reads near zero whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging` and the count starts over. |
 | `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress reached the cutover LSN within one WAL page, or `pgcopydb compare data` found every migrated table matching (an idle source leaves the origin behind by publication-filtered WAL, which is not loss). Changes applied, sequences synced. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification found changes missing on the target (`pgcopydb compare data` backed the refusal); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
 | `Verified` | `Unknown` | `VerificationRunning` | A `pgcopydb compare` Job is running. |
@@ -114,7 +115,7 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
-| `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream 0.18 defect); the operator removed the pod so the normal retry could resume. |
+| `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |
 | `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |
