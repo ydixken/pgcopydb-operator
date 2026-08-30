@@ -820,7 +820,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "by size",
+          "legendFormat": "by size (first clone only)",
           "instant": true,
           "range": false
         },
@@ -853,7 +853,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "clone bytes",
+          "legendFormat": "clone bytes (peaks ~97%, see info)",
           "instant": true,
           "range": false
         }
@@ -899,7 +899,7 @@
         "minVizWidth": 8,
         "maxVizHeight": 300
       },
-      "description": "Size ratio overshoots when the target carries other data; tables, indexes and clone bytes need the bundled (patched) runner. Absent series simply show no bar."
+      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero."
     },
     {
       "id": 12,

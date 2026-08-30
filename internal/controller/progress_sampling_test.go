@@ -46,6 +46,16 @@ type fakeProgress struct {
 	sizesErr  error
 	cpCalls   int
 	sizeCalls int
+
+	copying, finalizing bool
+	stageCalls          int
+}
+
+func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stageCalls++
+	return f.copying, f.finalizing
 }
 
 func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.CloneProgress, error) {
@@ -300,5 +310,46 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, found = gaugeValue("pgcopydb_migration_attempts", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+})
+
+// The copy and its tail are reported apart because they behave differently: a
+// copy runs every worker, the tail narrows to index builds and a vacuum on the
+// largest table, and during it the target stops growing so any size-derived
+// estimate reads as finished. Driven through the reconciler on the same gate
+// the other specs here use, because a fake returning what a test told it to
+// return proves nothing about the branch that reads it.
+var _ = Describe("Migration Controller clone stage", func() {
+	ctx := context.Background()
+
+	phaseFor := func(name string, copying, finalizing bool) v1beta1.MigrationPhase {
+		GinkgoHelper()
+		r := newReconciler()
+		r.Progress = &fakeProgress{copying: copying, finalizing: finalizing}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		return reconcileAndGet(ctx, r, name).Status.Phase
+	}
+
+	It("reports Finalizing once only the tail is left", func() {
+		const name = "mig-stage-tail"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, false, true)).To(Equal(v1beta1.PhaseFinalizing))
+	})
+
+	It("stays Cloning while copy workers are busy", func() {
+		const name = "mig-stage-copying"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, true, false)).To(Equal(v1beta1.PhaseCloning))
+	})
+
+	It("stays Cloning when the probe knows nothing", func() {
+		const name = "mig-stage-unknown"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, false, false)).To(Equal(v1beta1.PhaseCloning),
+			"an unreadable probe must not be read as either state")
 	})
 })

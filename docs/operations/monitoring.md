@@ -29,7 +29,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size; `rate()` of it is the copy throughput | worker running |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | patched runner |
 | `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built / planned | patched runner |
-| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned | patched runner |
+| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | patched runner |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | Last LSN written by the receiver | follow, streaming |
@@ -74,7 +74,7 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationFailed` | critical | The phase is `Failed` for 5m |
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
-| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
+| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail is reported as `Finalizing` and leaves the target flat without being stalled. |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 

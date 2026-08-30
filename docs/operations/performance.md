@@ -140,6 +140,31 @@ It does matter during follow-mode apply, where transactions are small and freque
 
 `full_page_writes = off` is not safe on a target that becomes production, and is not safe at all on a CloudNativePG cluster, which enables `wal_log_hints` and data checksums.
 
+## The VACUUM tail
+
+pgcopydb runs `VACUUM ANALYZE` per table alongside the copy, with a worker pool sized from `tableJobs`.
+The catch is ordering: a table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
+So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
+
+On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a fifth of the clone's wall clock.
+The operator reports it as the `Finalizing` phase precisely because it looks like a stall and is not: the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
+[Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
+
+You can have that time back:
+
+```yaml
+spec:
+  clone:
+    skip: [vacuum]
+```
+
+> [!important]
+> The target is then left without fresh statistics.
+> The planner will use whatever it had, which on a freshly restored database is nothing, so the first real queries after cutover can choose badly.
+> Run `ANALYZE` on the target yourself before pointing traffic at it, and the trade is a good one: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
+
+The operator does not skip it by default, because a migration target that silently lacks statistics is a worse failure than a slow one: it is invisible until a query plan goes wrong in production.
+
 ## Measuring
 
 Tune nothing you cannot measure.

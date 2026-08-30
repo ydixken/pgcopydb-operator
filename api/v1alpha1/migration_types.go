@@ -522,13 +522,22 @@ type MigrationSpec struct {
 
 // MigrationPhase is a human-facing summary derived from conditions. It exists
 // for the printer column only; conditions are authoritative.
-// +kubebuilder:validation:Enum=Pending;Validating;Cloning;Streaming;CutoverPending;CuttingOver;Verifying;Completed;Failed;Suspended
+// +kubebuilder:validation:Enum=Pending;Validating;Cloning;Finalizing;Streaming;CutoverPending;CuttingOver;Verifying;Completed;Failed;Suspended
 type MigrationPhase string
 
 const (
-	PhasePending        MigrationPhase = "Pending"
-	PhaseValidating     MigrationPhase = "Validating"
-	PhaseCloning        MigrationPhase = "Cloning"
+	PhasePending    MigrationPhase = "Pending"
+	PhaseValidating MigrationPhase = "Validating"
+	PhaseCloning    MigrationPhase = "Cloning"
+	// PhaseFinalizing is the tail of a base copy: the data is across and the
+	// worker is building indexes, applying constraints and vacuuming. It is
+	// distinct from Cloning because it behaves nothing like it. The copy runs
+	// with every worker busy; the tail routinely narrows to a single VACUUM on
+	// the largest table, because a table's vacuum cannot start until its own
+	// copy finishes and the largest one finishes last. That tail measured
+	// roughly a fifth of a clone's wall clock, during which the target stops
+	// growing and every size-based estimate reads as finished.
+	PhaseFinalizing     MigrationPhase = "Finalizing"
 	PhaseStreaming      MigrationPhase = "Streaming"
 	PhaseCutoverPending MigrationPhase = "CutoverPending"
 	PhaseCuttingOver    MigrationPhase = "CuttingOver"
