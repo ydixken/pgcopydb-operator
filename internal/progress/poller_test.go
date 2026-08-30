@@ -236,3 +236,74 @@ func deref(p *int64) any {
 	}
 	return *p
 }
+
+// CloneStage decides a user-visible phase, so every way the probe can fail has
+// to land on "unknown" rather than on a confident wrong answer. Unknown is
+// both flags false, which leaves the caller reporting Cloning.
+func TestCloneStage(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		exec                *fakeExec
+		copying, finalizing bool
+	}{
+		{
+			name:    "copy workers busy",
+			exec:    &fakeExec{pod: "w", out: []byte("4 0\n")},
+			copying: true,
+		},
+		{
+			name:       "only the tail left",
+			exec:       &fakeExec{pod: "w", out: []byte("0 1\n")},
+			finalizing: true,
+		},
+		{
+			// Both counts zero is a worker that holds no active backend on the
+			// target: between statements, or not connected yet. Neither state.
+			name: "no active backends",
+			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
+		},
+		{
+			// The copy is winding down while the tail has started. Still
+			// copying, because data is still moving.
+			name:    "both kinds active",
+			exec:    &fakeExec{pod: "w", out: []byte("2 3\n")},
+			copying: true,
+		},
+		{name: "no running pod", exec: &fakeExec{}},
+		{name: "pod lookup failed", exec: &fakeExec{podErr: errors.New("boom")}},
+		{name: "exec failed", exec: &fakeExec{pod: "w", execErr: errors.New("boom")}},
+		{name: "unparseable output", exec: &fakeExec{pod: "w", out: []byte("ERROR: nope\n")}},
+		{name: "empty output", exec: &fakeExec{pod: "w", out: nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewFromExec(tc.exec, nil)
+			copying, finalizing := p.CloneStage(context.Background(), "ns", "job")
+			if copying != tc.copying || finalizing != tc.finalizing {
+				t.Errorf("copying=%v finalizing=%v, want copying=%v finalizing=%v",
+					copying, finalizing, tc.copying, tc.finalizing)
+			}
+		})
+	}
+}
+
+// The probe must never open pgcopydb's SQLite catalog: doing that during a
+// copy is what killed workers and made the poll conditional in the first
+// place. It must also only count this worker's own backends, or another
+// migration's compare workers read as this clone's tail.
+func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
+	f := &fakeExec{pod: "w", out: []byte("0 1\n")}
+	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+
+	joined := strings.Join(f.argv, " ")
+	for _, forbidden := range []string{"pgcopydb", "--dir", "list progress"} {
+		if strings.Contains(joined, forbidden) && forbidden != "pgcopydb" {
+			t.Errorf("probe runs %q; it must not touch the pgcopydb catalog: %s", forbidden, joined)
+		}
+	}
+	if !strings.Contains(joined, "pg_stat_activity") {
+		t.Errorf("probe does not read pg_stat_activity: %s", joined)
+	}
+	if !strings.Contains(joined, "client_addr = inet_client_addr()") {
+		t.Errorf("probe is not scoped to this worker's own backends: %s", joined)
+	}
+}

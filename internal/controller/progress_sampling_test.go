@@ -316,28 +316,40 @@ var _ = Describe("Migration Controller progress sampling", func() {
 // The copy and its tail are reported apart because they behave differently: a
 // copy runs every worker, the tail narrows to index builds and a vacuum on the
 // largest table, and during it the target stops growing so any size-derived
-// estimate reads as finished. Unknown must leave Cloning standing rather than
-// guessing, since an unreadable probe is not evidence of either state.
-var _ = Describe("Clone stage", func() {
-	stage := func(copying, finalizing bool) v1beta1.MigrationPhase {
-		f := &fakeProgress{copying: copying, finalizing: finalizing}
-		phase := v1beta1.PhaseCloning
-		if _, fin := f.CloneStage(context.Background(), "ns", "job"); fin {
-			phase = v1beta1.PhaseFinalizing
-		}
-		return phase
+// estimate reads as finished. Driven through the reconciler on the same gate
+// the other specs here use, because a fake returning what a test told it to
+// return proves nothing about the branch that reads it.
+var _ = Describe("Migration Controller clone stage", func() {
+	ctx := context.Background()
+
+	phaseFor := func(name string, copying, finalizing bool) v1beta1.MigrationPhase {
+		GinkgoHelper()
+		r := newReconciler()
+		r.Progress = &fakeProgress{copying: copying, finalizing: finalizing}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		return reconcileAndGet(ctx, r, name).Status.Phase
 	}
 
-	It("stays Cloning while copy workers are busy", func() {
-		Expect(stage(true, false)).To(Equal(v1beta1.PhaseCloning))
+	It("reports Finalizing once only the tail is left", func() {
+		const name = "mig-stage-tail"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, false, true)).To(Equal(v1beta1.PhaseFinalizing))
 	})
 
-	It("reports Finalizing once only the tail is left", func() {
-		Expect(stage(false, true)).To(Equal(v1beta1.PhaseFinalizing))
+	It("stays Cloning while copy workers are busy", func() {
+		const name = "mig-stage-copying"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, true, false)).To(Equal(v1beta1.PhaseCloning))
 	})
 
 	It("stays Cloning when the probe knows nothing", func() {
-		Expect(stage(false, false)).To(Equal(v1beta1.PhaseCloning),
+		const name = "mig-stage-unknown"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		Expect(phaseFor(name, false, false)).To(Equal(v1beta1.PhaseCloning),
 			"an unreadable probe must not be read as either state")
 	})
 })
