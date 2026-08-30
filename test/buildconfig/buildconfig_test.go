@@ -25,6 +25,7 @@ package buildconfig
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,6 +36,12 @@ const (
 	managerDockerfile = "../../Dockerfile"
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
+	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
+	chartReadme       = "../../charts/pgcopydb-operator/README.md"
+	runnerReadme      = "../../images/runner/README.md"
+	mainGo            = "../../cmd/main.go"
+	mainTest          = "../../cmd/main_test.go"
+	pollerTest        = "../../internal/progress/poller_test.go"
 )
 
 func read(t *testing.T, path string) string {
@@ -44,6 +51,20 @@ func read(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// pin reads an ARG's default out of a Dockerfile. An empty result is fatal
+// rather than a mismatch: a renamed ARG would otherwise make every comparison
+// below agree trivially on "", which is a check that passes because nothing
+// matched.
+func pin(t *testing.T, path, arg string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^ARG\s+` + regexp.QuoteMeta(arg) + `=(\S+)\s*$`)
+	m := re.FindStringSubmatch(read(t, path))
+	if m == nil || m[1] == "" {
+		t.Fatalf("%s declares no `ARG %s=<value>`", path, arg)
+	}
+	return m[1]
 }
 
 // Without --platform=$BUILDPLATFORM a FROM resolves to the stage's *target*
@@ -146,5 +167,46 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	if !usesQEMU(wf.Jobs["runner-image"].Steps) {
 		t.Error("runner-image must keep docker/setup-qemu-action: it runs apt and the " +
 			"version canary on the emulated arm64 platform")
+	}
+}
+
+// The pinned pgcopydb version is an exact-match allowlist at runtime, not a
+// hint. charts/values.yaml feeds --progress-poll-versions, which becomes a
+// shell `case` pattern in progress.gateScript(); a version off the list
+// matches nothing and CloneProgress returns (nil, nil) with no error logged,
+// so status.progress and the clone byte metrics go dark in silence. Every
+// location below has to move together, and this reports all of them at once
+// rather than stopping at the first.
+func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
+	want := pin(t, runnerDockerfile, "PGCOPYDB_VERSION")
+
+	for _, c := range []struct{ path, why string }{
+		{runnerDockerfile, "the build canary that fails the image build on drift"},
+		{releaseWorkflow, "the release smoke test that runs the pushed image"},
+		{mainGo, "the --progress-poll-versions default"},
+		{mainTest, "the flag-default assertion"},
+		{pollerTest, "the gate-script assertion"},
+		{runnerReadme, "the runner image's documented version string"},
+		{chartReadme, "the documented default for runner.progressPollVersions"},
+	} {
+		if !strings.Contains(read(t, c.path), want) {
+			t.Errorf("%s does not mention pgcopydb %s (%s)", c.path, want, c.why)
+		}
+	}
+
+	// The chart value is what actually ships, so assert the parsed list rather
+	// than a substring: a commented-out line would satisfy Contains.
+	var values struct {
+		Runner struct {
+			ProgressPollVersions []string `json:"progressPollVersions"`
+		} `json:"runner"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, chartValues)), &values); err != nil {
+		t.Fatalf("parse chart values: %v", err)
+	}
+	if !slices.Contains(values.Runner.ProgressPollVersions, want) {
+		t.Errorf("runner.progressPollVersions is %v, which does not allow the pinned %s; "+
+			"the in-pod progress poll would fail closed and status.progress would go dark",
+			values.Runner.ProgressPollVersions, want)
 	}
 }
