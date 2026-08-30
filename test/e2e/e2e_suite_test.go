@@ -117,9 +117,9 @@ const (
 	// seedImage only needs a psql client; the CNPG operand image has one and
 	// is already pulled on any cluster running CNPG fixtures.
 	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
-	// ephemeralStorageClass is the suite-owned Longhorn class for the stress
-	// tier: one replica, reclaim Delete, so ~500Gi of throwaway volumes do
-	// not triple themselves across the cluster.
+	// ephemeralStorageClass is the suite-owned Longhorn class the fixture
+	// volumes bind to: one replica, reclaim Delete, so throwaway volumes that
+	// CNPG has already replicated do not triple themselves again underneath.
 	ephemeralStorageClass = "longhorn-e2e-ephemeral"
 )
 
@@ -133,11 +133,13 @@ var fixturesFS embed.FS
 
 // The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
 // fixture data (~12GB at scale 1) and with it the volumes (40/40/10Gi at
-// scale 1) on the cluster default StorageClass. Stress (E2E_STRESS=true):
-// scale 10 (~120GB) on fixed 200/150/50Gi volumes backed by the suite-owned
-// single-replica StorageClass, gated by the Longhorn capacity check. E2E_SCALE
-// always wins when set, so the version matrix can run small (0.1) against
-// either tier's sizing.
+// scale 1). Stress (E2E_STRESS=true): scale 10 (~120GB) on fixed 200/150/50Gi
+// volumes and much longer budgets. Both tiers put the fixture volumes on the
+// suite-owned single-replica StorageClass and both are gated by the Longhorn
+// capacity check. E2E_SCALE always wins when set, so the version matrix can
+// run small (0.1) against either tier's sizing. Every source and target volume
+// is provisioned once per CNPG instance, so the tier sizes multiply by
+// cnpgInstances.
 var (
 	stress = envTrue("E2E_STRESS")
 	scale  = 1.0
@@ -192,10 +194,15 @@ func envTrue(name string) bool {
 }
 
 func init() {
+	// Fixture volumes take the suite-owned single-replica class at every tier.
+	// CNPG already keeps cnpgInstances copies of the data, so a replicating
+	// default class would copy each of those again and store the fixtures nine
+	// times over for nothing a test can observe. ensureFixtureStorage falls
+	// back to the cluster default when the cluster has no Longhorn.
+	fixtureStorageClass = ephemeralStorageClass
 	if stress {
 		scale = 10
 		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
-		fixtureStorageClass = ephemeralStorageClass
 		migrationTimeout, followTimeout, seedTimeout = 2*time.Hour, 3*time.Hour, 3*time.Hour
 	}
 	if v := os.Getenv("E2E_SCALE"); v != "" {
@@ -353,11 +360,8 @@ var _ = BeforeSuite(func() {
 		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
 			" follow controller; upgrade the CRD (chart >= v0.1.0-alpha.6) before running the live scenarios")
 
-	if stress {
-		By("stress tier: ensuring the ephemeral StorageClass and checking Longhorn capacity")
-		ensureEphemeralStorageClass()
-		checkLonghornCapacity()
-	}
+	By("preparing the fixture StorageClass and checking Longhorn capacity")
+	ensureFixtureStorage()
 
 	// The suite is single-tenant per cluster: two runs share the release name,
 	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
@@ -729,8 +733,8 @@ func ensureSeededSource() {
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
 // and brings a fresh one up. Used when kept fixtures carry a stale seed
-// profile or scale; a major or instance-count mismatch on a kept cluster is
-// handled earlier by ensureClusterShape, for the target too.
+// profile or scale; a major, instance-count or storage-class mismatch on a
+// kept cluster is handled earlier by ensureClusterShape, for the target too.
 func recreateSourceCluster() {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
@@ -758,13 +762,13 @@ func deleteCluster(name string) {
 }
 
 // ensureClusterShape deletes a kept cluster that this run cannot adopt in
-// place, so the subsequent apply creates it fresh. Two things force that: a
+// place, so the subsequent apply creates it fresh. Three things force that: a
 // different PostgreSQL major (CNPG cannot change majors in place, so applying
-// another major's imageName would wedge the cluster rather than upgrade it)
-// and a different instance count. The instance check reads the spec and runs
-// before the readiness wait on purpose: a kept single-instance cluster can
-// never reach cnpgInstances ready, so waiting first would time out instead of
-// recreating.
+// another major's imageName would wedge the cluster rather than upgrade it), a
+// different instance count, and a different storage class, which is immutable
+// once a PVC is bound. The two shape checks read the spec and run before the
+// readiness wait on purpose: a kept single-instance cluster can never reach
+// cnpgInstances ready, so waiting first would time out instead of recreating.
 func ensureClusterShape(name string, major int) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
@@ -778,6 +782,12 @@ func ensureClusterShape(name string, major int) {
 	if got, _, _ := unstructured.NestedInt64(c.Object, "spec", "instances"); got != int64(cnpgInstances) {
 		By(fmt.Sprintf("deleting %s: kept cluster has %d instances, this run wants %d",
 			name, got, cnpgInstances))
+		deleteCluster(name)
+		return
+	}
+	if got, _, _ := unstructured.NestedString(c.Object, "spec", "storage", "storageClass"); got != fixtureStorageClass {
+		By(fmt.Sprintf("deleting %s: kept cluster is on storage class %q, this run wants %q",
+			name, got, fixtureStorageClass))
 		deleteCluster(name)
 		return
 	}
@@ -893,10 +903,48 @@ func seedJobLogs() string {
 	return string(out)
 }
 
+// ensureFixtureStorage prepares the class the fixture volumes bind to and
+// refuses a run that would not fit. Longhorn is optional: without it the
+// suite-owned class could never bind, so the fixtures fall back to the
+// cluster default and there is no capacity to read. E2E_STORAGE_CLASS is left
+// alone, because whoever pins a class owns the capacity question with it.
+func ensureFixtureStorage() {
+	GinkgoHelper()
+	if fixtureStorageClass != ephemeralStorageClass {
+		return
+	}
+	if !longhornPresent() {
+		By("no Longhorn in this cluster: fixture volumes fall back to the cluster default StorageClass")
+		fixtureStorageClass = ""
+		return
+	}
+	ensureEphemeralStorageClass()
+	checkLonghornCapacity()
+}
+
+// longhornPresent reports whether this cluster runs Longhorn, by asking for
+// the CRD the capacity check reads.
+func longhornPresent() bool {
+	GinkgoHelper()
+	err := k8sClient.List(ctx, longhornNodes())
+	if apimeta.IsNoMatchError(err) {
+		return false
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
+	return true
+}
+
+// longhornNodes is an empty list typed to the Longhorn Node CRD.
+func longhornNodes() *unstructured.UnstructuredList {
+	l := &unstructured.UnstructuredList{}
+	l.SetGroupVersionKind(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: "NodeList"})
+	return l
+}
+
 // ensureEphemeralStorageClass creates the suite-owned single-replica Longhorn
-// StorageClass for the stress tier if it does not exist. It stays behind
-// after the run: it is configuration, not data, and reclaimPolicy Delete
-// means volumes never outlive their claims.
+// StorageClass if it does not exist. It stays behind after the run: it is
+// configuration, not data, and reclaimPolicy Delete means volumes never
+// outlive their claims.
 func ensureEphemeralStorageClass() {
 	GinkgoHelper()
 	reclaim := corev1.PersistentVolumeReclaimDelete
@@ -911,20 +959,14 @@ func ensureEphemeralStorageClass() {
 	}
 }
 
-// checkLonghornCapacity refuses to start a stress run that would fill the
-// shared cluster: it sums storageAvailable over every disk of every
-// nodes.longhorn.io CR (live cluster state, deliberately never hardcoded)
-// and Skips unless the requested fixture volumes fit with 20% headroom.
+// checkLonghornCapacity refuses to start a run that would fill the shared
+// cluster: it sums storageAvailable over every disk of every nodes.longhorn.io
+// CR (live cluster state, deliberately never hardcoded) and Skips unless the
+// requested fixture volumes fit with 20% headroom.
 func checkLonghornCapacity() {
 	GinkgoHelper()
-	nodes := &unstructured.UnstructuredList{}
-	nodes.SetGroupVersionKind(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: "NodeList"})
-	if err := k8sClient.List(ctx, nodes); err != nil {
-		if apimeta.IsNoMatchError(err) {
-			Skip("stress tier needs Longhorn: no nodes.longhorn.io CRD in this cluster")
-		}
-		Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
-	}
+	nodes := longhornNodes()
+	Expect(k8sClient.List(ctx, nodes)).To(Succeed(), "failed to list nodes.longhorn.io")
 	var available int64
 	for _, n := range nodes.Items {
 		disks, _, _ := unstructured.NestedMap(n.Object, "status", "diskStatus")
@@ -941,21 +983,26 @@ func checkLonghornCapacity() {
 			}
 		}
 	}
+	// Every CNPG instance carries a full copy of its cluster's data, so the
+	// source and target volumes are provisioned once per instance. The work
+	// volume is one per migration and does not multiply.
 	var required int64
-	for _, size := range []string{srcStorageSize, tgtStorageSize, workVolumeSize} {
+	for _, size := range []string{srcStorageSize, tgtStorageSize} {
 		q := resource.MustParse(size)
-		required += q.Value()
+		required += q.Value() * cnpgInstances
 	}
+	work := resource.MustParse(workVolumeSize)
+	required += work.Value()
 	// numberOfReplicas is 1 on the ephemeral StorageClass, so requested
 	// bytes map 1:1 to consumed bytes; 1.2 leaves headroom for WAL churn
 	// and everything else living on the shared disks.
 	const replicas = 1
 	need := required * replicas * 12 / 10
 	if available < need {
-		Skip(fmt.Sprintf("stress tier needs %dGi available across Longhorn disks"+
-			" (%dGi requested x %d replica x 1.2 headroom) but only %dGi are free;"+
-			" free up space or run the default tier",
-			need>>30, required>>30, replicas, available>>30))
+		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
+			" (%dGi requested x %d replica x 1.2 headroom, source and target sized for"+
+			" %d CNPG instances each) but only %dGi are free; free up space or lower E2E_SCALE",
+			need>>30, required>>30, replicas, cnpgInstances, available>>30))
 	}
 }
 
