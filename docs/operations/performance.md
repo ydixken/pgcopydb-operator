@@ -68,7 +68,9 @@ Set it separately when they differ: `pg_restore` is a separate process and never
 Each table job holds one source connection and one target connection.
 pgcopydb also sizes its `VACUUM ANALYZE` pool from the same number and runs it alongside the copy, so N table jobs can mean up to 2N concurrent backends on the target.
 
-Check the target's `max_connections` against `tableJobs * 2 + indexJobs` before raising anything.
+Check the target's `max_connections` before raising anything.
+The worst case is roughly `tableJobs * 2 + indexJobs + largeObjectsJobs + 1`: table jobs twice over because of the vacuum pool, then one per index worker, one per large-object worker, and one for its metadata pass.
+The source sees the same table and large-object connections, without the index and vacuum ones.
 `skip: [vacuum]` removes the vacuum half if the target will be analysed separately after cutover.
 
 `clone.largeObjectsJobs` is worth setting to 1, or skipping with `skip: [largeObjects]`, unless the database is genuinely blob-heavy.
@@ -86,12 +88,32 @@ Set `useCopyBinary: false` to force text everywhere.
 
 ## Knobs left at pgcopydb's default, and why
 
-`clone.largeObjectsJobs` stays at four.
-One is better for a database with few large objects, because the default opens four connection pairs whether or not there is anything to move through them, and four is better for one that is genuinely blob-heavy.
-The operator cannot tell which it is looking at, so it does not guess.
-Set it to 1, or use `skip: [largeObjects]`, when the database has no blobs worth parallelising.
+### `largeObjectsJobs`
 
-`clone.restoreJobs` follows `indexJobs` unless you set it, which is pgcopydb's behaviour and not the operator's.
+Stays at pgcopydb's four, because there is no value that is right for both kinds of database and the operator cannot tell which one it is pointed at.
+
+Large objects live in `pg_largeobject` and are copied by a pool of their own, separate from the table COPY pipeline: one metadata worker plus N data workers, each holding a source connection and a target connection.
+So the default costs four connection pairs on both servers whether or not there is anything to move through them, and on a database with no large objects that is eight connections doing nothing.
+Drop it to 1 and a genuinely blob-heavy database loses most of its parallelism in the one phase that needed it.
+
+Ask the source which case you are in:
+
+```sql
+SELECT count(*), pg_size_pretty(sum(pg_column_size(data))) FROM pg_largeobject;
+```
+
+- **No rows.** Use `skip: [largeObjects]`. The pool is then not created at all, which is better than setting the job count to 1, because it also skips the metadata pass.
+- **A handful, or a few MB.** Set `largeObjectsJobs: 1`. The copy is short either way and the connections are better spent elsewhere.
+- **Many, or a large total.** Leave the default, and raise it if the large-object phase is visibly the tail of your migration.
+
+> [!note]
+> Large objects are not the same thing as `bytea`.
+> A column of type `bytea`, however big, is ordinary table data and is copied by the table workers.
+> Only `lo_*` and `oid`-referenced objects go through this pool, so most databases want `skip: [largeObjects]` rather than a job count.
+
+### `restoreJobs`
+
+Follows `indexJobs` unless you set it, which is pgcopydb's behaviour and not the operator's.
 That coupling is worth knowing about: lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
 Whether that is a problem depends on whether the target is short of memory or short of cores, which again is not something the operator can see.
 Set both explicitly when they should differ.
