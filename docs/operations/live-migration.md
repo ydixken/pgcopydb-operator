@@ -57,9 +57,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 }
 ```
 
-`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`; `replayLSN` is the target's replication origin progress, the last transaction durably applied there; `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once the lag is at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`; `replayLSN` is the target's replication origin progress, the last transaction durably applied there, with the source's own reading standing in until the origin has applied its first; `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once the lag is at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
 
-Granting the migration's source role `pg_read_all_stats` is optional, and sharpens `writeLSN` and nothing else. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so the reading falls back to the slot's confirmed flush position, one confirmation behind. Lag and `CaughtUp` are unaffected either way: they come from the target's origin.
+Granting the migration's source role `pg_read_all_stats` is optional, and sharpens `writeLSN` and nothing else. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so the reading falls back to the slot's confirmed flush position, one confirmation behind. Lag and `CaughtUp` come from the target's origin, so the grant does not reach them once the origin has applied its first transaction; before that they fall back to the source side, where it does.
 
 ## Manual cutover runbook
 
