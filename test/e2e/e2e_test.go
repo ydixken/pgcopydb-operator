@@ -1173,6 +1173,15 @@ func expectConditionTrue(m *v1beta1.Migration, condType string) {
 	Expect(c.Status).To(Equal(metav1.ConditionTrue), "condition %s is %s: %s", condType, c.Status, c.Message)
 }
 
+// followStreamingPhases are the phases waitFollowStreaming is defined over:
+// Streaming, plus the ones only CaughtUp opens the way to. Both the wait and
+// the check below read this list, so neither can accept a phase the other
+// rejects. A migration outside it is not converging, whatever put it there.
+var followStreamingPhases = []v1beta1.MigrationPhase{
+	v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending, v1beta1.PhaseCuttingOver,
+	v1beta1.PhaseVerifying, v1beta1.PhaseCompleted,
+}
+
 // waitFollowStreaming waits for the stream to start and then requires the lag
 // the operator reports to fall to or under the migration's maxCatchupLag. That
 // threshold is what sets CaughtUp, and CaughtUp is what both cutover modes
@@ -1184,9 +1193,7 @@ func expectConditionTrue(m *v1beta1.Migration, condType string) {
 // over the instant CaughtUp goes True and would otherwise race this wait.
 func waitFollowStreaming(name string) {
 	GinkgoHelper()
-	m := waitPhase(name, nsE2E, migrationTimeout,
-		v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending, v1beta1.PhaseCuttingOver,
-		v1beta1.PhaseVerifying, v1beta1.PhaseCompleted)
+	m := waitPhase(name, nsE2E, migrationTimeout, followStreamingPhases...)
 
 	// Read the threshold off the object rather than restating the CRD default,
 	// which would be a second copy of it that could drift.
@@ -1197,9 +1204,17 @@ func waitFollowStreaming(name string) {
 
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		if m.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying(fmt.Sprintf("migration %s/%s failed while its lag was still converging: %s",
+				nsE2E, name, failureMessage(m))).Now()
+		}
+		// Every exit below this line is an assertion or the one guarded return,
+		// because a bare return from here reads as a pass.
+		g.Expect(followStreamingPhases).To(ContainElement(m.Status.Phase),
+			"%s is at phase %q, which is not converging", name, m.Status.Phase)
 		if m.Status.Phase != v1beta1.PhaseStreaming {
-			// Only CaughtUp moves a follow migration out of Streaming, so a later
-			// phase is the convergence this asserts, already observed.
+			// Past the gate, and the line above proved which gate: CaughtUp is
+			// the only way into these phases, so convergence already happened.
 			return
 		}
 		// An absent sample is not a converged one: the failure this guards
