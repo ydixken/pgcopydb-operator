@@ -303,8 +303,8 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		create(mig)
 
-		By("waiting for the base copy to finish and streaming to start")
-		waitPhase(metricsMigration, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+		By("waiting for the base copy to finish, streaming to start, and the lag to converge")
+		waitFollowStreaming(metricsMigration)
 
 		By("asserting exactly one phase series is active")
 		Eventually(func(g Gomega) {

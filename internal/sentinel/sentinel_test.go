@@ -228,10 +228,9 @@ func runningPod() corev1.Pod {
 	}
 }
 
-// TestParseSample covers what the two databases actually answer through a
-// migration's life, including the states no test cluster reproduces on
-// demand. The labels come off psql, so a value can always be blank and a line
-// can always be missing.
+// TestParseSample covers what the source answers through a migration's life,
+// including the states no test cluster reproduces on demand. The labels come
+// off psql, so a value can always be blank and a line can always be missing.
 func TestParseSample(t *testing.T) {
 	cases := []struct {
 		name string
@@ -239,7 +238,7 @@ func TestParseSample(t *testing.T) {
 		want *State
 	}{{
 		name: "full sample",
-		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=0/1500\nreplay_lsn=0/1000\n",
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 replay_lsn=0/1000\n",
 		want: &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN},
 	}, {
 		// The slot is created with the migration; until then the operator
@@ -249,21 +248,17 @@ func TestParseSample(t *testing.T) {
 		want: nil,
 	}, {
 		// No walsender row (receiver reconnecting), or a role that may not
-		// see one: the slot's own confirmed flush position fills write_lsn
-		// and the source-side replay is blank.
+		// see one: both positions fall back to the slot's confirmed flush,
+		// so they arrive equal rather than absent.
 		name: "slot present, no walsender row",
-		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=\nreplay_lsn=0/1000\n",
-		want: &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN},
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 replay_lsn=0/2000\n",
+		want: &State{WriteLSN: writeLSN, ReplayLSN: writeLSN, SourceHead: headLSN},
 	}, {
-		// Before the target origin has applied anything the query returns no
-		// row at all, and the source's own view of the consumer stands in.
-		name: "origin absent",
-		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=0/1500\n",
-		want: &State{WriteLSN: writeLSN, ReplayLSN: "0/1500", SourceHead: headLSN},
-	}, {
-		name: "origin exists but has no progress",
-		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=\nreplay_lsn=\n",
-		want: &State{WriteLSN: writeLSN, SourceHead: headLSN},
+		// A slot that has confirmed nothing yet: the row is there, the
+		// positions are not.
+		name: "slot row with no positions",
+		out:  "source_head=0/3000\nwrite_lsn= replay_lsn=\n",
+		want: nil,
 	}, {
 		name: "garbage",
 		out:  "psql: error: connection to server failed: FATAL: sslmode=require\n",
@@ -275,7 +270,7 @@ func TestParseSample(t *testing.T) {
 	}, {
 		// A value that is not an LSN is treated as absent, never stored.
 		name: "unparsable values",
-		out:  "source_head=later\nwrite_lsn=0/2000 source_replay_lsn=zz/1\n",
+		out:  "source_head=later\nwrite_lsn=0/2000 replay_lsn=zz/1\n",
 		want: &State{WriteLSN: writeLSN},
 	}}
 	for _, c := range cases {
@@ -293,20 +288,38 @@ func TestParseSample(t *testing.T) {
 	}
 }
 
+// TestReadScript pins where the lag figure comes from. Both positions are
+// read from the source slot row with the same fallback, and the target's
+// replication origin must not appear here at all: it parks at the last
+// applied COMMIT, so on a source whose recent WAL is filtered or idle it
+// trails without bound, and driving lag off it hung a release candidate at
+// 1.95 GB of reported lag on a fully caught-up migration. The origin is the
+// stricter position and it keeps its job, one layer over, in buildVerifyJob.
+//
+// What this can prove is the wiring: if anyone reaches for the origin from
+// the watch again, this fails. What it cannot prove is the semantics, since
+// no fake answers two real LSN sources; that took two databases, and the
+// numbers are in the commit message.
 func TestReadScript(t *testing.T) {
 	script := readScript("ns_mig_1")
 	for _, want := range []string{
-		// The slot names both the source slot and the target origin.
 		"where s.slot_name = 'ns_mig_1'",
-		"where roname = 'ns_mig_1'",
 		"pg_current_wal_flush_lsn()",
 		"coalesce(r.write_lsn, s.confirmed_flush_lsn)",
-		"pg_replication_origin_progress(roname, true)",
-		// One side failing must not cost the other side's line.
+		"coalesce(r.replay_lsn, s.confirmed_flush_lsn)",
 		"exit 0",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script misses %q:\n%s", want, script)
+		}
+	}
+	// The lag path reads the source and only the source.
+	for _, forbidden := range []string{
+		"pg_replication_origin",
+		"PGCOPYDB_TARGET_PGURI",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("the lag path must not read %q; that is the drain check's job:\n%s", forbidden, script)
 		}
 	}
 	// Nothing in the watch may open the worker's catalogs any more.
@@ -342,14 +355,19 @@ func TestRead_NoPodOrFailedExecIsNoSample(t *testing.T) {
 	argv := strings.Join(cmds[0], " ")
 	for _, want := range []string{
 		"sh -c",
+		// The recovery prelude is the shared wrapper and restores both sides
+		// whatever the command does with them.
 		"[ -f /tmp/pgm-source-uri ]",
 		"[ -f /tmp/pgm-target-uri ]",
 		`psql "$PGCOPYDB_SOURCE_PGURI"`,
-		`psql "$PGCOPYDB_TARGET_PGURI"`,
 	} {
 		if !strings.Contains(argv, want) {
 			t.Fatalf("exec %q misses %q", argv, want)
 		}
+	}
+	// The watch queries the source alone; see TestReadScript for why.
+	if strings.Contains(argv, `psql "$PGCOPYDB_TARGET_PGURI"`) {
+		t.Fatalf("the watch must not query the target: %q", argv)
 	}
 }
 
@@ -363,7 +381,7 @@ func TestRead_ListError(t *testing.T) {
 func TestRead_FullSample(t *testing.T) {
 	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
 	rec.script(map[string]string{"pg_replication_slots": "source_head=0/3000\n" +
-		"write_lsn=0/2000 source_replay_lsn=0/1500\nreplay_lsn=0/1000\n"})
+		"write_lsn=0/2000 replay_lsn=0/1000\n"})
 	st, err := c.Read(context.Background(), "ns", "j", "s")
 	if err != nil || st == nil {
 		t.Fatalf("want a sample, got (%v, %v)", st, err)

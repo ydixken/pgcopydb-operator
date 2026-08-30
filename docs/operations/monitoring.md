@@ -34,7 +34,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
-| `pgcopydb_migration_replay_lsn_bytes` | | Last LSN replayed on the target, from its replication origin; the source's own reading stands in until the origin has applied anything | follow, streaming |
+| `pgcopydb_migration_replay_lsn_bytes` | | How far the target has consumed the stream, as an absolute byte position, as reported to the source | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
 
@@ -49,10 +49,10 @@ The "Exists" column is the contract for when a series is present:
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
-Receive lag can be off in either direction.
-Where `write` fell back to the slot's confirmed flush position it reads high by one confirmation, and where a pass carried the source position because the target did not answer, `write` stays fresh against a stale head, so on a busy source the same figure reads low or briefly negative.
-Apply backlog is no longer sign-constrained either: `write` is a source-side reading and `replay` is the target's origin, so the two come from different databases and nothing orders them the way it did when both came from the sentinel.
-We have not seen it read negative; if the Replication Lag Split panel ever shows that, read it as the two readings crossing, not as data moving backwards.
+Receive lag reads high by one confirmation wherever `write` fell back to the slot's confirmed flush position.
+A pass whose source row carried no confirmed position leaves the previous replay and lag standing, so those two read stale for a pass rather than wrong.
+Apply backlog reads both operands from the same walsender row, so the ordering that holds there holds here.
+Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 
 ## Dashboards
 

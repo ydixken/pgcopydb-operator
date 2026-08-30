@@ -461,7 +461,12 @@ type ReplicationStatus struct {
 	// writeLSN is the last LSN received from the source.
 	// +optional
 	WriteLSN string `json:"writeLSN,omitempty"`
-	// replayLSN is the last transaction durably applied to the target.
+	// replayLSN is how far the target has consumed the stream, as the source
+	// reports it: the walsender's replay position, or the slot's confirmed
+	// flush position where the migration role may not read the walsender.
+	// It measures consumption, not application. Whether the target really
+	// applied every change is settled after cutover by the drain
+	// verification, which reads the target's own replication origin.
 	// +optional
 	ReplayLSN string `json:"replayLSN,omitempty"`
 	// endpos is the cutover LSN once set.

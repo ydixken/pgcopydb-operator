@@ -2126,8 +2126,13 @@ spec:
                     format: int64
                     type: integer
                   replayLSN:
-                    description: replayLSN is the last transaction durably applied
-                      to the target.
+                    description: |-
+                      replayLSN is how far the target has consumed the stream, as the source
+                      reports it: the walsender's replay position, or the slot's confirmed
+                      flush position where the migration role may not read the walsender.
+                      It measures consumption, not application. Whether the target really
+                      applied every change is settled after cutover by the drain
+                      verification, which reads the target's own replication origin.
                     type: string
                   slotName:
                     type: string
@@ -4274,8 +4279,13 @@ spec:
                     format: int64
                     type: integer
                   replayLSN:
-                    description: replayLSN is the last transaction durably applied
-                      to the target.
+                    description: |-
+                      replayLSN is how far the target has consumed the stream, as the source
+                      reports it: the walsender's replay position, or the slot's confirmed
+                      flush position where the migration role may not read the walsender.
+                      It measures consumption, not application. Whether the target really
+                      applied every change is settled after cutover by the drain
+                      verification, which reads the target's own replication origin.
                     type: string
                   slotName:
                     type: string

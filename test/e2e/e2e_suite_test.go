@@ -200,6 +200,12 @@ var (
 	// seedTimeout bounds the seed Job; seeding is IO-bound on the source
 	// volume.
 	seedTimeout = 30 * time.Minute
+	// lagConvergeTimeout bounds how long a follow migration may take to report
+	// a lag at or under its maxCatchupLag once the stream is up. It only has to
+	// separate a catch-up from a stall, and those are not close: replaying what
+	// a quiet source produced during the base copy takes a pass or two, while a
+	// lag reading that cannot converge never moves at all.
+	lagConvergeTimeout = 5 * time.Minute
 	// primaryTimeout bounds the wait for a cluster to carry exactly one
 	// primary. It only has to cover a CNPG promotion, not a bootstrap.
 	primaryTimeout = 2 * time.Minute
@@ -234,6 +240,7 @@ func init() {
 		scale = 10
 		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
 		migrationTimeout, followTimeout, seedTimeout = 2*time.Hour, 3*time.Hour, 3*time.Hour
+		lagConvergeTimeout = 20 * time.Minute
 	}
 	if v := os.Getenv("E2E_SCALE"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)

@@ -92,6 +92,16 @@ func passGate(ctx context.Context, r *MigrationReconciler, name string) {
 	reconcileAndGet(ctx, r, name)
 }
 
+// confirmCaughtUp runs the second pass a caught-up stream needs before the
+// operator acts on it. One sample below the threshold only arms the CaughtUp
+// latch; the next consecutive one turns the condition true (see lagSeenBelow),
+// because a single sample can land in the window where the worker is still
+// confirming its raw receive position.
+func confirmCaughtUp(ctx context.Context, r *MigrationReconciler, name string) *v1beta1.Migration {
+	GinkgoHelper()
+	return reconcileAndGet(ctx, r, name)
+}
+
 // drainEvents empties the fake recorder so each phase of a test only sees the
 // events it caused.
 func drainEvents(rec *events.FakeRecorder) []string {

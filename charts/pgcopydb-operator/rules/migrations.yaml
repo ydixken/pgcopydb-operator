@@ -96,8 +96,9 @@ groups:
             Migration {{ $labels.namespace }}/{{ $labels.name }} is more than
             64Mi behind the source for 10m
           description: >-
-            The target is not applying changes as fast as the source writes
-            them. Sustained lag delays cutover and retains WAL on the source.
+            The target is not consuming the stream as fast as the source
+            writes it. Sustained lag delays cutover and retains WAL on the
+            source.
       # Cutover drain. endpos only exists once cutover has set it, and the
       # trailing filter drops the series when replay reaches endpos, so a
       # healthy drain resolves this on its own.
