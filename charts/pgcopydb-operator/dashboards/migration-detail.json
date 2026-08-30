@@ -1088,7 +1088,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 4,
+        "w": 3,
         "x": 9,
         "y": 4
       },
@@ -1154,8 +1154,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 4,
-        "x": 13,
+        "w": 3,
+        "x": 12,
         "y": 4
       },
       "targets": [
@@ -1253,15 +1253,15 @@
     {
       "id": 21,
       "type": "stat",
-      "title": "Schema",
+      "title": "Schema Verification",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 3,
-        "w": 3,
-        "x": 17,
+        "w": 4,
+        "x": 15,
         "y": 4
       },
       "targets": [
@@ -1332,15 +1332,15 @@
     {
       "id": 22,
       "type": "stat",
-      "title": "Data",
+      "title": "Data Verification",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 3,
-        "w": 4,
-        "x": 20,
+        "w": 5,
+        "x": 19,
         "y": 4
       },
       "targets": [
@@ -1409,15 +1409,16 @@
       }
     },
     {
-      "id": 7,
-      "type": "state-timeline",
+      "id": 28,
+      "type": "table",
       "title": "Phase Timeline",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "When each phase was first seen in the dashboard range, so a phase entered before the range reads as the range start.",
       "gridPos": {
-        "h": 9,
+        "h": 6,
         "w": 24,
         "x": 0,
         "y": 7
@@ -1425,119 +1426,74 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1",
+          "expr": "1000 * min_over_time((timestamp(pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))[$__range:1m])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{phase}}",
-          "range": true,
-          "instant": false,
-          "format": "time_series"
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "namespace": true,
+              "name": true,
+              "job": true,
+              "instance": true,
+              "container": true,
+              "endpoint": true,
+              "pod": true,
+              "service": true,
+              "prometheus": true
+            },
+            "renameByName": {
+              "phase": "Phase",
+              "Value": "Entered"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Entered"
+              }
+            ]
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
           "custom": {
-            "fillOpacity": 70,
-            "lineWidth": 0,
-            "spanNulls": false
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            }
           }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Completed"
+              "options": "Entered"
             },
             "properties": [
               {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "green"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Failed"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Suspended"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "orange"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "CutoverPending"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "yellow"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "CuttingOver"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "purple"
-                }
+                "id": "unit",
+                "value": "dateTimeAsIso"
               }
             ]
           }
         ]
-      },
-      "options": {
-        "mergeValues": true,
-        "showValue": "never",
-        "rowHeight": 0.85,
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
       }
     },
     {
@@ -1549,7 +1505,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 13
       },
       "panels": []
     },
@@ -1565,7 +1521,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 14
       },
       "targets": [
         {
@@ -1636,7 +1592,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 14
       },
       "targets": [
         {
@@ -1704,7 +1660,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 21
       },
       "panels": []
     },
@@ -1720,7 +1676,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 25
+        "y": 22
       },
       "targets": [
         {
@@ -1809,7 +1765,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 25
+        "y": 22
       },
       "targets": [
         {
@@ -1888,7 +1844,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 29
       },
       "targets": [
         {
@@ -1950,7 +1906,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 29
       },
       "targets": [
         {

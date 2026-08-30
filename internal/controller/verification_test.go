@@ -79,6 +79,52 @@ var _ = Describe("Migration Controller verification", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 	})
 
+	It("records every compare check, not just the one the condition names", func() {
+		const name = "mig-verify-both-bad"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, newReconciler(), name)
+
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, newReconciler(), name)
+		finishJob(ctx, name+"-compare-schema", false)
+		reconcileAndGet(ctx, newReconciler(), name)
+		finishJob(ctx, name+"-compare-data", false)
+		m = reconcileAndGet(ctx, newReconciler(), name)
+
+		// A schema mismatch outranks a data one, so the condition reason names
+		// schema alone. Reading that reason is how a dashboard would conclude
+		// data passed when it did not; the per-check results say otherwise.
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
+		Expect(cond.Reason).To(Equal("SchemaMismatch"))
+		Expect(m.Status.Verification).To(ConsistOf(
+			v1beta1.VerificationResult{Check: "schema", Passed: false},
+			v1beta1.VerificationResult{Check: "data", Passed: false},
+		))
+	})
+
+	It("records a per-check pass and drops the result when a check is not requested", func() {
+		const name = "mig-verify-data-only"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, newReconciler(), name)
+
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, newReconciler(), name)
+		finishJob(ctx, name+"-compare-data", true)
+		m = reconcileAndGet(ctx, newReconciler(), name)
+
+		// Only what ran is reported: an unrequested check must be absent, not
+		// a false or a zero, or the dashboard would show it as failing.
+		Expect(m.Status.Verification).To(ConsistOf(
+			v1beta1.VerificationResult{Check: "data", Passed: true},
+		))
+	})
+
 	It("reports a data mismatch without failing the migration", func() {
 		const name = "mig-verify-mismatch"
 		defer removeMigration(ctx, name)
