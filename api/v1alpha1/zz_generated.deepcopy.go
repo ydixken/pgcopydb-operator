@@ -34,6 +34,11 @@ func (in *CloneOptions) DeepCopyInto(out *CloneOptions) {
 		x := (*in).DeepCopy()
 		*out = &x
 	}
+	if in.UseCopyBinary != nil {
+		in, out := &in.UseCopyBinary, &out.UseCopyBinary
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Skip != nil {
 		in, out := &in.Skip, &out.Skip
 		*out = make([]SkipOption, len(*in))

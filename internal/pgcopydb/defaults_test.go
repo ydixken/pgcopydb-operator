@@ -100,17 +100,21 @@ func TestTableJobsFor(t *testing.T) {
 	}
 }
 
-// useCopyBinary is defaulted by the API server, not here, because false is its
-// zero value. What this pins is that the operator forwards the field either
-// way: a Migration that says false must get text COPY, not the default.
+// useCopyBinary is defaulted by the API server, not here, because false is a
+// meaningful value rather than an absence. The pointer is what makes the three
+// states distinguishable, and this pins all three: nil is what a CRD without
+// the default produces and must not silently turn binary COPY on, and an
+// explicit false must reach pgcopydb as text rather than being defaulted away.
 func TestUseCopyBinaryIsForwardedBothWays(t *testing.T) {
+	yes, no := true, false
 	for _, tc := range []struct {
 		name string
-		set  bool
+		set  *bool
 		want bool
 	}{
-		{name: "true renders the flag", set: true, want: true},
-		{name: "false renders nothing", set: false, want: false},
+		{name: "true renders the flag", set: &yes, want: true},
+		{name: "false renders nothing", set: &no, want: false},
+		{name: "nil renders nothing", set: nil, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := &v1beta1.MigrationSpec{}

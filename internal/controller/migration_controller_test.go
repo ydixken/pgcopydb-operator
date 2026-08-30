@@ -160,7 +160,7 @@ var _ = Describe("Migration Controller", func() {
 		job := fetchJob(ctx, name+"-run-1")
 		c := job.Spec.Template.Spec.Containers[0]
 		Expect(c.Image).To(Equal(testRunnerImage))
-		Expect(strings.Join(c.Args, " ")).To(Equal("clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --restart"))
+		Expect(strings.Join(c.Args, " ")).To(Equal("clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary --restart"))
 		Expect(strings.Join(c.Args, " ")).NotTo(ContainSubstring("--resume"))
 		// Source password travels via the prelude-assembled passfile.
 		Expect(c.Command[2]).To(ContainSubstring("PGPASSFILE"))

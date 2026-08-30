@@ -30,6 +30,9 @@ import (
 
 // TestAddToScheme pins the registration cmd/main depends on: both kinds
 // land in a fresh scheme under this group-version.
+
+var copyBinary = true
+
 func TestAddToScheme(t *testing.T) {
 	s := runtime.NewScheme()
 	if err := AddToScheme(s); err != nil {
@@ -82,7 +85,7 @@ func fullMigration() *Migration {
 				SplitTablesLargerThan: &split, SplitMaxParts: 8,
 				EstimateTableSizes: true, DropIfExists: true, Roles: true,
 				NoRolePasswords: true, NoOwner: true, NoACL: true, NoComments: true,
-				NoTablespaces: true, UseCopyBinary: true, FailFast: true,
+				NoTablespaces: true, UseCopyBinary: &copyBinary, FailFast: true,
 				Skip: []SkipOption{"largeObjects", "analyze"},
 				Filters: &Filters{
 					IncludeOnlyTables:     []string{"public.a"},

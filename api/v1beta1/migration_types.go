@@ -252,12 +252,16 @@ type CloneOptions struct {
 	// binary encoding is not safe, so this is per table rather than all or
 	// nothing. Set it false to force text everywhere.
 	//
-	// Defaulted by the API server rather than by the operator: false is this
-	// field's zero value, so a default applied in Go could not tell "unset"
-	// from "the user asked for text".
+	// A pointer, and defaulted by the API server rather than by the operator,
+	// because this is the only shape where all three states are expressible.
+	// A plain bool cannot carry them: false is its zero value, so a Go client
+	// that never touches the field still marshals "useCopyBinary": false, the
+	// API server sees a value present and skips its default, and the setting
+	// silently stays off for everyone not writing YAML by hand. nil with
+	// omitempty leaves the key absent, which is what the default needs.
 	// +kubebuilder:default=true
 	// +optional
-	UseCopyBinary bool `json:"useCopyBinary"`
+	UseCopyBinary *bool `json:"useCopyBinary,omitempty"`
 
 	// failFast stops the whole run on the first failed child (--fail-fast).
 	// +optional

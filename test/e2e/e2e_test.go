@@ -1018,13 +1018,14 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			Source:     e2eConn(sourceCluster),
 			Target:     e2eConn(targetCluster),
 			WorkVolume: wv,
-			// Every runner Job the suite produces comes through here, so this
-			// is the one place that decides where the workers land and what
-			// the scheduler thinks they cost.
-			Clone: clone,
+			Clone:      clone,
+			// Placement is the suite's business, because it depends on where
+			// the fixtures landed. Sizing is not: leaving resources unset is
+			// what makes these Jobs run on the operator's own default, which
+			// is the configuration every user gets and the only way the suite
+			// exercises it. Pinning a number here would test one nobody runs.
 			Runner: v1beta1.RunnerSpec{
-				Resources: workerResources(fixtureCPU, fixtureMemory),
-				Affinity:  fixtureAntiAffinity(),
+				Affinity: fixtureAntiAffinity(),
 			},
 		},
 	}
