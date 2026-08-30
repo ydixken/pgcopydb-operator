@@ -313,13 +313,18 @@ func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
 // connected for the whole base copy, and counting only the active ones read as
 // the tail while data was still moving.
 //
-// The row filter is the part that has to be pinned by absence. Narrowing the
-// rows to the active ones anywhere in the WHERE clause reinstates the bug, in
-// any wording, so the test rejects the word "state" there outright.
+// Both narrowings are pinned by absence, because a narrowing can be spelled
+// any number of ways and only its absence is checkable. The copy count may
+// name state exactly once, in the arm that falls back to the statement text,
+// and the row filter may not name it at all. The edit this guards against is
+// a likely one: anyone acting on a copy worker that lingers connected after
+// its queue drains reaches for exactly such a conjunction.
 func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
 	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
-	flat := strings.Join(strings.Fields(strings.Join(f.argv, " ")), " ")
+	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
+	// to fail these checks the same way a lowercase one does.
+	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
 
 	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
 	if !ok {
@@ -336,16 +341,20 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 		t.Fatalf("cannot find the end of the probe query: %s", flat)
 	}
 
-	// A copy worker counts while it is connected, so one arm of the copy
-	// count tests the name and nothing else.
-	byConnection := false
-	for arm := range strings.SplitSeq(copyCount, " or ") {
-		if strings.Contains(arm, "application_name ilike '%copy worker%'") && !strings.Contains(arm, "state") {
-			byConnection = true
-		}
+	// A copy worker counts while it is connected, so the first arm of the
+	// copy count tests the name and nothing else.
+	primary, _, ok := strings.Cut(copyCount, " or ")
+	if !ok {
+		t.Fatalf("the copy count lost its statement-text fallback: %s", copyCount)
 	}
-	if !byConnection {
-		t.Errorf("copy workers are not counted by connection: %s", copyCount)
+	if !strings.Contains(primary, "application_name ilike '%copy worker%'") || strings.Contains(primary, "state") {
+		t.Errorf("copy workers are not counted by connection: %s", primary)
+	}
+	// One mention of state in the whole copy count, the fallback arm's own.
+	// A second one narrows the count however it is parenthesized, including
+	// a conjunction wrapped around every arm at once.
+	if n := strings.Count(copyCount, "state"); n != 1 {
+		t.Errorf("copy count names state %d times, want 1 (the fallback arm alone): %s", n, copyCount)
 	}
 	if !strings.Contains(tailCount, "state = 'active'") {
 		t.Errorf("the tail count dropped its active test: %s", tailCount)
