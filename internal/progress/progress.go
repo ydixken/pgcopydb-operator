@@ -136,13 +136,21 @@ printf 'source=%s\ntarget=%s\n' "$s" "$t"
 // the copy statement lowercase, which is easy to match wrongly and gives a
 // confident zero when four copies are running.
 //
+// Scoped to this worker's own connections by client_addr. Every worker of one
+// migration runs in one pod and so shares a source address, while a target can
+// be shared: the e2e suite points every migration at one, and without the
+// scope a compare worker from another migration's verification counts as this
+// clone's tail and reports the wrong phase. psql's own backend is excluded by
+// the application_name test.
+//
 // psql against the target touches no SQLite catalog, so it is safe while the
 // clone runs. Reading `list progress` is not, which is why this exists.
 const finalizingScript = `psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select
   count(*) filter (where application_name ilike '%copy worker%' or query ilike 'copy %') || ' ' ||
   count(*) filter (where application_name not ilike '%copy worker%' and query not ilike 'copy %')
 from pg_stat_activity
-where application_name like 'pgcopydb%' and state = 'active'" || echo
+where application_name like 'pgcopydb%' and state = 'active'
+  and client_addr = inet_client_addr()" || echo
 `
 
 // CloneStage reports whether the worker is still copying data or has moved on
