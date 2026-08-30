@@ -25,6 +25,7 @@ package buildconfig
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,6 +36,14 @@ const (
 	managerDockerfile = "../../Dockerfile"
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
+	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
+	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
+	chartReadme       = "../../charts/pgcopydb-operator/README.md"
+	runnerReadme      = "../../images/runner/README.md"
+	mainGo            = "../../cmd/main.go"
+	mainTest          = "../../cmd/main_test.go"
+	pollerTest        = "../../internal/progress/poller_test.go"
+	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
 )
 
 func read(t *testing.T, path string) string {
@@ -44,6 +53,19 @@ func read(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// pin reads an ARG's default out of a Dockerfile. Empty is fatal, not a
+// mismatch: a renamed ARG must not let every comparison agree trivially on
+// "".
+func pin(t *testing.T, path, arg string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^ARG\s+` + regexp.QuoteMeta(arg) + `=(\S+)\s*$`)
+	m := re.FindStringSubmatch(read(t, path))
+	if m == nil || m[1] == "" {
+		t.Fatalf("%s declares no `ARG %s=<value>`", path, arg)
+	}
+	return m[1]
 }
 
 // Without --platform=$BUILDPLATFORM a FROM resolves to the stage's *target*
@@ -91,32 +113,99 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 	}
 }
 
-// pgcopydb is ~67 translation units. Serial `make` was the runner image's
-// critical path; upstream's own Dockerfile for this tree runs -j$(nproc).
-func TestRunnerCompilesInParallel(t *testing.T) {
-	src := read(t, runnerDockerfile)
+// pgcopydb is ~67 translation units, of which the vendored 9 MB sqlite3.c is
+// one and cannot be split. Upstream's own Dockerfile for this tree runs
+// -j$(nproc); this matters on every SHA bump.
+func TestBuilderCompilesInParallel(t *testing.T) {
+	src := read(t, builderDockerfile)
 
-	makeLine := regexp.MustCompile(`(?m)^.*\bmake\b.*\binstall\b.*$`)
+	// Anchored past a leading "#" so a comment mentioning make/install cannot
+	// stand in for the live command this test means to inspect.
+	makeLine := regexp.MustCompile(`(?m)^\s*[^#\s].*\bmake\b.*\binstall\b.*$`)
 	line := makeLine.FindString(src)
 	if line == "" {
-		t.Fatal("no `make ... install` line in the runner Dockerfile")
+		t.Fatal("no live `make ... install` line in the builder Dockerfile")
 	}
 	if !regexp.MustCompile(`\s-j`).MatchString(line) {
 		t.Errorf("pgcopydb compiles serially; pass -j:\n %s", strings.TrimSpace(line))
 	}
 }
 
+// The split puts the compile in one file and the tag that consumes it in
+// another. If they disagree and the old tag still exists in the registry, the
+// build succeeds and the release ships the previous pgcopydb.
+func TestRunnerPullsThePinnedBuilder(t *testing.T) {
+	wantSHA := pin(t, builderDockerfile, "PGCOPYDB_SHA")
+
+	re := regexp.MustCompile(`(?m)^FROM\s+\S*pgcopydb-builder:(\S+)\s+AS\s+pgcopydb\s*$`)
+	m := re.FindStringSubmatch(read(t, runnerDockerfile))
+	if m == nil {
+		t.Fatal("no pgcopydb-builder FROM (tag@sha256:digest AS pgcopydb) in the runner Dockerfile")
+	}
+
+	// A bare tag is mutable: a debian bump inside the builder republishes it,
+	// so only the digest stops that rebuild from reaching this image unreviewed.
+	tag, digest, hasDigest := strings.Cut(m[1], "@")
+	if !hasDigest || !strings.HasPrefix(digest, "sha256:") {
+		t.Errorf("pgcopydb-builder FROM %q has no @sha256: digest pin", m[1])
+	}
+	if tag != wantSHA {
+		t.Errorf("builder pins %s, runner's FROM pins %s", wantSHA, tag)
+	}
+
+	// PGCOPYDB_VERSION can drift independently of the SHA check above; if it
+	// does, the runner's canary asserts a version the builder never produced.
+	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
+	if !strings.Contains(read(t, runnerDockerfile), "grep -qF '"+wantVersion+"'") {
+		t.Errorf("builder pins version %s, runner canary does not assert it", wantVersion)
+	}
+}
+
+// A --platform here would copy an amd64 binary into the arm64 image, and the
+// canary below cannot catch it: binfmt runs the amd64 ELF natively on the
+// build host, so `pgcopydb --version` passes anyway.
+func TestBuilderReferenceIsNotPlatformPinned(t *testing.T) {
+	re := regexp.MustCompile(`(?m)^FROM\s+(.*pgcopydb-builder.*)$`)
+	m := re.FindStringSubmatch(read(t, runnerDockerfile))
+	if m == nil {
+		t.Fatal("no FROM referencing pgcopydb-builder in the runner Dockerfile")
+	}
+	if strings.Contains(m[1], "--platform") {
+		t.Errorf("the pgcopydb-builder FROM must not pin a platform:\n  FROM %s", m[1])
+	}
+}
+
+// The whole point of the split. Restoring the compile here raises no error,
+// because the image still builds correctly, just twenty minutes slower.
+func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
+	src := read(t, runnerDockerfile)
+	for _, banned := range []string{"codeload.github.com", "postgresql-server-dev-18"} {
+		if strings.Contains(src, banned) {
+			t.Errorf("the runner Dockerfile still compiles pgcopydb: found %q", banned)
+		}
+	}
+	// Same anchoring as TestBuilderCompilesInParallel: a comment mentioning
+	// make/install must not read as the live command coming back.
+	if regexp.MustCompile(`(?m)^\s*[^#\s].*\bmake\b.*\binstall\b.*$`).MatchString(src) {
+		t.Error("the runner Dockerfile still runs `make ... install`")
+	}
+}
+
+type workflowStep struct {
+	Uses string `json:"uses"`
+	With struct {
+		Context   string `json:"context"`
+		Platforms string `json:"platforms"`
+	} `json:"with"`
+}
+
 type workflow struct {
 	Jobs map[string]struct {
-		Steps []struct {
-			Uses string `json:"uses"`
-		} `json:"steps"`
+		Steps []workflowStep `json:"steps"`
 	} `json:"jobs"`
 }
 
-func usesQEMU(steps []struct {
-	Uses string `json:"uses"`
-}) bool {
+func usesQEMU(steps []workflowStep) bool {
 	for _, s := range steps {
 		if strings.HasPrefix(s.Uses, "docker/setup-qemu-action") {
 			return true
@@ -146,5 +235,117 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	if !usesQEMU(wf.Jobs["runner-image"].Steps) {
 		t.Error("runner-image must keep docker/setup-qemu-action: it runs apt and the " +
 			"version canary on the emulated arm64 platform")
+	}
+}
+
+// Matches by context, not position: release.yml has three build-push-action
+// steps and only one builds images/pgcopydb-builder. Fatal on a miss, so a
+// missing step cannot read as an empty platform list to the caller.
+func builderPlatforms(t *testing.T, path string) string {
+	t.Helper()
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, job := range wf.Jobs {
+		for _, s := range job.Steps {
+			if strings.HasPrefix(s.Uses, "docker/build-push-action") && s.With.Context == "images/pgcopydb-builder" {
+				return s.With.Platforms
+			}
+		}
+	}
+	t.Fatalf("%s has no docker/build-push-action step building images/pgcopydb-builder", path)
+	return ""
+}
+
+// The existence check in release.yml only proves the pre-built tag resolves,
+// never that it is multi-arch, so a single-arch pre-build would read as
+// "exists" and let an amd64 pgcopydb land inside the arm64 runner image.
+func TestBuilderPlatformsAgreeAcrossWorkflows(t *testing.T) {
+	release := builderPlatforms(t, releaseWorkflow)
+	if release == "" {
+		t.Fatalf("%s: pgcopydb-builder build step declares no platforms", releaseWorkflow)
+	}
+	prebuild := builderPlatforms(t, builderWorkflow)
+	if prebuild == "" {
+		t.Fatalf("%s: pgcopydb-builder build step declares no platforms", builderWorkflow)
+	}
+	if release != prebuild {
+		t.Errorf("release.yml builds pgcopydb-builder for %q, %s for %q; they must agree "+
+			"or a single-arch pre-build passes the existence check unnoticed",
+			release, builderWorkflow, prebuild)
+	}
+	requireMultiArch(t, releaseWorkflow, release)
+	requireMultiArch(t, builderWorkflow, prebuild)
+}
+
+// Agreement alone is not enough: both files could agree on linux/amd64 only,
+// which is exactly the tag the release check cannot tell from multi-arch.
+func requireMultiArch(t *testing.T, path, platforms string) {
+	t.Helper()
+	list := strings.Split(platforms, ",")
+	for _, want := range []string{"linux/amd64", "linux/arm64"} {
+		if !slices.Contains(list, want) {
+			t.Errorf("%s: pgcopydb-builder platforms are %q, missing %s", path, platforms, want)
+		}
+	}
+}
+
+// The pinned pgcopydb version is a runtime exact-match allowlist, not a
+// hint: charts/values.yaml feeds gateScript()'s shell case, so an unlisted
+// version matches nothing and fails closed with no error logged anywhere.
+func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
+	want := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
+	q := regexp.QuoteMeta(want)
+
+	for _, c := range []struct {
+		path string
+		// pattern anchors to the specific construct why names, built from q
+		// so a count can't be satisfied by an unrelated, coincidental hit.
+		pattern *regexp.Regexp
+		why     string
+	}{
+		{runnerDockerfile, regexp.MustCompile(`pgcopydb --version \| grep -qF '` + q + `'`),
+			"the build canary that fails the image build on drift"},
+		{releaseWorkflow, regexp.MustCompile(`pgcopydb --version \| grep -F '` + q + `'`),
+			"the release smoke test that runs the pushed image"},
+		{mainGo, regexp.MustCompile(`"progress-poll-versions", "` + q + `"`),
+			"the --progress-poll-versions default"},
+		{mainTest, regexp.MustCompile(`defaultPollVersions = "` + q + `"`),
+			"the flag-default assertion"},
+		{pollerTest, regexp.MustCompile(`const patchedVersion = "` + q + `"`),
+			"the gate-script assertion's fixture constant"},
+		// Anchored to the start of the line so a comment mentioning the same
+		// pin and pipe elsewhere in the file cannot satisfy this.
+		{pollerTest, regexp.MustCompile(`(?m)^\s*"` + q + `\|`),
+			"the gate-script assertion's case pattern"},
+		// Anchored to the sentence that introduces the value, not just any
+		// backticked mention, so a decoy mention elsewhere cannot satisfy this.
+		{runnerReadme, regexp.MustCompile("The version string is `" + q + "`"),
+			"the runner image's documented version string"},
+		// Anchored to the table row (same line as the field name), not just
+		// any backticked mention, so a decoy elsewhere cannot satisfy this.
+		{chartReadme, regexp.MustCompile("progressPollVersions.*`[^`]*" + q + "[^`]*`"),
+			"the documented default for runner.progressPollVersions"},
+	} {
+		if !c.pattern.MatchString(read(t, c.path)) {
+			t.Errorf("%s has no construct matching pgcopydb %s (%s)", c.path, want, c.why)
+		}
+	}
+
+	// The chart value is what actually ships, so assert the parsed list rather
+	// than a substring: a commented-out line would satisfy Contains.
+	var values struct {
+		Runner struct {
+			ProgressPollVersions []string `json:"progressPollVersions"`
+		} `json:"runner"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, chartValues)), &values); err != nil {
+		t.Fatalf("parse chart values: %v", err)
+	}
+	if !slices.Contains(values.Runner.ProgressPollVersions, want) {
+		t.Errorf("runner.progressPollVersions is %v, which does not allow the pinned %s; "+
+			"the in-pod progress poll would fail closed and status.progress would go dark",
+			values.Runner.ProgressPollVersions, want)
 	}
 }

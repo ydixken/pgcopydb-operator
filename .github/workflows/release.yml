@@ -4,7 +4,9 @@ name: Release
 # manager image, runner image, and the Helm chart as OCI.
 # Images are multi-arch (linux/amd64 + linux/arm64) via buildx (M4). The manager
 # cross-compiles both from one native toolchain; only the runner needs QEMU,
-# because it compiles C and runs a canary on each platform.
+# for its apt install and version canary, both of which still run emulated on
+# arm64. pgcopydb itself is no longer compiled here; images/pgcopydb-builder
+# builds it and this workflow only copies the result in.
 #
 # A tag carrying an -rc.N suffix publishes the same artifacts, then runs e2e
 # against them on the cluster and pushes the stable tag when that passes. So
@@ -13,11 +15,14 @@ name: Release
 #
 # The two image jobs run on the cluster's own runner scale set
 # (github-runner-pgcopydb-operator, an Actions Runner Controller install
-# managed from the app-of-apps repo). The runner image's arm64 half is
-# QEMU-emulated, so the win is core count: the cluster nodes have 20 against
-# a GitHub-hosted runner's 2. That makes releases depend on the cluster being
-# reachable; if it is down the jobs queue rather than fail. The chart job
-# stays hosted because helm packaging gains nothing from the move.
+# managed from the app-of-apps repo). On the runner image itself the emulated
+# arm64 half is only an apt install and a version canary, where core count
+# buys almost nothing; the win is the pgcopydb builder compile that the same
+# job also runs, on the rare release where its tag is missing, where the
+# cluster nodes' 20 cores against a GitHub-hosted runner's 2 matter under
+# QEMU. That makes releases depend on the cluster being reachable; if it is
+# down the jobs queue rather than fail. The chart job stays hosted because
+# helm packaging gains nothing from the move.
 
 on:
   push:
@@ -82,6 +87,48 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The pgcopydb compile is ~20 minutes under QEMU and its only input is
+      # PGCOPYDB_SHA, which changed once across 55 tags. Build when the tag is
+      # missing, reuse it every other time.
+      - name: Read the pinned pgcopydb commit
+        id: pin
+        run: |
+          sha=$(sed -n 's/^ARG PGCOPYDB_SHA=//p' images/pgcopydb-builder/Dockerfile)
+          if [ -z "$sha" ]; then
+            echo "::error::images/pgcopydb-builder/Dockerfile has no ARG PGCOPYDB_SHA=<value>"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Is the pgcopydb builder image already published?
+        id: builder
+        # imagetools reuses the docker login above, so it works while the
+        # package is private. "Cannot tell" is an error, not a miss: treating
+        # a registry blip as absence would overwrite a tag mid-pull.
+        run: |
+          ref="$IMAGE/pgcopydb-builder:${{ steps.pin.outputs.sha }}"
+          set +e
+          out=$(docker buildx imagetools inspect "$ref" 2>&1); rc=$?
+          set -e
+          # $ref embeds the 40-char SHA, which can itself contain "404"; strip
+          # it before matching or that coincidence reads a transient failure
+          # as absence and republishes the tag over content mid-pull.
+          msg=$(printf '%s' "$out" | sed "s#$ref##g")
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$msg" | grep -qiE 'not found|MANIFEST_UNKNOWN|404'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cannot reach $ref: $out"
+            exit 1
+          fi
+      - name: Build the pgcopydb builder image
+        if: steps.builder.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: images/pgcopydb-builder
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
       - name: Decide whether this tag also moves :latest
         id: tags
         # See manager-image: an rc must not move the tag a `helm install`
@@ -237,10 +284,16 @@ jobs:
           done
 
   promote:
-    # Turning v0.4.1-rc.2 into v0.4.1. Nothing is rebuilt: the stable tag
-    # points at the commit the candidate was cut from, so the second run
-    # produces byte-identical images from the same context and the chart from
-    # the same sources.
+    # Turning v0.4.1-rc.2 into v0.4.1 pushes a new tag and lets that tag run
+    # this whole workflow again; nothing is rebuilt here. The two runs are not
+    # byte-identical: the manager bakes GITHUB_REF_NAME into its binary via
+    # ldflags, and the chart's version and appVersion track it too, so both
+    # differ between the candidate and the stable release by construction.
+    # The runner's apt layers float on purpose, so a security update can land
+    # on the stable image even though the candidate predates it. What does
+    # hold still is the runner's pgcopydb layer: both runs copy it from the
+    # same pgcopydb-builder tag, keyed by the pinned commit rather than by
+    # GITHUB_REF_NAME.
     #
     # The recursion stops one level down. The tag pushed here has no -rc., so
     # in that run the e2e job's `if` skips, and promote skips with it.

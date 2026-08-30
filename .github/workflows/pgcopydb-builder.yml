@@ -1,0 +1,47 @@
+name: pgcopydb builder image
+
+# Pre-builds the image release.yml would otherwise build inline on the next
+# tag. Safe to forget: runner-image builds it if it is missing.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/pgcopydb-builder.yml", "images/pgcopydb-builder/Dockerfile"]
+
+# A half-pushed multi-arch manifest is worse than a queued second run, so
+# a race between two triggers waits rather than cancels.
+concurrency:
+  group: pgcopydb-builder-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: pin
+        run: |
+          sha=$(sed -n 's/^ARG PGCOPYDB_SHA=//p' images/pgcopydb-builder/Dockerfile)
+          if [ -z "$sha" ]; then
+            echo "::error::images/pgcopydb-builder/Dockerfile has no ARG PGCOPYDB_SHA=<value>"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: images/pgcopydb-builder
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}

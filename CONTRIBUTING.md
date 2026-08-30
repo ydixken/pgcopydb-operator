@@ -12,7 +12,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 - [golangci-lint](https://golangci-lint.run) v2: Go linting, activates once `go.mod` exists.
 - [kubectl](https://kubernetes.io/docs/reference/kubectl/): only needed for `task e2e`.
 - [gh](https://cli.github.com): PRs happen on GitHub.
-- Docker MAY be installed for local image builds; CI builds the published image.
+- Docker MAY be installed for local image builds; CI builds the published image. Building `images/runner` locally pulls the pinned `pgcopydb-builder` tag from ghcr instead of compiling pgcopydb; see [images/pgcopydb-builder](images/pgcopydb-builder/README.md).
 
 ## Day-to-day loop
 
@@ -48,20 +48,20 @@ The e2e job backs the first rule with something GitHub enforces rather than some
 
 Two tiers, and the environment variables a run reads:
 
-| Variable                      | Default | Effect                                                                                                             |
-|-------------------------------|---------|--------------------------------------------------------------------------------------------------------------------|
+| Variable                      | Default | Effect                                                                                                                                                     |
+|-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `E2E_SCALE`                   | `1`     | Fixture size multiplier, sizing both the seeded data and the volumes. 1 seeds roughly 12GB on 50Gi volumes; 0.25 seeds 3GB on 13Gi, which is what CI runs. |
-| `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets. Use `task e2e:stress`. |
-| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed. |
-| `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                       |
-| `E2E_PG_SOURCE`               | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                            |
-| `E2E_PG_TARGET`               | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).            |
-| `E2E_OPERATOR_TAG`            | unset   | Manager image tag to install instead of the pinned release; the runner follows it.                                  |
-| `E2E_RUNNER_TAG`              | unset   | Worker image tag on its own, for an unreleased `images/runner` build.                                               |
-| `E2E_STORAGE_CLASS`           | unset   | Pins the fixture volumes to one StorageClass, and wins over the suite-owned one. Setting it also skips the capacity check. |
-| `E2E_MANAGE_NAMESPACES`       | `true`  | `false` works inside namespaces someone else owns: creates and deletes none, installs with `rbac.create=false`.     |
-| `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                      |
-| `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.         |
+| `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets. Use `task e2e:stress`.                               |
+| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed.                                        |
+| `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                                                              |
+| `E2E_PG_SOURCE`               | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                                                                   |
+| `E2E_PG_TARGET`               | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).                                                   |
+| `E2E_OPERATOR_TAG`            | unset   | Manager image tag to install instead of the pinned release; the runner follows it.                                                                         |
+| `E2E_RUNNER_TAG`              | unset   | Worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.              |
+| `E2E_STORAGE_CLASS`           | unset   | Pins the fixture volumes to one StorageClass, and wins over the suite-owned one. Setting it also skips the capacity check.                                 |
+| `E2E_MANAGE_NAMESPACES`       | `true`  | `false` works inside namespaces someone else owns: creates and deletes none, installs with `rbac.create=false`.                                            |
+| `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                                                             |
+| `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.                                                |
 
 Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: a 0.1 run gets 7/7/2Gi and the 0.25 CI tier gets 13/13/3Gi. `max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright. The floor is there because WAL, indexes and the change spool need headroom that the row counts alone do not size. Source and target sizes are per instance, so a three-instance cluster provisions three of them; the work volume is one per migration and does not multiply.
 

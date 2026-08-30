@@ -13,8 +13,10 @@
 # Built from debian:trixie-slim with the PGDG apt repo instead of the
 # upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16
 # and a passwordless-sudo user, so basing on it would carry two client majors
-# plus sudo. PGDG trixie ships postgresql-client-18 for amd64 and arm64, and
-# the build stage compiles pgcopydb against its server-dev packages.
+# plus sudo. PGDG trixie ships postgresql-client-18 for amd64 and arm64. The
+# pgcopydb binary itself comes from the pgcopydb-builder image, which compiles
+# it against the same server-dev packages on its own schedule (see
+# images/pgcopydb-builder/Dockerfile).
 #
 # The image then deletes what it does not run. Debian ships no fixed version
 # for most of what a scanner finds here, so patching cannot help; removal can.
@@ -32,52 +34,16 @@
 # database, so what a scanner reports is the truth rather than an artifact of
 # having nothing left to enumerate.
 
-# Pinned by tag and digest; Renovate's dockerfile manager bumps both FROM
-# lines together.
-# renovate: datasource=docker depName=debian
-FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258 AS build
+# Pinned by tag and digest, not just tag: a debian bump inside the
+# builder republishes this same tag, so only the digest stops that
+# rebuild from reaching this image before Renovate can raise a PR.
+# No --platform here. It is right for the manager's Go builder and wrong here:
+# it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
+# that because binfmt runs the amd64 binary natively on the build host.
+# renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:ea87951753f06361550c0a1357da7b42c3c55034@sha256:e68bb07a74bd6a74b7461588705a82ad12a105e4eb0767665c8b673f29a195d4 AS pgcopydb
 
-# These two move together: the version is what `git describe` prints for the
-# sha (v0.18-2-gea87951, dashes become dots). GIT-VERSION-GEN reads VERSION
-# from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=ea87951753f06361550c0a1357da7b42c3c55034
-ARG PGCOPYDB_VERSION=0.18.2.gea87951
-
-# DL3008: apt versions deliberately float within their majors; the version
-# canary in the final stage fails the build on a major drift.
-# hadolint ignore=DL3008
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl; \
-    install -d -m 0755 /etc/apt/keyrings; \
-    curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
-    echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
-    apt-get update; \
-    # debian/control Build-Depends minus packaging and docs; SQLite is
-    # vendored in-tree. server-dev-18 pins which pg_config the build reads.
-    # numa and uring are PG18 additions that pg_config --libs puts on the
-    # link line; control predates them.
-    apt-get install -y --no-install-recommends \
-      build-essential postgresql-server-dev-18 libpq-dev \
-      libedit-dev libgc-dev libkrb5-dev liblz4-dev libncurses-dev \
-      libnuma-dev libpam0g-dev libreadline-dev libselinux1-dev libssl-dev \
-      liburing-dev libxslt1-dev libzstd-dev zlib1g-dev; \
-    rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
-RUN set -eux; \
-    curl -fsSL -o pgcopydb.tar.gz "https://codeload.github.com/ydixken/pgcopydb/tar.gz/${PGCOPYDB_SHA}"; \
-    tar -xzf pgcopydb.tar.gz --strip-components=1; \
-    # install lands the binary in pg_config --bindir, the same path the
-    # final stage's PATH prefers. -j$(nproc) is what upstream's own Dockerfile
-    # runs against this tree; the vendored 9 MB sqlite3.c is one translation
-    # unit, so it stays the floor no matter how many cores are free.
-    VERSION="${PGCOPYDB_VERSION}" make -s -j"$(nproc)" install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config; \
-    # ldd documents what the final stage has to install (libgc1; the rest
-    # rides in with libpq5)
-    ldd /usr/lib/postgresql/18/bin/pgcopydb; \
-    /usr/lib/postgresql/18/bin/pgcopydb --version | grep -qF "${PGCOPYDB_VERSION}"
-
+# Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 
@@ -123,7 +89,7 @@ RUN set -eux; \
 
 # The fork-built binary lands next to the version-18 client tools, so the
 # PATH below covers it too.
-COPY --from=build /usr/lib/postgresql/18/bin/pgcopydb /usr/lib/postgresql/18/bin/pgcopydb
+COPY --from=pgcopydb /pgcopydb /usr/lib/postgresql/18/bin/pgcopydb
 
 # Version-18 binaries ahead of Debian's pg_wrapper, so pg_dump and pg_restore
 # resolve to 18.x deterministically even if another client major lands later.
