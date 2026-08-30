@@ -73,18 +73,20 @@ Secondary bug: the progress query reads `sum(bytes)` from `s_table`, which has n
 
 Set `skipFilterCheck` for `list progress` (it only reads), or keep the adopted filtering in memory instead of writing it back to the catalog in Case 3.
 
-## Concurrent catalog readers (`stream sentinel get`) can starve catalog writers: clone worker dies with `[SQLite 5: database is locked]` (exit 12)
+## `copydb_prepare_sequence_specs` writes through an open read cursor: any concurrent commit fails the write for good, and no busy timeout can clear it
 
 Status: draft, not filed.
 
 ### Environment
 
 - pgcopydb 0.18-1.pgdg12+1 (upstream container image)
-- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` in the worker pod on every reconcile pass (one to two passes per second, measured below)
+- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod on every reconcile pass (at least one pass per second, measured below)
 
 ### What happened
 
-During the base copy of a live migration (observed 2026-08-09), an index-creation worker died on SQLITE_BUSY while the only other catalog users were the periodic sentinel reads. The clone supervisor then tore the run down. Log excerpt shape (JSON logging, fields abbreviated):
+Two failures with the same error, at two points in a run.
+
+The first was during the base copy of a live migration (2026-08-09): an index-creation worker died on `[SQLite 5: database is locked]` while the only other catalog users were the operator's periodic sentinel commands, and the clone supervisor tore the run down with it. Log excerpt shape (JSON logging, fields abbreviated):
 
 ```
 {"pid":123,"error_severity":"ERROR","message":"[SQLite 5: database is locked]"}
@@ -93,11 +95,9 @@ During the base copy of a live migration (observed 2026-08-09), an index-creatio
 {"pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}
 ```
 
-### The same lock after the drain (2026-08-30)
+That one is a signature match, not a traced failure: same error, same conditions, and we have not traced a cursor-write on the index path. The rest of this entry is the second site, which is traced.
 
-We mitigated the first occurrence on our side, by not opening the catalog while the base copy runs.
-That closes one end of the window.
-On a later run, both follow migrations of the same e2e suite lost attempts at the other end, where `follow` has reached its endpos and pgcopydb resets the sequences on the target:
+After `follow` reaches its endpos, pgcopydb resets the target's sequences. On 2026-08-30 both follow migrations of the same e2e suite lost attempts there:
 
 ```
 16:08:09.610  follow.c    Follow mode is now done, reached endpos 1/76081A70
@@ -109,7 +109,7 @@ On a later run, both follow migrations of the same e2e suite lost attempts at th
 16:08:15.248  sequences.c  ERROR  Failed to prepare our internal sequence catalogs, see above for details
 ```
 
-`follow.c` had logged "Subprocesses for receive and apply have now all exited" immediately before the sequence step, so pgcopydb's own children were not holding the lock.
+`follow.c` had logged "Subprocesses for receive and apply have now all exited" immediately before the sequence step, so pgcopydb's own children were not committing into the catalog. The operator was.
 The retry died the same way half a minute later, on a different sequence.
 A second run of the same suite cost `e2e-metrics` an attempt at the same step, on `public.invoice_number_seq`, again about five seconds after the step started.
 Only follow migrations are still polled that late in a run, and across both runs only follow migrations lost attempts:
@@ -121,25 +121,40 @@ Only follow migrations are still polled that late in a run, and across both runs
 | e2e-follow-auto | yes | 2 | run-1 |
 | e2e-metrics | yes | 2 | run-1 |
 
-Each pass opens the catalog five times: four `stream sentinel get` reads (`--apply`, `--write-lsn`, `--replay-lsn`, `--endpos`) and one `list progress`.
-Those passes are not thirty seconds apart, whatever the operator's configured interval says.
-Sampling one migration's status once per second through its cutover returned a distinct resourceVersion at 16:50:28, :29, :31, :32 and :33, the last of them in the second the worker logged the lock error: one to two reconcile passes per second, so two to four catalog opens per second.
-That is one migration over a five second window, but the cadence is structural rather than a burst.
-The watch carries no predicate, so each status write feeds back as an event that starts the next pass, and the replication lag the operator writes changes on every pass because it is derived from the source's WAL head.
-The sequence reset is the last catalog write of the run and takes about five seconds, which was enough to kill four of the seven attempts those three migrations spent.
+### Root cause
 
-### Root cause (suspected)
+`copydb_prepare_sequence_specs` iterates `s_seq` with an open cursor and calls `catalog_update_sequence_values` from inside the iteration callback, on the same connection. The failing statement in the log above is that write.
 
-`stream sentinel get` opens the same SQLite catalog databases the clone workers write to. With SQLite's default rollback journal and no busy timeout, a writer that hits a reader's lock gets SQLITE_BUSY immediately; pgcopydb treats the failed statement as fatal for that worker, and the clone dies with it. Any external reader on the sanctioned CLI surface (sentinel reads are the documented way to watch a migration) can therefore kill a running clone, with a probability that grows with polling frequency.
+Writing through an open read cursor is a read-to-write upgrade, and SQLite fails the upgrade with `SQLITE_BUSY_SNAPSHOT` (extended code 517) as soon as another connection has committed since the cursor opened. SQLite deliberately does not downgrade that to a retryable `SQLITE_BUSY` while a transaction is already open. Waiting cannot help: the cursor's snapshot is older than the database and stays that way until the cursor closes.
 
-The two failure sites have different victims and different timing: an index build in the middle of the base copy, the sequence catalog write in the last seconds before the run exits.
-Index workers connect at the start of a run and build as tables finish, so a catalog writer can be live anywhere between the first table and the last sequence, and a caller polling the documented read commands has no safe window to aim at.
-At two to four opens per second the reader is not an occasional visitor but a permanent one, and backing the cadence off shrinks the collision probability without ever removing it.
-Quiescing our reads for the duration of the base copy removed the first occurrence and left the second untouched.
+pgcopydb retries regardless. `catalog_sql_step` loops for `maxT = 5` seconds with a 10 to 350ms backoff, so the statement burns five seconds and then fails. That is the entire distance between the sequence step starting and the error, and it is why three separate failures landed at 5.381, 5.224 and 5.237 seconds: the 0.157s spread is the random final sleep, not contention.
+
+The retry loop logs at `log_notice`, so at pgcopydb's default level those five seconds leave no trace. The log shows a step that starts and an error five seconds later with nothing in between, which is a hang as far as anyone reading it can tell.
+
+### Why any client can trigger it, and why pgcopydb's own CLI does
+
+The catalogs are opened in WAL mode. Under WAL a reader cannot block a writer, and a reader does not have to: `SQLITE_BUSY_SNAPSHOT` needs a commit from another connection, not a lock. A reproduction compiled against the vendored SQLite confirms both halves. An external process running `SELECT` in a loop against a writing loop had no effect at all, and a single external `INSERT` failed the writer permanently.
+
+The commits do not have to come from a third-party tool either. Every top-level `pgcopydb` invocation calls `catalog_log_command`, which inserts the command line into `command_log`. So `stream sentinel get` and `list progress`, the documented way to watch a running migration, each commit into that migration's catalog before doing any of their own work.
+
+Our own polling is what supplied the commits here. Each pass runs five of those commands: `stream sentinel get` four times, once each for `--apply`, `--write-lsn`, `--replay-lsn` and `--endpos`, plus one `list progress`.
+Sampling one migration's status once per second through its cutover returned five distinct resourceVersions across the five seconds from 16:50:28 to 16:50:33, the last of them in the second the worker logged the lock error: about one reconcile pass per second, so at least five commits per second into the catalog the worker was iterating.
+That is a floor and not a rate, since sampling once a second cannot resolve two passes inside one second.
+It is also one migration over five seconds, but the cadence is structural rather than a burst: the operator's watch carries no predicate, so each status write feeds back as an event that starts the next pass, and the replication lag it writes changes on every pass because it is derived from the source's WAL head.
+None of that is what makes a caller dangerous, since one commit from any client is enough. It is what makes the collision certain: the cursor only has to outlive a single commit, and at five or more commits a second its snapshot is stale within a couple of hundred milliseconds of opening.
+
+### Why a busy timeout does not fix it
+
+There is no `sqlite3_busy_timeout` call in pgcopydb, and adding one would not help. A busy handler answers `SQLITE_BUSY`, which SQLite raises when a lock is held and may later be released. `SQLITE_BUSY_SNAPSHOT` is the other case: nothing is holding anything, the transaction's snapshot is simply older than the database, and no amount of waiting makes an old snapshot current. Raising `maxT` in `catalog_sql_step` has the same problem and only fails later.
 
 ### Suggested fix
 
-Set `PRAGMA busy_timeout` on catalog connections so writers wait out short reader locks instead of failing, or open the catalogs in WAL journal mode (`PRAGMA journal_mode=WAL`) so readers stop blocking writers entirely. Read-only commands could also open the catalog files read-only.
+Collect the sequence rows, close the cursor, then apply the updates. Any shape works as long as the write is not issued while the read cursor over the same connection is open.
+
+Two smaller things worth doing on the same path:
+
+- Log the retry loop at a level users see. Five seconds of invisible retrying reads as a hang, and it is the only evidence that anything was retried at all.
+- Surface the extended result code. `[SQLite 5: database is locked]` sends a reader hunting for lock contention, which is the wrong bug class; `SQLITE_BUSY_SNAPSHOT` names the actual condition.
 
 ## Process-group termination on clone failure leaves the streaming receive child running, keeping the container alive indefinitely
 
@@ -152,7 +167,7 @@ Status: draft, not filed.
 
 ### What happened
 
-A clone worker died (see the SQLITE_BUSY draft above), the supervisor reported it, and pid 1 terminated the process group:
+A clone worker died (see the catalog-lock draft above), the supervisor reported it, and pid 1 terminated the process group:
 
 ```
 {"pid":1,"error_severity":"ERROR","message":"clone process 10 has terminated [6]"}
