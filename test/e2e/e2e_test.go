@@ -973,7 +973,7 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			// is the one place that decides where the workers land and what
 			// the scheduler thinks they cost.
 			Runner: v1beta1.RunnerSpec{
-				Resources: workerResources("500m", "1Gi"),
+				Resources: workerResources(fixtureCPU, fixtureMemory),
 				Affinity:  fixtureAntiAffinity(),
 			},
 		},
