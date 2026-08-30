@@ -542,9 +542,9 @@ func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta
 // the logs were unreadable and there is nothing to detect. Acting only once
 // the marker has stood for zombieGrace keeps an ordinary failure shutdown in
 // progress (marker just logged, container about to exit, Job about to fail on
-// its own) from being misread as a zombie. Clock skew
-// between the runtime's stamp and this process only shifts the grace by
-// seconds either way and converges on the next poll. handled=true ends the
+// its own) from being misread as a zombie. Clock skew between the runtime's
+// stamp and this process only shifts the grace by seconds either way and
+// converges on the next poll. handled=true ends the
 // pass here: confirm on the next poll, or pod deleted.
 func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job, raw []byte) (ctrl.Result, bool, error) {
 	if !followEnabled(m) || len(raw) == 0 {

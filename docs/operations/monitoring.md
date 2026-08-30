@@ -10,7 +10,9 @@ With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` is the whole
 The scraping ServiceAccount additionally needs `get` on the `/metrics` nonResourceURL; kube-prometheus-stack already grants that to its Prometheus, and the 401/403/500 rows in [Troubleshooting](../troubleshooting.md) map the failure modes.
 
 The ServiceMonitor sets `honorLabels: true`, so the `namespace` and `name` labels on migration metrics stay the Migration's own instead of being renamed to `exported_namespace` by the scrape.
-Optional values tune the rest: `metrics.serviceMonitor.additionalLabels` (for a Prometheus that selects monitors by label), `interval`, `scrapeTimeout`, `relabelings`, and `metricRelabelings`.
+The chart scrapes every 10 seconds, matching the operator's reconcile poll: the gauges only move on a poll, so a slower scrape reads the same sample twice and misses the one in between.
+Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by whatever you set.
+The other values tune the rest: `metrics.serviceMonitor.additionalLabels` (for a Prometheus that selects monitors by label), `scrapeTimeout`, `relabelings`, and `metricRelabelings`.
 
 ## Metric reference
 
@@ -63,6 +65,9 @@ The chart ships three dashboards, linked to each other through their shared `pgc
   Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
+
+All three auto-refresh every 10 seconds, the same cadence as the poll and the scrape, so a change reaches the screen in roughly one to two of those.
+That is a saved default, not a policy: Grafana's own refresh picker overrides it for your session.
 
 ![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)
 

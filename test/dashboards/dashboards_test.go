@@ -95,6 +95,12 @@ func TestDashboardIdentity(t *testing.T) {
 		if d.SchemaVersion != 39 {
 			t.Errorf("%s: schemaVersion %d, want 39", file, d.SchemaVersion)
 		}
+		// The browser is the last of three intervals standing between a gauge
+		// moving and a human seeing it, and the only one shipped per file.
+		// All three are 10s; a dashboard left slower hides a live operator.
+		if d.Refresh != "10s" {
+			t.Errorf("%s: refresh %q, want 10s to match the poll and the scrape", file, d.Refresh)
+		}
 		if !strings.HasPrefix(d.Title, "pgcopydb / ") {
 			t.Errorf("%s: title %q lacks the pgcopydb / prefix", file, d.Title)
 		}
