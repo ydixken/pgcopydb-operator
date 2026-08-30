@@ -78,7 +78,15 @@ func TestGateScript(t *testing.T) {
 	p := NewFromExec(&fakeExec{}, []string{patchedVersion, "0.19"})
 	s := p.GateScript()
 	for _, want := range []string{
-		"0.18.2.gea87951|0.19)",
+		// The pattern list opens with "(", and that is asserted on the text
+		// rather than by parsing the script, because the shells that reject
+		// the bare form are not the ones a CI runner has: bash 3.2 refuses
+		// it, bash 4.0 and everything after parse it, and so does dash
+		// (measured). A parse check would therefore pass on a tree that has
+		// the bug, which is the one thing this test exists to prevent. The
+		// verify Job embeds this script inside $( ), where the bare form is
+		// ambiguous, so the leading "(" is the property, not the parse.
+		"\n(0.18.2.gea87951|0.19) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {

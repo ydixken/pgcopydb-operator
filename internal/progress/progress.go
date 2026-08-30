@@ -84,16 +84,23 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 // so the gate cannot drift between the two callers.
 //
 // An empty allowlist renders nothing at all, which is the same "do not even
-// ask" the poll itself takes: `case "$v" in` with no pattern is a shell
-// syntax error, and a caller embedding this in a larger script carries it.
+// ask" the poll itself takes. Rendering the case statement with no pattern at
+// all is a syntax error in dash, which is what the runner image links /bin/sh
+// to (measured on the shipped image), so a caller embedding this in a larger
+// script would have had the shell refuse the whole thing.
 func (p *Poller) GateScript() string {
 	if len(p.allowed) == 0 {
 		return ""
 	}
-	// The pattern list opens with "(", which POSIX allows and which every
-	// caller needs: without it a shell reading this inside $( ) can take the
-	// pattern's own ")" for the end of the substitution. dash does not, bash
-	// does, and the verify Job embeds this script (found by sh -n).
+	// The pattern list opens with "(", the unambiguous POSIX form, because
+	// the verify Job embeds this script inside $( ), where a shell may read
+	// the pattern's own ")" as the end of the substitution. Shells disagree
+	// about whether they do: bash 3.2 refuses the bare form, bash 4.0 and
+	// later accept it, dash accepts it (measured across 3.2, 4.0, 4.4, 5.1,
+	// 5.3 and the shipped runner image). Nothing we ship runs a shell that
+	// refuses it, so this is portability rather than a live bug, and the
+	// reason to write it this way is that the form which needs no such
+	// survey is free.
 	return `v=$(pgcopydb --version | head -n 1)
 v=${v#` + versionPrefix + `}
 case "$v" in

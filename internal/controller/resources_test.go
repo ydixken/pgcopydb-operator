@@ -206,7 +206,13 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 // ride as a passenger: printed before the verdict, gated on the version
 // allowlist, and unable to fail the Job whatever the gate does.
 func TestBuildVerifyJob_CloneCounters(t *testing.T) {
-	const gate = "case \"$v\" in\n0.18.2.gea87951) pgcopydb list progress --json --dir /work/pgcopydb ;;\nesac\n"
+	// The real renderer, so the assembled script is asserted as it ships: the
+	// counters block wraps this in $( ), where the pattern list needs its
+	// leading "(" (see TestGateScript).
+	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.2.gea87951)") {
+		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
+	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
 	if err != nil {
 		t.Fatal(err)
@@ -238,18 +244,20 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	}
 }
 
-// TestJobScripts_ShellValid parses every script the operator ships into a
-// Job. A script that does not parse does not half-run: the shell refuses the
-// file, the Job exits non-zero, and for the verify Job that reads as a
-// refuted drain, which fails the Migration. So the counters block, a
-// reporting nicety, could fail a cutover by syntax alone.
+// TestJobScripts_ShellValid is a smoke check, and only that: every script the
+// operator ships into a Job parses under whatever shells this machine has. It
+// earns its place because a script that does not parse does not half-run (the
+// shell refuses the file, the Job exits non-zero, and for the verify Job that
+// reads as a refuted drain, which fails the Migration), and because an empty
+// progress allowlist did exactly that until it was fixed: dash refuses a case
+// statement with no pattern, and dash is what the runner image links /bin/sh
+// to (measured on the shipped image).
 //
-// Both shells, because they disagree: the runner image links /bin/sh to dash,
-// which reads a case statement nested in $( ) the way it is meant, while bash
-// takes the pattern's ")" for the end of the substitution. A runner image
-// with sh linked to bash would have refused the verify script outright. dash
-// is what ships, bash is the one that catches this class, and neither alone
-// is the test.
+// What it does NOT guard is the leading "(" on the gate's pattern list. Which
+// shells are installed varies by machine, and the disagreement there is
+// between bash versions rather than between shells: only bash 3.2 refuses the
+// bare form, so this passes on a tree that has that bug wherever bash is
+// modern, which includes CI. TestGateScript asserts that one on the text.
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
