@@ -74,7 +74,7 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationFailed` | critical | The phase is `Failed` for 5m |
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
-| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
+| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail is reported as `Finalizing` and leaves the target flat without being stalled. |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 

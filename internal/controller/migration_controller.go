@@ -92,6 +92,7 @@ type LogReader interface {
 type ProgressOps interface {
 	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
 	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
+	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 }
 
 // MigrationReconciler reconciles a Migration object.
@@ -381,6 +382,16 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // runs; finishClone takes their one sample after pgcopydb exits.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	m.Status.Phase = v1beta1.PhaseCloning
+	// The copy and its tail look nothing alike from the outside: the copy runs
+	// every worker flat out, the tail narrows to index builds and a vacuum on
+	// the largest table, during which the target stops growing and a
+	// size-based estimate reads as finished. Report them apart so a watching
+	// human can tell a slow tail from a stall. Unknown leaves Cloning standing.
+	if r.Progress != nil {
+		if _, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name); finalizing {
+			m.Status.Phase = v1beta1.PhaseFinalizing
+		}
+	}
 	follow := followEnabled(m)
 
 	// One log fetch per pass serves both the clone-done and the zombie check.

@@ -71,8 +71,10 @@ groups:
             by nothing in 1h of Cloning
           description: >-
             The clone is active but the target database size is flat. Check
-            the worker pod logs and the source; a phase that writes little,
-            like analyze, also looks like this.
+            the worker pod logs and the source. The index and vacuum tail
+            looks exactly like this and is not a stall, which is why the
+            expression matches Cloning only: the operator reports that tail
+            as Finalizing, so it cannot trip this alert.
   - name: pgcopydb-migration-replication
     rules:
       # Streaming lag. The gauge only exists in follow mode, so this never

@@ -225,7 +225,7 @@ MigrationPhase is a human-facing summary derived from conditions. It exists
 for the printer column only; conditions are authoritative.
 
 _Validation:_
-- Enum: [Pending Validating Cloning Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended]
+- Enum: [Pending Validating Cloning Finalizing Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended]
 
 _Appears in:_
 - [MigrationStatus](#migrationstatus)
@@ -235,6 +235,7 @@ _Appears in:_
 | `Pending` |  |
 | `Validating` |  |
 | `Cloning` |  |
+| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a fifth of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished.<br /> |
 | `Streaming` |  |
 | `CutoverPending` |  |
 | `CuttingOver` |  |
@@ -285,7 +286,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | observedGeneration is the .metadata.generation last reconciled. |  | Optional: \{\} <br /> |
-| `phase` _[MigrationPhase](#migrationphase)_ | phase is a human-facing summary derived from conditions. |  | Enum: [Pending Validating Cloning Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended] <br />Optional: \{\} <br /> |
+| `phase` _[MigrationPhase](#migrationphase)_ | phase is a human-facing summary derived from conditions. |  | Enum: [Pending Validating Cloning Finalizing Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended] <br />Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#condition-v1-meta) array_ | conditions represent the current state of the Migration. |  | Optional: \{\} <br /> |
 | `attempts` _integer_ | attempts is the number of worker Jobs created so far. |  | Optional: \{\} <br /> |
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |

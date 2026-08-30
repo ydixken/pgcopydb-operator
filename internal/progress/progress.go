@@ -128,6 +128,45 @@ t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc 'select pg_database_size(current_databas
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
+// finalizingScript asks the target what pgcopydb is doing there, counting its
+// own backends by the work they are on. pgcopydb names its connections after
+// that work, "pgcopydb[54] copy worker" against "pgcopydb[32] VACUUM ANALYZE
+// public.documents", so the name is the primary signal and the statement text
+// only a fallback. Both tests are case insensitive on purpose: pgcopydb emits
+// the copy statement lowercase, which is easy to match wrongly and gives a
+// confident zero when four copies are running.
+//
+// psql against the target touches no SQLite catalog, so it is safe while the
+// clone runs. Reading `list progress` is not, which is why this exists.
+const finalizingScript = `psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select
+  count(*) filter (where application_name ilike '%copy worker%' or query ilike 'copy %') || ' ' ||
+  count(*) filter (where application_name not ilike '%copy worker%' and query not ilike 'copy %')
+from pg_stat_activity
+where application_name like 'pgcopydb%' and state = 'active'" || echo
+`
+
+// CloneStage reports whether the worker is still copying data or has moved on
+// to the tail: index builds, constraints and vacuum. Unknown (both false) when
+// there is no pod, the query failed, or pgcopydb holds no active backend on
+// the target, since an empty answer must not be read as either state.
+func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool) {
+	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
+	if err != nil || pod == "" {
+		return false, false
+	}
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + finalizingScript})
+	if err != nil {
+		return false, false
+	}
+	var nCopy, nOther int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &nCopy, &nOther); err != nil {
+		return false, false
+	}
+	// Only once no copy worker is left is the data across. A single remaining
+	// backend is the normal shape of the tail, not a sign of trouble.
+	return nCopy > 0, nCopy == 0 && nOther > 0
+}
+
 // DatabaseSizes samples both databases' sizes from the Job's running pod.
 // No running pod means (nil, nil, nil); a side whose query failed stays nil.
 func (p *Poller) DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error) {

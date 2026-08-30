@@ -46,6 +46,16 @@ type fakeProgress struct {
 	sizesErr  error
 	cpCalls   int
 	sizeCalls int
+
+	copying, finalizing bool
+	stageCalls          int
+}
+
+func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stageCalls++
+	return f.copying, f.finalizing
 }
 
 func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.CloneProgress, error) {
@@ -300,5 +310,34 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, found = gaugeValue("pgcopydb_migration_attempts", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+})
+
+// The copy and its tail are reported apart because they behave differently: a
+// copy runs every worker, the tail narrows to index builds and a vacuum on the
+// largest table, and during it the target stops growing so any size-derived
+// estimate reads as finished. Unknown must leave Cloning standing rather than
+// guessing, since an unreadable probe is not evidence of either state.
+var _ = Describe("Clone stage", func() {
+	stage := func(copying, finalizing bool) v1beta1.MigrationPhase {
+		f := &fakeProgress{copying: copying, finalizing: finalizing}
+		phase := v1beta1.PhaseCloning
+		if _, fin := f.CloneStage(context.Background(), "ns", "job"); fin {
+			phase = v1beta1.PhaseFinalizing
+		}
+		return phase
+	}
+
+	It("stays Cloning while copy workers are busy", func() {
+		Expect(stage(true, false)).To(Equal(v1beta1.PhaseCloning))
+	})
+
+	It("reports Finalizing once only the tail is left", func() {
+		Expect(stage(false, true)).To(Equal(v1beta1.PhaseFinalizing))
+	})
+
+	It("stays Cloning when the probe knows nothing", func() {
+		Expect(stage(false, false)).To(Equal(v1beta1.PhaseCloning),
+			"an unreadable probe must not be read as either state")
 	})
 })

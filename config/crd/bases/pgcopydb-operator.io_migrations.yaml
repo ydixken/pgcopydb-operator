@@ -2069,6 +2069,7 @@ spec:
                 - Pending
                 - Validating
                 - Cloning
+                - Finalizing
                 - Streaming
                 - CutoverPending
                 - CuttingOver
@@ -4190,6 +4191,7 @@ spec:
                 - Pending
                 - Validating
                 - Cloning
+                - Finalizing
                 - Streaming
                 - CutoverPending
                 - CuttingOver
