@@ -111,7 +111,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "unknown",
+          "noValue": "Unknown",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -146,7 +146,7 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Scrape targets up",
+      "title": "Scrape Targets Up",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -214,7 +214,7 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Leader elected",
+      "title": "Leader Elected",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -242,18 +242,18 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "unknown",
+          "noValue": "Unknown",
           "mappings": [
             {
               "type": "value",
               "options": {
                 "1": {
-                  "text": "elected",
+                  "text": "Elected",
                   "color": "green",
                   "index": 0
                 },
                 "0": {
-                  "text": "none",
+                  "text": "None",
                   "color": "red",
                   "index": 1
                 }
@@ -306,7 +306,7 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Reconcile rate",
+      "title": "Reconcile Rate",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -367,7 +367,7 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Reconcile errors",
+      "title": "Reconcile Errors",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -386,7 +386,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "errors/s"
+          "legendFormat": "Errors/s"
         }
       ],
       "fieldConfig": {
@@ -428,7 +428,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Reconcile duration",
+      "title": "Reconcile Duration",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -447,7 +447,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "p50"
+          "legendFormat": "P50"
         },
         {
           "refId": "B",
@@ -456,7 +456,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "p90"
+          "legendFormat": "P90"
         },
         {
           "refId": "C",
@@ -465,7 +465,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "p99"
+          "legendFormat": "P99"
         }
       ],
       "fieldConfig": {
@@ -527,7 +527,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "active"
+          "legendFormat": "Active"
         },
         {
           "refId": "B",
@@ -536,7 +536,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "max"
+          "legendFormat": "Max"
         }
       ],
       "fieldConfig": {
@@ -591,7 +591,7 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Queue depth",
+      "title": "Queue Depth",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -610,7 +610,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "depth"
+          "legendFormat": "Depth"
         }
       ],
       "fieldConfig": {
@@ -653,7 +653,7 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Queue wait p99",
+      "title": "Queue Wait P99",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -672,7 +672,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "p99"
+          "legendFormat": "P99"
         }
       ],
       "fieldConfig": {
@@ -714,7 +714,7 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Work duration p99",
+      "title": "Work Duration P99",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -733,7 +733,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "p99"
+          "legendFormat": "P99"
         }
       ],
       "fieldConfig": {
@@ -775,7 +775,7 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Requeue rate",
+      "title": "Requeue Rate",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -794,7 +794,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "retries/s"
+          "legendFormat": "Retries/s"
         }
       ],
       "fieldConfig": {
@@ -929,7 +929,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "rss {{pod}}"
+          "legendFormat": "RSS {{pod}}"
         },
         {
           "refId": "B",
@@ -938,7 +938,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "heap {{pod}}"
+          "legendFormat": "Heap {{pod}}"
         }
       ],
       "fieldConfig": {
@@ -1041,7 +1041,7 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "Open file descriptors",
+      "title": "Open File Descriptors",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

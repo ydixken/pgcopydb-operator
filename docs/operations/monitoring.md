@@ -99,6 +99,6 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
   The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.
 - The planned clone bytes come from pgcopydb's table-size statistics.
   The copied/planned ratio stays a few percent short of 100 by construction: a relation's on-disk size carries page and tuple headers, alignment padding and free space that a COPY stream does not move.
-- Copy throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
+- Copy Throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
-- On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `n/a` for them and the size-based panels keep working.
+- On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `N/A` for them and the size-based panels keep working.

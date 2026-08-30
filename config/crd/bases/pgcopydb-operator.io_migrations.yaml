@@ -2133,6 +2133,32 @@ spec:
               startedAt:
                 format: date-time
                 type: string
+              verification:
+                description: |-
+                  verification reports each requested compare check separately, because
+                  the Verified condition collapses them and its reason names only the
+                  first mismatch. Re-derived from the compare Jobs every reconcile.
+                items:
+                  description: VerificationResult is one compare check's outcome.
+                  properties:
+                    check:
+                      description: 'check is the pgcopydb compare subcommand: schema
+                        or data.'
+                      enum:
+                      - schema
+                      - data
+                      type: string
+                    passed:
+                      description: passed is false when that compare reported differences.
+                      type: boolean
+                  required:
+                  - check
+                  - passed
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - check
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec
@@ -4255,6 +4281,32 @@ spec:
               startedAt:
                 format: date-time
                 type: string
+              verification:
+                description: |-
+                  verification reports each requested compare check separately, because
+                  the Verified condition collapses them and its reason names only the
+                  first mismatch. Re-derived from the compare Jobs every reconcile.
+                items:
+                  description: VerificationResult is one compare check's outcome.
+                  properties:
+                    check:
+                      description: 'check is the pgcopydb compare subcommand: schema
+                        or data.'
+                      enum:
+                      - schema
+                      - data
+                      type: string
+                    passed:
+                      description: passed is false when that compare reported differences.
+                      type: boolean
+                  required:
+                  - check
+                  - passed
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - check
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

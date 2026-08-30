@@ -130,9 +130,9 @@ expect_match '^  name: rel-pgcopydb-operator-operator-health$' "$@"
 expect_match '^  namespace: ns$' "$@"
 expect_match '^    grafana_dashboard: "1"$' "$@"
 expect_match '^    grafana_folder: "pgcopydb"$' "$@"
-expect_match '"title": "Phase timeline"' "$@"
-expect_match '"title": "Migrations by phase"' "$@"
-expect_match '"title": "Reconcile rate"' "$@"
+expect_match '"title": "Phase Timeline"' "$@"
+expect_match '"title": "Migrations By Phase"' "$@"
+expect_match '"title": "Reconcile Rate"' "$@"
 render "$@"
 cms=$(printf '%s\n' "$out" | grep -c '^kind: ConfigMap$' || true)
 labels=$(printf '%s\n' "$out" | grep -c '^    grafana_dashboard: "1"$' || true)

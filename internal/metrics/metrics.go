@@ -79,6 +79,10 @@ var (
 	verified = gauge("pgcopydb_migration_verified",
 		"1 when pgcopydb compare verification passed, 0 on mismatch (absent before a result).")
 
+	verifiedCheck = gauge("pgcopydb_migration_verification_check",
+		"1 when that pgcopydb compare check passed, 0 on mismatch (absent until it has run).",
+		"check")
+
 	sourceDatabaseSizeBytes = gauge("pgcopydb_migration_source_database_size_bytes",
 		"Source database size in bytes, sampled from the worker pod.")
 
@@ -178,6 +182,16 @@ func Record(m *v1beta1.Migration) {
 		verified.WithLabelValues(m.Namespace, m.Name).Set(1)
 	default:
 		verified.WithLabelValues(m.Namespace, m.Name).Set(0)
+	}
+	// Per check, because the condition collapses them and its reason names
+	// only the first mismatch. Absent until a check has actually run.
+	verifiedCheck.DeletePartialMatch(prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name})
+	for _, r := range m.Status.Verification {
+		v := 0.0
+		if r.Passed {
+			v = 1
+		}
+		verifiedCheck.WithLabelValues(m.Namespace, m.Name, r.Check).Set(v)
 	}
 }
 

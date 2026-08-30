@@ -144,6 +144,9 @@ func loadMigration(m *v1beta1.Migration) {
 	m.Status.StartedAt = &start
 	m.Status.CompletedAt = &done
 	setVerified(m, metav1.ConditionTrue)
+	// One check, not both: TestForget asserts a single series per vec for the
+	// surviving CR, and this gauge carries one series per check.
+	m.Status.Verification = []v1beta1.VerificationResult{{Check: "schema", Passed: true}}
 }
 
 func TestForget(t *testing.T) {

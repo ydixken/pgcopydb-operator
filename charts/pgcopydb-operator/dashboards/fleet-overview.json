@@ -343,7 +343,7 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Total lag",
+      "title": "Total Lag",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -372,7 +372,7 @@
             "mode": "thresholds"
           },
           "unit": "bytes",
-          "noValue": "none",
+          "noValue": "None",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -406,7 +406,7 @@
     {
       "id": 7,
       "type": "stat",
-      "title": "Copy throughput",
+      "title": "Copy Throughput",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -435,7 +435,7 @@
             "mode": "thresholds"
           },
           "unit": "binBps",
-          "noValue": "idle",
+          "noValue": "Idle",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -469,7 +469,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Migrations by phase",
+      "title": "Migrations By Phase",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -543,7 +543,7 @@
     {
       "id": 10,
       "type": "table",
-      "title": "All migrations",
+      "title": "All Migrations",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -755,7 +755,7 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Replication lag by migration",
+      "title": "Replication Lag By Migration",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -816,7 +816,7 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Copy throughput by migration",
+      "title": "Copy Throughput By Migration",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -877,7 +877,7 @@
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Attempt churn (30m)",
+      "title": "Attempt Churn (30m)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
