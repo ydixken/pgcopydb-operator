@@ -113,16 +113,19 @@ The second is the sequence reset, and it is traced. After `follow` reaches its e
 `follow.c` had logged "Subprocesses for receive and apply have now all exited" immediately before the sequence step, so pgcopydb's own children were not committing into the catalog. The operator was.
 The retry died the same way half a minute later, on a different sequence.
 A second run of the same suite cost `e2e-metrics` an attempt at the same step, on `public.invoice_number_seq`, again about five seconds after the step started, and cost `e2e-follow-manual` the same two attempts it had lost in the first run.
-Only follow migrations are still polled that late in a run, and across both runs only follow migrations lost attempts:
+
+The failure needs two things at once: an attempt that reaches the post-drain sequence reset, and another connection committing while that attempt's cursor is open. Every attempt with both died there.
 
 | migration | suite run | follow | attempts | attempts that logged `database is locked` |
 |---|---|---|---|---|
-| nine clone-only migrations | both | no | 1 each | none |
 | e2e-follow-manual | first | yes | 3 | 1 and 2 |
 | e2e-follow-auto | first | yes | 2 | 1 |
+| e2e-follow-del | first | yes | 1 | none |
 | e2e-metrics | second | yes | 2 | 1 |
 | e2e-follow-manual | second | yes | 3 | 1 and 2 |
 
+`e2e-follow-del` is the control for the first condition. Its spec deletes the Migration mid-stream, before any cutover, so it never drains and never reaches the sequence reset: same mode as the others, polled the same way, no failure.
+The clone-only migrations are the control for the second. The operator ran no catalog commands against those, so nothing was committing alongside their workers, and none of them logged the error in either run.
 `e2e-follow-manual` is listed twice on purpose: the same migration lost the same two attempts at the same step in two separate runs, which says more than the total does.
 
 ### Root cause
