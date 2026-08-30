@@ -44,6 +44,18 @@ import (
 // metricsMigration is the follow Migration the metrics specs drive.
 const metricsMigration = "e2e-metrics"
 
+// The counters a follow migration gets only from the verify Job after cutover.
+// Both specs below name them through these constants: spelled twice, a typo in
+// the absence list would pass vacuously while the presence list caught nothing.
+const (
+	mCloneCopied  = "pgcopydb_migration_clone_copied_bytes"
+	mClonePlanned = "pgcopydb_migration_clone_planned_bytes"
+	mTablesDone   = "pgcopydb_migration_tables_done"
+	mTablesTotal  = "pgcopydb_migration_tables_total"
+)
+
+var cloneCounterMetrics = []string{mCloneCopied, mClonePlanned, mTablesDone, mTablesTotal}
+
 // promLocalPort is the local end of the suite-spawned port-forward; high and
 // odd so it stays clear of a developer's own forwards.
 const promLocalPort = "19090"
@@ -312,10 +324,11 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		// Absence is the assertion here. Nothing may read pgcopydb's catalogs
-		// from a live worker, so a follow migration's counters arrive only with
-		// the verify Job after cutover, which the terminal spec asserts. The
-		// anchors must answer at the same instant, or an empty result would
-		// equally mean a typo'd name or a Prometheus that is not scraping.
+		// from a live worker, so these counters arrive only with the verify Job
+		// after cutover, which the terminal spec asserts. The anchors prove
+		// this migration's series are reaching Prometheus at the same instant,
+		// so an empty result below is neither a typo nor a dead scrape; the
+		// waitPhase above is what proves a worker is running.
 		By("asserting the clone counters stay absent while a worker is live")
 		Eventually(func(g Gomega) {
 			g.Expect(promVector(g, e2eSeries("pgcopydb_migration_phase")+" == 1")).To(HaveLen(1),
@@ -327,12 +340,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 				g.Expect(promVector(g, e2eSeries(m))).To(HaveLen(1),
 					"anchor: %s must answer, or the absences below prove nothing", m)
 			}
-			for _, m := range []string{
-				"pgcopydb_migration_clone_copied_bytes",
-				"pgcopydb_migration_clone_planned_bytes",
-				"pgcopydb_migration_tables_done",
-				"pgcopydb_migration_tables_total",
-			} {
+			for _, m := range cloneCounterMetrics {
 				g.Expect(promVector(g, e2eSeries(m))).To(BeEmpty(),
 					"%s has a series mid-stream: something is polling a live worker", m)
 			}
@@ -379,8 +387,8 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 
 		By("asserting the clone counters arrived with the drain verification")
 		Eventually(func(g Gomega) {
-			copied := promValue(g, e2eSeries("pgcopydb_migration_clone_copied_bytes"))
-			planned := promValue(g, e2eSeries("pgcopydb_migration_clone_planned_bytes"))
+			copied := promValue(g, e2eSeries(mCloneCopied))
+			planned := promValue(g, e2eSeries(mClonePlanned))
 			g.Expect(copied).To(BeNumerically(">", 0))
 			g.Expect(planned).To(BeNumerically(">", 0))
 			// planned is pgcopydb's table-size estimate and the copy routinely
@@ -388,8 +396,8 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			// a generous sanity bound is stable.
 			g.Expect(copied).To(BeNumerically("<", 3*planned),
 				"copied bytes out of all proportion to the planned estimate")
-			done := promValue(g, e2eSeries("pgcopydb_migration_tables_done"))
-			total := promValue(g, e2eSeries("pgcopydb_migration_tables_total"))
+			done := promValue(g, e2eSeries(mTablesDone))
+			total := promValue(g, e2eSeries(mTablesTotal))
 			g.Expect(total).To(BeNumerically(">", 0))
 			g.Expect(done).To(BeNumerically("<=", total))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())

@@ -49,7 +49,8 @@ The "Exists" column is the contract for when a series is present:
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
-Receive lag reads a little high wherever `write` fell back to the slot's confirmed flush position, which is one confirmation behind the walsender.
+Receive lag can be off in either direction.
+Where `write` fell back to the slot's confirmed flush position it reads high by one confirmation, and where a pass carried the source position because the target did not answer, `write` stays fresh against a stale head, so on a busy source the same figure reads low or briefly negative.
 Apply backlog is no longer sign-constrained either: `write` is a source-side reading and `replay` is the target's origin, so the two come from different databases and nothing orders them the way it did when both came from the sentinel.
 We have not seen it read negative; if the Replication Lag Split panel ever shows that, read it as the two readings crossing, not as data moving backwards.
 

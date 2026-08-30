@@ -154,6 +154,32 @@ tests:
                 writes them. Sustained lag delays cutover and retains WAL on
                 the source.
 
+  # A Manual cutover parks in CutoverPending until a human approves, sometimes
+  # for hours, which is when a growing lag is most worth a page. The other arm
+  # of the phase matcher, unexercised until this case existed.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="waiting", phase="CutoverPending"}'
+        values: "1x20"
+      - series: 'pgcopydb_migration_replication_lag_bytes{namespace="default", name="waiting"}'
+        values: "100000000x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PgcopydbMigrationReplicationLagHigh
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: waiting
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Migration default/waiting is more than 64Mi behind the source
+                for 10m
+              description: >-
+                The target is not applying changes as fast as the source
+                writes them. Sustained lag delays cutover and retains WAL on
+                the source.
+
   # The base copy: replication status is sampled from the first pass now, so a
   # lagging Cloning migration has a lag gauge and must still stay quiet. There
   # is nothing to act on before the stream is the thing running.
