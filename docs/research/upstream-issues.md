@@ -93,9 +93,42 @@ During the base copy of a live migration (observed 2026-08-09), an index-creatio
 {"pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}
 ```
 
+### Second occurrence: the sequence reset after the drain (2026-08-30)
+
+We mitigated the first occurrence on our side, by not opening the catalog while the base copy runs.
+That closes one end of the window.
+On a later run, both follow migrations of the same e2e suite lost attempts to the same lock at the other end, where `follow` has reached its endpos and pgcopydb resets the sequences on the target:
+
+```
+16:08:09.610  follow.c    Follow mode is now done, reached endpos 1/76081A70
+16:08:09.866  copydb_schema.c  A previous run has run through completion
+16:08:09.867  sequences.c  Reset sequences values on the target database
+16:08:09.867  sequences.c  Fetching information for 5 sequences
+16:08:15.248  catalog.c   ERROR  Failed to execute statement: update s_seq set last_value = $1, isCalled = $2 where nspname = $3 and relname = $4
+16:08:15.248  catalog.c   ERROR  [SQLite 5: database is locked]: database is locked
+16:08:15.248  sequences.c  ERROR  Failed to prepare our internal sequence catalogs, see above for details
+```
+
+`follow.c` had logged "Subprocesses for receive and apply have now all exited" immediately before the sequence step, so pgcopydb's own children were not holding the lock.
+The retry died the same way half a minute later, on a different sequence.
+Only follow migrations were still being polled at that point in a run, and only follow migrations lost attempts:
+
+| migration | follow | attempts | `database is locked` |
+|---|---|---|---|
+| e2e-fresh, reclone, uri, details, filters, verified | no | 1 each | none |
+| e2e-follow-manual | yes | 3 | run-1, run-2 |
+| e2e-follow-auto | yes | 2 | run-1 |
+
+Each 30-second pass opened the catalog five times: four `stream sentinel get` reads (`--apply`, `--write-lsn`, `--replay-lsn`, `--endpos`) and one `list progress`.
+The sequence reset is the last catalog write of the run and takes a few seconds, which was enough for a poll to land in it on three of the five attempts those two migrations spent.
+
 ### Root cause (suspected)
 
 `stream sentinel get` opens the same SQLite catalog databases the clone workers write to. With SQLite's default rollback journal and no busy timeout, a writer that hits a reader's lock gets SQLITE_BUSY immediately; pgcopydb treats the failed statement as fatal for that worker, and the clone dies with it. Any external reader on the sanctioned CLI surface (sentinel reads are the documented way to watch a migration) can therefore kill a running clone, with a probability that grows with polling frequency.
+
+The two occurrences have different victims and different timing: an index build in the middle of the base copy, the sequence catalog write in the last seconds before the run exits.
+Index workers connect at the start of a run and build as tables finish, so a catalog writer can be live anywhere between the first table and the last sequence, and a caller polling the documented read commands has no safe window to aim at.
+Quiescing our reads for the duration of the base copy removed the first occurrence and left the second untouched.
 
 ### Suggested fix
 
