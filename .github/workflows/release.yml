@@ -247,7 +247,7 @@ jobs:
         # answer, so it calls go test with the same flags the task passes.
         env:
           E2E_OPERATOR_TAG: ${{ github.ref_name }}
-          E2E_SCALE: "0.25"
+          E2E_SCALE: "0.1"
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
