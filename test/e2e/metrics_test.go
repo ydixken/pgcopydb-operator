@@ -44,6 +44,18 @@ import (
 // metricsMigration is the follow Migration the metrics specs drive.
 const metricsMigration = "e2e-metrics"
 
+// The counters a follow migration gets only from the verify Job after cutover.
+// Both specs below name them through these constants: spelled twice, a typo in
+// the absence list would pass vacuously while the presence list caught nothing.
+const (
+	mCloneCopied  = "pgcopydb_migration_clone_copied_bytes"
+	mClonePlanned = "pgcopydb_migration_clone_planned_bytes"
+	mTablesDone   = "pgcopydb_migration_tables_done"
+	mTablesTotal  = "pgcopydb_migration_tables_total"
+)
+
+var cloneCounterMetrics = []string{mCloneCopied, mClonePlanned, mTablesDone, mTablesTotal}
+
 // promLocalPort is the local end of the suite-spawned port-forward; high and
 // odd so it stays clear of a developer's own forwards.
 const promLocalPort = "19090"
@@ -210,13 +222,6 @@ var emptyOK = map[panelKey]bool{
 	{uid: uidFleet, title: "Failed"}: true,
 	// The suite never leaves a migration suspended.
 	{uid: uidFleet, title: "Suspended"}: true,
-	// endpos reaches status through a sentinel sample taken while the worker
-	// drains; a small drain can finish before the next sample, leaving the
-	// endpos gauge legitimately unset.
-	{uid: uidDetail, title: "Cutover Drain"}: true,
-	// The same endpos gap empties that target here; the panel's other three
-	// targets are asserted directly by the streaming spec.
-	{uid: uidDetail, title: "LSN Positions"}: true,
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
 	{uid: uidOperator, title: "Leader Elected"}: true,
@@ -296,9 +301,6 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		// exempting the Data Verification panel would leave the per-check metric
 		// with no e2e coverage at all.
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-		// Same budget as the streaming specs: 0.18's catalog layer crashes
-		// probabilistically at this scale; retries resume from the work dir.
-		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		By("waiting for the base copy to finish and streaming to start")
@@ -321,25 +323,27 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("asserting byte progress from the gated clone poll")
+		// Absence is the assertion here. Nothing may read pgcopydb's catalogs
+		// from a live worker, so these counters arrive only with the verify Job
+		// after cutover, which the terminal spec asserts. The anchors prove
+		// this migration's series are reaching Prometheus at the same instant,
+		// so an empty result below is neither a typo nor a dead scrape; the
+		// waitPhase above is what proves a worker is running.
+		By("asserting the clone counters stay absent while a worker is live")
 		Eventually(func(g Gomega) {
-			copied := promValue(g, e2eSeries("pgcopydb_migration_clone_copied_bytes"))
-			planned := promValue(g, e2eSeries("pgcopydb_migration_clone_planned_bytes"))
-			g.Expect(copied).To(BeNumerically(">", 0))
-			g.Expect(planned).To(BeNumerically(">", 0))
-			// planned is pgcopydb's table-size estimate and the copy routinely
-			// overshoots it (a gate measured copied at 1.19x planned), so only
-			// a generous sanity bound is stable.
-			g.Expect(copied).To(BeNumerically("<", 3*planned),
-				"copied bytes out of all proportion to the planned estimate")
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
-
-		By("asserting table progress")
-		Eventually(func(g Gomega) {
-			done := promValue(g, e2eSeries("pgcopydb_migration_tables_done"))
-			total := promValue(g, e2eSeries("pgcopydb_migration_tables_total"))
-			g.Expect(total).To(BeNumerically(">", 0))
-			g.Expect(done).To(BeNumerically("<=", total))
+			g.Expect(promVector(g, e2eSeries("pgcopydb_migration_phase")+" == 1")).To(HaveLen(1),
+				"anchor: the phase series must answer, or the absences below prove nothing")
+			for _, m := range []string{
+				"pgcopydb_migration_source_database_size_bytes",
+				"pgcopydb_migration_target_database_size_bytes",
+			} {
+				g.Expect(promVector(g, e2eSeries(m))).To(HaveLen(1),
+					"anchor: %s must answer, or the absences below prove nothing", m)
+			}
+			for _, m := range cloneCounterMetrics {
+				g.Expect(promVector(g, e2eSeries(m))).To(BeEmpty(),
+					"%s has a series mid-stream: something is polling a live worker", m)
+			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("asserting the LSN gauges and the derived lags")
@@ -381,9 +385,27 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_attempts"))).To(BeNumerically(">=", 1))
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
+		By("asserting the clone counters arrived with the drain verification")
+		Eventually(func(g Gomega) {
+			copied := promValue(g, e2eSeries(mCloneCopied))
+			planned := promValue(g, e2eSeries(mClonePlanned))
+			g.Expect(copied).To(BeNumerically(">", 0))
+			g.Expect(planned).To(BeNumerically(">", 0))
+			// planned is pgcopydb's table-size estimate and the copy routinely
+			// overshoots it (a gate measured copied at 1.19x planned), so only
+			// a generous sanity bound is stable.
+			g.Expect(copied).To(BeNumerically("<", 3*planned),
+				"copied bytes out of all proportion to the planned estimate")
+			done := promValue(g, e2eSeries(mTablesDone))
+			total := promValue(g, e2eSeries(mTablesTotal))
+			g.Expect(total).To(BeNumerically(">", 0))
+			g.Expect(done).To(BeNumerically("<=", total))
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
 		By("cross-checking the progress poll landed in status, without Prometheus")
 		m := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}, m)).To(Succeed())
+		expectSingleAttempt(m)
 		Expect(m.Status.Progress).NotTo(BeNil(), "status.progress never populated; the progress poll did not run")
 		Expect(m.Status.Progress.BytesDone).NotTo(BeNil(), "status.progress.bytesDone absent")
 		Expect(m.Status.Progress.BytesDone.Value()).To(BeNumerically(">", 0))

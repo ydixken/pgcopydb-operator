@@ -76,9 +76,17 @@ func TestNewFromExec_DropsInvalidVersions(t *testing.T) {
 
 func TestGateScript(t *testing.T) {
 	p := NewFromExec(&fakeExec{}, []string{patchedVersion, "0.19"})
-	s := p.gateScript()
+	s := p.GateScript()
 	for _, want := range []string{
-		"0.18.2.gea87951|0.19)",
+		// The pattern list opens with "(", and that is asserted on the text
+		// rather than by parsing the script, because the shells that reject
+		// the bare form are not the ones a CI runner has: bash 3.2 refuses
+		// it, bash 4.0 and everything after parse it, and so does dash
+		// (measured). A parse check would therefore pass on a tree that has
+		// the bug, which is the one thing this test exists to prevent. The
+		// verify Job embeds this script inside $( ), where the bare form is
+		// ambiguous, so the leading "(" is the property, not the parse.
+		"\n(0.18.2.gea87951|0.19) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {
@@ -110,8 +118,25 @@ esac
 	return dir
 }
 
+// TestGateScript_Disabled: an empty allowlist renders no script. Rendering
+// the case statement with no pattern would be a syntax error, and the verify
+// Job embeds whatever comes back into a larger script, so "the poll is off"
+// has to mean nothing is emitted rather than something that cannot parse.
+func TestGateScript_Disabled(t *testing.T) {
+	for name, versions := range map[string][]string{
+		"nil":                 nil,
+		"empty":               {},
+		"all entries invalid": {"; rm -rf /", "$(id)"},
+	} {
+		if s := NewFromExec(&fakeExec{}, versions).GateScript(); s != "" {
+			t.Errorf("%s allowlist must render nothing, got:\n%s", name, s)
+		}
+	}
+}
+
 // TestGateScript_UnderSh proves the gate on a real shell: an allowlisted
-// version opens it, any other version produces no output and a zero exit.
+// version opens it, any other version produces no output and a zero exit,
+// and every allowlist shape renders something a shell will accept.
 func TestGateScript_UnderSh(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -122,7 +147,7 @@ func TestGateScript_UnderSh(t *testing.T) {
 		patchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
 		"0.18":         "",
 	} {
-		cmd := exec.Command(sh, "-c", p.gateScript())
+		cmd := exec.Command(sh, "-c", p.GateScript())
 		cmd.Env = append(os.Environ(), "PATH="+stubPgcopydb(t, version)+":"+os.Getenv("PATH"))
 		out, err := cmd.Output()
 		if err != nil {
@@ -130,6 +155,14 @@ func TestGateScript_UnderSh(t *testing.T) {
 		}
 		if string(out) != want {
 			t.Errorf("version %s: output %q, want %q", version, out, want)
+		}
+	}
+	// The disabled gate has to parse too: it is pasted into the verify Job's
+	// script, where a syntax error would be the whole file's problem.
+	for _, versions := range [][]string{nil, {patchedVersion}} {
+		script := NewFromExec(&fakeExec{}, versions).GateScript()
+		if err := exec.Command(sh, "-n", "-c", script).Run(); err != nil {
+			t.Errorf("allowlist %v renders a script sh rejects: %v\n%s", versions, err, script)
 		}
 	}
 }
@@ -176,7 +209,7 @@ func TestCloneProgress_Sample(t *testing.T) {
 	if cp.TablesTotal != 5 || cp.TablesDone != 2 || cp.BytesTotal.Value() != 100 || cp.BytesDone.Value() != 40 {
 		t.Fatalf("bad sample: %+v", cp)
 	}
-	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.gateScript() {
+	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.GateScript() {
 		t.Fatalf("exec argv = %v, want the gate script under sh -c", f.argv)
 	}
 }
@@ -257,9 +290,9 @@ func TestCloneStage(t *testing.T) {
 			finalizing: true,
 		},
 		{
-			// Both counts zero is a worker that holds no active backend on the
-			// target: between statements, or not connected yet. Neither state.
-			name: "no active backends",
+			// Both counts zero is a worker that holds no backend the query
+			// counts: not connected yet, or already gone. Neither state.
+			name: "no counted backends",
 			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
 		},
 		{
@@ -305,5 +338,61 @@ func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
 	}
 	if !strings.Contains(joined, "client_addr = inet_client_addr()") {
 		t.Errorf("probe is not scoped to this worker's own backends: %s", joined)
+	}
+}
+
+// The two counts are asked differently on purpose, so the predicate is pinned
+// by shape rather than by text: on a live worker all four copy workers stayed
+// connected for the whole base copy, and counting only the active ones read as
+// the tail while data was still moving.
+//
+// Both narrowings are pinned by absence, because a narrowing can be spelled
+// any number of ways and only its absence is checkable. The copy count may
+// name state exactly once, in the arm that falls back to the statement text,
+// and the row filter may not name it at all. The edit this guards against is
+// a likely one: anyone acting on a copy worker that lingers connected after
+// its queue drains reaches for exactly such a conjunction.
+func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
+	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
+	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
+	// to fail these checks the same way a lowercase one does.
+	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
+
+	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
+	if !ok {
+		t.Fatalf("probe no longer asks for two counts: %s", flat)
+	}
+	tailCount, afterFrom, ok := strings.Cut(rest, "from pg_stat_activity")
+	if !ok {
+		t.Fatalf("probe no longer reads pg_stat_activity: %s", flat)
+	}
+	// The SQL ends at the psql argument's closing quote; the URI prelude's
+	// own quotes are all behind us by here.
+	where, _, ok := strings.Cut(afterFrom, `"`)
+	if !ok {
+		t.Fatalf("cannot find the end of the probe query: %s", flat)
+	}
+
+	// A copy worker counts while it is connected, so the first arm of the
+	// copy count tests the name and nothing else.
+	primary, _, ok := strings.Cut(copyCount, " or ")
+	if !ok {
+		t.Fatalf("the copy count lost its statement-text fallback: %s", copyCount)
+	}
+	if !strings.Contains(primary, "application_name ilike '%copy worker%'") || strings.Contains(primary, "state") {
+		t.Errorf("copy workers are not counted by connection: %s", primary)
+	}
+	// One mention of state in the whole copy count, the fallback arm's own.
+	// A second one narrows the count however it is parenthesized, including
+	// a conjunction wrapped around every arm at once.
+	if n := strings.Count(copyCount, "state"); n != 1 {
+		t.Errorf("copy count names state %d times, want 1 (the fallback arm alone): %s", n, copyCount)
+	}
+	if !strings.Contains(tailCount, "state = 'active'") {
+		t.Errorf("the tail count dropped its active test: %s", tailCount)
+	}
+	if strings.Contains(where, "state") {
+		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
 	}
 }

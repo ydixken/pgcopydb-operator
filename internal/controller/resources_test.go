@@ -37,6 +37,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
@@ -153,7 +154,7 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 			Follow: &v1beta1.FollowOptions{Enabled: true},
 		},
 	}
-	job, err := buildVerifyJob(m, "img")
+	job, err := buildVerifyJob(m, "img", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +192,103 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 		strings.Count(c.Args[1], "exit 1") != 1 ||
 		strings.Index(c.Args[1], "compare data") > strings.Index(c.Args[1], "exit 1") {
 		t.Fatalf("verify script must refuse only after compare data:\n%s", c.Args[1])
+	}
+	// No poller wired, no counters asked for: the drain script stays exactly
+	// what it was.
+	if strings.Contains(c.Args[1], verifyProgressPrefix) {
+		t.Fatalf("verify script must not ask for counters without a gate:\n%s", c.Args[1])
+	}
+}
+
+// TestBuildVerifyJob_CloneCounters: the copy counters ride along in the
+// verify Job, because it is the only pod that may read them (the worker owns
+// its catalog while it lives, and its pod is gone once it does not). They must
+// ride as a passenger: printed before the verdict, gated on the version
+// allowlist, and unable to fail the Job whatever the gate does.
+func TestBuildVerifyJob_CloneCounters(t *testing.T) {
+	// The real renderer, so the assembled script is asserted as it ships: the
+	// counters block wraps this in $( ), where the pattern list needs its
+	// leading "(" (see TestGateScript).
+	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.2.gea87951)") {
+		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
+	}
+	job, err := buildVerifyJob(passwordMigration(), "img", gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := job.Spec.Template.Spec.Containers[0].Args[1]
+	if !strings.Contains(script, gate) {
+		t.Fatalf("verify script must carry the poller's own gate:\n%s", script)
+	}
+	for _, want := range []string{
+		// set -e off and stderr discarded: a shut gate or a failing command
+		// must leave the drain verdict alone.
+		"set +e",
+		"2>/dev/null",
+		"|| true",
+		verifyProgressPrefix,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("counters block missing %q:\n%s", want, script)
+		}
+	}
+	// Printed before the verdict, so the fast path's exit cannot skip it.
+	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `[ "$gap" -le 8192 ]`) {
+		t.Fatalf("counters must be printed before the drain verdict:\n%s", script)
+	}
+	// The counters are read, never judged: no exit of any kind in the block.
+	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$gap"`)]
+	if strings.Contains(block, "exit ") {
+		t.Fatalf("the counters block must not be able to end the Job:\n%s", block)
+	}
+}
+
+// TestJobScripts_ShellValid is a smoke check, and only that: every script the
+// operator ships into a Job parses under whatever shells this machine has. It
+// earns its place because a script that does not parse does not half-run (the
+// shell refuses the file, the Job exits non-zero, and for the verify Job that
+// reads as a refuted drain, which fails the Migration), and because an empty
+// progress allowlist did exactly that until it was fixed: dash refuses a case
+// statement with no pattern, and dash is what the runner image links /bin/sh
+// to (measured on the shipped image).
+//
+// What it does NOT guard is the leading "(" on the gate's pattern list. Which
+// shells are installed varies by machine, and the disagreement there is
+// between bash versions rather than between shells: only bash 3.2 refuses the
+// bare form, so this passes on a tree that has that bug wherever bash is
+// modern, which includes CI. TestGateScript asserts that one on the text.
+func TestJobScripts_ShellValid(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
+	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
+	scripts := map[string]func() (*batchv1.Job, error){
+		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
+		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+	}
+	shells := []string{}
+	for _, name := range []string{"sh", "dash", "bash"} {
+		if path, err := exec.LookPath(name); err == nil {
+			shells = append(shells, path)
+		}
+	}
+	if len(shells) == 0 {
+		t.Skip("no shell available")
+	}
+	for name, build := range scripts {
+		job, err := build()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, script := range []string{c.Command[2], c.Args[1]} {
+			for _, shell := range shells {
+				if err := exec.Command(shell, "-n", "-c", script).Run(); err != nil {
+					t.Errorf("%s: %s rejects the script: %v\n%s", name, shell, err, script)
+				}
+			}
+		}
 	}
 }
 
@@ -443,7 +541,7 @@ esac
 // script-Job passfile gap: without the prelude, psql in the verify pod cannot
 // authenticate against password-based targets.
 func TestBuildVerifyJob_KeepsPassfilePrelude(t *testing.T) {
-	job, err := buildVerifyJob(passwordMigration(), "img")
+	job, err := buildVerifyJob(passwordMigration(), "img", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +566,7 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	builders := map[string]func() (*batchv1.Job, error){
 		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
 	}

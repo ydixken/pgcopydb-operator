@@ -14,11 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sentinel drives a running follow migration through pgcopydb's own
-// CLI, exec-ed inside the worker pod (same filesystem as the catalogs, the
-// sanctioned access path). Single-value selectors are used instead of
-// `sentinel get --json` because of the known upstream bug where the JSON
-// endpos field carries the startpos value (see docs/research).
+// Package sentinel watches and drives a running follow migration from inside
+// the worker pod. Nothing here execs a pgcopydb command into a live worker
+// except the one that starts a cutover: watching is psql on the source and
+// the target only, because there is no such thing as a read-only pgcopydb
+// command. Every CLI invocation logs its own command line into the worker's
+// SQLite catalog, and that commit invalidates whatever read snapshot the
+// worker holds open. Its next write on that cursor then fails
+// SQLITE_BUSY_SNAPSHOT, which no retry can clear, and the attempt dies (see
+// docs/research/upstream-issues.md).
+// Driving the cutover still goes through the CLI, which owns the sentinel
+// table: one write, once, and there is no other way to ask for it.
 package sentinel
 
 import (
@@ -37,9 +43,12 @@ import (
 // endpos.
 const ZeroLSN = "0/0"
 
-// EndposSet reports whether lsn names a real cutover endpos: non-empty and
-// not the null LSN.
-func EndposSet(lsn string) bool { return lsn != "" && lsn != ZeroLSN }
+// EndposSet reports whether lsn names a real cutover endpos.
+func EndposSet(lsn string) bool { return lsnSet(lsn) }
+
+// lsnSet reports whether lsn names a real position: non-empty and not the
+// null LSN.
+func lsnSet(lsn string) bool { return lsn != "" && lsn != ZeroLSN }
 
 // Client reads and drives the sentinel of one running migration pod.
 type Client struct {
@@ -55,12 +64,12 @@ func (c *Client) inPodSh(ctx context.Context, namespace, pod, script string) ([]
 	return c.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + script})
 }
 
-// State is one sentinel sample plus the source WAL head.
+// State is one replication sample. Endpos is never read from the worker: the
+// operator sets it and keeps it in status.replication.
 type State struct {
-	ApplyEnabled bool
-	WriteLSN     string
-	ReplayLSN    string
-	Endpos       string
+	WriteLSN  string
+	ReplayLSN string
+	Endpos    string
 	// SourceHead is pg_current_wal_flush_lsn() on the source, the reference
 	// for lag: replication is caught up when SourceHead - ReplayLSN is small.
 	SourceHead string
@@ -76,10 +85,63 @@ func (s State) Lag() int64 {
 	return int64(head - replay)
 }
 
-// Read samples the sentinel and the source WAL head from the worker pod.
-// A nil State with nil error means "pod not ready to answer, keep the
-// previous sample" (same contract as progress polling).
-func (c *Client) Read(ctx context.Context, namespace, jobName string) (*State, error) {
+// readScript samples the stream in one exec, from the two databases rather
+// than from the worker's catalogs.
+//
+// write_lsn prefers the walsender's own number but falls back to the slot's
+// confirmed flush position, because PostgreSQL blanks every walsender detail
+// column in pg_stat_replication for a role without pg_read_all_stats, its own
+// row included (verified on 17). The slot row stays readable, and it is the
+// same feedback, one confirmation behind. replay_lsn comes from the target's
+// replication origin, the position the drain verification trusts too (see
+// buildVerifyJob for why the sentinel's own replay_lsn does not mean what its
+// name suggests); the source-side value is the fallback for the window before
+// the origin has applied anything. Both sides are best effort and the script
+// always exits 0: psql reports a SQL error in its exit status, and one side
+// failing must not cost the other side's line.
+func readScript(slot string) string {
+	return `psql "$PGCOPYDB_SOURCE_PGURI" -XAtq -F ' ' ` +
+		`-c "select 'source_head=' || pg_current_wal_flush_lsn()" ` +
+		`-c "select 'write_lsn=' || coalesce(coalesce(r.write_lsn, s.confirmed_flush_lsn)::text, ''), ` +
+		`'source_replay_lsn=' || coalesce(r.replay_lsn::text, '') from pg_replication_slots s ` +
+		`left join pg_stat_replication r on r.pid = s.active_pid where s.slot_name = '` + slot + `'"; ` +
+		`psql "$PGCOPYDB_TARGET_PGURI" -XAtq ` +
+		`-c "select 'replay_lsn=' || coalesce(pg_replication_origin_progress(roname, true)::text, '') ` +
+		`from pg_replication_origin where roname = '` + slot + `'"; exit 0`
+}
+
+// parseSample reads the labelled values out of the script's output. Anything
+// that is not an LSN is ignored, so a missing row, a blank column, and a psql
+// error line all land in the same place: absent.
+func parseSample(out []byte) *State {
+	vals := map[string]string{}
+	for field := range strings.FieldsSeq(string(out)) {
+		k, v, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		if _, err := ParseLSN(v); err != nil {
+			continue
+		}
+		vals[k] = v
+	}
+	if vals["write_lsn"] == "" {
+		// No slot row, so nothing was learned this pass. Reporting the WAL
+		// head alone would blank the LSNs already in status.
+		return nil
+	}
+	st := &State{WriteLSN: vals["write_lsn"], ReplayLSN: vals["replay_lsn"], SourceHead: vals["source_head"]}
+	if st.ReplayLSN == "" {
+		st.ReplayLSN = vals["source_replay_lsn"]
+	}
+	return st
+}
+
+// Read samples the stream of one running follow migration. slotName names
+// both the source slot and the target origin, which the operator keeps
+// identical (see effectiveSlotName). A nil State with a nil error means "no
+// sample, keep the previous one" (same contract as progress polling).
+func (c *Client) Read(ctx context.Context, namespace, jobName, slotName string) (*State, error) {
 	pod, err := c.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil {
 		return nil, err
@@ -87,34 +149,13 @@ func (c *Client) Read(ctx context.Context, namespace, jobName string) (*State, e
 	if pod == "" {
 		return nil, nil
 	}
-	get := func(selector string) (string, error) {
-		out, err := c.inPodSh(ctx, namespace, pod,
-			"pgcopydb stream sentinel get "+selector+" --dir "+pgcopydb.WorkDir)
-		return strings.TrimSpace(string(out)), err
-	}
-	st := &State{}
-	apply, err := get("--apply")
+	out, err := c.inPodSh(ctx, namespace, pod, readScript(slotName))
 	if err != nil {
-		// The sentinel exists only once follow setup ran; not an error.
+		// The pod can refuse an exec while it starts or terminates; the next
+		// pass retries.
 		return nil, nil
 	}
-	st.ApplyEnabled = apply == "enabled"
-	if st.WriteLSN, err = get("--write-lsn"); err != nil {
-		return nil, nil
-	}
-	if st.ReplayLSN, err = get("--replay-lsn"); err != nil {
-		return nil, nil
-	}
-	if st.Endpos, err = get("--endpos"); err != nil {
-		return nil, nil
-	}
-	// The runner env carries the source URI; psql ships in the runner image.
-	head, err := c.inPodSh(ctx, namespace, pod,
-		`psql "$PGCOPYDB_SOURCE_PGURI" -tAc "select pg_current_wal_flush_lsn()"`)
-	if err == nil {
-		st.SourceHead = strings.TrimSpace(string(head))
-	}
-	return st, nil
+	return parseSample(out), nil
 }
 
 // SetEndposCurrent freezes the stream at the source's current flush LSN; the
@@ -159,12 +200,17 @@ func (s *State) ToStatus(slotName string) *v1beta1.ReplicationStatus {
 	if s == nil {
 		return nil
 	}
-	rs := &v1beta1.ReplicationStatus{
-		SlotName:  slotName,
-		WriteLSN:  s.WriteLSN,
-		ReplayLSN: s.ReplayLSN,
+	// An unknown position is absent, never 0/0: the metric contract in
+	// docs/operations/monitoring.md is that a missing value has no sample,
+	// and a null LSN would plot as a real one at the bottom of the graph.
+	rs := &v1beta1.ReplicationStatus{SlotName: slotName}
+	if lsnSet(s.WriteLSN) {
+		rs.WriteLSN = s.WriteLSN
 	}
-	if EndposSet(s.Endpos) {
+	if lsnSet(s.ReplayLSN) {
+		rs.ReplayLSN = s.ReplayLSN
+	}
+	if lsnSet(s.Endpos) {
 		rs.Endpos = s.Endpos
 	}
 	if lag := s.Lag(); lag >= 0 {

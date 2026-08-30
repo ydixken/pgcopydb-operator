@@ -76,14 +76,35 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 	return p
 }
 
-// gateScript reads the pod's pgcopydb version and runs `list progress` only
+// GateScript reads the pod's pgcopydb version and runs `list progress` only
 // inside the case arm the allowlist rendered: any other version matches
-// nothing, prints nothing, and the poll stays shut.
-func (p *Poller) gateScript() string {
+// nothing, prints nothing, and the poll stays shut. Exported because the
+// drain-verification Job asks for the counters the same way, from its own pod
+// once the worker is gone (see buildVerifyJob): one allowlist, one renderer,
+// so the gate cannot drift between the two callers.
+//
+// An empty allowlist renders nothing at all, which is the same "do not even
+// ask" the poll itself takes. Rendering the case statement with no pattern at
+// all is a syntax error in dash, which is what the runner image links /bin/sh
+// to (measured on the shipped image), so a caller embedding this in a larger
+// script would have had the shell refuse the whole thing.
+func (p *Poller) GateScript() string {
+	if len(p.allowed) == 0 {
+		return ""
+	}
+	// The pattern list opens with "(", the unambiguous POSIX form, because
+	// the verify Job embeds this script inside $( ), where a shell may read
+	// the pattern's own ")" as the end of the substitution. Shells disagree
+	// about whether they do: bash 3.2 refuses the bare form, bash 4.0 and
+	// later accept it, dash accepts it (measured across 3.2, 4.0, 4.4, 5.1,
+	// 5.3 and the shipped runner image). Nothing we ship runs a shell that
+	// refuses it, so this is portability rather than a live bug, and the
+	// reason to write it this way is that the form which needs no such
+	// survey is free.
 	return `v=$(pgcopydb --version | head -n 1)
 v=${v#` + versionPrefix + `}
 case "$v" in
-` + strings.Join(p.allowed, "|") + `) pgcopydb list progress --json --dir ` + pgcopydb.WorkDir + ` ;;
+(` + strings.Join(p.allowed, "|") + `) pgcopydb list progress --json --dir ` + pgcopydb.WorkDir + ` ;;
 esac
 `
 }
@@ -103,7 +124,7 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 	if pod == "" {
 		return nil, nil
 	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", p.gateScript()})
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", p.GateScript()})
 	if err != nil {
 		// Catalogs still initializing, or the exec transport hiccuped.
 		return nil, nil
@@ -136,6 +157,11 @@ printf 'source=%s\ntarget=%s\n' "$s" "$t"
 // the copy statement lowercase, which is easy to match wrongly and gives a
 // confident zero when four copies are running.
 //
+// Copy workers count by connection, the tail only while active. Sampled
+// across a whole base copy on a live worker 2026-08-30: four copy workers
+// connected in every sample, zero the instant it ended, while the active
+// count dipped to zero mid-copy and read as the tail.
+//
 // Scoped to this worker's own connections by client_addr. Every worker of one
 // migration runs in one pod and so shares a source address, while a target can
 // be shared: the e2e suite points every migration at one, and without the
@@ -146,17 +172,19 @@ printf 'source=%s\ntarget=%s\n' "$s" "$t"
 // psql against the target touches no SQLite catalog, so it is safe while the
 // clone runs. Reading `list progress` is not, which is why this exists.
 const finalizingScript = `psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select
-  count(*) filter (where application_name ilike '%copy worker%' or query ilike 'copy %') || ' ' ||
-  count(*) filter (where application_name not ilike '%copy worker%' and query not ilike 'copy %')
+  count(*) filter (where application_name ilike '%copy worker%'
+                      or (state = 'active' and query ilike 'copy %')) || ' ' ||
+  count(*) filter (where state = 'active'
+                     and application_name not ilike '%copy worker%'
+                     and query not ilike 'copy %')
 from pg_stat_activity
-where application_name like 'pgcopydb%' and state = 'active'
-  and client_addr = inet_client_addr()" || echo
+where application_name like 'pgcopydb%' and client_addr = inet_client_addr()" || echo
 `
 
 // CloneStage reports whether the worker is still copying data or has moved on
 // to the tail: index builds, constraints and vacuum. Unknown (both false) when
-// there is no pod, the query failed, or pgcopydb holds no active backend on
-// the target, since an empty answer must not be read as either state.
+// there is no pod, the query failed, or pgcopydb holds no backend the query
+// counts, since an empty answer must not be read as either state.
 func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool) {
 	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil || pod == "" {
@@ -170,6 +198,10 @@ func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (cop
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &nCopy, &nOther); err != nil {
 		return false, false
 	}
+	// The counts behind the phase the operator goes on to report, so the next
+	// surprise arrives with evidence rather than a guess.
+	logf.FromContext(ctx).V(1).Info("clone stage sample",
+		"job", jobName, "copyBackends", nCopy, "otherBackends", nOther)
 	// Only once no copy worker is left is the data across. A single remaining
 	// backend is the normal shape of the tail, not a sign of trouble.
 	return nCopy > 0, nCopy == 0 && nOther > 0

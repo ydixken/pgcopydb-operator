@@ -31,18 +31,22 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // pollInterval is how often a running clone is re-checked (Job observation,
-// follow state, and the progress samples; catalog execs are quiesced
-// mid-copy, see observeRunningJob).
+// follow state, and the progress samples). It is the real cadence only
+// because migrationEvents keeps the operator's own status writes from
+// waking it again immediately.
 const pollInterval = 30 * time.Second
 
 const (
@@ -61,6 +65,10 @@ const (
 	// replica-identity audit, or applied grants lose their audit events.
 	// A number only because the log API wants a TailLines value.
 	preflightOkLogTail = 10000
+	// verifyLogTail bounds the log window scanned for the verify Job's copy
+	// counters. Generous because the line is printed before the drain verdict
+	// and a content-path compare can push it far up the log.
+	verifyLogTail = 10000
 	// zombieLogTail bounds the log window scanned for the supervisor-death
 	// marker. Wider than workerLogTail because the surviving streaming child
 	// keeps logging LSN reports after the marker and would push it out of a
@@ -73,6 +81,13 @@ const (
 	// under the events API's 1KiB note limit: the full follow battery is
 	// ~620 bytes and must never truncate out of the audit trail.
 	remediatedNoteLen = 950
+)
+
+// The CloneCompleted=False reasons of a running attempt. Promotion to the
+// second is the latch that lets the phase reach Finalizing (see copySeen).
+const (
+	reasonCloneRunning = "CloneRunning"
+	reasonCopyingData  = "CopyingData"
 )
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
@@ -93,6 +108,10 @@ type ProgressOps interface {
 	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
 	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
+	// GateScript renders the version-gated `list progress` the verify Job
+	// carries. The allowlist lives with the poller, so asking it keeps one
+	// gate for both callers rather than a second copy in the Job builder.
+	GateScript() string
 }
 
 // MigrationReconciler reconciles a Migration object.
@@ -365,30 +384,52 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // observeRunningJob samples a live worker (progress, sizes, follow state)
 // and schedules the next look.
 //
-// Catalog-opening execs (sentinel reads AND the `list progress` poll) are
-// quiesced until the base copy is done: every one opens pgcopydb's SQLite
-// catalogs inside the worker, and 0.18 crashes under concurrent catalog
-// access (a live clone's index worker died on "[SQLite 5: database is
-// locked]", exit 12, and polling into a fresh resume pod kills it during
-// catalog init; see docs/research/upstream-issues.md). So while
-// CloneCompleted is False the operator touches only the pod LOG and the
-// catalog-free psql size sample: the clone-done transition is derived from
-// the markers pgcopydb prints when the copy phase ends (pgcopydb.CloneDone),
-// and the single fetched tail also feeds the zombie check. Only once
-// CloneCompleted is True do sentinel reads and the progress poll begin;
-// the poll additionally runs only on runner versions its allowlist names,
-// because stock 0.18's `list progress` corrupts filtered catalogs and never
-// returns data. Plain clones never reach CloneCompleted while the worker
-// runs; finishClone takes their one sample after pgcopydb exits.
+// The invariant: no pass exec-s a pgcopydb command into a live worker pod.
+// There is no read-only one. Every invocation logs its own command line into
+// the worker's SQLite catalog, and that commit invalidates a read snapshot
+// the worker has open, failing its next write with
+// SQLITE_BUSY_SNAPSHOT, which no retry can clear. 0.18 died of it twice in
+// one e2e run, mid-copy in an index worker and again seconds after a drain,
+// on the sequence reset (see docs/research/upstream-issues.md). "Almost
+// never" is not a property, so a live worker gets psql and nothing else. All
+// three of them: the follow watch queries the two databases (see
+// internal/sentinel), the clone-stage probe counts pgcopydb's own backends on
+// the target, and the size sample reads pg_database_size (both in
+// internal/progress). The copy counters are read from a pod with no worker in
+// it, the verify Job for a follow migration and the exited worker's own pod
+// for a plain clone. The one remaining exec into a live worker is `sentinel
+// set endpos`, which is how a cutover is asked for and has no other route.
+//
+// The claim is about exec, not about the work dir, and deliberately: deleting
+// a Migration starts a cleanup Job (its own pod, same PVC) as soon as the
+// worker Job carries a deletion timestamp, and foreground propagation holds
+// that timestamp while the worker's pods are still going away. That path
+// predates this rule and is not reworked here.
+//
+// The copy's end is read from the markers pgcopydb prints when the copy phase
+// ends (pgcopydb.CloneDone), so a follow migration needs the log reader
+// cmd/main.go always wires; the single fetched tail also feeds the zombie
+// check.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
-	m.Status.Phase = v1beta1.PhaseCloning
 	// The copy and its tail look nothing alike from the outside: the copy runs
 	// every worker flat out, the tail narrows to index builds and a vacuum on
 	// the largest table, during which the target stops growing and a
 	// size-based estimate reads as finished. Report them apart so a watching
-	// human can tell a slow tail from a stall. Unknown leaves Cloning standing.
+	// human can tell a slow tail from a stall.
+	//
+	// Finalizing needs the copy seen running first: one sample that catches
+	// every copy worker between statements otherwise reports the tail with
+	// gigabytes still to move. A sample with no answer changes nothing.
 	if r.Progress != nil {
-		if _, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name); finalizing {
+		copying, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name)
+		switch {
+		case copying:
+			m.Status.Phase = v1beta1.PhaseCloning
+			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
+					"base copy running, copy workers connected to the target")
+			}
+		case finalizing && copySeen(m):
 			m.Status.Phase = v1beta1.PhaseFinalizing
 		}
 	}
@@ -413,17 +454,12 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
 			"base copy finished (worker logged clone completion), replaying changes")
 	}
-	// One rule for every catalog-opening exec, sentinel and progress poll
-	// alike. With no log reader wired the clone-done transition cannot be
-	// observed, so the execs stay on (the pre-quiescence behavior) rather
-	// than wedging the migration in Cloning forever.
-	catalogExecsOK := follow && (cloneDone || r.Logs == nil)
-	if catalogExecsOK {
+	if follow {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
 		// trigger the cutover itself; see follow.go.
-		r.reconcileFollowRunning(ctx, m, job.Name)
+		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
 	}
-	r.sampleProgress(ctx, m, job.Name, catalogExecsOK)
+	r.sampleProgress(ctx, m, job.Name)
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -435,16 +471,26 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	// mid-copy. Post-clone the fast cadence returns, keeping catchup and
 	// cutover reactive.
 	interval := pollInterval
-	if follow && !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+	if follow && !cloneDone {
 		interval = 2 * pollInterval
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
-// sampleProgress best-effort feeds the size gauges every pass (psql, no
-// catalog) and, only when catalog execs are safe, status.progress. Errors
-// V(1)-log and never flip a condition or fail the pass.
-func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string, catalogExecsOK bool) {
+// copySeen reports whether the clone-stage probe has caught this attempt's
+// copy moving data. The latch lives in the condition reason: startAttempt
+// resets it per attempt, and it survives an operator restart.
+func copySeen(m *v1beta1.Migration) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonCopyingData
+}
+
+// sampleProgress best-effort feeds the size gauges while the worker runs. It
+// is psql and nothing else, per the invariant on observeRunningJob; the
+// counters that would need a pgcopydb command wait for the Job to exit (see
+// sampleCloneProgress). Errors V(1)-log and never flip a condition or fail
+// the pass.
+func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
 	if r.Progress == nil {
 		return
 	}
@@ -455,16 +501,17 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 		// Metrics only, by design: sizes are observability, not state.
 		metrics.RecordDatabaseSizes(m.Namespace, m.Name, src, tgt)
 	}
-	if catalogExecsOK {
-		r.sampleCloneProgress(ctx, m, jobName)
-	}
 }
 
-// sampleCloneProgress best-effort refreshes status.progress from the
-// worker's `list progress`; an error or a nil sample keeps the previous
-// value.
+// sampleCloneProgress best-effort fills status.progress from `list progress`,
+// once, by exec-ing into the pod. Its one caller is finishClone, never a pass
+// with a live worker: this is a pgcopydb command and it writes to the catalog.
+// A follow migration cannot use this route at all (its pod is gone by the time
+// the drain is over) and reads the same counters out of the verify Job's log
+// instead, see recordCloneProgress. A failed try leaves the field empty and
+// the next pass retries.
 func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
-	if r.Progress == nil {
+	if r.Progress == nil || m.Status.Progress != nil {
 		return
 	}
 	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)
@@ -615,9 +662,14 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 	}
 	m.Status.Attempts = attempt
 	m.Status.JobName = job.Name
-	m.Status.Phase = v1beta1.PhaseCloning
-	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneRunning",
-		fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
+	m.Status.Phase = attemptPhase(m)
+	// A finished base copy does not un-happen when the worker is restarted;
+	// only a copy still owed gets the fresh attempt's reason, which is also
+	// what clears the Finalizing latch (see copySeen).
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneRunning,
+			fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
+	}
 	if createErr == nil {
 		// AlreadyExists means an overlapping pass created this Job and
 		// announced the attempt; a second event would just be noise.
@@ -627,6 +679,21 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
+}
+
+// attemptPhase is where the next attempt picks up, read off the conditions
+// rather than assumed: every attempt after the first resumes the migration,
+// and one that has already cut over is not back at the base copy.
+func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
+	rep := m.Status.Replication
+	switch {
+	case rep != nil && sentinel.EndposSet(rep.Endpos),
+		meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete):
+		return v1beta1.PhaseCuttingOver
+	case meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming):
+		return v1beta1.PhaseStreaming
+	}
+	return v1beta1.PhaseCloning
 }
 
 // handleFailedJob either schedules the next resume attempt or fails the
@@ -824,10 +891,21 @@ func (r *MigrationReconciler) updateStatus(ctx context.Context, m, base *v1beta1
 	return r.Status().Patch(ctx, m, client.MergeFrom(base))
 }
 
+// migrationEvents drops the controller's own status writes from the Migration
+// watch. Without it every status patch returns as a watch event and the next
+// pass starts at once: the lag figure is derived from the source's WAL head
+// and differs every time, so the loop sustains itself (measured at one to two
+// passes per second right through a cutover drain). Every waiting path
+// schedules its own RequeueAfter, so nothing depends on that feedback, and
+// the events that must arrive still do: the API server bumps the generation
+// for a spec change and for the deletion timestamp alike, and this filters
+// only the Migration watch, never the owned Jobs.
+var migrationEvents predicate.Predicate = predicate.GenerationChangedPredicate{}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *MigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1beta1.Migration{}).
+		For(&v1beta1.Migration{}, builder.WithPredicates(migrationEvents)).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).

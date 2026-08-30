@@ -30,6 +30,9 @@ tasks:
           else
             echo "lint: no helm, skipping chart lint"
           fi
+      # A link into a directory mkdocs excludes renders dead on the site, and
+      # mkdocs caps that message at INFO, so --strict cannot fail on it.
+      - ./hack/check-docs-links.sh
       # The alert rules are checked and unit-tested with the promtool of the
       # Prometheus version they are written for.
       - ./hack/ensure-promtool.sh

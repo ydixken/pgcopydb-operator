@@ -174,6 +174,7 @@ var _ = Describe("Migration Controller verification", func() {
 		fake := &fakeSentinel{}
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Logs = cloneDoneLogs()
 
 		m := validMigration(name)
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
@@ -186,7 +187,7 @@ var _ = Describe("Migration Controller verification", func() {
 		finishJob(ctx, name+"-preflight", true)
 
 		// Caught up: Automatic mode freezes the stream, the worker drains.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-run-1", true)
 

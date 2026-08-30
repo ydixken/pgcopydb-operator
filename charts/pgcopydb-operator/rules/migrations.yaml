@@ -74,14 +74,20 @@ groups:
             the worker pod logs and the source. The index and vacuum tail
             looks exactly like this and is not a stall, which is why the
             expression matches Cloning only: the operator reports that tail
-            as Finalizing, so it cannot trip this alert.
+            as Finalizing once it has seen the copy running.
   - name: pgcopydb-migration-replication
     rules:
       # Streaming lag. The gauge only exists in follow mode, so this never
       # fires for plain clones. 67108864 is 64Mi: well above the default
       # follow.maxCatchupLag, so it means "not keeping up", not "catching up".
+      # The phase matcher is load-bearing: replication status is sampled from
+      # the first pass now, so the gauge exists through the base copy, where
+      # lag is expected, unactionable, and hours long.
       - alert: PgcopydbMigrationReplicationLagHigh
-        expr: pgcopydb_migration_replication_lag_bytes > 67108864
+        expr: >-
+          (pgcopydb_migration_replication_lag_bytes > 67108864)
+          and on (namespace, name)
+          (pgcopydb_migration_phase{phase=~"Streaming|CutoverPending"} == 1)
         for: 10m
         labels:
           severity: warning
