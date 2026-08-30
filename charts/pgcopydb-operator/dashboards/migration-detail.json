@@ -257,7 +257,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 5,
         "x": 4,
         "y": 1
       },
@@ -561,7 +561,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 16
+        }
       },
       "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it."
     },
@@ -575,8 +578,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 8,
+        "w": 3,
+        "x": 9,
         "y": 1
       },
       "targets": [
@@ -649,7 +652,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 3,
         "x": 12,
         "y": 1
       },
@@ -713,7 +716,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
+        "x": 15,
         "y": 1
       },
       "targets": [
@@ -776,9 +779,9 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 5
+        "w": 5,
+        "x": 19,
+        "y": 1
       },
       "targets": [
         {
@@ -841,7 +844,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 5
       },
       "targets": [
         {
@@ -970,7 +973,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 10
       },
       "panels": []
     },
@@ -986,7 +989,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 11
       },
       "targets": [
         {
@@ -1057,12 +1060,12 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 11
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
+          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1114,7 +1117,7 @@
           "sort": "desc"
         }
       },
-      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise."
+      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise. Target growth is clamped at 0: vacuum reclaims space during Finalizing, and the resulting negative slope is real but meaningless as a byte rate. Clone copy needs no such clamp: it is a monotonic tally from the work-dir catalog that a retry resumes rather than rewinds."
     },
     {
       "id": 11,
@@ -1128,12 +1131,12 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 23
+        "y": 19
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "clamp_max(100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1217,7 +1220,7 @@
         "minVizWidth": 8,
         "maxVizHeight": 300
       },
-      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero."
+      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero. By size is clamped to 100: index builds and pre-vacuum bloat routinely put the target ahead of the source in bytes, and a progress bar reading over 100 is a display bug, not a finding."
     },
     {
       "id": 12,
@@ -1231,7 +1234,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 23
+        "y": 19
       },
       "targets": [
         {
@@ -1317,7 +1320,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 32
+        }
       },
       "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA in this phase instead of a clamp that would look like a real number."
     },
@@ -1330,7 +1336,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 27
       },
       "panels": []
     },
@@ -1346,7 +1352,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 28
       },
       "targets": [
         {
@@ -1435,7 +1441,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 28
       },
       "targets": [
         {
@@ -1514,7 +1520,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 36
       },
       "targets": [
         {
@@ -1576,7 +1582,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 36
       },
       "targets": [
         {
@@ -1637,7 +1643,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 43
       },
       "panels": []
     },
@@ -1653,7 +1659,7 @@
         "h": 5,
         "w": 8,
         "x": 0,
-        "y": 48
+        "y": 44
       },
       "targets": [
         {
