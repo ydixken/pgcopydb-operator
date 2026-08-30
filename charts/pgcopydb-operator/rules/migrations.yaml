@@ -74,7 +74,7 @@ groups:
             the worker pod logs and the source. The index and vacuum tail
             looks exactly like this and is not a stall, which is why the
             expression matches Cloning only: the operator reports that tail
-            as Finalizing, so it cannot trip this alert.
+            as Finalizing once it has seen the copy running.
   - name: pgcopydb-migration-replication
     rules:
       # Streaming lag. The gauge only exists in follow mode, so this never

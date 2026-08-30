@@ -108,7 +108,7 @@ tests:
                 Check the worker pod logs and the source. The index and vacuum
                 tail looks exactly like this and is not a stall, which is why
                 the expression matches Cloning only: the operator reports that
-                tail as Finalizing, so it cannot trip this alert.
+                tail as Finalizing once it has seen the copy running.
 
   # Lag above 64Mi for over 10m fires; lag exactly at 64Mi never does.
   - interval: 1m

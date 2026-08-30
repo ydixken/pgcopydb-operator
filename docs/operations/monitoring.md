@@ -148,7 +148,7 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationFailed` | critical | The phase is `Failed` for 5m |
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
-| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail is reported as `Finalizing` and leaves the target flat without being stalled. |
+| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail normally reads as `Finalizing` and leaves the target flat without being stalled. |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 
@@ -176,3 +176,6 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - Copy Throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `N/A` for them and the size-based panels keep working.
+- The stalled-clone alert matches `Cloning` alone because the tail normally reads as `Finalizing`, which needs the phase probe to have seen this attempt's copy workers at least once.
+  That probe runs roughly every 60 seconds during a follow migration's copy, so a base copy that finishes inside one interval never sets it and carries `Cloning` into its tail.
+  Firing still takes an hour of flat target, which a copy that short does not plausibly produce.
