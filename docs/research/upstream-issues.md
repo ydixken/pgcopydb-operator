@@ -80,7 +80,7 @@ Status: draft, not filed.
 ### Environment
 
 - pgcopydb 0.18-1.pgdg12+1 (upstream container image)
-- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod on every reconcile pass (cadence measured below)
+- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod repeatedly, for as long as a worker was running
 - Line numbers point at upstream [v0.18](https://github.com/dimitri/pgcopydb/tree/v0.18). `sequences.c` and `indexes.c` are byte-identical between v0.18 and the fork our runner builds ([ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) at `ea87951`), so both fault sites below are stock upstream code and every line number for those two files lands on v0.18 as written. `catalog.c` does differ, so its references are given as "fork N / upstream M".
 
 ### What happened
@@ -169,6 +169,8 @@ while ((rc == SQLITE_LOCKED || rc == SQLITE_BUSY) &&
 
 `pgsql_retry_policy_expired` enforces a fixed 5000 ms budget, which is the whole distance between the sequence step starting and the error: three failures in our worker logs landed at 5.381, 5.224 and 5.237 seconds. Expiry is checked before sleeping, so the last iteration adds one more sleep of 10 to 350 ms plus a final step, and the 0.157 s spread across those three sits inside that window. That last point is read off the code rather than instrumented, so take it as consistent with the numbers, not as a measurement.
 
+The same budget bounds how small the vulnerable window is. `pgsql_retry_policy_expired` starts its clock on its first call, which happens after the first `sqlite3_step` has already returned `SQLITE_BUSY`, so the first busy result landed 5.0 to 5.35 seconds before the error. For the 16:08 failure that puts the first `UPDATE` attempt between 0.03 and 0.38 seconds after the "Fetching information for 5 sequences" line: the cursor had been open a few hundred milliseconds at most when a commit invalidated it. That is arithmetic over the fixed budget and the log timestamps rather than a measurement. Running the worker once with `--verbose` would print the retry lines and pin the first busy result exactly, which is a test-run change and not a code change.
+
 The loop logs at `log_notice`. pgcopydb's default level is INFO and our runner passes no `--verbose`, so at default verbosity those five seconds leave no trace: the log shows a step starting, then an error five seconds later, with nothing in between. Two more copies of the same loop live at catalog.c fork 2019 and 10930 / upstream 1971 and 10881.
 
 ### The same fault at a second site, where pgcopydb is its own concurrent writer
@@ -198,7 +200,15 @@ Every top-level `pgcopydb` invocation calls `catalog_log_command`, which runs `i
 
 Both commands we poll with reach it, and neither has a read-only path: `stream sentinel get` through `cli_sentinel_init_specs` (cli_sentinel.c:936), `list progress` directly (cli_list.c:2050).
 
-A reproduction confirms the behaviour end to end. A short harness compiled against the SQLite the fork vendors (3.45.1, `sqlite3.h:149`) opens a WAL database, iterates `s_seq` with an open cursor, and issues the same parameterised `update s_seq ...` from inside the row loop, re-stepping four times the way `catalog_sql_step` does:
+Our own polling supplied the commits at the sequence site: each reconcile pass runs `stream sentinel get` four times, once each for `--apply`, `--write-lsn`, `--replay-lsn` and `--endpos`, plus one `list progress`, and every one of them commits a `command_log` row.
+
+How often a caller does that is not part of this report: upstream does not have our operator, and the mechanism needs no rate. The precondition is one commit from any connection between the cursor's first step and the write.
+
+Four attempts across two runs died at this step: reproduced four times, same step, same signature.
+
+### Reproduction
+
+A short harness compiled against the SQLite the fork vendors (3.45.1, `sqlite3.h:149`) opens a WAL database, iterates `s_seq` with an open cursor, and issues the same parameterised `update s_seq ...` from inside the row loop, re-stepping four times the way `catalog_sql_step` does:
 
 ```
 === A: no external process (control) ===
@@ -218,11 +228,11 @@ A reproduction confirms the behaviour end to end. A short harness compiled again
 
 `101` is `SQLITE_DONE`. Case B is the one that matters: the child opened the same file read-write and only read, and the writer was untouched. One external `INSERT` breaks it, and retrying never recovers. The harness exercises SQLite at the call shape v0.18 has byte-identically; it is not a run of stock 0.18 against a live migration, and nobody has done one.
 
-Our own polling supplied the commits at the sequence site. Each pass runs five of those commands: `stream sentinel get` four times, once each for `--apply`, `--write-lsn`, `--replay-lsn` and `--endpos`, plus one `list progress`.
+The harness is [`lockrepro.c`](lockrepro.c), 107 lines, kept here so it outlives the investigation; it creates and removes `/tmp/lockrepro`. Build it against the amalgamation pgcopydb vendors, and inline it in the issue body if this is ever filed:
 
-Those passes are not evenly spaced, and the way they bunch up matters more than any average. Sampling one migration's status once a second, from cutover through to completion, the gaps between status writes run one to three seconds in bursts and fall back to the configured twenty-five to thirty seconds when the status is quiet. The burst is caused by the drain rather than coinciding with it: the operator's watch carries no predicate, so every pass that writes a moved replication position triggers the next pass, and the position moves fastest as the drain converges on the endpos. The caller is therefore at its noisiest in exactly the seconds when the worker stops following and starts resetting sequences. In the measured run, five passes landed in the five seconds before the failing write, at 16:50:28, :29, :31, :32 and :33, the last of them in the second the error was logged, which puts on the order of twenty-five commits into the catalog the worker was iterating. Five is a floor: sampling once a second cannot resolve two passes inside one second. One migration, one run.
-
-None of that is what makes a caller dangerous, since one commit from anywhere is enough. It is what makes the collision near-certain at this particular moment: the cursor only has to outlive a single commit.
+```sh
+cc -O0 -I src/bin/lib/sqlite -o lockrepro lockrepro.c src/bin/lib/sqlite/sqlite3.c -lpthread
+```
 
 ### Why a busy timeout does not fix it, and neither does a semaphore
 
