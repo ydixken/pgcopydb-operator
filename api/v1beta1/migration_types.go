@@ -418,6 +418,16 @@ type VerificationOptions struct {
 	Data bool `json:"data,omitempty"`
 }
 
+// VerificationResult is one compare check's outcome.
+type VerificationResult struct {
+	// check is the pgcopydb compare subcommand: schema or data.
+	// +kubebuilder:validation:Enum=schema;data
+	Check string `json:"check"`
+
+	// passed is false when that compare reported differences.
+	Passed bool `json:"passed"`
+}
+
 // CutoverMode picks who pulls the trigger.
 // +kubebuilder:validation:Enum=Manual;Automatic
 type CutoverMode string
@@ -604,6 +614,14 @@ type MigrationStatus struct {
 	// replication reports streaming state while following.
 	// +optional
 	Replication *ReplicationStatus `json:"replication,omitempty"`
+
+	// verification reports each requested compare check separately, because
+	// the Verified condition collapses them and its reason names only the
+	// first mismatch. Re-derived from the compare Jobs every reconcile.
+	// +listType=map
+	// +listMapKey=check
+	// +optional
+	Verification []VerificationResult `json:"verification,omitempty"`
 
 	// jobName is the current worker Job.
 	// +optional

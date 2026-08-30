@@ -130,6 +130,9 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 	m.Status.Phase = v1beta1.PhaseVerifying
 
 	var mismatched []string
+	// Rebuilt from the Jobs each pass, like everything else here, so a restart
+	// does not lose which check passed.
+	m.Status.Verification = nil
 	for _, check := range enabledChecks(m) {
 		job, created, err := r.ensureJob(ctx, m, compareJobName(m, check), func() (*batchv1.Job, error) {
 			return buildCompareJob(m, r.RunnerImage, check)
@@ -150,6 +153,8 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 		if !done {
 			return false, nil
 		}
+		m.Status.Verification = append(m.Status.Verification,
+			v1beta1.VerificationResult{Check: check, Passed: ok})
 		if !ok {
 			mismatched = append(mismatched, check)
 		}
