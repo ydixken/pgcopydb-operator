@@ -5,7 +5,7 @@ Drafts for issues against [pgcopydb](https://github.com/dimitri/pgcopydb) found 
 ## `pgcopydb list progress` (no `--filters`) permanently corrupts the stored filtering of a filtered catalog, killing concurrent or resumed `clone --filters` runs
 
 Status: filed as [dimitri/pgcopydb#1038](https://github.com/dimitri/pgcopydb/issues/1038) on 2026-08-09; fix proposed in [dimitri/pgcopydb#1042](https://github.com/dimitri/pgcopydb/pull/1042) on 2026-08-22.
-The fork branch [ydixken/pgcopydb `v0.18-fixes`](https://github.com/ydixken/pgcopydb/tree/v0.18-fixes) carries the fix, and the [runner image](../../images/runner/README.md) builds pgcopydb from it until an upstream release ships it.
+The fork branch [ydixken/pgcopydb `v0.18-fixes`](https://github.com/ydixken/pgcopydb/tree/v0.18-fixes) carries the fix, and the [pgcopydb builder image](../../images/pgcopydb-builder/README.md) builds pgcopydb from it until an upstream release ships it.
 
 ### Environment
 

@@ -4,7 +4,9 @@ name: Release
 # manager image, runner image, and the Helm chart as OCI.
 # Images are multi-arch (linux/amd64 + linux/arm64) via buildx (M4). The manager
 # cross-compiles both from one native toolchain; only the runner needs QEMU,
-# because it compiles C and runs a canary on each platform.
+# for its apt install and version canary, both of which still run emulated on
+# arm64. pgcopydb itself is no longer compiled here; images/pgcopydb-builder
+# builds it and this workflow only copies the result in.
 #
 # A tag carrying an -rc.N suffix publishes the same artifacts, then runs e2e
 # against them on the cluster and pushes the stable tag when that passes. So
@@ -13,11 +15,14 @@ name: Release
 #
 # The two image jobs run on the cluster's own runner scale set
 # (github-runner-pgcopydb-operator, an Actions Runner Controller install
-# managed from the app-of-apps repo). The runner image's arm64 half is
-# QEMU-emulated, so the win is core count: the cluster nodes have 20 against
-# a GitHub-hosted runner's 2. That makes releases depend on the cluster being
-# reachable; if it is down the jobs queue rather than fail. The chart job
-# stays hosted because helm packaging gains nothing from the move.
+# managed from the app-of-apps repo). On the runner image itself the emulated
+# arm64 half is only an apt install and a version canary, where core count
+# buys almost nothing; the win is the pgcopydb builder compile that the same
+# job also runs, on the rare release where its tag is missing, where the
+# cluster nodes' 20 cores against a GitHub-hosted runner's 2 matter under
+# QEMU. That makes releases depend on the cluster being reachable; if it is
+# down the jobs queue rather than fail. The chart job stays hosted because
+# helm packaging gains nothing from the move.
 
 on:
   push:
@@ -275,10 +280,16 @@ jobs:
           done
 
   promote:
-    # Turning v0.4.1-rc.2 into v0.4.1. Nothing is rebuilt: the stable tag
-    # points at the commit the candidate was cut from, so the second run
-    # produces byte-identical images from the same context and the chart from
-    # the same sources.
+    # Turning v0.4.1-rc.2 into v0.4.1 pushes a new tag and lets that tag run
+    # this whole workflow again; nothing is rebuilt here. The two runs are not
+    # byte-identical: the manager bakes GITHUB_REF_NAME into its binary via
+    # ldflags, and the chart's version and appVersion track it too, so both
+    # differ between the candidate and the stable release by construction.
+    # The runner's apt layers float on purpose, so a security update can land
+    # on the stable image even though the candidate predates it. What does
+    # hold still is the runner's pgcopydb layer: both runs copy it from the
+    # same pgcopydb-builder tag, keyed by the pinned commit rather than by
+    # GITHUB_REF_NAME.
     #
     # The recursion stops one level down. The tag pushed here has no -rc., so
     # in that run the e2e job's `if` skips, and promote skips with it.
