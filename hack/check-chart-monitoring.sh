@@ -99,7 +99,10 @@ expect_match '^kind: ServiceMonitor$' "$@"
 # Without honor_labels the Migration's namespace label would be renamed
 # exported_namespace and the alerts and dashboards would group wrongly.
 expect_match '^      honorLabels: true$' "$@"
-expect_no_match '^      interval:' "$@"
+# The scrape ships matched to the operator's poll, not left to the Prometheus
+# default: a slower scrape drops gauge samples that already exist. Timeout
+# stays unset, since Prometheus clamps an inherited global down to the interval.
+expect_match '^      interval: 10s$' "$@"
 expect_no_match '^      scrapeTimeout:' "$@"
 expect_no_match '^      relabelings:' "$@"
 expect_no_match '^      metricRelabelings:' "$@"

@@ -6,7 +6,7 @@
   ],
   "editable": true,
   "graphTooltip": 1,
-  "refresh": "30s",
+  "refresh": "10s",
   "schemaVersion": 39,
   "time": {
     "from": "now-6h",

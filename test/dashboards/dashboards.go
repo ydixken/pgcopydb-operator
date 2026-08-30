@@ -65,7 +65,10 @@ type Dashboard struct {
 	UID           string `json:"uid"`
 	Title         string `json:"title"`
 	SchemaVersion int    `json:"schemaVersion"`
-	Templating    struct {
+	// Refresh is the browser's auto-refresh, the last of the three intervals
+	// between a gauge moving and a human seeing it (poll, scrape, refresh).
+	Refresh    string `json:"refresh"`
+	Templating struct {
 		List []Variable `json:"list"`
 	} `json:"templating"`
 	Panels []Panel `json:"panels"`

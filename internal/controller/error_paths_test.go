@@ -50,6 +50,9 @@ var errBoom = errors.New("boom")
 // workerJob names the attempt-1 worker the fixtures reference.
 const workerJob = "m-run-1"
 
+// workerPodName is the pod the Job controller would have made for workerJob.
+const workerPodName = "w-0"
+
 // failingReconciler wires a fake client with injected failures into a
 // reconciler; objs seed the fake API state.
 func failingReconciler(t *testing.T, fns interceptor.Funcs, objs ...client.Object) *MigrationReconciler {
@@ -215,7 +218,7 @@ func TestPreflightGate_Errors(t *testing.T) {
 }
 
 // TestObserveRunningJob_LogFetchFailureDegrades: an unreadable pod log keeps
-// the pass alive at the mid-copy cadence; no marker seen, nothing reaped.
+// the pass alive at the normal cadence; no marker seen, nothing reaped.
 func TestObserveRunningJob_LogFetchFailureDegrades(t *testing.T) {
 	m := followPasswordMigration()
 	r := failingReconciler(t, interceptor.Funcs{}, m)
@@ -224,8 +227,8 @@ func TestObserveRunningJob_LogFetchFailureDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an unreadable log must not fail the pass, got %v", err)
 	}
-	if res.RequeueAfter != 2*pollInterval {
-		t.Fatalf("requeue = %v, want the mid-copy cadence %v", res.RequeueAfter, 2*pollInterval)
+	if res.RequeueAfter != pollInterval {
+		t.Fatalf("requeue = %v, want the poll cadence %v", res.RequeueAfter, pollInterval)
 	}
 }
 
@@ -267,19 +270,42 @@ func supervisorDeathTail(age time.Duration) []byte {
 	return []byte(ts + " FATAL Terminating all processes in our process group\n")
 }
 
+// TestReapZombieWorker_GraceOutlivesOnePoll pins the reason zombieGrace is a
+// constant of its own: a marker one poll old belongs to a worker still inside
+// its termination window, and reaping that kills a pod that was shutting down
+// correctly.
+func TestReapZombieWorker_GraceOutlivesOnePoll(t *testing.T) {
+	m := followPasswordMigration()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: workerPodName, Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
+	}}
+	r := failingReconciler(t, interceptor.Funcs{}, m, pod)
+	res, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathTail(pollInterval))
+	if err != nil || !handled {
+		t.Fatalf("a marker inside the grace must end the pass cleanly, got (handled=%v, %v)", handled, err)
+	}
+	if res.RequeueAfter != pollInterval {
+		t.Fatalf("requeue = %v, want a re-check on the next poll %v", res.RequeueAfter, pollInterval)
+	}
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &corev1.Pod{}); err != nil {
+		t.Fatalf("the pod must survive its own termination grace, got %v", err)
+	}
+}
+
 // TestReapZombieWorker_PodDeleteFailure: the reap failing to delete the zombie
 // pod must surface so the next pass retries the reap.
 func TestReapZombieWorker_PodDeleteFailure(t *testing.T) {
 	m := followPasswordMigration()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "w-0", Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
+		Name: workerPodName, Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
 	}}
 	r := failingReconciler(t, interceptor.Funcs{
 		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
 			return errBoom
 		},
 	}, m, pod)
-	_, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathTail(2*pollInterval))
+	_, handled, err := r.reapZombieWorker(context.Background(), m, namedJob(workerJob), supervisorDeathTail(2*zombieGrace))
 	if !handled || !errors.Is(err, errBoom) {
 		t.Fatalf("a pod delete failure must propagate, got (handled=%v, %v)", handled, err)
 	}
@@ -290,7 +316,7 @@ func TestReapZombieWorker_PodDeleteFailure(t *testing.T) {
 func TestDeleteJobPods_SkipsTerminatingPods(t *testing.T) {
 	now := metav1.Now()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: "w-0", Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
+		Name: workerPodName, Namespace: "ns", Labels: map[string]string{jobNameLabel: workerJob},
 		DeletionTimestamp: &now, Finalizers: []string{"test/keep"},
 	}}
 	r := failingReconciler(t, interceptor.Funcs{

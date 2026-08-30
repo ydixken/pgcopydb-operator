@@ -10,7 +10,9 @@ With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` is the whole
 The scraping ServiceAccount additionally needs `get` on the `/metrics` nonResourceURL; kube-prometheus-stack already grants that to its Prometheus, and the 401/403/500 rows in [Troubleshooting](../troubleshooting.md) map the failure modes.
 
 The ServiceMonitor sets `honorLabels: true`, so the `namespace` and `name` labels on migration metrics stay the Migration's own instead of being renamed to `exported_namespace` by the scrape.
-Optional values tune the rest: `metrics.serviceMonitor.additionalLabels` (for a Prometheus that selects monitors by label), `interval`, `scrapeTimeout`, `relabelings`, and `metricRelabelings`.
+The chart scrapes every 10 seconds, matching the operator's reconcile poll: the gauges only move on a poll, so a slower scrape reads the same sample twice and misses the one in between.
+Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by whatever you set.
+The other values tune the rest: `metrics.serviceMonitor.additionalLabels` (for a Prometheus that selects monitors by label), `scrapeTimeout`, `relabelings`, and `metricRelabelings`.
 
 ## Metric reference
 
@@ -63,6 +65,9 @@ The chart ships three dashboards, linked to each other through their shared `pgc
   Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
+
+All three auto-refresh every 10 seconds, the same cadence as the poll and the scrape, so a change reaches the screen in roughly one to two of those.
+That is a saved default, not a policy: Grafana's own refresh picker overrides it for your session.
 
 ![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)
 
@@ -182,5 +187,5 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `N/A` for them and the size-based panels keep working.
 - The stalled-clone alert matches `Cloning` alone because the tail normally reads as `Finalizing`, which needs the phase probe to have seen this attempt's copy workers at least once.
-  That probe runs roughly every 60 seconds during a follow migration's copy, so a base copy that finishes inside one interval never sets it and carries `Cloning` into its tail.
+  That probe runs on every poll, about every 10 seconds, so only a copy that finishes almost the instant it starts fails to set it and carries `Cloning` into its tail.
   Firing still takes an hour of flat target, which a copy that short does not plausibly produce.

@@ -375,9 +375,9 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(pod.DeletionTimestamp.IsZero()).To(BeTrue())
 		Expect(drainEvents(rec)).NotTo(ContainElement(ContainSubstring("WorkerZombie")))
 
-		// One poll later the marker has aged past the grace and the Job is
-		// still active: that is the zombie, the pod goes.
-		logs.tsOut = supervisorDeathAt(time.Now().Add(-2 * pollInterval))
+		// The marker has now stood longer than the worker's termination
+		// grace and the Job is still active: that is the zombie, the pod goes.
+		logs.tsOut = supervisorDeathAt(time.Now().Add(-2 * zombieGrace))
 		reconcileAndGet(ctx, r, name)
 		// envtest has no kubelet to finish a pod delete; the deletion
 		// timestamp is the observable "being deleted", as in the suspend test.
@@ -411,7 +411,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r.Sentinel = fake
 		// Old timestamps on healthy lines: only the marker may trigger the
 		// reaper, never age alone.
-		r.Logs = &fakeLogs{tsOut: time.Now().Add(-2*pollInterval).UTC().Format(time.RFC3339Nano) +
+		r.Logs = &fakeLogs{tsOut: time.Now().Add(-2*zombieGrace).UTC().Format(time.RFC3339Nano) +
 			` {"timestamp":"t","pid":42,"error_severity":"INFO","message":"reported write_lsn 0/5000"}` + "\n"}
 		rec := r.Recorder.(*events.FakeRecorder)
 		reconcileAndGet(ctx, r, name) // preflight
