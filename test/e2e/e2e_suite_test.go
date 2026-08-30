@@ -80,11 +80,16 @@ const (
 
 	sourceCluster = "e2e-source"
 	targetCluster = "e2e-target"
-	// CNPG names the single instance <cluster>-1 and the app secret <cluster>-app.
-	srcPod    = sourceCluster + "-1"
-	tgtPod    = targetCluster + "-1"
+	// CNPG names the app secret <cluster>-app. Instance pods are <cluster>-N,
+	// and which of them is primary moves on failover, so every statement
+	// resolves its pod by label through primaryPod instead of by name.
 	srcSecret = sourceCluster + "-app"
 	tgtSecret = targetCluster + "-app"
+
+	// CNPG's own pod labels: what the suite selects, schedules and kills by.
+	labelCNPGCluster = "cnpg.io/cluster"
+	labelCNPGRole    = "cnpg.io/instanceRole"
+	rolePrimary      = "primary"
 
 	// appDB is the CNPG-bootstrapped database and its owning role.
 	appDB = "app"
@@ -156,6 +161,9 @@ var (
 	// seedTimeout bounds the seed Job; seeding is IO-bound on the source
 	// volume.
 	seedTimeout = 30 * time.Minute
+	// primaryTimeout bounds the wait for a cluster to carry exactly one
+	// primary. It only has to cover a CNPG promotion, not a bootstrap.
+	primaryTimeout = 2 * time.Minute
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -611,11 +619,11 @@ func waitClusterReady(name string) {
 // owner; app is the database owner, so it needs no extra grants.
 func resetTargetObjects() {
 	GinkgoHelper()
-	psql(tgtPod, "DROP EXTENSION IF EXISTS citext CASCADE")
-	psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(tgtPod, "DROP SCHEMA IF EXISTS public CASCADE")
-	psql(tgtPod, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
-	psql(tgtPod, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
+	psql(targetCluster, "DROP EXTENSION IF EXISTS citext CASCADE")
+	psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
+	psql(targetCluster, "DROP SCHEMA IF EXISTS public CASCADE")
+	psql(targetCluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 
 // ensureSeededSource brings the source database to the requested fixture
@@ -625,8 +633,8 @@ func resetTargetObjects() {
 // leaves surplus rows), so the cluster is recreated from scratch.
 func ensureSeededSource() {
 	GinkgoHelper()
-	if psql(srcPod, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
-		match := psql(srcPod, fmt.Sprintf(
+	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
+		match := psql(sourceCluster, fmt.Sprintf(
 			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
 			seedProfile, scaleArg()))
 		if match != "t" {
@@ -683,17 +691,17 @@ func ensureClusterMajor(name string, major int) {
 	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", name)
 	// The kept instance has to answer psql before its major can be read.
 	waitClusterReady(name)
-	if got := serverMajor(name + "-1"); got != major {
+	if got := serverMajor(name); got != major {
 		By(fmt.Sprintf("deleting %s: kept cluster runs PG %d, this run wants PG %d", name, got, major))
 		deleteCluster(name)
 	}
 }
 
-// serverMajor asks the running instance for its PostgreSQL major version.
-func serverMajor(pod string) int {
+// serverMajor asks the cluster's primary for its PostgreSQL major version.
+func serverMajor(cluster string) int {
 	GinkgoHelper()
-	num, err := strconv.Atoi(psql(pod, "SELECT current_setting('server_version_num')"))
-	Expect(err).NotTo(HaveOccurred(), "unparseable server_version_num from %s", pod)
+	num, err := strconv.Atoi(psql(cluster, "SELECT current_setting('server_version_num')"))
+	Expect(err).NotTo(HaveOccurred(), "unparseable server_version_num from %s", cluster)
 	return num / 10000
 }
 
@@ -869,7 +877,7 @@ func checkLonghornCapacity() {
 // targets (PG14 is a source only), so the statement always parses here.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
-	psql(srcPod, "ALTER ROLE app REPLICATION")
+	psql(sourceCluster, "ALTER ROLE app REPLICATION")
 	grantTargetFollowPrivileges(appDB)
 }
 
@@ -879,11 +887,11 @@ func ensureFollowPrivileges() {
 // parameter grant is cluster-wide but idempotent and simply rides along.
 func grantTargetFollowPrivileges(db string) {
 	GinkgoHelper()
-	psqlDB(tgtPod, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
-	psqlDB(tgtPod, db, "GRANT SET ON PARAMETER session_replication_role TO app")
+	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO app")
 }
 
 // resetSourceReplication drops what a crashed follow run may have left on the
@@ -893,10 +901,10 @@ func grantTargetFollowPrivileges(db string) {
 // collide with this run's follow scenarios.
 func resetSourceReplication() {
 	GinkgoHelper()
-	psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-%'")
-	psql(srcPod, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
+	psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	psql(sourceCluster, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
 		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
-	psql(srcPod, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
+	psql(sourceCluster, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
 		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
 }
 
@@ -909,28 +917,51 @@ func resetSourceReplication() {
 // is in use.
 func resetTargetReplication() {
 	GinkgoHelper()
-	psql(tgtPod, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
+	psql(targetCluster, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
 		" WHERE roname LIKE 'pgcopydb%'")
 }
 
-// psql runs one statement against the app database; see psqlDB.
-func psql(pod, sql string) string {
+// primaryPod returns the pod name of the cluster's current primary. Which
+// instance carries the role moves on failover and the chaos scenarios force
+// failovers on purpose, so a hardcoded <cluster>-1 would send writes to a
+// read-only replica. A promotion leaves the cluster without a primary for a
+// few seconds, so this waits out the gap instead of failing into it.
+func primaryPod(cluster string) string {
 	GinkgoHelper()
-	return psqlDB(pod, appDB, sql)
+	var name string
+	Eventually(func(g Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
+			labelCNPGCluster: cluster,
+			labelCNPGRole:    rolePrimary,
+		})).To(Succeed())
+		g.Expect(pods.Items).To(HaveLen(1), "CNPG cluster %s has no single primary", cluster)
+		name = pods.Items[0].Name
+	}, primaryTimeout, 2*time.Second).Should(Succeed())
+	return name
 }
 
-// psqlDB runs one statement in the given database inside a CNPG instance pod
-// as the in-pod postgres superuser (peer auth on the unix socket, no password
-// involved) and returns trimmed stdout. kubectl exec is deliberate: it reuses
-// the same current context as the client and saves a hand-rolled SPDY
-// executor. Failures to even reach the pod get two retries; anything after
-// connecting fails hard, because the statement may have run and not every
-// caller is idempotent.
-func psqlDB(pod, db, sql string) string {
+// psql runs one statement against the app database; see psqlDB.
+func psql(cluster, sql string) string {
+	GinkgoHelper()
+	return psqlDB(cluster, appDB, sql)
+}
+
+// psqlDB runs one statement in the given database on the named CNPG cluster's
+// current primary, as the in-pod postgres superuser (peer auth on the unix
+// socket, no password involved), and returns trimmed stdout. kubectl exec is
+// deliberate: it reuses the same current context as the client and saves a
+// hand-rolled SPDY executor. Failures to even reach the pod get two retries,
+// each re-resolving the primary so a retry after a failover reaches the new
+// one; anything after connecting fails hard, because the statement may have
+// run and not every caller is idempotent.
+func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	var lastErr error
 	var lastStderr string
+	var pod string
 	for attempt := 1; attempt <= 3; attempt++ {
+		pod = primaryPod(cluster)
 		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
 			"psql", "-U", "postgres", db, "-tAc", sql)
 		out, err := cmd.Output()

@@ -62,13 +62,13 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		// on documents means the data copy is happening right now, with most
 		// of its minutes still ahead at the asserted scale.
 		Eventually(func(g Gomega) {
-			g.Expect(psql(tgtPod, "SELECT coalesce(sum(tuples_processed), 0) > 0"+
+			g.Expect(psql(targetCluster, "SELECT coalesce(sum(tuples_processed), 0) > 0"+
 				" FROM pg_stat_progress_copy WHERE relid = to_regclass('public.documents')")).
 				To(Equal("t"), "no COPY on documents in progress yet")
 		}, migrationTimeout, 500*time.Millisecond).Should(Succeed())
 
 		By("killing the source primary mid-copy")
-		deletePod(client.MatchingLabels{"cnpg.io/cluster": sourceCluster, "cnpg.io/instanceRole": "primary"})
+		deletePod(client.MatchingLabels{labelCNPGCluster: sourceCluster, labelCNPGRole: rolePrimary})
 
 		By("waiting for the resumed clone to complete")
 		m := waitCompleted(name, nsE2E)
@@ -76,9 +76,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			"the clone survived a dead source without a new attempt; the kill missed the copy window")
 
 		By("comparing the scale-derived counts on both sides")
-		Expect(seedTableCounts(srcPod)).To(Equal(expectedSeedCounts()),
+		Expect(seedTableCounts(sourceCluster)).To(Equal(expectedSeedCounts()),
 			"source rows deviate from the scale formula after the primary restart")
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 	})
 
 	// Disk pressure needs follow mode: a clone's work dir holds catalogs and
@@ -121,7 +121,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
 			if cur.Status.Phase != v1beta1.PhaseFailed {
 				batch++
-				psql(srcPod, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
+				psql(sourceCluster, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
 					" WHERE id <= 1000", batch))
 			}
 			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
@@ -146,7 +146,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		DeferCleanup(func() {
 			deleteMigration(nameA)
 			deleteMigration(nameB)
-			psql(tgtPod, "DROP DATABASE IF EXISTS "+dbB+" WITH (FORCE)")
+			psql(targetCluster, "DROP DATABASE IF EXISTS "+dbB+" WITH (FORCE)")
 			Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 				"replication slot left on the source after the fan-out cleanup")
 			Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
@@ -154,8 +154,8 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		})
 
 		By("creating the app2 database and its per-database follow grants on the target")
-		if psql(tgtPod, "SELECT count(*) FROM pg_database WHERE datname = '"+dbB+"'") == "0" {
-			psql(tgtPod, "CREATE DATABASE "+dbB+" OWNER app")
+		if psql(targetCluster, "SELECT count(*) FROM pg_database WHERE datname = '"+dbB+"'") == "0" {
+			psql(targetCluster, "CREATE DATABASE "+dbB+" OWNER app")
 		}
 		grantTargetFollowPrivileges(dbB)
 
@@ -170,7 +170,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		mbl := waitPhase(nameB, nsE2E, followTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("checking the source carries two distinct pgcopydb slots")
-		Expect(psql(srcPod, "SELECT count(DISTINCT slot_name) FROM pg_replication_slots"+
+		Expect(psql(sourceCluster, "SELECT count(DISTINCT slot_name) FROM pg_replication_slots"+
 			" WHERE slot_name LIKE 'pgcopydb%'")).To(Equal("2"))
 		Expect(ma.Status.Replication).NotTo(BeNil(), "status.replication missing on %s", nameA)
 		Expect(mbl.Status.Replication).NotTo(BeNil(), "status.replication missing on %s", nameB)
@@ -192,8 +192,8 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		}
 
 		By("comparing the seeded data in both target databases")
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
-		Expect(psqlDB(tgtPod, dbB, seedCountSQL)).To(Equal(seedTableCounts(srcPod)))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
+		Expect(psqlDB(targetCluster, dbB, seedCountSQL)).To(Equal(seedTableCounts(sourceCluster)))
 
 		By("checking no replication state remains on either side")
 		Expect(sourceSlotCount()).To(Equal("0"))
@@ -211,7 +211,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		const name = "e2e-chaos-drainkill"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-drain-%'")
+			psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-drain-%'")
 			Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 				"replication slot left on the source after cleanup")
 			Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
@@ -232,7 +232,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			if m.Status.Phase != v1beta1.PhaseCuttingOver {
 				batch++
-				psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
+				psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
 					" SELECT (g %% %d) + 1, (g %% 90)::numeric / 3, 'live-drain-%d-' || g"+
 					" FROM generate_series(1, 2000) g", scaled(50000), batch))
 			}
@@ -247,10 +247,10 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		switch m.Status.Phase {
 		case v1beta1.PhaseCompleted:
 			expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
-			Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")).
-				To(Equal(psql(srcPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")),
+			Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")).
+				To(Equal(psql(sourceCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-drain-%'")),
 					"INVARIANT VIOLATED: Completed with rows missing on the target")
-			Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
+			Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 			Expect(sourceSlotCount()).To(Equal("0"))
 		case v1beta1.PhaseFailed:
 			c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
@@ -267,7 +267,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		DeferCleanup(func() {
 			deleteMigration(name)
 			waitClusterReady(targetCluster)
-			psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-tgt-%'")
+			psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-tgt-%'")
 			Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 				"replication slot left on the source after cleanup")
 			Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
@@ -278,9 +278,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("writing live rows and killing the target primary mid-apply")
-		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
 			" (g %% 90)::numeric / 3, 'live-tgt-' || g FROM generate_series(1, 2000) g", scaled(50000)))
-		deletePod(client.MatchingLabels{"cnpg.io/cluster": targetCluster, "cnpg.io/instanceRole": "primary"})
+		deletePod(client.MatchingLabels{labelCNPGCluster: targetCluster, labelCNPGRole: rolePrimary})
 		waitClusterReady(targetCluster)
 
 		By("waiting for the stream to recover on a later attempt")
@@ -301,9 +301,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		expectCleanupSucceeded(name)
 
 		By("checking origin dedup: every live row arrived exactly once")
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-tgt-%'")).To(Equal("2000"),
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-tgt-%'")).To(Equal("2000"),
 			"more than 2000 means origin dedup replayed rows twice, fewer means loss")
-		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
+		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"))
 		Expect(targetOriginCount()).To(Equal("0"))
 	})
