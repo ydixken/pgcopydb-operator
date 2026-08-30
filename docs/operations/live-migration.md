@@ -42,7 +42,7 @@ Preflight failure is terminal: these are configuration errors on the databases, 
 
 ## Watching the stream
 
-`status.replication` mirrors the pgcopydb sentinel from the moment streaming starts. During the base copy it stays empty on purpose: on pgcopydb 0.18 a sentinel read opens the SQLite catalogs the copy is writing to, and concurrent access can crash workers, so the operator derives the copy phase from the worker log and only starts sentinel reads once `CloneCompleted` is True.
+`status.replication` is sampled from the two databases rather than from the worker: the replication slot and `pg_stat_replication` on the source, the replication origin on the target. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](../research/upstream-issues.md)).
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
@@ -57,7 +57,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 }
 ```
 
-`writeLSN` is the last position received from the source, `replayLSN` the last transaction durably applied to the target, `lagBytes` the distance from the source's current WAL head. The `CaughtUp` condition goes True once the lag is at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`; `replayLSN` is the target's replication origin progress, the last transaction durably applied there; `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once the lag is at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+
+Granting the migration's source role `pg_read_all_stats` is optional, and sharpens `writeLSN` and nothing else. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so the reading falls back to the slot's confirmed flush position, one confirmation behind. Lag and `CaughtUp` are unaffected either way: they come from the target's origin.
 
 ## Manual cutover runbook
 

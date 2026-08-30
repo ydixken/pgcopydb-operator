@@ -210,13 +210,6 @@ var emptyOK = map[panelKey]bool{
 	{uid: uidFleet, title: "Failed"}: true,
 	// The suite never leaves a migration suspended.
 	{uid: uidFleet, title: "Suspended"}: true,
-	// endpos reaches status through a sentinel sample taken while the worker
-	// drains; a small drain can finish before the next sample, leaving the
-	// endpos gauge legitimately unset.
-	{uid: uidDetail, title: "Cutover Drain"}: true,
-	// The same endpos gap empties that target here; the panel's other three
-	// targets are asserted directly by the streaming spec.
-	{uid: uidDetail, title: "LSN Positions"}: true,
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
 	{uid: uidOperator, title: "Leader Elected"}: true,
@@ -296,9 +289,6 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		// exempting the Data Verification panel would leave the per-check metric
 		// with no e2e coverage at all.
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-		// Same budget as the streaming specs: 0.18's catalog layer crashes
-		// probabilistically at this scale; retries resume from the work dir.
-		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		By("waiting for the base copy to finish and streaming to start")
@@ -384,6 +374,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		By("cross-checking the progress poll landed in status, without Prometheus")
 		m := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}, m)).To(Succeed())
+		expectSingleAttempt(m)
 		Expect(m.Status.Progress).NotTo(BeNil(), "status.progress never populated; the progress poll did not run")
 		Expect(m.Status.Progress.BytesDone).NotTo(BeNil(), "status.progress.bytesDone absent")
 		Expect(m.Status.Progress.BytesDone.Value()).To(BeNumerically(">", 0))

@@ -33,7 +33,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | patched runner |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
-| `pgcopydb_migration_write_lsn_bytes` | | Last LSN written by the receiver | follow, streaming |
+| `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
 | `pgcopydb_migration_replay_lsn_bytes` | | Last LSN replayed on the target | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
@@ -44,10 +44,12 @@ The "Exists" column is the contract for when a series is present:
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **patched runner**: the in-pod progress poll runs only on allowlisted runner versions; the bundled runner qualifies, a custom stock 0.18 image keeps these series dark (see the [troubleshooting row](../troubleshooting.md)).
   The poll also waits out the base copy, because opening pgcopydb 0.18's catalogs mid-copy crashes the worker.
-  On a follow migration these series appear once `CloneCompleted` is True; a plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
-- **follow, streaming**: plain clones never produce these; in follow mode they start once streaming does.
+  On a follow migration these series arrive with the drain verification, after cutover: the worker pod is gone by then, so the counters are read out of the verify Job's log instead.
+  A plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
+- **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
+Receive lag reads a little high wherever `write` fell back to the slot's confirmed flush position, which is one confirmation behind the walsender.
 
 ## Dashboards
 
@@ -123,6 +125,7 @@ Reading it:
 
 - **Phase** is the state the operator is in.
   **Current Work** is the activity inside that state, so `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
+  The tile reaches Vacuum And Index Builds only after the operator has seen the copy running and then stop, so it does not appear while tables are still being copied.
 - **Elapsed** keeps counting after the migration finishes.
   **Completed At** is where it ended, and reads Still Running until there is an end.
 - **Percent** is target size over source size, clamped at 100.
@@ -147,7 +150,7 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationFailed` | critical | The phase is `Failed` for 5m |
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
-| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail is reported as `Finalizing` and leaves the target flat without being stalled. |
+| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail normally reads as `Finalizing` and leaves the target flat without being stalled. |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 
@@ -175,3 +178,6 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - Copy Throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `N/A` for them and the size-based panels keep working.
+- The stalled-clone alert matches `Cloning` alone because the tail normally reads as `Finalizing`, which needs the phase probe to have seen this attempt's copy workers at least once.
+  That probe runs roughly every 60 seconds during a follow migration's copy, so a base copy that finishes inside one interval never sets it and carries `Cloning` into its tail.
+  Firing still takes an hour of flat target, which a copy that short does not plausibly produce.
