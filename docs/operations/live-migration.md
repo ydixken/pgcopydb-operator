@@ -42,7 +42,7 @@ Preflight failure is terminal: these are configuration errors on the databases, 
 
 ## Watching the stream
 
-`status.replication` is sampled from the two databases rather than from the worker: the replication slot and `pg_stat_replication` on the source, the replication origin on the target. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
+`status.replication` is sampled from the databases rather than from the worker: the replication slot and `pg_stat_replication` on the source. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
@@ -57,15 +57,15 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 }
 ```
 
-`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`; `replayLSN` is the target's replication origin progress, the last transaction durably applied there, with the source's own reading standing in until the origin has applied its first; `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once the lag is at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`. `replayLSN` is how far the target has consumed the stream as the source reports it: the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender. It measures consumption, not application; the drain verification after cutover is what proves the target applied everything. `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
 
-Granting the migration's source role `pg_read_all_stats` is optional, and sharpens `writeLSN` and nothing else. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so the reading falls back to the slot's confirmed flush position, one confirmation behind. Lag and `CaughtUp` come from the target's origin, so the grant does not reach them once the origin has applied its first transaction; before that they fall back to the source side, where it does.
+Granting the migration's source role `pg_read_all_stats` is optional, and sharpens both LSN readings. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so `writeLSN` and `replayLSN` both fall back to the slot's confirmed flush position: one confirmation behind, and identical to each other, which is why the apply backlog derived from them reads zero without the grant. Lag and `CaughtUp` follow `replayLSN`, so they inherit whichever reading is available.
 
 ## Manual cutover runbook
 
 Manual is the default mode. Cutover freezes the stream at the source's current LSN: anything written after that instant never reaches the target. So the order matters.
 
-1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`).
+1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`). It returns up to one poll interval (about 30 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
 2. Stop writes to the source (stop the application, revoke access, whatever your setup calls quiescing).
 3. Approve: `kubectl patch pgm billing --type=merge -p '{"spec":{"cutover":{"approved":true}}}'`.
 4. The operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits. Phase: `CuttingOver`.

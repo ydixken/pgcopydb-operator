@@ -28,6 +28,10 @@ Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone -
 
 The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg_restore` MUST be at least the target server's major version. The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools; for a newer target major, set `spec.runner.image` to an image with matching tools.
 
+pgcopydb 0.18 is also a floor for the replication lag reading, not only for the client tools.
+At pgcopydb 0.18 and above, `status.replication.lagBytes` reflects what the target has applied; below it the same figure reflects what the target has received, so it reads optimistically and a migration can look caught up while the apply is still behind.
+The bundled runner ships pgcopydb 0.18.2, so this only matters for a `spec.runner.image` pinned to something older.
+
 ## Base clone (every Migration)
 
 Every Migration is gated by a `<name>-preflight` Job before the first attempt.
