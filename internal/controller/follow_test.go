@@ -111,6 +111,7 @@ type fakeSentinel struct {
 	nudgeErr  error
 	calls     int
 	nudges    int
+	sets      int
 	slots     []string
 }
 
@@ -129,16 +130,21 @@ func (f *fakeSentinel) Read(_ context.Context, _, _, slotName string) (*sentinel
 	return &s, nil
 }
 
+// SetEndposCurrent reports the frozen LSN and changes nothing a later Read
+// will see. That is the shipped contract, which State's own doc states:
+// endpos is never read back from the worker. A double that fed it back would
+// certify the opposite, and the status carry-forward that replaced it could
+// then be deleted with every spec still green.
 func (f *fakeSentinel) SetEndposCurrent(_ context.Context, _, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.sets++
 	if f.setErr != nil {
 		return "", f.setErr
 	}
 	f.endposSet = true
-	f.state.Endpos = f.state.SourceHead
-	return f.state.Endpos, nil
+	return f.state.SourceHead, nil
 }
 
 func (f *fakeSentinel) NudgeEndpos(_ context.Context, _, _ string) error {
@@ -147,6 +153,14 @@ func (f *fakeSentinel) NudgeEndpos(_ context.Context, _, _ string) error {
 	f.calls++
 	f.nudges++
 	return f.nudgeErr
+}
+
+// setCount is how many times the operator asked for a cutover, which has to
+// be once per migration however many passes run.
+func (f *fakeSentinel) setCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sets
 }
 
 func (f *fakeSentinel) callCount() int {
@@ -441,6 +455,26 @@ var _ = Describe("Migration Controller follow mode", func() {
 		// it back out of the worker any more.
 		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
 		Expect(fake.slots).To(ContainElement(effectiveSlotName(m)))
+		Expect(fake.setCount()).To(Equal(1))
+
+		// Every later pass reads the same caught-up stream and must recognise
+		// its own cutover from status alone. Asking pgcopydb to freeze at the
+		// current LSN again would move the drain target under a source that
+		// is still taking writes, so it would never be reached, and each pass
+		// would announce a cutover that had already started.
+		for range 2 {
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+			Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+		}
+		Expect(fake.setCount()).To(Equal(1), "the cutover must be asked for once, not once per pass")
+		started := 0
+		for _, e := range drainEvents(r.Recorder.(*events.FakeRecorder)) {
+			if strings.Contains(e, "CutoverStarted") {
+				started++
+			}
+		}
+		Expect(started).To(Equal(1), "one cutover, one announcement")
 	})
 
 	It("keeps what a half-answered sample did not learn", func() {
