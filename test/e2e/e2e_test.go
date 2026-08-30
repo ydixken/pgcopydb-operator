@@ -407,8 +407,6 @@ var _ = Describe("Migration", Ordered, func() {
 	It("streams live writes and completes a Manual cutover", func() {
 		const name = "e2e-follow-manual"
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
-		// 0.18's catalog layer crashes probabilistically at this scale; retries resume from the work dir.
-		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		By("waiting for the base copy to finish and streaming to start")
@@ -439,6 +437,7 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("waiting for the cutover to drain and complete")
 		m = waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
+		expectSingleAttempt(m)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
 
@@ -463,11 +462,10 @@ var _ = Describe("Migration", Ordered, func() {
 		// must both come out True on one Migration.
 		mig := newFollowMigration(name, v1beta1.CutoverAutomatic)
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
-		// 0.18's catalog layer crashes probabilistically at this scale; retries resume from the work dir.
-		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectSingleAttempt(m)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 		expectCleanupSucceeded(name)
@@ -709,7 +707,6 @@ var _ = Describe("Migration", Ordered, func() {
 		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
 
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
-		mig.Spec.BackoffLimit = 5
 		mig.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super-src"}
 		mig.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super-tgt"}
 		create(mig)
@@ -745,6 +742,7 @@ var _ = Describe("Migration", Ordered, func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 		approveCutover(name)
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
+		expectSingleAttempt(m)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
@@ -1168,6 +1166,14 @@ func expectConditionTrue(m *v1beta1.Migration, condType string) {
 	c := apimeta.FindStatusCondition(m.Status.Conditions, condType)
 	Expect(c).NotTo(BeNil(), "condition %s missing on %s", condType, m.Name)
 	Expect(c.Status).To(Equal(metav1.ConditionTrue), "condition %s is %s: %s", condType, c.Status, c.Message)
+}
+
+// expectSingleAttempt asserts the Migration finished on its first worker
+// attempt. A retry hides a worker that died mid-run, so read the failed
+// attempt's pod log instead of raising backoffLimit.
+func expectSingleAttempt(m *v1beta1.Migration) {
+	GinkgoHelper()
+	Expect(m.Status.Attempts).To(Equal(int32(1)), "migration %s needed %d attempts", m.Name, m.Status.Attempts)
 }
 
 // expectCleanupSucceeded asserts the <name>-cleanup Job ran pgcopydb stream

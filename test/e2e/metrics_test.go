@@ -296,9 +296,6 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		// exempting the Data Verification panel would leave the per-check metric
 		// with no e2e coverage at all.
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-		// Same budget as the streaming specs: 0.18's catalog layer crashes
-		// probabilistically at this scale; retries resume from the work dir.
-		mig.Spec.BackoffLimit = 5
 		create(mig)
 
 		By("waiting for the base copy to finish and streaming to start")
@@ -384,6 +381,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		By("cross-checking the progress poll landed in status, without Prometheus")
 		m := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}, m)).To(Succeed())
+		expectSingleAttempt(m)
 		Expect(m.Status.Progress).NotTo(BeNil(), "status.progress never populated; the progress poll did not run")
 		Expect(m.Status.Progress.BytesDone).NotTo(BeNil(), "status.progress.bytesDone absent")
 		Expect(m.Status.Progress.BytesDone.Value()).To(BeNumerically(">", 0))
