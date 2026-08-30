@@ -34,7 +34,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
-| `pgcopydb_migration_replay_lsn_bytes` | | Last LSN replayed on the target | follow, streaming |
+| `pgcopydb_migration_replay_lsn_bytes` | | Last LSN replayed on the target, from its replication origin; the source's own reading stands in until the origin has applied anything | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
 
