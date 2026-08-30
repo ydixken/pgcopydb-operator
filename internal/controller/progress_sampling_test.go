@@ -572,14 +572,14 @@ var _ = Describe("Migration Controller clone stage", func() {
 	})
 })
 
-// A retry resumes a migration where it stopped, so the phase it starts from is
-// read off the conditions. The case that used to lie: a worker dying during
-// the drain came back reported as Cloning, with the finished base copy marked
-// unfinished behind it.
 // A stream that is applying but nowhere near caught up: the gap between these
 // two is far above the 16Mi default, so no pass can mistake it for a cutover.
 const laggingWriteLSN, laggingReplayLSN, laggingHeadLSN = "0/40000000", "0/10000000", "0/48000000"
 
+// A retry resumes a migration where it stopped, so the phase it starts from is
+// read off the conditions. The case that used to lie: a worker dying during
+// the drain came back reported as Cloning, with the finished base copy marked
+// unfinished behind it.
 var _ = Describe("Migration Controller attempt phase", func() {
 	ctx := context.Background()
 
