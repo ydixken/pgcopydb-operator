@@ -183,8 +183,7 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 		pattern *regexp.Regexp
 		why     string
 	}{
-		{runnerDockerfile, regexp.MustCompile(`(?m)^ARG\s+PGCOPYDB_VERSION=` + q + `\s*$`),
-			"the ARG that pin() itself parses"},
+		// The ARG line is not listed here: pin() already fails fatally if it is missing.
 		{runnerDockerfile, regexp.MustCompile(`pgcopydb --version \| grep -qF '` + q + `'`),
 			"the build canary that fails the image build on drift"},
 		{releaseWorkflow, regexp.MustCompile(`pgcopydb --version \| grep -F '` + q + `'`),
@@ -195,11 +194,17 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 			"the flag-default assertion"},
 		{pollerTest, regexp.MustCompile(`const patchedVersion = "` + q + `"`),
 			"the gate-script assertion's fixture constant"},
-		{pollerTest, regexp.MustCompile(`"` + q + `\|`),
+		// Anchored to the start of the line so a comment mentioning the same
+		// pin and pipe elsewhere in the file cannot satisfy this.
+		{pollerTest, regexp.MustCompile(`(?m)^\s*"` + q + `\|`),
 			"the gate-script assertion's case pattern"},
-		{runnerReadme, regexp.MustCompile("`[^`]*" + q + "[^`]*`"),
+		// Anchored to the sentence that introduces the value, not just any
+		// backticked mention, so a decoy mention elsewhere cannot satisfy this.
+		{runnerReadme, regexp.MustCompile("The version string is `" + q + "`"),
 			"the runner image's documented version string"},
-		{chartReadme, regexp.MustCompile("`[^`]*" + q + "[^`]*`"),
+		// Anchored to the table row (same line as the field name), not just
+		// any backticked mention, so a decoy elsewhere cannot satisfy this.
+		{chartReadme, regexp.MustCompile("progressPollVersions.*`[^`]*" + q + "[^`]*`"),
 			"the documented default for runner.progressPollVersions"},
 	} {
 		if !c.pattern.MatchString(read(t, c.path)) {
