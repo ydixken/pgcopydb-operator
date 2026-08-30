@@ -291,6 +291,7 @@ _Appears in:_
 | `attempts` _integer_ | attempts is the number of worker Jobs created so far. |  | Optional: \{\} <br /> |
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
+| `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
@@ -420,6 +421,23 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `schema` _boolean_ | schema runs pgcopydb compare schema: tables, columns, indexes,<br />constraints, and sequence values as pgcopydb models them. Not a full<br />DDL diff (no functions, triggers, ACLs, defaults). |  | Optional: \{\} <br /> |
 | `data` _boolean_ | data runs pgcopydb compare data: per-table row counts and full-table<br />checksums. Expensive: budget a sequential scan of every table on both<br />sides. |  | Optional: \{\} <br /> |
+
+
+#### VerificationResult
+
+
+
+VerificationResult is one compare check's outcome.
+
+
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `check` _string_ | check is the pgcopydb compare subcommand: schema or data. |  | Enum: [schema data] <br /> |
+| `passed` _boolean_ | passed is false when that compare reported differences. |  |  |
 
 
 #### WorkVolume
