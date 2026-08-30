@@ -420,7 +420,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum(deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -830,7 +830,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval])",
+          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

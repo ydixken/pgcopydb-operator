@@ -158,6 +158,26 @@ func TestEveryMetricTokenIsKnown(t *testing.T) {
 	}
 }
 
+// Every pgcopydb_migration_* series is a gauge; the operator registers no
+// counters and no histograms. rate() and irate() are counter functions: they
+// assume monotonic growth and read any decrease as a reset, which is exactly
+// what happens when a re-clone with dropIfExists empties the target. deriv()
+// is the gauge-native slope and returns the same per-second unit.
+//
+// This exists because an ETA panel using rate() over a fixed 15m window read
+// 46 minutes on a clone that had 8 minutes left, and every test here passed.
+func TestNoCounterFunctionsOnGauges(t *testing.T) {
+	counterFn := regexp.MustCompile(`\b(rate|irate|increase|resets)\(\s*(pgcopydb_[a-z_]+)`)
+	for name, d := range load(t) {
+		for _, expr := range d.Exprs() {
+			for _, m := range counterFn.FindAllStringSubmatch(expr, -1) {
+				t.Errorf("%s applies %s() to %s, which is a gauge; use deriv() instead:\n  %s",
+					name, m[1], m[2], expr)
+			}
+		}
+	}
+}
+
 func TestEveryRegisteredMetricIsConsumed(t *testing.T) {
 	var exprs []string
 	for _, d := range load(t) {
