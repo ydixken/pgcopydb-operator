@@ -50,12 +50,13 @@ On a fixture where one table held 73% of the bytes, that tail was roughly a fift
 > This is why `PgcopydbMigrationCloneStalled` matches `Cloning` alone: a long tail is not a stall.
 > [Performance tuning](../operations/performance.md) explains how to trade the vacuum away for the time.
 
-The phase is derived by asking the target which of the worker's own backends are active, which is a plain `pg_stat_activity` query and touches no pgcopydb catalog.
+The phase is derived by asking the target what the worker is doing there, a plain `pg_stat_activity` query that touches no pgcopydb catalog: copy workers count while they are connected, everything else only while it is running a statement.
+pgcopydb opens its copy workers up front and they idle between statements, so a copy worker counted only mid-`COPY` reads as finished while data is still moving; an index worker parked idle on a `SET` is not the tail either, which is why the two counts differ.
+The query is scoped to the worker's own pod, so another migration's backends on a shared target cannot read as this clone's tail.
 Reading pgcopydb's catalog while the copy is writing it kills workers, so the operator does not do it during a clone.
-`Finalizing` needs the probe to have seen this attempt's copy workers connected to the target at least once, which the `CopyingData` reason below records.
-Presence is a connection count, not an active-statement count: pgcopydb opens its copy workers up front and they idle between statements, so counting only the ones mid-`COPY` reads as finished while data is still moving.
+`Finalizing` needs the probe to have seen this attempt's copy workers at least once, which the `CopyingData` reason below records.
 Until that first sighting, a sample with no copy workers and other backends busy leaves the phase at `Cloning`: the copy has not been seen running, so it cannot have been seen stopping.
-An unanswerable query changes nothing: the phase stays where the last answered sample left it, because not knowing is not evidence of finishing.
+Zero on both counts is the unknown answer rather than the tail, and the phase stays where the last answered sample left it: not knowing is not evidence of finishing.
 
 ## Condition types
 
