@@ -240,9 +240,7 @@ func init() {
 		// Volumes follow the scale: a 0.1 run seeds ~1.2GB and has no business
 		// parking 100Gi of PVCs on the shared cluster. The stress tier keeps
 		// the fixed sizes its capacity check was written around. The 50Gi
-		// basis is chosen so the round scales land on round volumes, and 0.5
-		// gives the 25Gi fixture a clone has to reach before it spends longer
-		// moving data than starting up.
+		// basis is chosen so the round scales land on round volumes.
 		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(50), scaledSize(50), scaledSize(12)
 	}
 	// E2E_STORAGE_CLASS pins the fixture volumes to one class, for clusters

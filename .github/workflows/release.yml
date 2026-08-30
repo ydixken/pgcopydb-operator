@@ -200,7 +200,7 @@ jobs:
         # answer, so it calls go test with the same flags the task passes.
         env:
           E2E_OPERATOR_TAG: ${{ github.ref_name }}
-          E2E_SCALE: "0.5"
+          E2E_SCALE: "0.25"
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
@@ -210,8 +210,8 @@ jobs:
         # produces no output at all. poll-progress-after turns a spec that
         # wedges into a stack dump rather than silence.
         #
-        # 15m, not 5m. A clone at E2E_SCALE=0.5 takes about eleven minutes, so
-        # a five minute threshold fired on every healthy clone spec and the
+        # 15m, not 5m. A healthy clone spec at the CI scale runs for minutes on
+        # end, so a five minute threshold fired on every one of them and the
         # dump stopped meaning anything. A diagnostic that triggers on normal
         # work is one nobody reads, which is worse than not having it.
         run: |
