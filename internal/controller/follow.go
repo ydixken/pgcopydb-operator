@@ -184,11 +184,12 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	// in readScript cannot help: the walsender's replay column is NULL in that
 	// same window, so it falls through to the very value that is polluted. The
 	// window opens at every worker start and every worker pod restart and
-	// closes within seconds, so a second sample clears it. cloneDone already
-	// covers the fresh start, which leaves about one sample at clone-end and
-	// after a restart. The cost is one poll interval of cutover latency on a
-	// stream that really is caught up, against an endpos frozen at a position
-	// the target has not actually applied to.
+	// closes within seconds, so a second sample clears it. All of it upstream
+	// v0.18 code, zero guard included, so a rebase off the fork keeps it.
+	// cloneDone already covers the fresh start, which leaves about one sample
+	// at clone-end and after a restart. The cost is one poll interval of
+	// cutover latency on a stream that really is caught up, against an endpos
+	// frozen at a position the target has not actually applied to.
 	caughtUp := below && lagSeenBelow(m)
 	switch {
 	case caughtUp:

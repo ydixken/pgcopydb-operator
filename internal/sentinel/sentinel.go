@@ -98,16 +98,32 @@ func (s State) Lag() int64 {
 // way: the walsender's own number when the reader may see it, the slot's
 // confirmed flush position otherwise, because PostgreSQL blanks every
 // walsender detail column in pg_stat_replication for a role without
-// pg_read_all_stats, its own row included (verified on 17). The slot row
-// stays readable by anyone, and for pgcopydb it is faithful: it confirms
-// flush only for what it has processed, which is why its own feedback reports
-// write, flush, and replay at the same LSN.
+// pg_read_all_stats, its own row included (verified on PostgreSQL 17).
+//
+// That order is a preference, not a workaround, and the coalesce must not be
+// collapsed to the slot alone. The walsender's replay_lsn column carries the
+// applied field of the consumer's feedback packet, which is pgcopydb's
+// sentinel replay cursor on every version that has one, 0.17 included. So
+// wherever the reader may see the column, the value is honest whatever
+// pgcopydb is running, and the slot is the fallback rather than the source.
+//
+// The fallback is honest from 0.18 on: stream_sync_sentinel drives the
+// confirmed flush position from that same sentinel replay cursor whenever it
+// is non-zero, which is why pgcopydb's own feedback reports write, flush and
+// replay at one LSN. That is upstream behaviour, verified identical between
+// upstream v0.18 and the pinned fork commit; the fork pin buys the
+// list-progress and filtered-catalog fixes and nothing here depends on it.
+// Below 0.18, where streamFlush confirms the locally fsynced receive
+// position, the slot tracks receive progress instead and lag under-reports by
+// the whole receive-ahead-of-apply gap, silently. A downgrade past that
+// boundary, or a future upstream change to stream_sync_sentinel, breaks this
+// reading with no error anywhere.
 //
 // The target's replication origin is deliberately NOT read here, though it is
 // the stricter position. The origin only advances inside a committed apply
 // transaction, so it parks at the last applied COMMIT and falls behind by
 // every byte of WAL that is consumed but never applied: filtered tables,
-// catalog churn, keepalives. Measured on 17, a source writing only to
+// catalog churn, keepalives. Measured on PostgreSQL 17, a source writing only to
 // unpublished tables put the origin 122 MB behind while the consumer sat at
 // the WAL head, and once the source went idle the gap only grew, because
 // nothing would ever apply again. Driving lag off that number hung a release
