@@ -99,11 +99,11 @@ const (
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
 	// request, so a bigger request alone would change nothing.
 	// Two, not four. Four was tried and measured: seeding ran at 16.6 MiB/s
-	// against 15.9 at two, which is noise, so the fixtures are not CPU-bound
-	// (see the rate curve in issue #146). It is not free either. Longhorn's
-	// instance manager holds a guaranteed 6 CPUs per node here, so six
-	// four-CPU instances leave no room for a worker and the run dies on
-	// FailedScheduling instead of running slowly.
+	// against 15.9 at two, which is noise. Issue #146 later found why: the
+	// seeding backend waits on WAL write and fsync, never on a core. It is
+	// not free either. Longhorn's instance manager holds a guaranteed 6 CPUs
+	// per node here, so six four-CPU instances leave no room for a worker and
+	// the run dies on FailedScheduling instead of running slowly.
 	fixtureCPU    = "2"
 	fixtureMemory = "4Gi"
 	// The seed Job is not a migration worker, so it does not get the
@@ -141,6 +141,10 @@ const (
 	// seedImage only needs a psql client; the CNPG operand image has one and
 	// is already pulled on any cluster running CNPG fixtures.
 	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
+	// seedLogTail is generous because the log is the seed's profile, not just
+	// a failure hint: the DDL alone echoes a line per object before the first
+	// table is loaded.
+	seedLogTail = 400
 	// ephemeralStorageClass is the suite-owned Longhorn class the fixture
 	// volumes bind to: one replica, reclaim Delete, so throwaway volumes that
 	// CNPG has already replicated do not triple themselves again underneath.
@@ -149,10 +153,12 @@ const (
 
 var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
 
-// fixturesFS carries the fixture SQL (see fixtures/schema.sql and
-// fixtures/seed.sql) into the seed Job via a ConfigMap.
+// fixturesFS carries the fixture SQL and the script that stages it (see
+// fixtures/run.sh) into the seed Job via a ConfigMap. The whole directory,
+// not a list: a stage added to run.sh but forgotten here would only surface
+// as a failed Job on a real cluster.
 //
-//go:embed fixtures/schema.sql fixtures/seed.sql
+//go:embed fixtures
 var fixturesFS embed.FS
 
 // The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
@@ -671,6 +677,11 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 					// Index builds during pg_restore, and the sort memory the
 					// seed's generate_series passes through.
 					"maintenance_work_mem": "512MB",
+					// At the 16MB default a seeding backend was flushing
+					// WAL itself in ~70KB chunks: wal_buffers_full 133,611
+					// against wal_write 135,705 across one seed. The
+					// concurrent load stages make that tighter still.
+					"wal_buffers": "64MB",
 					// Bulk load checkpoints on volume, not on time. Small
 					// max_wal_size means a checkpoint every few seconds and a
 					// full-page write storm behind it. Proportional, because
@@ -909,20 +920,25 @@ func serverMajor(cluster string) int {
 	return num / 10000
 }
 
-// runSeedJob applies schema.sql and seed.sql to the source database through
-// a Kubernetes Job (psql from the CNPG operand image, fixture SQL mounted
-// from a ConfigMap). A Job instead of exec: it survives suite interruptions,
-// retries transient DB unavailability (backoffLimit 2), and leaves its log
-// behind. On failure the log tail lands in the Ginkgo output.
+// runSeedJob loads the fixtures into the source database through a Kubernetes
+// Job (bash and psql from the CNPG operand image, fixture files mounted from a
+// ConfigMap, staged by run.sh). A Job instead of exec: it survives suite
+// interruptions, retries transient DB unavailability (backoffLimit 2), and
+// leaves its log behind. The log tail lands in the Ginkgo output either way:
+// on failure as the diagnosis, on success as the seed's per-phase profile.
 func runSeedJob() {
 	GinkgoHelper()
-	schemaSQL, err := fixturesFS.ReadFile("fixtures/schema.sql")
-	Expect(err).NotTo(HaveOccurred())
-	seedSQL, err := fixturesFS.ReadFile("fixtures/seed.sql")
-	Expect(err).NotTo(HaveOccurred())
+	entries, err := fixturesFS.ReadDir("fixtures")
+	Expect(err).NotTo(HaveOccurred(), "failed to read the embedded fixtures")
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		b, err := fixturesFS.ReadFile("fixtures/" + e.Name())
+		Expect(err).NotTo(HaveOccurred(), "failed to read fixture %s", e.Name())
+		files[e.Name()] = string(b)
+	}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}
 	_, err = controllerutil.CreateOrUpdate(ctx, k8sClient, cm, func() error {
-		cm.Data = map[string]string{"schema.sql": string(schemaSQL), "seed.sql": string(seedSQL)}
+		cm.Data = files
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred(), "failed to apply the fixture ConfigMap")
@@ -940,17 +956,26 @@ func runSeedJob() {
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	Expect(k8sClient.Create(ctx, buildSeedJob())).To(Succeed(), "failed to create the seed Job")
+	started := time.Now()
 	Eventually(func(g Gomega) {
 		job := &batchv1.Job{}
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: seedJobName}, job)).To(Succeed())
 		for _, c := range job.Status.Conditions {
 			if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
-				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs())
+				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs(seedLogTail))
 				StopTrying("seed Job exhausted its retries: " + c.Message).Now()
 			}
 		}
 		g.Expect(job.Status.Succeeded).To(BeNumerically(">=", 1), "seed Job still running")
 	}, seedTimeout, 10*time.Second).Should(Succeed())
+
+	// The log carries a \timing line per table, so on success it is the seed's
+	// per-phase profile and belongs in the run's output. Without it the only
+	// way to learn where the seed spends its minutes is to sample a live
+	// cluster while one happens to be running (issue #146).
+	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", seedJobLogs(seedLogTail))
+	AddReportEntry("seed wall clock", fmt.Sprintf("%s at scale %s (profile %s)",
+		time.Since(started).Round(time.Second), scaleArg(), seedProfile))
 }
 
 func buildSeedJob() *batchv1.Job {
@@ -967,13 +992,13 @@ func buildSeedJob() *batchv1.Job {
 						Name:      "seed",
 						Image:     seedImage,
 						Resources: workerResources(workerCPU, workerMemory),
-						Command: []string{"psql",
-							"-v", "ON_ERROR_STOP=1",
-							"-v", "scale=" + scaleArg(),
-							"-v", "profile=" + seedProfile,
-							"-f", "/fixtures/schema.sql",
-							"-f", "/fixtures/seed.sql"},
+						// bash, not sh: run.sh reads PIPESTATUS to report the
+						// failing stage rather than the exit of the sed that
+						// labels its output.
+						Command: []string{"bash", "/fixtures/run.sh"},
 						Env: []corev1.EnvVar{
+							{Name: "SEED_SCALE", Value: scaleArg()},
+							{Name: "SEED_PROFILE", Value: seedProfile},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
 							{Name: "PGDATABASE", Value: appDB},
 							{Name: "PGUSER", Value: appDB},
@@ -997,11 +1022,11 @@ func buildSeedJob() *batchv1.Job {
 	}
 }
 
-// seedJobLogs returns the seed Job's log tail for failure diagnostics.
-// kubectl for the same reason psql uses it: current context, no hand-rolled
-// log streaming.
-func seedJobLogs() string {
-	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName, "--tail=100").CombinedOutput()
+// seedJobLogs returns the last lines of the seed Job's log. kubectl for the
+// same reason psql uses it: current context, no hand-rolled log streaming.
+func seedJobLogs(lines int) string {
+	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName,
+		"--tail="+strconv.Itoa(lines)).CombinedOutput()
 	return string(out)
 }
 
