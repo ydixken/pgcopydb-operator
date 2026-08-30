@@ -918,7 +918,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1)",
+          "expr": "(clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1)) / 60",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -932,7 +932,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "unit": "s",
+          "unit": "m",
           "noValue": "n/a",
           "thresholds": {
             "mode": "absolute",
@@ -945,17 +945,38 @@
           },
           "mappings": [
             {
-              "type": "range",
+              "type": "value",
               "options": {
-                "from": 86400,
-                "to": null,
-                "result": {
+                "0": {
                   "text": "Calculating",
                   "index": 0
                 }
               }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 0,
+                "to": 1,
+                "result": {
+                  "text": "~1m",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 1440,
+                "to": null,
+                "result": {
+                  "text": "Calculating",
+                  "index": 2
+                }
+              }
             }
-          ]
+          ],
+          "decimals": 0
         },
         "overrides": []
       },
@@ -976,7 +997,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false
       },
-      "description": "Remaining size over how fast the target is currently growing. Anything past a day renders as Calculating, because at that point the number is the denominator clamp rather than an estimate: the target stops growing during index builds and analyze, deriv falls to zero, and a few GB divided by the one byte per second floor is a century. Both halves of the division are clamped. The numerator because a finished target is routinely larger than its source, since index builds, WAL and page bloat mean the copy never lands byte for byte, and the subtraction then reads as a negative ETA. The denominator because dividing by nothing is an infinity. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing."
+      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing."
     },
     {
       "id": 13,
