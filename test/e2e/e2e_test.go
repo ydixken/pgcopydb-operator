@@ -481,6 +481,71 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 	})
 
+	It("loses no committed transaction when the source is written throughout", func() {
+		const name = "e2e-follow-load"
+		const marker = "live-load"
+
+		// CaughtUp proves the stream was consumed, not that the data matches:
+		// the lag converges the same whether the apply process changed
+		// anything or not. Data verification proves equality instead of
+		// inferring it from the lag.
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		mig.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+
+		By("writing to the source continuously, starting before the base copy")
+		w := startLiveWriter(marker)
+		// The fixture is shared and these specs are Ordered, so a writer that
+		// outlives this spec corrupts every spec after it.
+		DeferCleanup(func() { _, _ = w.stop() })
+		create(mig)
+
+		By("waiting for streaming with the source still moving")
+		waitFollowStreaming(name)
+
+		// Stop before approval, not at it: cutover freezes the source, and
+		// the row compare below only means something once nothing can write
+		// after it.
+		By("stopping the writer, so the source is quiescent from the freeze onward")
+		last, err := w.stop()
+		Expect(err).NotTo(HaveOccurred(), "the live writer failed after %d rows", last)
+		Expect(last).To(BeNumerically(">", 100),
+			"the writer committed only %d rows, too few to exercise a migration under load", last)
+
+		approveCutover(name)
+		// A follow migration with data verification can run two whole
+		// compares, the drain's fallback and the one Verifying does, so
+		// this spec gets the follow budget, not the clone one.
+		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectSingleAttempt(m)
+		expectConditionTrue(m, v1beta1.ConditionVerified)
+
+		By("checking every committed row arrived, with no gaps")
+		// Compared against the source, not against last: a dropped exec
+		// stream (transientExecError) can retry an INSERT that already
+		// committed, so last is a lower bound on the source's count, not
+		// the count itself.
+		srcRows := psql(sourceCluster, fmt.Sprintf(
+			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))
+		Expect(psql(targetCluster, fmt.Sprintf(
+			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))).To(Equal(srcRows),
+			"target holds a different number of live rows than the source, which committed %d", last)
+
+		firstGap := psql(targetCluster, fmt.Sprintf(
+			"SELECT coalesce(min(g), 0) FROM generate_series(1, %d) g"+
+				" WHERE NOT EXISTS (SELECT 1 FROM orders WHERE note = '%s-' || g)", last, marker))
+		Expect(firstGap).To(Equal("0"),
+			"target is missing row %s of %d: a gap proves a lost transaction, not a slow one", firstGap, last)
+
+		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"replication slot leaked on the source by the write-load cutover")
+		Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin leaked on the target by the write-load cutover")
+
+		By("restoring the fixture for the specs that follow")
+		psql(sourceCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
+		psql(targetCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
+	})
+
 	It("drops the replication slot when a streaming Migration is deleted", func() {
 		const name = "e2e-follow-del"
 		create(newFollowMigration(name, v1beta1.CutoverManual))

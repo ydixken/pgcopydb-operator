@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,6 +210,9 @@ var (
 	// primaryTimeout bounds the wait for a cluster to carry exactly one
 	// primary. It only has to cover a CNPG promotion, not a bootstrap.
 	primaryTimeout = 2 * time.Minute
+	// liveWriteInterval caps the average write rate at one per interval: a
+	// tick buffered during a slow kubectl exec makes the next gap near zero.
+	liveWriteInterval = 200 * time.Millisecond
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -1362,13 +1366,45 @@ func psql(cluster, sql string) string {
 
 // psqlDB runs one statement in the given database on the named CNPG cluster's
 // current primary, as the in-pod postgres superuser (peer auth on the unix
-// socket, no password involved), and returns trimmed stdout. kubectl exec is
+// socket, no password involved), and returns trimmed stdout. See psqlDBErr for
+// the retry and failover behaviour; this is the Expect-wrapped form for spec
+// goroutines, which is every caller except the live writer.
+func psqlDB(cluster, db, sql string) string {
+	GinkgoHelper()
+	out, err := psqlDBErr(cluster, db, sql)
+	var f *psqlFailure
+	if errors.As(err, &f) {
+		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
+	}
+	// psqlDBErr today only ever returns nil or *psqlFailure, but any other
+	// non-nil error must still fail here rather than read back as "".
+	Expect(err).NotTo(HaveOccurred(), "psql %q failed: %s", sql, err)
+	return out
+}
+
+// psqlFailure is psqlDBErr's error result: the pod the last attempt ran
+// against and its stderr, so psqlDB can raise its exact failure message
+// without a second copy of the retry loop.
+type psqlFailure struct {
+	pod, stderr string
+	err         error
+}
+
+func (f *psqlFailure) Error() string {
+	return fmt.Sprintf("on %s: %s: %v", f.pod, f.stderr, f.err)
+}
+
+// psqlDBErr is psqlDB's retrying core, split out so the live writer can run
+// it without Expect: a Ginkgo assertion failing outside the spec goroutine
+// aborts the whole process instead of the one spec. kubectl exec is
 // deliberate: it reuses the same current context as the client and saves a
 // hand-rolled SPDY executor. Failures to even reach the pod get two retries,
 // each re-resolving the primary so a retry after a failover reaches the new
 // one; anything after connecting fails hard, because the statement may have
 // run and not every caller is idempotent.
-func psqlDB(cluster, db, sql string) string {
+func psqlDBErr(cluster, db, sql string) (string, error) {
+	// Here for primaryPod's Eventually, not for an assertion of its own:
+	// without it a primary timeout is reported here, not at the calling spec.
 	GinkgoHelper()
 	var lastErr error
 	var lastStderr string
@@ -1379,7 +1415,7 @@ func psqlDB(cluster, db, sql string) string {
 			"psql", "-U", "postgres", db, "-tAc", sql)
 		out, err := cmd.Output()
 		if err == nil {
-			return strings.TrimSpace(string(out))
+			return strings.TrimSpace(string(out)), nil
 		}
 		lastErr = err
 		lastStderr = ""
@@ -1392,8 +1428,69 @@ func psqlDB(cluster, db, sql string) string {
 		}
 		time.Sleep(5 * time.Second)
 	}
-	Expect(lastErr).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, pod, lastStderr)
-	return ""
+	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
+}
+
+// liveWriter commits one row into orders every liveWriteInterval until
+// stopped, so a spec can hold sourceCluster under write traffic through a
+// migration's base copy and streaming phase.
+type liveWriter struct {
+	stopCh chan struct{}
+	done   chan struct{}
+	// stopOnce lets the spec's cleanup call stop after the spec already did.
+	stopOnce sync.Once
+
+	mu   sync.Mutex
+	last int
+	err  error
+}
+
+// startLiveWriter starts committing marker-tagged rows to sourceCluster and
+// returns immediately; call stop to end it.
+func startLiveWriter(marker string) *liveWriter {
+	w := &liveWriter{stopCh: make(chan struct{}), done: make(chan struct{})}
+	go w.run(marker)
+	return w
+}
+
+// run writes rows numbered from 1 until stopCh closes or a write fails. It
+// calls psqlDBErr, never psql, and defers GinkgoRecover so a Gomega failure
+// anywhere in this goroutine fails the spec instead of the whole process.
+func (w *liveWriter) run(marker string) {
+	// GinkgoRecover must run before close(w.done): defers run in reverse
+	// registration order, so a panic recovers before done closes, not after.
+	defer close(w.done)
+	defer GinkgoRecover()
+	ticker := time.NewTicker(liveWriteInterval)
+	defer ticker.Stop()
+	for n := 1; ; n++ {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+		}
+		_, err := psqlDBErr(sourceCluster, appDB, fmt.Sprintf(
+			"INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d')", marker, n))
+		w.mu.Lock()
+		if err != nil {
+			w.err = err
+			w.mu.Unlock()
+			return
+		}
+		w.last = n
+		w.mu.Unlock()
+	}
+}
+
+// stop ends the writer, waits for any in-flight insert, and returns last plus
+// the first write error. Rows 1 through last are committed on the source, and
+// last is a lower bound on the marker rows it holds, not an exact count.
+func (w *liveWriter) stop() (int, error) {
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	<-w.done
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last, w.err
 }
 
 // waitFailed waits until the Migration in nsE2E is terminally Failed with the
