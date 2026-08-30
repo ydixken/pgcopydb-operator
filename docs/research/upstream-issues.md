@@ -73,14 +73,15 @@ Secondary bug: the progress query reads `sum(bytes)` from `s_table`, which has n
 
 Set `skipFilterCheck` for `list progress` (it only reads), or keep the adopted filtering in memory instead of writing it back to the catalog in Case 3.
 
-## `copydb_prepare_sequence_specs` writes through an open read cursor: any concurrent commit fails the write for good, and no busy timeout can clear it
+## Writing through an open read cursor makes any concurrent commit fatal: `copydb_prepare_sequence_specs` and `copydb_create_constraints` die on `SQLITE_BUSY_SNAPSHOT`, which no busy timeout can clear
 
 Status: draft, not filed.
 
 ### Environment
 
 - pgcopydb 0.18-1.pgdg12+1 (upstream container image)
-- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod on every reconcile pass (at least one pass per second, measured below)
+- `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod on every reconcile pass (cadence measured below)
+- Line numbers point at upstream [v0.18](https://github.com/dimitri/pgcopydb/tree/v0.18). `sequences.c` and `indexes.c` are byte-identical between v0.18 and the fork our runner builds ([ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) at `ea87951`), so both fault sites below are stock upstream code and every line number for those two files lands on v0.18 as written. `catalog.c` does differ, so its references are given as "fork N / upstream M".
 
 ### What happened
 
@@ -95,9 +96,9 @@ The first was during the base copy of a live migration (2026-08-09): an index-cr
 {"pid":1,"error_severity":"FATAL","message":"Terminating all processes in our process group"}
 ```
 
-That one is a signature match, not a traced failure: same error, same conditions, and we have not traced a cursor-write on the index path. The rest of this entry is the second site, which is traced.
+Treat that one as a signature match rather than a traced failure. The index worker does carry a site with this fault, described below, but that log does not name the in-flight statement and nobody has matched the two up.
 
-After `follow` reaches its endpos, pgcopydb resets the target's sequences. On 2026-08-30 both follow migrations of the same e2e suite lost attempts there:
+The second is the sequence reset, and it is traced. After `follow` reaches its endpos, pgcopydb resets the target's sequences. On 2026-08-30 both follow migrations of the same e2e suite lost attempts there:
 
 ```
 16:08:09.610  follow.c    Follow mode is now done, reached endpos 1/76081A70
@@ -123,38 +124,146 @@ Only follow migrations are still polled that late in a run, and across both runs
 
 ### Root cause
 
-`copydb_prepare_sequence_specs` iterates `s_seq` with an open cursor and calls `catalog_update_sequence_values` from inside the iteration callback, on the same connection. The failing statement in the log above is that write.
+The catalogs are WAL databases: `catalog_set_wal_mode` runs `PRAGMA journal_mode = WAL` (catalog.c fork 1999 / upstream 1951), called from `catalog_init` when the file is created, and WAL is persistent in the file header.
 
-Writing through an open read cursor is a read-to-write upgrade, and SQLite fails the upgrade with `SQLITE_BUSY_SNAPSHOT` (extended code 517) as soon as another connection has committed since the cursor opened. SQLite deliberately does not downgrade that to a retryable `SQLITE_BUSY` while a transaction is already open. Waiting cannot help: the cursor's snapshot is older than the database and stays that way until the cursor closes.
+`copydb_prepare_sequence_specs` iterates `s_seq` with an open cursor (sequences.c:86) and calls `catalog_update_sequence_values` from inside the iteration callback (sequences.c:175). Both use the same `sqlite3 *`: the iterator binds to `iter->catalog->db` (catalog.c fork 7139 / upstream 7091), and the callback gets that same `DatabaseCatalog` through its context (sequences.c:81-84), which the writer opens with `sqlite3 *db = catalog->db;`. So the `UPDATE` runs while the `SELECT` cursor is mid-step: it has returned `SQLITE_ROW` and has not yet returned `SQLITE_DONE`.
 
-pgcopydb retries regardless. `catalog_sql_step` loops for `maxT = 5` seconds with a 10 to 350ms backoff, so the statement burns five seconds and then fails. That is the entire distance between the sequence step starting and the error, and it is why three separate failures landed at 5.381, 5.224 and 5.237 seconds: the 0.157s spread is the random final sleep, not contention.
+That is a read-to-write upgrade inside an open read transaction, and SQLite documents this exact case as [`SQLITE_BUSY_SNAPSHOT`](https://www.sqlite.org/rescode.html#busy_snapshot):
 
-The retry loop logs at `log_notice`, so at pgcopydb's default level those five seconds leave no trace. The log shows a step that starts and an error five seconds later with nothing in between, which is a hang as far as anyone reading it can tell.
+> The SQLITE_BUSY_SNAPSHOT error code is an extended error code for SQLITE_BUSY that occurs on WAL mode databases when a database connection tries to promote a read transaction into a write transaction but finds that another database connection has already written to the database and thus invalidated prior reads.
 
-### Why any client can trigger it, and why pgcopydb's own CLI does
+The scenario that page then walks through (A reads and holds the transaction open, B writes, A tries to write and gets the error) describes the callback line for line.
 
-The catalogs are opened in WAL mode. Under WAL a reader cannot block a writer, and a reader does not have to: `SQLITE_BUSY_SNAPSHOT` needs a commit from another connection, not a lock. A reproduction compiled against the vendored SQLite confirms both halves. An external process running `SELECT` in a loop against a writing loop had no effect at all, and a single external `INSERT` failed the writer permanently.
+Retrying cannot win. SQLite downgrades `SQLITE_BUSY_SNAPSHOT` to a plain, retryable `SQLITE_BUSY` only when no transaction was open when the call started (vendored `sqlite3.c:73763`):
 
-The commits do not have to come from a third-party tool either. Every top-level `pgcopydb` invocation calls `catalog_log_command`, which inserts the command line into `command_log`. So `stream sentinel get` and `list progress`, the documented way to watch a running migration, each commit into that migration's catalog before doing any of their own work.
+```c
+}else if( rc==SQLITE_BUSY_SNAPSHOT && pBt->inTransaction==TRANS_NONE ){
+  /* if there was no transaction opened when this function was
+  ** called and SQLITE_BUSY_SNAPSHOT is returned, change the error
+  ** code to SQLITE_BUSY. */
+  rc = SQLITE_BUSY;
+}
+```
 
-Our own polling is what supplied the commits here. Each pass runs five of those commands: `stream sentinel get` four times, once each for `--apply`, `--write-lsn`, `--replay-lsn` and `--endpos`, plus one `list progress`.
-Sampling one migration's status once per second through its cutover returned five distinct resourceVersions across the five seconds from 16:50:28 to 16:50:33, the last of them in the second the worker logged the lock error: about one reconcile pass per second, so at least five commits per second into the catalog the worker was iterating.
-That is a floor and not a rate, since sampling once a second cannot resolve two passes inside one second.
-It is also one migration over five seconds, but the cadence is structural rather than a burst: the operator's watch carries no predicate, so each status write feeds back as an event that starts the next pass, and the replication lag it writes changes on every pass because it is derived from the source's WAL head.
-None of that is what makes a caller dangerous, since one commit from any client is enough. It is what makes the collision certain: the cursor only has to outlive a single commit, and at five or more commits a second its snapshot is stale within a couple of hundred milliseconds of opening.
+With the cursor open, `inTransaction` is not `TRANS_NONE`: the extended code survives, and the enclosing busy-handler loop is skipped by the same condition. The snapshot is stale and stays stale until the cursor closes.
 
-### Why a busy timeout does not fix it
+pgcopydb retries regardless. `catalog_sql_step` (catalog.c fork 11211 / upstream 11162) loops for five seconds:
 
-There is no `sqlite3_busy_timeout` call in pgcopydb, and adding one would not help. A busy handler answers `SQLITE_BUSY`, which SQLite raises when a lock is held and may later be released. `SQLITE_BUSY_SNAPSHOT` is the other case: nothing is holding anything, the transaction's snapshot is simply older than the database, and no amount of waiting makes an old snapshot current. Raising `maxT` in `catalog_sql_step` has the same problem and only fails later.
+```c
+int maxT = 5;            /* 5s */
+int maxSleepTime = 350;  /* 350ms */
+int baseSleepTime = 10;  /* 10ms */
+...
+while ((rc == SQLITE_LOCKED || rc == SQLITE_BUSY) &&
+       !pgsql_retry_policy_expired(&retryPolicy))
+{
+    int sleepTimeMs = pgsql_compute_connection_retry_sleep_time(&retryPolicy);
+
+    log_notice("[SQLite %d]: %s, try again in %dms",
+               rc, sqlite3_errmsg(query->db), sleepTimeMs);
+
+    (void) pg_usleep(sleepTimeMs * 1000);
+    rc = sqlite3_step(query->ppStmt);
+}
+```
+
+`pgsql_retry_policy_expired` enforces a fixed 5000 ms budget, which is the whole distance between the sequence step starting and the error: three failures in our worker logs landed at 5.381, 5.224 and 5.237 seconds. Expiry is checked before sleeping, so the last iteration adds one more sleep of 10 to 350 ms plus a final step, and the 0.157 s spread across those three sits inside that window. That last point is read off the code rather than instrumented, so take it as consistent with the numbers, not as a measurement.
+
+The loop logs at `log_notice`. pgcopydb's default level is INFO and our runner passes no `--verbose`, so at default verbosity those five seconds leave no trace: the log shows a step starting, then an error five seconds later, with nothing in between. Two more copies of the same loop live at catalog.c fork 2019 and 10930 / upstream 1971 and 10881.
+
+### The same fault at a second site, where pgcopydb is its own concurrent writer
+
+`copydb_create_constraints` iterates `s_index` for a table (indexes.c:1247, binding `iter->catalog->db` at catalog.c fork 6623 / upstream 6575) and writes three times from inside the callback on that same connection: `summary_add_constraint` (indexes.c:1304), `summary_finish_constraint` (:1354) and `summary_increment_timing` (:1360).
+
+Here the concurrent commits are pgcopydb's own. Constraint creation runs in the one index worker that finished last, while the other `--index-jobs` workers are still in `copydb_create_index` writing to the same `source.db` from their own processes (indexes.c:1008, :1028, :1034). No external client is involved, so this site stands without accepting anything about how we drive pgcopydb.
+
+The code reasons about concurrency at exactly this spot and reaches the opposite conclusion (indexes.c:1338):
+
+```c
+/*
+ * Constraints are built by the CREATE INDEX worker process that is
+ * the last one to finish an index for a given table. We do not
+ * have to care about concurrency here: no semaphore locking.
+ */
+```
+
+This site is traced in code and has not been tied to a specific incident of ours.
+It is also why a caller-side fix is not a fix: quiescing our polling closes the sequence site and does nothing here, where pgcopydb supplies the concurrent commits itself.
+
+### Why the documented way to watch a migration is also a writer
+
+Under WAL a reader cannot block a writer, and it does not need to: `SQLITE_BUSY_SNAPSHOT` needs a commit from another connection, not a lock. The commands we used to watch the migration commit.
+
+Every top-level `pgcopydb` invocation calls `catalog_log_command`, which runs `insert into command_log(cmdline) values($1)` (catalog.c fork 10327 / upstream 10279). It is called unconditionally from `catalog_register_setup_from_specs` (fork 1456 / upstream 1408), which `catalog_init_from_specs` calls unconditionally in turn, so any command reaching `catalog_init_from_specs` writes a row. A guard (fork 10320 / upstream 10272) skips it for fork-only children by testing `getpid() != getpgid(0)`, since `main()` calls `setpgrp()` (main.c:61) and only the top-level process has `PID == PGID`. A process started by `kubectl exec` is its own process-group leader, so it writes exactly one row.
+
+Both commands we poll with reach it, and neither has a read-only path: `stream sentinel get` through `cli_sentinel_init_specs` (cli_sentinel.c:936), `list progress` directly (cli_list.c:2050).
+
+A reproduction confirms the behaviour end to end. A short harness compiled against the SQLite the fork vendors (3.45.1, `sqlite3.h:149`) opens a WAL database, iterates `s_seq` with an open cursor, and issues the same parameterised `update s_seq ...` from inside the row loop, re-stepping four times the way `catalog_sql_step` does:
+
+```
+=== A: no external process (control) ===
+  update public.a -> rc=101 ... (all five succeed)
+
+=== B: external PURE READER mid-loop ===
+  update public.a -> rc=101 ... (all five succeed)
+
+=== C: external WRITER mid-loop (one INSERT, like catalog_log_command) ===
+  update public.a -> rc=101 (no more rows available)
+  update public.b -> rc=5 (database is locked) extended=517 (database is locked)
+    retry 1 -> rc=5 extended=517
+    retry 2 -> rc=5 extended=517
+    retry 3 -> rc=5 extended=517
+    retry 4 -> rc=5 extended=517
+```
+
+`101` is `SQLITE_DONE`. Case B is the one that matters: the child opened the same file read-write and only read, and the writer was untouched. One external `INSERT` breaks it, and retrying never recovers. The harness exercises SQLite at the call shape v0.18 has byte-identically; it is not a run of stock 0.18 against a live migration, and nobody has done one.
+
+Our own polling supplied the commits at the sequence site. Each pass runs five of those commands: `stream sentinel get` four times, once each for `--apply`, `--write-lsn`, `--replay-lsn` and `--endpos`, plus one `list progress`.
+
+Those passes are not evenly spaced, and the way they bunch up matters more than any average. Sampling one migration's status once a second, from cutover through to completion, the gaps between status writes run one to three seconds in bursts and fall back to the configured twenty-five to thirty seconds when the status is quiet. The burst is caused by the drain rather than coinciding with it: the operator's watch carries no predicate, so every pass that writes a moved replication position triggers the next pass, and the position moves fastest as the drain converges on the endpos. The caller is therefore at its noisiest in exactly the seconds when the worker stops following and starts resetting sequences. In the measured run, five passes landed in the five seconds before the failing write, at 16:50:28, :29, :31, :32 and :33, the last of them in the second the error was logged, which puts on the order of twenty-five commits into the catalog the worker was iterating. Five is a floor: sampling once a second cannot resolve two passes inside one second. One migration, one run.
+
+None of that is what makes a caller dangerous, since one commit from anywhere is enough. It is what makes the collision near-certain at this particular moment: the cursor only has to outlive a single commit.
+
+### Why a busy timeout does not fix it, and neither does a semaphore
+
+A search over `src/bin/pgcopydb` for `busy_timeout`, `busy_handler`, `sqlite3_busy` and `SQLITE_BUSY` finds no `sqlite3_busy_timeout`, no `sqlite3_busy_handler` and no `PRAGMA busy_timeout`; every match is in the vendored SQLite amalgamation under `src/bin/lib/sqlite`. So SQLite's default applies and `sqlite3_step` returns immediately rather than waiting.
+
+Installing one would not help. A busy handler answers `SQLITE_BUSY`, which SQLite raises when a lock is held and may later be released. `SQLITE_BUSY_SNAPSHOT` is the other case: nothing is holding anything, the transaction's snapshot is simply older than the database, and waiting does not make an old snapshot current. Raising `maxT` in `catalog_sql_step` fails later for the same reason.
+
+A semaphore does not fix it either, which is worth saying because `catalog_update_sequence_values` is missing the `catalog->sema` locking that most other catalog writers take (catalog.c fork 2201, 2274, 2334, 2556, 2708) and that looks like the bug. The constraint site is the counter-example: `summary_add_constraint` and `summary_finish_constraint` do take the semaphore (summary.c:1541, :1624) and fail anyway. Serializing writers does nothing about a read snapshot that went stale before the writer acquired the lock.
+
+### The log does not distinguish the two errors
+
+`sqlite3_step` returns the primary code unless extended result codes are enabled, and nothing in `src/bin/pgcopydb` calls `sqlite3_extended_result_codes`. The catalog error path prints that primary code straight (catalog.c fork 11098 / upstream 11049), so `SQLITE_BUSY_SNAPSHOT` (517, `SQLITE_BUSY | (2<<8)`, `sqlite3.h:535`) reaches the log as `[SQLite 5: database is locked]`. The message string does not help either: `sqlite3_errstr(517)` returns the same "database is locked" text, which the reproduction above shows directly.
+
+pgcopydb does call `sqlite3_extended_errcode`, but only in the replay-store layer (ld_store.c:2637, :2879, :3143) and never in catalog.c, and even there it only feeds `sqlite3_errstr`. So the number that would identify this bug is printed nowhere. A maintainer reading a user's log sees plain `SQLITE_BUSY`, concludes lock contention, and reaches for a timeout, which is the one fix that cannot work.
 
 ### Suggested fix
 
-Collect the sequence rows, close the cursor, then apply the updates. Any shape works as long as the write is not issued while the read cursor over the same connection is open.
+Collect the rows, close the cursor, then apply the writes. At the sequence site that means letting `copydb_prepare_sequence_specs` finish its iteration before calling `catalog_update_sequence_values`; at the constraint site, the same for the three `summary_*` writes in `copydb_create_constraints_hook`. Any shape works as long as no write is issued on a connection whose read cursor is still open.
 
-Two smaller things worth doing on the same path:
+Two smaller things worth doing on the same paths:
 
 - Log the retry loop at a level users see. Five seconds of invisible retrying reads as a hang, and it is the only evidence that anything was retried at all.
-- Surface the extended result code. `[SQLite 5: database is locked]` sends a reader hunting for lock contention, which is the wrong bug class; `SQLITE_BUSY_SNAPSHOT` names the actual condition.
+- Print the extended result code in catalog.c's error path. `[SQLite 5: database is locked]` sends a reader hunting for lock contention, which is the wrong bug class.
+
+## `catalog_sql_execute` finalizes a cached statement without evicting it
+
+Status: draft, not filed. Found by reading the source, not from an incident.
+
+### Environment
+
+- Source read from upstream [v0.18](https://github.com/dimitri/pgcopydb/tree/v0.18) and the fork at `ea87951`; `catalog.c` references are given as "fork N / upstream M"
+
+### What happens
+
+`catalog_sql_execute`'s error path calls `sqlite3_finalize(query->ppStmt)` even when `query->fromCache` is true (catalog.c fork 11104 / upstream 11055), while the `CachedStmt` entry in `catalog->stmtCache` keeps the pointer that call just freed. A later hit in `catalog_sql_prepare_cached` then calls `sqlite3_reset(entry->stmt)` on freed memory (catalog.c fork 10986).
+
+We have not seen it bite. On the catalog-lock path above the process exits before the cache is reused, and whether another error path survives to a later cache hit is not established.
+
+### Suggested fix
+
+Evict the cache entry when finalizing a cached statement, or leave the statement alone on the error path and let the cache own its lifetime.
 
 ## Process-group termination on clone failure leaves the streaming receive child running, keeping the container alive indefinitely
 
