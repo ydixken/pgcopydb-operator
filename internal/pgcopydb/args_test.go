@@ -39,6 +39,8 @@ func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
 	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --restart")
 }
 
+var copyBinary = true
+
 func TestCloneArgs_Full(t *testing.T) {
 	split := resource.MustParse("1Gi")
 	spec := &v1beta1.MigrationSpec{
@@ -57,7 +59,7 @@ func TestCloneArgs_Full(t *testing.T) {
 			NoACL:                 true,
 			NoComments:            true,
 			NoTablespaces:         true,
-			UseCopyBinary:         true,
+			UseCopyBinary:         &copyBinary,
 			FailFast:              true,
 			Skip: []v1beta1.SkipOption{
 				"vacuum", "largeObjects", "analyze", "extensionComments",

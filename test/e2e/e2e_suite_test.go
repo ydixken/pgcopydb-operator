@@ -98,8 +98,12 @@ const (
 	// PostgreSQL gets a cache worth having. The caches are derived by hand
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
 	// request, so a bigger request alone would change nothing.
-	fixtureCPU           = "2"
-	fixtureMemory        = "4Gi"
+	fixtureCPU    = "4"
+	fixtureMemory = "4Gi"
+	// The seed Job is not a migration worker, so it does not get the
+	// operator's runner default; size it like one of the servers it loads.
+	workerCPU            = "2"
+	workerMemory         = "4Gi"
 	fixtureSharedBuffers = "1GB"
 	fixtureCacheSize     = "3GB"
 
@@ -958,7 +962,7 @@ func buildSeedJob() *batchv1.Job {
 					Containers: []corev1.Container{{
 						Name:      "seed",
 						Image:     seedImage,
-						Resources: workerResources(fixtureCPU, fixtureMemory),
+						Resources: workerResources(workerCPU, workerMemory),
 						Command: []string{"psql",
 							"-v", "ON_ERROR_STOP=1",
 							"-v", "scale=" + scaleArg(),

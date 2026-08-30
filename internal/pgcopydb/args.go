@@ -131,7 +131,10 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	if c.NoTablespaces {
 		args = append(args, "--no-tablespaces")
 	}
-	if c.UseCopyBinary {
+	// nil means the API server did not default it, which happens only on a
+	// cluster whose CRD predates the default. Treat that as off rather than
+	// guessing on the user's behalf about their data path.
+	if c.UseCopyBinary != nil && *c.UseCopyBinary {
 		args = append(args, "--use-copy-binary")
 	}
 	if c.FailFast {
