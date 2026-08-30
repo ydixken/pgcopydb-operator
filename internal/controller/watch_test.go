@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"os"
+	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -27,6 +30,28 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
+
+// TestMigrationWatchIsFiltered pins the wiring, which the spec below cannot:
+// it exercises the predicate directly, so swapping what SetupWithManager
+// passes (an empty predicate.Funcs, say) leaves it green while the operator
+// goes back to waking itself on its own status writes.
+//
+// Asserted on the source text because the behavioural alternative is a
+// started manager and a count of reconciles that do not arrive, and a spec
+// that passes by waiting is a spec that fails when a runner is slow.
+// controller-runtime exposes no way to read a built controller's predicates
+// back, so the registration is what there is to check. The repo does this
+// elsewhere for the same reason (see test/buildconfig).
+func TestMigrationWatchIsFiltered(t *testing.T) {
+	src, err := os.ReadFile("migration_controller.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "For(&v1beta1.Migration{}, builder.WithPredicates(migrationEvents))"
+	if !strings.Contains(string(src), want) {
+		t.Errorf("the Migration watch must be registered as %s, or the operator paces itself off its own writes", want)
+	}
+}
 
 // The pacing of a running migration rests on two facts about the API server:
 // a status write leaves the generation alone, and marking an object for
