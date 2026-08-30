@@ -409,8 +409,8 @@ var _ = Describe("Migration", Ordered, func() {
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
 		create(mig)
 
-		By("waiting for the base copy to finish and streaming to start")
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+		By("waiting for the base copy to finish, streaming to start, and the lag to converge")
+		waitFollowStreaming(name)
 
 		By("inserting 1000 fresh rows into source orders while streaming")
 		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
@@ -463,6 +463,11 @@ var _ = Describe("Migration", Ordered, func() {
 		mig := newFollowMigration(name, v1beta1.CutoverAutomatic)
 		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		create(mig)
+
+		// Unattended, so nothing else here would notice a lag that never
+		// converges: the spec would sit at Streaming until followTimeout.
+		By("waiting for streaming and the lag to converge")
+		waitFollowStreaming(name)
 
 		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
 		expectSingleAttempt(m)
@@ -712,7 +717,7 @@ var _ = Describe("Migration", Ordered, func() {
 		create(mig)
 
 		By("waiting for the remediated preflight to clear and streaming to start")
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
+		waitFollowStreaming(name)
 
 		By("checking the applied grants were re-granted and recorded as events")
 		Expect(psql(sourceCluster, "SELECT rolreplication::int FROM pg_roles WHERE rolname = 'app'")).To(Equal("1"),
@@ -1166,6 +1171,46 @@ func expectConditionTrue(m *v1beta1.Migration, condType string) {
 	c := apimeta.FindStatusCondition(m.Status.Conditions, condType)
 	Expect(c).NotTo(BeNil(), "condition %s missing on %s", condType, m.Name)
 	Expect(c.Status).To(Equal(metav1.ConditionTrue), "condition %s is %s: %s", condType, c.Status, c.Message)
+}
+
+// waitFollowStreaming waits for the stream to start and then requires the lag
+// the operator reports to fall to or under the migration's maxCatchupLag. That
+// threshold is what sets CaughtUp, and CaughtUp is what both cutover modes
+// wait on, so a lag that cannot converge parks the migration at Streaming
+// until the spec's own budget expires and reports a timeout instead of a
+// cause. Every follow spec that cuts over goes through here for that reason.
+//
+// The phase set runs past CutoverPending because an Automatic migration cuts
+// over the instant CaughtUp goes True and would otherwise race this wait.
+func waitFollowStreaming(name string) {
+	GinkgoHelper()
+	m := waitPhase(name, nsE2E, migrationTimeout,
+		v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending, v1beta1.PhaseCuttingOver,
+		v1beta1.PhaseVerifying, v1beta1.PhaseCompleted)
+
+	// Read the threshold off the object rather than restating the CRD default,
+	// which would be a second copy of it that could drift.
+	Expect(m.Spec.Follow).NotTo(BeNil(), "waitFollowStreaming is for follow migrations, %s is not one", name)
+	Expect(m.Spec.Follow.MaxCatchupLag).NotTo(BeNil(),
+		"maxCatchupLag unset on %s; the CRD default did not apply", name)
+	want := m.Spec.Follow.MaxCatchupLag.Value()
+
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		if m.Status.Phase != v1beta1.PhaseStreaming {
+			// Only CaughtUp moves a follow migration out of Streaming, so a later
+			// phase is the convergence this asserts, already observed.
+			return
+		}
+		// An absent sample is not a converged one: the failure this guards
+		// against looks identical from the outside if absence counts as pass.
+		rep := m.Status.Replication
+		g.Expect(rep).NotTo(BeNil(), "%s: no replication sample yet, so no lag to converge", name)
+		g.Expect(rep.LagBytes).NotTo(BeNil(), "%s: replication sample carries no lagBytes", name)
+		g.Expect(*rep.LagBytes).To(BeNumerically("<=", want),
+			"%s: lag stuck at %d bytes, threshold %d (maxCatchupLag); CaughtUp cannot go True and no cutover will start",
+			name, *rep.LagBytes, want)
+	}, lagConvergeTimeout, 5*time.Second).Should(Succeed())
 }
 
 // expectSingleAttempt asserts the Migration finished on its first worker
