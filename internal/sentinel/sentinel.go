@@ -121,6 +121,15 @@ func (s State) Lag() int64 {
 // buildVerifyJob, whose own comment records that this gap "grows with idle
 // time" and refuted healthy drains live). Conflating them is what broke.
 //
+// Which is also the limit of what a caught-up stream means, and the reason
+// the compare-data path in that verification must not be dropped on the
+// grounds that this figure is now honest. What advances here is an apply
+// cursor, and it advances when the apply's COMMITs succeed whether or not
+// they changed anything on the target: in the live session_replication_role
+// incident the positions tracked normally while nothing was being applied at
+// all. CaughtUp therefore means the stream has been consumed, never that the
+// two databases hold the same rows. Only content can say that.
+//
 // Best effort, and the script always exits 0: psql reports a SQL error in its
 // exit status, and a failure here must never cost the caller its sample.
 func readScript(slot string) string {
