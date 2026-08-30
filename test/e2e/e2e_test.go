@@ -973,16 +973,26 @@ func e2eConn(cluster string) v1beta1.PostgresConnection {
 	}
 }
 
-// reportCloneRate records how long a completed clone took and how many fixture
-// bytes it moved per second, as a Ginkgo report entry. Deliberately not an
-// assertion: throughput on a shared cluster varies run to run, so a threshold
-// would fail for reasons that have nothing to do with the operator.
+// reportCloneRate records how long a completed clone took, against the size of
+// the source it copied, as a Ginkgo report entry. Deliberately not an
+// assertion: two clones of identical data on this cluster minutes apart
+// measured 666s and 399s, so any threshold would fail for reasons that have
+// nothing to do with the operator.
 //
-// "Fixture bytes" is the source database size, not bytes on the wire. It
-// counts the source's own indexes and bloat, which the target rebuilds rather
-// than receives, so the figure is a comparable number between runs of the same
-// scale and not an absolute transfer rate. Nothing here names a node, because
-// this repository's CI logs are public.
+// The divisor is the SOURCE DATABASE SIZE, which is not what crossed the wire
+// and is roughly 16% larger. A relation's size counts its indexes, page and
+// tuple headers, alignment padding and free space; a COPY stream carries none
+// of those, and the target rebuilds the indexes rather than receiving them.
+// One run measured 5078 MB transmitted against a 5886 MiB source. So this is a
+// number comparable between runs of the same scale, and not a transfer rate.
+//
+// pgcopydb's own COPY figure would be the honest divisor and is not reachable
+// here: status.progress stays empty for a plain clone even after it finishes,
+// because the catalog poll that fills it is gated off during the copy (it kills
+// workers) and gated on a runner-version allowlist besides. Reading pgcopydb's
+// end-of-run summary from the worker log would work and costs a log fetch.
+//
+// Nothing here names a node, because this repository's CI logs are public.
 func reportCloneRate(m *v1beta1.Migration) {
 	GinkgoHelper()
 	if m.Status.StartedAt == nil || m.Status.CompletedAt == nil {
@@ -999,8 +1009,9 @@ func reportCloneRate(m *v1beta1.Migration) {
 		AddReportEntry("clone rate", fmt.Sprintf("%s for the clone; source size unreadable: %v", elapsed, err))
 		return
 	}
-	AddReportEntry("clone rate", fmt.Sprintf(
-		"%s for %.0f MiB of fixture at scale %s: %.1f MiB/s",
+	AddReportEntry("clone wall clock", fmt.Sprintf(
+		"%s for a %.0f MiB source at scale %s: %.1f fixture MiB/s"+
+			" (not transfer throughput; see the helper comment)",
 		elapsed.Round(time.Second), bytes/(1<<20), scaleArg(), bytes/(1<<20)/elapsed.Seconds()))
 }
 

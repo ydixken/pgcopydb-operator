@@ -167,8 +167,17 @@ The operator does not skip it by default, because a migration target that silent
 
 ## Measuring
 
-Tune nothing you cannot measure.
-Two runs on a shared cluster vary on their own, so treat any change smaller than the spread between two identical runs as noise.
+Tune nothing you cannot measure, and be careful what you measure with.
+
+Two clones of identical data on the same cluster minutes apart measured 666s and 399s.
+That is a 67% spread from thin provisioning alone: the first run writes into freshly allocated blocks, the second overwrites blocks that already exist.
+So a single before-and-after pair proves nothing.
+Give every arm a freshly provisioned target volume, run at least three, and report the median and the range.
+
+Watch the divisor too.
+Dividing the source database size by wall clock overstates throughput by roughly 16%, because a relation's size counts its indexes, page and tuple headers, alignment padding and free space, and a COPY stream carries none of them.
+One run moved 5078 MB against a 5886 MiB source.
+pgcopydb's own summary, printed at the end of every clone, is the honest source: its `COPY (cumulative)` row gives both the bytes and the time.
 
 The operator exports `pgcopydb_migration_start_time_seconds` and `pgcopydb_migration_completion_time_seconds`.
 Subtracting them gives the duration, which is the number to compare.
