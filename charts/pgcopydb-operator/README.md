@@ -75,6 +75,8 @@ Thresholds and windows are starting points; promtool unit tests in the repositor
 
 ## Dashboards
 
+![Migration Detail, on a follow migration a minute after its cutover](https://ydixken.github.io/pgcopydb-operator/assets/migration-detail-dashboard.png)
+
 `grafana.dashboards.enabled=true` ships the three dashboards in [dashboards/](dashboards/) (migration detail, fleet overview, operator health) as ConfigMaps labeled `grafana_dashboard: "1"` for Grafana's dashboard sidecar.
 The sidecar usually watches only Grafana's own namespace, so set `grafana.dashboards.namespace` to it.
 The `grafana_folder` annotation takes effect only when the sidecar's `folderAnnotation` setting names it.
