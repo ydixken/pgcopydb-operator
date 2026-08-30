@@ -37,6 +37,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
@@ -234,6 +235,52 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$gap"`)]
 	if strings.Contains(block, "exit ") {
 		t.Fatalf("the counters block must not be able to end the Job:\n%s", block)
+	}
+}
+
+// TestJobScripts_ShellValid parses every script the operator ships into a
+// Job. A script that does not parse does not half-run: the shell refuses the
+// file, the Job exits non-zero, and for the verify Job that reads as a
+// refuted drain, which fails the Migration. So the counters block, a
+// reporting nicety, could fail a cutover by syntax alone.
+//
+// Both shells, because they disagree: the runner image links /bin/sh to dash,
+// which reads a case statement nested in $( ) the way it is meant, while bash
+// takes the pattern's ")" for the end of the substitution. A runner image
+// with sh linked to bash would have refused the verify script outright. dash
+// is what ships, bash is the one that catches this class, and neither alone
+// is the test.
+func TestJobScripts_ShellValid(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
+	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
+	scripts := map[string]func() (*batchv1.Job, error){
+		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
+		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+	}
+	shells := []string{}
+	for _, name := range []string{"sh", "dash", "bash"} {
+		if path, err := exec.LookPath(name); err == nil {
+			shells = append(shells, path)
+		}
+	}
+	if len(shells) == 0 {
+		t.Skip("no shell available")
+	}
+	for name, build := range scripts {
+		job, err := build()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, script := range []string{c.Command[2], c.Args[1]} {
+			for _, shell := range shells {
+				if err := exec.Command(shell, "-n", "-c", script).Run(); err != nil {
+					t.Errorf("%s: %s rejects the script: %v\n%s", name, shell, err, script)
+				}
+			}
+		}
 	}
 }
 

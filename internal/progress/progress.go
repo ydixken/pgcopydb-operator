@@ -82,11 +82,22 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 // drain-verification Job asks for the counters the same way, from its own pod
 // once the worker is gone (see buildVerifyJob): one allowlist, one renderer,
 // so the gate cannot drift between the two callers.
+//
+// An empty allowlist renders nothing at all, which is the same "do not even
+// ask" the poll itself takes: `case "$v" in` with no pattern is a shell
+// syntax error, and a caller embedding this in a larger script carries it.
 func (p *Poller) GateScript() string {
+	if len(p.allowed) == 0 {
+		return ""
+	}
+	// The pattern list opens with "(", which POSIX allows and which every
+	// caller needs: without it a shell reading this inside $( ) can take the
+	// pattern's own ")" for the end of the substitution. dash does not, bash
+	// does, and the verify Job embeds this script (found by sh -n).
 	return `v=$(pgcopydb --version | head -n 1)
 v=${v#` + versionPrefix + `}
 case "$v" in
-` + strings.Join(p.allowed, "|") + `) pgcopydb list progress --json --dir ` + pgcopydb.WorkDir + ` ;;
+(` + strings.Join(p.allowed, "|") + `) pgcopydb list progress --json --dir ` + pgcopydb.WorkDir + ` ;;
 esac
 `
 }

@@ -110,8 +110,25 @@ esac
 	return dir
 }
 
+// TestGateScript_Disabled: an empty allowlist renders no script. Rendering
+// the case statement with no pattern would be a syntax error, and the verify
+// Job embeds whatever comes back into a larger script, so "the poll is off"
+// has to mean nothing is emitted rather than something that cannot parse.
+func TestGateScript_Disabled(t *testing.T) {
+	for name, versions := range map[string][]string{
+		"nil":                 nil,
+		"empty":               {},
+		"all entries invalid": {"; rm -rf /", "$(id)"},
+	} {
+		if s := NewFromExec(&fakeExec{}, versions).GateScript(); s != "" {
+			t.Errorf("%s allowlist must render nothing, got:\n%s", name, s)
+		}
+	}
+}
+
 // TestGateScript_UnderSh proves the gate on a real shell: an allowlisted
-// version opens it, any other version produces no output and a zero exit.
+// version opens it, any other version produces no output and a zero exit,
+// and every allowlist shape renders something a shell will accept.
 func TestGateScript_UnderSh(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -130,6 +147,14 @@ func TestGateScript_UnderSh(t *testing.T) {
 		}
 		if string(out) != want {
 			t.Errorf("version %s: output %q, want %q", version, out, want)
+		}
+	}
+	// The disabled gate has to parse too: it is pasted into the verify Job's
+	// script, where a syntax error would be the whole file's problem.
+	for _, versions := range [][]string{nil, {patchedVersion}} {
+		script := NewFromExec(&fakeExec{}, versions).GateScript()
+		if err := exec.Command(sh, "-n", "-c", script).Run(); err != nil {
+			t.Errorf("allowlist %v renders a script sh rejects: %v\n%s", versions, err, script)
 		}
 	}
 }
