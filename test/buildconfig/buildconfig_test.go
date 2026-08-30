@@ -53,10 +53,9 @@ func read(t *testing.T, path string) string {
 	return string(b)
 }
 
-// pin reads an ARG's default out of a Dockerfile. An empty result is fatal
-// rather than a mismatch: a renamed ARG would otherwise make every comparison
-// below agree trivially on "", which is a check that passes because nothing
-// matched.
+// pin reads an ARG's default out of a Dockerfile. Empty is fatal, not a
+// mismatch: a renamed ARG must not let every comparison agree trivially on
+// "".
 func pin(t *testing.T, path, arg string) string {
 	t.Helper()
 	re := regexp.MustCompile(`(?m)^ARG\s+` + regexp.QuoteMeta(arg) + `=(\S+)\s*$`)
@@ -170,27 +169,30 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	}
 }
 
-// The pinned pgcopydb version is an exact-match allowlist at runtime, not a
-// hint. charts/values.yaml feeds --progress-poll-versions, which becomes a
-// shell `case` pattern in progress.gateScript(); a version off the list
-// matches nothing and CloneProgress returns (nil, nil) with no error logged,
-// so status.progress and the clone byte metrics go dark in silence. Every
-// location below has to move together, and this reports all of them at once
-// rather than stopping at the first.
+// The pinned pgcopydb version is a runtime exact-match allowlist, not a
+// hint: charts/values.yaml feeds gateScript()'s shell case, so an unlisted
+// version matches nothing and fails closed with no error logged anywhere.
 func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 	want := pin(t, runnerDockerfile, "PGCOPYDB_VERSION")
 
-	for _, c := range []struct{ path, why string }{
-		{runnerDockerfile, "the build canary that fails the image build on drift"},
-		{releaseWorkflow, "the release smoke test that runs the pushed image"},
-		{mainGo, "the --progress-poll-versions default"},
-		{mainTest, "the flag-default assertion"},
-		{pollerTest, "the gate-script assertion"},
-		{runnerReadme, "the runner image's documented version string"},
-		{chartReadme, "the documented default for runner.progressPollVersions"},
+	for _, c := range []struct {
+		path string
+		why  string
+		// count: occurrences of want required. >1 where a second,
+		// independently typed literal could drift alone past a plain Contains.
+		count int
+	}{
+		{runnerDockerfile, "the build canary that fails the image build on drift", 2},
+		{releaseWorkflow, "the release smoke test that runs the pushed image", 1},
+		{mainGo, "the --progress-poll-versions default", 1},
+		{mainTest, "the flag-default assertion", 1},
+		{pollerTest, "the gate-script assertion", 2},
+		{runnerReadme, "the runner image's documented version string", 1},
+		{chartReadme, "the documented default for runner.progressPollVersions", 1},
 	} {
-		if !strings.Contains(read(t, c.path), want) {
-			t.Errorf("%s does not mention pgcopydb %s (%s)", c.path, want, c.why)
+		if n := strings.Count(read(t, c.path), want); n < c.count {
+			t.Errorf("%s mentions pgcopydb %s %d time(s), want at least %d (%s)",
+				c.path, want, n, c.count, c.why)
 		}
 	}
 
