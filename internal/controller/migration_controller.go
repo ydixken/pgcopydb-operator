@@ -31,9 +31,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
@@ -41,7 +43,9 @@ import (
 )
 
 // pollInterval is how often a running clone is re-checked (Job observation,
-// follow state, and the progress samples).
+// follow state, and the progress samples). It is the real cadence only
+// because migrationEvents keeps the operator's own status writes from
+// waking it again immediately.
 const pollInterval = 30 * time.Second
 
 const (
@@ -820,10 +824,21 @@ func (r *MigrationReconciler) updateStatus(ctx context.Context, m, base *v1beta1
 	return r.Status().Patch(ctx, m, client.MergeFrom(base))
 }
 
+// migrationEvents drops the controller's own status writes from the Migration
+// watch. Without it every status patch returns as a watch event and the next
+// pass starts at once: the lag figure is derived from the source's WAL head
+// and differs every time, so the loop sustains itself (measured at one to two
+// passes per second right through a cutover drain). Every waiting path
+// schedules its own RequeueAfter, so nothing depends on that feedback, and
+// the events that must arrive still do: the API server bumps the generation
+// for a spec change and for the deletion timestamp alike, and this filters
+// only the Migration watch, never the owned Jobs.
+var migrationEvents predicate.Predicate = predicate.GenerationChangedPredicate{}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *MigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1beta1.Migration{}).
+		For(&v1beta1.Migration{}, builder.WithPredicates(migrationEvents)).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ConfigMap{}).
