@@ -51,7 +51,7 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 - The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
 - kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
 - CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)). [ci.yml](.github/workflows/ci.yml) runs lint, tests and the docs build on every push and pull request, and those three are the required checks on `main`. [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, and [auto-release.yml](.github/workflows/auto-release.yml) cuts that tag once a week.
-- E2e runs in **two places**. Locally, `task e2e` targets the dev cluster through the developer's own kubeconfig context and asks first. In CI, `release.yml` runs the same specs against a release candidate at `E2E_SCALE=0.1`, on a runner scale set that may reach the dev cluster, inside namespaces it neither creates nor deletes.
+- E2e runs in **two places**. Locally, `task e2e` targets the dev cluster through the developer's own kubeconfig context and asks first. In CI, `release.yml` runs the same specs against a release candidate at `E2E_SCALE=0.5`, on a runner scale set that may reach the dev cluster, inside namespaces it neither creates nor deletes. That candidate is cut weekly, so the run's few hours buy a throughput reading the old 0.1 tier was too small to give.
 
 ## The solution ladder ("ponytail")
 
