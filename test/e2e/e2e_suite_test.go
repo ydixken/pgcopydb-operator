@@ -98,7 +98,13 @@ const (
 	// PostgreSQL gets a cache worth having. The caches are derived by hand
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
 	// request, so a bigger request alone would change nothing.
-	fixtureCPU    = "4"
+	// Two, not four. Four was tried and measured: seeding ran at 16.6 MiB/s
+	// against 15.9 at two, which is noise, so the fixtures are not CPU-bound
+	// (see the rate curve in issue #146). It is not free either. Longhorn's
+	// instance manager holds a guaranteed 6 CPUs per node here, so six
+	// four-CPU instances leave no room for a worker and the run dies on
+	// FailedScheduling instead of running slowly.
+	fixtureCPU    = "2"
 	fixtureMemory = "4Gi"
 	// The seed Job is not a migration worker, so it does not get the
 	// operator's runner default; size it like one of the servers it loads.
