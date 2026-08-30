@@ -36,6 +36,7 @@ const (
 	managerDockerfile = "../../Dockerfile"
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
+	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
 	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
 	chartReadme       = "../../charts/pgcopydb-operator/README.md"
 	runnerReadme      = "../../images/runner/README.md"
@@ -176,17 +177,21 @@ func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
 	}
 }
 
+type workflowStep struct {
+	Uses string `json:"uses"`
+	With struct {
+		Context   string `json:"context"`
+		Platforms string `json:"platforms"`
+	} `json:"with"`
+}
+
 type workflow struct {
 	Jobs map[string]struct {
-		Steps []struct {
-			Uses string `json:"uses"`
-		} `json:"steps"`
+		Steps []workflowStep `json:"steps"`
 	} `json:"jobs"`
 }
 
-func usesQEMU(steps []struct {
-	Uses string `json:"uses"`
-}) bool {
+func usesQEMU(steps []workflowStep) bool {
 	for _, s := range steps {
 		if strings.HasPrefix(s.Uses, "docker/setup-qemu-action") {
 			return true
@@ -216,6 +221,46 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	if !usesQEMU(wf.Jobs["runner-image"].Steps) {
 		t.Error("runner-image must keep docker/setup-qemu-action: it runs apt and the " +
 			"version canary on the emulated arm64 platform")
+	}
+}
+
+// builderPlatforms returns the platforms list of the docker/build-push-action
+// step that builds the images/pgcopydb-builder context. Fatal, not empty,
+// when no such step exists: a silent miss would let the comparison below
+// pass vacuously instead of catching a divergence.
+func builderPlatforms(t *testing.T, path string) string {
+	t.Helper()
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, job := range wf.Jobs {
+		for _, s := range job.Steps {
+			if strings.HasPrefix(s.Uses, "docker/build-push-action") && s.With.Context == "images/pgcopydb-builder" {
+				return s.With.Platforms
+			}
+		}
+	}
+	t.Fatalf("%s has no docker/build-push-action step building images/pgcopydb-builder", path)
+	return ""
+}
+
+// The existence check in release.yml only proves the pre-built tag resolves,
+// never that it is multi-arch, so a single-arch pre-build would read as
+// "exists" and let an amd64 pgcopydb land inside the arm64 runner image.
+func TestBuilderPlatformsAgreeAcrossWorkflows(t *testing.T) {
+	release := builderPlatforms(t, releaseWorkflow)
+	if release == "" {
+		t.Fatalf("%s: pgcopydb-builder build step declares no platforms", releaseWorkflow)
+	}
+	prebuild := builderPlatforms(t, builderWorkflow)
+	if prebuild == "" {
+		t.Fatalf("%s: pgcopydb-builder build step declares no platforms", builderWorkflow)
+	}
+	if release != prebuild {
+		t.Errorf("release.yml builds pgcopydb-builder for %q, %s for %q; they must agree "+
+			"or a single-arch pre-build passes the existence check unnoticed",
+			release, builderWorkflow, prebuild)
 	}
 }
 

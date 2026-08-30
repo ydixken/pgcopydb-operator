@@ -28,7 +28,10 @@ jobs:
       - id: pin
         run: |
           sha=$(sed -n 's/^ARG PGCOPYDB_SHA=//p' images/pgcopydb-builder/Dockerfile)
-          test -n "$sha"
+          if [ -z "$sha" ]; then
+            echo "::error::images/pgcopydb-builder/Dockerfile has no ARG PGCOPYDB_SHA=<value>"
+            exit 1
+          fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
