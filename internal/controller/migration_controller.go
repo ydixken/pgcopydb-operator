@@ -384,10 +384,10 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // observeRunningJob samples a live worker (progress, sizes, follow state)
 // and schedules the next look.
 //
-// The invariant: while a worker runs, the operator never opens its catalog.
-// There is no read-only pgcopydb command. Every invocation logs its own
-// command line into the worker's SQLite catalog, and that commit invalidates
-// a read snapshot the worker has open, failing its next write with
+// The invariant: no pass exec-s a pgcopydb command into a live worker pod.
+// There is no read-only one. Every invocation logs its own command line into
+// the worker's SQLite catalog, and that commit invalidates a read snapshot
+// the worker has open, failing its next write with
 // SQLITE_BUSY_SNAPSHOT, which no retry can clear. 0.18 died of it twice in
 // one e2e run, mid-copy in an index worker and again seconds after a drain,
 // on the sequence reset (see docs/research/upstream-issues.md). "Almost
@@ -397,8 +397,14 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // the target, and the size sample reads pg_database_size (both in
 // internal/progress). The copy counters are read from a pod with no worker in
 // it, the verify Job for a follow migration and the exited worker's own pod
-// for a plain clone. The one remaining write to a live catalog is `sentinel
+// for a plain clone. The one remaining exec into a live worker is `sentinel
 // set endpos`, which is how a cutover is asked for and has no other route.
+//
+// The claim is about exec, not about the work dir, and deliberately: deleting
+// a Migration starts a cleanup Job (its own pod, same PVC) as soon as the
+// worker Job carries a deletion timestamp, and foreground propagation holds
+// that timestamp while the worker's pods are still going away. That path
+// predates this rule and is not reworked here.
 //
 // The copy's end is read from the markers pgcopydb prints when the copy phase
 // ends (pgcopydb.CloneDone), so a follow migration needs the log reader
