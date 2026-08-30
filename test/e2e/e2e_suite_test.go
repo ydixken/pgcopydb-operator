@@ -87,10 +87,21 @@ const (
 	tgtSecret = targetCluster + "-app"
 
 	// CNPG's own pod labels: what the suite selects, schedules and kills by.
-	labelCNPGCluster = "cnpg.io/cluster"
-	labelCNPGRole    = "cnpg.io/instanceRole"
-	labelCNPGPodRole = "cnpg.io/podRole"
-	rolePrimary      = "primary"
+	labelCNPGCluster  = "cnpg.io/cluster"
+	labelCNPGRole     = "cnpg.io/instanceRole"
+	labelCNPGPodRole  = "cnpg.io/podRole"
+	labelCNPGInstance = "cnpg.io/instanceName"
+	rolePrimary       = "primary"
+
+	// Fixture server sizing. Requests only, so nothing is ever throttled, but
+	// large enough that a seeding or restoring backend gets a real core and
+	// PostgreSQL gets a cache worth having. The caches are derived by hand
+	// rather than by ratio: CNPG does not size shared_buffers from the memory
+	// request, so a bigger request alone would change nothing.
+	fixtureCPU           = "2"
+	fixtureMemory        = "4Gi"
+	fixtureSharedBuffers = "1GB"
+	fixtureCacheSize     = "3GB"
 
 	// cnpgInstances is the instance count of both fixture clusters. Three, so
 	// each cluster spans three nodes and a migration's SQL legs cross the
@@ -574,6 +585,34 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	if fixtureStorageClass != "" {
 		storage["storageClass"] = fixtureStorageClass
 	}
+	affinity := map[string]any{
+		// These three are what CNPG already defaults to, so they change
+		// nothing today. They are here so an upstream default that moves
+		// cannot quietly return the fixtures to a single node: the whole
+		// point of cnpgInstances > 1 is one instance per node.
+		"enablePodAntiAffinity": true,
+		"podAntiAffinityType":   "preferred",
+		"topologyKey":           corev1.LabelHostname,
+	}
+	if name == targetCluster {
+		// CNPG's own anti-affinity repels only instances of the same cluster,
+		// so without this the two -1 pods, the primaries at bootstrap, both
+		// land on whichever node scores highest and the migration's SQL legs
+		// never leave it. Keyed on the instance name and not the primary role:
+		// CNPG applies that role label only after promotion, long after the
+		// target's first pod has been scheduled.
+		affinity["additionalPodAntiAffinity"] = map[string]any{
+			"preferredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{
+				"weight": int64(100),
+				"podAffinityTerm": map[string]any{
+					"topologyKey": corev1.LabelHostname,
+					"labelSelector": map[string]any{
+						"matchLabels": map[string]any{labelCNPGInstance: sourceCluster + "-1"},
+					},
+				},
+			}},
+		}
+	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": cnpgGVK.Group + "/" + cnpgGVK.Version,
 		"kind":       cnpgGVK.Kind,
@@ -585,34 +624,45 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 			// own operand default.
 			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
 			"storage":   storage,
-			// These three are what CNPG already defaults to, so they change
-			// nothing today. They are here so an upstream default that moves
-			// cannot quietly return the fixtures to a single node: the whole
-			// point of cnpgInstances > 1 is one instance per node.
-			"affinity": map[string]any{
-				"enablePodAntiAffinity": true,
-				"podAntiAffinityType":   "preferred",
-				"topologyKey":           corev1.LabelHostname,
-			},
+			"affinity":  affinity,
 			// Requests, no limits, and they are not what spreads these pods:
-			// the anti-affinity above does that. They are here so the fixtures
-			// cost the scheduler something, which is what stops the workers
-			// that have no sibling to repel from all picking the same
-			// least-allocated node. A floor for accounting, not a budget.
+			// the anti-affinity above does that. They make the fixtures cost
+			// the scheduler something, which is what stops the workers that
+			// have no sibling to repel from all picking the same
+			// least-allocated node, and they size the server: a quarter core
+			// left a seeding backend pinned at its request for minutes.
 			"resources": map[string]any{
-				"requests": map[string]any{"cpu": "250m", "memory": "512Mi"},
+				"requests": map[string]any{"cpu": fixtureCPU, "memory": fixtureMemory},
 			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
 				"database": appDB,
 				"owner":    appDB,
 			}},
-			// CNPG defaults wal_sender_timeout to 5s for its own HA streaming;
-			// that terminates pgcopydb's logical-decoding walsender whenever a
-			// standby status update is a few seconds late (observed live). Use
-			// the PostgreSQL default so follow scenarios exercise the operator,
-			// not the fixture's aggressive timeout.
 			"postgresql": map[string]any{
-				"parameters": map[string]any{"wal_sender_timeout": "60s"},
+				"parameters": map[string]any{
+					// CNPG defaults wal_sender_timeout to 5s for its own HA
+					// streaming; that terminates pgcopydb's logical-decoding
+					// walsender whenever a standby status update is a few
+					// seconds late (observed live). Use the PostgreSQL default
+					// so follow scenarios exercise the operator, not the
+					// fixture's aggressive timeout.
+					"wal_sender_timeout": "60s",
+					// A migration is one long bulk load, and PostgreSQL ships
+					// defaults sized for a machine that has other work to do.
+					// Left at 128MB of shared_buffers the fixtures spend the
+					// clone reading their own pages back off Longhorn, which
+					// measures the storage rather than the operator.
+					"shared_buffers":       fixtureSharedBuffers,
+					"effective_cache_size": fixtureCacheSize,
+					// Index builds during pg_restore, and the sort memory the
+					// seed's generate_series passes through.
+					"maintenance_work_mem": "512MB",
+					// Bulk load checkpoints on volume, not on time. Small
+					// max_wal_size means a checkpoint every few seconds and a
+					// full-page write storm behind it.
+					"max_wal_size":       "4GB",
+					"checkpoint_timeout": "15min",
+				},
 			},
 		},
 	}}
@@ -864,7 +914,7 @@ func buildSeedJob() *batchv1.Job {
 					Containers: []corev1.Container{{
 						Name:      "seed",
 						Image:     seedImage,
-						Resources: workerResources("250m", "512Mi"),
+						Resources: workerResources(fixtureCPU, fixtureMemory),
 						Command: []string{"psql",
 							"-v", "ON_ERROR_STOP=1",
 							"-v", "scale=" + scaleArg(),
