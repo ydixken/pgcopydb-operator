@@ -116,12 +116,29 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	if st == nil {
 		return
 	}
+	rs := st.ToStatus(slot)
 	if prev := m.Status.Replication; prev != nil {
-		// Endpos is no longer read back from the worker: the operator set it
-		// and its own status is where it lives now.
-		st.Endpos = prev.Endpos
+		// What one pass did not learn, it must not erase. The sample is per
+		// side: the source answering while the target does not (revoked
+		// grants, a restarting target) yields a write_lsn with no replay
+		// position, and publishing that alone would empty the lag out of the
+		// CR and flip CaughtUp on a healthy stream. Endpos is carried for a
+		// different reason: nothing reads it back from the worker any more,
+		// so this status is the only place it lives.
+		if rs.Endpos == "" {
+			rs.Endpos = prev.Endpos
+		}
+		if rs.ReplayLSN == "" {
+			rs.ReplayLSN = prev.ReplayLSN
+		}
+		if rs.LagBytes == nil {
+			// The previous figure, not a fresh one computed from a stale
+			// replay against a moved WAL head: that pair only ever reads as
+			// falling behind.
+			rs.LagBytes = prev.LagBytes
+		}
 	}
-	m.Status.Replication = st.ToStatus(slot)
+	m.Status.Replication = rs
 	if !cloneDone {
 		// Base copy still running; prefetch streams in the background.
 		return
@@ -131,8 +148,10 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 		"logical replication is applying changes")
 	m.Status.Phase = v1beta1.PhaseStreaming
 
-	lag := st.Lag()
-	caughtUp := lag >= 0 && lag <= maxCatchupLagBytes(m)
+	// Read the lag back off the status just written, so the condition and the
+	// CR can never disagree: a pass that carried the previous figure forward
+	// must carry the previous verdict with it.
+	caughtUp := rs.LagBytes != nil && *rs.LagBytes <= maxCatchupLagBytes(m)
 	if caughtUp {
 		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionTrue, "LagBelowThreshold",
 			"replication lag is below spec.follow.maxCatchupLag")
@@ -142,7 +161,7 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	}
 
 	switch {
-	case sentinel.EndposSet(st.Endpos):
+	case sentinel.EndposSet(rs.Endpos):
 		// Cutover already triggered; the worker drains and exits 0.
 		m.Status.Phase = v1beta1.PhaseCuttingOver
 	case cutoverWanted(m, caughtUp):

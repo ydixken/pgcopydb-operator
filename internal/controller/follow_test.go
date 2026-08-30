@@ -443,6 +443,42 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(fake.slots).To(ContainElement(effectiveSlotName(m)))
 	})
 
+	It("keeps what a half-answered sample did not learn", func() {
+		const name = "mig-follow-partial"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+
+		// Both sides answer: a full sample, caught up.
+		const head = "0/4000000"
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: head, SourceHead: head}
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Replication.ReplayLSN).To(Equal(head))
+		Expect(m.Status.Replication.LagBytes).NotTo(BeNil())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+
+		// The target side stops answering (revoked grants, a restarting
+		// target): the source still reports a write position, so the sample
+		// is not empty, but it has learned nothing about the replay. The
+		// stream is healthy and the CR must not say otherwise, because the
+		// documented manual runbook has people block on CaughtUp.
+		fake.state = &sentinel.State{WriteLSN: head, SourceHead: head}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Replication.WriteLSN).To(Equal(head))
+		Expect(m.Status.Replication.ReplayLSN).To(Equal(head), "the previous replay position was erased")
+		Expect(m.Status.Replication.LagBytes).NotTo(BeNil(), "the lag was erased")
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue(),
+			"a half-answered sample flipped CaughtUp on a healthy stream")
+
+		// Manual mode without approval, so the phase parks at CutoverPending
+		// rather than cutting over on a figure this pass did not measure.
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+	})
+
 	It("fails loudly when drain verification is refuted", func() {
 		const name = "mig-follow-lost"
 		defer removeMigration(ctx, name)
