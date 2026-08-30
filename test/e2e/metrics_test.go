@@ -213,13 +213,13 @@ var emptyOK = map[panelKey]bool{
 	// endpos reaches status through a sentinel sample taken while the worker
 	// drains; a small drain can finish before the next sample, leaving the
 	// endpos gauge legitimately unset.
-	{uid: uidDetail, title: "Cutover drain"}: true,
+	{uid: uidDetail, title: "Cutover Drain"}: true,
 	// The same endpos gap empties that target here; the panel's other three
 	// targets are asserted directly by the streaming spec.
-	{uid: uidDetail, title: "LSN positions"}: true,
+	{uid: uidDetail, title: "LSN Positions"}: true,
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
-	{uid: uidOperator, title: "Leader elected"}: true,
+	{uid: uidOperator, title: "Leader Elected"}: true,
 }
 
 // panelFailure replays one panel target and describes what is wrong with the
@@ -292,7 +292,10 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 
 	It("exports live series while streaming", func() {
 		mig := newFollowMigration(metricsMigration, v1beta1.CutoverManual)
-		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
+		// Both checks, because this spec asserts every dashboard panel answers:
+		// exempting the Data Verification panel would leave the per-check metric
+		// with no e2e coverage at all.
+		mig.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		// Same budget as the streaming specs: 0.18's catalog layer crashes
 		// probabilistically at this scale; retries resume from the work dir.
 		mig.Spec.BackoffLimit = 5
@@ -389,6 +392,21 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 	It("answers every dashboard panel query", func() {
 		loaded, err := dashboards.Load(filepath.Join(chartPath, "dashboards"))
 		Expect(err).NotTo(HaveOccurred())
+
+		// emptyOK is keyed by panel title, so renaming a panel orphans its
+		// entry and the panel starts failing the sweep for the wrong reason.
+		// Catch that here, where the message names the stale key, rather than
+		// three minutes later as an unexplained empty result.
+		titles := map[panelKey]bool{}
+		for _, d := range loaded {
+			for _, p := range d.AllPanels() {
+				titles[panelKey{uid: d.UID, title: p.Title}] = true
+			}
+		}
+		for k := range emptyOK {
+			Expect(titles).To(HaveKey(k),
+				"emptyOK names %q on dashboard %q, which has no such panel; a rename left it stale", k.title, k.uid)
+		}
 		vars := map[string]string{"namespace": nsE2E, "name": metricsMigration, "job": metricsJob()}
 		// One Eventually around the whole sweep: each pass reports every
 		// failing panel, so one run shows the full damage instead of the
