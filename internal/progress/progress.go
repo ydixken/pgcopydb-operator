@@ -136,13 +136,10 @@ printf 'source=%s\ntarget=%s\n' "$s" "$t"
 // the copy statement lowercase, which is easy to match wrongly and gives a
 // confident zero when four copies are running.
 //
-// Copy workers count by connection, not by active statement: pgcopydb opens
-// them up front and they disconnect the moment the copy ends (sampled across
-// a whole base copy on a live worker, 2026-08-30: four connected in every
-// sample, zero the instant it finished). A worker between two COPY statements
-// is still the copy phase, and counting only the active ones reported the tail
-// while gigabytes were still moving. The tail count keeps the active test,
-// because an index worker parked idle on a SET is not the tail either.
+// Copy workers count by connection, the tail only while active. Sampled
+// across a whole base copy on a live worker 2026-08-30: four copy workers
+// connected in every sample, zero the instant it ended, while the active
+// count dipped to zero mid-copy and read as the tail.
 //
 // Scoped to this worker's own connections by client_addr. Every worker of one
 // migration runs in one pod and so shares a source address, while a target can

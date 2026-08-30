@@ -76,9 +76,8 @@ const (
 	remediatedNoteLen = 950
 )
 
-// The two CloneCompleted=False reasons a running attempt passes through.
-// startAttempt writes the first, the clone-stage probe promotes it to the
-// second, and that promotion is what lets the phase reach Finalizing.
+// The CloneCompleted=False reasons of a running attempt. Promotion to the
+// second is the latch that lets the phase reach Finalizing (see copySeen).
 const (
 	reasonCloneRunning = "CloneRunning"
 	reasonCopyingData  = "CopyingData"
