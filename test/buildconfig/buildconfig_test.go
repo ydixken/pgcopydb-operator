@@ -174,25 +174,36 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 // version matches nothing and fails closed with no error logged anywhere.
 func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 	want := pin(t, runnerDockerfile, "PGCOPYDB_VERSION")
+	q := regexp.QuoteMeta(want)
 
 	for _, c := range []struct {
 		path string
-		why  string
-		// count: occurrences of want required. >1 where a second,
-		// independently typed literal could drift alone past a plain Contains.
-		count int
+		// pattern anchors to the specific construct why names, built from q
+		// so a count can't be satisfied by an unrelated, coincidental hit.
+		pattern *regexp.Regexp
+		why     string
 	}{
-		{runnerDockerfile, "the build canary that fails the image build on drift", 2},
-		{releaseWorkflow, "the release smoke test that runs the pushed image", 1},
-		{mainGo, "the --progress-poll-versions default", 1},
-		{mainTest, "the flag-default assertion", 1},
-		{pollerTest, "the gate-script assertion", 2},
-		{runnerReadme, "the runner image's documented version string", 1},
-		{chartReadme, "the documented default for runner.progressPollVersions", 1},
+		{runnerDockerfile, regexp.MustCompile(`(?m)^ARG\s+PGCOPYDB_VERSION=` + q + `\s*$`),
+			"the ARG that pin() itself parses"},
+		{runnerDockerfile, regexp.MustCompile(`pgcopydb --version \| grep -qF '` + q + `'`),
+			"the build canary that fails the image build on drift"},
+		{releaseWorkflow, regexp.MustCompile(`pgcopydb --version \| grep -F '` + q + `'`),
+			"the release smoke test that runs the pushed image"},
+		{mainGo, regexp.MustCompile(`"progress-poll-versions", "` + q + `"`),
+			"the --progress-poll-versions default"},
+		{mainTest, regexp.MustCompile(`defaultPollVersions = "` + q + `"`),
+			"the flag-default assertion"},
+		{pollerTest, regexp.MustCompile(`const patchedVersion = "` + q + `"`),
+			"the gate-script assertion's fixture constant"},
+		{pollerTest, regexp.MustCompile(`"` + q + `\|`),
+			"the gate-script assertion's case pattern"},
+		{runnerReadme, regexp.MustCompile("`[^`]*" + q + "[^`]*`"),
+			"the runner image's documented version string"},
+		{chartReadme, regexp.MustCompile("`[^`]*" + q + "[^`]*`"),
+			"the documented default for runner.progressPollVersions"},
 	} {
-		if n := strings.Count(read(t, c.path), want); n < c.count {
-			t.Errorf("%s mentions pgcopydb %s %d time(s), want at least %d (%s)",
-				c.path, want, n, c.count, c.why)
+		if !c.pattern.MatchString(read(t, c.path)) {
+			t.Errorf("%s has no construct matching pgcopydb %s (%s)", c.path, want, c.why)
 		}
 	}
 
