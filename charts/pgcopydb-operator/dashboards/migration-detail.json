@@ -107,7 +107,7 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 3,
+        "w": 4,
         "x": 0,
         "y": 1
       },
@@ -252,229 +252,6 @@
       }
     },
     {
-      "id": 23,
-      "type": "stat",
-      "title": "Percent",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 3,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "clamp_max(100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        }
-      ],
-      "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "text": {
-          "valueSize": 20,
-          "titleSize": 20
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "noValue": "N/A",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent",
-          "decimals": 0
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 21,
-      "type": "stat",
-      "title": "Schema",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 5,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"schema\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        }
-      ],
-      "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "text": {
-          "valueSize": 20,
-          "titleSize": 20
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "noValue": "Not Run",
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "1": {
-                  "text": "PASS",
-                  "color": "green",
-                  "index": 0
-                },
-                "0": {
-                  "text": "FAIL",
-                  "color": "red",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 22,
-      "type": "stat",
-      "title": "Data",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 3,
-        "w": 2,
-        "x": 7,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"data\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        }
-      ],
-      "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "text": {
-          "valueSize": 20,
-          "titleSize": 20
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "noValue": "Not Run",
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "1": {
-                  "text": "PASS",
-                  "color": "green",
-                  "index": 0
-                },
-                "0": {
-                  "text": "FAIL",
-                  "color": "red",
-                  "index": 1
-                }
-              }
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 20,
       "type": "stat",
       "title": "Current Work",
@@ -484,8 +261,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 5,
-        "x": 9,
+        "w": 6,
+        "x": 4,
         "y": 1
       },
       "targets": [
@@ -806,8 +583,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 14,
+        "w": 3,
+        "x": 10,
         "y": 1
       },
       "targets": [
@@ -909,8 +686,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 1,
-        "x": 16,
+        "w": 2,
+        "x": 13,
         "y": 1
       },
       "targets": [
@@ -976,8 +753,8 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 3,
-        "x": 17,
+        "w": 4,
+        "x": 15,
         "y": 1
       },
       "targets": [
@@ -1035,6 +812,339 @@
       "description": "Keeps counting after completion; Completed at marks the end."
     },
     {
+      "id": 6,
+      "type": "stat",
+      "title": "Completed At",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"} * 1000",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "time:HH:mm:ss",
+          "noValue": "Running",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Percent",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max(100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 20,
+          "titleSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Tables",
+      "description": "Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 3,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max(100 * pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 20,
+          "titleSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Indexes",
+      "description": "Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 3,
+        "x": 6,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max(100 * pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 20,
+          "titleSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Clone Bytes",
+      "description": "Stays a few percent short of 100 by construction: on-disk size carries headers, padding and free space a COPY stream does not move. Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 9,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max(100 * pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 20,
+          "titleSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 12,
       "type": "stat",
       "title": "ETA By Size",
@@ -1044,9 +1154,9 @@
       },
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 20,
-        "y": 1
+        "w": 4,
+        "x": 13,
+        "y": 4
       },
       "targets": [
         {
@@ -1141,23 +1251,23 @@
       "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running."
     },
     {
-      "id": 6,
+      "id": 21,
       "type": "stat",
-      "title": "Completed At",
+      "title": "Schema",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 3,
-        "w": 2,
-        "x": 22,
-        "y": 1
+        "w": 3,
+        "x": 17,
+        "y": 4
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"} * 1000",
+          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"schema\"}",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1166,13 +1276,46 @@
           "range": false
         }
       ],
+      "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 20,
+          "titleSize": 20
+        }
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "unit": "time:HH:mm:ss",
-          "noValue": "Running",
+          "noValue": "Not Run",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "PASS",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "FAIL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1184,8 +1327,39 @@
           }
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Data",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
       },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"data\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
       "options": {
+        "textMode": "auto",
+        "justifyMode": "center",
+        "colorMode": "value",
+        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1193,18 +1367,45 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "wideLayout": true,
-        "percentChangeColorMode": "standard",
-        "showPercentChange": false,
         "text": {
-          "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 20,
+          "titleSize": 20
         }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "Not Run",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "PASS",
+                  "color": "green",
+                  "index": 0
+                },
+                "0": {
+                  "text": "FAIL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
       }
     },
     {
@@ -1219,7 +1420,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 7
       },
       "targets": [
         {
@@ -1348,112 +1549,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 16
       },
       "panels": []
-    },
-    {
-      "id": 11,
-      "type": "bargauge",
-      "title": "Percent Done",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "clamp_max(100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "By Size (First Clone Only)",
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "B",
-          "expr": "100 * pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "Tables",
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "C",
-          "expr": "100 * pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "Indexes",
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "D",
-          "expr": "100 * pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "Clone Bytes (Peaks ~97%, See Info)",
-          "instant": true,
-          "range": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 100
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "top",
-        "minVizHeight": 16,
-        "minVizWidth": 8,
-        "maxVizHeight": 300
-      },
-      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero. By size is clamped to 100: index builds and pre-vacuum bloat routinely put the target ahead of the source in bytes, and a progress bar reading over 100 is a display bug, not a finding."
     },
     {
       "id": 9,
@@ -1467,7 +1565,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 17
       },
       "targets": [
         {
@@ -1538,7 +1636,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 17
       },
       "targets": [
         {
@@ -1606,7 +1704,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 24
       },
       "panels": []
     },
@@ -1622,7 +1720,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 25
       },
       "targets": [
         {
@@ -1711,7 +1809,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 25
       },
       "targets": [
         {
@@ -1790,7 +1888,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 32
       },
       "targets": [
         {
@@ -1852,7 +1950,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 32
       },
       "targets": [
         {
