@@ -52,7 +52,7 @@ Derived quantities stay in PromQL rather than becoming metrics: receive lag is `
 
 The chart ships three dashboards, linked to each other through their shared `pgcopydb` tag:
 
-- **Migration detail** (uid `pgcopydb-migration`): one migration end to end; phase and its timeline, database sizes and copy throughput, percent done, a naive ETA, LSN positions with the lag split, the cutover drain, and the verification outcome.
+- **Migration detail** (uid `pgcopydb-migration`): one migration end to end; a status row (phase, what the worker is doing inside it, a naive ETA that only estimates during `Cloning`) and its timeline, then percent done, database sizes and copy throughput, LSN positions with the lag split, the cutover drain, and the verification outcome.
 - **Fleet overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
@@ -95,6 +95,10 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
 - The tables, indexes, and clone byte series hold still during the base copy itself: the poll that feeds them waits for `CloneCompleted`, so the size panels are the live view mid-copy and the percent-done panel fills in from clone completion onward.
-- The planned clone bytes come from pgcopydb's table-size statistics, an estimate the actual copy routinely overshoots.
-  A copied/planned ratio can therefore pass 100 percent; the detail dashboard's bar gauge clamps it there.
+- The `by size` percent-done series can read above 100 during `Finalizing`: index builds and pre-vacuum bloat put the target ahead of the source in bytes before space is reclaimed.
+  The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.
+- The planned clone bytes come from pgcopydb's table-size statistics.
+  The copied/planned ratio stays a few percent short of 100 by construction: a relation's on-disk size carries page and tuple headers, alignment padding and free space that a COPY stream does not move.
+- Copy throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
+  Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
 - On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `n/a` for them and the size-based panels keep working.

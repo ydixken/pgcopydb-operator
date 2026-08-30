@@ -106,7 +106,7 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
+        "h": 3,
         "w": 4,
         "x": 0,
         "y": 1
@@ -244,8 +244,334 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Current work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 5,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{phase}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "n/a",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": " ",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Pending"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Not started",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Validating"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Preflight checks",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cloning"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Copying tables",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Finalizing"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Vacuum and index builds",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Streaming"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Following WAL",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CutoverPending"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Awaiting cutover",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CuttingOver"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Cutting over",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Verifying"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Verifying",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Completed"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Done",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failed"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Stopped",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Suspended"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "Paused",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "percentChangeColorMode": "standard",
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
+      },
+      "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it."
     },
     {
       "id": 3,
@@ -256,9 +582,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
+        "h": 3,
+        "w": 2,
+        "x": 9,
         "y": 1
       },
       "targets": [
@@ -318,7 +644,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
     },
     {
@@ -330,9 +660,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
+        "h": 3,
+        "w": 2,
+        "x": 11,
         "y": 1
       },
       "targets": [
@@ -381,7 +711,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
     },
     {
@@ -393,9 +727,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
+        "h": 3,
+        "w": 3,
+        "x": 13,
         "y": 1
       },
       "targets": [
@@ -444,7 +778,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       },
       "description": "Keeps counting after completion; Completed at marks the end."
     },
@@ -457,9 +795,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 16,
+        "h": 3,
+        "w": 5,
+        "x": 19,
         "y": 1
       },
       "targets": [
@@ -508,7 +846,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
     },
     {
@@ -520,10 +862,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 5,
+        "h": 9,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 4
       },
       "targets": [
         {
@@ -635,7 +977,7 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": false
         },
         "tooltip": {
           "mode": "single",
@@ -652,7 +994,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 13
       },
       "panels": []
     },
@@ -665,10 +1007,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 11
+        "y": 21
       },
       "targets": [
         {
@@ -736,15 +1078,15 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 11
+        "y": 21
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
+          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -796,7 +1138,7 @@
           "sort": "desc"
         }
       },
-      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise."
+      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise. Target growth is clamped at 0: vacuum reclaims space during Finalizing, and the resulting negative slope is real but meaningless as a byte rate. Clone copy needs no such clamp: it is a monotonic tally from the work-dir catalog that a retry resumes rather than rewinds."
     },
     {
       "id": 11,
@@ -807,15 +1149,15 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 16,
+        "h": 7,
+        "w": 24,
         "x": 0,
-        "y": 19
+        "y": 14
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "clamp_max(100 * pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -899,7 +1241,7 @@
         "minVizWidth": 8,
         "maxVizHeight": 300
       },
-      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero."
+      "description": "Four readings of the same question, because no single one is trustworthy on its own. Clone bytes stops a few percent short of 100 by construction: planned is the relation size on disk, copied is bytes on the wire, and a relation carries page and tuple headers, alignment padding and free space that a COPY stream does not. Tables and indexes are the two that reach 100. By size works only on a first clone into a fresh target, because PostgreSQL never returns freed space to the operating system, so a re-clone starts with the target already at its previous size. Tables, indexes and clone bytes come from status.progress, which the operator stops polling during a plain clone because pgcopydb 0.18 dies under concurrent catalog access, so they populate for follow migrations and after a clone finishes. Absent means unknown, not zero. By size is clamped to 100: index builds and pre-vacuum bloat routinely put the target ahead of the source in bytes, and a progress bar reading over 100 is a display bug, not a finding."
     },
     {
       "id": 12,
@@ -910,15 +1252,15 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 8,
+        "h": 3,
+        "w": 3,
         "x": 16,
-        "y": 19
+        "y": 1
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "(clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1)) / 60",
+          "expr": "((clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1)) / 60) and on (namespace, name) (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\", phase=\"Cloning\"} == 1) or sum by (namespace, name) (-1 * (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -950,6 +1292,10 @@
                 "0": {
                   "text": "Calculating",
                   "index": 0
+                },
+                "-1": {
+                  "text": "No ETA",
+                  "index": 3
                 }
               }
             },
@@ -995,9 +1341,13 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       },
-      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing."
+      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running."
     },
     {
       "id": 13,
@@ -1008,7 +1358,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 28
       },
       "panels": []
     },
@@ -1021,10 +1371,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 29
       },
       "targets": [
         {
@@ -1110,10 +1460,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 29
       },
       "targets": [
         {
@@ -1302,7 +1652,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 48
+        }
       },
       "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done."
     },
@@ -1328,8 +1681,8 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 5,
-        "w": 8,
+        "h": 3,
+        "w": 24,
         "x": 0,
         "y": 44
       },
@@ -1395,7 +1748,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 28
+        }
       },
       "description": "pgcopydb compare result; n/a until a verification ran."
     }
