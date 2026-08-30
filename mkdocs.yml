@@ -45,6 +45,7 @@ nav:
       - Verification: operations/verification.md
       - Suspend, retries, deletion: operations/lifecycle.md
       - Monitoring: operations/monitoring.md
+      - Performance tuning: operations/performance.md
       - Migrating into CloudNativePG: operations/cloudnativepg.md
       - Argo CD health checks: operations/argocd.md
   - Troubleshooting: troubleshooting.md

@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,6 +125,13 @@ var _ = Describe("Migration", Ordered, func() {
 		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
+
+		// The only clone in the suite that configures nothing, so it is the
+		// one that exercises whatever the operator decided on the user's
+		// behalf. Report what it cost rather than assert on it: a threshold
+		// here would be a throughput assertion on a shared cluster, which is a
+		// flake. Reported, two runs can be compared; asserted, neither can.
+		reportCloneRate(m)
 
 		By("checking the seeded source matches the scale-derived expectations")
 		Expect(seedTableCounts(sourceCluster)).To(Equal(expectedSeedCounts()),
@@ -965,6 +973,37 @@ func e2eConn(cluster string) v1beta1.PostgresConnection {
 	}
 }
 
+// reportCloneRate records how long a completed clone took and how many fixture
+// bytes it moved per second, as a Ginkgo report entry. Deliberately not an
+// assertion: throughput on a shared cluster varies run to run, so a threshold
+// would fail for reasons that have nothing to do with the operator.
+//
+// "Fixture bytes" is the source database size, not bytes on the wire. It
+// counts the source's own indexes and bloat, which the target rebuilds rather
+// than receives, so the figure is a comparable number between runs of the same
+// scale and not an absolute transfer rate. Nothing here names a node, because
+// this repository's CI logs are public.
+func reportCloneRate(m *v1beta1.Migration) {
+	GinkgoHelper()
+	if m.Status.StartedAt == nil || m.Status.CompletedAt == nil {
+		AddReportEntry("clone rate", "unavailable: the Migration carries no start or completion time")
+		return
+	}
+	elapsed := m.Status.CompletedAt.Sub(m.Status.StartedAt.Time)
+	if elapsed <= 0 {
+		AddReportEntry("clone rate", "unavailable: completion is not after start")
+		return
+	}
+	bytes, err := strconv.ParseFloat(psql(sourceCluster, "SELECT pg_database_size(current_database())"), 64)
+	if err != nil {
+		AddReportEntry("clone rate", fmt.Sprintf("%s for the clone; source size unreadable: %v", elapsed, err))
+		return
+	}
+	AddReportEntry("clone rate", fmt.Sprintf(
+		"%s for %.0f MiB of fixture at scale %s: %.1f MiB/s",
+		elapsed.Round(time.Second), bytes/(1<<20), scaleArg(), bytes/(1<<20)/elapsed.Seconds()))
+}
+
 func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migration {
 	// The work volume follows the tier: it holds the schema dump, catalogs,
 	// and (for follow) buffered change files, not the table data itself.
@@ -978,11 +1017,11 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 		Spec: v1beta1.MigrationSpec{
 			Source:     e2eConn(sourceCluster),
 			Target:     e2eConn(targetCluster),
-			Clone:      clone,
 			WorkVolume: wv,
 			// Every runner Job the suite produces comes through here, so this
 			// is the one place that decides where the workers land and what
 			// the scheduler thinks they cost.
+			Clone: clone,
 			Runner: v1beta1.RunnerSpec{
 				Resources: workerResources(fixtureCPU, fixtureMemory),
 				Affinity:  fixtureAntiAffinity(),

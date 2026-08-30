@@ -468,7 +468,7 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	builders := map[string]func() (*batchv1.Job, error){
 		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		"verify":      func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
 		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
 	}

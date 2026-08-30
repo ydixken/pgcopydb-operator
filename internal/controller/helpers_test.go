@@ -22,6 +22,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestTruncate(t *testing.T) {
@@ -106,6 +107,56 @@ func TestJobFinished(t *testing.T) {
 
 // TestBuildJob_RunnerImage pins the image resolution order: spec.runner.image
 // overrides the operator default, and every derived Job honors it.
+// Names for the non-worker Jobs, so the table keys are not bare literals.
+const (
+	jobKindCleanup = "cleanup"
+	jobKindVerify  = "verify"
+)
+
+// The worker default must not leak onto the other Jobs. buildJob, cleanup,
+// verify and preflight all come out of jobSkeleton, but only the worker copies
+// data: a cleanup that runs one pg_drop_replication_slot must not need a copy
+// worker's cores to be schedulable, or a busy cluster leaves the slot behind
+// on the source.
+func TestBuildJob_WorkerDefaultDoesNotLeakToOtherJobs(t *testing.T) {
+	m := passwordMigration()
+
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpu := worker.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu()
+	if cpu.IsZero() {
+		t.Fatal("worker Job requests no cpu; the worker default did not apply")
+	}
+
+	for name, build := range map[string]func() (*batchv1.Job, error){
+		jobKindCleanup: func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+	} {
+		job, err := build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := job.Spec.Template.Spec.Containers[0].Resources
+		if len(got.Requests) != 0 {
+			t.Errorf("%s Job requests %v; it does no copying and the Migration set nothing", name, got.Requests)
+		}
+	}
+
+	// What the Migration does ask for still reaches every Job.
+	m.Spec.Runner.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+	}
+	cleanup, err := buildCleanupJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cleanup.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu(); got.String() != "250m" {
+		t.Errorf("cleanup cpu = %s, want the Migration's 250m", got.String())
+	}
+}
+
 func TestBuildJob_RunnerImage(t *testing.T) {
 	m := passwordMigration()
 	job, err := buildJob(m, "default:img", 1)
@@ -118,9 +169,9 @@ func TestBuildJob_RunnerImage(t *testing.T) {
 
 	m.Spec.Runner.Image = "custom/runner:v9"
 	for name, build := range map[string]func() (*batchv1.Job, error){
-		"worker":  func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
-		"cleanup": func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
-		"verify":  func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img") },
+		"worker":       func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
+		jobKindCleanup: func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
+		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img") },
 	} {
 		job, err := build()
 		if err != nil {

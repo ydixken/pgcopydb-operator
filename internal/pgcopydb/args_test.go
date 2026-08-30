@@ -25,14 +25,18 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
+// A Migration that configures nothing still gets the operator's opinion: table
+// jobs sized to the default worker, and same-table concurrency on. Only index
+// jobs are left to pgcopydb, because their cost lands on the target and the
+// operator cannot see it.
 func TestCloneArgs_Minimal(t *testing.T) {
 	got := CloneArgs(&v1beta1.MigrationSpec{}, false, false, false)
-	assertArgs(t, got, "clone --dir /work/pgcopydb")
+	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8")
 }
 
 func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
 	got := CloneArgs(&v1beta1.MigrationSpec{}, true, false, false)
-	assertArgs(t, got, "clone --dir /work/pgcopydb --restart")
+	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --restart")
 }
 
 func TestCloneArgs_Full(t *testing.T) {

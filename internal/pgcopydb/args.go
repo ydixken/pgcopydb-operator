@@ -71,9 +71,24 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	c := spec.Clone
 	args := []string{"clone", flagDir, WorkDir}
 
+	// Always emitted, derived from the worker's CPU when the spec is silent,
+	// so raising spec.runner.resources raises the copy concurrency with it.
+	// Note the target pays twice: pgcopydb sizes its VACUUM ANALYZE pool from
+	// this same number (copydb.c) and runs it alongside the copy, so N table
+	// jobs means up to 2N concurrent backends on the target.
 	if c.TableJobs > 0 {
 		args = append(args, "--table-jobs", itoa(c.TableJobs))
+	} else {
+		args = append(args, "--table-jobs", itoa(tableJobsFor(spec.Runner.Resources)))
 	}
+	// indexJobs deliberately has no operator default, because the binding
+	// constraint is on a machine the operator cannot see. Each index worker
+	// opens one target connection and immediately sets maintenance_work_mem to
+	// 1GB: pgcopydb hardcodes that in dstSettings (copydb.c) and applies it per
+	// worker (indexes.c), overriding whatever the target itself is configured
+	// with. So the cost of this number is indexJobs GB of target memory, and
+	// pgcopydb's own default of four asks for 4GB. Sizing it needs the target's
+	// RAM and cores; docs/configuration.md says how.
 	if c.IndexJobs > 0 {
 		args = append(args, "--index-jobs", itoa(c.IndexJobs))
 	}
@@ -83,13 +98,15 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	if c.LargeObjectsJobs > 0 {
 		args = append(args, "--large-objects-jobs", itoa(c.LargeObjectsJobs))
 	}
-	if c.SplitTablesLargerThan != nil {
-		// pgcopydb accepts a plain byte count; resource.Quantity.Value() gives bytes.
-		args = append(args, "--split-tables-larger-than", fmt.Sprintf("%d", c.SplitTablesLargerThan.Value()))
-	}
-	if c.SplitMaxParts > 0 {
-		args = append(args, "--split-max-parts", itoa(c.SplitMaxParts))
-	}
+	// Same-table concurrency, always on. pgcopydb defaults the threshold to 0,
+	// which disables it outright and leaves one large table to one process
+	// however many table jobs are running; one or two large tables is the
+	// ordinary shape of a database. The part cap goes with it so the pair is
+	// never half-applied. pgcopydb accepts a plain byte count, and
+	// resource.Quantity.Value() gives bytes.
+	split := splitTablesLargerThan(&c)
+	args = append(args, "--split-tables-larger-than", fmt.Sprintf("%d", split.Value()))
+	args = append(args, "--split-max-parts", itoa(splitMaxParts(&c)))
 	if c.EstimateTableSizes {
 		args = append(args, "--estimate-table-sizes")
 	}
