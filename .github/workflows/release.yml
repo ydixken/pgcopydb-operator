@@ -203,12 +203,17 @@ jobs:
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
         # -v and -ginkgo.v are what make this readable while it runs. Without
         # -v, go test buffers the whole package and prints nothing until it
-        # exits, so a 40 minute run looks hung and a run that hits the job
-        # timeout produces no output at all. poll-progress-after turns a spec
-        # that wedges into a stack dump rather than silence.
+        # exits, so a long run looks hung and a run that hits the job timeout
+        # produces no output at all. poll-progress-after turns a spec that
+        # wedges into a stack dump rather than silence.
+        #
+        # 15m, not 5m. A clone at E2E_SCALE=0.5 takes about eleven minutes, so
+        # a five minute threshold fired on every healthy clone spec and the
+        # dump stopped meaning anything. A diagnostic that triggers on normal
+        # work is one nobody reads, which is worse than not having it.
         run: |
           go test ./test/e2e/... -v -timeout 4h \
-            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=5m \
+            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=15m \
             -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # AfterSuite already does this when the suite exits cleanly; this is
