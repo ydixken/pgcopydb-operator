@@ -354,7 +354,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 	})
 
-	It("polls at half speed during the base copy and full speed once streaming", func() {
+	It("polls at one cadence through the base copy and on into streaming", func() {
 		const name = "mig-clone-cadence"
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
@@ -366,15 +366,16 @@ var _ = Describe("Migration Controller follow mode", func() {
 		reconcileAndGet(ctx, r, name) // run-1
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}}
 
-		// Base copy running: nothing time-critical to observe, so the requeue
-		// stretches to double the poll interval.
+		// Base copy running. The mid-copy requeue used to stretch to double
+		// the poll; the size samples are the live view of a copy, so it does
+		// not any more, and this is the guard against it coming back.
 		fake.state = &sentinel.State{WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
 		res, err := r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.RequeueAfter).To(Equal(2 * pollInterval))
+		Expect(res.RequeueAfter).To(Equal(pollInterval))
 
-		// Base copy done: the fast cadence returns for cutover. Manual mode
-		// without approval, so being caught up changes nothing.
+		// Base copy done, cutover ahead: same cadence. Manual mode without
+		// approval, so being caught up changes nothing.
 		logs.tsOut += cloneDoneLine
 		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
 		res, err = r.Reconcile(ctx, req)

@@ -267,7 +267,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
 	r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",
@@ -299,7 +299,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
 	now := metav1.Now()
@@ -459,7 +459,7 @@ func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1beta1.
 				if err := r.Delete(ctx, worker, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
 					return ctrl.Result{}, err
 				}
-				return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+				return ctrl.Result{RequeueAfter: pollInterval}, nil
 			}
 		}
 		done, err := r.ensureCleanup(ctx, m)
@@ -467,7 +467,7 @@ func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1beta1.
 			return ctrl.Result{}, err
 		}
 		if !done {
-			return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+			return ctrl.Result{RequeueAfter: pollInterval}, nil
 		}
 	}
 	// Metadata-only patch for the same reason as ensureFinalizer: an Update

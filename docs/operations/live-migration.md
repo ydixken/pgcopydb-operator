@@ -65,7 +65,7 @@ Granting the migration's source role `pg_read_all_stats` is optional, and sharpe
 
 Manual is the default mode. Cutover freezes the stream at the source's current LSN: anything written after that instant never reaches the target. So the order matters.
 
-1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`). It returns up to one poll interval (about 30 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
+1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`). It returns up to one poll interval (about 10 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
 2. Stop writes to the source (stop the application, revoke access, whatever your setup calls quiescing).
 3. Approve: `kubectl patch pgm billing --type=merge -p '{"spec":{"cutover":{"approved":true}}}'`.
 4. The operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits. Phase: `CuttingOver`.

@@ -108,7 +108,7 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: pollInterval / 3}, nil
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
 	now := metav1.Now()

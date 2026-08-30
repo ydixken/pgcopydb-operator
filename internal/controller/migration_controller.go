@@ -46,8 +46,16 @@ import (
 // pollInterval is how often a running clone is re-checked (Job observation,
 // follow state, and the progress samples). It is the real cadence only
 // because migrationEvents keeps the operator's own status writes from
-// waking it again immediately.
-const pollInterval = 30 * time.Second
+// waking it again immediately, so it is also the age of the freshest gauge a
+// dashboard can show: 10s because a pass is now one psql query per view, not
+// the five catalog-opening pgcopydb commands that bought 30s its margin.
+const pollInterval = 10 * time.Second
+
+// zombieGrace is how long a supervisor-death marker must stand before the
+// worker pod is reaped, and deliberately not the poll: the worker pod runs on
+// Kubernetes' default 30s termination grace, so a worker inside an ordinary
+// shutdown is still alive several polls in and must not read as the zombie.
+const zombieGrace = 30 * time.Second
 
 const (
 	// workerLogTail bounds the log window scanned for the terminal pgcopydb
@@ -289,7 +297,7 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, true, err
 		}
-		return ctrl.Result{RequeueAfter: pollInterval / 3}, true, nil
+		return ctrl.Result{RequeueAfter: pollInterval}, true, nil
 	}
 	// Emit once per gate outcome: after Validated=True is persisted this is
 	// skipped. At-least-once on purpose: a pass losing every status write
@@ -466,15 +474,11 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	if res, handled, err := r.reapZombieWorker(ctx, m, job, logTail); handled || err != nil {
 		return res, err
 	}
-	// Cadence: until the base copy is done, poll at half speed; a pass costs
-	// only a pod-log read, but there is nothing time-critical to observe
-	// mid-copy. Post-clone the fast cadence returns, keeping catchup and
-	// cutover reactive.
-	interval := pollInterval
-	if follow && !cloneDone {
-		interval = 2 * pollInterval
-	}
-	return ctrl.Result{RequeueAfter: interval}, nil
+	// One cadence throughout. The base copy used to poll at half speed for
+	// want of anything time-critical to watch mid-copy; the size sample is now
+	// the only live view of a running copy, and the throughput panel is its
+	// slope, so mid-copy is where a halved rate shows worst.
+	return ctrl.Result{RequeueAfter: pollInterval}, nil
 }
 
 // copySeen reports whether the clone-stage probe has caught this attempt's
@@ -536,10 +540,9 @@ func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta
 // the marker line. raw is the tail observeRunningJob already fetched for this
 // pass (one fetch serves this check and the clone-done check); empty means
 // the logs were unreadable and there is nothing to detect. Acting only once
-// the marker is a full pollInterval old is the stateless equivalent of
-// requiring it on two consecutive polls, and keeps an ordinary failure
-// shutdown in progress (marker just logged, container about to exit, Job
-// about to fail on its own) from being misread as a zombie. Clock skew
+// the marker has stood for zombieGrace keeps an ordinary failure shutdown in
+// progress (marker just logged, container about to exit, Job about to fail on
+// its own) from being misread as a zombie. Clock skew
 // between the runtime's stamp and this process only shifts the grace by
 // seconds either way and converges on the next poll. handled=true ends the
 // pass here: confirm on the next poll, or pod deleted.
@@ -551,9 +554,9 @@ func (r *MigrationReconciler) reapZombieWorker(ctx context.Context, m *v1beta1.M
 	if !found {
 		return ctrl.Result{}, false, nil
 	}
-	if time.Since(died) < pollInterval {
-		// First sighting: give an ordinary shutdown one poll to fail the Job
-		// on its own before treating the survivor as a zombie.
+	if time.Since(died) < zombieGrace {
+		// Still inside the grace: let an ordinary shutdown use all of its
+		// termination window to fail the Job before the survivor is a zombie.
 		return ctrl.Result{RequeueAfter: pollInterval}, true, nil
 	}
 	if err := r.deleteJobPods(ctx, m.Namespace, job.Name); err != nil {
