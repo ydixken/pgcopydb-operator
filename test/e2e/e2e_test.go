@@ -51,6 +51,20 @@ var _ = Describe("Migration", Ordered, func() {
 		resetTargetObjects()
 	})
 
+	// Placement is configuration, and configuration that stops working fails
+	// silently: the suite would still pass on a single node, just slower and
+	// over loopback instead of the wire. Assert it explicitly, scaled to the
+	// cluster actually running the suite so a smaller one does not fail.
+	It("spreads each CNPG fixture across as many nodes as the cluster has", func() {
+		want := min(schedulableNodes(), cnpgInstances)
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			nodes := instanceNodes(cluster)
+			Expect(nodes).To(HaveLen(want),
+				"CNPG cluster %s occupies %d nodes, want %d: instances are co-located"+
+					" and the migration never leaves the node", cluster, len(nodes), want)
+		}
+	})
+
 	It("completes a fresh clone with matching rows and sequences", func() {
 		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
@@ -911,6 +925,13 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			Target:     e2eConn(targetCluster),
 			Clone:      clone,
 			WorkVolume: wv,
+			// Every runner Job the suite produces comes through here, so this
+			// is the one place that decides where the workers land and what
+			// the scheduler thinks they cost.
+			Runner: v1beta1.RunnerSpec{
+				Resources: workerResources("500m", "1Gi"),
+				Affinity:  fixtureAntiAffinity(),
+			},
 		},
 	}
 }

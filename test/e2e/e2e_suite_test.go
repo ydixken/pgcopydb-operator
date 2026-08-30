@@ -89,7 +89,14 @@ const (
 	// CNPG's own pod labels: what the suite selects, schedules and kills by.
 	labelCNPGCluster = "cnpg.io/cluster"
 	labelCNPGRole    = "cnpg.io/instanceRole"
+	labelCNPGPodRole = "cnpg.io/podRole"
 	rolePrimary      = "primary"
+
+	// cnpgInstances is the instance count of both fixture clusters. Three, so
+	// each cluster spans three nodes and a migration's SQL legs cross the
+	// real network the way a production migration does. Below three nodes
+	// CNPG co-locates instances and the suite still passes.
+	cnpgInstances = 3
 
 	// appDB is the CNPG-bootstrapped database and its owning role.
 	appDB = "app"
@@ -413,8 +420,8 @@ var _ = BeforeSuite(func() {
 
 	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
 		pgSource, pgTarget))
-	ensureClusterMajor(sourceCluster, pgSource)
-	ensureClusterMajor(targetCluster, pgTarget)
+	ensureClusterShape(sourceCluster, pgSource)
+	ensureClusterShape(targetCluster, pgTarget)
 	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
 	applyCluster(cnpgCluster(targetCluster, tgtStorageSize, pgTarget))
 	waitClusterReady(sourceCluster)
@@ -568,12 +575,29 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 		"kind":       cnpgGVK.Kind,
 		"metadata":   map[string]any{"name": name, "namespace": nsE2E},
 		"spec": map[string]any{
-			"instances": int64(1),
+			"instances": int64(cnpgInstances),
 			// An explicit major so the version matrix (task e2e:matrix) can
 			// vary it and the default never drifts with the CNPG operator's
 			// own operand default.
 			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
 			"storage":   storage,
+			// Spelled out rather than left to the CNPG defaults, because the
+			// whole point of cnpgInstances > 1 here is one instance per node:
+			// a default that drifts would silently return the suite to a
+			// single-node run and nothing would fail.
+			"affinity": map[string]any{
+				"enablePodAntiAffinity": true,
+				"podAntiAffinityType":   "preferred",
+				"topologyKey":           corev1.LabelHostname,
+			},
+			// Requests, no limits. Their job is to make the pod visible to the
+			// scheduler: a pod that requests nothing scores identically on
+			// every node, so the least-allocated node wins every decision and
+			// the whole suite lands on it. The values are a floor for
+			// accounting, not a budget, so seeding is never throttled.
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "250m", "memory": "512Mi"},
+			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
 				"database": appDB,
 				"owner":    appDB,
@@ -590,6 +614,59 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	}}
 }
 
+// fixtureAntiAffinity keeps a suite-created worker pod off the nodes running
+// the fixture primaries, so a migration's SQL legs cross the real network
+// instead of looping back inside one node.
+//
+// It repels the primaries specifically, not every instance. With cnpgInstances
+// spread one per node, every node carries a source instance and a target
+// instance, so repelling all of them scores every node identically and decides
+// nothing. Repelling the two primaries leaves the node that holds neither,
+// which is the production shape: a runner off-box from both databases it
+// talks to.
+//
+// Preferred, never required. On a cluster with fewer nodes than fixtures a
+// required term would leave the pod Pending until the scenario's timeout, and
+// the shared dev cluster runs a descheduler that enforces required inter-pod
+// anti-affinity by eviction, which would kill a runner mid-migration.
+// Namespaces is spelled out because the cross-namespace scenario schedules its
+// runner in nsX: an empty namespaces field means "the scheduling pod's own
+// namespace", so the term would match nothing there and read as satisfied.
+func fixtureAntiAffinity() *corev1.Affinity {
+	return &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					Namespaces:  []string{nsE2E},
+					TopologyKey: corev1.LabelHostname,
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{{
+							Key:      labelCNPGCluster,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{sourceCluster, targetCluster},
+						}, {
+							Key:      labelCNPGRole,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{rolePrimary},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// workerResources is what every suite-created worker pod requests. Requests
+// only: they exist so the scheduler can see the pod at all (see the note in
+// cnpgCluster), not to cap what it may use.
+func workerResources(cpu, memory string) corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{Requests: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(cpu),
+		corev1.ResourceMemory: resource.MustParse(memory),
+	}}
+}
+
 // applyCluster server-side applies the fixture, which both creates it fresh
 // and adopts an existing one left over from manual runs.
 func applyCluster(obj *unstructured.Unstructured) {
@@ -599,6 +676,10 @@ func applyCluster(obj *unstructured.Unstructured) {
 		To(Succeed(), "failed to apply CNPG cluster %s", obj.GetName())
 }
 
+// waitClusterReady waits until every instance is ready, not just the primary.
+// One ready instance would let the suite start while the replicas are still
+// cloning, which is exactly when the fixtures are not yet spread across nodes
+// and a chaos failover has nowhere to promote to.
 func waitClusterReady(name string) {
 	GinkgoHelper()
 	Eventually(func(g Gomega) {
@@ -606,7 +687,8 @@ func waitClusterReady(name string) {
 		c.SetGroupVersionKind(cnpgGVK)
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, c)).To(Succeed())
 		ready, _, _ := unstructured.NestedInt64(c.Object, "status", "readyInstances")
-		g.Expect(ready).To(BeNumerically(">=", 1), "CNPG cluster %s has no ready instance", name)
+		g.Expect(ready).To(BeNumerically(">=", int64(cnpgInstances)),
+			"CNPG cluster %s has %d of %d instances ready", name, ready, cnpgInstances)
 	}, clusterReadyTimeout, 5*time.Second).Should(Succeed())
 }
 
@@ -647,8 +729,8 @@ func ensureSeededSource() {
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
 // and brings a fresh one up. Used when kept fixtures carry a stale seed
-// profile or scale; a PG-major mismatch on a kept cluster is handled earlier
-// by ensureClusterMajor, for the target too.
+// profile or scale; a major or instance-count mismatch on a kept cluster is
+// handled earlier by ensureClusterShape, for the target too.
 func recreateSourceCluster() {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
@@ -675,12 +757,15 @@ func deleteCluster(name string) {
 	}, 10*time.Minute, 5*time.Second).Should(Succeed())
 }
 
-// ensureClusterMajor deletes a kept cluster whose server runs a different
-// PostgreSQL major than this run requests; the subsequent apply then creates
-// it fresh on the right image. The check runs before that apply on purpose:
-// CNPG cannot change majors in place, so server-side applying another major's
-// imageName onto a live cluster would wedge it instead of upgrading it.
-func ensureClusterMajor(name string, major int) {
+// ensureClusterShape deletes a kept cluster that this run cannot adopt in
+// place, so the subsequent apply creates it fresh. Two things force that: a
+// different PostgreSQL major (CNPG cannot change majors in place, so applying
+// another major's imageName would wedge the cluster rather than upgrade it)
+// and a different instance count. The instance check reads the spec and runs
+// before the readiness wait on purpose: a kept single-instance cluster can
+// never reach cnpgInstances ready, so waiting first would time out instead of
+// recreating.
+func ensureClusterShape(name string, major int) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
 	c.SetGroupVersionKind(cnpgGVK)
@@ -689,7 +774,14 @@ func ensureClusterMajor(name string, major int) {
 		return
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", name)
-	// The kept instance has to answer psql before its major can be read.
+
+	if got, _, _ := unstructured.NestedInt64(c.Object, "spec", "instances"); got != int64(cnpgInstances) {
+		By(fmt.Sprintf("deleting %s: kept cluster has %d instances, this run wants %d",
+			name, got, cnpgInstances))
+		deleteCluster(name)
+		return
+	}
+	// The kept instances have to answer psql before the major can be read.
 	waitClusterReady(name)
 	if got := serverMajor(name); got != major {
 		By(fmt.Sprintf("deleting %s: kept cluster runs PG %d, this run wants PG %d", name, got, major))
@@ -758,9 +850,11 @@ func buildSeedJob() *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					Affinity:      fixtureAntiAffinity(),
 					Containers: []corev1.Container{{
-						Name:  "seed",
-						Image: seedImage,
+						Name:      "seed",
+						Image:     seedImage,
+						Resources: workerResources("250m", "512Mi"),
 						Command: []string{"psql",
 							"-v", "ON_ERROR_STOP=1",
 							"-v", "scale=" + scaleArg(),
@@ -919,6 +1013,67 @@ func resetTargetReplication() {
 	GinkgoHelper()
 	psql(targetCluster, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
 		" WHERE roname LIKE 'pgcopydb%'")
+}
+
+// instanceNodes returns the distinct node names carrying the cluster's
+// instances. A set, not a count of pods: two instances on one node is exactly
+// the failure the caller is looking for.
+func instanceNodes(cluster string) []string {
+	GinkgoHelper()
+	pods := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
+		labelCNPGCluster: cluster,
+		labelCNPGPodRole: "instance",
+	})).To(Succeed(), "failed to list instances of CNPG cluster %s", cluster)
+	Expect(pods.Items).NotTo(BeEmpty(), "CNPG cluster %s has no instance pods", cluster)
+	seen := map[string]bool{}
+	var nodes []string
+	for i := range pods.Items {
+		if n := pods.Items[i].Spec.NodeName; n != "" && !seen[n] {
+			seen[n] = true
+			nodes = append(nodes, n)
+		}
+	}
+	return nodes
+}
+
+// schedulableNodes counts the nodes a fixture pod could actually land on, so
+// the placement assertion scales to the cluster running it instead of
+// hardcoding a node count the repo is not allowed to record anyway. The
+// fixtures carry no tolerations, so any NoSchedule or NoExecute taint rules a
+// node out just as cordoning does; counting those in would fail the assertion
+// on a cluster where the pods had nowhere else to go.
+func schedulableNodes() int {
+	GinkgoHelper()
+	nodes := &corev1.NodeList{}
+	Expect(k8sClient.List(ctx, nodes)).To(Succeed(), "failed to list nodes")
+	n := 0
+	for i := range nodes.Items {
+		if usableNode(&nodes.Items[i]) {
+			n++
+		}
+	}
+	Expect(n).To(BeNumerically(">", 0), "no schedulable node in this cluster")
+	return n
+}
+
+// usableNode reports whether a pod with no tolerations can be scheduled on a
+// node: Ready, not cordoned, and free of blocking taints.
+func usableNode(n *corev1.Node) bool {
+	if n.Spec.Unschedulable {
+		return false
+	}
+	for _, t := range n.Spec.Taints {
+		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+			return false
+		}
+	}
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // primaryPod returns the pod name of the cluster's current primary. Which
