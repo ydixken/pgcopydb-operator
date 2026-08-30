@@ -32,6 +32,11 @@ annotations:
   artifacthub.io/operatorCapabilities: basic install
   # People search for the tool they know, not for the operator wrapping it.
   artifacthub.io/alternativeName: pgcopydb
+  # Artifact Hub renders this page off the packaged chart, so the URL has to
+  # be absolute; it points at the copy the docs site publishes.
+  artifacthub.io/screenshots: |
+    - title: Migration Detail, a follow migration just after cutover
+      url: https://ydixken.github.io/pgcopydb-operator/assets/migration-detail-dashboard.png
   artifacthub.io/crds: |
     - kind: Migration
       version: v1beta1

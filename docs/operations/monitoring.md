@@ -24,7 +24,8 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_info` | `mode` | Always 1; mode is `clone` or `follow` | always |
 | `pgcopydb_migration_start_time_seconds` | | Unix time the first attempt started | once started |
 | `pgcopydb_migration_completion_time_seconds` | | Unix time the migration completed | once completed |
-| `pgcopydb_migration_verified` | | 1 on compare pass, 0 on mismatch | after a verification result |
+| `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
+| `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch; `check` is `schema` or `data` | after that check has run |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size | worker running |
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size; `rate()` of it is the copy throughput | worker running |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | patched runner |
@@ -52,16 +53,88 @@ Derived quantities stay in PromQL rather than becoming metrics: receive lag is `
 
 The chart ships three dashboards, linked to each other through their shared `pgcopydb` tag:
 
-- **Migration Detail** (uid `pgcopydb-migration`): one migration end to end. Two rows of stats lead: what it is doing and when, then how far along it is and whether each compare check passed. Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
+- **Migration Detail** (uid `pgcopydb-migration`): one migration end to end.
+  Two rows of stats lead: what it is doing and when, then how far along it is and whether each compare check passed.
+  Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
-`grafana.dashboards.enabled=true` renders them as ConfigMaps labeled `grafana_dashboard: "1"` for Grafana's dashboard sidecar.
-The sidecar usually watches only Grafana's own namespace, so set `grafana.dashboards.namespace` to it (the chart's release namespace is only the default).
-`grafana.dashboards.folder` writes a `grafana_folder` annotation; the sidecar honors it only when its `folderAnnotation` setting names that annotation, and files the dashboards in General otherwise.
+![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)
 
-Without a sidecar, import by hand: take the JSON files from `charts/pgcopydb-operator/dashboards/` and import them in the Grafana UI.
-Every panel reads its data source from the dashboard's `datasource` variable, so pick your Prometheus there after importing; nothing is hardcoded.
+### Wiring the chart into Grafana
+
+Two things have to exist first, and the chart provides neither: a Prometheus that scrapes the operator ([Scrape setup](#scrape-setup) above), and a Grafana with that Prometheus as a data source.
+With both in place, the chart's side is two values:
+
+```yaml
+metrics:
+  serviceMonitor:
+    enabled: true
+grafana:
+  dashboards:
+    enabled: true
+    # The namespace Grafana runs in, not the one the operator runs in.
+    namespace: monitoring
+    folder: pgcopydb
+```
+
+`grafana.dashboards.enabled=true` renders each dashboard as its own ConfigMap, labeled `grafana_dashboard: "1"`.
+Grafana's dashboard sidecar (kube-prometheus-stack runs one by default) watches for that label, writes each ConfigMap's data key out as a file, and Grafana loads what appears.
+Check they landed where the sidecar is watching:
+
+```sh
+kubectl get configmap -n monitoring -l grafana_dashboard=1
+```
+
+Two sidecar settings then decide whether the dashboards show up, and where:
+
+- **Namespace.** The sidecar watches only its own namespace unless `sidecar.dashboards.searchNamespace` widens it, so `grafana.dashboards.namespace` has to name the namespace Grafana runs in.
+  The chart's release namespace is only the default, and it is rarely the right answer.
+- **Folder.** `grafana.dashboards.folder` writes a `grafana_folder` annotation.
+  The sidecar acts on it only when its own `folderAnnotation` setting names that annotation and its dashboard provider has `foldersFromFilesStructure` enabled.
+  Otherwise the three land in General, which is cosmetic.
+
+> [!warning]
+> The sidecar names the file it writes after the ConfigMap's **data key**, not after the ConfigMap.
+> A second ConfigMap in that namespace carrying a `migration-detail.json` key therefore overwrites this one, last writer wins, with no error logged anywhere; a hand-imported copy kept around for editing is the usual source of that.
+> These are provisioned files rather than Grafana's own dashboards, so Grafana also refuses UI edits over them unless the provider sets `allowUiUpdates: true`, and the next provisioning pass overwrites whatever it did accept: keep changes in the JSON, or "Save as" a copy under its own uid.
+
+### Importing without the sidecar
+
+Import the JSON by hand in Grafana (Dashboards, New, Import).
+Render the copies that match the chart you deployed rather than reading them off `main`:
+
+```sh
+helm template pgcopydb-operator oci://ghcr.io/ydixken/pgcopydb-operator/charts/pgcopydb-operator \
+  --set grafana.dashboards.enabled=true \
+  --show-only templates/grafana-dashboards.yaml
+```
+
+Each ConfigMap in that output holds one dashboard under a `<name>.json` data key.
+Every panel reads its data source from the dashboard's `datasource` variable, so pick your Prometheus there after importing; no panel hardcodes one.
+
+### Reading Migration Detail
+
+Two variables at the top select the migration: namespace, then name.
+Both are filled from `pgcopydb_migration_info`, so a Migration is listed from its first reconcile until it is deleted.
+
+The screenshot above is a follow migration shortly after its cutover, with both compare checks enabled.
+Reading it:
+
+- **Phase** is the state the operator is in.
+  **Current Work** is the activity inside that state, so `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
+- **Elapsed** keeps counting after the migration finishes.
+  **Completed At** is where it ended, and reads Still Running until there is an end.
+- **Percent** is target size over source size, clamped at 100.
+  It is the live progress reading during the base copy, because the catalog-derived counters beside it hold still until that copy finishes.
+  **ETA By Size** divides the remaining bytes by how fast the target is currently growing, and reads No ETA outside `Cloning`: index builds, the cutover drain, and verification do not move bytes at a rate worth extrapolating from.
+- **Tables**, **Indexes**, and **Clone Bytes** come from pgcopydb's own catalogs, so they read N/A wherever the "patched runner" contract above does not hold.
+  Clone Bytes stopping a few percent short of 100 while the other two reach it is the expected end state, for the reason given in that table.
+- **Schema Verification** and **Data Verification** are one tile per compare check.
+  Each reads Not Run until its Job produces a result, then PASS or FAIL.
+  A check you did not enable stays Not Run.
+- **Cutover Drain** is the bytes still to replay before the endpos is reached.
+  It reads No Endpos until a cutover sets one, and 0 B once the target has caught up, which is what the screenshot shows.
 
 ## Alerts
 
