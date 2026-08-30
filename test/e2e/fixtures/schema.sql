@@ -1,6 +1,8 @@
 -- Fixture schema for the e2e suite (profile v2). Runs as the app user against
 -- the app database, so every object lands owned by app: superuser-owned
 -- objects break the clone with permission errors when restoring as app.
+-- Primary keys and unique constraints only: the non-unique secondary indexes
+-- are in finish.sql, built after the data instead of maintained per insert.
 -- Every statement is idempotent (IF NOT EXISTS / OR REPLACE / exception
 -- wrapped) because the seed Job re-runs this file on kept clusters.
 -- PG14-clean on purpose: the version matrix (W-E) reuses these fixtures.
@@ -41,7 +43,6 @@ CREATE TABLE IF NOT EXISTS orders (
     amount numeric(12,2) NOT NULL,
     note text
 );
-CREATE INDEX IF NOT EXISTS orders_customer_idx ON orders (customer_id);
 
 -- Second schema; audit.events keeps its v1 shape.
 CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION app;
@@ -68,8 +69,6 @@ CREATE TABLE IF NOT EXISTS app_users (
     prefs jsonb NOT NULL DEFAULT '{}'::jsonb,
     updated_at timestamptz
 );
-CREATE INDEX IF NOT EXISTS app_users_tags_gin ON app_users USING gin (tags);
-CREATE INDEX IF NOT EXISTS app_users_name_lower_idx ON app_users (lower(display_name));
 
 CREATE OR REPLACE FUNCTION e2e_touch_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -113,11 +112,8 @@ CREATE TABLE IF NOT EXISTS events_2026_08 PARTITION OF events
     FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
 CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT;
 
-CREATE INDEX IF NOT EXISTS events_customer_time_idx ON events (customer_id, occurred_at);
-CREATE INDEX IF NOT EXISTS events_payload_gin ON events USING gin (payload);
-
--- Arrays, a generated STORED column, a composite-typed column, and a partial
--- index.
+-- Arrays, a generated STORED column, and a composite-typed column. Its partial
+-- index is built after the load, in finish.sql.
 CREATE TABLE IF NOT EXISTS readings (
     id bigint PRIMARY KEY,
     sensor text NOT NULL,
@@ -128,8 +124,6 @@ CREATE TABLE IF NOT EXISTS readings (
     total_price numeric(14,4) GENERATED ALWAYS AS (unit_price * quantity) STORED,
     dimensions e2e_dimensions
 );
-CREATE INDEX IF NOT EXISTS readings_recent_partial_idx ON readings (captured_at)
-    WHERE quantity > 5;
 
 -- TOAST-heavy: STORAGE EXTERNAL disables compression so the ~24KB payloads
 -- really occupy TOAST pages instead of compressing away. This table carries
@@ -143,7 +137,6 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 ALTER TABLE documents ALTER COLUMN body SET STORAGE EXTERNAL;
 ALTER TABLE documents ALTER COLUMN attachment SET STORAGE EXTERNAL;
-CREATE INDEX IF NOT EXISTS documents_title_lower_idx ON documents (lower(title));
 
 -- Custom-start sequences; their state must survive the clone.
 CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 720001 INCREMENT BY 10;

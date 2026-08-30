@@ -153,10 +153,12 @@ const (
 
 var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
 
-// fixturesFS carries the fixture SQL (see fixtures/schema.sql and
-// fixtures/seed.sql) into the seed Job via a ConfigMap.
+// fixturesFS carries the fixture SQL and the script that stages it (see
+// fixtures/run.sh) into the seed Job via a ConfigMap. The whole directory,
+// not a list: a stage added to run.sh but forgotten here would only surface
+// as a failed Job on a real cluster.
 //
-//go:embed fixtures/schema.sql fixtures/seed.sql
+//go:embed fixtures
 var fixturesFS embed.FS
 
 // The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
@@ -913,21 +915,25 @@ func serverMajor(cluster string) int {
 	return num / 10000
 }
 
-// runSeedJob applies schema.sql and seed.sql to the source database through
-// a Kubernetes Job (psql from the CNPG operand image, fixture SQL mounted
-// from a ConfigMap). A Job instead of exec: it survives suite interruptions,
-// retries transient DB unavailability (backoffLimit 2), and leaves its log
-// behind. The log tail lands in the Ginkgo output either way: on failure as
-// the diagnosis, on success as the seed's per-phase profile.
+// runSeedJob loads the fixtures into the source database through a Kubernetes
+// Job (bash and psql from the CNPG operand image, fixture files mounted from a
+// ConfigMap, staged by run.sh). A Job instead of exec: it survives suite
+// interruptions, retries transient DB unavailability (backoffLimit 2), and
+// leaves its log behind. The log tail lands in the Ginkgo output either way:
+// on failure as the diagnosis, on success as the seed's per-phase profile.
 func runSeedJob() {
 	GinkgoHelper()
-	schemaSQL, err := fixturesFS.ReadFile("fixtures/schema.sql")
-	Expect(err).NotTo(HaveOccurred())
-	seedSQL, err := fixturesFS.ReadFile("fixtures/seed.sql")
-	Expect(err).NotTo(HaveOccurred())
+	entries, err := fixturesFS.ReadDir("fixtures")
+	Expect(err).NotTo(HaveOccurred(), "failed to read the embedded fixtures")
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		b, err := fixturesFS.ReadFile("fixtures/" + e.Name())
+		Expect(err).NotTo(HaveOccurred(), "failed to read fixture %s", e.Name())
+		files[e.Name()] = string(b)
+	}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}
 	_, err = controllerutil.CreateOrUpdate(ctx, k8sClient, cm, func() error {
-		cm.Data = map[string]string{"schema.sql": string(schemaSQL), "seed.sql": string(seedSQL)}
+		cm.Data = files
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred(), "failed to apply the fixture ConfigMap")
@@ -981,13 +987,13 @@ func buildSeedJob() *batchv1.Job {
 						Name:      "seed",
 						Image:     seedImage,
 						Resources: workerResources(workerCPU, workerMemory),
-						Command: []string{"psql",
-							"-v", "ON_ERROR_STOP=1",
-							"-v", "scale=" + scaleArg(),
-							"-v", "profile=" + seedProfile,
-							"-f", "/fixtures/schema.sql",
-							"-f", "/fixtures/seed.sql"},
+						// bash, not sh: run.sh reads PIPESTATUS to report the
+						// failing stage rather than the exit of the sed that
+						// labels its output.
+						Command: []string{"bash", "/fixtures/run.sh"},
 						Env: []corev1.EnvVar{
+							{Name: "SEED_SCALE", Value: scaleArg()},
+							{Name: "SEED_PROFILE", Value: seedProfile},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
 							{Name: "PGDATABASE", Value: appDB},
 							{Name: "PGUSER", Value: appDB},
