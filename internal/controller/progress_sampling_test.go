@@ -624,10 +624,12 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 	})
 
-	// The endpos reaches status only through a sentinel read taken after it
-	// was set, and a worker that exits promptly leaves no pass to take one.
-	// Then CutoverCompleted is the only record that the cutover happened.
-	It("resumes at CuttingOver on a verified cutover whose endpos was never read back", func() {
+	// An operator writes the endpos into status at the freeze, so a cutover
+	// played forward always carries one. A status written before that change
+	// does not, and the operator that reads it back is the new one: on an
+	// upgrade mid-migration, CutoverCompleted is the only record left that
+	// the cutover happened, and the resumed attempt has to honour it.
+	It("resumes at CuttingOver when an upgraded status carries no endpos", func() {
 		const name = "mig-retry-after-verified"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
@@ -637,7 +639,6 @@ var _ = Describe("Migration Controller attempt phase", func() {
 			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
-		Expect(m.Status.Replication.Endpos).To(BeEmpty())
 
 		// Worker exits 0, the verify Job proves the drain, cleanup is still
 		// to run: CutoverCompleted is True and Complete is not.
@@ -646,11 +647,17 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		finishJob(ctx, name+"-verify", true)
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
-		Expect(m.Status.Replication.Endpos).To(BeEmpty())
+
+		// What the older operator left behind. Blanking it is the only way
+		// to reach the condition arm, since with an endpos in status the
+		// EndposSet arm answers first and this spec would prove nothing.
+		m.Status.Replication.Endpos = ""
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
 		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 	})
 
@@ -663,9 +670,10 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		// Caught up: the operator freezes the stream and the worker drains.
 		fake.state = &sentinel.State{WriteLSN: caughtUpLSN,
 			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
-		Expect(reconcileAndGet(ctx, r, name).Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
-		// The pass after the freeze is the one that persists the endpos.
+		// The freeze records its own endpos: nothing reads it back out of
+		// the worker, so the operator keeps what it set.
 		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
 
 		// The worker dies mid-drain. Attempt 2 resumes that drain: the base
