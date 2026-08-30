@@ -129,7 +129,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "n/a",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
@@ -283,7 +283,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "n/a",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
@@ -605,7 +605,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "n/a",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
@@ -775,7 +775,7 @@
             "mode": "thresholds"
           },
           "unit": "s",
-          "noValue": "not started",
+          "noValue": "Not Started",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -843,7 +843,7 @@
             "mode": "thresholds"
           },
           "unit": "dateTimeAsIso",
-          "noValue": "running",
+          "noValue": "Running",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1300,7 +1300,7 @@
             "mode": "thresholds"
           },
           "unit": "m",
-          "noValue": "n/a",
+          "noValue": "N/A",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1649,7 +1649,7 @@
             "mode": "thresholds"
           },
           "unit": "bytes",
-          "noValue": "no endpos",
+          "noValue": "No Endpos",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -1728,7 +1728,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "n/a",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
