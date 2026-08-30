@@ -319,7 +319,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Not started",
+                        "text": "Not Started",
                         "index": 0
                       }
                     }
@@ -341,7 +341,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Preflight checks",
+                        "text": "Preflight Checks",
                         "index": 0
                       }
                     }
@@ -363,7 +363,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Copying tables",
+                        "text": "Copying Tables",
                         "index": 0
                       }
                     }
@@ -385,7 +385,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Vacuum and index builds",
+                        "text": "Vacuum and Index Builds",
                         "index": 0
                       }
                     }
@@ -429,7 +429,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Awaiting cutover",
+                        "text": "Awaiting Cutover",
                         "index": 0
                       }
                     }
@@ -451,7 +451,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Cutting over",
+                        "text": "Cutting Over",
                         "index": 0
                       }
                     }
@@ -627,7 +627,32 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "clone"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Clone"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "follow"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Follow"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
