@@ -110,6 +110,21 @@ tests:
                 the expression matches Cloning only: the operator reports that
                 tail as Finalizing once it has seen the copy running.
 
+  # The index and vacuum tail: target just as flat, but Finalizing rather than
+  # Cloning, so the phase matcher has to keep it quiet. This is the case that
+  # makes the alert's "matches Cloning only" promise mean anything; without it
+  # every input series is Cloning and the matcher is unconstrained.
+  - interval: 5m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="tail", phase="Finalizing"}'
+        values: "1x20"
+      - series: 'pgcopydb_migration_target_database_size_bytes{namespace="default", name="tail"}'
+        values: "1000000x20"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: PgcopydbMigrationCloneStalled
+        exp_alerts: []
+
   # Lag above 64Mi for over 10m fires; lag exactly at 64Mi never does.
   - interval: 1m
     input_series:
