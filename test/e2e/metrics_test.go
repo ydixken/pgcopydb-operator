@@ -210,13 +210,6 @@ var emptyOK = map[panelKey]bool{
 	{uid: uidFleet, title: "Failed"}: true,
 	// The suite never leaves a migration suspended.
 	{uid: uidFleet, title: "Suspended"}: true,
-	// endpos reaches status through a sentinel sample taken while the worker
-	// drains; a small drain can finish before the next sample, leaving the
-	// endpos gauge legitimately unset.
-	{uid: uidDetail, title: "Cutover Drain"}: true,
-	// The same endpos gap empties that target here; the panel's other three
-	// targets are asserted directly by the streaming spec.
-	{uid: uidDetail, title: "LSN Positions"}: true,
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
 	{uid: uidOperator, title: "Leader Elected"}: true,

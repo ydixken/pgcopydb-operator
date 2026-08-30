@@ -33,7 +33,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | patched runner |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
-| `pgcopydb_migration_write_lsn_bytes` | | Last LSN written by the receiver | follow, streaming |
+| `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
 | `pgcopydb_migration_replay_lsn_bytes` | | Last LSN replayed on the target | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
@@ -44,10 +44,12 @@ The "Exists" column is the contract for when a series is present:
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **patched runner**: the in-pod progress poll runs only on allowlisted runner versions; the bundled runner qualifies, a custom stock 0.18 image keeps these series dark (see the [troubleshooting row](../troubleshooting.md)).
   The poll also waits out the base copy, because opening pgcopydb 0.18's catalogs mid-copy crashes the worker.
-  On a follow migration these series appear once `CloneCompleted` is True; a plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
-- **follow, streaming**: plain clones never produce these; in follow mode they start once streaming does.
+  On a follow migration these series arrive with the drain verification, after cutover: the worker pod is gone by then, so the counters are read out of the verify Job's log instead.
+  A plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
+- **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
+Receive lag reads a little high wherever `write` fell back to the slot's confirmed flush position, which is one confirmation behind the walsender.
 
 ## Dashboards
 
