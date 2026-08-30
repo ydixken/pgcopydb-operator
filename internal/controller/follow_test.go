@@ -100,8 +100,8 @@ func removeMigration(ctx context.Context, name string) {
 
 // fakeSentinel scripts the sentinel the way envtest scripts Job status: tests
 // set the state (or an error), the reconciler reads it. calls counts every
-// exec (reads, endpos sets, and nudges), so specs can prove copy-phase
-// quiescence; nudges counts the endpos nudges on their own.
+// exec (reads, endpos sets, and nudges); nudges counts the endpos nudges on
+// their own, and slots records the slot name each read was given.
 type fakeSentinel struct {
 	mu        sync.Mutex
 	state     *sentinel.State
@@ -111,12 +111,14 @@ type fakeSentinel struct {
 	nudgeErr  error
 	calls     int
 	nudges    int
+	slots     []string
 }
 
-func (f *fakeSentinel) Read(_ context.Context, _, _ string) (*sentinel.State, error) {
+func (f *fakeSentinel) Read(_ context.Context, _, _, slotName string) (*sentinel.State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.slots = append(f.slots, slotName)
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -192,6 +194,19 @@ func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]
 	return []byte(f.tsOut), f.tsErr
 }
 
+// The worker log is where the operator reads the end of the base copy, so a
+// follow spec that wants to reach the streaming phase has to script one.
+const (
+	workerLogStamp = "2026-08-09T10:00:00.000000000Z "
+	copyingLine    = workerLogStamp +
+		`{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n"
+	cloneDoneLine = workerLogStamp +
+		`{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+)
+
+func copyingLogs() *fakeLogs   { return &fakeLogs{tsOut: copyingLine} }
+func cloneDoneLogs() *fakeLogs { return &fakeLogs{tsOut: copyingLine + cloneDoneLine} }
+
 var _ = Describe("Migration Controller follow mode", func() {
 	ctx := context.Background()
 
@@ -224,6 +239,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		r := followReconciler(fake)
+		logs := copyingLogs()
+		r.Logs = logs
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 
 		// Pass 1 creates the preflight Job, not the worker: the finalizer is
@@ -242,13 +259,21 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(args).To(ContainSubstring("--follow"))
 		Expect(args).To(ContainSubstring("--slot-name"))
 
-		// Base copy still running: no phase change from the sentinel.
-		fake.state = &sentinel.State{ApplyEnabled: false, WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
+		// Base copy still running: the stream is watched and reported (psql,
+		// no catalog), but nothing acts on it and no phase moves.
+		fake.state = &sentinel.State{WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(m.Status.Replication).NotTo(BeNil())
+		Expect(m.Status.Replication.WriteLSN).To(Equal("0/10"))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming)).To(BeFalse())
 
-		// Apply on, lag far above threshold: Streaming, not caught up.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/40000000", ReplayLSN: "0/10000000", SourceHead: "0/48000000", Endpos: sentinel.ZeroLSN}
+		// The worker logs the end of the copy phase: only now does the
+		// operator act on the stream.
+		logs.tsOut += cloneDoneLine
+
+		// Lag far above threshold: Streaming, not caught up.
+		fake.state = &sentinel.State{WriteLSN: "0/40000000", ReplayLSN: "0/10000000", SourceHead: "0/48000000", Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming)).To(BeTrue())
@@ -257,7 +282,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(*m.Status.Replication.LagBytes).To(BeNumerically(">", int64(16<<20)))
 
 		// Caught up, Manual, not approved: waiting.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: "0/48000010", ReplayLSN: "0/48000000", SourceHead: "0/48000010", Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: "0/48000010", ReplayLSN: "0/48000000", SourceHead: "0/48000010", Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
@@ -315,9 +340,9 @@ var _ = Describe("Migration Controller follow mode", func() {
 		const name = "mig-clone-cadence"
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
-		// nil Logs: this deliberately exercises the no-log-reader fallback,
-		// where the sentinel stays the clone-done detector.
 		r := followReconciler(fake)
+		logs := copyingLogs()
+		r.Logs = logs
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -325,56 +350,76 @@ var _ = Describe("Migration Controller follow mode", func() {
 
 		// Base copy running: nothing time-critical to observe, so the requeue
 		// stretches to double the poll interval.
-		fake.state = &sentinel.State{ApplyEnabled: false, WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
+		fake.state = &sentinel.State{WriteLSN: "0/10", ReplayLSN: "0/0", SourceHead: "0/20"}
 		res, err := r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(2 * pollInterval))
 
-		// Apply on (base copy done): the fast cadence returns for cutover.
-		// Manual mode without approval, so being caught up changes nothing.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		// Base copy done: the fast cadence returns for cutover. Manual mode
+		// without approval, so being caught up changes nothing.
+		logs.tsOut += cloneDoneLine
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
 		res, err = r.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(pollInterval))
 	})
 
-	It("derives CloneCompleted from the worker log and keeps the sentinel quiet until then", func() {
+	It("derives CloneCompleted from the worker log and never opens the catalogs while the copy runs", func() {
 		const name = "mig-clone-quiesce"
 		defer removeMigration(ctx, name)
-		// The scripted sentinel would report a caught-up stream right away;
-		// if the reconciler asked, the phases would move. It must not ask:
-		// on pgcopydb 0.18 every sentinel exec opens the SQLite catalogs the
-		// copy phase is writing to, and concurrent access crashes workers.
+		// The scripted sample reports a caught-up stream from the first pass.
+		// Watching it is free now (psql on the two databases), so the read
+		// may run; acting on it must not, and neither may `list progress`,
+		// the one pgcopydb command left, which writes to the very catalog the
+		// copy phase is working in.
 		fake := &fakeSentinel{state: &sentinel.State{
-			ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN,
-			SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN,
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
 		}}
 		r := followReconciler(fake)
-		const ts = "2026-08-09T10:00:00.000000000Z "
-		logs := &fakeLogs{tsOut: ts +
-			`{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n"}
+		logs := copyingLogs()
 		r.Logs = logs
+		poll := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 5, TablesDone: 5}}
+		r.Progress = poll
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name) // run-1
 
-		// Copy still running (step banners only in the log): zero sentinel
-		// execs, CloneCompleted stays False whatever the sentinel would say.
+		// Copy still running (step banners only in the log): no pgcopydb
+		// command, and CloneCompleted stays False whatever the stream says.
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeFalse())
-		Expect(fake.callCount()).To(BeZero())
+		cp, _ := poll.counts()
+		Expect(cp).To(BeZero())
 
 		// The worker logs the clone-done marker: CloneCompleted flips from
-		// the log alone, and only then does the sentinel path engage, with
-		// the usual Streaming/CaughtUp handling.
-		logs.tsOut += ts +
-			`{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+		// the log alone, and only then does the cutover path engage, with the
+		// usual Streaming/CaughtUp handling.
+		logs.tsOut += cloneDoneLine
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
-		Expect(fake.callCount()).To(BeNumerically(">", 0))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming)).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+
+		// Streaming and cutting over are still worker-alive passes, so they
+		// are still psql only. This is the invariant: no pgcopydb command
+		// runs against a live worker, whatever phase it is in.
+		m.Spec.Cutover.Approved = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		reconcileAndGet(ctx, r, name)
+		cp, _ = poll.counts()
+		Expect(cp).To(BeZero(), "the progress poll must not run while the worker is alive")
+
+		// Nor after it exits: a follow migration's counters come out of the
+		// verify Job's log, so nothing ever execs `list progress` into a pod
+		// of this migration's worker.
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		cp, _ = poll.counts()
+		Expect(cp).To(BeZero())
 	})
 
 	It("cuts over automatically once caught up", func() {
@@ -382,15 +427,20 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		fake := &fakeSentinel{}
 		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverAutomatic))).To(Succeed())
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name)
 
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
 		m := reconcileAndGet(ctx, r, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(fake.nudgeCount()).To(Equal(1))
+		// The endpos the operator set is its own to remember: nothing reads
+		// it back out of the worker any more.
+		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+		Expect(fake.slots).To(ContainElement(effectiveSlotName(m)))
 	})
 
 	It("fails loudly when drain verification is refuted", func() {

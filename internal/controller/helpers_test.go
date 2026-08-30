@@ -132,7 +132,7 @@ func TestBuildJob_WorkerDefaultDoesNotLeakToOtherJobs(t *testing.T) {
 
 	for name, build := range map[string]func() (*batchv1.Job, error){
 		jobKindCleanup: func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 	} {
 		job, err := build()
 		if err != nil {
@@ -171,7 +171,7 @@ func TestBuildJob_RunnerImage(t *testing.T) {
 	for name, build := range map[string]func() (*batchv1.Job, error){
 		"worker":       func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
 		jobKindCleanup: func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
-		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img") },
+		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img", "") },
 	} {
 		job, err := build()
 		if err != nil {

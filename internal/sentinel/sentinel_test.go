@@ -54,6 +54,15 @@ func serveExecSuccess(w http.ResponseWriter, r *http.Request, out []byte) {
 	_, _ = streams[1].Write(out)
 }
 
+// The LSNs the tables below repeat: a set endpos, and one healthy sample of
+// write, replay, and source head.
+const (
+	endposLSN = "0/A0"
+	writeLSN  = "0/2000"
+	replayLSN = "0/1000"
+	headLSN   = "0/3000"
+)
+
 func TestParseLSN(t *testing.T) {
 	cases := map[string]uint64{
 		ZeroLSN:      0,
@@ -73,6 +82,14 @@ func TestParseLSN(t *testing.T) {
 	for _, bad := range []string{"", "nope", "1-2", "zz/0", "1/zz"} {
 		if _, err := ParseLSN(bad); err == nil {
 			t.Fatalf("%q: error expected", bad)
+		}
+	}
+}
+
+func TestEndposSet(t *testing.T) {
+	for lsn, want := range map[string]bool{"": false, ZeroLSN: false, endposLSN: true} {
+		if got := EndposSet(lsn); got != want {
+			t.Fatalf("EndposSet(%q) = %v, want %v", lsn, got, want)
 		}
 	}
 }
@@ -102,6 +119,11 @@ func TestToStatus(t *testing.T) {
 	if rs.Endpos != "" {
 		t.Fatal("zero endpos must render empty")
 	}
+	// The metric contract is that an unknown value is absent, never zero.
+	zero := (&State{WriteLSN: ZeroLSN, ReplayLSN: ZeroLSN, Endpos: ZeroLSN}).ToStatus("slot1")
+	if zero.WriteLSN != "" || zero.ReplayLSN != "" || zero.Endpos != "" {
+		t.Fatalf("null LSNs must render empty: %+v", zero)
+	}
 	if rs.LagBytes == nil || *rs.LagBytes != 0x20 {
 		t.Fatalf("lag bytes: %+v", rs.LagBytes)
 	}
@@ -113,9 +135,9 @@ func TestToStatus(t *testing.T) {
 func TestToStatus_EndposSetAndLagUnknown(t *testing.T) {
 	// A frozen stream carries its cutover LSN into status; before the first
 	// WAL-head sample, lag is unknown and must stay absent, not read as 0.
-	s := &State{WriteLSN: "0/21", ReplayLSN: "0/11", Endpos: "0/A0"}
+	s := &State{WriteLSN: "0/21", ReplayLSN: "0/11", Endpos: endposLSN}
 	rs := s.ToStatus("slot1")
-	if rs.Endpos != "0/A0" {
+	if rs.Endpos != endposLSN {
 		t.Fatalf("endpos: %q", rs.Endpos)
 	}
 	if rs.LagBytes != nil {
@@ -206,24 +228,113 @@ func runningPod() corev1.Pod {
 	}
 }
 
-func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
+// TestParseSample covers what the two databases actually answer through a
+// migration's life, including the states no test cluster reproduces on
+// demand. The labels come off psql, so a value can always be blank and a line
+// can always be missing.
+func TestParseSample(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want *State
+	}{{
+		name: "full sample",
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=0/1500\nreplay_lsn=0/1000\n",
+		want: &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN},
+	}, {
+		// The slot is created with the migration; until then the operator
+		// has learned nothing and the previous status must stand.
+		name: "no slot row yet",
+		out:  "source_head=0/3000\n",
+		want: nil,
+	}, {
+		// No walsender row (receiver reconnecting), or a role that may not
+		// see one: the slot's own confirmed flush position fills write_lsn
+		// and the source-side replay is blank.
+		name: "slot present, no walsender row",
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=\nreplay_lsn=0/1000\n",
+		want: &State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN},
+	}, {
+		// Before the target origin has applied anything the query returns no
+		// row at all, and the source's own view of the consumer stands in.
+		name: "origin absent",
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=0/1500\n",
+		want: &State{WriteLSN: writeLSN, ReplayLSN: "0/1500", SourceHead: headLSN},
+	}, {
+		name: "origin exists but has no progress",
+		out:  "source_head=0/3000\nwrite_lsn=0/2000 source_replay_lsn=\nreplay_lsn=\n",
+		want: &State{WriteLSN: writeLSN, SourceHead: headLSN},
+	}, {
+		name: "garbage",
+		out:  "psql: error: connection to server failed: FATAL: sslmode=require\n",
+		want: nil,
+	}, {
+		name: "empty",
+		out:  "",
+		want: nil,
+	}, {
+		// A value that is not an LSN is treated as absent, never stored.
+		name: "unparsable values",
+		out:  "source_head=later\nwrite_lsn=0/2000 source_replay_lsn=zz/1\n",
+		want: &State{WriteLSN: writeLSN},
+	}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parseSample([]byte(c.out))
+			switch {
+			case c.want == nil && got != nil:
+				t.Fatalf("want no sample, got %+v", *got)
+			case c.want != nil && got == nil:
+				t.Fatalf("want %+v, got no sample", *c.want)
+			case c.want != nil && *got != *c.want:
+				t.Fatalf("got %+v, want %+v", *got, *c.want)
+			}
+		})
+	}
+}
+
+func TestReadScript(t *testing.T) {
+	script := readScript("ns_mig_1")
+	for _, want := range []string{
+		// The slot names both the source slot and the target origin.
+		"where s.slot_name = 'ns_mig_1'",
+		"where roname = 'ns_mig_1'",
+		"pg_current_wal_flush_lsn()",
+		"coalesce(r.write_lsn, s.confirmed_flush_lsn)",
+		"pg_replication_origin_progress(roname, true)",
+		// One side failing must not cost the other side's line.
+		"exit 0",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script misses %q:\n%s", want, script)
+		}
+	}
+	// Nothing in the watch may open the worker's catalogs any more.
+	if strings.Contains(script, "pgcopydb") {
+		t.Fatalf("the watch must not run pgcopydb:\n%s", script)
+	}
+}
+
+func TestRead_NoPodOrFailedExecIsNoSample(t *testing.T) {
 	// No running pod: (nil, nil), the previous sample stands.
 	c, _ := fakeAPI(t, nil, false)
-	st, err := c.Read(context.Background(), "ns", "j")
+	st, err := c.Read(context.Background(), "ns", "j", "s")
 	if err != nil || st != nil {
 		t.Fatalf("no pod: want (nil, nil), got (%v, %v)", st, err)
 	}
-	// Pod up but the sentinel query fails (follow setup not done yet, or the
-	// exec transport hiccuped): also (nil, nil), never a reconcile error.
+	// Pod up but the exec fails (starting, terminating, transport hiccup):
+	// also (nil, nil), never a reconcile error.
 	var rec *execRecorder
 	c, rec = fakeAPI(t, []corev1.Pod{runningPod()}, false)
-	st, err = c.Read(context.Background(), "ns", "j")
+	st, err = c.Read(context.Background(), "ns", "j", "s")
 	if err != nil || st != nil {
-		t.Fatalf("sentinel not ready: want (nil, nil), got (%v, %v)", st, err)
+		t.Fatalf("exec refused: want (nil, nil), got (%v, %v)", st, err)
 	}
-	// Every exec routes through the shared shell wrapper with the URI
-	// recovery for both sides; a bare argv would break only on secretRef
-	// migrations, which no unit fake catches later.
+	// The exec routes through the shared shell wrapper with the URI recovery
+	// for both sides; a bare argv would break only on secretRef migrations,
+	// which no unit fake catches later. (A refused exec is recorded once per
+	// transport the fallback executor tries, so only the command is asserted
+	// here; TestRead_FullSample counts the execs of a healthy pass.)
 	cmds := rec.commands()
 	if len(cmds) == 0 {
 		t.Fatal("no exec recorded")
@@ -233,7 +344,8 @@ func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
 		"sh -c",
 		"[ -f /tmp/pgm-source-uri ]",
 		"[ -f /tmp/pgm-target-uri ]",
-		"pgcopydb stream sentinel get --apply",
+		`psql "$PGCOPYDB_SOURCE_PGURI"`,
+		`psql "$PGCOPYDB_TARGET_PGURI"`,
 	} {
 		if !strings.Contains(argv, want) {
 			t.Fatalf("exec %q misses %q", argv, want)
@@ -243,67 +355,26 @@ func TestRead_NoPodOrNoSentinelIsNoSample(t *testing.T) {
 
 func TestRead_ListError(t *testing.T) {
 	c, _ := fakeAPI(t, nil, true)
-	if _, err := c.Read(context.Background(), "ns", "j"); err == nil {
+	if _, err := c.Read(context.Background(), "ns", "j", "s"); err == nil {
 		t.Fatal("want error when the pod list fails")
-	}
-}
-
-// sentinelOutputs scripts one full healthy sample; tests copy and prune it.
-func sentinelOutputs() map[string]string {
-	return map[string]string{
-		"sentinel get --apply":      "enabled\n",
-		"sentinel get --write-lsn":  "0/2000\n",
-		"sentinel get --replay-lsn": "0/1000\n",
-		"sentinel get --endpos":     "0/0\n",
-		"pg_current_wal_flush_lsn":  "0/3000\n",
 	}
 }
 
 func TestRead_FullSample(t *testing.T) {
 	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
-	rec.script(sentinelOutputs())
-	st, err := c.Read(context.Background(), "ns", "j")
+	rec.script(map[string]string{"pg_replication_slots": "source_head=0/3000\n" +
+		"write_lsn=0/2000 source_replay_lsn=0/1500\nreplay_lsn=0/1000\n"})
+	st, err := c.Read(context.Background(), "ns", "j", "s")
 	if err != nil || st == nil {
 		t.Fatalf("want a sample, got (%v, %v)", st, err)
 	}
-	want := State{ApplyEnabled: true, WriteLSN: "0/2000", ReplayLSN: "0/1000", Endpos: "0/0", SourceHead: "0/3000"}
+	want := State{WriteLSN: writeLSN, ReplayLSN: replayLSN, SourceHead: headLSN}
 	if *st != want {
 		t.Fatalf("sample = %+v, want %+v", *st, want)
 	}
-}
-
-// TestRead_SelectorFailureIsNoSample: any selector failing after the sentinel
-// answered once still yields (nil, nil), never a partial sample: the caller
-// keeps the previous one.
-func TestRead_SelectorFailureIsNoSample(t *testing.T) {
-	for _, broken := range []string{"--write-lsn", "--replay-lsn", "--endpos"} {
-		c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
-		outputs := sentinelOutputs()
-		delete(outputs, "sentinel get "+broken)
-		rec.script(outputs)
-		st, err := c.Read(context.Background(), "ns", "j")
-		if err != nil || st != nil {
-			t.Fatalf("%s failing: want (nil, nil), got (%v, %v)", broken, st, err)
-		}
-	}
-}
-
-// TestRead_SourceHeadBestEffort: the WAL-head query failing must not lose the
-// sentinel sample; lag simply reads as unknown until the next pass.
-func TestRead_SourceHeadBestEffort(t *testing.T) {
-	c, rec := fakeAPI(t, []corev1.Pod{runningPod()}, false)
-	outputs := sentinelOutputs()
-	delete(outputs, "pg_current_wal_flush_lsn")
-	rec.script(outputs)
-	st, err := c.Read(context.Background(), "ns", "j")
-	if err != nil || st == nil {
-		t.Fatalf("want a sample, got (%v, %v)", st, err)
-	}
-	if st.SourceHead != "" {
-		t.Fatalf("source head must stay empty when psql fails, got %q", st.SourceHead)
-	}
-	if st.WriteLSN != "0/2000" || !st.ApplyEnabled {
-		t.Fatalf("sentinel fields lost: %+v", st)
+	// The whole point of the rewrite: one exec per pass, and it is psql.
+	if cmds := rec.commands(); len(cmds) != 1 {
+		t.Fatalf("want exactly one exec per pass, got %d", len(cmds))
 	}
 }
 

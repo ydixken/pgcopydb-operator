@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -46,7 +48,7 @@ const defaultMaxCatchupLag = int64(16 << 20)
 // SentinelOps drives a running follow migration; nil disables follow handling
 // (envtest injects a fake).
 type SentinelOps interface {
-	Read(ctx context.Context, namespace, jobName string) (*sentinel.State, error)
+	Read(ctx context.Context, namespace, jobName, slotName string) (*sentinel.State, error)
 	SetEndposCurrent(ctx context.Context, namespace, jobName string) (string, error)
 	NudgeEndpos(ctx context.Context, namespace, jobName string) error
 }
@@ -96,14 +98,17 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Mi
 }
 
 // reconcileFollowRunning handles the streaming and cutover phases while the
-// worker Job runs. The sentinel sample is best effort: no sample keeps the
-// previous status, exactly like progress polling.
-func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string) {
+// worker Job runs. The sample is best effort: no sample keeps the previous
+// status, exactly like progress polling. cloneDone is the caller's reading of
+// the base copy (the worker's own log markers); until it is true the stream
+// is only reported, never acted on.
+func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone bool) {
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
 		return
 	}
-	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName)
+	slot := effectiveSlotName(m)
+	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName, slot)
 	if err != nil {
 		log.V(1).Info("sentinel read failed", "error", err)
 		return
@@ -111,14 +116,17 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	if st == nil {
 		return
 	}
-	m.Status.Replication = st.ToStatus(effectiveSlotName(m))
-	if !st.ApplyEnabled {
+	if prev := m.Status.Replication; prev != nil {
+		// Endpos is no longer read back from the worker: the operator set it
+		// and its own status is where it lives now.
+		st.Endpos = prev.Endpos
+	}
+	m.Status.Replication = st.ToStatus(slot)
+	if !cloneDone {
 		// Base copy still running; prefetch streams in the background.
 		return
 	}
 
-	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
-		"base copy finished, replaying changes")
 	r.setCondition(m, v1beta1.ConditionStreaming, metav1.ConditionTrue, "Replaying",
 		"logical replication is applying changes")
 	m.Status.Phase = v1beta1.PhaseStreaming
@@ -145,6 +153,9 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CutoverRetry", "Cutover",
 				"setting endpos failed, retrying: %s", err.Error())
 			return
+		}
+		if sentinel.EndposSet(lsn) {
+			m.Status.Replication.Endpos = lsn
 		}
 		m.Status.Phase = v1beta1.PhaseCuttingOver
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CutoverStarted", "Cutover",
@@ -316,7 +327,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
 	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
-		return buildVerifyJob(m, r.RunnerImage)
+		return buildVerifyJob(m, r.RunnerImage, r.progressGate())
 	})
 	if err != nil || job == nil {
 		return false, false, err
@@ -325,7 +336,46 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 	if !done {
 		return false, false, nil
 	}
+	// A refuted drain carries the counters too: the Job ran, so the line is
+	// there, and a failed migration is exactly when someone wants to know how
+	// far the copy got.
+	r.recordCloneProgress(ctx, m, job.Name)
 	return ok, !ok, nil
+}
+
+// progressGate renders the verify Job's `list progress` block, or nothing
+// when no poller is wired to say which pgcopydb versions may run it.
+func (r *MigrationReconciler) progressGate() string {
+	if r.Progress == nil {
+		return ""
+	}
+	return r.Progress.GateScript()
+}
+
+// recordCloneProgress takes the copy counters out of a finished verify Job's
+// log. This is where a follow migration's status.progress comes from: the
+// worker owns its catalog until it exits, and then its pod is gone, so the
+// verify Job (own pod, same work dir, worker dead) is the one place left that
+// can count. Best effort in both directions: an absent or unparsable line
+// leaves the field empty, and nothing here can move the drain verdict.
+func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+	if m.Status.Progress != nil || r.Logs == nil {
+		return
+	}
+	tail := r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail)
+	for line := range strings.SplitSeq(tail, "\n") {
+		raw, found := strings.CutPrefix(line, verifyProgressPrefix)
+		if !found {
+			continue
+		}
+		cp, err := progress.ParseListProgress([]byte(raw))
+		if err != nil {
+			logf.FromContext(ctx).V(1).Info("verify Job progress line did not parse", "job", jobName, "error", err)
+			return
+		}
+		m.Status.Progress = cp
+		return
+	}
 }
 
 // reconcileDeletion routes deletion through cleanup for live migrations. The

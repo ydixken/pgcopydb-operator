@@ -168,12 +168,37 @@ func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, er
 	return job, nil
 }
 
+// verifyProgressPrefix is the verify Job's log contract for the copy
+// counters: one line, the JSON `list progress` printed (see
+// recordCloneProgress for the reading half).
+const verifyProgressPrefix = "clone-progress: "
+
+// cloneCountersBlock reads the copy counters in the verify Job, which is the
+// only pod that may: the worker holds its catalog for as long as it runs, and
+// once it exits there is no pod left to exec into, while this Job mounts the
+// same work dir with the worker gone. It is a passenger and never a voter.
+// The gate runs with errors discarded and `set -e` off, so a shut gate, a
+// failed command, and a missing binary alike leave the line unprinted and the
+// drain verdict below untouched (all three exercised under a real shell).
+// gate is empty when no progress poller is wired, and then nothing is asked.
+func cloneCountersBlock(gate string) string {
+	if gate == "" {
+		return ""
+	}
+	return `clone_progress=$( { set +e
+` + gate + `} 2>/dev/null | tr -d '\n' ) || true
+if [ -n "$clone_progress" ]; then
+  printf '` + verifyProgressPrefix + `%s\n' "$clone_progress"
+fi
+`
+}
+
 // buildVerifyJob checks, after the worker exited 0, that the target really
 // applied everything up to endpos. Exit code 0 is not proof of a complete
 // drain: a crash between endpos-set and drain-complete makes pgcopydb's
 // --resume short-circuit on the receive-side "endpos previously reached" and
 // exit 0 without replaying pending WAL (found live, silent data loss).
-func buildVerifyJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
+func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
 	// The gate has a fast path and a content path, because no LSN can prove
 	// the drain on its own.
@@ -209,7 +234,7 @@ replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + 
 progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
 gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
 echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
-if [ "$gap" -le 8192 ]; then
+` + cloneCountersBlock(progressGate) + `if [ "$gap" -le 8192 ]; then
   echo "drain verified: origin progress reached endpos within one WAL page"
   exit 0
 fi

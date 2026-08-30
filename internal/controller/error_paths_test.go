@@ -244,14 +244,14 @@ func TestObserveRunningJob_StatusPatchFailure(t *testing.T) {
 func TestReconcileFollowRunning_EarlyReturns(t *testing.T) {
 	m := followPasswordMigration()
 	r := &MigrationReconciler{}
-	r.reconcileFollowRunning(context.Background(), m, "j")
+	r.reconcileFollowRunning(context.Background(), m, "j", true)
 	if m.Status.Replication != nil {
 		t.Fatal("nil sentinel must not touch replication status")
 	}
 
 	fake := &fakeSentinel{}
 	r = &MigrationReconciler{Sentinel: fake}
-	r.reconcileFollowRunning(context.Background(), m, "j")
+	r.reconcileFollowRunning(context.Background(), m, "j", true)
 	if m.Status.Replication != nil {
 		t.Fatal("a nil sample must keep the previous replication status")
 	}

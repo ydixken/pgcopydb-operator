@@ -76,7 +76,7 @@ func TestNewFromExec_DropsInvalidVersions(t *testing.T) {
 
 func TestGateScript(t *testing.T) {
 	p := NewFromExec(&fakeExec{}, []string{patchedVersion, "0.19"})
-	s := p.gateScript()
+	s := p.GateScript()
 	for _, want := range []string{
 		"0.18.2.gea87951|0.19)",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
@@ -122,7 +122,7 @@ func TestGateScript_UnderSh(t *testing.T) {
 		patchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
 		"0.18":         "",
 	} {
-		cmd := exec.Command(sh, "-c", p.gateScript())
+		cmd := exec.Command(sh, "-c", p.GateScript())
 		cmd.Env = append(os.Environ(), "PATH="+stubPgcopydb(t, version)+":"+os.Getenv("PATH"))
 		out, err := cmd.Output()
 		if err != nil {
@@ -176,7 +176,7 @@ func TestCloneProgress_Sample(t *testing.T) {
 	if cp.TablesTotal != 5 || cp.TablesDone != 2 || cp.BytesTotal.Value() != 100 || cp.BytesDone.Value() != 40 {
 		t.Fatalf("bad sample: %+v", cp)
 	}
-	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.gateScript() {
+	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.GateScript() {
 		t.Fatalf("exec argv = %v, want the gate script under sh -c", f.argv)
 	}
 }
