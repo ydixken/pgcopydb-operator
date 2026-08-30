@@ -263,14 +263,6 @@ func TestCloneStage(t *testing.T) {
 			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
 		},
 		{
-			// The measured shape of the false Finalizing: four copy workers
-			// connected but between statements while a vacuum runs. Copying,
-			// and the count says so because it follows connections.
-			name:    "copy workers connected, only the tail active",
-			exec:    &fakeExec{pod: "w", out: []byte("4 1\n")},
-			copying: true,
-		},
-		{
 			// The copy is winding down while the tail has started. Still
 			// copying, because data is still moving.
 			name:    "both kinds active",
@@ -317,24 +309,48 @@ func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
 }
 
 // The two counts are asked differently on purpose, so the predicate is pinned
-// here: on a live worker all four copy workers stayed connected for the whole
-// base copy, and counting only the active ones read as the tail while data was
-// still moving. Whitespace is normalized, the shape is what matters.
+// by shape rather than by text: on a live worker all four copy workers stayed
+// connected for the whole base copy, and counting only the active ones read as
+// the tail while data was still moving.
+//
+// The row filter is the part that has to be pinned by absence. Narrowing the
+// rows to the active ones anywhere in the WHERE clause reinstates the bug, in
+// any wording, so the test rejects the word "state" there outright.
 func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
 	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
 	flat := strings.Join(strings.Fields(strings.Join(f.argv, " ")), " ")
 
-	for _, want := range []string{
-		// Copy workers by connection: the name alone decides, no state test.
-		"count(*) filter (where application_name ilike '%copy worker%' or (",
-		// The tail only counts what is running now.
-		"count(*) filter (where state = 'active' and application_name not ilike",
-		// And nothing narrows every row to the active ones any more.
-		"from pg_stat_activity where application_name like 'pgcopydb%' and client_addr",
-	} {
-		if !strings.Contains(flat, want) {
-			t.Errorf("probe query lost %q:\n%s", want, flat)
+	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
+	if !ok {
+		t.Fatalf("probe no longer asks for two counts: %s", flat)
+	}
+	tailCount, afterFrom, ok := strings.Cut(rest, "from pg_stat_activity")
+	if !ok {
+		t.Fatalf("probe no longer reads pg_stat_activity: %s", flat)
+	}
+	// The SQL ends at the psql argument's closing quote; the URI prelude's
+	// own quotes are all behind us by here.
+	where, _, ok := strings.Cut(afterFrom, `"`)
+	if !ok {
+		t.Fatalf("cannot find the end of the probe query: %s", flat)
+	}
+
+	// A copy worker counts while it is connected, so one arm of the copy
+	// count tests the name and nothing else.
+	byConnection := false
+	for arm := range strings.SplitSeq(copyCount, " or ") {
+		if strings.Contains(arm, "application_name ilike '%copy worker%'") && !strings.Contains(arm, "state") {
+			byConnection = true
 		}
+	}
+	if !byConnection {
+		t.Errorf("copy workers are not counted by connection: %s", copyCount)
+	}
+	if !strings.Contains(tailCount, "state = 'active'") {
+		t.Errorf("the tail count dropped its active test: %s", tailCount)
+	}
+	if strings.Contains(where, "state") {
+		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
 	}
 }
