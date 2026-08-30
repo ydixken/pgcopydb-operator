@@ -123,7 +123,7 @@ Reading it:
 
 - **Phase** is the state the operator is in.
   **Current Work** is the activity inside that state, so `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
-  The tile reaches Vacuum And Index Builds only after the operator has seen the copy move data and then stop, so it does not appear while tables are still being copied.
+  The tile reaches Vacuum And Index Builds only after the operator has seen the copy running and then stop, so it does not appear while tables are still being copied.
 - **Elapsed** keeps counting after the migration finishes.
   **Completed At** is where it ended, and reads Still Running until there is an end.
 - **Percent** is target size over source size, clamped at 100.

@@ -52,8 +52,9 @@ On a fixture where one table held 73% of the bytes, that tail was roughly a fift
 
 The phase is derived by asking the target which of the worker's own backends are active, which is a plain `pg_stat_activity` query and touches no pgcopydb catalog.
 Reading pgcopydb's catalog while the copy is writing it kills workers, so the operator does not do it during a clone.
-`Finalizing` needs the probe to have seen a COPY backend at least once during the attempt, which the `CopyingData` reason below records.
-Before that, a sample that finds no copy workers and other backends busy is the probe missing the copy, not the copy being over, and the phase stays `Cloning`.
+`Finalizing` needs the probe to have seen this attempt's copy workers connected to the target at least once, which the `CopyingData` reason below records.
+Presence is a connection count, not an active-statement count: pgcopydb opens its copy workers up front and they idle between statements, so counting only the ones mid-`COPY` reads as finished while data is still moving.
+Until that first sighting, a sample with no copy workers and other backends busy leaves the phase at `Cloning`: the copy has not been seen running, so it cannot have been seen stopping.
 An unanswerable query changes nothing: the phase stays where the last answered sample left it, because not knowing is not evidence of finishing.
 
 ## Condition types
@@ -82,7 +83,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
 | `Validated` | `False` | `PreflightFailed` | The preflight found a failed check: connectivity or a target clone privilege on any migration, or a missing follow prerequisite; the message carries the check output with the exact `GRANT` or setting to fix, plus a `superuserSecretRef` hint when that field could apply it. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
-| `CloneCompleted` | `False` | `CopyingData` | The probe has seen the base copy move table data (an active COPY backend on the target); it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
+| `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished. |
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished (detected from the worker's clone-completion log line) and change replay took over. |
