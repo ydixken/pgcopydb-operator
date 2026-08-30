@@ -75,6 +75,12 @@ Manual is the default mode. Cutover freezes the stream at the source's current L
 
 An idle source needs no extra care from you. pgcopydb 0.18 only checks the cutover LSN against WAL it receives, and a source with zero writes sends none, which would leave the drain waiting forever. So while the phase is `CuttingOver` the operator emits a tiny logical message on the source (`pg_logical_emit_message`) on every pass: one WAL record for the stream to deliver, letting the worker reach the LSN promptly. The message carries no data, needs no special privilege, and changes nothing user-visible.
 
+The e2e suite exercises this runbook under load: a client commits one row per transaction to the source, from before the base copy, through the whole streaming phase, stopping only at the approval.
+It requires the target to end with the same count of that client's rows as the source, no gap in the run the client committed, and a passing `pgcopydb compare data` over the whole database.
+Leaving the application running through the copy and the stream loses no committed transaction.
+What that leaves untested is the other side of the freeze: the source is silent from step 2 onward, so there are no writes past the cutover LSN to lose.
+Keeping that set empty is what step 2 is for, and [Automatic mode](#automatic-mode) below is the same warning for the mode that skips it.
+
 ## Automatic mode
 
 `cutover.mode: Automatic` skips the approval: the operator cuts over the moment `CaughtUp` first goes True. Use it only when the source is already quiesced (a decommissioned system, a maintenance window that started before the Migration). Against a source still taking writes, "caught up" is a moving target crossed at an arbitrary moment, and every write after the freeze is lost to the target. When in doubt, use Manual.
