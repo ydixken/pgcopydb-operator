@@ -69,8 +69,10 @@ RUN set -eux; \
     curl -fsSL -o pgcopydb.tar.gz "https://codeload.github.com/ydixken/pgcopydb/tar.gz/${PGCOPYDB_SHA}"; \
     tar -xzf pgcopydb.tar.gz --strip-components=1; \
     # install lands the binary in pg_config --bindir, the same path the
-    # final stage's PATH prefers
-    VERSION="${PGCOPYDB_VERSION}" make -s install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config; \
+    # final stage's PATH prefers. -j$(nproc) is what upstream's own Dockerfile
+    # runs against this tree; the vendored 9 MB sqlite3.c is one translation
+    # unit, so it stays the floor no matter how many cores are free.
+    VERSION="${PGCOPYDB_VERSION}" make -s -j"$(nproc)" install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config; \
     # ldd documents what the final stage has to install (libgc1; the rest
     # rides in with libpq5)
     ldd /usr/lib/postgresql/18/bin/pgcopydb; \
