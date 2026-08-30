@@ -42,7 +42,7 @@ Preflight failure is terminal: these are configuration errors on the databases, 
 
 ## Watching the stream
 
-`status.replication` is sampled from the databases rather than from the worker: the replication slot and `pg_stat_replication` on the source. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
+`status.replication` is sampled from the source rather than from the worker: one row joining the replication slot to `pg_stat_replication`. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
