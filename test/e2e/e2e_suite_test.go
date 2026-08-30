@@ -80,11 +80,23 @@ const (
 
 	sourceCluster = "e2e-source"
 	targetCluster = "e2e-target"
-	// CNPG names the single instance <cluster>-1 and the app secret <cluster>-app.
-	srcPod    = sourceCluster + "-1"
-	tgtPod    = targetCluster + "-1"
+	// CNPG names the app secret <cluster>-app. Instance pods are <cluster>-N,
+	// and which of them is primary moves on failover, so every statement
+	// resolves its pod by label through primaryPod instead of by name.
 	srcSecret = sourceCluster + "-app"
 	tgtSecret = targetCluster + "-app"
+
+	// CNPG's own pod labels: what the suite selects, schedules and kills by.
+	labelCNPGCluster = "cnpg.io/cluster"
+	labelCNPGRole    = "cnpg.io/instanceRole"
+	labelCNPGPodRole = "cnpg.io/podRole"
+	rolePrimary      = "primary"
+
+	// cnpgInstances is the instance count of both fixture clusters. Three, so
+	// each cluster spans three nodes and a migration's SQL legs cross the
+	// real network the way a production migration does. Below three nodes
+	// CNPG co-locates instances and the suite still passes.
+	cnpgInstances = 3
 
 	// appDB is the CNPG-bootstrapped database and its owning role.
 	appDB = "app"
@@ -105,9 +117,9 @@ const (
 	// seedImage only needs a psql client; the CNPG operand image has one and
 	// is already pulled on any cluster running CNPG fixtures.
 	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
-	// ephemeralStorageClass is the suite-owned Longhorn class for the stress
-	// tier: one replica, reclaim Delete, so ~500Gi of throwaway volumes do
-	// not triple themselves across the cluster.
+	// ephemeralStorageClass is the suite-owned Longhorn class the fixture
+	// volumes bind to: one replica, reclaim Delete, so throwaway volumes that
+	// CNPG has already replicated do not triple themselves again underneath.
 	ephemeralStorageClass = "longhorn-e2e-ephemeral"
 )
 
@@ -121,11 +133,13 @@ var fixturesFS embed.FS
 
 // The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
 // fixture data (~12GB at scale 1) and with it the volumes (40/40/10Gi at
-// scale 1) on the cluster default StorageClass. Stress (E2E_STRESS=true):
-// scale 10 (~120GB) on fixed 200/150/50Gi volumes backed by the suite-owned
-// single-replica StorageClass, gated by the Longhorn capacity check. E2E_SCALE
-// always wins when set, so the version matrix can run small (0.1) against
-// either tier's sizing.
+// scale 1). Stress (E2E_STRESS=true): scale 10 (~120GB) on fixed 200/150/50Gi
+// volumes and much longer budgets. Both tiers put the fixture volumes on the
+// suite-owned single-replica StorageClass and both are gated by the Longhorn
+// capacity check. E2E_SCALE always wins when set, so the version matrix can
+// run small (0.1) against either tier's sizing. Every source and target volume
+// is provisioned once per CNPG instance, so the tier sizes multiply by
+// cnpgInstances.
 var (
 	stress = envTrue("E2E_STRESS")
 	scale  = 1.0
@@ -156,6 +170,9 @@ var (
 	// seedTimeout bounds the seed Job; seeding is IO-bound on the source
 	// volume.
 	seedTimeout = 30 * time.Minute
+	// primaryTimeout bounds the wait for a cluster to carry exactly one
+	// primary. It only has to cover a CNPG promotion, not a bootstrap.
+	primaryTimeout = 2 * time.Minute
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -177,10 +194,15 @@ func envTrue(name string) bool {
 }
 
 func init() {
+	// Fixture volumes take the suite-owned single-replica class at every tier.
+	// CNPG already keeps cnpgInstances copies of the data, so a replicating
+	// default class would copy each of those again and store the fixtures nine
+	// times over for nothing a test can observe. ensureFixtureStorage falls
+	// back to the cluster default when the cluster has no Longhorn.
+	fixtureStorageClass = ephemeralStorageClass
 	if stress {
 		scale = 10
 		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
-		fixtureStorageClass = ephemeralStorageClass
 		migrationTimeout, followTimeout, seedTimeout = 2*time.Hour, 3*time.Hour, 3*time.Hour
 	}
 	if v := os.Getenv("E2E_SCALE"); v != "" {
@@ -338,11 +360,8 @@ var _ = BeforeSuite(func() {
 		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
 			" follow controller; upgrade the CRD (chart >= v0.1.0-alpha.6) before running the live scenarios")
 
-	if stress {
-		By("stress tier: ensuring the ephemeral StorageClass and checking Longhorn capacity")
-		ensureEphemeralStorageClass()
-		checkLonghornCapacity()
-	}
+	By("preparing the fixture StorageClass and checking Longhorn capacity")
+	ensureFixtureStorage()
 
 	// The suite is single-tenant per cluster: two runs share the release name,
 	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
@@ -405,8 +424,8 @@ var _ = BeforeSuite(func() {
 
 	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
 		pgSource, pgTarget))
-	ensureClusterMajor(sourceCluster, pgSource)
-	ensureClusterMajor(targetCluster, pgTarget)
+	ensureClusterShape(sourceCluster, pgSource)
+	ensureClusterShape(targetCluster, pgTarget)
 	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
 	applyCluster(cnpgCluster(targetCluster, tgtStorageSize, pgTarget))
 	waitClusterReady(sourceCluster)
@@ -560,12 +579,29 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 		"kind":       cnpgGVK.Kind,
 		"metadata":   map[string]any{"name": name, "namespace": nsE2E},
 		"spec": map[string]any{
-			"instances": int64(1),
+			"instances": int64(cnpgInstances),
 			// An explicit major so the version matrix (task e2e:matrix) can
 			// vary it and the default never drifts with the CNPG operator's
 			// own operand default.
 			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
 			"storage":   storage,
+			// Spelled out rather than left to the CNPG defaults, because the
+			// whole point of cnpgInstances > 1 here is one instance per node:
+			// a default that drifts would silently return the suite to a
+			// single-node run and nothing would fail.
+			"affinity": map[string]any{
+				"enablePodAntiAffinity": true,
+				"podAntiAffinityType":   "preferred",
+				"topologyKey":           corev1.LabelHostname,
+			},
+			// Requests, no limits. Their job is to make the pod visible to the
+			// scheduler: a pod that requests nothing scores identically on
+			// every node, so the least-allocated node wins every decision and
+			// the whole suite lands on it. The values are a floor for
+			// accounting, not a budget, so seeding is never throttled.
+			"resources": map[string]any{
+				"requests": map[string]any{"cpu": "250m", "memory": "512Mi"},
+			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
 				"database": appDB,
 				"owner":    appDB,
@@ -582,6 +618,59 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	}}
 }
 
+// fixtureAntiAffinity keeps a suite-created worker pod off the nodes running
+// the fixture primaries, so a migration's SQL legs cross the real network
+// instead of looping back inside one node.
+//
+// It repels the primaries specifically, not every instance. With cnpgInstances
+// spread one per node, every node carries a source instance and a target
+// instance, so repelling all of them scores every node identically and decides
+// nothing. Repelling the two primaries leaves the node that holds neither,
+// which is the production shape: a runner off-box from both databases it
+// talks to.
+//
+// Preferred, never required. On a cluster with fewer nodes than fixtures a
+// required term would leave the pod Pending until the scenario's timeout, and
+// the shared dev cluster runs a descheduler that enforces required inter-pod
+// anti-affinity by eviction, which would kill a runner mid-migration.
+// Namespaces is spelled out because the cross-namespace scenario schedules its
+// runner in nsX: an empty namespaces field means "the scheduling pod's own
+// namespace", so the term would match nothing there and read as satisfied.
+func fixtureAntiAffinity() *corev1.Affinity {
+	return &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					Namespaces:  []string{nsE2E},
+					TopologyKey: corev1.LabelHostname,
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{{
+							Key:      labelCNPGCluster,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{sourceCluster, targetCluster},
+						}, {
+							Key:      labelCNPGRole,
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{rolePrimary},
+						}},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// workerResources is what every suite-created worker pod requests. Requests
+// only: they exist so the scheduler can see the pod at all (see the note in
+// cnpgCluster), not to cap what it may use.
+func workerResources(cpu, memory string) corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{Requests: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse(cpu),
+		corev1.ResourceMemory: resource.MustParse(memory),
+	}}
+}
+
 // applyCluster server-side applies the fixture, which both creates it fresh
 // and adopts an existing one left over from manual runs.
 func applyCluster(obj *unstructured.Unstructured) {
@@ -591,6 +680,10 @@ func applyCluster(obj *unstructured.Unstructured) {
 		To(Succeed(), "failed to apply CNPG cluster %s", obj.GetName())
 }
 
+// waitClusterReady waits until every instance is ready, not just the primary.
+// One ready instance would let the suite start while the replicas are still
+// cloning, which is exactly when the fixtures are not yet spread across nodes
+// and a chaos failover has nowhere to promote to.
 func waitClusterReady(name string) {
 	GinkgoHelper()
 	Eventually(func(g Gomega) {
@@ -598,7 +691,8 @@ func waitClusterReady(name string) {
 		c.SetGroupVersionKind(cnpgGVK)
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, c)).To(Succeed())
 		ready, _, _ := unstructured.NestedInt64(c.Object, "status", "readyInstances")
-		g.Expect(ready).To(BeNumerically(">=", 1), "CNPG cluster %s has no ready instance", name)
+		g.Expect(ready).To(BeNumerically(">=", int64(cnpgInstances)),
+			"CNPG cluster %s has %d of %d instances ready", name, ready, cnpgInstances)
 	}, clusterReadyTimeout, 5*time.Second).Should(Succeed())
 }
 
@@ -611,11 +705,11 @@ func waitClusterReady(name string) {
 // owner; app is the database owner, so it needs no extra grants.
 func resetTargetObjects() {
 	GinkgoHelper()
-	psql(tgtPod, "DROP EXTENSION IF EXISTS citext CASCADE")
-	psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(tgtPod, "DROP SCHEMA IF EXISTS public CASCADE")
-	psql(tgtPod, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
-	psql(tgtPod, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
+	psql(targetCluster, "DROP EXTENSION IF EXISTS citext CASCADE")
+	psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
+	psql(targetCluster, "DROP SCHEMA IF EXISTS public CASCADE")
+	psql(targetCluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 
 // ensureSeededSource brings the source database to the requested fixture
@@ -625,8 +719,8 @@ func resetTargetObjects() {
 // leaves surplus rows), so the cluster is recreated from scratch.
 func ensureSeededSource() {
 	GinkgoHelper()
-	if psql(srcPod, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
-		match := psql(srcPod, fmt.Sprintf(
+	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
+		match := psql(sourceCluster, fmt.Sprintf(
 			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
 			seedProfile, scaleArg()))
 		if match != "t" {
@@ -639,8 +733,8 @@ func ensureSeededSource() {
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
 // and brings a fresh one up. Used when kept fixtures carry a stale seed
-// profile or scale; a PG-major mismatch on a kept cluster is handled earlier
-// by ensureClusterMajor, for the target too.
+// profile or scale; a major, instance-count or storage-class mismatch on a
+// kept cluster is handled earlier by ensureClusterShape, for the target too.
 func recreateSourceCluster() {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
@@ -667,12 +761,15 @@ func deleteCluster(name string) {
 	}, 10*time.Minute, 5*time.Second).Should(Succeed())
 }
 
-// ensureClusterMajor deletes a kept cluster whose server runs a different
-// PostgreSQL major than this run requests; the subsequent apply then creates
-// it fresh on the right image. The check runs before that apply on purpose:
-// CNPG cannot change majors in place, so server-side applying another major's
-// imageName onto a live cluster would wedge it instead of upgrading it.
-func ensureClusterMajor(name string, major int) {
+// ensureClusterShape deletes a kept cluster that this run cannot adopt in
+// place, so the subsequent apply creates it fresh. Three things force that: a
+// different PostgreSQL major (CNPG cannot change majors in place, so applying
+// another major's imageName would wedge the cluster rather than upgrade it), a
+// different instance count, and a different storage class, which is immutable
+// once a PVC is bound. The two shape checks read the spec and run before the
+// readiness wait on purpose: a kept single-instance cluster can never reach
+// cnpgInstances ready, so waiting first would time out instead of recreating.
+func ensureClusterShape(name string, major int) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
 	c.SetGroupVersionKind(cnpgGVK)
@@ -681,19 +778,32 @@ func ensureClusterMajor(name string, major int) {
 		return
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", name)
-	// The kept instance has to answer psql before its major can be read.
+
+	if got, _, _ := unstructured.NestedInt64(c.Object, "spec", "instances"); got != int64(cnpgInstances) {
+		By(fmt.Sprintf("deleting %s: kept cluster has %d instances, this run wants %d",
+			name, got, cnpgInstances))
+		deleteCluster(name)
+		return
+	}
+	if got, _, _ := unstructured.NestedString(c.Object, "spec", "storage", "storageClass"); got != fixtureStorageClass {
+		By(fmt.Sprintf("deleting %s: kept cluster is on storage class %q, this run wants %q",
+			name, got, fixtureStorageClass))
+		deleteCluster(name)
+		return
+	}
+	// The kept instances have to answer psql before the major can be read.
 	waitClusterReady(name)
-	if got := serverMajor(name + "-1"); got != major {
+	if got := serverMajor(name); got != major {
 		By(fmt.Sprintf("deleting %s: kept cluster runs PG %d, this run wants PG %d", name, got, major))
 		deleteCluster(name)
 	}
 }
 
-// serverMajor asks the running instance for its PostgreSQL major version.
-func serverMajor(pod string) int {
+// serverMajor asks the cluster's primary for its PostgreSQL major version.
+func serverMajor(cluster string) int {
 	GinkgoHelper()
-	num, err := strconv.Atoi(psql(pod, "SELECT current_setting('server_version_num')"))
-	Expect(err).NotTo(HaveOccurred(), "unparseable server_version_num from %s", pod)
+	num, err := strconv.Atoi(psql(cluster, "SELECT current_setting('server_version_num')"))
+	Expect(err).NotTo(HaveOccurred(), "unparseable server_version_num from %s", cluster)
 	return num / 10000
 }
 
@@ -750,9 +860,11 @@ func buildSeedJob() *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					Affinity:      fixtureAntiAffinity(),
 					Containers: []corev1.Container{{
-						Name:  "seed",
-						Image: seedImage,
+						Name:      "seed",
+						Image:     seedImage,
+						Resources: workerResources("250m", "512Mi"),
 						Command: []string{"psql",
 							"-v", "ON_ERROR_STOP=1",
 							"-v", "scale=" + scaleArg(),
@@ -791,10 +903,48 @@ func seedJobLogs() string {
 	return string(out)
 }
 
+// ensureFixtureStorage prepares the class the fixture volumes bind to and
+// refuses a run that would not fit. Longhorn is optional: without it the
+// suite-owned class could never bind, so the fixtures fall back to the
+// cluster default and there is no capacity to read. E2E_STORAGE_CLASS is left
+// alone, because whoever pins a class owns the capacity question with it.
+func ensureFixtureStorage() {
+	GinkgoHelper()
+	if fixtureStorageClass != ephemeralStorageClass {
+		return
+	}
+	if !longhornPresent() {
+		By("no Longhorn in this cluster: fixture volumes fall back to the cluster default StorageClass")
+		fixtureStorageClass = ""
+		return
+	}
+	ensureEphemeralStorageClass()
+	checkLonghornCapacity()
+}
+
+// longhornPresent reports whether this cluster runs Longhorn, by asking for
+// the CRD the capacity check reads.
+func longhornPresent() bool {
+	GinkgoHelper()
+	err := k8sClient.List(ctx, longhornNodes())
+	if apimeta.IsNoMatchError(err) {
+		return false
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
+	return true
+}
+
+// longhornNodes is an empty list typed to the Longhorn Node CRD.
+func longhornNodes() *unstructured.UnstructuredList {
+	l := &unstructured.UnstructuredList{}
+	l.SetGroupVersionKind(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: "NodeList"})
+	return l
+}
+
 // ensureEphemeralStorageClass creates the suite-owned single-replica Longhorn
-// StorageClass for the stress tier if it does not exist. It stays behind
-// after the run: it is configuration, not data, and reclaimPolicy Delete
-// means volumes never outlive their claims.
+// StorageClass if it does not exist. It stays behind after the run: it is
+// configuration, not data, and reclaimPolicy Delete means volumes never
+// outlive their claims.
 func ensureEphemeralStorageClass() {
 	GinkgoHelper()
 	reclaim := corev1.PersistentVolumeReclaimDelete
@@ -809,20 +959,14 @@ func ensureEphemeralStorageClass() {
 	}
 }
 
-// checkLonghornCapacity refuses to start a stress run that would fill the
-// shared cluster: it sums storageAvailable over every disk of every
-// nodes.longhorn.io CR (live cluster state, deliberately never hardcoded)
-// and Skips unless the requested fixture volumes fit with 20% headroom.
+// checkLonghornCapacity refuses to start a run that would fill the shared
+// cluster: it sums storageAvailable over every disk of every nodes.longhorn.io
+// CR (live cluster state, deliberately never hardcoded) and Skips unless the
+// requested fixture volumes fit with 20% headroom.
 func checkLonghornCapacity() {
 	GinkgoHelper()
-	nodes := &unstructured.UnstructuredList{}
-	nodes.SetGroupVersionKind(schema.GroupVersionKind{Group: "longhorn.io", Version: "v1beta2", Kind: "NodeList"})
-	if err := k8sClient.List(ctx, nodes); err != nil {
-		if apimeta.IsNoMatchError(err) {
-			Skip("stress tier needs Longhorn: no nodes.longhorn.io CRD in this cluster")
-		}
-		Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
-	}
+	nodes := longhornNodes()
+	Expect(k8sClient.List(ctx, nodes)).To(Succeed(), "failed to list nodes.longhorn.io")
 	var available int64
 	for _, n := range nodes.Items {
 		disks, _, _ := unstructured.NestedMap(n.Object, "status", "diskStatus")
@@ -839,21 +983,26 @@ func checkLonghornCapacity() {
 			}
 		}
 	}
+	// Every CNPG instance carries a full copy of its cluster's data, so the
+	// source and target volumes are provisioned once per instance. The work
+	// volume is one per migration and does not multiply.
 	var required int64
-	for _, size := range []string{srcStorageSize, tgtStorageSize, workVolumeSize} {
+	for _, size := range []string{srcStorageSize, tgtStorageSize} {
 		q := resource.MustParse(size)
-		required += q.Value()
+		required += q.Value() * cnpgInstances
 	}
+	work := resource.MustParse(workVolumeSize)
+	required += work.Value()
 	// numberOfReplicas is 1 on the ephemeral StorageClass, so requested
 	// bytes map 1:1 to consumed bytes; 1.2 leaves headroom for WAL churn
 	// and everything else living on the shared disks.
 	const replicas = 1
 	need := required * replicas * 12 / 10
 	if available < need {
-		Skip(fmt.Sprintf("stress tier needs %dGi available across Longhorn disks"+
-			" (%dGi requested x %d replica x 1.2 headroom) but only %dGi are free;"+
-			" free up space or run the default tier",
-			need>>30, required>>30, replicas, available>>30))
+		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
+			" (%dGi requested x %d replica x 1.2 headroom, source and target sized for"+
+			" %d CNPG instances each) but only %dGi are free; free up space or lower E2E_SCALE",
+			need>>30, required>>30, replicas, cnpgInstances, available>>30))
 	}
 }
 
@@ -869,7 +1018,7 @@ func checkLonghornCapacity() {
 // targets (PG14 is a source only), so the statement always parses here.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
-	psql(srcPod, "ALTER ROLE app REPLICATION")
+	psql(sourceCluster, "ALTER ROLE app REPLICATION")
 	grantTargetFollowPrivileges(appDB)
 }
 
@@ -879,11 +1028,11 @@ func ensureFollowPrivileges() {
 // parameter grant is cluster-wide but idempotent and simply rides along.
 func grantTargetFollowPrivileges(db string) {
 	GinkgoHelper()
-	psqlDB(tgtPod, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
-	psqlDB(tgtPod, db, "GRANT SET ON PARAMETER session_replication_role TO app")
+	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO app")
 }
 
 // resetSourceReplication drops what a crashed follow run may have left on the
@@ -893,10 +1042,10 @@ func grantTargetFollowPrivileges(db string) {
 // collide with this run's follow scenarios.
 func resetSourceReplication() {
 	GinkgoHelper()
-	psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-%'")
-	psql(srcPod, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
+	psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	psql(sourceCluster, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
 		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
-	psql(srcPod, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
+	psql(sourceCluster, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
 		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
 }
 
@@ -909,28 +1058,112 @@ func resetSourceReplication() {
 // is in use.
 func resetTargetReplication() {
 	GinkgoHelper()
-	psql(tgtPod, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
+	psql(targetCluster, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
 		" WHERE roname LIKE 'pgcopydb%'")
 }
 
-// psql runs one statement against the app database; see psqlDB.
-func psql(pod, sql string) string {
+// instanceNodes returns the distinct node names carrying the cluster's
+// instances. A set, not a count of pods: two instances on one node is exactly
+// the failure the caller is looking for.
+func instanceNodes(cluster string) []string {
 	GinkgoHelper()
-	return psqlDB(pod, appDB, sql)
+	pods := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
+		labelCNPGCluster: cluster,
+		labelCNPGPodRole: "instance",
+	})).To(Succeed(), "failed to list instances of CNPG cluster %s", cluster)
+	Expect(pods.Items).NotTo(BeEmpty(), "CNPG cluster %s has no instance pods", cluster)
+	seen := map[string]bool{}
+	var nodes []string
+	for i := range pods.Items {
+		if n := pods.Items[i].Spec.NodeName; n != "" && !seen[n] {
+			seen[n] = true
+			nodes = append(nodes, n)
+		}
+	}
+	return nodes
 }
 
-// psqlDB runs one statement in the given database inside a CNPG instance pod
-// as the in-pod postgres superuser (peer auth on the unix socket, no password
-// involved) and returns trimmed stdout. kubectl exec is deliberate: it reuses
-// the same current context as the client and saves a hand-rolled SPDY
-// executor. Failures to even reach the pod get two retries; anything after
-// connecting fails hard, because the statement may have run and not every
-// caller is idempotent.
-func psqlDB(pod, db, sql string) string {
+// schedulableNodes counts the nodes a fixture pod could actually land on, so
+// the placement assertion scales to the cluster running it instead of
+// hardcoding a node count the repo is not allowed to record anyway. The
+// fixtures carry no tolerations, so any NoSchedule or NoExecute taint rules a
+// node out just as cordoning does; counting those in would fail the assertion
+// on a cluster where the pods had nowhere else to go.
+func schedulableNodes() int {
+	GinkgoHelper()
+	nodes := &corev1.NodeList{}
+	Expect(k8sClient.List(ctx, nodes)).To(Succeed(), "failed to list nodes")
+	n := 0
+	for i := range nodes.Items {
+		if usableNode(&nodes.Items[i]) {
+			n++
+		}
+	}
+	Expect(n).To(BeNumerically(">", 0), "no schedulable node in this cluster")
+	return n
+}
+
+// usableNode reports whether a pod with no tolerations can be scheduled on a
+// node: Ready, not cordoned, and free of blocking taints.
+func usableNode(n *corev1.Node) bool {
+	if n.Spec.Unschedulable {
+		return false
+	}
+	for _, t := range n.Spec.Taints {
+		if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+			return false
+		}
+	}
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// primaryPod returns the pod name of the cluster's current primary. Which
+// instance carries the role moves on failover and the chaos scenarios force
+// failovers on purpose, so a hardcoded <cluster>-1 would send writes to a
+// read-only replica. A promotion leaves the cluster without a primary for a
+// few seconds, so this waits out the gap instead of failing into it.
+func primaryPod(cluster string) string {
+	GinkgoHelper()
+	var name string
+	Eventually(func(g Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
+			labelCNPGCluster: cluster,
+			labelCNPGRole:    rolePrimary,
+		})).To(Succeed())
+		g.Expect(pods.Items).To(HaveLen(1), "CNPG cluster %s has no single primary", cluster)
+		name = pods.Items[0].Name
+	}, primaryTimeout, 2*time.Second).Should(Succeed())
+	return name
+}
+
+// psql runs one statement against the app database; see psqlDB.
+func psql(cluster, sql string) string {
+	GinkgoHelper()
+	return psqlDB(cluster, appDB, sql)
+}
+
+// psqlDB runs one statement in the given database on the named CNPG cluster's
+// current primary, as the in-pod postgres superuser (peer auth on the unix
+// socket, no password involved), and returns trimmed stdout. kubectl exec is
+// deliberate: it reuses the same current context as the client and saves a
+// hand-rolled SPDY executor. Failures to even reach the pod get two retries,
+// each re-resolving the primary so a retry after a failover reaches the new
+// one; anything after connecting fails hard, because the statement may have
+// run and not every caller is idempotent.
+func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	var lastErr error
 	var lastStderr string
+	var pod string
 	for attempt := 1; attempt <= 3; attempt++ {
+		pod = primaryPod(cluster)
 		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
 			"psql", "-U", "postgres", db, "-tAc", sql)
 		out, err := cmd.Output()

@@ -51,22 +51,36 @@ var _ = Describe("Migration", Ordered, func() {
 		resetTargetObjects()
 	})
 
+	// Placement is configuration, and configuration that stops working fails
+	// silently: the suite would still pass on a single node, just slower and
+	// over loopback instead of the wire. Assert it explicitly, scaled to the
+	// cluster actually running the suite so a smaller one does not fail.
+	It("spreads each CNPG fixture across as many nodes as the cluster has", func() {
+		want := min(schedulableNodes(), cnpgInstances)
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			nodes := instanceNodes(cluster)
+			Expect(nodes).To(HaveLen(want),
+				"CNPG cluster %s occupies %d nodes, want %d: instances are co-located"+
+					" and the migration never leaves the node", cluster, len(nodes), want)
+		}
+	})
+
 	It("completes a fresh clone with matching rows and sequences", func() {
 		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
 		By("checking the seeded source matches the scale-derived expectations")
-		Expect(seedTableCounts(srcPod)).To(Equal(expectedSeedCounts()),
+		Expect(seedTableCounts(sourceCluster)).To(Equal(expectedSeedCounts()),
 			"source row counts do not match the scale formula; seed and suite disagree")
-		Expect(largeObjectCount(srcPod)).To(Equal(fmt.Sprint(scaled(40))))
+		Expect(largeObjectCount(sourceCluster)).To(Equal(fmt.Sprint(scaled(40))))
 
 		By("comparing table groups, matview, large objects, and sequences on both sides")
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
-		Expect(matviewState(tgtPod)).To(Equal(matviewState(srcPod)),
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
+		Expect(matviewState(targetCluster)).To(Equal(matviewState(sourceCluster)),
 			"materialized view not repopulated identically on the target")
-		Expect(largeObjectCount(tgtPod)).To(Equal(largeObjectCount(srcPod)))
-		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
+		Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
+		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 	})
 
 	It("re-clones onto the populated target with dropIfExists", func() {
@@ -80,7 +94,7 @@ var _ = Describe("Migration", Ordered, func() {
 		// schema left by the previous scenario must go by hand for the
 		// absence check to mean anything.
 		By("dropping the audit schema on the target")
-		psql(tgtPod, "DROP SCHEMA IF EXISTS audit CASCADE")
+		psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
 
 		create(newMigration("e2e-filters", nsE2E, v1beta1.CloneOptions{
 			DropIfExists: true,
@@ -89,9 +103,9 @@ var _ = Describe("Migration", Ordered, func() {
 		waitCompleted("e2e-filters", nsE2E)
 
 		By("checking audit stayed away while public tables arrived")
-		Expect(psql(tgtPod, "SELECT to_regclass('audit.events') IS NULL")).To(Equal("t"))
-		Expect(psql(tgtPod, "SELECT count(*) FROM customers")).To(Equal(fmt.Sprint(scaled(50000))))
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders")).To(Equal(fmt.Sprint(scaled(200000))))
+		Expect(psql(targetCluster, "SELECT to_regclass('audit.events') IS NULL")).To(Equal("t"))
+		Expect(psql(targetCluster, "SELECT count(*) FROM customers")).To(Equal(fmt.Sprint(scaled(50000))))
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(fmt.Sprint(scaled(200000))))
 	})
 
 	// Labelled flaky, not skipped: it fails about three runs in four at
@@ -129,7 +143,7 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: "e2e-resume-run-2"}, job)).To(Succeed())
 		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--resume"))
 
-		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
+		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 	})
 
 	It("clones across namespaces using local secrets and remote hosts", func() {
@@ -197,7 +211,7 @@ var _ = Describe("Migration", Ordered, func() {
 		create(m)
 		waitCompleted("e2e-uri", nsE2E)
 
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 	})
 
 	It("clones with connection details from a single Secret", func() {
@@ -249,7 +263,7 @@ var _ = Describe("Migration", Ordered, func() {
 		create(m)
 		waitCompleted(name, nsE2E)
 
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 	})
 
 	It("fails preflight fast on wrong credentials", func() {
@@ -338,7 +352,7 @@ var _ = Describe("Migration", Ordered, func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("inserting 1000 fresh rows into source orders while streaming")
-		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
 			" (g %% 90)::numeric / 3, 'live-' || g FROM generate_series(1, 1000) g", scaled(50000)))
 
 		By("verifying status.replication fills in from the sentinel")
@@ -366,17 +380,17 @@ var _ = Describe("Migration", Ordered, func() {
 		expectCleanupSucceeded(name)
 
 		By("comparing data, sequences, and slot state after cutover")
-		srcOrders := psql(srcPod, "SELECT count(*) FROM orders")
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
+		srcOrders := psql(sourceCluster, "SELECT count(*) FROM orders")
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
 			"target orders count differs from source after cutover")
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-%'")).To(Equal("1000"),
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-%'")).To(Equal("1000"),
 			"live rows written during streaming did not all arrive on the target")
-		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
+		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 
 		By("removing the live rows so the source matches the seeded fixture again")
-		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-%'")
+		psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
 	})
 
 	It("runs an Automatic cutover to completion unattended", func() {
@@ -396,7 +410,7 @@ var _ = Describe("Migration", Ordered, func() {
 		expectCleanupSucceeded(name)
 
 		By("comparing data and slot state after the unattended cutover")
-		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
+		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 	})
@@ -471,7 +485,7 @@ var _ = Describe("Migration", Ordered, func() {
 		}, time.Minute, 2*time.Second).Should(Succeed())
 
 		By("writing 500 rows on the source while suspended")
-		psql(srcPod, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
 			" (g %% 60)::numeric / 2, 'live-susp-' || g FROM generate_series(1, 500) g", scaled(50000)))
 
 		By("resuming the Migration")
@@ -495,15 +509,15 @@ var _ = Describe("Migration", Ordered, func() {
 		expectCleanupSucceeded(name)
 
 		By("comparing data and slot state after the resumed cutover")
-		Expect(rowCounts(tgtPod)).To(Equal(rowCounts(srcPod)))
-		Expect(psql(tgtPod, "SELECT count(*) FROM orders WHERE note LIKE 'live-susp-%'")).To(Equal("500"),
+		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-susp-%'")).To(Equal("500"),
 			"rows written while suspended did not arrive after resume")
-		Expect(sequenceValues(tgtPod)).To(Equal(sequenceValues(srcPod)))
+		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 
 		By("removing the suspend-window rows so the source matches the seeded fixture again")
-		psql(srcPod, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
+		psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
 	})
 
 	// The rights-manipulation specs close the ordered container: each one
@@ -522,7 +536,7 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking REPLICATION from the app role on the source")
-		psql(srcPod, "ALTER ROLE app NOREPLICATION")
+		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
@@ -540,7 +554,7 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking EXECUTE on the pg_replication_origin functions on the target")
-		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
@@ -562,7 +576,7 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking SET on session_replication_role on the target")
-		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
@@ -581,12 +595,12 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking all three grantable follow rights from the app role")
-		psql(srcPod, "ALTER ROLE app NOREPLICATION")
-		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
+		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
-		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
@@ -600,8 +614,8 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-remediate"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(srcPod, "ALTER ROLE postgres PASSWORD NULL")
-			psql(tgtPod, "ALTER ROLE postgres PASSWORD NULL")
+			psql(sourceCluster, "ALTER ROLE postgres PASSWORD NULL")
+			psql(targetCluster, "ALTER ROLE postgres PASSWORD NULL")
 			ensureFollowPrivileges()
 			resetSourceReplication()
 			resetTargetReplication()
@@ -611,9 +625,10 @@ var _ = Describe("Migration", Ordered, func() {
 		// CNPG's generated pg_hba ends in a host-all scram rule, so a
 		// password-enabled postgres authenticates over the rw service exactly
 		// like the app role does.
-		for secName, pod := range map[string]string{name + "-super-src": srcPod, name + "-super-tgt": tgtPod} {
+		supers := map[string]string{name + "-super-src": sourceCluster, name + "-super-tgt": targetCluster}
+		for secName, cluster := range supers {
 			pw := secName + "-pw"
-			psql(pod, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+			psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
 			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secName}}
 			_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
 				sec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(pw)}
@@ -623,12 +638,12 @@ var _ = Describe("Migration", Ordered, func() {
 		}
 
 		By("revoking all three grantable follow rights from the app role")
-		psql(srcPod, "ALTER ROLE app NOREPLICATION")
-		psql(tgtPod, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
+		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
-		psql(tgtPod, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
 
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
 		mig.Spec.BackoffLimit = 5
@@ -640,7 +655,7 @@ var _ = Describe("Migration", Ordered, func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("checking the applied grants were re-granted and recorded as events")
-		Expect(psql(srcPod, "SELECT rolreplication::int FROM pg_roles WHERE rolname = 'app'")).To(Equal("1"),
+		Expect(psql(sourceCluster, "SELECT rolreplication::int FROM pg_roles WHERE rolname = 'app'")).To(Equal("1"),
 			"remediation must restore the REPLICATION attribute")
 		got := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, got)).To(Succeed())
@@ -669,7 +684,7 @@ var _ = Describe("Migration", Ordered, func() {
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
 		Expect(targetOriginCount()).To(Equal("0"), "replication origin left behind on the target")
 	})
@@ -712,7 +727,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-clonegrant-fix"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(tgtPod, "ALTER ROLE postgres PASSWORD NULL")
+			psql(targetCluster, "ALTER ROLE postgres PASSWORD NULL")
 			dropLimitedRole()
 			resetTargetObjects()
 		})
@@ -720,7 +735,7 @@ var _ = Describe("Migration", Ordered, func() {
 		By("recreating the managed-Postgres matrix plus a target superuser Secret")
 		makeLimitedTarget(name)
 		superPW := name + "-super-pw"
-		psql(tgtPod, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", superPW))
+		psql(targetCluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", superPW))
 		superSec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name + "-super"}}
 		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, superSec, func() error {
 			superSec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(superPW)}
@@ -746,8 +761,8 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("waiting for the remediated clone to complete")
 		waitCompleted(name, nsE2E)
-		Expect(seedTableCounts(tgtPod)).To(Equal(seedTableCounts(srcPod)))
-		Expect(psql(tgtPod, "SELECT has_schema_privilege('"+limitedRole+"', 'public', 'CREATE')::int")).To(Equal("1"),
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
+		Expect(psql(targetCluster, "SELECT has_schema_privilege('"+limitedRole+"', 'public', 'CREATE')::int")).To(Equal("1"),
 			"remediation must leave the schema grant in place")
 
 		By("checking the applied grant was recorded as a PreflightRemediated event")
@@ -771,7 +786,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-permdenied"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
+			psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
 		})
 
 		By("creating a source role that can connect but not read")
@@ -779,8 +794,8 @@ var _ = Describe("Migration", Ordered, func() {
 		// SELECT still passes the gate and fails the copy itself: exactly the
 		// deterministic permission error the classifier must terminate on the
 		// first attempt instead of burning the budget.
-		psql(srcPod, "DROP ROLE IF EXISTS e2e_noselect")
-		psql(srcPod, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
+		psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
+		psql(sourceCluster, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
 		copySecret(nsE2E, name, []byte("e2e-noselect-pw"))
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
@@ -824,7 +839,7 @@ var _ = Describe("Migration", Ordered, func() {
 		// volume cannot carry this spec: a clone's work dir holds only
 		// catalogs and schema dumps (see the chaos suite's spool note).
 		resetTargetObjects()
-		psql(tgtPod, "CREATE TABLE public.customers (mismatch int)")
+		psql(targetCluster, "CREATE TABLE public.customers (mismatch int)")
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		m.Spec.BackoffLimit = 1
@@ -865,10 +880,10 @@ func makeLimitedTarget(secretName string) {
 	// no-dropIfExists remediation clone (pg_restore only drops what the
 	// incoming dump carries).
 	resetTargetObjects()
-	psql(tgtPod, "GRANT USAGE ON SCHEMA public TO PUBLIC")
+	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 	pw := secretName + "-pw"
-	psql(tgtPod, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
-	psql(tgtPod, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
+	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
+	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
 	copySecret(nsE2E, secretName, []byte(pw))
 }
 
@@ -876,9 +891,9 @@ func makeLimitedTarget(secretName string) {
 // DO block guards DROP OWNED, which unlike DROP ROLE has no IF EXISTS.
 func dropLimitedRole() {
 	GinkgoHelper()
-	psql(tgtPod, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
+	psql(targetCluster, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
 		" THEN EXECUTE 'DROP OWNED BY %s CASCADE'; END IF; END $$", limitedRole, limitedRole))
-	psql(tgtPod, "DROP ROLE IF EXISTS "+limitedRole)
+	psql(targetCluster, "DROP ROLE IF EXISTS "+limitedRole)
 }
 
 // e2eConn points at a fixture cluster through its rw service, fully qualified
@@ -910,6 +925,13 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			Target:     e2eConn(targetCluster),
 			Clone:      clone,
 			WorkVolume: wv,
+			// Every runner Job the suite produces comes through here, so this
+			// is the one place that decides where the workers land and what
+			// the scheduler thinks they cost.
+			Runner: v1beta1.RunnerSpec{
+				Resources: workerResources("500m", "1Gi"),
+				Affinity:  fixtureAntiAffinity(),
+			},
 		},
 	}
 }
@@ -951,9 +973,9 @@ func failureMessage(m *v1beta1.Migration) string {
 
 // rowCounts returns customers/orders/audit.events counts in one round trip:
 // the tables the live-write scenarios touch.
-func rowCounts(pod string) string {
+func rowCounts(cluster string) string {
 	GinkgoHelper()
-	return psql(pod, "SELECT (SELECT count(*) FROM customers) || '/' ||"+
+	return psql(cluster, "SELECT (SELECT count(*) FROM customers) || '/' ||"+
 		" (SELECT count(*) FROM orders) || '/' || (SELECT count(*) FROM audit.events)")
 }
 
@@ -968,9 +990,9 @@ const seedCountSQL = "SELECT (SELECT count(*) FROM customers) || '/' ||" +
 	" (SELECT count(*) FROM documents)"
 
 // seedTableCounts returns every seeded table's count in one round trip.
-func seedTableCounts(pod string) string {
+func seedTableCounts(cluster string) string {
 	GinkgoHelper()
-	return psql(pod, seedCountSQL)
+	return psql(cluster, seedCountSQL)
 }
 
 // expectedSeedCounts derives the seedTableCounts string from the scale; the
@@ -984,24 +1006,24 @@ func expectedSeedCounts() string {
 // matviewState reports whether event_daily_counts is populated and how many
 // rows it holds. pg_restore repopulates it with REFRESH on the target, so
 // both sides must agree.
-func matviewState(pod string) string {
+func matviewState(cluster string) string {
 	GinkgoHelper()
-	return psql(pod, "SELECT ispopulated || '/' || (SELECT count(*) FROM event_daily_counts)"+
+	return psql(cluster, "SELECT ispopulated || '/' || (SELECT count(*) FROM event_daily_counts)"+
 		" FROM pg_matviews WHERE matviewname = 'event_daily_counts'")
 }
 
 // largeObjectCount counts large objects; pg_largeobject_metadata is
 // per-database, so this sees exactly the fixture LOs.
-func largeObjectCount(pod string) string {
+func largeObjectCount(cluster string) string {
 	GinkgoHelper()
-	return psql(pod, "SELECT count(*) FROM pg_largeobject_metadata")
+	return psql(cluster, "SELECT count(*) FROM pg_largeobject_metadata")
 }
 
 // sequenceValues flattens every sequence and its last_value into one line, so
 // source and target compare as plain strings.
-func sequenceValues(pod string) string {
+func sequenceValues(cluster string) string {
 	GinkgoHelper()
-	return psql(pod, "SELECT string_agg(schemaname || '.' || sequencename || '=' ||"+
+	return psql(cluster, "SELECT string_agg(schemaname || '.' || sequencename || '=' ||"+
 		" coalesce(last_value::text, 'null'), ',' ORDER BY schemaname, sequencename) FROM pg_sequences")
 }
 
@@ -1056,7 +1078,7 @@ func expectCleanupSucceeded(name string) {
 // generated names always start with pgcopydb_.
 func sourceSlotCount() string {
 	GinkgoHelper()
-	return psql(srcPod, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")
+	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")
 }
 
 // targetOriginCount counts pgcopydb-created replication origins on the target.
@@ -1066,7 +1088,7 @@ func sourceSlotCount() string {
 // sees it.
 func targetOriginCount() string {
 	GinkgoHelper()
-	return psql(tgtPod, "SELECT count(*) FROM pg_replication_origin WHERE roname LIKE 'pgcopydb%'")
+	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE roname LIKE 'pgcopydb%'")
 }
 
 // copySecret writes a password-only secret; CreateOrUpdate keeps reruns with
