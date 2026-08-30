@@ -38,8 +38,8 @@ import (
 
 // fakeProgress scripts the sampler the way fakeSentinel scripts the
 // sentinel: tests choose the samples (or errors), the reconciler reads them.
-// The call counters let specs prove copy-phase quiescence of the catalog
-// poll while the size sampler keeps running.
+// The call counters let specs prove the catalog poll never runs against a
+// live worker, in any phase, while the size sampler keeps running.
 type fakeProgress struct {
 	mu        sync.Mutex
 	cp        *v1beta1.CloneProgress
@@ -506,8 +506,10 @@ var _ = Describe("Migration Controller clone stage", func() {
 	})
 
 	// The latch may only ever promote a CloneCompleted that is still False.
-	// Writing False over a True one would un-quiesce the catalog execs that
-	// killed workers, which is the whole reason the condition gates them.
+	// Writing False over a True one would tell the operator the base copy is
+	// running again, and it acts on that: it reports the stream but stops
+	// driving it, so a caught-up migration would sit there uncut and the
+	// phase would rewind out of Streaming.
 	It("keeps a finished base copy finished when a copy worker turns up late", func() {
 		const name = "mig-stage-late-copy"
 		defer removeMigration(ctx, name)
@@ -538,7 +540,7 @@ var _ = Describe("Migration Controller clone stage", func() {
 		m = sample(r, fake, name, true, false)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 		Expect(sent.callCount()).To(BeNumerically(">", before),
-			"the sentinel must stay reachable; a rewound condition would quiesce it")
+			"the follow watch runs on every pass a worker is alive, whatever the copy probe says")
 	})
 
 	// No controller path writes CopyingData on a True condition, so this pins

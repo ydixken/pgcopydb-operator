@@ -391,10 +391,12 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // SQLITE_BUSY_SNAPSHOT, which no retry can clear. 0.18 died of it twice in
 // one e2e run, mid-copy in an index worker and again seconds after a drain,
 // on the sequence reset (see docs/research/upstream-issues.md). "Almost
-// never" is not a property, so a live worker gets psql and nothing else: the
-// follow watch queries the two databases (see internal/sentinel) and the size
-// sample does the same. The copy counters are read from a pod with no worker
-// in it, the verify Job for a follow migration and the exited worker's own pod
+// never" is not a property, so a live worker gets psql and nothing else. All
+// three of them: the follow watch queries the two databases (see
+// internal/sentinel), the clone-stage probe counts pgcopydb's own backends on
+// the target, and the size sample reads pg_database_size (both in
+// internal/progress). The copy counters are read from a pod with no worker in
+// it, the verify Job for a follow migration and the exited worker's own pod
 // for a plain clone. The one remaining write to a live catalog is `sentinel
 // set endpos`, which is how a cutover is asked for and has no other route.
 //
