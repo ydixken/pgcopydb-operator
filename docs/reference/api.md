@@ -17,8 +17,12 @@ Package v1beta1 contains API Schema definitions for the  v1beta1 API group.
 
 
 
-CloneOptions maps the pgcopydb clone surface. All fields are optional; zero
-values mean "use the pgcopydb default".
+CloneOptions maps the pgcopydb clone surface. All fields are optional. A
+zero value means the operator decides, which for most fields is pgcopydb's
+own default. Three it overrides, because pgcopydb's defaults are wrong for a
+migration: tableJobs follows the worker's CPU request, and
+splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
+which pgcopydb ships disabled. See docs/configuration.md.
 
 
 
@@ -27,12 +31,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `tableJobs` _integer_ | tableJobs is the number of concurrent table COPY workers (pgcopydb --table-jobs). |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `indexJobs` _integer_ | indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs). |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `tableJobs` _integer_ | tableJobs is the number of concurrent table COPY workers (pgcopydb<br />--table-jobs). Unset follows the worker's CPU request, minimum four. Each<br />job also gets a concurrent VACUUM ANALYZE backend on the target, so N<br />here means up to 2N target connections. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `indexJobs` _integer_ | indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).<br />Unset leaves pgcopydb's default of four. Size it against the TARGET, not<br />the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,<br />overriding the server's own setting, so four jobs authorise 4GB there. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `restoreJobs` _integer_ | restoreJobs is pg_restore --jobs (--restore-jobs); 0 follows indexJobs. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `largeObjectsJobs` _integer_ | largeObjectsJobs is the number of concurrent large-object workers. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `splitTablesLargerThan` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | splitTablesLargerThan enables same-table concurrency for tables at or<br />above this size (--split-tables-larger-than), rendered to bytes. |  | Optional: \{\} <br /> |
-| `splitMaxParts` _integer_ | splitMaxParts caps the number of parts per table (--split-max-parts). |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `splitTablesLargerThan` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | splitTablesLargerThan enables same-table concurrency for tables at or<br />above this size (--split-tables-larger-than), rendered to bytes. Unset<br />defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one<br />large table to a single worker however many table jobs are running.<br />Splitting needs a single-column integer key, or it falls back to ctid<br />ranges, and pgcopydb disables it silently when the source is a standby. |  | Optional: \{\} <br /> |
+| `splitMaxParts` _integer_ | splitMaxParts caps the number of parts per table (--split-max-parts).<br />Unset defaults to 8, so a very large table cannot fan out into hundreds<br />of parts and catalog rows. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `estimateTableSizes` _boolean_ | estimateTableSizes bases split decisions on pg_class page-count<br />estimates instead of exact size queries (--estimate-table-sizes). To<br />refresh those estimates pgcopydb first runs vacuumdb --analyze-only<br />(with tableJobs workers) on the SOURCE; add "analyze" to skip to leave<br />the source untouched and trust its existing statistics. |  | Optional: \{\} <br /> |
 | `dropIfExists` _boolean_ | dropIfExists issues pg_restore --clean --if-exists on the target. |  | Optional: \{\} <br /> |
 | `roles` _boolean_ | roles copies roles before the clone (--roles). Needs superuser on the<br />source unless noRolePasswords is also set. |  | Optional: \{\} <br /> |
@@ -41,7 +45,7 @@ _Appears in:_
 | `noACL` _boolean_ | noACL skips GRANT/REVOKE on restore (--no-acl). |  | Optional: \{\} <br /> |
 | `noComments` _boolean_ | noComments skips COMMENT statements (--no-comments). |  | Optional: \{\} <br /> |
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |
-| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary). |  | Optional: \{\} <br /> |
+| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which<br />is on by default. Text COPY encodes bytea as hex, two wire bytes per<br />data byte, and the worker relays every row between source and target, so<br />the cost lands on both legs. pgcopydb checks each table against the<br />source catalog and falls back to text for any table with a column whose<br />binary encoding is not safe, so this is per table rather than all or<br />nothing. Set it false to force text everywhere.<br />Defaulted by the API server rather than by the operator: false is this<br />field's zero value, so a default applied in Go could not tell "unset"<br />from "the user asked for text". | true | Optional: \{\} <br /> |
 | `failFast` _boolean_ | failFast stops the whole run on the first failed child (--fail-fast). |  | Optional: \{\} <br /> |
 | `skip` _[SkipOption](#skipoption) array_ | skip lists base-copy sections to skip. |  | Enum: [largeObjects extensions extensionComments collations vacuum analyze dbProperties ctidSplit] <br />Optional: \{\} <br /> |
 | `filters` _[Filters](#filters)_ | filters is rendered to the pgcopydb --filters INI file. |  | Optional: \{\} <br /> |

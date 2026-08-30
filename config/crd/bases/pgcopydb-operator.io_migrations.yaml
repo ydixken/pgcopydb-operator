@@ -135,8 +135,11 @@ spec:
                     - message: includeOnlyExtensions cannot be combined with excludeExtensions
                       rule: '!(has(self.includeOnlyExtensions) && has(self.excludeExtensions))'
                   indexJobs:
-                    description: indexJobs is the number of concurrent CREATE INDEX
-                      workers (--index-jobs).
+                    description: |-
+                      indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).
+                      Unset leaves pgcopydb's default of four. Size it against the TARGET, not
+                      the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,
+                      overriding the server's own setting, so four jobs authorise 4GB there.
                     format: int32
                     minimum: 1
                     type: integer
@@ -195,8 +198,10 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                   splitMaxParts:
-                    description: splitMaxParts caps the number of parts per table
-                      (--split-max-parts).
+                    description: |-
+                      splitMaxParts caps the number of parts per table (--split-max-parts).
+                      Unset defaults to 8, so a very large table cannot fan out into hundreds
+                      of parts and catalog rows.
                     format: int32
                     minimum: 0
                     type: integer
@@ -206,17 +211,36 @@ spec:
                     - type: string
                     description: |-
                       splitTablesLargerThan enables same-table concurrency for tables at or
-                      above this size (--split-tables-larger-than), rendered to bytes.
+                      above this size (--split-tables-larger-than), rendered to bytes. Unset
+                      defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one
+                      large table to a single worker however many table jobs are running.
+                      Splitting needs a single-column integer key, or it falls back to ctid
+                      ranges, and pgcopydb disables it silently when the source is a standby.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   tableJobs:
-                    description: tableJobs is the number of concurrent table COPY
-                      workers (pgcopydb --table-jobs).
+                    description: |-
+                      tableJobs is the number of concurrent table COPY workers (pgcopydb
+                      --table-jobs). Unset follows the worker's CPU request, minimum four. Each
+                      job also gets a concurrent VACUUM ANALYZE backend on the target, so N
+                      here means up to 2N target connections.
                     format: int32
                     minimum: 1
                     type: integer
                   useCopyBinary:
-                    description: useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
+                    default: true
+                    description: |-
+                      useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which
+                      is on by default. Text COPY encodes bytea as hex, two wire bytes per
+                      data byte, and the worker relays every row between source and target, so
+                      the cost lands on both legs. pgcopydb checks each table against the
+                      source catalog and falls back to text for any table with a column whose
+                      binary encoding is not safe, so this is per table rather than all or
+                      nothing. Set it false to force text everywhere.
+
+                      Defaulted by the API server rather than by the operator: false is this
+                      field's zero value, so a default applied in Go could not tell "unset"
+                      from "the user asked for text".
                     type: boolean
                 type: object
               cutover:
@@ -2228,8 +2252,11 @@ spec:
                     - message: includeOnlyExtensions cannot be combined with excludeExtensions
                       rule: '!(has(self.includeOnlyExtensions) && has(self.excludeExtensions))'
                   indexJobs:
-                    description: indexJobs is the number of concurrent CREATE INDEX
-                      workers (--index-jobs).
+                    description: |-
+                      indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).
+                      Unset leaves pgcopydb's default of four. Size it against the TARGET, not
+                      the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,
+                      overriding the server's own setting, so four jobs authorise 4GB there.
                     format: int32
                     minimum: 1
                     type: integer
@@ -2288,8 +2315,10 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                   splitMaxParts:
-                    description: splitMaxParts caps the number of parts per table
-                      (--split-max-parts).
+                    description: |-
+                      splitMaxParts caps the number of parts per table (--split-max-parts).
+                      Unset defaults to 8, so a very large table cannot fan out into hundreds
+                      of parts and catalog rows.
                     format: int32
                     minimum: 0
                     type: integer
@@ -2299,17 +2328,36 @@ spec:
                     - type: string
                     description: |-
                       splitTablesLargerThan enables same-table concurrency for tables at or
-                      above this size (--split-tables-larger-than), rendered to bytes.
+                      above this size (--split-tables-larger-than), rendered to bytes. Unset
+                      defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one
+                      large table to a single worker however many table jobs are running.
+                      Splitting needs a single-column integer key, or it falls back to ctid
+                      ranges, and pgcopydb disables it silently when the source is a standby.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   tableJobs:
-                    description: tableJobs is the number of concurrent table COPY
-                      workers (pgcopydb --table-jobs).
+                    description: |-
+                      tableJobs is the number of concurrent table COPY workers (pgcopydb
+                      --table-jobs). Unset follows the worker's CPU request, minimum four. Each
+                      job also gets a concurrent VACUUM ANALYZE backend on the target, so N
+                      here means up to 2N target connections.
                     format: int32
                     minimum: 1
                     type: integer
                   useCopyBinary:
-                    description: useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
+                    default: true
+                    description: |-
+                      useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which
+                      is on by default. Text COPY encodes bytea as hex, two wire bytes per
+                      data byte, and the worker relays every row between source and target, so
+                      the cost lands on both legs. pgcopydb checks each table against the
+                      source catalog and falls back to text for any table with a column whose
+                      binary encoding is not safe, so this is per table rather than all or
+                      nothing. Set it false to force text everywhere.
+
+                      Defaulted by the API server rather than by the operator: false is this
+                      field's zero value, so a default applied in Go could not tell "unset"
+                      from "the user asked for text".
                     type: boolean
                 type: object
               cutover:

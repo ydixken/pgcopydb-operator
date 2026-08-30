@@ -58,6 +58,9 @@ spec:
 
 `pg_dump` in the image must be at least the target's major version; see [client tool versions](reference/prerequisites.md#client-tool-versions).
 
+Left unset, `resources` defaults to 4 CPUs and 4Gi, requests only.
+The copy concurrency follows that request, so raising it is usually the only tuning a migration needs; see [Performance tuning](operations/performance.md).
+
 The runner version also gates the in-pod progress poll that fills `status.progress` and the byte-progress metrics.
 The chart value `runner.progressPollVersions` (manager flag `--progress-poll-versions`) lists the exact pgcopydb versions allowed to run it, and it fails closed: an unlisted version, such as a custom stock 0.18 image, never runs the poll and keeps the clone byte metrics dark, while everything else keeps working.
 The [monitoring guide](operations/monitoring.md) lists which metrics that gate affects.

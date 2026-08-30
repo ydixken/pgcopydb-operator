@@ -157,15 +157,25 @@ type TLSSecretRefs struct {
 // +kubebuilder:validation:Enum=largeObjects;extensions;extensionComments;collations;vacuum;analyze;dbProperties;ctidSplit
 type SkipOption string
 
-// CloneOptions maps the pgcopydb clone surface. All fields are optional; zero
-// values mean "use the pgcopydb default".
+// CloneOptions maps the pgcopydb clone surface. All fields are optional. A
+// zero value means the operator decides, which for most fields is pgcopydb's
+// own default. Three it overrides, because pgcopydb's defaults are wrong for a
+// migration: tableJobs follows the worker's CPU request, and
+// splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
+// which pgcopydb ships disabled. See docs/configuration.md.
 type CloneOptions struct {
-	// tableJobs is the number of concurrent table COPY workers (pgcopydb --table-jobs).
+	// tableJobs is the number of concurrent table COPY workers (pgcopydb
+	// --table-jobs). Unset follows the worker's CPU request, minimum four. Each
+	// job also gets a concurrent VACUUM ANALYZE backend on the target, so N
+	// here means up to 2N target connections.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TableJobs int32 `json:"tableJobs,omitempty"`
 
 	// indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).
+	// Unset leaves pgcopydb's default of four. Size it against the TARGET, not
+	// the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,
+	// overriding the server's own setting, so four jobs authorise 4GB there.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	IndexJobs int32 `json:"indexJobs,omitempty"`
@@ -181,11 +191,17 @@ type CloneOptions struct {
 	LargeObjectsJobs int32 `json:"largeObjectsJobs,omitempty"`
 
 	// splitTablesLargerThan enables same-table concurrency for tables at or
-	// above this size (--split-tables-larger-than), rendered to bytes.
+	// above this size (--split-tables-larger-than), rendered to bytes. Unset
+	// defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one
+	// large table to a single worker however many table jobs are running.
+	// Splitting needs a single-column integer key, or it falls back to ctid
+	// ranges, and pgcopydb disables it silently when the source is a standby.
 	// +optional
 	SplitTablesLargerThan *resource.Quantity `json:"splitTablesLargerThan,omitempty"`
 
 	// splitMaxParts caps the number of parts per table (--split-max-parts).
+	// Unset defaults to 8, so a very large table cannot fan out into hundreds
+	// of parts and catalog rows.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	SplitMaxParts int32 `json:"splitMaxParts,omitempty"`
@@ -228,9 +244,20 @@ type CloneOptions struct {
 	// +optional
 	NoTablespaces bool `json:"noTablespaces,omitempty"`
 
-	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary).
+	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which
+	// is on by default. Text COPY encodes bytea as hex, two wire bytes per
+	// data byte, and the worker relays every row between source and target, so
+	// the cost lands on both legs. pgcopydb checks each table against the
+	// source catalog and falls back to text for any table with a column whose
+	// binary encoding is not safe, so this is per table rather than all or
+	// nothing. Set it false to force text everywhere.
+	//
+	// Defaulted by the API server rather than by the operator: false is this
+	// field's zero value, so a default applied in Go could not tell "unset"
+	// from "the user asked for text".
+	// +kubebuilder:default=true
 	// +optional
-	UseCopyBinary bool `json:"useCopyBinary,omitempty"`
+	UseCopyBinary bool `json:"useCopyBinary"`
 
 	// failFast stops the whole run on the first failed child (--fail-fast).
 	// +optional

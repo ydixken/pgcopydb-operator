@@ -116,7 +116,18 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	resume := attempt > 1
 	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
-	return jobSkeleton(m, runnerImage, jobName(m, attempt), args, publicationDropGuard(m, attempt), 0)
+	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, publicationDropGuard(m, attempt), 0)
+	if err != nil {
+		return nil, err
+	}
+	// Only this Job copies data, and only this Job gets the worker defaults.
+	// jobSkeleton also builds the preflight, compare and cleanup Jobs, and
+	// those do one statement each: giving them a copy worker's request would
+	// leave a cleanup Pending on a busy cluster, and a cleanup that never runs
+	// is a replication slot left behind on the source.
+	job.Spec.Template.Spec.Containers[0].Resources =
+		pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)
+	return job, nil
 }
 
 // publicationDropGuard returns the retry prelude that drops pgcopydb's own
