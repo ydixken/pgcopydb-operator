@@ -52,9 +52,9 @@ Derived quantities stay in PromQL rather than becoming metrics: receive lag is `
 
 The chart ships three dashboards, linked to each other through their shared `pgcopydb` tag:
 
-- **Migration detail** (uid `pgcopydb-migration`): one migration end to end; a status row (phase, what the worker is doing inside it, a naive ETA that only estimates during `Cloning`) and its timeline, then percent done, database sizes and copy throughput, LSN positions with the lag split, the cutover drain, and the verification outcome.
-- **Fleet overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
-- **Operator health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
+- **Migration Detail** (uid `pgcopydb-migration`): one migration end to end. Two rows of stats lead: what it is doing and when, then how far along it is and whether each compare check passed. Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
+- **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
+- **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
 `grafana.dashboards.enabled=true` renders them as ConfigMaps labeled `grafana_dashboard: "1"` for Grafana's dashboard sidecar.
 The sidecar usually watches only Grafana's own namespace, so set `grafana.dashboards.namespace` to it (the chart's release namespace is only the default).
