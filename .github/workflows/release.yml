@@ -82,6 +82,41 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The pgcopydb compile is ~20 minutes under QEMU and its only input is
+      # PGCOPYDB_SHA, which changed once across 55 tags. Build when the tag is
+      # missing, reuse it every other time.
+      - name: Read the pinned pgcopydb commit
+        id: pin
+        run: |
+          sha=$(sed -n 's/^ARG PGCOPYDB_SHA=//p' images/pgcopydb-builder/Dockerfile)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Is the pgcopydb builder image already published?
+        id: builder
+        # imagetools reuses the docker login above, so it works while the
+        # package is private. "Cannot tell" is an error, not a miss: treating
+        # a registry blip as absence would overwrite a tag mid-pull.
+        run: |
+          ref="$IMAGE/pgcopydb-builder:${{ steps.pin.outputs.sha }}"
+          set +e
+          out=$(docker buildx imagetools inspect "$ref" 2>&1); rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$out" | grep -qiE 'not found|MANIFEST_UNKNOWN|404'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::cannot reach $ref: $out"
+            exit 1
+          fi
+      - name: Build the pgcopydb builder image
+        if: steps.builder.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: images/pgcopydb-builder
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
       - name: Decide whether this tag also moves :latest
         id: tags
         # See manager-image: an rc must not move the tag a `helm install`
