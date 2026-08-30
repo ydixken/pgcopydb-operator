@@ -99,11 +99,11 @@ const (
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
 	// request, so a bigger request alone would change nothing.
 	// Two, not four. Four was tried and measured: seeding ran at 16.6 MiB/s
-	// against 15.9 at two, which is noise, so the fixtures are not CPU-bound
-	// (see the rate curve in issue #146). It is not free either. Longhorn's
-	// instance manager holds a guaranteed 6 CPUs per node here, so six
-	// four-CPU instances leave no room for a worker and the run dies on
-	// FailedScheduling instead of running slowly.
+	// against 15.9 at two, which is noise. Issue #146 later found why: the
+	// seeding backend waits on WAL write and fsync, never on a core. It is
+	// not free either. Longhorn's instance manager holds a guaranteed 6 CPUs
+	// per node here, so six four-CPU instances leave no room for a worker and
+	// the run dies on FailedScheduling instead of running slowly.
 	fixtureCPU    = "2"
 	fixtureMemory = "4Gi"
 	// The seed Job is not a migration worker, so it does not get the
@@ -677,6 +677,11 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 					// Index builds during pg_restore, and the sort memory the
 					// seed's generate_series passes through.
 					"maintenance_work_mem": "512MB",
+					// At the 16MB default a seeding backend was flushing
+					// WAL itself in ~70KB chunks: wal_buffers_full 133,611
+					// against wal_write 135,705 across one seed. The
+					// concurrent load stages make that tighter still.
+					"wal_buffers": "64MB",
 					// Bulk load checkpoints on volume, not on time. Small
 					// max_wal_size means a checkpoint every few seconds and a
 					// full-page write storm behind it. Proportional, because
