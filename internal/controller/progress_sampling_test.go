@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -381,6 +382,61 @@ var _ = Describe("Migration Controller clone stage", func() {
 		Expect(sample(r, fake, name, false, true).Status.Phase).To(Equal(v1beta1.PhaseFinalizing))
 	})
 
+	// The latch may only ever promote a CloneCompleted that is still False.
+	// Writing False over a True one would un-quiesce the catalog execs that
+	// killed workers, which is the whole reason the condition gates them.
+	It("keeps a finished base copy finished when a copy worker turns up late", func() {
+		const name = "mig-stage-late-copy"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		const ts = "2026-08-30T10:00:00.000000000Z "
+		const banner = `{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}`
+		fake := &fakeProgress{}
+		sent := &fakeSentinel{state: &sentinel.State{ApplyEnabled: true, WriteLSN: laggingWriteLSN,
+			ReplayLSN: laggingReplayLSN, SourceHead: laggingHeadLSN, Endpos: sentinel.ZeroLSN}}
+		logs := &fakeLogs{tsOut: ts + banner + "\n"}
+		r := newReconciler()
+		r.Progress, r.Sentinel, r.Logs = fake, sent, logs
+		mig := validMigration(name)
+		mig.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		mig.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverManual}
+		Expect(k8sClient.Create(ctx, mig)).To(Succeed())
+		passGate(ctx, r, name)
+
+		logs.tsOut += ts + `{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+		m := reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+
+		// The marker scrolls out of the tail window (it is a bounded read),
+		// so nothing would put the condition back, and a stray backend gets
+		// counted as a copy worker.
+		logs.tsOut = ts + banner + "\n"
+		before := sent.callCount()
+		m = sample(r, fake, name, true, false)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(sent.callCount()).To(BeNumerically(">", before),
+			"the sentinel must stay reachable; a rewound condition would quiesce it")
+	})
+
+	// No controller path writes CopyingData on a True condition, so this pins
+	// the invariant against everything else that can write status: an older
+	// operator's leftover reason, a manual edit, a future path that forgets.
+	It("does not open the latch off a reason left on a completed base copy", func() {
+		const name = "mig-stage-stale-latch"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := start(name)
+		m := reconcileAndGet(ctx, r, name)
+		meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+			Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionTrue, Reason: reasonCopyingData,
+			Message: "a reason this operator only ever writes on a False condition",
+		})
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
+
+		Expect(sample(r, fake, name, false, true).Status.Phase).To(Equal(v1beta1.PhaseCloning),
+			"a finished base copy has no tail to report")
+	})
+
 	It("keeps the phase the last answered sample left when the probe knows nothing", func() {
 		const name = "mig-stage-unknown"
 		defer removeMigration(ctx, name)
@@ -397,28 +453,94 @@ var _ = Describe("Migration Controller clone stage", func() {
 // read off the conditions. The case that used to lie: a worker dying during
 // the drain came back reported as Cloning, with the finished base copy marked
 // unfinished behind it.
+// A stream that is applying but nowhere near caught up: the gap between these
+// two is far above the 16Mi default, so no pass can mistake it for a cutover.
+const laggingWriteLSN, laggingReplayLSN, laggingHeadLSN = "0/40000000", "0/10000000", "0/48000000"
+
 var _ = Describe("Migration Controller attempt phase", func() {
 	ctx := context.Background()
 
-	It("does not rewind the phase when an attempt fails after cutover started", func() {
-		const name = "mig-retry-after-cutover"
-		defer removeMigration(ctx, name)
-		defer metrics.Forget(testNS, name)
+	// followSentinel wires a scripted sentinel into a fresh reconciler and
+	// puts an automatic-cutover follow migration on its first observed pass.
+	followSentinel := func(name string, mode v1beta1.CutoverMode) (*MigrationReconciler, *fakeSentinel) {
+		GinkgoHelper()
 		fake := &fakeSentinel{}
 		r := newReconciler()
 		r.Sentinel = fake
 		m := validMigration(name)
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
-		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: mode}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		passGate(ctx, r, name)
+		return r, fake
+	}
+
+	// A worker Job can go while the Migration is still live: spec.ttl
+	// SecondsAfterFinished reaches it, and so does a manual delete. The next
+	// pass finds it gone and starts an attempt, which is the path that used
+	// to announce Cloning over a migration long past its base copy.
+	It("resumes a streaming migration at Streaming when its Job vanishes", func() {
+		const name = "mig-retry-while-streaming"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := followSentinel(name, v1beta1.CutoverManual)
+
+		// Applying, but far too far behind to cut over: no endpos anywhere.
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: laggingWriteLSN,
+			ReplayLSN: laggingReplayLSN, SourceHead: laggingHeadLSN, Endpos: sentinel.ZeroLSN}
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(m.Status.Replication.Endpos).To(BeEmpty())
+
+		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
+			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+	})
+
+	// The endpos reaches status only through a sentinel read taken after it
+	// was set, and a worker that exits promptly leaves no pass to take one.
+	// Then CutoverCompleted is the only record that the cutover happened.
+	It("resumes at CuttingOver on a verified cutover whose endpos was never read back", func() {
+		const name = "mig-retry-after-verified"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := followSentinel(name, v1beta1.CutoverAutomatic)
+
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN,
+			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(m.Status.Replication.Endpos).To(BeEmpty())
+
+		// Worker exits 0, the verify Job proves the drain, cleanup is still
+		// to run: CutoverCompleted is True and Complete is not.
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-verify", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
+		Expect(m.Status.Replication.Endpos).To(BeEmpty())
+
+		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
+			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+	})
+
+	It("does not rewind the phase when an attempt fails after cutover started", func() {
+		const name = "mig-retry-after-cutover"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := followSentinel(name, v1beta1.CutoverAutomatic)
 
 		// Caught up: the operator freezes the stream and the worker drains.
 		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN,
 			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		Expect(reconcileAndGet(ctx, r, name).Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		// The pass after the freeze is the one that persists the endpos.
-		m = reconcileAndGet(ctx, r, name)
+		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
 
 		// The worker dies mid-drain. Attempt 2 resumes that drain: the base
