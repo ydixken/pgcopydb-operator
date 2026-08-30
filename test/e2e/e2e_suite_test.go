@@ -115,9 +115,12 @@ const (
 	// suite-made copies.
 	passwordKey = "password"
 
-	// clusterReadyTimeout covers CNPG bootstrap and volume provisioning;
-	// seeding happens later in its own Job, not at initdb time.
-	clusterReadyTimeout = 5 * time.Minute
+	// clusterReadyTimeout covers CNPG bootstrap and volume provisioning for
+	// every instance, not just the first. Seeding happens later in its own
+	// Job, so a fresh cluster's replicas join an empty database and this is
+	// generous. A replica rejoining after a chaos kill copies the seeded data
+	// instead, which is what the budget is really sized for.
+	clusterReadyTimeout = 10 * time.Minute
 
 	// seedProfile names the fixture generation; bump it when the schema or
 	// the seeded shapes change so kept clusters get recreated.
@@ -143,7 +146,7 @@ var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1"
 var fixturesFS embed.FS
 
 // The suite runs in one of two tiers. Default: E2E_SCALE (default 1) sizes the
-// fixture data (~12GB at scale 1) and with it the volumes (40/40/10Gi at
+// fixture data (~12GB at scale 1) and with it the volumes (50/50/12Gi at
 // scale 1). Stress (E2E_STRESS=true): scale 10 (~120GB) on fixed 200/150/50Gi
 // volumes and much longer budgets. Both tiers put the fixture volumes on the
 // suite-owned single-replica StorageClass and both are gated by the Longhorn
@@ -225,9 +228,12 @@ func init() {
 	}
 	if !stress {
 		// Volumes follow the scale: a 0.1 run seeds ~1.2GB and has no business
-		// parking 90Gi of PVCs on the shared cluster. The stress tier keeps the
-		// fixed sizes its capacity check was written around.
-		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(40), scaledSize(40), scaledSize(10)
+		// parking 100Gi of PVCs on the shared cluster. The stress tier keeps
+		// the fixed sizes its capacity check was written around. The 50Gi
+		// basis is chosen so the round scales land on round volumes, and 0.5
+		// gives the 25Gi fixture a clone has to reach before it spends longer
+		// moving data than starting up.
+		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(50), scaledSize(50), scaledSize(12)
 	}
 	// E2E_STORAGE_CLASS pins the fixture volumes to one class, for clusters
 	// where several are marked default and binding is otherwise a coin flip.
@@ -659,8 +665,11 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 					"maintenance_work_mem": "512MB",
 					// Bulk load checkpoints on volume, not on time. Small
 					// max_wal_size means a checkpoint every few seconds and a
-					// full-page write storm behind it.
-					"max_wal_size":       "4GB",
+					// full-page write storm behind it. Proportional, because
+					// WAL shares the data volume: a flat 4GB was 80% of a
+					// scale 0.1 fixture and PostgreSQL stopped mid-restore
+					// with a low-disk condition.
+					"max_wal_size":       walMaxSize(size),
 					"checkpoint_timeout": "15min",
 				},
 			},
@@ -719,6 +728,41 @@ func workerResources(cpu, memory string) corev1.ResourceRequirements {
 		corev1.ResourceCPU:    resource.MustParse(cpu),
 		corev1.ResourceMemory: resource.MustParse(memory),
 	}}
+}
+
+// walHeadroom returns the fixture's max_wal_size and its volume size, both in
+// bytes, read off the live Cluster. The spec that uses it exists because a
+// flat max_wal_size once took 80% of a small fixture's volume and PostgreSQL
+// stopped mid-restore; nothing failed until then, because WAL only fills the
+// disk once there is enough data to fill it with.
+func walHeadroom(cluster string) (wal, volume int64) {
+	GinkgoHelper()
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster}, c)).
+		To(Succeed(), "failed to read CNPG cluster %s", cluster)
+
+	size, _, _ := unstructured.NestedString(c.Object, "spec", "storage", "size")
+	Expect(size).NotTo(BeEmpty(), "CNPG cluster %s declares no storage size", cluster)
+	q := resource.MustParse(size)
+
+	got, found, _ := unstructured.NestedString(c.Object, "spec", "postgresql", "parameters", "max_wal_size")
+	Expect(found).To(BeTrue(), "CNPG cluster %s sets no max_wal_size", cluster)
+	mb, err := strconv.Atoi(strings.TrimSuffix(got, "MB"))
+	Expect(err).NotTo(HaveOccurred(), "max_wal_size %q on %s is not a plain MB value", got, cluster)
+	return int64(mb) << 20, q.Value()
+}
+
+// walMaxSize returns a max_wal_size proportional to the volume it is given.
+// CNPG keeps pg_wal inside PGDATA, so WAL and data compete for one PVC and a
+// value that is comfortable at the default tier fills a small one outright. A
+// fifth still spaces checkpoints out across a bulk load and leaves four fifths
+// for the data being loaded. At the smallest tier this lands on PostgreSQL's
+// own 1GB default, which is the point: no worse than stock where there is no
+// room to be better.
+func walMaxSize(volume string) string {
+	q := resource.MustParse(volume)
+	return fmt.Sprintf("%dMB", q.Value()/5>>20)
 }
 
 // applyCluster server-side applies the fixture, which both creates it fresh

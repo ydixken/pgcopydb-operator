@@ -32,7 +32,7 @@ on:
       scale:
         description: E2E_SCALE, the fixture size multiplier
         required: false
-        default: "0.1"
+        default: "0.5"
         type: string
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
     if: github.repository == 'ydixken/pgcopydb-operator'
     runs-on: github-runner-pgcopydb-e2e
     environment: e2e-cluster
-    timeout-minutes: 90
+    timeout-minutes: 260
     steps:
       - uses: actions/checkout@v5
       # The scale set runs a bare actions-runner image: git and node are all it
@@ -95,13 +95,13 @@ jobs:
         env:
           # A tag push has no inputs, so fall back to the tag that triggered it.
           E2E_OPERATOR_TAG: ${{ inputs.tag || github.ref_name }}
-          E2E_SCALE: ${{ inputs.scale || '0.1' }}
+          E2E_SCALE: ${{ inputs.scale || '0.5' }}
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
         run: |
-          go test ./test/e2e/... -v -timeout 1h \
-            -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
+          go test ./test/e2e/... -v -timeout 4h \
+            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=5m \
             -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # The namespaces are GitOps owned and the CI identity cannot delete

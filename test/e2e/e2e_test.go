@@ -64,6 +64,17 @@ var _ = Describe("Fixture placement", func() {
 						" scheduler cannot see it and every pod scores the same node highest", cluster)
 			}
 		}
+		// WAL shares the data volume, so a max_wal_size that does not follow
+		// the tier eats the space the restore needs. A quarter is the line:
+		// walMaxSize targets a fifth, and anything approaching half means the
+		// value was hardcoded for a bigger fixture than this one.
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			wal, volume := walHeadroom(cluster)
+			Expect(wal*4 <= volume).To(BeTrue(),
+				"CNPG cluster %s allows %dMB of WAL on a %dMB volume, leaving too little"+
+					" for the data being loaded", cluster, wal>>20, volume>>20)
+		}
+
 		seed := seedPod()
 		Expect(spreadsOverHostname(&seed.Spec)).To(BeTrue(),
 			"the seed worker carries no anti-affinity away from the fixture primaries")

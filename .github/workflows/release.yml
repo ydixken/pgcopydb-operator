@@ -173,7 +173,7 @@ jobs:
     needs: [chart]
     runs-on: github-runner-pgcopydb-e2e
     environment: e2e-cluster
-    timeout-minutes: 90
+    timeout-minutes: 260
     steps:
       - uses: actions/checkout@v5
       # The scale set runs a bare actions-runner image: git and node are all
@@ -197,7 +197,7 @@ jobs:
         # answer, so it calls go test with the same flags the task passes.
         env:
           E2E_OPERATOR_TAG: ${{ github.ref_name }}
-          E2E_SCALE: "0.1"
+          E2E_SCALE: "0.5"
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
@@ -207,8 +207,8 @@ jobs:
         # timeout produces no output at all. poll-progress-after turns a spec
         # that wedges into a stack dump rather than silence.
         run: |
-          go test ./test/e2e/... -v -timeout 1h \
-            -ginkgo.v -ginkgo.timeout=1h -ginkgo.poll-progress-after=5m \
+          go test ./test/e2e/... -v -timeout 4h \
+            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=5m \
             -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # AfterSuite already does this when the suite exits cleanly; this is
