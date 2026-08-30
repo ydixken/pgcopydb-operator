@@ -125,7 +125,7 @@ The failure needs two things at once: an attempt that reaches the post-drain seq
 | e2e-follow-manual | second | yes | 3 | 1 and 2 |
 
 `e2e-follow-del` is the control for the first condition. Its spec deletes the Migration mid-stream, before any cutover, so it never drains and never reaches the sequence reset: same mode as the others, polled the same way, no failure.
-The clone-only migrations are the control for the second. The operator ran no catalog commands against those, so nothing was committing alongside their workers, and none of them logged the error in either run.
+The clone-only migrations are the control for the second. The operator ran no catalog commands against those while their workers were alive, so nothing was committing alongside them, and none of them logged the error in either run.
 `e2e-follow-manual` is listed twice on purpose: the same migration lost the same two attempts at the same step in two separate runs, which says more than the total does.
 
 ### Root cause
