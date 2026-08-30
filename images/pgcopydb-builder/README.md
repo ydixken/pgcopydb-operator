@@ -14,8 +14,8 @@ Publishing the compile as its own image, tagged by the commit it builds, reuses 
 
 `PGCOPYDB_SHA` and `PGCOPYDB_VERSION` sit at the top of the Dockerfile as `ARG` defaults and move together.
 `PGCOPYDB_VERSION` is what `git describe` prints for that commit, with dashes turned to dots.
-The [runner Dockerfile](../runner/Dockerfile) carries the same two values and pulls this image by tag: `ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:<PGCOPYDB_SHA>`.
-A test in `test/buildconfig` fails the build if the two Dockerfiles disagree on either value.
+The [runner Dockerfile](../runner/Dockerfile) pulls this image pinned by tag and digest: `ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:<PGCOPYDB_SHA>@sha256:<digest>`, not by an interpolated ARG, so a debian bump here cannot reach it through a republished tag.
+A test in `test/buildconfig` fails the build if the runner's pin disagrees with either value here.
 
 ## Building it locally
 

@@ -136,18 +136,28 @@ func TestBuilderCompilesInParallel(t *testing.T) {
 // build succeeds and the release ships the previous pgcopydb.
 func TestRunnerPullsThePinnedBuilder(t *testing.T) {
 	wantSHA := pin(t, builderDockerfile, "PGCOPYDB_SHA")
-	if got := pin(t, runnerDockerfile, "PGCOPYDB_SHA"); got != wantSHA {
-		t.Errorf("builder pins %s, runner pins %s", wantSHA, got)
+
+	re := regexp.MustCompile(`(?m)^FROM\s+\S*pgcopydb-builder:(\S+)\s+AS\s+pgcopydb\s*$`)
+	m := re.FindStringSubmatch(read(t, runnerDockerfile))
+	if m == nil {
+		t.Fatal("no pgcopydb-builder FROM (tag@sha256:digest AS pgcopydb) in the runner Dockerfile")
 	}
-	if !strings.Contains(read(t, runnerDockerfile), "pgcopydb-builder:${PGCOPYDB_SHA}") {
-		t.Error("the runner's builder FROM must interpolate ${PGCOPYDB_SHA}, not repeat the literal")
+
+	// A bare tag is mutable: a debian bump inside the builder republishes it,
+	// so only the digest stops that rebuild from reaching this image unreviewed.
+	tag, digest, hasDigest := strings.Cut(m[1], "@")
+	if !hasDigest || !strings.HasPrefix(digest, "sha256:") {
+		t.Errorf("pgcopydb-builder FROM %q has no @sha256: digest pin", m[1])
+	}
+	if tag != wantSHA {
+		t.Errorf("builder pins %s, runner's FROM pins %s", wantSHA, tag)
 	}
 
 	// PGCOPYDB_VERSION can drift independently of the SHA check above; if it
 	// does, the runner's canary asserts a version the builder never produced.
 	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
-	if got := pin(t, runnerDockerfile, "PGCOPYDB_VERSION"); got != wantVersion {
-		t.Errorf("builder pins version %s, runner pins %s", wantVersion, got)
+	if !strings.Contains(read(t, runnerDockerfile), "grep -qF '"+wantVersion+"'") {
+		t.Errorf("builder pins version %s, runner canary does not assert it", wantVersion)
 	}
 }
 
@@ -285,7 +295,7 @@ func requireMultiArch(t *testing.T, path, platforms string) {
 // hint: charts/values.yaml feeds gateScript()'s shell case, so an unlisted
 // version matches nothing and fails closed with no error logged anywhere.
 func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
-	want := pin(t, runnerDockerfile, "PGCOPYDB_VERSION")
+	want := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
 	q := regexp.QuoteMeta(want)
 
 	for _, c := range []struct {
@@ -295,7 +305,6 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 		pattern *regexp.Regexp
 		why     string
 	}{
-		// The ARG line is not listed here: pin() already fails fatally if it is missing.
 		{runnerDockerfile, regexp.MustCompile(`pgcopydb --version \| grep -qF '` + q + `'`),
 			"the build canary that fails the image build on drift"},
 		{releaseWorkflow, regexp.MustCompile(`pgcopydb --version \| grep -F '` + q + `'`),

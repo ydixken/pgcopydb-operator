@@ -6,10 +6,7 @@ name: pgcopydb builder image
 on:
   workflow_dispatch:
   push:
-    # TEMPORARY: this branch is listed so Actions can publish the first
-    # pgcopydb-builder image before the runner Dockerfile pins its digest.
-    # Removed in this same PR once the digest is pinned.
-    branches: [main, sdd/pgcopydb-builder-split]
+    branches: [main]
     paths: [".github/workflows/pgcopydb-builder.yml", "images/pgcopydb-builder/Dockerfile"]
 
 # A half-pushed multi-arch manifest is worse than a queued second run, so

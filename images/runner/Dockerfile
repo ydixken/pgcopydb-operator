@@ -34,17 +34,14 @@
 # database, so what a scanner reports is the truth rather than an artifact of
 # having nothing left to enumerate.
 
-# Duplicated from the builder image: this exact string is what the canary
-# below asserts, so drift here would mean the canary passes a stale binary.
-ARG PGCOPYDB_VERSION=0.18.2.gea87951
-# Global scope on purpose: an ARG declared after a FROM is stage-scoped and
-# cannot be read by a FROM line, so ${PGCOPYDB_SHA} would expand to empty and
-# this tag would silently resolve to :latest.
-ARG PGCOPYDB_SHA=ea87951753f06361550c0a1357da7b42c3c55034
+# Pinned by tag and digest, not just tag: a debian bump inside the
+# builder republishes this same tag, so only the digest stops that
+# rebuild from reaching this image before Renovate can raise a PR.
 # No --platform here. It is right for the manager's Go builder and wrong here:
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:${PGCOPYDB_SHA} AS pgcopydb
+# renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:ea87951753f06361550c0a1357da7b42c3c55034@sha256:e68bb07a74bd6a74b7461588705a82ad12a105e4eb0767665c8b673f29a195d4 AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
