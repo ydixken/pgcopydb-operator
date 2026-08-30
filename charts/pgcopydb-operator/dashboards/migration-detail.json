@@ -254,7 +254,7 @@
     {
       "id": 20,
       "type": "stat",
-      "title": "Current work",
+      "title": "Current Work",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -385,7 +385,7 @@
                     "type": "value",
                     "options": {
                       "1": {
-                        "text": "Vacuum and Index Builds",
+                        "text": "Vacuum And Index Builds",
                         "index": 0
                       }
                     }
@@ -814,7 +814,7 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Completed at",
+      "title": "Completed At",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -881,7 +881,7 @@
     {
       "id": 7,
       "type": "state-timeline",
-      "title": "Phase timeline",
+      "title": "Phase Timeline",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1013,20 +1013,20 @@
     {
       "id": 8,
       "type": "row",
-      "title": "Copy progress",
+      "title": "Copy Progress",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 17
       },
       "panels": []
     },
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Database size",
+      "title": "Database Size",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1035,7 +1035,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 25
       },
       "targets": [
         {
@@ -1045,7 +1045,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "source"
+          "legendFormat": "Source"
         },
         {
           "refId": "B",
@@ -1054,7 +1054,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "target"
+          "legendFormat": "Target"
         }
       ],
       "fieldConfig": {
@@ -1097,7 +1097,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Copy throughput",
+      "title": "Copy Throughput",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1106,7 +1106,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 25
       },
       "targets": [
         {
@@ -1116,7 +1116,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "target growth"
+          "legendFormat": "Target Growth"
         },
         {
           "refId": "B",
@@ -1125,7 +1125,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "clone copy"
+          "legendFormat": "Clone Copy"
         }
       ],
       "fieldConfig": {
@@ -1168,7 +1168,7 @@
     {
       "id": 11,
       "type": "bargauge",
-      "title": "Percent done",
+      "title": "Percent Done",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1177,7 +1177,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 18
       },
       "targets": [
         {
@@ -1187,7 +1187,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "by size (first clone only)",
+          "legendFormat": "By Size (First Clone Only)",
           "instant": true,
           "range": false
         },
@@ -1198,7 +1198,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "tables",
+          "legendFormat": "Tables",
           "instant": true,
           "range": false
         },
@@ -1209,7 +1209,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "indexes",
+          "legendFormat": "Indexes",
           "instant": true,
           "range": false
         },
@@ -1220,7 +1220,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "clone bytes (peaks ~97%, see info)",
+          "legendFormat": "Clone Bytes (Peaks ~97%, See Info)",
           "instant": true,
           "range": false
         }
@@ -1271,7 +1271,7 @@
     {
       "id": 12,
       "type": "stat",
-      "title": "ETA by size",
+      "title": "ETA By Size",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1383,14 +1383,14 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 32
       },
       "panels": []
     },
     {
       "id": 14,
       "type": "timeseries",
-      "title": "LSN positions",
+      "title": "LSN Positions",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1399,7 +1399,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 33
       },
       "targets": [
         {
@@ -1409,7 +1409,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "source"
+          "legendFormat": "Source"
         },
         {
           "refId": "B",
@@ -1418,7 +1418,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "write"
+          "legendFormat": "Write"
         },
         {
           "refId": "C",
@@ -1427,7 +1427,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "replay"
+          "legendFormat": "Replay"
         },
         {
           "refId": "D",
@@ -1436,7 +1436,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "endpos"
+          "legendFormat": "Endpos"
         }
       ],
       "fieldConfig": {
@@ -1479,7 +1479,7 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Replication lag split",
+      "title": "Replication Lag Split",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1488,7 +1488,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 33
       },
       "targets": [
         {
@@ -1498,7 +1498,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "receive lag (source-write)"
+          "legendFormat": "Receive Lag (Source-Write)"
         },
         {
           "refId": "B",
@@ -1507,7 +1507,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "apply backlog (write-replay)"
+          "legendFormat": "Apply Backlog (Write-Replay)"
         },
         {
           "refId": "C",
@@ -1516,7 +1516,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "total"
+          "legendFormat": "Total"
         }
       ],
       "fieldConfig": {
@@ -1558,7 +1558,7 @@
     {
       "id": 16,
       "type": "timeseries",
-      "title": "WAL generation",
+      "title": "WAL Generation",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1567,7 +1567,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 40
       },
       "targets": [
         {
@@ -1577,7 +1577,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "WAL bytes/s"
+          "legendFormat": "WAL Bytes/s"
         }
       ],
       "fieldConfig": {
@@ -1620,7 +1620,7 @@
     {
       "id": 17,
       "type": "stat",
-      "title": "Cutover drain",
+      "title": "Cutover Drain",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1629,7 +1629,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 40
       },
       "targets": [
         {
@@ -1693,7 +1693,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 13
       },
       "panels": []
     },
@@ -1709,7 +1709,7 @@
         "h": 3,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 14
       },
       "targets": [
         {
@@ -1728,7 +1728,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "N/A",
+          "noValue": "Not Run",
           "mappings": [
             {
               "type": "value",
