@@ -102,7 +102,7 @@ var (
 		"Last LSN written by the receiver, as an absolute byte position.")
 
 	replayLSNBytes = gauge("pgcopydb_migration_replay_lsn_bytes",
-		"Last LSN replayed on the target, as an absolute byte position.")
+		"How far the target has consumed the stream, as an absolute byte position.")
 
 	endposLSNBytes = gauge("pgcopydb_migration_endpos_lsn_bytes",
 		"Cutover endpos as an absolute byte position (absent until cutover sets it).")
