@@ -23,6 +23,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,6 +45,27 @@ const finalizerName = "pgcopydb-operator.io/cleanup"
 
 // defaultMaxCatchupLag applies when spec.follow.maxCatchupLag is unset.
 const defaultMaxCatchupLag = int64(16 << 20)
+
+// The CaughtUp reasons. ConfirmingCatchUp is the latch: one sample below the
+// threshold parks here, and only a second consecutive one turns the condition
+// true (see lagSeenBelow).
+const (
+	reasonLagBelowThreshold = "LagBelowThreshold"
+	reasonConfirmingCatchUp = "ConfirmingCatchUp"
+	reasonLagging           = "Lagging"
+)
+
+// lagSeenBelow reports whether an earlier pass already measured the lag below
+// the threshold. Like copySeen, the latch lives in the condition reason, so it
+// needs no API field and survives an operator restart; a sample above the
+// threshold writes Lagging and clears it.
+func lagSeenBelow(m *v1beta1.Migration) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
+	if c == nil {
+		return false
+	}
+	return c.Status == metav1.ConditionTrue || c.Reason == reasonConfirmingCatchUp
+}
 
 // SentinelOps drives a running follow migration; nil disables follow handling
 // (envtest injects a fake).
@@ -151,12 +173,32 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	// Read the lag back off the status just written, so the condition and the
 	// CR can never disagree: a pass that carried the previous figure forward
 	// must carry the previous verdict with it.
-	caughtUp := rs.LagBytes != nil && *rs.LagBytes <= maxCatchupLagBytes(m)
-	if caughtUp {
-		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionTrue, "LagBelowThreshold",
+	below := rs.LagBytes != nil && *rs.LagBytes <= maxCatchupLagBytes(m)
+
+	// Two consecutive samples, because one can be measured inside a window
+	// where the figure is not yet meaningful. pgcopydb's sentinel replay_lsn
+	// starts at 0/0 and the override that ties the confirmed flush position to
+	// the apply cursor is guarded on it being non-zero, so until the apply
+	// loop's first sync the worker confirms its raw receive position instead.
+	// Lag then reads near zero whatever the apply backlog is, and the fallback
+	// in readScript cannot help: the walsender's replay column is NULL in that
+	// same window, so it falls through to the very value that is polluted. The
+	// window opens at every worker start and every worker pod restart and
+	// closes within seconds, so a second sample clears it. cloneDone already
+	// covers the fresh start, which leaves about one sample at clone-end and
+	// after a restart. The cost is one poll interval of cutover latency on a
+	// stream that really is caught up, against an endpos frozen at a position
+	// the target has not actually applied to.
+	caughtUp := below && lagSeenBelow(m)
+	switch {
+	case caughtUp:
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionTrue, reasonLagBelowThreshold,
 			"replication lag is below spec.follow.maxCatchupLag")
-	} else {
-		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionFalse, "Lagging",
+	case below:
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionFalse, reasonConfirmingCatchUp,
+			"one sample measured the lag below spec.follow.maxCatchupLag; CaughtUp turns true when the next one agrees")
+	default:
+		r.setCondition(m, v1beta1.ConditionCaughtUp, metav1.ConditionFalse, reasonLagging,
 			"replication lag is above spec.follow.maxCatchupLag or unknown")
 	}
 

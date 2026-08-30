@@ -295,9 +295,13 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(m.Status.Replication).NotTo(BeNil())
 		Expect(*m.Status.Replication.LagBytes).To(BeNumerically(">", int64(16<<20)))
 
-		// Caught up, Manual, not approved: waiting.
+		// Caught up, Manual, not approved: waiting. The first below-threshold
+		// sample only arms the latch, so nothing moves until the second.
 		fake.state = &sentinel.State{WriteLSN: "0/48000010", ReplayLSN: "0/48000000", SourceHead: "0/48000010", Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeFalse())
+		m = confirmCaughtUp(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 		Expect(fake.endposSet).To(BeFalse())
@@ -413,6 +417,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming)).To(BeTrue())
+		m = confirmCaughtUp(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 
 		// Streaming and cutting over are still worker-alive passes, so they
@@ -447,7 +452,9 @@ var _ = Describe("Migration Controller follow mode", func() {
 		reconcileAndGet(ctx, r, name)
 
 		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
-		m := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		Expect(fake.endposSet).To(BeFalse(), "one sample must not be enough to freeze the stream")
+		m := confirmCaughtUp(ctx, r, name)
 		Expect(fake.endposSet).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(fake.nudgeCount()).To(Equal(1))
@@ -490,7 +497,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		// Both sides answer: a full sample, caught up.
 		const head = "0/4000000"
 		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: head, SourceHead: head}
-		m := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
 		Expect(m.Status.Replication.ReplayLSN).To(Equal(head))
 		Expect(m.Status.Replication.LagBytes).NotTo(BeNil())
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
@@ -511,6 +519,68 @@ var _ = Describe("Migration Controller follow mode", func() {
 		// Manual mode without approval, so the phase parks at CutoverPending
 		// rather than cutting over on a figure this pass did not measure.
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+	})
+
+	It("needs two consecutive samples before it calls a stream caught up", func() {
+		const name = "mig-follow-confirm"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverAutomatic))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+
+		// One sample below the threshold. It may have been measured before
+		// the worker's apply loop first synced, when the confirmed position
+		// is the raw receive position and the lag reads near zero whatever
+		// the backlog is, so it arms the latch and nothing more.
+		const head = "0/4000000"
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: head, SourceHead: head}
+		m := reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeFalse())
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp).Reason).
+			To(Equal(reasonConfirmingCatchUp))
+		Expect(fake.setCount()).To(BeZero(), "one sample must not freeze the stream")
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+
+		// The second agrees: now the stream is caught up and Automatic cuts
+		// over on it.
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+		Expect(fake.setCount()).To(Equal(1))
+	})
+
+	It("re-arms the latch when a sample goes back above the threshold", func() {
+		const name = "mig-follow-relag"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := followReconciler(fake)
+		r.Logs = cloneDoneLogs()
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverAutomatic))).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+
+		const head = "0/4000000"
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: head, SourceHead: head}
+		m := reconcileAndGet(ctx, r, name)
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp).Reason).
+			To(Equal(reasonConfirmingCatchUp))
+
+		// A burst of writes puts the stream behind again, so the pair is
+		// broken and the count starts over.
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: "0/1000000", SourceHead: head}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp).Reason).
+			To(Equal(reasonLagging))
+
+		// One below-threshold sample after that is a first sample again.
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: head, SourceHead: head}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeFalse())
+		Expect(fake.setCount()).To(BeZero())
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 	})
 
 	It("fails loudly when drain verification is refuted", func() {

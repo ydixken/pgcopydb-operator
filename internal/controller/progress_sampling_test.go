@@ -639,7 +639,8 @@ var _ = Describe("Migration Controller attempt phase", func() {
 
 		fake.state = &sentinel.State{WriteLSN: caughtUpLSN,
 			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
-		m := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 
 		// Worker exits 0, the verify Job proves the drain, cleanup is still
@@ -674,7 +675,8 @@ var _ = Describe("Migration Controller attempt phase", func() {
 			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		// The freeze records its own endpos: nothing reads it back out of
 		// the worker, so the operator keeps what it set.
-		m := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		m := confirmCaughtUp(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
 

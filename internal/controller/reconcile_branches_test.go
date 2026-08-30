@@ -151,7 +151,8 @@ var _ = Describe("Migration Controller resilience", func() {
 		reconcileAndGet(ctx, r, name) // run-1
 
 		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
-		reconcileAndGet(ctx, r, name) // caught up, Automatic: endpos set
+		reconcileAndGet(ctx, r, name) // one sample below: arms the latch
+		confirmCaughtUp(ctx, r, name) // the second: Automatic sets endpos
 		Expect(fake.endposSet).To(BeTrue())
 
 		finishJob(ctx, name+"-run-1", true)
@@ -267,9 +268,11 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 
-		// 256 bytes behind: under the custom threshold.
+		// 256 bytes behind: under the custom threshold, confirmed by a second
+		// consecutive sample.
 		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: "0/3F00", SourceHead: head, Endpos: sentinel.ZeroLSN}
-		m = reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		m = confirmCaughtUp(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 	})
