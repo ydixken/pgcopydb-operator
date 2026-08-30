@@ -119,10 +119,12 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 func TestBuilderCompilesInParallel(t *testing.T) {
 	src := read(t, builderDockerfile)
 
-	makeLine := regexp.MustCompile(`(?m)^.*\bmake\b.*\binstall\b.*$`)
+	// Anchored past a leading "#" so a comment mentioning make/install cannot
+	// stand in for the live command this test means to inspect.
+	makeLine := regexp.MustCompile(`(?m)^\s*[^#\s].*\bmake\b.*\binstall\b.*$`)
 	line := makeLine.FindString(src)
 	if line == "" {
-		t.Fatal("no `make ... install` line in the builder Dockerfile")
+		t.Fatal("no live `make ... install` line in the builder Dockerfile")
 	}
 	if !regexp.MustCompile(`\s-j`).MatchString(line) {
 		t.Errorf("pgcopydb compiles serially; pass -j:\n %s", strings.TrimSpace(line))
@@ -172,7 +174,9 @@ func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
 			t.Errorf("the runner Dockerfile still compiles pgcopydb: found %q", banned)
 		}
 	}
-	if regexp.MustCompile(`(?m)^.*\bmake\b.*\binstall\b.*$`).MatchString(src) {
+	// Same anchoring as TestBuilderCompilesInParallel: a comment mentioning
+	// make/install must not read as the live command coming back.
+	if regexp.MustCompile(`(?m)^\s*[^#\s].*\bmake\b.*\binstall\b.*$`).MatchString(src) {
 		t.Error("the runner Dockerfile still runs `make ... install`")
 	}
 }
@@ -260,6 +264,20 @@ func TestBuilderPlatformsAgreeAcrossWorkflows(t *testing.T) {
 		t.Errorf("release.yml builds pgcopydb-builder for %q, %s for %q; they must agree "+
 			"or a single-arch pre-build passes the existence check unnoticed",
 			release, builderWorkflow, prebuild)
+	}
+	requireMultiArch(t, releaseWorkflow, release)
+	requireMultiArch(t, builderWorkflow, prebuild)
+}
+
+// Agreement alone is not enough: both files could agree on linux/amd64 only,
+// which is exactly the tag the release check cannot tell from multi-arch.
+func requireMultiArch(t *testing.T, path, platforms string) {
+	t.Helper()
+	list := strings.Split(platforms, ",")
+	for _, want := range []string{"linux/amd64", "linux/arm64"} {
+		if !slices.Contains(list, want) {
+			t.Errorf("%s: pgcopydb-builder platforms are %q, missing %s", path, platforms, want)
+		}
 	}
 }
 

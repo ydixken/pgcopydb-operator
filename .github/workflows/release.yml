@@ -109,9 +109,13 @@ jobs:
           set +e
           out=$(docker buildx imagetools inspect "$ref" 2>&1); rc=$?
           set -e
+          # $ref embeds the 40-char SHA, which can itself contain "404"; strip
+          # it before matching or that coincidence reads a transient failure
+          # as absence and republishes the tag over content mid-pull.
+          msg=$(printf '%s' "$out" | sed "s#$ref##g")
           if [ "$rc" -eq 0 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-          elif printf '%s' "$out" | grep -qiE 'not found|MANIFEST_UNKNOWN|404'; then
+          elif printf '%s' "$msg" | grep -qiE 'not found|MANIFEST_UNKNOWN|404'; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
           else
             echo "::error::cannot reach $ref: $out"

@@ -7,7 +7,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [".github/workflows/pgcopydb-builder.yml", "images/pgcopydb-builder/**"]
+    paths: [".github/workflows/pgcopydb-builder.yml", "images/pgcopydb-builder/Dockerfile"]
+
+# A half-pushed multi-arch manifest is worse than a queued second run, so
+# a race between two triggers waits rather than cancels.
+concurrency:
+  group: pgcopydb-builder-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read

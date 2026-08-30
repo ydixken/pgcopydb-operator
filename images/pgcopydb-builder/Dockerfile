@@ -1,9 +1,9 @@
 # Compiles pgcopydb from the pinned fork commit and ships nothing but the
-# binary. It exists because that compile is ~20 minutes under QEMU while its
-# only input, PGCOPYDB_SHA, has changed once across 55 releases, whereas the
-# runner image's apt layers float on purpose and must rebuild every release.
-# A registry cache cannot tell those two apart, so we separate them by hand.
-# Renovate's debian digest bumps here are inert until the next SHA bump.
+# binary. Its only input, PGCOPYDB_SHA, has changed once across 55
+# releases, unlike the runner image's apt layers, which float on purpose
+# and rebuild every release; a registry cache cannot tell the two apart.
+# A debian digest bump here still rebuilds and republishes this tag, so
+# it tracks the pinned pgcopydb commit but not the base it compiled against.
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
