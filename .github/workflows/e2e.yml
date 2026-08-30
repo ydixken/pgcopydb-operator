@@ -92,6 +92,8 @@ jobs:
       - name: Run the suite against ${{ inputs.tag || github.ref_name }}
         # -v and -ginkgo.v stream the output; without them go test buffers the
         # whole package and a run that hits the timeout prints nothing at all.
+        # poll-progress-after is 15m because a clone at the default scale runs
+        # for about eleven minutes: at 5m it fired on every healthy spec.
         env:
           # A tag push has no inputs, so fall back to the tag that triggered it.
           E2E_OPERATOR_TAG: ${{ inputs.tag || github.ref_name }}
@@ -101,7 +103,7 @@ jobs:
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
         run: |
           go test ./test/e2e/... -v -timeout 4h \
-            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=5m \
+            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=15m \
             -ginkgo.label-filter='!chaos && !flaky'
       - name: Empty the e2e namespaces
         # The namespaces are GitOps owned and the CI identity cannot delete
