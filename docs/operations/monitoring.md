@@ -50,6 +50,8 @@ The "Exists" column is the contract for when a series is present:
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
 Receive lag reads a little high wherever `write` fell back to the slot's confirmed flush position, which is one confirmation behind the walsender.
+Apply backlog is no longer sign-constrained either: `write` is a source-side reading and `replay` is the target's origin, so the two come from different databases and nothing orders them the way it did when both came from the sentinel.
+We have not seen it read negative; if the Replication Lag Split panel ever shows that, read it as the two readings crossing, not as data moving backwards.
 
 ## Dashboards
 
@@ -151,7 +153,7 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
 | `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail normally reads as `Finalizing` and leaves the target flat without being stalled. |
-| `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m |
+| `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending`. The phase matcher is deliberate: the lag gauge exists during the base copy too, where a large lag is expected and nothing can act on it |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 
 Slot retention is deliberately not covered.

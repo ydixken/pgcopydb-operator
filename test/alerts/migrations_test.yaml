@@ -125,11 +125,16 @@ tests:
         alertname: PgcopydbMigrationCloneStalled
         exp_alerts: []
 
-  # Lag above 64Mi for over 10m fires; lag exactly at 64Mi never does.
+  # Lag above 64Mi for over 10m fires; lag exactly at 64Mi never does. Both
+  # carry a Streaming phase, which the expression now requires.
   - interval: 1m
     input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="bad", phase="Streaming"}'
+        values: "1x20"
       - series: 'pgcopydb_migration_replication_lag_bytes{namespace="default", name="bad"}'
         values: "100000000x20"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="ok", phase="Streaming"}'
+        values: "1x20"
       - series: 'pgcopydb_migration_replication_lag_bytes{namespace="default", name="ok"}'
         values: "67108864x20"
     alert_rule_test:
@@ -148,6 +153,20 @@ tests:
                 The target is not applying changes as fast as the source
                 writes them. Sustained lag delays cutover and retains WAL on
                 the source.
+
+  # The base copy: replication status is sampled from the first pass now, so a
+  # lagging Cloning migration has a lag gauge and must still stay quiet. There
+  # is nothing to act on before the stream is the thing running.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="copying", phase="Cloning"}'
+        values: "1x30"
+      - series: 'pgcopydb_migration_replication_lag_bytes{namespace="default", name="copying"}'
+        values: "500000000x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PgcopydbMigrationReplicationLagHigh
+        exp_alerts: []
 
   # A drain that never reaches endpos fires after 15m; a replay that catches
   # up at 10m drops out of the expression and stays silent.

@@ -311,25 +311,31 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-		By("asserting byte progress from the gated clone poll")
+		// Absence is the assertion here. Nothing may read pgcopydb's catalogs
+		// from a live worker, so a follow migration's counters arrive only with
+		// the verify Job after cutover, which the terminal spec asserts. The
+		// anchors must answer at the same instant, or an empty result would
+		// equally mean a typo'd name or a Prometheus that is not scraping.
+		By("asserting the clone counters stay absent while a worker is live")
 		Eventually(func(g Gomega) {
-			copied := promValue(g, e2eSeries("pgcopydb_migration_clone_copied_bytes"))
-			planned := promValue(g, e2eSeries("pgcopydb_migration_clone_planned_bytes"))
-			g.Expect(copied).To(BeNumerically(">", 0))
-			g.Expect(planned).To(BeNumerically(">", 0))
-			// planned is pgcopydb's table-size estimate and the copy routinely
-			// overshoots it (a gate measured copied at 1.19x planned), so only
-			// a generous sanity bound is stable.
-			g.Expect(copied).To(BeNumerically("<", 3*planned),
-				"copied bytes out of all proportion to the planned estimate")
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
-
-		By("asserting table progress")
-		Eventually(func(g Gomega) {
-			done := promValue(g, e2eSeries("pgcopydb_migration_tables_done"))
-			total := promValue(g, e2eSeries("pgcopydb_migration_tables_total"))
-			g.Expect(total).To(BeNumerically(">", 0))
-			g.Expect(done).To(BeNumerically("<=", total))
+			g.Expect(promVector(g, e2eSeries("pgcopydb_migration_phase")+" == 1")).To(HaveLen(1),
+				"anchor: the phase series must answer, or the absences below prove nothing")
+			for _, m := range []string{
+				"pgcopydb_migration_source_database_size_bytes",
+				"pgcopydb_migration_target_database_size_bytes",
+			} {
+				g.Expect(promVector(g, e2eSeries(m))).To(HaveLen(1),
+					"anchor: %s must answer, or the absences below prove nothing", m)
+			}
+			for _, m := range []string{
+				"pgcopydb_migration_clone_copied_bytes",
+				"pgcopydb_migration_clone_planned_bytes",
+				"pgcopydb_migration_tables_done",
+				"pgcopydb_migration_tables_total",
+			} {
+				g.Expect(promVector(g, e2eSeries(m))).To(BeEmpty(),
+					"%s has a series mid-stream: something is polling a live worker", m)
+			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("asserting the LSN gauges and the derived lags")
@@ -370,6 +376,23 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_verified"))).To(Equal(1.0))
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_attempts"))).To(BeNumerically(">=", 1))
 		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("asserting the clone counters arrived with the drain verification")
+		Eventually(func(g Gomega) {
+			copied := promValue(g, e2eSeries("pgcopydb_migration_clone_copied_bytes"))
+			planned := promValue(g, e2eSeries("pgcopydb_migration_clone_planned_bytes"))
+			g.Expect(copied).To(BeNumerically(">", 0))
+			g.Expect(planned).To(BeNumerically(">", 0))
+			// planned is pgcopydb's table-size estimate and the copy routinely
+			// overshoots it (a gate measured copied at 1.19x planned), so only
+			// a generous sanity bound is stable.
+			g.Expect(copied).To(BeNumerically("<", 3*planned),
+				"copied bytes out of all proportion to the planned estimate")
+			done := promValue(g, e2eSeries("pgcopydb_migration_tables_done"))
+			total := promValue(g, e2eSeries("pgcopydb_migration_tables_total"))
+			g.Expect(total).To(BeNumerically(">", 0))
+			g.Expect(done).To(BeNumerically("<=", total))
+		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("cross-checking the progress poll landed in status, without Prometheus")
 		m := &v1beta1.Migration{}
