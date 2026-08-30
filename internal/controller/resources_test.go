@@ -153,7 +153,7 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 			Follow: &v1beta1.FollowOptions{Enabled: true},
 		},
 	}
-	job, err := buildVerifyJob(m, "img")
+	job, err := buildVerifyJob(m, "img", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +191,49 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 		strings.Count(c.Args[1], "exit 1") != 1 ||
 		strings.Index(c.Args[1], "compare data") > strings.Index(c.Args[1], "exit 1") {
 		t.Fatalf("verify script must refuse only after compare data:\n%s", c.Args[1])
+	}
+	// No poller wired, no counters asked for: the drain script stays exactly
+	// what it was.
+	if strings.Contains(c.Args[1], verifyProgressPrefix) {
+		t.Fatalf("verify script must not ask for counters without a gate:\n%s", c.Args[1])
+	}
+}
+
+// TestBuildVerifyJob_CloneCounters: the copy counters ride along in the
+// verify Job, because it is the only pod that may read them (the worker owns
+// its catalog while it lives, and its pod is gone once it does not). They must
+// ride as a passenger: printed before the verdict, gated on the version
+// allowlist, and unable to fail the Job whatever the gate does.
+func TestBuildVerifyJob_CloneCounters(t *testing.T) {
+	const gate = "case \"$v\" in\n0.18.2.gea87951) pgcopydb list progress --json --dir /work/pgcopydb ;;\nesac\n"
+	job, err := buildVerifyJob(passwordMigration(), "img", gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := job.Spec.Template.Spec.Containers[0].Args[1]
+	if !strings.Contains(script, gate) {
+		t.Fatalf("verify script must carry the poller's own gate:\n%s", script)
+	}
+	for _, want := range []string{
+		// set -e off and stderr discarded: a shut gate or a failing command
+		// must leave the drain verdict alone.
+		"set +e",
+		"2>/dev/null",
+		"|| true",
+		verifyProgressPrefix,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("counters block missing %q:\n%s", want, script)
+		}
+	}
+	// Printed before the verdict, so the fast path's exit cannot skip it.
+	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `[ "$gap" -le 8192 ]`) {
+		t.Fatalf("counters must be printed before the drain verdict:\n%s", script)
+	}
+	// The counters are read, never judged: no exit of any kind in the block.
+	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$gap"`)]
+	if strings.Contains(block, "exit ") {
+		t.Fatalf("the counters block must not be able to end the Job:\n%s", block)
 	}
 }
 
@@ -443,7 +486,7 @@ esac
 // script-Job passfile gap: without the prelude, psql in the verify pod cannot
 // authenticate against password-based targets.
 func TestBuildVerifyJob_KeepsPassfilePrelude(t *testing.T) {
-	job, err := buildVerifyJob(passwordMigration(), "img")
+	job, err := buildVerifyJob(passwordMigration(), "img", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +511,7 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	builders := map[string]func() (*batchv1.Job, error){
 		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img") },
+		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
 	}

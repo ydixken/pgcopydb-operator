@@ -64,6 +64,10 @@ const (
 	// replica-identity audit, or applied grants lose their audit events.
 	// A number only because the log API wants a TailLines value.
 	preflightOkLogTail = 10000
+	// verifyLogTail bounds the log window scanned for the verify Job's copy
+	// counters. Generous because the line is printed before the drain verdict
+	// and a content-path compare can push it far up the log.
+	verifyLogTail = 10000
 	// zombieLogTail bounds the log window scanned for the supervisor-death
 	// marker. Wider than workerLogTail because the surviving streaming child
 	// keeps logging LSN reports after the marker and would push it out of a
@@ -96,6 +100,10 @@ type ProgressOps interface {
 	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
 	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
+	// GateScript renders the version-gated `list progress` the verify Job
+	// carries. The allowlist lives with the poller, so asking it keeps one
+	// gate for both callers rather than a second copy in the Job builder.
+	GateScript() string
 }
 
 // MigrationReconciler reconciles a Migration object.
@@ -377,9 +385,10 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // on the sequence reset (see docs/research/upstream-issues.md). "Almost
 // never" is not a property, so a live worker gets psql and nothing else: the
 // follow watch queries the two databases (see internal/sentinel) and the size
-// sample does the same. `list progress` waits for the Job to exit; the one
-// remaining write to a live catalog is `sentinel set endpos`, which is how a
-// cutover is asked for and has no other route.
+// sample does the same. The copy counters are read from a pod with no worker
+// in it, the verify Job for a follow migration and the exited worker's own pod
+// for a plain clone. The one remaining write to a live catalog is `sentinel
+// set endpos`, which is how a cutover is asked for and has no other route.
 //
 // The copy's end is read from the markers pgcopydb prints when the copy phase
 // ends (pgcopydb.CloneDone), so a follow migration needs the log reader
@@ -460,9 +469,12 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 }
 
 // sampleCloneProgress best-effort fills status.progress from `list progress`,
-// once. Callers are the two finish paths only, never a pass with a live
-// worker: this is a pgcopydb command and it writes to the catalog. A failed
-// try leaves the field empty and the next pass retries.
+// once, by exec-ing into the pod. Its one caller is finishClone, never a pass
+// with a live worker: this is a pgcopydb command and it writes to the catalog.
+// A follow migration cannot use this route at all (its pod is gone by the time
+// the drain is over) and reads the same counters out of the verify Job's log
+// instead, see recordCloneProgress. A failed try leaves the field empty and
+// the next pass retries.
 func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
 	if r.Progress == nil || m.Status.Progress != nil {
 		return

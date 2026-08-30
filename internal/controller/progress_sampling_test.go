@@ -32,6 +32,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // fakeProgress scripts the sampler the way fakeSentinel scripts the
@@ -49,6 +50,12 @@ type fakeProgress struct {
 
 	copying, finalizing bool
 	stageCalls          int
+}
+
+// GateScript stands in for the poller's version gate. Specs assert on this
+// text reaching the verify Job, not on a real allowlist.
+func (f *fakeProgress) GateScript() string {
+	return "pgcopydb list progress --json --dir /work/pgcopydb\n"
 }
 
 func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) {
@@ -129,6 +136,13 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		return m
 	}
 
+	// listProgressJSON is what `pgcopydb list progress --json` prints, newlines
+	// squeezed out by the verify script (read off the real command in the
+	// v0.9.0 runner image against a finished clone).
+	const listProgressJSON = `{    "tables": {        "total": 2,        "done": 2    },` +
+		`    "indexes": {        "total": 3,        "done": 3    },` +
+		`    "bytes": {        "total": 12165120,        "done": 10347680    }}`
+
 	It("persists a sample to status.progress and the gauges", func() {
 		const name = "mig-progress-sample"
 		defer removeMigration(ctx, name)
@@ -143,8 +157,10 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		r := newReconciler()
 		r.Progress = fake
-		r.Logs = cloneDoneLogs()
-		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
+		// A plain clone, whose counters are read by exec-ing into its own pod
+		// once pgcopydb has exited (a follow migration takes the same numbers
+		// out of the verify Job instead; see the specs below).
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// While the worker runs only the psql size sample may go out; the
@@ -170,38 +186,43 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 	})
 
-	It("retries the poll until a sample lands, then stops asking", func() {
+	It("keeps reading the verify Job until the counters land, then stops", func() {
 		const name = "mig-progress-keep"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		// Gate shut on the first try (pod restarting, version off the
-		// allowlist): no sample, nothing written, and the next pass retries.
-		fake := &fakeProgress{}
 		r := newReconciler()
-		r.Progress = fake
-		r.Logs = cloneDoneLogs()
-		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
+		r.Progress = &fakeProgress{}
+		r.Sentinel = &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		passGate(ctx, r, name)
 		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-run-1", true)
-
-		m := reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Progress).To(BeNil())
-		cp, _ := fake.counts()
-		Expect(cp).To(Equal(1))
-
-		fake.mu.Lock()
-		fake.cp = &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 2}
-		fake.mu.Unlock()
-		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Progress).NotTo(BeNil())
-		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
-
-		// The sample landed and the counters are final: further passes stop
-		// asking.
 		reconcileAndGet(ctx, r, name)
-		cp, _ = fake.counts()
-		Expect(cp).To(Equal(2))
+
+		// The Job finished but its log is not readable yet (pod still being
+		// collected): no counters, and no reason to give up on them.
+		logs.out = ""
+		finishJob(ctx, name+"-verify", true)
+		got := reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).To(BeNil())
+
+		// Readable now: the counters land.
+		logs.out = verifyProgressPrefix + listProgressJSON + "\n"
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil())
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
+
+		// Landed once is landed: a later pass does not re-read the log, so a
+		// changed line cannot rewrite a finished migration's counters.
+		logs.out = verifyProgressPrefix + `{"tables": {"total": 99, "done": 99}}` + "\n"
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
 	})
 
 	It("passes despite sampler errors", func() {
@@ -211,8 +232,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		fake := &fakeProgress{cpErr: errors.New("exec wedged"), sizesErr: errors.New("psql refused")}
 		r := newReconciler()
 		r.Progress = fake
-		r.Logs = cloneDoneLogs()
-		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
+		// A plain clone, so both samplers that exec into a pod are exercised:
+		// the sizes while the worker runs, the counters once it has exited.
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// reconcileAndGet already asserts a nil reconcile error.
@@ -263,13 +285,85 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(cp).To(BeZero(), "the copy being done does not make the worker's catalog safe to open")
 		Expect(sizes).To(Equal(2))
 
-		// The worker exits: now the counters can be read.
+		// The worker exits, and still nothing execs into it: this migration's
+		// counters are read from the verify Job's log instead.
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Progress).NotTo(BeNil())
-		Expect(m.Status.Progress.TablesDone).To(Equal(int64(5)))
+		Expect(m.Status.Progress).To(BeNil())
 		cp, _ = fake.counts()
-		Expect(cp).To(Equal(1))
+		Expect(cp).To(BeZero())
+	})
+
+	It("takes a follow migration's counters from the verify Job", func() {
+		const name = "mig-progress-verify"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(9000)}
+		r := newReconciler()
+		r.Progress = fake
+		r.Sentinel = &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+		reconcileAndGet(ctx, r, name) // caught up, Automatic: endpos set
+
+		// The verify Job carries the gate the poller would have run.
+		finishJob(ctx, name+"-run-1", true)
+		got := reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).To(BeNil(), "nothing to read before the verify Job has run")
+		Expect(fetchJob(ctx, name+"-verify").Spec.Template.Spec.Containers[0].Args[1]).
+			To(ContainSubstring("list progress"))
+
+		// It finishes, and its log carries the counters.
+		logs.out = "endpos=0/100 replay_lsn=0/100 origin_progress=0/100 origin_gap_bytes=0\n" +
+			verifyProgressPrefix + listProgressJSON + "\n" +
+			"drain verified: origin progress reached endpos within one WAL page\n"
+		finishJob(ctx, name+"-verify", true)
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil(), "the verify Job's counters never reached status")
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
+		Expect(got.Status.Progress.IndexesDone).To(Equal(int64(3)))
+		Expect(got.Status.Progress.BytesDone.Value()).To(Equal(int64(10347680)))
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
+
+		// The poller itself was never asked to exec into anything: this
+		// migration's counters came out of a Job log.
+		cp, _ := fake.counts()
+		Expect(cp).To(BeZero())
+	})
+
+	It("verifies the drain whatever the counters line does", func() {
+		const name = "mig-progress-verify-junk"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r := newReconciler()
+		r.Progress = &fakeProgress{}
+		r.Sentinel = &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, r, name)
+
+		// Truncated JSON, the shape a killed `list progress` would leave.
+		logs.out = verifyProgressPrefix + `{ "tables": { "total":` + "\n" +
+			"drain verified: origin progress reached endpos within one WAL page\n"
+		finishJob(ctx, name+"-verify", true)
+		got := reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).To(BeNil())
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue(),
+			"a broken counters line must not touch the drain verdict")
 	})
 
 	It("gives a plain clone its one sample when the worker succeeds", func() {

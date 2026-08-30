@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -185,11 +187,6 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // loudly with the slot intact, so the data stays recoverable (at the
 // documented cost of WAL retention on the source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
-	// The only moment a follow migration's copy counters may be read: while
-	// the worker ran, no pgcopydb command could touch its catalog (see
-	// observeRunningJob), and now it is nobody's. Same best-effort caveat as
-	// finishClone, and the same reason it may find nothing to sample.
-	r.sampleCloneProgress(ctx, m, m.Status.JobName)
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
 	m.Status.Phase = v1beta1.PhaseCuttingOver
 
@@ -330,7 +327,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
 	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
-		return buildVerifyJob(m, r.RunnerImage)
+		return buildVerifyJob(m, r.RunnerImage, r.progressGate())
 	})
 	if err != nil || job == nil {
 		return false, false, err
@@ -339,7 +336,46 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 	if !done {
 		return false, false, nil
 	}
+	// A refuted drain carries the counters too: the Job ran, so the line is
+	// there, and a failed migration is exactly when someone wants to know how
+	// far the copy got.
+	r.recordCloneProgress(ctx, m, job.Name)
 	return ok, !ok, nil
+}
+
+// progressGate renders the verify Job's `list progress` block, or nothing
+// when no poller is wired to say which pgcopydb versions may run it.
+func (r *MigrationReconciler) progressGate() string {
+	if r.Progress == nil {
+		return ""
+	}
+	return r.Progress.GateScript()
+}
+
+// recordCloneProgress takes the copy counters out of a finished verify Job's
+// log. This is where a follow migration's status.progress comes from: the
+// worker owns its catalog until it exits, and then its pod is gone, so the
+// verify Job (own pod, same work dir, worker dead) is the one place left that
+// can count. Best effort in both directions: an absent or unparsable line
+// leaves the field empty, and nothing here can move the drain verdict.
+func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+	if m.Status.Progress != nil || r.Logs == nil {
+		return
+	}
+	tail := r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail)
+	for line := range strings.SplitSeq(tail, "\n") {
+		raw, found := strings.CutPrefix(line, verifyProgressPrefix)
+		if !found {
+			continue
+		}
+		cp, err := progress.ParseListProgress([]byte(raw))
+		if err != nil {
+			logf.FromContext(ctx).V(1).Info("verify Job progress line did not parse", "job", jobName, "error", err)
+			return
+		}
+		m.Status.Progress = cp
+		return
+	}
 }
 
 // reconcileDeletion routes deletion through cleanup for live migrations. The

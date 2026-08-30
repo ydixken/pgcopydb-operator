@@ -76,10 +76,13 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 	return p
 }
 
-// gateScript reads the pod's pgcopydb version and runs `list progress` only
+// GateScript reads the pod's pgcopydb version and runs `list progress` only
 // inside the case arm the allowlist rendered: any other version matches
-// nothing, prints nothing, and the poll stays shut.
-func (p *Poller) gateScript() string {
+// nothing, prints nothing, and the poll stays shut. Exported because the
+// drain-verification Job asks for the counters the same way, from its own pod
+// once the worker is gone (see buildVerifyJob): one allowlist, one renderer,
+// so the gate cannot drift between the two callers.
+func (p *Poller) GateScript() string {
 	return `v=$(pgcopydb --version | head -n 1)
 v=${v#` + versionPrefix + `}
 case "$v" in
@@ -103,7 +106,7 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 	if pod == "" {
 		return nil, nil
 	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", p.gateScript()})
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", p.GateScript()})
 	if err != nil {
 		// Catalogs still initializing, or the exec transport hiccuped.
 		return nil, nil

@@ -412,12 +412,14 @@ var _ = Describe("Migration Controller follow mode", func() {
 		cp, _ = poll.counts()
 		Expect(cp).To(BeZero(), "the progress poll must not run while the worker is alive")
 
-		// The worker exits: its catalog is nobody's, and the counters are
-		// taken then.
+		// Nor after it exits: a follow migration's counters come out of the
+		// verify Job's log, so nothing ever execs `list progress` into a pod
+		// of this migration's worker.
 		finishJob(ctx, name+"-run-1", true)
 		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
 		cp, _ = poll.counts()
-		Expect(cp).To(Equal(1))
+		Expect(cp).To(BeZero())
 	})
 
 	It("cuts over automatically once caught up", func() {
