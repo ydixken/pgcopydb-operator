@@ -184,5 +184,6 @@ Subtracting them gives the duration, which is the number to compare.
 `pgcopydb_migration_clone_copied_bytes` and `pgcopydb_migration_source_database_size_bytes` give you a rate to divide it into.
 [Monitoring](monitoring.md) has the full metric reference.
 
-For per-table detail, `pgcopydb list progress --summary --json` inside the worker's work directory reports per-step and per-table timings, which is the only way to answer which table was slow.
-Run it only against a finished migration's work volume, and not at all when the Migration used filters: every pgcopydb invocation writes to the catalog, so one landing while a worker is mid-cursor kills that worker, and `list progress` additionally overwrites a filtered work dir's stored filtering (both in the [upstream drafts](../research/upstream-issues.md)).
+For per-table detail, run `pgcopydb list progress --summary --json` against a finished Migration's work PVC (`<name>-work`) from a short-lived pod that mounts it, never with `kubectl exec` into a running worker: every pgcopydb invocation writes to the catalog, and one landing while a worker is mid-cursor kills that worker.
+It reports per-step and per-table timings, which is the only way to answer which table was slow.
+Skip it when the Migration used filters: `list progress` overwrites a filtered work dir's stored filtering, poisoning the directory for any later resume (both hazards in the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
