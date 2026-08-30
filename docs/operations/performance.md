@@ -148,6 +148,7 @@ So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the bigg
 
 On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a fifth of the clone's wall clock.
 The operator reports it as the `Finalizing` phase precisely because it looks like a stall and is not: the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
+[Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
 
 You can have that time back:
 

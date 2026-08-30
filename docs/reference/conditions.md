@@ -8,6 +8,52 @@ The condition types and reason strings the controller writes to `status.conditio
 kubectl wait --for=condition=Complete migration/shop --timeout=1h
 ```
 
+## Phases
+
+`status.phase` is the printer column: one word for what the migration is doing now.
+It is derived from the conditions and from what the worker is observably doing, and the conditions remain authoritative.
+Automation should wait on conditions, not on phase strings.
+
+| Phase | The operator is | Next |
+|---|---|---|
+| `Pending` | Accepted the object, not yet acted | `Validating` |
+| `Validating` | Materializing the spec and running the preflight Job | `Cloning`, or `Failed` |
+| `Cloning` | Running the worker: schema, then table data | `Finalizing`, `Streaming`, `Completed`, or `Failed` |
+| `Finalizing` | Past the data copy, finishing indexes, constraints and vacuum | `Streaming`, `Completed`, or `Failed` |
+| `Streaming` | Applying changes from the replication slot (live migrations) | `CutoverPending`, or `Failed` |
+| `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
+| `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
+| `Verifying` | Running the requested `pgcopydb compare` checks | `Completed`, or `Failed` |
+| `Completed` | Finished. Terminal | |
+| `Failed` | Finished badly. Terminal | |
+| `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
+
+### Inside `Cloning` and `Finalizing`
+
+pgcopydb does not run its steps in sequence.
+After the schema is in place it starts the table copy, index builds, constraint creation, large-object copy and vacuum **all at once**, and prints nothing between starting them and finishing them.
+So a single phase would cover the whole run and tell you nothing, which is why the copy and its tail are reported apart.
+
+| Sub-state | Phase | What is running | How it looks |
+|---|---|---|---|
+| Catalog and schema | `Cloning` | Source catalog queries, `pg_dump`, pre-data `pg_restore` | Seconds. The target barely grows |
+| Table data | `Cloning` | `tableJobs` COPY workers, plus index, constraint and vacuum workers on whatever has already finished | The bulk of the run. The target grows steadily |
+| The tail | `Finalizing` | Index builds, constraints, and vacuum on the tables that finished last | **The target stops growing** while work continues |
+| Post-data | `Finalizing` | Post-data `pg_restore`: foreign keys and the rest | Seconds |
+
+The tail is the one that surprises people.
+A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last, so a clone routinely ends as a single `VACUUM ANALYZE` running alone while every other worker sits idle.
+On a fixture where one table held 73% of the bytes, that tail was roughly a fifth of the wall clock.
+
+> [!important]
+> During `Finalizing` the target database stops growing, so anything derived from its size reads as finished while real work continues.
+> This is why `PgcopydbMigrationCloneStalled` matches `Cloning` alone: a long tail is not a stall.
+> [Performance tuning](../operations/performance.md) explains how to trade the vacuum away for the time.
+
+The phase is derived by asking the target which of the worker's own backends are active, which is a plain `pg_stat_activity` query and touches no pgcopydb catalog.
+Reading pgcopydb's catalog while the copy is writing it kills workers, so the operator does not do it during a clone.
+When the query cannot be answered the phase stays `Cloning`: not knowing is not evidence of finishing.
+
 ## Condition types
 
 Each type is named for what `True` means. Seven are normal-true (True is the desired state); `Failed` is abnormal-true (True means the migration ended in failure).
