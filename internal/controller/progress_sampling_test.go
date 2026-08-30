@@ -32,6 +32,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // fakeProgress scripts the sampler the way fakeSentinel scripts the
@@ -322,34 +323,111 @@ var _ = Describe("Migration Controller progress sampling", func() {
 var _ = Describe("Migration Controller clone stage", func() {
 	ctx := context.Background()
 
-	phaseFor := func(name string, copying, finalizing bool) v1beta1.MigrationPhase {
+	// start drives a fresh Migration to its first observation pass with a
+	// probe the spec scripts from there on.
+	start := func(name string) (*MigrationReconciler, *fakeProgress) {
 		GinkgoHelper()
+		fake := &fakeProgress{}
 		r := newReconciler()
-		r.Progress = &fakeProgress{copying: copying, finalizing: finalizing}
+		r.Progress = fake
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
-		return reconcileAndGet(ctx, r, name).Status.Phase
+		return r, fake
 	}
+
+	// sample scripts the next probe answer and runs one observation pass.
+	sample := func(r *MigrationReconciler, f *fakeProgress, name string, copying, finalizing bool) *v1beta1.Migration {
+		GinkgoHelper()
+		f.mu.Lock()
+		f.copying, f.finalizing = copying, finalizing
+		f.mu.Unlock()
+		return reconcileAndGet(ctx, r, name)
+	}
+
+	cloneReason := func(m *v1beta1.Migration) string {
+		GinkgoHelper()
+		c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+		Expect(c).NotTo(BeNil())
+		return c.Reason
+	}
+
+	It("stays Cloning while copy workers are busy, and records having seen them", func() {
+		const name = "mig-stage-copying"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := start(name)
+		m := sample(r, fake, name, true, false)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(cloneReason(m)).To(Equal(reasonCopyingData))
+	})
+
+	It("refuses Finalizing until the probe has seen the copy move", func() {
+		const name = "mig-stage-early-tail"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r, fake := start(name)
+		m := sample(r, fake, name, false, true)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning),
+			"a copy nobody ever saw running cannot already be in its tail")
+		Expect(cloneReason(m)).To(Equal(reasonCloneRunning))
+	})
 
 	It("reports Finalizing once only the tail is left", func() {
 		const name = "mig-stage-tail"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		Expect(phaseFor(name, false, true)).To(Equal(v1beta1.PhaseFinalizing))
+		r, fake := start(name)
+		Expect(sample(r, fake, name, true, false).Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(sample(r, fake, name, false, true).Status.Phase).To(Equal(v1beta1.PhaseFinalizing))
 	})
 
-	It("stays Cloning while copy workers are busy", func() {
-		const name = "mig-stage-copying"
-		defer removeMigration(ctx, name)
-		defer metrics.Forget(testNS, name)
-		Expect(phaseFor(name, true, false)).To(Equal(v1beta1.PhaseCloning))
-	})
-
-	It("stays Cloning when the probe knows nothing", func() {
+	It("keeps the phase the last answered sample left when the probe knows nothing", func() {
 		const name = "mig-stage-unknown"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		Expect(phaseFor(name, false, false)).To(Equal(v1beta1.PhaseCloning),
-			"an unreadable probe must not be read as either state")
+		r, fake := start(name)
+		sample(r, fake, name, true, false)
+		Expect(sample(r, fake, name, false, true).Status.Phase).To(Equal(v1beta1.PhaseFinalizing))
+		Expect(sample(r, fake, name, false, false).Status.Phase).To(Equal(v1beta1.PhaseFinalizing),
+			"an unreadable probe is evidence of nothing, least of all of going backwards")
+	})
+})
+
+// A retry resumes a migration where it stopped, so the phase it starts from is
+// read off the conditions. The case that used to lie: a worker dying during
+// the drain came back reported as Cloning, with the finished base copy marked
+// unfinished behind it.
+var _ = Describe("Migration Controller attempt phase", func() {
+	ctx := context.Background()
+
+	It("does not rewind the phase when an attempt fails after cutover started", func() {
+		const name = "mig-retry-after-cutover"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeSentinel{}
+		r := newReconciler()
+		r.Sentinel = fake
+		m := validMigration(name)
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+
+		// Caught up: the operator freezes the stream and the worker drains.
+		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN,
+			ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		Expect(reconcileAndGet(ctx, r, name).Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		// The pass after the freeze is the one that persists the endpos.
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+
+		// The worker dies mid-drain. Attempt 2 resumes that drain: the base
+		// copy is still done and the cutover is still under way.
+		finishJob(ctx, name+"-run-1", false)
+		reconcileAndGet(ctx, r, name)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 	})
 })

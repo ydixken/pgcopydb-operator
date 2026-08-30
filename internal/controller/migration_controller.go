@@ -38,6 +38,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // pollInterval is how often a running clone is re-checked (Job observation,
@@ -73,6 +74,14 @@ const (
 	// under the events API's 1KiB note limit: the full follow battery is
 	// ~620 bytes and must never truncate out of the audit trail.
 	remediatedNoteLen = 950
+)
+
+// The two CloneCompleted=False reasons a running attempt passes through.
+// startAttempt writes the first, the clone-stage probe promotes it to the
+// second, and that promotion is what lets the phase reach Finalizing.
+const (
+	reasonCloneRunning = "CloneRunning"
+	reasonCopyingData  = "CopyingData"
 )
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
@@ -381,14 +390,25 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // returns data. Plain clones never reach CloneCompleted while the worker
 // runs; finishClone takes their one sample after pgcopydb exits.
 func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
-	m.Status.Phase = v1beta1.PhaseCloning
 	// The copy and its tail look nothing alike from the outside: the copy runs
 	// every worker flat out, the tail narrows to index builds and a vacuum on
 	// the largest table, during which the target stops growing and a
 	// size-based estimate reads as finished. Report them apart so a watching
-	// human can tell a slow tail from a stall. Unknown leaves Cloning standing.
+	// human can tell a slow tail from a stall.
+	//
+	// Finalizing needs the copy seen running first: one sample that catches
+	// every copy worker between statements otherwise reports the tail with
+	// gigabytes still to move. A sample with no answer changes nothing.
 	if r.Progress != nil {
-		if _, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name); finalizing {
+		copying, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name)
+		switch {
+		case copying:
+			m.Status.Phase = v1beta1.PhaseCloning
+			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
+					"base copy running, copy workers connected to the target")
+			}
+		case finalizing && copySeen(m):
 			m.Status.Phase = v1beta1.PhaseFinalizing
 		}
 	}
@@ -439,6 +459,14 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		interval = 2 * pollInterval
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
+}
+
+// copySeen reports whether the clone-stage probe has caught this attempt's
+// copy moving data. The latch lives in the condition reason: startAttempt
+// resets it per attempt, and it survives an operator restart.
+func copySeen(m *v1beta1.Migration) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonCopyingData
 }
 
 // sampleProgress best-effort feeds the size gauges every pass (psql, no
@@ -615,9 +643,14 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 	}
 	m.Status.Attempts = attempt
 	m.Status.JobName = job.Name
-	m.Status.Phase = v1beta1.PhaseCloning
-	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneRunning",
-		fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
+	m.Status.Phase = attemptPhase(m)
+	// A finished base copy does not un-happen when the worker is restarted;
+	// only a copy still owed gets the fresh attempt's reason, which is also
+	// what clears the Finalizing latch (see copySeen).
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneRunning,
+			fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
+	}
 	if createErr == nil {
 		// AlreadyExists means an overlapping pass created this Job and
 		// announced the attempt; a second event would just be noise.
@@ -627,6 +660,21 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
+}
+
+// attemptPhase is where the next attempt picks up, read off the conditions
+// rather than assumed: every attempt after the first resumes the migration,
+// and one that has already cut over is not back at the base copy.
+func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
+	rep := m.Status.Replication
+	switch {
+	case rep != nil && sentinel.EndposSet(rep.Endpos),
+		meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete):
+		return v1beta1.PhaseCuttingOver
+	case meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionStreaming):
+		return v1beta1.PhaseStreaming
+	}
+	return v1beta1.PhaseCloning
 }
 
 // handleFailedJob either schedules the next resume attempt or fails the
