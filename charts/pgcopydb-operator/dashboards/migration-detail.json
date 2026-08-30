@@ -106,7 +106,7 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
+        "h": 3,
         "w": 4,
         "x": 0,
         "y": 1
@@ -244,7 +244,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
     },
     {
@@ -256,7 +260,7 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
+        "h": 3,
         "w": 5,
         "x": 4,
         "y": 1
@@ -563,7 +567,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
-          "valueSize": 16
+          "valueSize": 20
         }
       },
       "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it."
@@ -577,8 +581,8 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 3,
+        "h": 3,
+        "w": 2,
         "x": 9,
         "y": 1
       },
@@ -639,7 +643,11 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 20
+        }
       }
     },
     {
@@ -651,9 +659,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 3,
-        "x": 12,
+        "h": 3,
+        "w": 2,
+        "x": 11,
         "y": 1
       },
       "targets": [
@@ -702,7 +710,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        }
       }
     },
     {
@@ -714,9 +725,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 15,
+        "h": 3,
+        "w": 3,
+        "x": 13,
         "y": 1
       },
       "targets": [
@@ -765,7 +776,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        }
       },
       "description": "Keeps counting after completion; Completed at marks the end."
     },
@@ -778,7 +792,7 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 4,
+        "h": 3,
         "w": 5,
         "x": 19,
         "y": 1
@@ -829,7 +843,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        }
       }
     },
     {
@@ -841,10 +858,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 5,
+        "h": 4,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 4
       },
       "targets": [
         {
@@ -973,7 +990,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 8
       },
       "panels": []
     },
@@ -986,10 +1003,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 11
+        "y": 13
       },
       "targets": [
         {
@@ -1057,10 +1074,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 11
+        "y": 13
       },
       "targets": [
         {
@@ -1128,10 +1145,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 16,
+        "h": 4,
+        "w": 24,
         "x": 0,
-        "y": 19
+        "y": 9
       },
       "targets": [
         {
@@ -1231,10 +1248,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
-        "w": 8,
+        "h": 3,
+        "w": 3,
         "x": 16,
-        "y": 19
+        "y": 1
       },
       "targets": [
         {
@@ -1273,7 +1290,7 @@
                   "index": 0
                 },
                 "-1": {
-                  "text": "No ETA in this phase",
+                  "text": "No ETA",
                   "index": 3
                 }
               }
@@ -1322,10 +1339,10 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
-          "valueSize": 32
+          "valueSize": 20
         }
       },
-      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA in this phase instead of a clamp that would look like a real number."
+      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running."
     },
     {
       "id": 13,
@@ -1336,7 +1353,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 20
       },
       "panels": []
     },
@@ -1349,10 +1366,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 21
       },
       "targets": [
         {
@@ -1438,10 +1455,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 21
       },
       "targets": [
         {
@@ -1520,7 +1537,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 28
       },
       "targets": [
         {
@@ -1582,7 +1599,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 28
       },
       "targets": [
         {
@@ -1630,7 +1647,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 48
+        }
       },
       "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done."
     },
@@ -1643,7 +1663,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 35
       },
       "panels": []
     },
@@ -1656,10 +1676,10 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 5,
-        "w": 8,
+        "h": 3,
+        "w": 24,
         "x": 0,
-        "y": 44
+        "y": 36
       },
       "targets": [
         {
@@ -1723,7 +1743,10 @@
         "justifyMode": "auto",
         "wideLayout": true,
         "percentChangeColorMode": "standard",
-        "showPercentChange": false
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 28
+        }
       },
       "description": "pgcopydb compare result; n/a until a verification ran."
     }
