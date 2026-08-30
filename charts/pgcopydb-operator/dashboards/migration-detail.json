@@ -1161,13 +1161,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "((clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1)) / 60) and on (namespace, name) (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\", phase=\"Cloning\"} == 1) or sum by (namespace, name) (-1 * (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))",
+          "expr": "sum by (namespace, name) (clamp_min(pgcopydb_migration_source_database_size_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}, 0) / clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 1) / 60) and on (namespace, name) (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\", phase=\"Cloning\"} == 1) or sum by (namespace, name) (-1 * (pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "instant": true,
-          "range": false
+          "range": false,
+          "legendFormat": "{{name}}"
         }
       ],
       "fieldConfig": {
