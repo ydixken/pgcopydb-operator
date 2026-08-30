@@ -37,6 +37,64 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
+// Placement is configuration, and configuration that stops working fails
+// silently: the suite would still pass on a single node, just slower and over
+// loopback instead of the wire. Deliberately its own container rather than a
+// spec inside the Ordered one below: a failure in an Ordered container skips
+// every spec after it, and a check on where pods landed must never be able to
+// take the functional suite down with it. Unlabeled on purpose, so it runs in
+// every functional run and never under task e2e:chaos, which deletes instance
+// pods deliberately.
+var _ = Describe("Fixture placement", func() {
+	// The binding check. It reads what was rendered onto the pods rather than
+	// where they ended up, which makes it namespaced (so it runs under the
+	// confined CI identity, never skipped) and deterministic (no scheduler in
+	// the loop). Drop the requests or the affinity block and this fails at
+	// once. The node-count spec below would not notice: CNPG defaults to a
+	// preferred hostname anti-affinity on its own, so the fixtures would still
+	// spread and that spec would still pass.
+	It("configures every fixture pod with anti-affinity and resource requests", func() {
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			for _, pod := range instancePods(cluster) {
+				Expect(spreadsOverHostname(&pod.Spec)).To(BeTrue(),
+					"an instance of CNPG cluster %s carries no preferred hostname"+
+						" anti-affinity, so its instances may share a node", cluster)
+				Expect(requestsCPUAndMemory(&pod.Spec)).To(BeTrue(),
+					"an instance of CNPG cluster %s requests no cpu or memory, so the"+
+						" scheduler cannot see it and every pod scores the same node highest", cluster)
+			}
+		}
+		seed := seedPod()
+		Expect(spreadsOverHostname(&seed.Spec)).To(BeTrue(),
+			"the seed worker carries no anti-affinity away from the fixture primaries")
+		Expect(requestsCPUAndMemory(&seed.Spec)).To(BeTrue(),
+			"the seed worker requests no cpu or memory")
+	})
+
+	// The outcome check, and only a sanity check: it proves the cluster is
+	// shaped the way the fixtures assume, not that this suite configured
+	// anything. At least, never exactly: the node set is read now while the
+	// pods were placed in BeforeSuite, so a node cordoned or gone NotReady in
+	// between lowers the expectation without moving a single pod.
+	It("spreads each CNPG fixture across as many nodes as the cluster has", func() {
+		usable := schedulableNodes()
+		if usable == 0 {
+			Skip("this identity is confined to the fixture namespaces and may not list" +
+				" nodes, so the expected spread cannot be computed here; task e2e checks it")
+		}
+		want := min(usable, cnpgInstances)
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			// Compare counts, never the slice. This repository is public and
+			// its CI logs are public with it, and a failed matcher would print
+			// the node names it matched against.
+			got := len(instanceNodes(cluster))
+			Expect(got).To(BeNumerically(">=", want),
+				"CNPG cluster %s occupies %d nodes, want at least %d: instances are"+
+					" co-located and the migration never leaves the node", cluster, got, want)
+		}
+	})
+})
+
 // The scenarios share the two CNPG fixtures and run in order: later ones
 // build on the populated target that earlier ones leave behind.
 var _ = Describe("Migration", Ordered, func() {
@@ -49,20 +107,6 @@ var _ = Describe("Migration", Ordered, func() {
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
 			"pgcopydb replication origin left on the target by an earlier container")
 		resetTargetObjects()
-	})
-
-	// Placement is configuration, and configuration that stops working fails
-	// silently: the suite would still pass on a single node, just slower and
-	// over loopback instead of the wire. Assert it explicitly, scaled to the
-	// cluster actually running the suite so a smaller one does not fail.
-	It("spreads each CNPG fixture across as many nodes as the cluster has", func() {
-		want := min(schedulableNodes(), cnpgInstances)
-		for _, cluster := range []string{sourceCluster, targetCluster} {
-			nodes := instanceNodes(cluster)
-			Expect(nodes).To(HaveLen(want),
-				"CNPG cluster %s occupies %d nodes, want %d: instances are co-located"+
-					" and the migration never leaves the node", cluster, len(nodes), want)
-		}
 	})
 
 	It("completes a fresh clone with matching rows and sequences", func() {

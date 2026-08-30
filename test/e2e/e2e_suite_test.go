@@ -585,20 +585,20 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 			// own operand default.
 			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
 			"storage":   storage,
-			// Spelled out rather than left to the CNPG defaults, because the
-			// whole point of cnpgInstances > 1 here is one instance per node:
-			// a default that drifts would silently return the suite to a
-			// single-node run and nothing would fail.
+			// These three are what CNPG already defaults to, so they change
+			// nothing today. They are here so an upstream default that moves
+			// cannot quietly return the fixtures to a single node: the whole
+			// point of cnpgInstances > 1 is one instance per node.
 			"affinity": map[string]any{
 				"enablePodAntiAffinity": true,
 				"podAntiAffinityType":   "preferred",
 				"topologyKey":           corev1.LabelHostname,
 			},
-			// Requests, no limits. Their job is to make the pod visible to the
-			// scheduler: a pod that requests nothing scores identically on
-			// every node, so the least-allocated node wins every decision and
-			// the whole suite lands on it. The values are a floor for
-			// accounting, not a budget, so seeding is never throttled.
+			// Requests, no limits, and they are not what spreads these pods:
+			// the anti-affinity above does that. They are here so the fixtures
+			// cost the scheduler something, which is what stops the workers
+			// that have no sibling to repel from all picking the same
+			// least-allocated node. A floor for accounting, not a budget.
 			"resources": map[string]any{
 				"requests": map[string]any{"cpu": "250m", "memory": "512Mi"},
 			},
@@ -923,12 +923,20 @@ func ensureFixtureStorage() {
 }
 
 // longhornPresent reports whether this cluster runs Longhorn, by asking for
-// the CRD the capacity check reads.
+// the CRD the capacity check reads. A missing CRD is the only soft answer:
+// being denied the read is not the same as the cluster not having Longhorn,
+// and quietly treating it as absent would move the fixtures onto the default
+// class and recreate both CNPG clusters to get there. Pin E2E_STORAGE_CLASS
+// instead, which is what a confined identity is expected to do.
 func longhornPresent() bool {
 	GinkgoHelper()
 	err := k8sClient.List(ctx, longhornNodes())
 	if apimeta.IsNoMatchError(err) {
 		return false
+	}
+	if apierrors.IsForbidden(err) {
+		Fail("this identity may not read nodes.longhorn.io, so the fixture StorageClass" +
+			" cannot be chosen here; set E2E_STORAGE_CLASS to pin it")
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to list nodes.longhorn.io")
 	return true
@@ -1062,10 +1070,9 @@ func resetTargetReplication() {
 		" WHERE roname LIKE 'pgcopydb%'")
 }
 
-// instanceNodes returns the distinct node names carrying the cluster's
-// instances. A set, not a count of pods: two instances on one node is exactly
-// the failure the caller is looking for.
-func instanceNodes(cluster string) []string {
+// instancePods returns the CNPG instance pods of one fixture cluster. A
+// namespaced read, so it works under the confined CI identity.
+func instancePods(cluster string) []corev1.Pod {
 	GinkgoHelper()
 	pods := &corev1.PodList{}
 	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
@@ -1073,10 +1080,67 @@ func instanceNodes(cluster string) []string {
 		labelCNPGPodRole: "instance",
 	})).To(Succeed(), "failed to list instances of CNPG cluster %s", cluster)
 	Expect(pods.Items).NotTo(BeEmpty(), "CNPG cluster %s has no instance pods", cluster)
+	return pods.Items
+}
+
+// seedPod returns the seed Job's pod, the dependable witness for what
+// fixtureAntiAffinity renders onto a suite-created worker: BeforeSuite always
+// creates it and a completed pod keeps its spec.
+func seedPod() corev1.Pod {
+	GinkgoHelper()
+	pods := &corev1.PodList{}
+	Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+		client.MatchingLabels{"batch.kubernetes.io/job-name": seedJobName})).
+		To(Succeed(), "failed to list the seed Job's pods")
+	Expect(pods.Items).NotTo(BeEmpty(), "the seed Job left no pod behind")
+	return pods.Items[0]
+}
+
+// spreadsOverHostname reports whether the pod carries a preferred pod
+// anti-affinity keyed on the hostname. Preferred and not required is part of
+// the contract: a required term wedges a small cluster and invites the
+// descheduler to evict a runner mid-migration.
+func spreadsOverHostname(spec *corev1.PodSpec) bool {
+	if spec.Affinity == nil || spec.Affinity.PodAntiAffinity == nil {
+		return false
+	}
+	for _, t := range spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution {
+		if t.PodAffinityTerm.TopologyKey == corev1.LabelHostname {
+			return true
+		}
+	}
+	return false
+}
+
+// requestsCPUAndMemory reports whether every container asks the scheduler for
+// something. Zero requests is what made the whole suite pile onto one node.
+func requestsCPUAndMemory(spec *corev1.PodSpec) bool {
+	for _, c := range spec.Containers {
+		if c.Resources.Requests.Cpu().IsZero() || c.Resources.Requests.Memory().IsZero() {
+			return false
+		}
+	}
+	return len(spec.Containers) > 0
+}
+
+// instanceNodes returns the distinct node names carrying the cluster's
+// instances. A set, not a count of pods: two instances on one node is exactly
+// the failure the caller is looking for.
+func instanceNodes(cluster string) []string {
+	GinkgoHelper()
+	pods := instancePods(cluster)
 	seen := map[string]bool{}
 	var nodes []string
-	for i := range pods.Items {
-		if n := pods.Items[i].Spec.NodeName; n != "" && !seen[n] {
+	for i := range pods {
+		pod := &pods[i]
+		// A pod on its way out still carries the node it used to run on, and
+		// counting it would report a replacement as co-location. Skip anything
+		// terminating or not running, so a missing instance stays a missing
+		// instance rather than becoming a placement bug.
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		if n := pod.Spec.NodeName; n != "" && !seen[n] {
 			seen[n] = true
 			nodes = append(nodes, n)
 		}
@@ -1090,10 +1154,19 @@ func instanceNodes(cluster string) []string {
 // fixtures carry no tolerations, so any NoSchedule or NoExecute taint rules a
 // node out just as cordoning does; counting those in would fail the assertion
 // on a cluster where the pods had nowhere else to go.
+//
+// Zero means the answer is unknowable rather than "no nodes": in CI the suite
+// runs as an identity confined to the fixture namespaces, which may not read
+// anything cluster scoped. The caller Skips on zero. Widening that identity to
+// satisfy an assertion would trade a real security boundary for a test.
 func schedulableNodes() int {
 	GinkgoHelper()
 	nodes := &corev1.NodeList{}
-	Expect(k8sClient.List(ctx, nodes)).To(Succeed(), "failed to list nodes")
+	err := k8sClient.List(ctx, nodes)
+	if apierrors.IsForbidden(err) {
+		return 0
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to list nodes")
 	n := 0
 	for i := range nodes.Items {
 		if usableNode(&nodes.Items[i]) {
@@ -1137,7 +1210,11 @@ func primaryPod(cluster string) string {
 			labelCNPGCluster: cluster,
 			labelCNPGRole:    rolePrimary,
 		})).To(Succeed())
-		g.Expect(pods.Items).To(HaveLen(1), "CNPG cluster %s has no single primary", cluster)
+		// The count, never the slice: a failed HaveLen prints the pods it
+		// matched, node names and all, and this repository's CI logs are
+		// public. Bound to a variable so ginkgolinter does not rewrite it back.
+		found := len(pods.Items)
+		g.Expect(found).To(Equal(1), "CNPG cluster %s has %d primaries, want 1", cluster, found)
 		name = pods.Items[0].Name
 	}, primaryTimeout, 2*time.Second).Should(Succeed())
 	return name
