@@ -141,6 +141,10 @@ const (
 	// seedImage only needs a psql client; the CNPG operand image has one and
 	// is already pulled on any cluster running CNPG fixtures.
 	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
+	// seedLogTail is generous because the log is the seed's profile, not just
+	// a failure hint: the DDL alone echoes a line per object before the first
+	// table is loaded.
+	seedLogTail = 400
 	// ephemeralStorageClass is the suite-owned Longhorn class the fixture
 	// volumes bind to: one replica, reclaim Delete, so throwaway volumes that
 	// CNPG has already replicated do not triple themselves again underneath.
@@ -913,7 +917,8 @@ func serverMajor(cluster string) int {
 // a Kubernetes Job (psql from the CNPG operand image, fixture SQL mounted
 // from a ConfigMap). A Job instead of exec: it survives suite interruptions,
 // retries transient DB unavailability (backoffLimit 2), and leaves its log
-// behind. On failure the log tail lands in the Ginkgo output.
+// behind. The log tail lands in the Ginkgo output either way: on failure as
+// the diagnosis, on success as the seed's per-phase profile.
 func runSeedJob() {
 	GinkgoHelper()
 	schemaSQL, err := fixturesFS.ReadFile("fixtures/schema.sql")
@@ -940,17 +945,26 @@ func runSeedJob() {
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 	Expect(k8sClient.Create(ctx, buildSeedJob())).To(Succeed(), "failed to create the seed Job")
+	started := time.Now()
 	Eventually(func(g Gomega) {
 		job := &batchv1.Job{}
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: seedJobName}, job)).To(Succeed())
 		for _, c := range job.Status.Conditions {
 			if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
-				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs())
+				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs(seedLogTail))
 				StopTrying("seed Job exhausted its retries: " + c.Message).Now()
 			}
 		}
 		g.Expect(job.Status.Succeeded).To(BeNumerically(">=", 1), "seed Job still running")
 	}, seedTimeout, 10*time.Second).Should(Succeed())
+
+	// The log carries a \timing line per table, so on success it is the seed's
+	// per-phase profile and belongs in the run's output. Without it the only
+	// way to learn where the seed spends its minutes is to sample a live
+	// cluster while one happens to be running (issue #146).
+	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", seedJobLogs(seedLogTail))
+	AddReportEntry("seed wall clock", fmt.Sprintf("%s at scale %s (profile %s)",
+		time.Since(started).Round(time.Second), scaleArg(), seedProfile))
 }
 
 func buildSeedJob() *batchv1.Job {
@@ -997,11 +1011,11 @@ func buildSeedJob() *batchv1.Job {
 	}
 }
 
-// seedJobLogs returns the seed Job's log tail for failure diagnostics.
-// kubectl for the same reason psql uses it: current context, no hand-rolled
-// log streaming.
-func seedJobLogs() string {
-	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName, "--tail=100").CombinedOutput()
+// seedJobLogs returns the last lines of the seed Job's log. kubectl for the
+// same reason psql uses it: current context, no hand-rolled log streaming.
+func seedJobLogs(lines int) string {
+	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName,
+		"--tail="+strconv.Itoa(lines)).CombinedOutput()
 	return string(out)
 }
 

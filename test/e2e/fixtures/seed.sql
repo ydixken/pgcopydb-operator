@@ -24,6 +24,11 @@ SELECT EXISTS (
 -- setting.
 SELECT set_config('e2e.scale', :'scale', false);
 
+-- Each CALL below is one table. Timing them is what turns the Job log into a
+-- per-phase profile of the seed, which is otherwise only obtainable by
+-- sampling a live cluster (issue #146).
+\timing on
+
 \echo seed: customers
 CALL e2e_seed_batches($sql$
     INSERT INTO customers (id, name)
