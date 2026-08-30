@@ -46,7 +46,7 @@ const defaultMaxCatchupLag = int64(16 << 20)
 // SentinelOps drives a running follow migration; nil disables follow handling
 // (envtest injects a fake).
 type SentinelOps interface {
-	Read(ctx context.Context, namespace, jobName string) (*sentinel.State, error)
+	Read(ctx context.Context, namespace, jobName, slotName string) (*sentinel.State, error)
 	SetEndposCurrent(ctx context.Context, namespace, jobName string) (string, error)
 	NudgeEndpos(ctx context.Context, namespace, jobName string) error
 }
@@ -96,14 +96,17 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Mi
 }
 
 // reconcileFollowRunning handles the streaming and cutover phases while the
-// worker Job runs. The sentinel sample is best effort: no sample keeps the
-// previous status, exactly like progress polling.
-func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string) {
+// worker Job runs. The sample is best effort: no sample keeps the previous
+// status, exactly like progress polling. cloneDone is the caller's reading of
+// the base copy (the worker's own log markers); until it is true the stream
+// is only reported, never acted on.
+func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone bool) {
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
 		return
 	}
-	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName)
+	slot := effectiveSlotName(m)
+	st, err := r.Sentinel.Read(ctx, m.Namespace, jobName, slot)
 	if err != nil {
 		log.V(1).Info("sentinel read failed", "error", err)
 		return
@@ -111,14 +114,17 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	if st == nil {
 		return
 	}
-	m.Status.Replication = st.ToStatus(effectiveSlotName(m))
-	if !st.ApplyEnabled {
+	if prev := m.Status.Replication; prev != nil {
+		// Endpos is no longer read back from the worker: the operator set it
+		// and its own status is where it lives now.
+		st.Endpos = prev.Endpos
+	}
+	m.Status.Replication = st.ToStatus(slot)
+	if !cloneDone {
 		// Base copy still running; prefetch streams in the background.
 		return
 	}
 
-	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
-		"base copy finished, replaying changes")
 	r.setCondition(m, v1beta1.ConditionStreaming, metav1.ConditionTrue, "Replaying",
 		"logical replication is applying changes")
 	m.Status.Phase = v1beta1.PhaseStreaming
@@ -145,6 +151,9 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "CutoverRetry", "Cutover",
 				"setting endpos failed, retrying: %s", err.Error())
 			return
+		}
+		if sentinel.EndposSet(lsn) {
+			m.Status.Replication.Endpos = lsn
 		}
 		m.Status.Phase = v1beta1.PhaseCuttingOver
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CutoverStarted", "Cutover",
@@ -176,6 +185,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // loudly with the slot intact, so the data stays recoverable (at the
 // documented cost of WAL retention on the source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	// The only moment a follow migration's copy counters may be read: while
+	// the worker ran, no pgcopydb command could touch its catalog (see
+	// observeRunningJob), and now it is nobody's. Same best-effort caveat as
+	// finishClone, and the same reason it may find nothing to sample.
+	r.sampleCloneProgress(ctx, m, m.Status.JobName)
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
 	m.Status.Phase = v1beta1.PhaseCuttingOver
 

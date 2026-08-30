@@ -145,11 +145,12 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Logs = cloneDoneLogs()
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
 
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		reconcileAndGet(ctx, r, name) // caught up, Automatic: endpos set
 		Expect(fake.endposSet).To(BeTrue())
 
@@ -253,6 +254,7 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Logs = cloneDoneLogs()
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -260,13 +262,13 @@ var _ = Describe("Migration Controller resilience", func() {
 		// 8KiB behind: far below the 16Mi default, above the 1Ki spec value.
 		// Only the custom threshold explains a CaughtUp=False here.
 		const head = "0/4000"
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: head, ReplayLSN: "0/2000", SourceHead: head, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: "0/2000", SourceHead: head, Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 		Expect(meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 
 		// 256 bytes behind: under the custom threshold.
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: head, ReplayLSN: "0/3F00", SourceHead: head, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: head, ReplayLSN: "0/3F00", SourceHead: head, Endpos: sentinel.ZeroLSN}
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
@@ -282,6 +284,7 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		r := newReconciler()
 		r.Sentinel = fake
+		r.Logs = cloneDoneLogs()
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -294,7 +297,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(m.Status.Replication).To(BeNil())
 		fake.readErr = nil
 
-		fake.state = &sentinel.State{ApplyEnabled: true, WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
 		fresh := getM(name)
 		fresh.Spec.Cutover.Approved = true
 		Expect(k8sClient.Update(ctx, fresh)).To(Succeed())

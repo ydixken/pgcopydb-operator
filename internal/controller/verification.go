@@ -91,9 +91,9 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 // reads succeeded, so it must stay idempotent.
 func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
-		// The one progress sample a plain clone gets: the poll is quiesced
-		// while pgcopydb writes its catalogs (see observeRunningJob), and only
-		// now, with the worker exited, are they quiet. Best effort: the pod
+		// The one progress sample a plain clone gets: no pgcopydb command may
+		// run against a live worker (see observeRunningJob), and only now,
+		// with it exited, is its catalog nobody's. Best effort: the pod
 		// usually leaves Running along with the Job, and then there is nothing
 		// to sample, which is acceptable for a finished clone.
 		r.sampleCloneProgress(ctx, m, m.Status.JobName)

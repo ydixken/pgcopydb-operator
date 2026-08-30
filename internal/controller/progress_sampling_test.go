@@ -119,9 +119,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 	migLabels := func(name string) map[string]string {
 		return map[string]string{"namespace": testNS, "name": name}
 	}
-	// The catalog poll runs mid-attempt only on follow migrations past
-	// CloneCompleted; with no log reader wired (as here) the transition is
-	// unobservable and the poll stays on, mirroring the sentinel fallback.
+	// The catalog poll runs mid-attempt only on a follow migration past
+	// CloneCompleted, which the operator reads off the worker log, so these
+	// specs wire a log reader that has already logged the end of the copy.
 	followMigration := func(name string) *v1beta1.Migration {
 		m := validMigration(name)
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
@@ -143,10 +143,16 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		r := newReconciler()
 		r.Progress = fake
+		r.Logs = cloneDoneLogs()
 		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
+		// While the worker runs only the psql size sample may go out; the
+		// counters wait for it to exit.
 		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(3)))
 		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(400)))
@@ -164,24 +170,38 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 	})
 
-	It("keeps the previous sample when the poller returns none", func() {
+	It("retries the poll until a sample lands, then stops asking", func() {
 		const name = "mig-progress-keep"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 2}}
+		// Gate shut on the first try (pod restarting, version off the
+		// allowlist): no sample, nothing written, and the next pass retries.
+		fake := &fakeProgress{}
 		r := newReconciler()
 		r.Progress = fake
+		r.Logs = cloneDoneLogs()
 		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-run-1", true)
 
-		// Gate shut (pod restarting, version off the allowlist): no sample.
-		fake.mu.Lock()
-		fake.cp = nil
-		fake.mu.Unlock()
 		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		cp, _ := fake.counts()
+		Expect(cp).To(Equal(1))
+
+		fake.mu.Lock()
+		fake.cp = &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 2}
+		fake.mu.Unlock()
+		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
+
+		// The sample landed and the counters are final: further passes stop
+		// asking.
+		reconcileAndGet(ctx, r, name)
+		cp, _ = fake.counts()
+		Expect(cp).To(Equal(2))
 	})
 
 	It("passes despite sampler errors", func() {
@@ -191,18 +211,25 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		fake := &fakeProgress{cpErr: errors.New("exec wedged"), sizesErr: errors.New("psql refused")}
 		r := newReconciler()
 		r.Progress = fake
+		r.Logs = cloneDoneLogs()
 		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// reconcileAndGet already asserts a nil reconcile error.
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
-		Expect(m.Status.Progress).To(BeNil())
 		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
 		Expect(found).To(BeFalse())
+
+		// The poll's own error, on the finish path where it runs, is just as
+		// absorbing: no sample, no condition, no failed pass.
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
 	})
 
-	It("quiesces the catalog poll until the base copy is done", func() {
+	It("never polls the catalog while the worker is alive", func() {
 		const name = "mig-progress-quiesce"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
@@ -212,34 +239,37 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		r := newReconciler()
 		r.Progress = fake
-		// A log reader is wired, so the fallback above does not apply: the
-		// poll must wait for the clone-done marker.
-		const ts = "2026-08-28T10:00:00.000000000Z "
-		logs := &fakeLogs{tsOut: ts +
-			`{"error_severity":"INFO","message":"STEP 10: restore the post-data section to the target database"}` + "\n"}
+		logs := copyingLogs()
 		r.Logs = logs
 		Expect(k8sClient.Create(ctx, followMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// Copy still running (step banners only in the log): the sizes flow
-		// (psql, no catalog), the catalog poll does not.
+		// (psql, no catalog), the poll does not.
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
 		cp, sizes := fake.counts()
 		Expect(cp).To(BeZero())
 		Expect(sizes).To(Equal(1))
 
-		// The worker logs the clone-done marker: the poll starts and the
-		// sizes keep flowing.
-		logs.tsOut += ts +
-			`{"error_severity":"INFO","message":"Updating the pgcopydb.sentinel to enable applying changes"}` + "\n"
+		// The worker logs the clone-done marker. The copy is over, but the
+		// worker is not: it streams changes now, and its catalog stays off
+		// limits. Only the sizes keep flowing.
+		logs.tsOut += cloneDoneLine
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(m.Status.Progress).To(BeNil())
+		cp, sizes = fake.counts()
+		Expect(cp).To(BeZero(), "the copy being done does not make the worker's catalog safe to open")
+		Expect(sizes).To(Equal(2))
+
+		// The worker exits: now the counters can be read.
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(5)))
-		cp, sizes = fake.counts()
+		cp, _ = fake.counts()
 		Expect(cp).To(Equal(1))
-		Expect(sizes).To(Equal(2))
 	})
 
 	It("gives a plain clone its one sample when the worker succeeds", func() {
