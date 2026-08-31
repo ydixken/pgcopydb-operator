@@ -31,7 +31,7 @@ ARG YAMLLINT_VERSION=1.38.0
 # buildah is here because this image is what builds the next one, and a job
 # that had to apt-get it first would pay that on every rebuild. uidmap goes
 # with it: buildah runs rootless as uid 1001 and needs newuidmap to map the
-# subuid range the base image already grants that user.
+# subordinate id range the base image already grants that user.
 RUN apt-get update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         make gcc libc6-dev gh postgresql-client python3-pip pipx buildah uidmap \
@@ -45,6 +45,16 @@ RUN apt-get update -qq \
 RUN pip install --no-cache-dir --break-system-packages \
         "yamllint==${YAMLLINT_VERSION}" \
         mkdocs-material==9.7.7
+
+# Only newuidmap and newgidmap may write a subordinate id map, and the job runs
+# as uid 1001 holding no capabilities. Granting them here rather than leaving it
+# to the package means the image is ready to build the next one without a job
+# having to elevate anything. File capabilities rather than the setuid bit: the
+# narrower grant, and the container's bounding set carries SETUID, SETGID and
+# SETFCAP with NoNewPrivs 0, which is what makes the kernel honour them.
+RUN setcap cap_setuid+ep /usr/bin/newuidmap \
+    && setcap cap_setgid+ep /usr/bin/newgidmap \
+    && getcap /usr/bin/newuidmap /usr/bin/newgidmap
 
 WORKDIR /tmp/build
 # The two versions this file deliberately does not own. Copying the files in

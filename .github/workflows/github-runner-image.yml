@@ -58,6 +58,19 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq buildah uidmap
           fi
+          # Rootless buildah maps a range of subordinate ids, and only
+          # newuidmap and newgidmap may write those maps. As uid 1001 the job
+          # holds no capabilities at all, so without this buildah warns
+          # "should be setgid or have filecaps setgid", falls back to mapping
+          # one id, and then cannot extract a base layer that owns files as
+          # other users. File capabilities rather than the setuid bit, because
+          # they are the narrower grant, and they work here: the container's
+          # bounding set carries SETUID, SETGID and SETFCAP, and NoNewPrivs is
+          # 0, which is what decides whether the kernel honours them at all.
+          for pair in newuidmap:cap_setuid newgidmap:cap_setgid; do
+            bin=/usr/bin/${pair%:*}
+            [ -u "$bin" ] || sudo setcap "${pair#*:}+ep" "$bin"
+          done
 
       - id: meta
         # A date tag so a bad week can be rolled back to a named image, and
