@@ -45,7 +45,7 @@ FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:e37d2bd4dd10b7ed7b415555
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
-FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 # DL3008: apt versions deliberately float within their majors (PGDG rotates
 # point releases); the version canary below fails the build on a major drift.

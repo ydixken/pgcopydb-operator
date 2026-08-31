@@ -27,8 +27,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Check the CRD reference is current
@@ -40,16 +40,16 @@ jobs:
           bin/crd-ref-docs --source-path=api/v1beta1 --config=hack/crd-ref-docs.yaml \
             --renderer=markdown --output-path=docs/reference/api.md
           git diff --exit-code docs/reference/api.md
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - run: pip install mkdocs-material==9.7.7
       - name: Build the site
         # --strict turns warnings (broken links, orphaned pages) into errors.
         run: mkdocs build --strict
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

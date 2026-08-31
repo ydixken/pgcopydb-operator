@@ -220,11 +220,8 @@ var (
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
-// is overridable with E2E_OPERATOR_TAG. v0.4.0 is the first Apache-2.0 release
-// and the first with the slimmed runner: perl, util-linux, login and gzip are
-// gone, since a migration never executes them and Debian ships no fixed version
-// for what they carry. Controller behaviour is unchanged from v0.3.0.
-var operatorTag = "v0.5.0"
+// can be overridden with E2E_OPERATOR_TAG. v0.11.3 is the stable baseline.
+var operatorTag = "v0.11.3"
 
 // runnerTag is the tag for the worker image. It defaults to the same release
 // as the manager and is overridable with E2E_RUNNER_TAG so an unreleased
@@ -1374,8 +1371,7 @@ func psql(cluster, sql string) string {
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	out, err := psqlDBErr(cluster, db, sql)
-	var f *psqlFailure
-	if errors.As(err, &f) {
+	if f, ok := errors.AsType[*psqlFailure](err); ok {
 		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
 	}
 	// psqlDBErr today only ever returns nil or *psqlFailure, but any other
@@ -1467,9 +1463,8 @@ func psqlDBErrWith(
 			)
 			break
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			lastStderr = string(exitErr.Stderr)
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			lastStderr = string(ee.Stderr)
 		}
 		if !transientExecError(lastStderr) {
 			break

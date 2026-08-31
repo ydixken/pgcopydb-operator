@@ -23,7 +23,10 @@ limitations under the License.
 package buildconfig
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -37,6 +40,8 @@ const (
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
 	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
+	workflowDir       = "../../.github/workflows"
+	ciWorkflow        = "../../.github/workflows/ci.yml"
 	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
 	chartReadme       = "../../charts/pgcopydb-operator/README.md"
 	runnerReadme      = "../../images/runner/README.md"
@@ -44,7 +49,11 @@ const (
 	mainTest          = "../../cmd/main_test.go"
 	pollerTest        = "../../internal/progress/poller_test.go"
 	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
+	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
 )
+
+const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
+	"LicenseRef-scancode-google-patent-license-golang"
 
 func read(t *testing.T, path string) string {
 	t.Helper()
@@ -192,17 +201,190 @@ func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
 }
 
 type workflowStep struct {
+	Name string `json:"name"`
 	Uses string `json:"uses"`
+	If   string `json:"if"`
 	With struct {
-		Context   string `json:"context"`
-		Platforms string `json:"platforms"`
+		AllowLicenses  string `json:"allow-licenses"`
+		Context        string `json:"context"`
+		FailOnScopes   string `json:"fail-on-scopes"`
+		FailOnSeverity string `json:"fail-on-severity"`
+		Platforms      string `json:"platforms"`
 	} `json:"with"`
 }
 
+type workflowJob struct {
+	Needs json.RawMessage `json:"needs"`
+	If    string          `json:"if"`
+	Uses  string          `json:"uses"`
+	Steps []workflowStep  `json:"steps"`
+}
+
 type workflow struct {
-	Jobs map[string]struct {
-		Steps []workflowStep `json:"steps"`
-	} `json:"jobs"`
+	Jobs map[string]workflowJob `json:"jobs"`
+}
+
+func TestReleasePromotionWaitsForCandidateChecks(t *testing.T) {
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, releaseWorkflow)), &wf); err != nil {
+		t.Fatalf("parse release.yml: %v", err)
+	}
+
+	promote, ok := wf.Jobs["promote"]
+	if !ok {
+		t.Fatal("release.yml has no promote job")
+	}
+	if len(promote.Needs) == 0 {
+		t.Fatal("release.yml promote job declares no prerequisites")
+	}
+
+	var needs []string
+	if err := json.Unmarshal(promote.Needs, &needs); err != nil {
+		t.Fatalf("parse release.yml promote needs: %v", err)
+	}
+	want := []string{"e2e", "release-notes"}
+	if !slices.Equal(needs, want) {
+		t.Errorf("release.yml promote needs %v, want exactly %v", needs, want)
+	}
+	if promote.If != "" {
+		t.Errorf("release.yml promote has job-level if %q; default dependency handling must gate promotion", promote.If)
+	}
+}
+
+func TestE2EDefaultRelease(t *testing.T) {
+	re := regexp.MustCompile(`(?m)^var operatorTag = "([^"]+)"$`)
+	match := re.FindStringSubmatch(read(t, e2eSuite))
+	if match == nil {
+		t.Fatal("e2e suite declares no operatorTag default")
+	}
+	if got, want := match[1], "v0.11.3"; got != want {
+		t.Errorf("e2e operatorTag default is %s, want %s", got, want)
+	}
+}
+
+func TestWorkflowActionInventory(t *testing.T) {
+	approved := map[string]string{
+		"actions/cache":                    "v6",
+		"actions/checkout":                 "v7",
+		"actions/configure-pages":          "v6",
+		"actions/dependency-review-action": "v4",
+		"actions/deploy-pages":             "v5",
+		"actions/setup-go":                 "v7",
+		"actions/setup-python":             "v7",
+		"actions/upload-pages-artifact":    "v5",
+		"azure/setup-helm":                 "v5",
+		"azure/setup-kubectl":              "v5",
+		"codecov/codecov-action":           "v7",
+		"docker/build-push-action":         "v7",
+		"docker/login-action":              "v4",
+		"docker/setup-buildx-action":       "v4",
+		"docker/setup-qemu-action":         "v4",
+		"oras-project/setup-oras":          "v2",
+	}
+
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		t.Fatalf("read workflow directory: %v", err)
+	}
+
+	files := 0
+	references := 0
+	dependencyReviews := 0
+	check := func(location, uses string) {
+		if uses == "" {
+			return
+		}
+		references++
+		name, version, ok := strings.Cut(uses, "@")
+		if !ok || name == "" || version == "" {
+			t.Errorf("%s has malformed action reference %q", location, uses)
+			return
+		}
+		want, ok := approved[name]
+		if !ok {
+			t.Errorf("%s uses unapproved action %q", location, name)
+			return
+		}
+		if version != want {
+			t.Errorf("%s uses %s@%s, want %s@%s", location, name, version, name, want)
+		}
+		if name == "actions/dependency-review-action" {
+			dependencyReviews++
+		}
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yml" {
+			continue
+		}
+		files++
+		path := filepath.Join(workflowDir, entry.Name())
+		var wf workflow
+		if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+			t.Errorf("parse %s: %v", path, err)
+			continue
+		}
+		for jobName, job := range wf.Jobs {
+			check(entry.Name()+"/jobs/"+jobName, job.Uses)
+			for i, step := range job.Steps {
+				check(fmt.Sprintf("%s/jobs/%s/steps/%d", entry.Name(), jobName, i), step.Uses)
+			}
+		}
+	}
+
+	if files != 9 {
+		t.Errorf("workflow inventory contains %d YAML files, want 9", files)
+	}
+	if references != 52 {
+		t.Errorf("workflow inventory contains %d action references, want 52", references)
+	}
+	if dependencyReviews != 1 {
+		t.Errorf("workflow inventory contains %d dependency review references, want 1", dependencyReviews)
+	}
+}
+
+func TestDependencyReviewPolicy(t *testing.T) {
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, ciWorkflow)), &wf); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+
+	lint, ok := wf.Jobs["lint"]
+	if !ok {
+		t.Fatal("ci.yml has no lint job")
+	}
+
+	reviews := 0
+	for i, step := range lint.Steps {
+		if step.Uses != "actions/dependency-review-action@v4" {
+			continue
+		}
+		reviews++
+		if i == 0 || lint.Steps[i-1].Uses != "actions/checkout@v7" {
+			t.Error("dependency review must appear immediately after lint checkout")
+		}
+		if step.Name != "Review dependency changes" {
+			t.Errorf("dependency review name is %q", step.Name)
+		}
+		if step.If != "github.event_name == 'pull_request'" {
+			t.Errorf("dependency review if is %q", step.If)
+		}
+		if step.With.FailOnSeverity != "moderate" {
+			t.Errorf("dependency review fail-on-severity is %q", step.With.FailOnSeverity)
+		}
+		if step.With.FailOnScopes != "runtime, development, unknown" {
+			t.Errorf("dependency review fail-on-scopes is %q", step.With.FailOnScopes)
+		}
+		if step.With.AllowLicenses != dependencyReviewAllowLicenses {
+			t.Errorf("dependency review allow-licenses is %q", step.With.AllowLicenses)
+		}
+	}
+	if reviews != 1 {
+		t.Errorf("lint job contains %d dependency review steps, want 1", reviews)
+	}
+	if strings.Contains(read(t, ciWorkflow), "allow-dependencies-licenses") {
+		t.Error("dependency review must not use an allow-dependencies-licenses exemption")
+	}
 }
 
 func usesQEMU(steps []workflowStep) bool {

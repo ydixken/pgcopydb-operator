@@ -167,6 +167,7 @@ type MigrationReconciler struct {
 func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	res, err := r.reconcile(ctx, req)
 	if apierrors.IsConflict(err) {
+		//nolint:staticcheck // Requeue preserves the intentional silent rate-limited conflict retry.
 		return ctrl.Result{Requeue: true}, nil
 	}
 	return res, err
@@ -737,6 +738,7 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
+	//nolint:staticcheck // Requeue preserves the intentional rate-limited resume retry after the status patch.
 	return ctrl.Result{Requeue: true}, nil
 }
 

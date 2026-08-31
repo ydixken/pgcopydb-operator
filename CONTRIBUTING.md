@@ -6,7 +6,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 ## Requirements
 
-- [go](https://go.dev): the operator's language (nothing to build yet).
+- [go](https://go.dev): the operator's language and test toolchain.
 - [task](https://taskfile.dev): task runner, the entrypoint for everything.
 - [yamllint](https://yamllint.readthedocs.io): lints all YAML; the only linter with work to do pre-scaffold.
 - [golangci-lint](https://golangci-lint.run) v2: Go linting, activates once `go.mod` exists.
@@ -24,6 +24,8 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. Commit (see below), push the branch to GitHub, open a PR.
 
 `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
+The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
+GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
 
 The `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
 That variable is what runs `TestCompareDataQuery`, the only test that exercises the SQL deciding the `pgcopydb compare data` verdict; without it the test skips.
