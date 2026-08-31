@@ -15,10 +15,10 @@
 - [x] Write the implementation plan from the approved and reviewed design.
 - [x] Complete an independent review of the implementation plan before implementation.
 - [x] Get user approval for the implementation plan before implementation.
-- [ ] Enable GitHub Dependency Graph through the repository Settings UI (Task 1 prerequisite in progress).
-- [ ] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
+- [x] Enable GitHub Dependency Graph through the repository Settings UI.
+- [x] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
 - [ ] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
-- [ ] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
+- [ ] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if` (Task 2 release-promotion TDD in progress).
 - [ ] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
 - [ ] Upgrade all 51 existing Action references and add the one approved Dependency Review reference.
 - [ ] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
