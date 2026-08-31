@@ -5,7 +5,8 @@ name: E2E
 # Automatically on a stable tag, because promote rebuilds rather than retags:
 # the images a stable release ships are not the ones e2e checked on the
 # candidate. This run checks what users actually pull, and its result is what
-# the E2E badge reports.
+# the E2E badge reports: the badge carries ?event=push, because a tag run is
+# recorded against the tag and an unscoped badge only ever reads main.
 #
 # release.yml runs e2e once, against the candidate it just built. That answers
 # "is this candidate good" but cannot answer "which release did this start
