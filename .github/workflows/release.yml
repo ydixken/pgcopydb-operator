@@ -87,20 +87,21 @@ jobs:
           cache-from: ${{ steps.cachemgr.outputs.dir && format('type=local,src={0}', steps.cachemgr.outputs.dir) || '' }}
           cache-to: ${{ steps.cachemgr.outputs.dir && format('type=local,dest={0},mode=max', steps.cachemgr.outputs.dir) || '' }}
 
-  runner-image:
+  # Split out so the build below can be a reusable workflow call, which a step
+  # cannot be. Its only input, PGCOPYDB_SHA, changed once across 55 tags, so the
+  # answer is almost always "published, reuse it".
+  builder-check:
     runs-on: github-runner-pgcopydb-operator
+    outputs:
+      exists: ${{ steps.builder.outputs.exists }}
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # The pgcopydb compile is ~20 minutes under QEMU and its only input is
-      # PGCOPYDB_SHA, which changed once across 55 tags. Build when the tag is
-      # missing, reuse it every other time.
       - name: Read the pinned pgcopydb commit
         id: pin
         run: |
@@ -132,25 +133,38 @@ jobs:
             echo "::error::cannot reach $ref: $out"
             exit 1
           fi
-      # The buildx layer cache goes on the node, next to the Go caches,
-      # rather than through GitHub's cache service. One directory per image,
-      # so rebuilding one cannot evict another's layers.
-      - id: cachebld
-        run: |
-          [ -d /cache ] || exit 0
-          sudo mkdir -p /cache/buildx-pgcopydb-builder
-          [ -O /cache/buildx-pgcopydb-builder ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-pgcopydb-builder
-          echo "dir=/cache/buildx-pgcopydb-builder" >> "$GITHUB_OUTPUT"
-      - name: Build the pgcopydb builder image
-        if: steps.builder.outputs.exists != 'true'
-        uses: docker/build-push-action@v7
+
+  # The same split pgcopydb-builder.yml runs on its own: each architecture on a
+  # machine of that architecture, joined into one tag afterwards. Calling it
+  # rather than copying it keeps the arm64 half off QEMU here too, which is
+  # where roughly 15 of this job's 20 minutes used to go.
+  builder-build:
+    needs: builder-check
+    if: needs.builder-check.outputs.exists != 'true'
+    uses: ./.github/workflows/pgcopydb-builder.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+
+  runner-image:
+    needs: [builder-check, builder-build]
+    # skipped is the normal path: the builder tag is almost always published
+    # already, and a plain needs would skip this job along with it.
+    if: >-
+      !cancelled()
+      && needs.builder-check.result == 'success'
+      && needs.builder-build.result != 'failure'
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
-          context: images/pgcopydb-builder
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.IMAGE }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
-          cache-from: ${{ steps.cachebld.outputs.dir && format('type=local,src={0}', steps.cachebld.outputs.dir) || '' }}
-          cache-to: ${{ steps.cachebld.outputs.dir && format('type=local,dest={0},mode=max', steps.cachebld.outputs.dir) || '' }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Decide whether this tag also moves :latest
         id: tags
         # See manager-image: an rc must not move the tag a `helm install`
