@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -114,7 +116,10 @@ type LogReader interface {
 // value and an error never fails the pass.
 type ProgressOps interface {
 	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
-	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
+	// Sample reads both databases in one exec: their sizes, and the relation
+	// counts. Unlike CloneProgress it is safe on a pass with a live worker,
+	// which is what makes the progress fields move during a copy.
+	Sample(ctx context.Context, namespace, jobName string) (*progress.Sample, error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
 	// carries. The allowlist lives with the poller, so asking it keeps one
@@ -499,12 +504,39 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	if r.Progress == nil {
 		return
 	}
-	src, tgt, err := r.Progress.DatabaseSizes(ctx, m.Namespace, jobName)
+	s, err := r.Progress.Sample(ctx, m.Namespace, jobName)
 	if err != nil {
-		logf.FromContext(ctx).V(1).Info("database size sample failed", "job", jobName, "error", err)
-	} else {
-		// Metrics only, by design: sizes are observability, not state.
-		metrics.RecordDatabaseSizes(m.Namespace, m.Name, src, tgt)
+		logf.FromContext(ctx).V(1).Info("database sample failed", "job", jobName, "error", err)
+		return
+	}
+	if s == nil {
+		return
+	}
+	// Metrics only, by design: sizes are observability, not state.
+	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
+	if s.Counts != nil {
+		applyCounts(m, s.Counts)
+	}
+}
+
+// applyCounts fills the progress fields the catalog would have filled, and
+// only those it has not. The catalog is pgcopydb's own accounting and wins
+// where it answered; these counts lead it slightly, because a table counts as
+// copied once it holds any data.
+func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
+	if m.Status.Progress == nil {
+		m.Status.Progress = &v1beta1.CloneProgress{}
+	}
+	p := m.Status.Progress
+	if p.TablesTotal == 0 {
+		p.TablesTotal, p.TablesDone = c.TablesTotal, c.TablesDone
+	}
+	if p.IndexesTotal == 0 {
+		p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
+	}
+	if p.BytesTotal == nil {
+		p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
+		p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
 	}
 }
 

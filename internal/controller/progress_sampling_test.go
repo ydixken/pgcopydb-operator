@@ -33,6 +33,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -45,6 +46,7 @@ type fakeProgress struct {
 	cp        *v1beta1.CloneProgress
 	cpErr     error
 	src, tgt  *int64
+	relations *progress.RelationCounts
 	sizesErr  error
 	cpCalls   int
 	sizeCalls int
@@ -80,11 +82,14 @@ func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.
 	return &c, nil
 }
 
-func (f *fakeProgress) DatabaseSizes(context.Context, string, string) (src, tgt *int64, err error) {
+func (f *fakeProgress) Sample(context.Context, string, string) (*progress.Sample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sizeCalls++
-	return f.src, f.tgt, f.sizesErr
+	if f.sizesErr != nil {
+		return nil, f.sizesErr
+	}
+	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
 }
 
 // counts returns (catalog polls, size samples) seen so far.
@@ -435,6 +440,75 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, found = gaugeValue("pgcopydb_migration_attempts", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+
+	It("fills the progress fields from the live counts while the worker runs", func() {
+		const name = "mig-live-counts"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// No catalog sample: this is the plain clone case, whose worker pod is
+		// usually gone before `list progress` can be read, which is why these
+		// fields and the dashboard tiles were empty.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000), tgt: int64p(400),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 23,
+				IndexesTotal: 85, IndexesDone: 0,
+				BytesTotal: 48000, BytesDone: 12000,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		// While the worker is still alive, which the catalog read cannot do.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(23)))
+		Expect(m.Status.Progress.IndexesTotal).To(Equal(int64(85)))
+		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(12000)))
+
+		got, found := gaugeValue("pgcopydb_migration_tables_done", migLabels(name))
+		Expect(found).To(BeTrue())
+		Expect(got).To(Equal(float64(23)))
+	})
+
+	It("keeps pgcopydb's own counters when the catalog answered", func() {
+		const name = "mig-catalog-wins"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// The counts lead the catalog, because a table counts as copied once
+		// it holds any data, so the catalog wins where it answered.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			cp:        &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 7},
+			src:       int64p(5000),
+			relations: &progress.RelationCounts{TablesTotal: 60, TablesDone: 23},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		finishJob(ctx, name+"-run-1", true)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(7)))
+	})
+
+	It("writes nothing when the target has no schema to count yet", func() {
+		const name = "mig-no-schema"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// A sample with sizes but no counts: the restore has not run, and
+		// 0 of 0 would render on a tile as though it were progress.
+		r := newReconciler()
+		r.Progress = &fakeProgress{src: int64p(5000), tgt: int64p(8)}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
 	})
 })
 

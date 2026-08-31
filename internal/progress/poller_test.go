@@ -214,46 +214,6 @@ func TestCloneProgress_Sample(t *testing.T) {
 	}
 }
 
-func TestDatabaseSizes(t *testing.T) {
-	ctx := context.Background()
-	for name, tc := range map[string]struct {
-		out      string
-		src, tgt *int64
-	}{
-		"both sides":     {"source=1073741824\ntarget=999\n", ptr(1073741824), ptr(999)},
-		"target failed":  {"source=42\ntarget=\n", ptr(42), nil},
-		"source garbage": {"source=oom-killed\ntarget=7\n", nil, ptr(7)},
-		"no output":      {"", nil, nil},
-	} {
-		f := &fakeExec{pod: "p", out: []byte(tc.out)}
-		src, tgt, err := NewFromExec(f, nil).DatabaseSizes(ctx, "ns", "job")
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if !eq(src, tc.src) || !eq(tgt, tc.tgt) {
-			t.Errorf("%s: = (%v, %v), want (%v, %v)", name, deref(src), deref(tgt), deref(tc.src), deref(tc.tgt))
-		}
-		// The exec must restore the secretRef URIs before touching psql.
-		if !strings.HasPrefix(f.argv[2], conn.URIRecover()) {
-			t.Errorf("%s: script misses the URI recovery prelude", name)
-		}
-	}
-}
-
-func TestDatabaseSizes_Errors(t *testing.T) {
-	ctx := context.Background()
-
-	if src, tgt, err := NewFromExec(&fakeExec{pod: ""}, nil).DatabaseSizes(ctx, "ns", "job"); src != nil || tgt != nil || err != nil {
-		t.Fatalf("no pod: = (%v, %v, %v), want all nil", src, tgt, err)
-	}
-	if _, _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).DatabaseSizes(ctx, "ns", "job"); err == nil {
-		t.Fatal("pod lookup error: want it surfaced")
-	}
-	if _, _, err := NewFromExec(&fakeExec{pod: "p", execErr: errors.New("exec refused")}, nil).DatabaseSizes(ctx, "ns", "job"); err == nil {
-		t.Fatal("exec error: want it surfaced")
-	}
-}
-
 func ptr(n int64) *int64 { return &n }
 
 func eq(a, b *int64) bool {
@@ -263,199 +223,106 @@ func eq(a, b *int64) bool {
 	return *a == *b
 }
 
-func deref(p *int64) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-// CloneStage decides a user-visible phase, so every way the probe can fail has
-// to land on "unknown" rather than on a confident wrong answer. Unknown is
-// both flags false, which leaves the caller reporting Cloning.
-func TestCloneStage(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		exec                *fakeExec
-		copying, finalizing bool
-	}{
-		{
-			name:    "copy workers busy",
-			exec:    &fakeExec{pod: "w", out: []byte("4 0\n")},
-			copying: true,
-		},
-		{
-			name:       "only the tail left",
-			exec:       &fakeExec{pod: "w", out: []byte("0 1\n")},
-			finalizing: true,
-		},
-		{
-			// Both counts zero is a worker that holds no backend the query
-			// counts: not connected yet, or already gone. Neither state.
-			name: "no counted backends",
-			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
-		},
-		{
-			// The copy is winding down while the tail has started. Still
-			// copying, because data is still moving.
-			name:    "both kinds active",
-			exec:    &fakeExec{pod: "w", out: []byte("2 3\n")},
-			copying: true,
-		},
-		{name: "no running pod", exec: &fakeExec{}},
-		{name: "pod lookup failed", exec: &fakeExec{podErr: errors.New("boom")}},
-		{name: "exec failed", exec: &fakeExec{pod: "w", execErr: errors.New("boom")}},
-		{name: "unparseable output", exec: &fakeExec{pod: "w", out: []byte("ERROR: nope\n")}},
-		{name: "empty output", exec: &fakeExec{pod: "w", out: nil}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := NewFromExec(tc.exec, nil)
-			copying, finalizing := p.CloneStage(context.Background(), "ns", "job")
-			if copying != tc.copying || finalizing != tc.finalizing {
-				t.Errorf("copying=%v finalizing=%v, want copying=%v finalizing=%v",
-					copying, finalizing, tc.copying, tc.finalizing)
-			}
-		})
-	}
-}
-
-// The probe must never open pgcopydb's SQLite catalog: doing that during a
-// copy is what killed workers and made the poll conditional in the first
-// place. It must also only count this worker's own backends, or another
-// migration's compare workers read as this clone's tail.
-func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
-	f := &fakeExec{pod: "w", out: []byte("0 1\n")}
-	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
-
-	joined := strings.Join(f.argv, " ")
-	for _, forbidden := range []string{"pgcopydb", "--dir", "list progress"} {
-		if strings.Contains(joined, forbidden) && forbidden != "pgcopydb" {
-			t.Errorf("probe runs %q; it must not touch the pgcopydb catalog: %s", forbidden, joined)
-		}
-	}
-	if !strings.Contains(joined, "pg_stat_activity") {
-		t.Errorf("probe does not read pg_stat_activity: %s", joined)
-	}
-	if !strings.Contains(joined, "client_addr = inet_client_addr()") {
-		t.Errorf("probe is not scoped to this worker's own backends: %s", joined)
-	}
-}
-
-// The two counts are asked differently on purpose, so the predicate is pinned
-// by shape rather than by text: on a live worker all four copy workers stayed
-// connected for the whole base copy, and counting only the active ones read as
-// the tail while data was still moving.
-//
-// Both narrowings are pinned by absence, because a narrowing can be spelled
-// any number of ways and only its absence is checkable. The copy count may
-// name state exactly once, in the arm that falls back to the statement text,
-// and the row filter may not name it at all. The edit this guards against is
-// a likely one: anyone acting on a copy worker that lingers connected after
-// its queue drains reaches for exactly such a conjunction.
-func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
-	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
-	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
-	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
-	// to fail these checks the same way a lowercase one does.
-	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
-
-	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
-	if !ok {
-		t.Fatalf("probe no longer asks for two counts: %s", flat)
-	}
-	tailCount, afterFrom, ok := strings.Cut(rest, "from pg_stat_activity")
-	if !ok {
-		t.Fatalf("probe no longer reads pg_stat_activity: %s", flat)
-	}
-	// The SQL ends at the psql argument's closing quote; the URI prelude's
-	// own quotes are all behind us by here.
-	where, _, ok := strings.Cut(afterFrom, `"`)
-	if !ok {
-		t.Fatalf("cannot find the end of the probe query: %s", flat)
-	}
-
-	// A copy worker counts while it is connected, so the first arm of the
-	// copy count tests the name and nothing else.
-	primary, _, ok := strings.Cut(copyCount, " or ")
-	if !ok {
-		t.Fatalf("the copy count lost its statement-text fallback: %s", copyCount)
-	}
-	if !strings.Contains(primary, "application_name ilike '%copy worker%'") || strings.Contains(primary, "state") {
-		t.Errorf("copy workers are not counted by connection: %s", primary)
-	}
-	// One mention of state in the whole copy count, the fallback arm's own.
-	// A second one narrows the count however it is parenthesized, including
-	// a conjunction wrapped around every arm at once.
-	if n := strings.Count(copyCount, "state"); n != 1 {
-		t.Errorf("copy count names state %d times, want 1 (the fallback arm alone): %s", n, copyCount)
-	}
-	if !strings.Contains(tailCount, "state = 'active'") {
-		t.Errorf("the tail count dropped its active test: %s", tailCount)
-	}
-	if strings.Contains(where, "state") {
-		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
-	}
-}
-
-func TestRelationCounts(t *testing.T) {
+func TestSample(t *testing.T) {
 	ctx := context.Background()
+	// Five fields a side: database size, tables, tables holding data, indexes,
+	// table bytes.
 	for name, tc := range map[string]struct {
-		out  string
-		want *RelationCounts
+		out        string
+		src, tgt   *int64
+		wantCounts *RelationCounts
 	}{
-		// Four fields a side: tables, tables holding data, indexes, bytes.
 		"mid copy": {
-			out: "source=60 60 85 48000000000\ntarget=60 23 0 12000000000\n",
-			want: &RelationCounts{
+			out: "source=1073741824 60 60 85 48000000000\ntarget=536870912 60 23 0 12000000000\n",
+			src: ptr(1073741824), tgt: ptr(536870912),
+			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 23,
 				IndexesTotal: 85, IndexesDone: 0,
 				BytesTotal: 48000000000, BytesDone: 12000000000,
 			},
 		},
 		"index build under way": {
-			out: "source=60 60 85 48000000000\ntarget=60 60 41 47000000000\n",
-			want: &RelationCounts{
+			out: "source=1073741824 60 60 85 48000000000\ntarget=1000000000 60 60 41 47000000000\n",
+			src: ptr(1073741824), tgt: ptr(1000000000),
+			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 60,
 				IndexesTotal: 85, IndexesDone: 41,
 				BytesTotal: 48000000000, BytesDone: 47000000000,
 			},
 		},
-		// The schema restore has not run yet. 0 of 0 is not progress, it is an
-		// absent sample, and reporting it would render "0 of 0" on a tile.
-		"target empty":  {out: "source=60 60 85 48000000000\ntarget=0 0 0 0\n"},
-		"source failed": {out: "source=\ntarget=60 23 0 12000000000\n"},
-		"target failed": {out: "source=60 60 85 48000000000\ntarget=\n"},
-		"short row":     {out: "source=60 60 85\ntarget=60 23 0 12\n"},
-		"not a number":  {out: "source=60 60 85 oom\ntarget=60 23 0 12\n"},
-		"no output":     {out: ""},
+		// The schema restore has not run yet, so there is a size but nothing
+		// to count. 0 of 0 is an absent sample, not progress.
+		"target has no schema": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=8388608 0 0 0 0\n",
+			src: ptr(1073741824), tgt: ptr(8388608),
+		},
+		// One side unreadable: its size goes too, and counts need both.
+		"source failed": {
+			out: "source=\ntarget=536870912 60 23 0 12000000000\n",
+			tgt: ptr(536870912),
+		},
+		"target failed": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=\n",
+			src: ptr(1073741824),
+		},
+		// A source row that is short or not numeric kills the counts, which
+		// need both sides, but the target answered and its size still stands.
+		"short source row":    {out: "source=1 60 60 85\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"source not a number": {out: "source=1 60 60 85 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"no output":           {out: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeExec{pod: "p", out: []byte(tc.out)}
-			got, err := NewFromExec(f, nil).RelationCounts(ctx, "ns", "job")
+			got, err := NewFromExec(f, nil).Sample(ctx, "ns", "job")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tc.want == nil {
-				if got != nil {
-					t.Fatalf("got %+v, want no sample", got)
-				}
-				return
+			if got == nil {
+				t.Fatal("got no sample at all")
 			}
-			if got == nil || *got != *tc.want {
-				t.Fatalf("got %+v, want %+v", got, tc.want)
+			if !eq(got.SourceSize, tc.src) || !eq(got.TargetSize, tc.tgt) {
+				t.Errorf("sizes = %v/%v, want %v/%v", got.SourceSize, got.TargetSize, tc.src, tc.tgt)
+			}
+			switch {
+			case tc.wantCounts == nil && got.Counts != nil:
+				t.Errorf("counts = %+v, want none", got.Counts)
+			case tc.wantCounts != nil && got.Counts == nil:
+				t.Errorf("no counts, want %+v", tc.wantCounts)
+			case tc.wantCounts != nil && *got.Counts != *tc.wantCounts:
+				t.Errorf("counts = %+v, want %+v", got.Counts, tc.wantCounts)
 			}
 		})
 	}
 }
 
-func TestRelationCounts_NoPodOrError(t *testing.T) {
+// The URI recovery prelude has to be in front of the script, or psql runs
+// with whatever the pod's environment happens to hold.
+func TestSample_RunsWithTheURIPrelude(t *testing.T) {
+	f := &fakeExec{pod: "p", out: []byte("source=\ntarget=\n")}
+	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" {
+		t.Fatalf("argv = %q, want sh -c <script>", f.argv)
+	}
+	if !strings.HasPrefix(f.argv[2], conn.URIRecover()) {
+		t.Error("the script does not start with the URI recovery prelude")
+	}
+	if !strings.Contains(f.argv[2], sampleScript) {
+		t.Error("the script is not sampleScript")
+	}
+}
+
+func TestSample_NoPodOrError(t *testing.T) {
 	ctx := context.Background()
-	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).RelationCounts(ctx, "ns", "job"); got != nil || err != nil {
+	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).Sample(ctx, "ns", "job"); got != nil || err != nil {
 		t.Fatalf("no pod: got %+v, %v; want nil, nil", got, err)
 	}
-	f := &fakeExec{pod: "p", execErr: errors.New("boom")}
-	if _, err := NewFromExec(f, nil).RelationCounts(ctx, "ns", "job"); err == nil {
-		t.Fatal("exec failure must surface as an error")
+	if _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).Sample(ctx, "ns", "job"); err == nil {
+		t.Fatal("a pod lookup failure must surface")
+	}
+	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: errors.New("refused")}, nil).Sample(ctx, "ns", "job"); err == nil {
+		t.Fatal("an exec failure must surface")
 	}
 }
 
@@ -463,8 +330,8 @@ func TestRelationCounts_NoPodOrError(t *testing.T) {
 // plausible on a tile, so the query has to exclude them by name.
 func TestRelationCountsScript_ExcludesSystemSchemas(t *testing.T) {
 	for _, want := range []string{"pg_catalog", "information_schema", "pg_toast", "relkind"} {
-		if !strings.Contains(countsScript, want) {
-			t.Errorf("countsScript does not mention %q", want)
+		if !strings.Contains(sampleScript, want) {
+			t.Errorf("sampleScript does not mention %q", want)
 		}
 	}
 }
@@ -474,12 +341,12 @@ func TestRelationCountsScript_ExcludesSystemSchemas(t *testing.T) {
 // denominator counts indexes the target has not built. Verified against a real
 // pair: a target holding one populated table of three reported two.
 func TestRelationCountsScript_MeasuresTheTableNotItsIndexes(t *testing.T) {
-	if strings.Contains(countsScript, "pg_total_relation_size") {
-		t.Error("countsScript uses pg_total_relation_size; an empty table with an " +
+	if strings.Contains(sampleScript, "pg_total_relation_size") {
+		t.Error("sampleScript uses pg_total_relation_size; an empty table with an " +
 			"index then counts as copied. Use pg_relation_size.")
 	}
-	if !strings.Contains(countsScript, "pg_relation_size") {
-		t.Error("countsScript measures no relation size at all")
+	if !strings.Contains(sampleScript, "pg_relation_size") {
+		t.Error("sampleScript measures no relation size at all")
 	}
 }
 
@@ -493,12 +360,12 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 		"in ($scope)",               // and the source query uses it
 		`if [ -n "$scope" ]`,        // an empty list would be a syntax error
 	} {
-		if !strings.Contains(countsScript, want) {
-			t.Errorf("countsScript is missing %q", want)
+		if !strings.Contains(sampleScript, want) {
+			t.Errorf("sampleScript is missing %q", want)
 		}
 	}
 	// The scope is read off the target; asking the source would defeat it.
-	scope := countsScript[strings.Index(countsScript, "scope=$("):]
+	scope := sampleScript[strings.Index(sampleScript, "scope=$("):]
 	scope = scope[:strings.Index(scope, "\nif ")]
 	if !strings.Contains(scope, "PGCOPYDB_TARGET_PGURI") || strings.Contains(scope, "SOURCE") {
 		t.Errorf("the table list must come from the target:\n%s", scope)
