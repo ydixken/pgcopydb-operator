@@ -1106,7 +1106,7 @@
       "id": 25,
       "type": "stat",
       "title": "Tables",
-      "description": "Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1120,7 +1120,19 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max(100 * pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "expr": "max by (namespace, name) (pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "copied",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, name) (pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1130,10 +1142,6 @@
         }
       ],
       "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1141,17 +1149,21 @@
           "fields": "",
           "values": false
         },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 16,
+          "valueSize": 20
         }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
+          "unit": "short",
           "decimals": 0,
-          "min": 0,
-          "max": 100,
           "color": {
             "mode": "thresholds"
           },
@@ -1174,7 +1186,7 @@
       "id": 26,
       "type": "stat",
       "title": "Indexes",
-      "description": "Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1188,7 +1200,19 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max(100 * pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "expr": "max by (namespace, name) (pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "built",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, name) (pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1198,10 +1222,6 @@
         }
       ],
       "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1209,17 +1229,21 @@
           "fields": "",
           "values": false
         },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 16,
+          "valueSize": 20
         }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
+          "unit": "short",
           "decimals": 0,
-          "min": 0,
-          "max": 100,
           "color": {
             "mode": "thresholds"
           },
@@ -1241,8 +1265,8 @@
     {
       "id": 27,
       "type": "stat",
-      "title": "Clone Bytes",
-      "description": "Stays a few percent short of 100 by construction: on-disk size carries headers, padding and free space a COPY stream does not move. Absent on a plain clone: the operator only samples pgcopydb's catalogs while following, so no value here is not zero progress.",
+      "title": "Bytes",
+      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1256,7 +1280,19 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max(100 * pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"} / pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}, 100)",
+          "expr": "max by (namespace, name) (pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "cloned",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (namespace, name) (pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1266,10 +1302,6 @@
         }
       ],
       "options": {
-        "textMode": "auto",
-        "justifyMode": "center",
-        "colorMode": "value",
-        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1277,17 +1309,21 @@
           "fields": "",
           "values": false
         },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 16,
+          "valueSize": 20
         }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "decimals": 0,
-          "min": 0,
-          "max": 100,
+          "unit": "decgbytes",
+          "decimals": 2,
           "color": {
             "mode": "thresholds"
           },

@@ -34,6 +34,7 @@ const (
 	dashboardsDir = "../../charts/pgcopydb-operator/dashboards"
 	rulesFile     = "../../charts/pgcopydb-operator/rules/migrations.yaml"
 	phaseMetric   = "pgcopydb_migration_phase"
+	statPanel     = "stat"
 )
 
 // ruleExprs reads every alert expression from the chart's rule file.
@@ -321,7 +322,7 @@ func TestTimelinesSurviveAnOperatorRestart(t *testing.T) {
 func TestDetailTilesReadNAWhenTheMigrationIsGone(t *testing.T) {
 	var tiles int
 	for _, p := range load(t)["migration-detail.json"].AllPanels() {
-		if p.Type != "stat" {
+		if p.Type != statPanel {
 			continue
 		}
 		tiles++
@@ -367,7 +368,7 @@ func TestSentinelFallbacksAreMapped(t *testing.T) {
 func TestHistoryYieldsToALiveMigration(t *testing.T) {
 	for file, d := range load(t) {
 		for _, p := range d.AllPanels() {
-			if p.Type != "stat" {
+			if p.Type != statPanel {
 				continue
 			}
 			for _, tg := range p.Targets {
@@ -380,6 +381,43 @@ func TestHistoryYieldsToALiveMigration(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The counters are sampled while the worker runs and stop when its pod exits,
+// so a tile reading only at the range end shows N/A for every finished
+// migration. Measured on e2e-follow-auto: no series at the range end, two over
+// six hours. The same defect the other run-fact tiles already had fixed.
+func TestCountTilesReadOverTheRange(t *testing.T) {
+	counters := []string{
+		"pgcopydb_migration_tables_done",
+		"pgcopydb_migration_indexes_done",
+		"pgcopydb_migration_clone_copied_bytes",
+	}
+	var found int
+	for _, p := range load(t)["migration-detail.json"].AllPanels() {
+		// Stat tiles only. A timeseries reads the range by construction, and
+		// Copy Throughput is a live rate that should read where the range ends.
+		if p.Type != statPanel {
+			continue
+		}
+		for _, counter := range counters {
+			if !p.Reads(counter) {
+				continue
+			}
+			found++
+			for _, tg := range p.Targets {
+				if !slices.Contains(Metrics(tg.Expr), counter) {
+					continue
+				}
+				if !strings.Contains(tg.Expr, "last_over_time(") {
+					t.Errorf("%q reads %s only where the range ends:\n  %s", p.Title, counter, tg.Expr)
+				}
+			}
+		}
+	}
+	if found != 3 {
+		t.Errorf("found %d count tiles, want 3 (Tables, Indexes, Bytes)", found)
 	}
 }
 
