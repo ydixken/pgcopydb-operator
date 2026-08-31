@@ -32,6 +32,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -214,6 +215,8 @@ var (
 	// liveWriteInterval caps the average write rate at one per interval.
 	// The ticker drops ticks while a persistent pipe write is blocked.
 	liveWriteInterval = 200 * time.Millisecond
+	// e2eCommandTimeout bounds one subprocess attempt or shutdown wait.
+	e2eCommandTimeout = 30 * time.Second
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -1381,6 +1384,22 @@ func psqlDB(cluster, db, sql string) string {
 	return out
 }
 
+type commandFactory func(context.Context, string, ...string) *exec.Cmd
+
+func commandOutput(
+	ctx context.Context,
+	command commandFactory,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	cmd := command(ctx, name, args...)
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
+	return out, err
+}
+
 // psqlFailure is psqlDBErr's error result: the pod the last attempt ran
 // against and its stderr, so psqlDB can raise its exact failure message
 // without a second copy of the retry loop.
@@ -1393,6 +1412,10 @@ func (f *psqlFailure) Error() string {
 	return fmt.Sprintf("on %s: %s: %v", f.pod, f.stderr, f.err)
 }
 
+func (f *psqlFailure) Unwrap() error {
+	return f.err
+}
+
 // psqlDBErr retries transient connection failures before a statement reaches
 // PostgreSQL. Each retry re-resolves the primary; connected failures stop
 // because the statement may have run and callers need not be idempotent.
@@ -1400,27 +1423,60 @@ func psqlDBErr(cluster, db, sql string) (string, error) {
 	// Here for primaryPod's Eventually, not for an assertion of its own:
 	// without it a primary timeout is reported here, not at the calling spec.
 	GinkgoHelper()
+	return psqlDBErrWith(
+		cluster,
+		db,
+		sql,
+		primaryPod,
+		time.Sleep,
+		exec.CommandContext,
+		e2eCommandTimeout,
+	)
+}
+
+func psqlDBErrWith(
+	cluster, db, sql string,
+	primary func(string) string,
+	wait func(time.Duration),
+	command commandFactory,
+	timeout time.Duration,
+) (string, error) {
 	var lastErr error
 	var lastStderr string
 	var pod string
 	for attempt := 1; attempt <= 3; attempt++ {
-		pod = primaryPod(cluster)
-		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", db, "-tAc", sql)
-		out, err := cmd.Output()
+		pod = primary(cluster)
+		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		out, err := commandOutput(
+			attemptCtx,
+			command,
+			"kubectl",
+			"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+			"psql", "-U", "postgres", db, "-tAc", sql,
+		)
+		cancel()
 		if err == nil {
 			return strings.TrimSpace(string(out)), nil
 		}
 		lastErr = err
 		lastStderr = ""
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			lastStderr = string(ee.Stderr)
+		if errors.Is(err, context.DeadlineExceeded) {
+			lastErr = fmt.Errorf(
+				"psql %q for cluster %s on pod %s timed out after %s: %w",
+				sql, cluster, pod, timeout, err,
+			)
+			break
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			lastStderr = string(exitErr.Stderr)
 		}
 		if !transientExecError(lastStderr) {
 			break
 		}
-		time.Sleep(5 * time.Second)
+		if attempt < 3 {
+			wait(5 * time.Second)
+		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
 }
@@ -1429,28 +1485,53 @@ func psqlDBErr(cluster, db, sql string) (string, error) {
 // write fails. The final marker query uses the primary captured at startup.
 type liveWriter struct {
 	stopCh chan struct{}
+	reaped chan struct{}
 	done   chan struct{}
 	// stopOnce lets the spec's cleanup call stop after the spec already did.
 	stopOnce sync.Once
 
-	primary  func(string) string
-	command  func(string, ...string) *exec.Cmd
+	ctx      context.Context
+	cancel   context.CancelFunc
+	command  commandFactory
 	interval time.Duration
+	timeout  time.Duration
 
 	mu   sync.Mutex
+	pod  string
 	last int
 	err  error
 }
 
-// startLiveWriter starts marker-tagged writes to sourceCluster and returns
-// immediately. Call stop to close and reap the persistent child.
+// startLiveWriter resolves the source primary before it returns the writer.
+// Call stop to close and reap the persistent child.
 func startLiveWriter(marker string) *liveWriter {
+	return startLiveWriterWith(
+		marker,
+		primaryPod,
+		exec.CommandContext,
+		liveWriteInterval,
+		e2eCommandTimeout,
+	)
+}
+
+func startLiveWriterWith(
+	marker string,
+	primary func(string) string,
+	command commandFactory,
+	interval, timeout time.Duration,
+) *liveWriter {
+	pod := primary(sourceCluster)
+	writerCtx, cancel := context.WithCancel(context.Background())
 	w := &liveWriter{
 		stopCh:   make(chan struct{}),
+		reaped:   make(chan struct{}),
 		done:     make(chan struct{}),
-		primary:  primaryPod,
-		command:  exec.Command,
-		interval: liveWriteInterval,
+		ctx:      writerCtx,
+		cancel:   cancel,
+		command:  command,
+		interval: interval,
+		timeout:  timeout,
+		pod:      pod,
 	}
 	go w.run(marker)
 	return w
@@ -1465,6 +1546,38 @@ func (w *liveWriter) recordErr(err error) {
 	if w.err == nil {
 		w.err = err
 	}
+}
+
+func (w *liveWriter) readFinalMarker(marker, pod string) {
+	query := liveMarkerQuery(marker)
+	queryCtx, cancel := context.WithTimeout(context.Background(), w.timeout)
+	out, err := commandOutput(
+		queryCtx,
+		w.command,
+		"kubectl",
+		"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+		"psql", "-U", "postgres", appDB, "-tAc", query,
+	)
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) {
+		w.recordErr(fmt.Errorf(
+			"read final marker for cluster %s on pod %s with SQL %q timed out after %s: %w",
+			sourceCluster, pod, query, w.timeout, err,
+		))
+		return
+	}
+	if err != nil {
+		w.recordErr(fmt.Errorf("read final marker: %w", err))
+		return
+	}
+	last, err := parseLiveMarker(out)
+	if err != nil {
+		w.recordErr(fmt.Errorf("parse final marker: %w", err))
+		return
+	}
+	w.mu.Lock()
+	w.last = last
+	w.mu.Unlock()
 }
 
 func liveMarkerQuery(marker string) string {
@@ -1485,20 +1598,28 @@ func parseLiveMarker(out []byte) (int, error) {
 	return last, nil
 }
 
-// run resolves one primary, starts one stream, and never replaces either.
+// run starts one stream on the captured primary and never replaces either.
 // Every started child is closed, waited, and followed by one marker query.
 func (w *liveWriter) run(marker string) {
 	// GinkgoRecover must run before close(w.done): defers run in reverse
 	// registration order, so a panic recovers before done closes, not after.
 	defer close(w.done)
 	defer GinkgoRecover()
+	defer w.cancel()
 
-	pod := w.primary(sourceCluster)
-	cmd := w.command("kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
+	pod := w.pod
+	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	select {
+	case <-w.stopCh:
+		close(w.reaped)
+		return
+	default:
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		w.recordErr(fmt.Errorf("open persistent psql stdin: %w", err))
+		close(w.reaped)
 		return
 	}
 	if err := cmd.Start(); err != nil {
@@ -1506,6 +1627,7 @@ func (w *liveWriter) run(marker string) {
 		if closeErr := stdin.Close(); closeErr != nil {
 			w.recordErr(fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
 		}
+		close(w.reaped)
 		return
 	}
 
@@ -1516,22 +1638,8 @@ func (w *liveWriter) run(marker string) {
 		if err := cmd.Wait(); err != nil {
 			w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
 		}
-
-		query := liveMarkerQuery(marker)
-		out, err := w.command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", appDB, "-tAc", query).Output()
-		if err != nil {
-			w.recordErr(fmt.Errorf("read final marker: %w", err))
-			return
-		}
-		last, err := parseLiveMarker(out)
-		if err != nil {
-			w.recordErr(fmt.Errorf("parse final marker: %w", err))
-			return
-		}
-		w.mu.Lock()
-		w.last = last
-		w.mu.Unlock()
+		close(w.reaped)
+		w.readFinalMarker(marker, pod)
 	}()
 
 	ticker := time.NewTicker(w.interval)
@@ -1561,7 +1669,25 @@ func (w *liveWriter) run(marker string) {
 // stop ends the stream and returns the captured source pod's final marker.
 // Repeated calls share the first call's completed lifecycle and first error.
 func (w *liveWriter) stop() (int, error) {
-	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		timer := time.NewTimer(w.timeout)
+		defer timer.Stop()
+		select {
+		case <-w.reaped:
+		case <-w.done:
+		case <-timer.C:
+			w.recordErr(fmt.Errorf(
+				"stop persistent psql for cluster %s on pod %s timed out after %s: %w",
+				sourceCluster, w.pod, w.timeout, context.DeadlineExceeded,
+			))
+			w.cancel()
+			select {
+			case <-w.reaped:
+			case <-w.done:
+			}
+		}
+	})
 	<-w.done
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1645,20 +1771,26 @@ func deleteMigration(name string) {
 	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 }
 
-// transientExecError reports whether kubectl exec failed before reaching the
-// pod (API-server hiccups happen on the shared dev cluster). Only those are
-// safe to retry for arbitrary SQL.
+var transientExecErrorPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^Unable to connect to the server: net/http: TLS handshake timeout$`),
+	regexp.MustCompile(`^The connection to the server \S+ was refused - did you specify the right host or port\?$`),
+	regexp.MustCompile(`^error: Internal error occurred: error dialing backend: \S(?:[^\r\n]*\S)?$`),
+	regexp.MustCompile(`^error: error sending request: Post "[^"\s]+": net/http: TLS handshake timeout$`),
+	regexp.MustCompile(`^error: error sending request: Post "[^"\s]+": dial tcp \S+: connect: connection refused$`),
+}
+
+// transientExecError reports a structured kubectl failure that occurred
+// before the remote command started, so arbitrary SQL is safe to retry.
 func transientExecError(stderr string) bool {
-	for _, marker := range []string{
-		"TLS handshake timeout",
-		"Unable to connect to the server",
-		"error dialing backend",
-		"connection refused",
-		// The kubelet occasionally drops an exec stream mid-request on the
-		// shared cluster; the apiserver surfaces it as this internal error.
-		"error sending request",
-	} {
-		if strings.Contains(stderr, marker) {
+	if trimmed, ok := strings.CutSuffix(stderr, "\n"); ok {
+		stderr = trimmed
+		stderr = strings.TrimSuffix(stderr, "\r")
+	}
+	if strings.ContainsAny(stderr, "\r\n") {
+		return false
+	}
+	for _, pattern := range transientExecErrorPatterns {
+		if pattern.MatchString(stderr) {
 			return true
 		}
 	}

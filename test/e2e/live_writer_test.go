@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,13 +46,19 @@ const (
 
 	liveWriterHelperTimeout = 2 * time.Second
 	liveWriterHelperPoll    = 10 * time.Millisecond
+	liveWriterTestTimeout   = 1_000 * time.Millisecond
+	liveWriterOuterTimeout  = 10 * time.Second
 
-	postgresContainer        = "postgres"
-	liveWriterModeStream     = "stream"
-	liveWriterModeStreamExit = "stream-exit"
-	liveWriterModeQueryThree = "query-3"
-	liveWriterModeQueryError = "query-error"
-	liveWriterTestMarker     = "unit-live"
+	postgresContainer                = "postgres"
+	liveWriterModeStream             = "stream"
+	liveWriterModeStreamExit         = "stream-exit"
+	liveWriterModeStreamHang         = "stream-hang"
+	liveWriterModeStreamBackpressure = "stream-backpressure"
+	liveWriterModeQueryThree         = "query-3"
+	liveWriterModeQueryError         = "query-error"
+	liveWriterModeQueryHang          = "query-hang"
+	liveWriterTestMarker             = "unit-live"
+	liveWriterTestPod                = "source-1"
 )
 
 type helperCall struct {
@@ -66,12 +73,14 @@ type helperCommandState struct {
 	env                 []string
 	calls               []helperCall
 	commands            []*exec.Cmd
+	cancels             []context.CancelFunc
+	aborted             bool
 	firstWaitedAtSecond bool
 }
 
 func helperCommand(
 	t *testing.T, modes []string, env []string,
-) (func(string, ...string) *exec.Cmd, *helperCommandState) {
+) (commandFactory, *helperCommandState) {
 	t.Helper()
 	state := &helperCommandState{
 		t:     t,
@@ -81,26 +90,29 @@ func helperCommand(
 	return state.command, state
 }
 
-func (s *helperCommandState) command(name string, args ...string) *exec.Cmd {
+func (s *helperCommandState) command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	s.mu.Lock()
 	s.recordRequestLocked(name, args)
 	if len(s.modes) == 0 {
 		s.mu.Unlock()
 		s.t.Errorf("unexpected command: %s %v", name, args)
-		return s.retainCommand(exec.Command(os.Args[0], "-test.run=^$"))
+		commandCtx, cancel := context.WithCancel(ctx)
+		return s.retainCommand(exec.CommandContext(commandCtx, os.Args[0], "-test.run=^$"), cancel)
 	}
 	mode := s.modes[0]
 	s.modes = s.modes[1:]
 	env := append([]string(nil), s.env...)
 	s.mu.Unlock()
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLiveWriterHelper$")
+	commandCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(commandCtx, os.Args[0], "-test.run=^TestLiveWriterHelper$")
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Env = append(cmd.Env,
+		"GORACE=atexit_sleep_ms=0",
 		liveWriterHelperEnv+"=1",
 		liveWriterHelperModeEnv+"="+mode,
 	)
-	return s.retainCommand(cmd)
+	return s.retainCommand(cmd, cancel)
 }
 
 func (s *helperCommandState) recordRequestLocked(name string, args []string) {
@@ -113,21 +125,43 @@ func (s *helperCommandState) recordRequestLocked(name string, args []string) {
 	})
 }
 
-func (s *helperCommandState) retainCommand(cmd *exec.Cmd) *exec.Cmd {
+func (s *helperCommandState) retainCommand(
+	cmd *exec.Cmd, cancel context.CancelFunc,
+) *exec.Cmd {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.commands = append(s.commands, cmd)
+	s.cancels = append(s.cancels, cancel)
+	aborted := s.aborted
+	s.mu.Unlock()
+	if aborted {
+		cancel()
+	}
 	return cmd
 }
 
 func (s *helperCommandState) recordCommand(
-	name string, args []string, cmd *exec.Cmd,
+	name string, args []string, cmd *exec.Cmd, cancel context.CancelFunc,
 ) *exec.Cmd {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.recordRequestLocked(name, args)
 	s.commands = append(s.commands, cmd)
+	s.cancels = append(s.cancels, cancel)
+	aborted := s.aborted
+	s.mu.Unlock()
+	if aborted {
+		cancel()
+	}
 	return cmd
+}
+
+func (s *helperCommandState) cancelAll() {
+	s.mu.Lock()
+	s.aborted = true
+	cancels := append([]context.CancelFunc(nil), s.cancels...)
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (s *helperCommandState) callsSnapshot() []helperCall {
@@ -185,19 +219,78 @@ func (p helperPaths) env() []string {
 func liveWriterForTest(
 	t *testing.T,
 	primary func(string) string,
-	command func(string, ...string) *exec.Cmd,
+	command commandFactory,
+	state *helperCommandState,
 ) *liveWriter {
 	t.Helper()
-	w := &liveWriter{
-		stopCh:   make(chan struct{}),
-		done:     make(chan struct{}),
-		primary:  primary,
-		command:  command,
-		interval: time.Millisecond,
-	}
-	go w.run(liveWriterTestMarker)
-	t.Cleanup(func() { _, _ = w.stop() })
+	return liveWriterForMarkerTest(t, liveWriterTestMarker, primary, command, state)
+}
+
+func liveWriterForMarkerTest(
+	t *testing.T,
+	marker string,
+	primary func(string) string,
+	command commandFactory,
+	state *helperCommandState,
+) *liveWriter {
+	t.Helper()
+	w := startLiveWriterWith(
+		marker,
+		primary,
+		command,
+		time.Millisecond,
+		liveWriterTestTimeout,
+	)
+	t.Cleanup(func() { forceStopLiveWriter(t, w, state) })
 	return w
+}
+
+type liveWriterStopResult struct {
+	last int
+	err  error
+}
+
+func forceStopLiveWriter(
+	t *testing.T, w *liveWriter, state *helperCommandState,
+) {
+	t.Helper()
+	w.cancel()
+	state.cancelAll()
+
+	timer := time.NewTimer(liveWriterOuterTimeout)
+	defer timer.Stop()
+	select {
+	case <-w.done:
+	case <-timer.C:
+		t.Fatalf("live writer did not reap its commands within %s", liveWriterOuterTimeout)
+	}
+	for _, cmd := range state.commandsSnapshot() {
+		if cmd.Process != nil {
+			requireReaped(t, cmd)
+		}
+	}
+}
+
+func stopLiveWriterWithWatchdog(
+	t *testing.T, w *liveWriter, state *helperCommandState,
+) (int, error) {
+	t.Helper()
+	resultCh := make(chan liveWriterStopResult, 1)
+	go func() {
+		last, err := w.stop()
+		resultCh <- liveWriterStopResult{last: last, err: err}
+	}()
+
+	timer := time.NewTimer(liveWriterOuterTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.last, result.err
+	case <-timer.C:
+		forceStopLiveWriter(t, w, state)
+		t.Fatalf("liveWriter.stop did not return within %s", liveWriterOuterTimeout)
+		return 0, nil
+	}
 }
 
 func countingPrimary() (func(string) string, func() int) {
@@ -207,7 +300,7 @@ func countingPrimary() (func(string) string, func() int) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls++
-		return "source-1"
+		return liveWriterTestPod
 	}
 	count := func() int {
 		mu.Lock()
@@ -262,6 +355,13 @@ func requireError(t *testing.T, err error, contains string) {
 	}
 }
 
+func requireReaped(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd.Process == nil || cmd.ProcessState == nil {
+		t.Fatalf("command was not started and reaped: process=%v state=%v", cmd.Process, cmd.ProcessState)
+	}
+}
+
 func requireCall(t *testing.T, got helperCall, want helperCall) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
@@ -295,9 +395,9 @@ func requireLifecycleCalls(
 	if len(commands) != wantCount {
 		t.Fatalf("returned commands = %d, want %d", len(commands), wantCount)
 	}
-	requireCall(t, calls[0], helperCall{name: "kubectl", args: persistentArgs("source-1")})
+	requireCall(t, calls[0], helperCall{name: "kubectl", args: persistentArgs(liveWriterTestPod)})
 	if wantCount == 2 {
-		requireCall(t, calls[1], helperCall{name: "kubectl", args: finalQueryArgs("source-1", liveWriterTestMarker)})
+		requireCall(t, calls[1], helperCall{name: "kubectl", args: finalQueryArgs(liveWriterTestPod, liveWriterTestMarker)})
 		if !state.firstWaitedAtSecondSnapshot() {
 			t.Fatal("final query was requested before the persistent command was waited")
 		}
@@ -312,6 +412,16 @@ func TestLiveWriterHelper(t *testing.T) {
 	switch os.Getenv(liveWriterHelperModeEnv) {
 	case liveWriterModeStream:
 		helperStream(t, 0)
+	case liveWriterModeStreamHang:
+		helperStream(t, 0)
+		time.Sleep(time.Hour)
+	case liveWriterModeStreamBackpressure:
+		var firstByte [1]byte
+		if _, err := io.ReadFull(os.Stdin, firstByte[:]); err != nil {
+			t.Fatalf("read first stdin byte: %v", err)
+		}
+		writeHelperSignal(t, liveWriterFirstEnv, liveWriterFirstSignal)
+		time.Sleep(time.Hour)
 	case "stream-wait-error":
 		helperStream(t, 17)
 	case liveWriterModeStreamExit:
@@ -324,6 +434,8 @@ func TestLiveWriterHelper(t *testing.T) {
 		os.Exit(0)
 	case liveWriterModeQueryError:
 		os.Exit(19)
+	case liveWriterModeQueryHang:
+		time.Sleep(time.Hour)
 	case "query-bad":
 		if _, err := fmt.Fprintln(os.Stdout, "not-an-int"); err != nil {
 			t.Fatalf("write bad query result: %v", err)
@@ -424,15 +536,125 @@ func TestLiveWriterMarkerHelpers(t *testing.T) {
 	}
 }
 
+func TestLiveWriterStartupBoundary(t *testing.T) {
+	paths := newHelperPaths(t)
+	baseCommand, state := helperCommand(t, []string{liveWriterModeStream}, paths.env())
+	primaryEntered := make(chan struct{})
+	releasePrimaryCh := make(chan struct{})
+	commandEntered := make(chan struct{})
+	releaseCommandCh := make(chan struct{})
+	releasePrimary := sync.OnceFunc(func() { close(releasePrimaryCh) })
+	releaseCommand := sync.OnceFunc(func() { close(releaseCommandCh) })
+	primaryCalls := 0
+	primary := func(cluster string) string {
+		primaryCalls++
+		if cluster != sourceCluster {
+			t.Errorf("primary cluster = %q, want %q", cluster, sourceCluster)
+		}
+		close(primaryEntered)
+		<-releasePrimaryCh
+		return liveWriterTestPod
+	}
+	command := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		close(commandEntered)
+		<-releaseCommandCh
+		return baseCommand(ctx, name, args...)
+	}
+
+	writerCh := make(chan *liveWriter, 1)
+	go func() {
+		writerCh <- startLiveWriterWith(
+			liveWriterTestMarker,
+			primary,
+			command,
+			time.Millisecond,
+			liveWriterTestTimeout,
+		)
+	}()
+
+	var w *liveWriter
+	t.Cleanup(func() {
+		releasePrimary()
+		releaseCommand()
+		if w == nil {
+			select {
+			case w = <-writerCh:
+			case <-time.After(liveWriterOuterTimeout):
+				t.Fatalf("live writer startup did not return within %s", liveWriterOuterTimeout)
+			}
+		}
+		forceStopLiveWriter(t, w, state)
+	})
+
+	select {
+	case <-primaryEntered:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("primary resolution did not start within %s", liveWriterOuterTimeout)
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	select {
+	case w = <-writerCh:
+		timer.Stop()
+		t.Fatal("live writer was exposed before primary resolution completed")
+	case <-timer.C:
+	}
+
+	releasePrimary()
+	select {
+	case w = <-writerCh:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer startup did not return within %s", liveWriterOuterTimeout)
+	}
+	select {
+	case <-commandEntered:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("persistent command was not constructed within %s", liveWriterOuterTimeout)
+	}
+
+	resultCh := make(chan liveWriterStopResult, 1)
+	go func() {
+		last, err := w.stop()
+		resultCh <- liveWriterStopResult{last: last, err: err}
+	}()
+	select {
+	case <-w.stopCh:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer stop did not start within %s", liveWriterOuterTimeout)
+	}
+	releaseCommand()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil || result.last != 0 {
+			t.Fatalf("stop result = %#v, want zero marker and no error", result)
+		}
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer stop did not return within %s", liveWriterOuterTimeout)
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("primary calls = %d, want 1", primaryCalls)
+	}
+	requireLifecycleCalls(t, state, 1)
+	commandState := state.commandsSnapshot()[0]
+	if commandState.Process != nil || commandState.ProcessState != nil {
+		t.Fatalf(
+			"persistent command started after stop: process=%v state=%v",
+			commandState.Process,
+			commandState.ProcessState,
+		)
+	}
+}
+
+//nolint:gocyclo // The subtests cover one lifecycle contract and share its setup helpers.
 func TestLiveWriterLifecycle(t *testing.T) {
 	t.Run("success closes stdin before Wait and returns the final marker", func(t *testing.T) {
 		paths := newHelperPaths(t)
 		command, state := helperCommand(t, []string{liveWriterModeStream, liveWriterModeQueryThree}, paths.env())
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.first, liveWriterFirstSignal)
-		last, err := w.stop()
+		last, err := stopLiveWriterWithWatchdog(t, w, state)
 		if err != nil {
 			t.Fatalf("stop: %v", err)
 		}
@@ -461,6 +683,9 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		}
 
 		requireLifecycleCalls(t, state, 2)
+		for _, cmd := range state.commandsSnapshot() {
+			requireReaped(t, cmd)
+		}
 		if got := primaryCalls(); got != 1 {
 			t.Fatalf("primary calls = %d, want 1", got)
 		}
@@ -469,16 +694,16 @@ func TestLiveWriterLifecycle(t *testing.T) {
 	t.Run("StdinPipe failure does not start or query", func(t *testing.T) {
 		paths := newHelperPaths(t)
 		baseCommand, state := helperCommand(t, []string{liveWriterModeStream}, paths.env())
-		command := func(name string, args ...string) *exec.Cmd {
-			cmd := baseCommand(name, args...)
+		command := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			cmd := baseCommand(ctx, name, args...)
 			cmd.Stdin = strings.NewReader("")
 			return cmd
 		}
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForDone(t, w)
-		_, err := w.stop()
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "open persistent psql stdin")
 		requireLifecycleCalls(t, state, 1)
 		commands := state.commandsSnapshot()
@@ -493,14 +718,17 @@ func TestLiveWriterLifecycle(t *testing.T) {
 	t.Run("Start failure closes the pipe and does not query", func(t *testing.T) {
 		state := &helperCommandState{t: t}
 		missing := filepath.Join(t.TempDir(), "missing")
-		command := func(name string, args ...string) *exec.Cmd {
-			return state.recordCommand(name, args, exec.Command(missing))
+		command := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			commandCtx, cancel := context.WithCancel(ctx)
+			return state.recordCommand(
+				name, args, exec.CommandContext(commandCtx, missing), cancel,
+			)
 		}
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForDone(t, w)
-		_, err := w.stop()
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "start persistent psql")
 		requireLifecycleCalls(t, state, 1)
 		if got := primaryCalls(); got != 1 {
@@ -514,11 +742,11 @@ func TestLiveWriterLifecycle(t *testing.T) {
 			t, []string{liveWriterModeStreamExit, liveWriterModeQueryThree, liveWriterModeStream}, paths.env(),
 		)
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.ready, liveWriterReadySignal)
 		waitForDone(t, w)
-		last, err := w.stop()
+		last, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "write live marker")
 		if last != 3 {
 			t.Fatalf("last = %d, want final query result 3", last)
@@ -533,10 +761,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		paths := newHelperPaths(t)
 		command, state := helperCommand(t, []string{"stream-wait-error", liveWriterModeQueryThree}, paths.env())
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.first, liveWriterFirstSignal)
-		last, err := w.stop()
+		last, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "wait for persistent psql")
 		if last != 3 {
 			t.Fatalf("last = %d, want final query result 3", last)
@@ -552,10 +780,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		paths := newHelperPaths(t)
 		command, state := helperCommand(t, []string{liveWriterModeStream, liveWriterModeQueryError}, paths.env())
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.first, liveWriterFirstSignal)
-		_, err := w.stop()
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "read final marker")
 		requireLifecycleCalls(t, state, 2)
 		if got := primaryCalls(); got != 1 {
@@ -574,10 +802,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 			paths := newHelperPaths(t)
 			command, state := helperCommand(t, []string{liveWriterModeStream, tc.mode}, paths.env())
 			primary, primaryCalls := countingPrimary()
-			w := liveWriterForTest(t, primary, command)
+			w := liveWriterForTest(t, primary, command, state)
 
 			waitForFile(t, paths.first, liveWriterFirstSignal)
-			_, err := w.stop()
+			_, err := stopLiveWriterWithWatchdog(t, w, state)
 			requireError(t, err, "parse final marker")
 			requireLifecycleCalls(t, state, 2)
 			if got := primaryCalls(); got != 1 {
@@ -590,11 +818,11 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		paths := newHelperPaths(t)
 		command, state := helperCommand(t, []string{liveWriterModeStreamExit, liveWriterModeQueryError}, paths.env())
 		primary, primaryCalls := countingPrimary()
-		w := liveWriterForTest(t, primary, command)
+		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.ready, liveWriterReadySignal)
 		waitForDone(t, w)
-		_, err := w.stop()
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "write live marker")
 		if strings.Contains(err.Error(), "read final marker") {
 			t.Fatalf("stop returned later final-query error: %v", err)
@@ -602,6 +830,167 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		requireLifecycleCalls(t, state, 2)
 		if got := primaryCalls(); got != 1 {
 			t.Fatalf("primary calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("shutdown timeout cancels and reaps a child stuck after EOF", func(t *testing.T) {
+		paths := newHelperPaths(t)
+		command, state := helperCommand(
+			t,
+			[]string{liveWriterModeStreamHang, liveWriterModeQueryThree},
+			paths.env(),
+		)
+		primary, primaryCalls := countingPrimary()
+		w := liveWriterForTest(t, primary, command, state)
+
+		waitForFile(t, paths.first, liveWriterFirstSignal)
+		last, err := stopLiveWriterWithWatchdog(t, w, state)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stop error = %v, want context.DeadlineExceeded", err)
+		}
+		for _, want := range []string{
+			sourceCluster, liveWriterTestPod, "stop persistent psql", liveWriterTestTimeout.String(),
+		} {
+			requireError(t, err, want)
+		}
+		if last != 3 {
+			t.Fatalf("last = %d, want marker 3 after forced cancellation", last)
+		}
+		waitForFile(t, paths.eof, liveWriterEOFSignal)
+		requireLifecycleCalls(t, state, 2)
+		for _, cmd := range state.commandsSnapshot() {
+			requireReaped(t, cmd)
+		}
+		if got := primaryCalls(); got != 1 {
+			t.Fatalf("primary calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("shutdown cancels a write blocked by pipe backpressure", func(t *testing.T) {
+		paths := newHelperPaths(t)
+		command, state := helperCommand(
+			t,
+			[]string{liveWriterModeStreamBackpressure, liveWriterModeQueryThree},
+			paths.env(),
+		)
+		primary, _ := countingPrimary()
+		marker := strings.Repeat("x", 2<<20)
+		w := liveWriterForMarkerTest(t, marker, primary, command, state)
+
+		waitForFile(t, paths.first, liveWriterFirstSignal)
+		last, err := stopLiveWriterWithWatchdog(t, w, state)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stop error = %v, want context.DeadlineExceeded", err)
+		}
+		if last != 3 {
+			t.Fatalf("last = %d, want marker 3", last)
+		}
+		commands := state.commandsSnapshot()
+		if len(commands) != 2 {
+			t.Fatalf("commands = %d, want persistent stream and marker query", len(commands))
+		}
+		for _, cmd := range commands {
+			requireReaped(t, cmd)
+		}
+	})
+
+	t.Run("final marker query has a fresh deadline and is reaped", func(t *testing.T) {
+		paths := newHelperPaths(t)
+		command, state := helperCommand(
+			t,
+			[]string{liveWriterModeStream, liveWriterModeQueryHang},
+			paths.env(),
+		)
+		primary, primaryCalls := countingPrimary()
+		w := liveWriterForTest(t, primary, command, state)
+
+		waitForFile(t, paths.first, liveWriterFirstSignal)
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stop error = %v, want context.DeadlineExceeded", err)
+		}
+		for _, want := range []string{
+			sourceCluster,
+			liveWriterTestPod,
+			"read final marker",
+			liveMarkerQuery(liveWriterTestMarker),
+			liveWriterTestTimeout.String(),
+		} {
+			requireError(t, err, want)
+		}
+		for _, cmd := range state.commandsSnapshot() {
+			requireReaped(t, cmd)
+		}
+		if got := primaryCalls(); got != 1 {
+			t.Fatalf("primary calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("shutdown timeout remains first when the marker query fails", func(t *testing.T) {
+		paths := newHelperPaths(t)
+		command, state := helperCommand(
+			t,
+			[]string{liveWriterModeStreamHang, liveWriterModeQueryError},
+			paths.env(),
+		)
+		primary, _ := countingPrimary()
+		w := liveWriterForTest(t, primary, command, state)
+
+		waitForFile(t, paths.first, liveWriterFirstSignal)
+		_, err := stopLiveWriterWithWatchdog(t, w, state)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stop error = %v, want the shutdown deadline", err)
+		}
+		requireError(t, err, "stop persistent psql")
+		if strings.Contains(err.Error(), "read final marker") {
+			t.Fatalf("later marker error replaced shutdown timeout: %v", err)
+		}
+		requireLifecycleCalls(t, state, 2)
+	})
+
+	t.Run("concurrent stop calls share one shutdown and result", func(t *testing.T) {
+		paths := newHelperPaths(t)
+		command, state := helperCommand(
+			t,
+			[]string{liveWriterModeStreamHang, liveWriterModeQueryThree},
+			paths.env(),
+		)
+		primary, _ := countingPrimary()
+		w := liveWriterForTest(t, primary, command, state)
+		waitForFile(t, paths.first, liveWriterFirstSignal)
+
+		start := make(chan struct{})
+		results := make(chan liveWriterStopResult, 2)
+		for range 2 {
+			go func() {
+				<-start
+				last, err := w.stop()
+				results <- liveWriterStopResult{last: last, err: err}
+			}()
+		}
+		close(start)
+		timer := time.NewTimer(liveWriterOuterTimeout)
+		defer timer.Stop()
+		got := make([]liveWriterStopResult, 0, 2)
+		for len(got) < 2 {
+			select {
+			case result := <-results:
+				got = append(got, result)
+			case <-timer.C:
+				forceStopLiveWriter(t, w, state)
+				t.Fatalf("concurrent stop calls did not return within %s", liveWriterOuterTimeout)
+			}
+		}
+		first, second := got[0], got[1]
+		if first.last != 3 || second.last != 3 || first.err != second.err {
+			t.Fatalf("stop results = %#v and %#v, want the same marker and error", first, second)
+		}
+		if !errors.Is(first.err, context.DeadlineExceeded) {
+			t.Fatalf("stop error = %v, want context.DeadlineExceeded", first.err)
+		}
+		requireLifecycleCalls(t, state, 2)
+		for _, cmd := range state.commandsSnapshot() {
+			requireReaped(t, cmd)
 		}
 	})
 }
