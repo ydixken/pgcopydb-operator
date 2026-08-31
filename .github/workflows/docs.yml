@@ -28,9 +28,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
       - name: Check the CRD reference is current
         # Same generation as `task docs` (keep the source path in sync with
         # the Taskfile docs task); a diff means the API changed without

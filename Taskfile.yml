@@ -33,6 +33,17 @@ tasks:
       # A link into a directory mkdocs excludes renders dead on the site, and
       # mkdocs caps that message at INFO, so --strict cannot fail on it.
       - ./hack/check-docs-links.sh
+      # yamllint proves a workflow is YAML, not that it is a workflow. A step
+      # that lost its `uses:` is still valid YAML, and release.yml only runs on
+      # a tag, so one shipped broken and nothing noticed until the next release
+      # would have failed. actionlint reads the schema and the expressions, and
+      # runs shellcheck over every run: block.
+      - cmd: |-
+          if command -v actionlint >/dev/null; then
+            actionlint
+          else
+            echo "lint: no actionlint, skipping workflow lint"
+          fi
       # The alert rules are checked and unit-tested with the promtool of the
       # Prometheus version they are written for.
       - ./hack/ensure-promtool.sh

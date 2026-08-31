@@ -1,0 +1,8 @@
+# The two Actions Runner Controller scale sets that serve this repository.
+# actionlint validates runs-on against GitHub's own labels and cannot know
+# these, so without them every workflow reports an unknown label and the real
+# findings are lost in the noise. See CONTRIBUTING.md for what each one is.
+self-hosted-runner:
+  labels:
+    - github-runner-pgcopydb-operator
+    - github-runner-pgcopydb-e2e

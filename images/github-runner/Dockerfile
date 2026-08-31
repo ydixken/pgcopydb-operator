@@ -23,6 +23,8 @@ ARG KUBECTL_VERSION=v1.37.0
 ARG ORAS_VERSION=v1.3.4
 # renovate: datasource=pypi depName=yamllint
 ARG YAMLLINT_VERSION=1.38.0
+# renovate: datasource=github-releases depName=rhysd/actionlint
+ARG ACTIONLINT_VERSION=v1.7.7
 
 # gh and postgresql-client are what the release and test jobs shell out to, and
 # make drives the Makefile. gcc and libc6-dev are here because cgo is on by
@@ -67,17 +69,23 @@ RUN set -eux; \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"; \
     chmod +x /usr/local/bin/kubectl; \
     curl -fsSL "https://github.com/oras-project/oras/releases/download/${ORAS_VERSION}/oras_${ORAS_VERSION#v}_linux_${arch}.tar.gz" \
-      | tar -xz -C /usr/local/bin oras
+      | tar -xz -C /usr/local/bin oras; \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION#v}_linux_${arch}.tar.gz" \
+      | tar -xz -C /usr/local/bin actionlint
 
 WORKDIR /home/runner
 RUN rm -rf /tmp/build
 
-# Go on PATH for every step, not just login shells. GOTOOLCHAIN=local stops the
-# go command quietly downloading a different toolchain when go.mod moves ahead
-# of this image between rebuilds: it fails with a plain version mismatch
-# instead, and the workflow's paths filter rebuilds on a go.mod change anyway.
-ENV PATH="/usr/local/go/bin:${PATH}" \
-    GOTOOLCHAIN=local
+# Go on PATH for every step, not just login shells.
+#
+# GOTOOLCHAIN is left at its default, auto, on purpose. Pinning it to local
+# made the go command fail on a version mismatch rather than fetch what go.mod
+# asks for, and that failure has nowhere to go: the image rebuilds only once a
+# go.mod bump is on main, so the pull request making the bump would be red with
+# no way to merge through it, and a push to main races its own rebuild. auto
+# means the toolchain arrives on its own in that window, into the module cache
+# on the node, and no job needs actions/setup-go to cover the gap.
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 
 # Everything `make test` and `make lint` would otherwise fetch or link on every

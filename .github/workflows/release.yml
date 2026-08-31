@@ -132,8 +132,6 @@ jobs:
             echo "::error::cannot reach $ref: $out"
             exit 1
           fi
-      - name: Build the pgcopydb builder image
-        if: steps.builder.outputs.exists != 'true'
       # The buildx layer cache goes on the node, next to the Go caches,
       # rather than through GitHub's cache service. One directory per image,
       # so rebuilding one cannot evict another's layers.
@@ -143,6 +141,8 @@ jobs:
           sudo mkdir -p /cache/buildx-pgcopydb-builder
           [ -O /cache/buildx-pgcopydb-builder ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-pgcopydb-builder
           echo "dir=/cache/buildx-pgcopydb-builder" >> "$GITHUB_OUTPUT"
+      - name: Build the pgcopydb builder image
+        if: steps.builder.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
           context: images/pgcopydb-builder
@@ -260,9 +260,6 @@ jobs:
       - uses: actions/checkout@v7
       # The scale set runs a bare actions-runner image: git and node are all
       # it ships, so every tool the suite shells out to is installed here.
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
       - name: Require the Prometheus URL
         # The metrics specs Skip when no Prometheus knob is set. On this gate
         # a missing repository variable must fail loudly, or the release would
