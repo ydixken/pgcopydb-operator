@@ -141,7 +141,8 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false
       },
-      "description": "Version of the running manager."
+      "description": "Version of the running manager.",
+      "interval": "10s"
     },
     {
       "id": 3,
@@ -209,7 +210,8 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false
       },
-      "description": "Standby replicas count too once their endpoint serves."
+      "description": "Standby replicas count too once their endpoint serves.",
+      "interval": "10s"
     },
     {
       "id": 4,
@@ -288,7 +290,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 5,
@@ -362,7 +365,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 7,
@@ -423,7 +427,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 8,
@@ -503,7 +508,8 @@
           "sort": "desc"
         }
       },
-      "description": "Absent until the first reconcile ran."
+      "description": "Absent until the first reconcile ran.",
+      "interval": "10s"
     },
     {
       "id": 9,
@@ -573,7 +579,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 10,
@@ -648,7 +655,8 @@
           "sort": "desc"
         }
       },
-      "description": "Absent while nothing has ever queued; no data means an empty queue."
+      "description": "Absent while nothing has ever queued; no data means an empty queue.",
+      "interval": "10s"
     },
     {
       "id": 12,
@@ -709,7 +717,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 13,
@@ -770,7 +779,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 14,
@@ -831,7 +841,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 15,
@@ -905,7 +916,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 17,
@@ -975,7 +987,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 18,
@@ -1036,7 +1049,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 19,
@@ -1097,7 +1111,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     }
   ]
 }

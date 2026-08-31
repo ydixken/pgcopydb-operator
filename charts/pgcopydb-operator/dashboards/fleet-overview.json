@@ -141,7 +141,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 3,
@@ -204,7 +205,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 4,
@@ -271,7 +273,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 5,
@@ -338,7 +341,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 6,
@@ -401,7 +405,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 7,
@@ -420,7 +425,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum(deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[20s]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -464,7 +469,8 @@
         "wideLayout": true,
         "percentChangeColorMode": "standard",
         "showPercentChange": false
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 8,
@@ -525,7 +531,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 9,
@@ -750,7 +757,8 @@
             }
           }
         }
-      ]
+      ],
+      "interval": "10s"
     },
     {
       "id": 11,
@@ -811,7 +819,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 12,
@@ -830,7 +839,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval])",
+          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[20s])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -872,7 +881,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 13,
@@ -934,7 +944,8 @@
           "sort": "desc"
         }
       },
-      "description": "New worker Jobs in the last 30m; the Retrying alert fires at 3."
+      "description": "New worker Jobs in the last 30m; the Retrying alert fires at 3.",
+      "interval": "10s"
     }
   ]
 }

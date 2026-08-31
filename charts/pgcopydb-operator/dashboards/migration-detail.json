@@ -249,7 +249,8 @@
           "titleSize": 20,
           "valueSize": 20
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 20,
@@ -571,7 +572,8 @@
           "valueSize": 20
         }
       },
-      "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it."
+      "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it.",
+      "interval": "10s"
     },
     {
       "id": 3,
@@ -694,7 +696,8 @@
           "titleSize": 20,
           "valueSize": 20
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 4,
@@ -761,7 +764,8 @@
           "titleSize": 20,
           "valueSize": 20
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 5,
@@ -829,7 +833,8 @@
           "valueSize": 20
         }
       },
-      "description": "Keeps counting after completion; Completed at marks the end."
+      "description": "Keeps counting after completion; Completed at marks the end.",
+      "interval": "10s"
     },
     {
       "id": 6,
@@ -896,7 +901,8 @@
           "titleSize": 20,
           "valueSize": 20
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 23,
@@ -961,7 +967,8 @@
           "decimals": 0
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 12,
@@ -1068,7 +1075,8 @@
           "valueSize": 20
         }
       },
-      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running."
+      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running.",
+      "interval": "10s"
     },
     {
       "id": 25,
@@ -1135,7 +1143,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 26,
@@ -1202,7 +1211,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 27,
@@ -1269,7 +1279,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 21,
@@ -1348,7 +1359,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 22,
@@ -1427,7 +1439,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 28,
@@ -1515,7 +1528,8 @@
             ]
           }
         ]
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 8,
@@ -1599,7 +1613,8 @@
           "sort": "desc"
         }
       },
-      "description": "Sampled from the worker pod; the series exist only while a worker runs."
+      "description": "Sampled from the worker pod; the series exist only while a worker runs.",
+      "interval": "10s"
     },
     {
       "id": 10,
@@ -1618,7 +1633,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 0)",
+          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[20s]), 0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1627,7 +1642,7 @@
         },
         {
           "refId": "B",
-          "expr": "deriv(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
+          "expr": "deriv(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[20s])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1670,7 +1685,8 @@
           "sort": "desc"
         }
       },
-      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise. Target growth is clamped at 0: vacuum reclaims space during Finalizing, and the resulting negative slope is real but meaningless as a byte rate. Clone copy needs no such clamp: it is a monotonic tally from the work-dir catalog that a retry resumes rather than rewinds."
+      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise. Target growth is clamped at 0: vacuum reclaims space during Finalizing, and the resulting negative slope is real but meaningless as a byte rate. Clone copy needs no such clamp: it is a monotonic tally from the work-dir catalog that a retry resumes rather than rewinds.",
+      "interval": "10s"
     },
     {
       "id": 13,
@@ -1772,7 +1788,8 @@
           "sort": "desc"
         }
       },
-      "description": "Absolute WAL byte positions. Present in follow mode once streaming starts; endpos appears when cutover sets it."
+      "description": "Absolute WAL byte positions. Present in follow mode once streaming starts; endpos appears when cutover sets it.",
+      "interval": "10s"
     },
     {
       "id": 15,
@@ -1851,7 +1868,8 @@
           "mode": "multi",
           "sort": "desc"
         }
-      }
+      },
+      "interval": "10s"
     },
     {
       "id": 16,
@@ -1870,7 +1888,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_source_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
+          "expr": "deriv(pgcopydb_migration_source_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[20s])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1913,7 +1931,8 @@
           "sort": "desc"
         }
       },
-      "description": "How fast the source produces WAL; what the target has to keep up with."
+      "description": "How fast the source produces WAL; what the target has to keep up with.",
+      "interval": "10s"
     },
     {
       "id": 17,
@@ -1980,7 +1999,8 @@
           "valueSize": 48
         }
       },
-      "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done."
+      "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done.",
+      "interval": "10s"
     }
   ]
 }
