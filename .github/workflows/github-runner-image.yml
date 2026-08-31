@@ -48,15 +48,13 @@ jobs:
 
       # buildah rather than the dind sidecar: this builds the image the runner
       # pods themselves boot, and handing that job to a privileged Docker
-      # daemon is more access than a build needs. buildah runs rootless here,
-      # as uid 1001, which the base image already has subuid and subgid ranges
-      # for. Once the new image is in service this step is a no-op, because it
-      # carries buildah itself.
+      # daemon is more access than a build needs. Once the new image is in
+      # service this step is a no-op, because it carries buildah itself.
       - name: Install buildah, which the runner image lacks
         run: |
           if ! command -v buildah >/dev/null; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq buildah uidmap
+            sudo apt-get install -y -qq buildah
           fi
 
       - id: meta
@@ -65,14 +63,23 @@ jobs:
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        # vfs, not overlay: overlay wants either root or a kernel that will
-        # give an unprivileged user a mount, and this pod is neither. vfs costs
-        # disk and time on a weekly build, which is the cheap side of the trade.
+        # Root inside the pod rather than rootless, because rootless needs
+        # newuidmap and newgidmap to carry a setuid bit they do not have here:
+        # buildah fell back to a single ID mapping and then could not extract a
+        # base layer owning files as other users. Root in an ordinary container
+        # still has no host privilege, only the default capability set, which
+        # covers the chowns a layer needs.
+        #
+        # vfs, not overlay, because overlay wants a mount this pod cannot make;
+        # chroot isolation for the same reason, so RUN steps do not ask for
+        # namespaces runc cannot create here. Both cost time on a weekly build,
+        # which is the cheap side of the trade.
         # The context is the repository root, not images/github-runner, because
         # the build reads go.mod, hack/ensure-promtool.sh and the source tree.
         run: |
-          buildah bud \
+          sudo -E buildah bud \
             --storage-driver vfs \
+            --isolation chroot \
             --platform linux/amd64 \
             --file images/github-runner/Dockerfile \
             --tag "$IMAGE:${{ steps.meta.outputs.date }}" \
@@ -85,21 +92,21 @@ jobs:
         # a heredoc inside a YAML block scalar cannot close, because its
         # terminator has to sit at column zero and the block indents it.
         run: |
-          ctr=$(buildah --storage-driver vfs from --pull=never "$IMAGE:${{ steps.meta.outputs.date }}")
-          trap 'buildah --storage-driver vfs rm "$ctr" >/dev/null 2>&1 || true' EXIT
-          buildah --storage-driver vfs copy "$ctr" images/github-runner/verify.sh /tmp/verify.sh
+          ctr=$(sudo buildah --storage-driver vfs from --pull=never "$IMAGE:${{ steps.meta.outputs.date }}")
+          trap 'sudo buildah --storage-driver vfs rm "$ctr" >/dev/null 2>&1 || true' EXIT
+          sudo buildah --storage-driver vfs copy "$ctr" images/github-runner/verify.sh /tmp/verify.sh
           {
             echo "### Runner image \`$IMAGE:${{ steps.meta.outputs.date }}\`"
             echo
-            buildah --storage-driver vfs run "$ctr" -- bash /tmp/verify.sh
+            sudo buildah --storage-driver vfs run "$ctr" -- bash /tmp/verify.sh
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          buildah login --storage-driver vfs \
+          sudo -E buildah login --storage-driver vfs \
             --username "${{ github.actor }}" --password-stdin ghcr.io <<< "$GHCR_TOKEN"
           for tag in "${{ steps.meta.outputs.date }}" latest; do
-            buildah push --storage-driver vfs "$IMAGE:$tag" "docker://$IMAGE:$tag"
+            sudo buildah push --storage-driver vfs "$IMAGE:$tag" "docker://$IMAGE:$tag"
           done

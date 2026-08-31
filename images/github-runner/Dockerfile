@@ -29,12 +29,13 @@ ARG YAMLLINT_VERSION=1.38.0
 # default and a package that needs it fails confusingly without them;
 # build-essential would pull about 200MB for the one compiler we want.
 # buildah is here because this image is what builds the next one, and a job
-# that had to apt-get it first would pay that on every rebuild. uidmap goes
-# with it: buildah runs rootless as uid 1001 and needs newuidmap to map the
-# subuid range the base image already grants that user.
+# that had to apt-get it first would pay that on every rebuild. It runs as root
+# inside the pod rather than rootless, so no uidmap: newuidmap and newgidmap
+# cannot hold a setuid bit in this container, and buildah's fallback to a single
+# ID mapping cannot extract a base layer owning files as other users.
 RUN apt-get update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        make gcc libc6-dev gh postgresql-client python3-pip pipx buildah uidmap \
+        make gcc libc6-dev gh postgresql-client python3-pip pipx buildah \
     && rm -rf /var/lib/apt/lists/*
 
 # System-wide rather than through pipx: pipx installs into ~/.local/bin, which
