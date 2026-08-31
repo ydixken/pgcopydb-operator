@@ -1462,7 +1462,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "When each phase was first seen in the dashboard range, so a phase entered before the range reads as the range start.",
+      "description": "When each phase was first seen in the dashboard range, so a phase entered before the range reads as the range start. The subquery steps at the scrape interval: a phase gauge series only stands until the next scrape marks it stale, so a coarser step walks past short phases entirely. A phase shorter than one scrape leaves no sample at all and cannot appear here; Condition Timeline, beside this, reads the transition times off the CR and does keep those.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -1472,7 +1472,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1000 * min_over_time((timestamp(pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))[$__range:1m])",
+          "expr": "1000 * min by (phase) (min_over_time((timestamp(pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))[$__range:10s]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1551,7 +1551,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "When each condition last changed status, straight from its lastTransitionTime, so a phase that lasted a second is still here. Read across the dashboard range rather than at its end: a condition that has since flipped keeps both of its rows, and a Migration that has since been deleted keeps its timeline.",
+      "description": "When each condition last changed status, straight from its lastTransitionTime, so a phase that lasted a second is still here. Read across the dashboard range rather than at its end: a condition that has since flipped keeps both of its rows, and a Migration that has since been deleted keeps its timeline. Aggregated by condition so an operator restart, which rescrapes the same transition under a new pod label, does not double every row.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -1561,7 +1561,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1000 * last_over_time(pgcopydb_migration_condition_transition_timestamp_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range])",
+          "expr": "1000 * max by (type, status) (last_over_time(pgcopydb_migration_condition_transition_timestamp_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
