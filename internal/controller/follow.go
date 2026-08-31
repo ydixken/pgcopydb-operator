@@ -389,9 +389,18 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
-	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
+	job, created, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
 		return buildVerifyJob(m, r.RunnerImage, r.progressGate())
 	})
+	if created {
+		// Drop what sampleProgress estimated from the databases during the copy.
+		// The worker Job is finished, so no further estimate can arrive, and this
+		// Job's catalog line is the real count: recordCloneProgress waits on an
+		// empty field to know it may still write one. This runs before the nil
+		// check below because ensureJob reports no Job on the pass it creates
+		// one, and it runs on that pass only, so a landed count is never cleared.
+		m.Status.Progress = nil
+	}
 	if err != nil || job == nil {
 		return false, false, err
 	}
@@ -421,6 +430,11 @@ func (r *MigrationReconciler) progressGate() string {
 // verify Job (own pod, same work dir, worker dead) is the one place left that
 // can count. Best effort in both directions: an absent or unparsable line
 // leaves the field empty, and nothing here can move the drain verdict.
+//
+// An empty status.progress is the latch, so an unreadable log (the Job is
+// finished, its pod not yet collected) is retried next pass and a landed
+// count is never rewritten. finishFollow drops the copy-time estimate for
+// exactly that reason: it would otherwise read as landed.
 func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
 	if m.Status.Progress != nil || r.Logs == nil {
 		return

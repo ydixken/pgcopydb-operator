@@ -519,10 +519,11 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	}
 }
 
-// applyCounts fills the progress fields the catalog would have filled, and
-// only those it has not. The catalog is pgcopydb's own accounting and wins
-// where it answered; these counts lead it slightly, because a table counts as
-// copied once it holds any data.
+// applyCounts fills the progress fields from the database estimate, leaving
+// any the catalog already answered. It is the live view during the copy; when
+// the catalog lands at clone completion or drain verification it replaces
+// this wholesale. The estimate leads pgcopydb slightly, because a table counts
+// as copied once it holds any data.
 func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	if m.Status.Progress == nil {
 		m.Status.Progress = &v1beta1.CloneProgress{}
@@ -543,12 +544,12 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 // sampleCloneProgress best-effort fills status.progress from `list progress`,
 // once, by exec-ing into the pod. Its one caller is finishClone, never a pass
 // with a live worker: this is a pgcopydb command and it writes to the catalog.
-// A follow migration cannot use this route at all (its pod is gone by the time
-// the drain is over) and reads the same counters out of the verify Job's log
-// instead, see recordCloneProgress. A failed try leaves the field empty and
-// the next pass retries.
+// It overwrites what sampleProgress estimated from the databases, and that is
+// the point: the catalog is pgcopydb's own accounting, and the estimate leads
+// it. The caller runs this behind CloneCompleted, so it reads the pod once.
+// A failed try leaves whatever the estimate put there.
 func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
-	if r.Progress == nil || m.Status.Progress != nil {
+	if r.Progress == nil {
 		return
 	}
 	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)

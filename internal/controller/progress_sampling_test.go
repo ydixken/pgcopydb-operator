@@ -231,6 +231,47 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
 	})
 
+	It("replaces the copy-time estimate with the verify Job's counters", func() {
+		const name = "mig-progress-estimate"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// A follow migration fills these twice: from the databases while the
+		// copy runs, then from pgcopydb's own catalog once the verify Job has
+		// read it. The second must win, and the first must not read as landed
+		// and lock the verify Job's line out.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src:       int64p(5000),
+			relations: &progress.RelationCounts{TablesTotal: 60, TablesDone: 59},
+		}
+		r.Sentinel = &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+
+		got := reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil())
+		Expect(got.Status.Progress.TablesTotal).To(Equal(int64(60)))
+
+		// The base copy ends: the estimate goes, because no further estimate
+		// can arrive and an occupied field would stop the verify Job's line.
+		finishJob(ctx, name+"-run-1", true)
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).To(BeNil())
+
+		logs.out = verifyProgressPrefix + listProgressJSON + "\n"
+		finishJob(ctx, name+"-verify", true)
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil())
+		Expect(got.Status.Progress.TablesTotal).To(Equal(int64(2)))
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
+	})
+
 	It("passes despite sampler errors", func() {
 		const name = "mig-progress-err"
 		defer removeMigration(ctx, name)
@@ -488,9 +529,15 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
-		finishJob(ctx, name+"-run-1", true)
 
+		// A pass with the worker running, so the estimate is in the field
+		// before the catalog can answer. Without it this spec passes on a
+		// build where the catalog read is skipped entirely.
 		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(7)))
