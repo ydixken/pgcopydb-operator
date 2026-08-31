@@ -256,4 +256,9 @@ jobs:
       - name: mkdocs build --strict
         # Pinned to match the docs deploy workflow; a Renovate custom manager
         # bumps both together.
-        run: pip install mkdocs-material==9.7.7 && mkdocs build --strict
+        run: |
+          # The runner image carries mkdocs-material at this pin, and a system
+          # python refuses a system-wide install under PEP 668 anyway. Only a
+          # fork's pull request, on a hosted runner with setup-python, installs.
+          command -v mkdocs >/dev/null || pip install mkdocs-material==9.7.7
+          mkdocs build --strict
