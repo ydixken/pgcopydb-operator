@@ -24,7 +24,7 @@ jobs:
   candidate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # The bump reads the tag history back to the last stable release.
           fetch-depth: 0

@@ -24,7 +24,9 @@ package buildconfig
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,6 +40,8 @@ const (
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
 	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
+	workflowDir       = "../../.github/workflows"
+	ciWorkflow        = "../../.github/workflows/ci.yml"
 	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
 	chartReadme       = "../../charts/pgcopydb-operator/README.md"
 	runnerReadme      = "../../images/runner/README.md"
@@ -193,16 +197,22 @@ func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
 }
 
 type workflowStep struct {
+	Name string `json:"name"`
 	Uses string `json:"uses"`
+	If   string `json:"if"`
 	With struct {
-		Context   string `json:"context"`
-		Platforms string `json:"platforms"`
+		AllowLicenses  string `json:"allow-licenses"`
+		Context        string `json:"context"`
+		FailOnScopes   string `json:"fail-on-scopes"`
+		FailOnSeverity string `json:"fail-on-severity"`
+		Platforms      string `json:"platforms"`
 	} `json:"with"`
 }
 
 type workflowJob struct {
 	Needs json.RawMessage `json:"needs"`
 	If    string          `json:"if"`
+	Uses  string          `json:"uses"`
 	Steps []workflowStep  `json:"steps"`
 }
 
@@ -234,6 +244,128 @@ func TestReleasePromotionWaitsForCandidateChecks(t *testing.T) {
 	}
 	if promote.If != "" {
 		t.Errorf("release.yml promote has job-level if %q; default dependency handling must gate promotion", promote.If)
+	}
+}
+
+func TestWorkflowActionInventory(t *testing.T) {
+	approved := map[string]string{
+		"actions/cache":                    "v6",
+		"actions/checkout":                 "v7",
+		"actions/configure-pages":          "v6",
+		"actions/dependency-review-action": "v4",
+		"actions/deploy-pages":             "v5",
+		"actions/setup-go":                 "v7",
+		"actions/setup-python":             "v7",
+		"actions/upload-pages-artifact":    "v5",
+		"azure/setup-helm":                 "v5",
+		"azure/setup-kubectl":              "v5",
+		"codecov/codecov-action":           "v7",
+		"docker/build-push-action":         "v7",
+		"docker/login-action":              "v4",
+		"docker/setup-buildx-action":       "v4",
+		"docker/setup-qemu-action":         "v4",
+		"oras-project/setup-oras":          "v2",
+	}
+
+	entries, err := os.ReadDir(workflowDir)
+	if err != nil {
+		t.Fatalf("read workflow directory: %v", err)
+	}
+
+	files := 0
+	references := 0
+	dependencyReviews := 0
+	check := func(location, uses string) {
+		if uses == "" {
+			return
+		}
+		references++
+		name, version, ok := strings.Cut(uses, "@")
+		if !ok || name == "" || version == "" {
+			t.Errorf("%s has malformed action reference %q", location, uses)
+			return
+		}
+		want, ok := approved[name]
+		if !ok {
+			t.Errorf("%s uses unapproved action %q", location, name)
+			return
+		}
+		if version != want {
+			t.Errorf("%s uses %s@%s, want %s@%s", location, name, version, name, want)
+		}
+		if name == "actions/dependency-review-action" {
+			dependencyReviews++
+		}
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yml" {
+			continue
+		}
+		files++
+		path := filepath.Join(workflowDir, entry.Name())
+		var wf workflow
+		if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+			t.Errorf("parse %s: %v", path, err)
+			continue
+		}
+		for jobName, job := range wf.Jobs {
+			check(entry.Name()+"/jobs/"+jobName, job.Uses)
+			for i, step := range job.Steps {
+				check(fmt.Sprintf("%s/jobs/%s/steps/%d", entry.Name(), jobName, i), step.Uses)
+			}
+		}
+	}
+
+	if files != 9 {
+		t.Errorf("workflow inventory contains %d YAML files, want 9", files)
+	}
+	if references != 52 {
+		t.Errorf("workflow inventory contains %d action references, want 52", references)
+	}
+	if dependencyReviews != 1 {
+		t.Errorf("workflow inventory contains %d dependency review references, want 1", dependencyReviews)
+	}
+}
+
+func TestDependencyReviewGatesPullRequests(t *testing.T) {
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, ciWorkflow)), &wf); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+
+	lint, ok := wf.Jobs["lint"]
+	if !ok {
+		t.Fatal("ci.yml has no lint job")
+	}
+
+	reviews := 0
+	for i, step := range lint.Steps {
+		if step.Uses != "actions/dependency-review-action@v4" {
+			continue
+		}
+		reviews++
+		if i == 0 || lint.Steps[i-1].Uses != "actions/checkout@v7" {
+			t.Error("dependency review must appear immediately after lint checkout")
+		}
+		if step.Name != "Review dependency changes" {
+			t.Errorf("dependency review name is %q", step.Name)
+		}
+		if step.If != "github.event_name == 'pull_request'" {
+			t.Errorf("dependency review if is %q", step.If)
+		}
+		if step.With.FailOnSeverity != "moderate" {
+			t.Errorf("dependency review fail-on-severity is %q", step.With.FailOnSeverity)
+		}
+		if step.With.FailOnScopes != "runtime, development, unknown" {
+			t.Errorf("dependency review fail-on-scopes is %q", step.With.FailOnScopes)
+		}
+		if step.With.AllowLicenses != "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT" {
+			t.Errorf("dependency review allow-licenses is %q", step.With.AllowLicenses)
+		}
+	}
+	if reviews != 1 {
+		t.Errorf("lint job contains %d dependency review steps, want 1", reviews)
 	}
 }
 

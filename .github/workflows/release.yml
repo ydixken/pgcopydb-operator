@@ -40,11 +40,11 @@ jobs:
   manager-image:
     runs-on: github-runner-pgcopydb-operator
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # No setup-qemu here: the builder stage pins --platform=$BUILDPLATFORM and
       # the distroless final stage is COPY-only, so nothing is ever emulated.
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -65,7 +65,7 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -79,10 +79,10 @@ jobs:
   runner-image:
     runs-on: github-runner-pgcopydb-operator
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -123,7 +123,7 @@ jobs:
           fi
       - name: Build the pgcopydb builder image
         if: steps.builder.outputs.exists != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: images/pgcopydb-builder
           platforms: linux/amd64,linux/arm64
@@ -143,7 +143,7 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: images/runner
           platforms: linux/amd64,linux/arm64
@@ -162,11 +162,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [manager-image, runner-image]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # hack/stamp-chart.sh reads the tag history to build the changelog.
           fetch-depth: 0
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - name: Push chart as OCI
         # Chart version and appVersion both track the git tag (without the
         # leading v, Helm requires SemVer). stamp-chart.sh fills in the
@@ -186,7 +186,7 @@ jobs:
     permissions:
       contents: write  # the workflow default is read-only
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Create the GitHub release
@@ -225,14 +225,14 @@ jobs:
     environment: e2e-cluster
     timeout-minutes: 260
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The scale set runs a bare actions-runner image: git and node are all
       # it ships, so every tool the suite shells out to is installed here.
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: azure/setup-helm@v4
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-helm@v5
+      - uses: azure/setup-kubectl@v5
       - name: Require the Prometheus URL
         # The metrics specs Skip when no Prometheus knob is set. On this gate
         # a missing repository variable must fail loudly, or the release would
@@ -300,7 +300,7 @@ jobs:
     needs: [e2e, release-notes]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Tags come with the full history only, and the check below has to
           # see an existing stable tag rather than tag over it.
