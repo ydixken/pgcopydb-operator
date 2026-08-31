@@ -8,11 +8,12 @@
 - [x] Get user approval for the release promotion fix and permanent dependency gate.
 - [x] Revise `docs/superpowers/specs/2026-08-31-issue-95-dependency-refresh-design.md` with the approved gates and stop rules.
 - [x] Self-review the revised spec for placeholders, contradictions, exact mappings, semantic line breaks, prohibited dashes, private information, and runnable commands.
-- [ ] Complete an independent review of the revised written spec before implementation planning.
+- [x] Complete an independent review of the revised written spec before implementation planning.
 
 ## First pull request
 
-- [ ] Write the implementation plan from the approved and reviewed design.
+- [x] Write the implementation plan from the approved and reviewed design.
+- [ ] Complete an independent review of the implementation plan before implementation.
 - [ ] Enable GitHub Dependency Graph through the repository Settings UI.
 - [ ] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
 - [ ] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
