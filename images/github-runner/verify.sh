@@ -15,7 +15,7 @@ note() {
 
 # On PATH, because a workflow step calls these by name.
 for tool in go make gcc gh psql helm kubectl promtool oras yamllint mkdocs \
-    python3 pip jq git curl docker; do
+    python3 pip jq git curl docker actionlint; do
     command -v "$tool" >/dev/null || note "missing on PATH: $tool"
 done
 

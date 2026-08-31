@@ -60,7 +60,11 @@ The runners boot `ghcr.io/ydixken/pgcopydb-operator/github-runner`, built from [
 
 Versions are pinned so the image is reproducible and Renovate can see them, except Go, promtool and crd-ref-docs, which are read out of `go.mod`, `hack/ensure-promtool.sh` and `Taskfile.yml` at build time so the image cannot drift from what the Makefile and the docs gate use. Merging a Renovate bump rebuilds the image; the weekly schedule is for the apt packages, which move on their own.
 
-`actions/setup-go` stays in every job even though the image carries Go. A pull request that bumps the Go version in `go.mod` would otherwise deadlock: the image only rebuilds once that change is on `main`, so CI would be red with no way to merge the fix. `setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner.
+No job runs `actions/setup-go`. The image carries Go, and `GOTOOLCHAIN` is left at its default so a `go.mod` that has moved ahead of the image fetches the toolchain it asks for rather than failing. Pinning it to `local` deadlocked instead: the image rebuilds only once a bump is on `main`, so the pull request making the bump would be red with no way through, and a push to main races its own rebuild.
+
+`setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner, and `ubuntu-latest` has neither Helm nor a guaranteed Python.
+
+`task lint` runs [actionlint](https://github.com/rhysd/actionlint), which yamllint cannot replace: a step that lost its `uses:` is still valid YAML. One shipped that way, and because `release.yml` only runs on a tag, nothing would have noticed until a release failed. [`.github/actionlint.yaml`](.github/actionlint.yaml) declares the two self-hosted labels so the real findings are not buried under unknown-label warnings.
 
 The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set. Nothing goes through GitHub's cache service: the jobs used to spend 109 and 173 seconds shipping 444MB of Go cache to the internet and pulling it back, and buildx would have done the same with the image layers.
 

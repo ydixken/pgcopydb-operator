@@ -77,20 +77,12 @@ jobs:
             echo "GOMODCACHE=/cache/go-mod"
             echo "GOLANGCI_LINT_CACHE=/cache/golangci"
           } >> "$GITHUB_ENV"
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          # The caches live on the node directory above. Left on, setup-go
-          # tars and uploads them to GitHub's cache service on every run:
-          # 444MB, 109s on this job and 173s on the test one.
-          cache: false
       # The runner image carries Helm. Only a fork's pull request, which lands
       # on a hosted runner, still needs this.
       - uses: azure/setup-helm@v5
         if: ${{ github.event.pull_request.head.repo.fork }}
-      # The cluster runner is the minimal actions-runner image: git, curl, jq
-      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
-      # so this is a no-op on the hosted runner a fork's pull request gets.
+      # The runner image carries these; a hosted runner, which is what a fork's
+      # pull request gets, does not. The check makes this a no-op on ours.
       - name: Install what the runner lacks
         run: |
           if ! command -v pipx >/dev/null || ! command -v make >/dev/null; then
@@ -196,16 +188,8 @@ jobs:
             echo "GOMODCACHE=/cache/go-mod"
             echo "GOLANGCI_LINT_CACHE=/cache/golangci"
           } >> "$GITHUB_ENV"
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          # The caches live on the volume above. Left on, setup-go tars and
-          # uploads them to GitHub's cache service on every run: 444MB, 109s on
-          # this job and 173s on the test one.
-          cache: false
-      # The cluster runner is the minimal actions-runner image: git, curl, jq
-      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
-      # so this is a no-op on the hosted runner a fork's pull request gets.
+      # The runner image carries these; a hosted runner, which is what a fork's
+      # pull request gets, does not. The check makes this a no-op on ours.
       # psql is the one this suite genuinely needs rather than merely runs
       # through: TestCompareDataQuery fails, not skips, when PGCOPYDB_TEST_PGURI
       # is set and psql is missing, so a runner without it would have turned the
