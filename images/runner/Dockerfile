@@ -106,7 +106,7 @@ ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 # which would mean the report never improved. Running pgcopydb at all also
 # proves its runtime libraries survived into this stage.
 RUN set -eux; \
-    pgcopydb --version | grep -qF '0.18.2.gea87951'; \
+    pgcopydb --version | grep -qF '0.18.5.ge37d2bd'; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \

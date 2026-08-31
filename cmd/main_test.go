@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	defaultPollVersions = "0.18.2.gea87951"
+	defaultPollVersions = "0.18.5.ge37d2bd"
 	testCertDir         = "/certs"
 	testCertName        = "m.crt"
 	testCertKey         = "m.key"

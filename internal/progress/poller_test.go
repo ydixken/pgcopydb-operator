@@ -29,7 +29,7 @@ import (
 )
 
 // patchedVersion is the allowlisted fixture version across these tests.
-const patchedVersion = "0.18.2.gea87951"
+const patchedVersion = "0.18.5.ge37d2bd"
 
 // fakeExec scripts the podexec surface: tests choose the pod lookup result
 // and the exec output, and read back what was executed.
@@ -86,7 +86,7 @@ func TestGateScript(t *testing.T) {
 		// the bug, which is the one thing this test exists to prevent. The
 		// verify Job embeds this script inside $( ), where the bare form is
 		// ambiguous, so the leading "(" is the property, not the parse.
-		"\n(0.18.2.gea87951|0.19) pgcopydb list progress",
+		"\n(0.18.5.ge37d2bd|0.19) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {

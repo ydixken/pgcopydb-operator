@@ -107,7 +107,7 @@ func registerFlags(fs *flag.FlagSet) *flags {
 		"Default image for migration worker Jobs; spec.runner.image overrides per Migration.")
 	fs.StringVar(&f.watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to watch; empty watches the whole cluster.")
-	fs.StringVar(&f.progressPollVersions, "progress-poll-versions", "0.18.2.gea87951",
+	fs.StringVar(&f.progressPollVersions, "progress-poll-versions", "0.18.5.ge37d2bd",
 		"Comma-separated exact pgcopydb versions allowed to run the in-pod progress poll; "+
 			"empty disables the poll (database sizes are sampled regardless).")
 	fs.BoolVar(&f.enableLeaderElection, "leader-elect", false,
