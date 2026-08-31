@@ -16,7 +16,7 @@
 - [x] Integrate both studies into a detailed implementation-plan draft.
 - [x] Review commit `dc96010` and record its remaining lifecycle-proof and stale-comment gaps.
 - [x] Correct the command-state proof, lifecycle assertions, and helper-comment coverage.
-- [ ] Obtain an independent re-review of the corrected plan before implementation starts.
+- [x] Obtain an independent re-review of the corrected plan before implementation starts.
 - [ ] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
 - [ ] Obtain an independent review of the implementation.
 - [ ] Run `task lint` and `task test` for the implementation.
@@ -32,7 +32,7 @@
 - Focused planning studies: specified the deterministic subprocess test protocol and the single-resolution close, Wait, and final-query lifecycle.
 - Commit `dc96010` review: required proof that the persistent child was not started on `StdinPipe` failure, proof that Wait completed before every final query, and three omitted stale-comment replacements.
 - Review corrections: complete with locked command snapshots, process-state assertions, and exact bounded comment edits.
-  Independent re-review is pending.
+- Independent implementation-plan re-review after commit `22f446b`: APPROVED.
 - Implementation: pending until the corrected plan passes independent re-review.
 - Implementation review: pending.
 - Verification results: pending implementation.
