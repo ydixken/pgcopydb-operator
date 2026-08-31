@@ -65,15 +65,12 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      # The buildx layer cache goes on the node, next to the Go caches,
-      # rather than through GitHub's cache service. One directory per image,
-      # so rebuilding one cannot evict another's layers.
-      - id: cachemgr
-        run: |
-          [ -d /cache ] || exit 0
-          sudo mkdir -p /cache/buildx-manager
-          [ -O /cache/buildx-manager ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-manager
-          echo "dir=/cache/buildx-manager" >> "$GITHUB_OUTPUT"
+      # No layer cache, unlike every other image here. Exporting it cost 92 of
+      # this job's 199 seconds and 1.1GB on the node, to make one layer
+      # reusable: go mod download. The layer that actually costs time, go build,
+      # is invalidated by the commit being released. This is also the only image
+      # that never emulates, because the builder stage runs on BUILDPLATFORM and
+      # cross-compiles, so there is no expensive emulated work to keep either.
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -84,8 +81,6 @@ jobs:
           # without it a released image reports "dev".
           build-args: |
             VERSION=${{ github.ref_name }}
-          cache-from: ${{ steps.cachemgr.outputs.dir && format('type=local,src={0}', steps.cachemgr.outputs.dir) || '' }}
-          cache-to: ${{ steps.cachemgr.outputs.dir && format('type=local,dest={0},mode=max', steps.cachemgr.outputs.dir) || '' }}
 
   # Split out so the build below can be a reusable workflow call, which a step
   # cannot be. Its only input, PGCOPYDB_SHA, changed once across 55 tags, so the
