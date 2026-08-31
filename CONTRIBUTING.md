@@ -6,7 +6,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 ## Requirements
 
-- [go](https://go.dev): the operator's language (nothing to build yet).
+- [go](https://go.dev): the operator's language and test toolchain.
 - [task](https://taskfile.dev): task runner, the entrypoint for everything.
 - [yamllint](https://yamllint.readthedocs.io): lints all YAML; the only linter with work to do pre-scaffold.
 - [golangci-lint](https://golangci-lint.run) v2: Go linting, activates once `go.mod` exists.
