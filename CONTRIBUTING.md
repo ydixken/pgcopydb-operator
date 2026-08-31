@@ -119,6 +119,8 @@ Releases cut themselves. Every Monday at 08:00 UTC `auto-release.yml` reads what
 
 That tag starts `release.yml`, which publishes the manager and runner images (multi-arch) and the Helm chart as OCI, creates the GitHub release whose notes GitHub generates from the merged PRs, and runs the e2e suite against exactly those artifacts on the cluster.
 
+Every job below `builder-build` carries `!cancelled()` in its condition, and that is load-bearing rather than defensive. `builder-build` skips on the normal path, because the pinned builder tag is almost always published already, and GitHub propagates that skip to every descendant: a job in between that survives it with its own status function still passes the skip along to its own dependants. `v0.12.1-rc.2` published two images and then skipped the chart, the release notes and e2e, reporting success.
+
 Fail, and the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main`, and the next candidate carries the fix.
 
 Pass, and nothing happens on its own. Promotion is [promote.yml](.github/workflows/promote.yml), dispatched by hand with the candidate tag. That is what lets several candidates stand between two releases: a candidate that is never promoted just stays a candidate, and rc.2 can supersede rc.1 without rc.1 having already become the release.

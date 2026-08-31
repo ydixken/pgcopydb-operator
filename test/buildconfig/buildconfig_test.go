@@ -228,6 +228,75 @@ type workflow struct {
 	Jobs map[string]workflowJob `json:"jobs"`
 }
 
+// GitHub propagates a skip down `needs`: a job whose dependency was skipped is
+// skipped too, unless its own `if` calls a status function (always, cancelled,
+// failure, success) instead of relying on the implicit success(). builder-build
+// skips on the normal path, because the pinned builder tag is almost always
+// published already, and v0.12.1-rc.2 shipped two images and then skipped the
+// chart, the release notes and e2e, reporting success while publishing an
+// incomplete release.
+//
+// So this walks the graph the way GitHub does and asserts what has to survive
+// that skip.
+func TestReleaseSurvivesTheBuilderBeingSkipped(t *testing.T) {
+	wf := mustParse(t, releaseWorkflow)
+
+	statusFn := regexp.MustCompile(`\b(always|cancelled|failure|success)\s*\(`)
+	needsOf := func(j workflowJob) []string {
+		if len(j.Needs) == 0 {
+			return nil
+		}
+		var many []string
+		if err := json.Unmarshal(j.Needs, &many); err == nil {
+			return many
+		}
+		var one string
+		if err := json.Unmarshal(j.Needs, &one); err == nil {
+			return []string{one}
+		}
+		t.Fatalf("release.yml: cannot read needs %s", j.Needs)
+		return nil
+	}
+
+	// Two things, and conflating them is what let v0.12.1-rc.2 through. The
+	// taint reaches every descendant of the skipped job whether or not a job in
+	// between ran: a status function lets that job itself run, it does not stop
+	// the taint flowing past it. Only a job's own status function saves it.
+	// Fixed point rather than one pass, since the graph is not in order.
+	tainted := map[string]bool{"builder-build": true}
+	for changed := true; changed; {
+		changed = false
+		for name, job := range wf.Jobs {
+			if tainted[name] {
+				continue
+			}
+			for _, need := range needsOf(job) {
+				if tainted[need] {
+					tainted[name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	skipped := map[string]bool{}
+	for name, job := range wf.Jobs {
+		skipped[name] = tainted[name] && !statusFn.MatchString(job.If)
+	}
+	delete(skipped, "builder-build")
+
+	// Everything a candidate must still produce once the builder is reused.
+	for _, name := range []string{"chart", "release-notes", "e2e"} {
+		if _, ok := wf.Jobs[name]; !ok {
+			t.Fatalf("release.yml has no %s job", name)
+		}
+		if skipped[name] {
+			t.Errorf("release.yml skips %s when builder-build is skipped, which is the normal "+
+				"path; the run would report success and publish an incomplete release", name)
+		}
+	}
+}
+
 // Promotion is manual and lives in its own workflow, so a release can have
 // several candidates before one becomes it. That moved the gate out of the
 // dependency graph, where GitHub enforced it, and into a step that has to

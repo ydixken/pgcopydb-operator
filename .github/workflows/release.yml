@@ -208,6 +208,15 @@ jobs:
   chart:
     runs-on: github-runner-pgcopydb-operator
     needs: [manager-image, runner-image]
+    # runner-image tolerates builder-build skipping, which is the normal path
+    # because the builder tag is almost always published already. A skip
+    # propagates down `needs` unless each job in turn says otherwise, so
+    # without this the whole release skips from here and reports success while
+    # publishing nothing. v0.12.1-rc.2 did exactly that.
+    if: >-
+      !cancelled()
+      && needs.manager-image.result == 'success'
+      && needs.runner-image.result == 'success'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -229,6 +238,12 @@ jobs:
     # Last, so a release only appears once its artifacts are actually published.
     runs-on: github-runner-pgcopydb-operator
     needs: [chart]
+    # Same reason as chart: the skip that starts at builder-build reaches every
+    # job below it, and a status function is the only thing that stops a job
+    # being taken with it.
+    if: >-
+      !cancelled()
+      && needs.chart.result == 'success'
     permissions:
       contents: write  # the workflow default is read-only
     steps:
@@ -261,8 +276,15 @@ jobs:
     # earn their place because what GitHub documents for a rejected ref is only
     # that "the job will fail and the run will stop", not that it fails before
     # a self-hosted runner is assigned.
+    #
+    # !cancelled() relaxes none of that. Without a status function the implicit
+    # success() applies, and the skip starting at builder-build would take this
+    # job with it; the chart result is checked explicitly in its place, so the
+    # gate still requires the chart it tests to have published.
     if: >-
-      contains(github.ref_name, '-rc.')
+      !cancelled()
+      && needs.chart.result == 'success'
+      && contains(github.ref_name, '-rc.')
       && github.repository == 'ydixken/pgcopydb-operator'
       && (github.event_name != 'pull_request'
       || github.event.pull_request.head.repo.full_name == github.repository)
