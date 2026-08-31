@@ -258,7 +258,7 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	}
 	if failedVerify {
 		r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionFalse, "DrainIncomplete",
-			"drain verification found changes missing on the target below endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
+			"drain verification did not show the target holding every change below endpos; the replication slot is kept so the data is recoverable, and it retains WAL on the source until resolved")
 		r.fail(m, "DrainIncomplete", "Verify",
 			"cutover drain verification refuted completeness; do not switch applications to the target")
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)

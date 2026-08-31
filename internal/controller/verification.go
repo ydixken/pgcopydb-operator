@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -46,6 +47,62 @@ const (
 	compareData   = "data"
 )
 
+// compareReportPath holds the --json report inside the pod's writable /tmp
+// for the length of one check; nothing outside the Job reads it.
+const compareReportPath = "/tmp/compare-data.json"
+
+// compareReportQuery names every table the report does not show as matching.
+// A row for a table whose source side is absent is deliberate: a report whose
+// keys the query cannot find would otherwise compare NULL against NULL and
+// read as a clean match, which is the blindness this whole change removes. So
+// is the row for an empty array, because a compare that examined no table has
+// not shown anything to match. psql reads the report itself instead of taking
+// it through -v, because Linux caps one argv string at 128 KiB, which a
+// pretty-printed report crosses at around 480 tables (measured).
+var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select 'the report lists no table, so nothing was compared'
+ where json_array_length(:'r'::json) = 0;
+select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)',
+              t->>'schema', t->>'name',
+              t->'source'->>'rowcount', t->'source'->>'checksum',
+              t->'target'->>'rowcount', t->'target'->>'checksum')
+  from json_array_elements(:'r'::json) as report(t)
+ where t->'source'->>'rowcount' is distinct from t->'target'->>'rowcount'
+    or t->'source'->>'checksum' is distinct from t->'target'->>'checksum'
+    or t->'source'->>'rowcount' is null
+    or t->'source'->>'checksum' is null;
+`
+
+// pgcopydb compare data reports a row-count or checksum difference by logging
+// it and returning success anyway, so the Job's exit code carries no verdict
+// and every gate reading that code passes blind. compare_data_strict re-derives
+// the verdict from the --json report, with psql as the parser because the
+// runner image ships neither jq nor python, and treats a report it could not
+// produce or could not read as a mismatch rather than as a match.
+var compareDataStrict = `compare_data_strict() {
+  if ! pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + compareReportPath + `; then
+    echo "compare data could not run; refusing to read that as a match"
+    return 1
+  fi
+  cat ` + compareReportPath + `
+  if ! unmatched=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -f - <<'SQL'
+` + compareReportQuery + `SQL
+  ); then
+    echo "compare data report could not be evaluated; refusing to read that as a match"
+    return 1
+  fi
+  if [ -n "$unmatched" ]; then
+    echo "compare data did not find every table matching between source and target:"
+    echo "$unmatched"
+    return 1
+  fi
+  return 0
+}
+`
+
+// compareDataScript is the whole program of the data compare Job: the
+// wrapper's return status is the last command's, so it becomes the Job's.
+var compareDataScript = "set -eu\n" + compareDataStrict + "compare_data_strict\n"
+
 func compareJobName(m *v1beta1.Migration, check string) string {
 	return m.Name + "-compare-" + check
 }
@@ -72,13 +129,14 @@ func enabledChecks(m *v1beta1.Migration) []string {
 // shape: pgcopydb compare wants the work-dir catalogs and both connections,
 // which is exactly what jobSkeleton provides. Backoff 1 absorbs one infra
 // flake (pod eviction) without reporting a false mismatch; a genuine mismatch
-// costs one redundant re-run, which is bounded.
+// costs one redundant re-run, which is bounded. The data check runs through
+// compare_data_strict because the bare command cannot fail on a difference;
+// compare schema counts its own diffs and exits on them, so it runs as argv.
 func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.Job, error) {
-	args := pgcopydb.CompareSchemaArgs()
 	if check == compareData {
-		args = pgcopydb.CompareDataArgs()
+		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript, 1)
 	}
-	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), args, "", 1)
+	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(), "", 1)
 	if err != nil {
 		return nil, err
 	}

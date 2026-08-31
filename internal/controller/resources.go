@@ -217,7 +217,10 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// session_replication_role incident where nothing was applied at all.
 	//
 	// Content path: when the origin cannot prove the drain, pgcopydb compare
-	// data checksums the migrated tables and refuses only on a difference.
+	// data checksums the migrated tables and passes only when the report
+	// shows every one of them matching. It runs through compare_data_strict:
+	// the bare command logs a difference and still exits 0, so its own status
+	// proves nothing.
 	// Both live-found loss modes stay caught, on this path, by content:
 	// resume-skips-replay and silent-apply both leave rows missing on the
 	// target, and neither can push the origin near endpos (the origin only
@@ -229,7 +232,7 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// an active source remains the residual risk; spec.verification.data is
 	// the airtight check.
 	script := `set -eu
-endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
 progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
 gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
@@ -239,11 +242,11 @@ echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_byt
   exit 0
 fi
 echo "origin gap exceeds one WAL page; on an idle source that is publication-filtered WAL, not loss. Deciding by content."
-if pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + `; then
+if compare_data_strict; then
   echo "drain verified: pgcopydb compare data found all migrated tables matching"
   exit 0
 fi
-echo "drain refuted: pgcopydb compare data found differences; do not switch applications to the target (the replication slot is kept)"
+echo "drain refuted: pgcopydb compare data did not show the target matching the source (see the line above for whether it found a difference or could not produce a verdict); do not switch applications to the target (the replication slot is kept)"
 exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely

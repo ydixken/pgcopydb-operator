@@ -22,8 +22,10 @@ func CompareSchemaArgs() []string {
 	return []string{"compare", "schema", flagDir, WorkDir}
 }
 
-// CompareDataArgs renders the argv for `pgcopydb compare data`. --json makes
-// the per-table result parseable from the Job logs.
+// CompareDataArgs renders the argv for `pgcopydb compare data`. --json is
+// load-bearing, not a convenience: the command logs a differing table and
+// still exits 0, so the report is the only place a verdict can come from
+// (see compare_data_strict, which is what actually runs this argv).
 func CompareDataArgs() []string {
 	return []string{"compare", "data", flagDir, WorkDir, "--json"}
 }

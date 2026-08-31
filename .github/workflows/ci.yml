@@ -63,6 +63,21 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      # The compare-data gate decides its verdict in SQL, and a server is the
+      # only place that logic can be exercised. Without one TestCompareDataQuery
+      # skips, and the check that exists to stop a blind pass ships unrun.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
@@ -70,6 +85,9 @@ jobs:
           go-version-file: go.mod
       - name: Unit and envtest suites
         # make test downloads the envtest control-plane binaries itself.
+        # The throwaway service above holds no data; the query only selects.
+        env:
+          PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: make test
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"

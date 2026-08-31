@@ -190,7 +190,7 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	// script's only failure exit follows the compare invocation.
 	if !strings.HasSuffix(c.Args[1], "exit 1") ||
 		strings.Count(c.Args[1], "exit 1") != 1 ||
-		strings.Index(c.Args[1], "compare data") > strings.Index(c.Args[1], "exit 1") {
+		strings.Index(c.Args[1], "if compare_data_strict") > strings.Index(c.Args[1], "exit 1") {
 		t.Fatalf("verify script must refuse only after compare data:\n%s", c.Args[1])
 	}
 	// No poller wired, no counters asked for: the drain script stays exactly
