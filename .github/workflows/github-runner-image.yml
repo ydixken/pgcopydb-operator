@@ -60,8 +60,18 @@ jobs:
 
       - id: meta
         # A date tag so a bad week can be rolled back to a named image, and
-        # :latest because that is the tag the scale sets track.
-        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        # :latest because that is the tag the scale sets track. The layer cache
+        # goes on the node beside the Go caches rather than through GitHub's
+        # cache service, which is the same round trip this repository already
+        # deleted from the lint and test jobs: 444MB and about two minutes a run
+        # to send a cache to the internet and pull it back.
+        run: |
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          if [ -d /cache ]; then
+            sudo mkdir -p /cache/buildx
+            [ -O /cache/buildx ] || sudo chown "$(id -u):$(id -g)" /cache/buildx
+            echo "cache=/cache/buildx" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/build-push-action@v7
         with:
@@ -81,8 +91,10 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}/github-runner:${{ steps.meta.outputs.date }}
             ghcr.io/${{ github.repository }}/github-runner:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Empty on a hosted runner, where buildx then simply builds cold.
+          # src is missing on the first run per node and buildx accepts that.
+          cache-from: ${{ steps.meta.outputs.cache && format('type=local,src={0}', steps.meta.outputs.cache) || '' }}
+          cache-to: ${{ steps.meta.outputs.cache && format('type=local,dest={0},mode=max', steps.meta.outputs.cache) || '' }}
 
       - name: Prove the image carries what the jobs reach for
         # An image missing a tool turns every workflow red at once, and the

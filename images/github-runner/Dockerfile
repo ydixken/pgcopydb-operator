@@ -95,13 +95,21 @@ ENV PATH="/usr/local/go/bin:${PATH}" \
 # go build ./... leaves the whole dependency tree in the build cache. This
 # repository's own packages go stale with the next commit, which is what the
 # node cache under /cache is for; their dependencies do not.
-ENV LOCALBIN=/opt/toolchain/bin
+ENV LOCALBIN=/opt/toolchain/bin \
+    GOMODCACHE=/home/runner/go/pkg/mod \
+    GOCACHE=/home/runner/.cache/go-build
+
+# The module download is its own layer, keyed on go.mod and go.sum alone, so a
+# change anywhere else in the tree does not make the image re-fetch every
+# dependency. That ordering is worth real time: the download is the largest
+# single step in this build.
+COPY go.mod go.sum /tmp/src/
+RUN cd /tmp/src && go mod download
+
 COPY . /tmp/src
 RUN set -eux; \
     cd /tmp/src; \
     mkdir -p "$LOCALBIN"; \
-    export GOMODCACHE=/home/runner/go/pkg/mod GOCACHE=/home/runner/.cache/go-build; \
-    go mod download; \
     make controller-gen setup-envtest golangci-lint kustomize; \
     crd_ref="$(sed -n 's|.*go install \(github.com/elastic/crd-ref-docs@v[0-9.]*\).*|\1|p' Taskfile.yml | head -1)"; \
     [ -n "$crd_ref" ] || { echo "Taskfile.yml has no crd-ref-docs pin" >&2; exit 1; }; \
