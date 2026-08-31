@@ -23,6 +23,7 @@ limitations under the License.
 package buildconfig
 
 import (
+	"encoding/json"
 	"os"
 	"regexp"
 	"slices"
@@ -199,10 +200,41 @@ type workflowStep struct {
 	} `json:"with"`
 }
 
+type workflowJob struct {
+	Needs json.RawMessage `json:"needs"`
+	If    string          `json:"if"`
+	Steps []workflowStep  `json:"steps"`
+}
+
 type workflow struct {
-	Jobs map[string]struct {
-		Steps []workflowStep `json:"steps"`
-	} `json:"jobs"`
+	Jobs map[string]workflowJob `json:"jobs"`
+}
+
+func TestReleasePromotionWaitsForCandidateChecks(t *testing.T) {
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, releaseWorkflow)), &wf); err != nil {
+		t.Fatalf("parse release.yml: %v", err)
+	}
+
+	promote, ok := wf.Jobs["promote"]
+	if !ok {
+		t.Fatal("release.yml has no promote job")
+	}
+	if len(promote.Needs) == 0 {
+		t.Fatal("release.yml promote job declares no prerequisites")
+	}
+
+	var needs []string
+	if err := json.Unmarshal(promote.Needs, &needs); err != nil {
+		t.Fatalf("parse release.yml promote needs: %v", err)
+	}
+	want := []string{"e2e", "release-notes"}
+	if !slices.Equal(needs, want) {
+		t.Errorf("release.yml promote needs %v, want exactly %v", needs, want)
+	}
+	if promote.If != "" {
+		t.Errorf("release.yml promote has job-level if %q; default dependency handling must gate promotion", promote.If)
+	}
 }
 
 func usesQEMU(steps []workflowStep) bool {
