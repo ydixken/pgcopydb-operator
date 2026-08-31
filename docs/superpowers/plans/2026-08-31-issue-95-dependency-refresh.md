@@ -1602,17 +1602,7 @@ Run:
 set -euo pipefail
 git diff --check fcbc56d..HEAD
 git diff --stat fcbc56d..HEAD
-git diff fcbc56d..HEAD -- \
-  .custom-gcl.yml \
-  .github/workflows \
-  Dockerfile \
-  Makefile \
-  go.mod \
-  go.sum \
-  images/pgcopydb-builder/Dockerfile \
-  images/runner/Dockerfile \
-  test/buildconfig/buildconfig_test.go \
-  test/e2e/e2e_suite_test.go
+git diff fcbc56d..HEAD
 ```
 
 Expected: no whitespace errors.
