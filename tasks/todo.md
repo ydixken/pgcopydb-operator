@@ -19,7 +19,7 @@
 - [x] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
 - [x] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
 - [x] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
-- [ ] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
+- [x] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
 - [x] Upgrade all 51 existing Action references and add the one approved Dependency Review reference.
 - [x] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
 - [x] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged.
@@ -27,7 +27,7 @@
 - [x] Review every changed dependency license and block unresolved or unacceptable licenses.
 - [x] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
 - [x] Run the action inventory, `git diff --check`, `task lint`, and `task test` gates.
-- [ ] Delegate independent code and workflow review, then resolve every finding (Task 7 documentation and final branch review in progress).
+- [x] Delegate independent code and workflow review, then resolve every finding.
 - [ ] Push `fix/issue-95-maintenance`, open the first pull request, and record its public URL.
 - [ ] Confirm the PR `lint`, `test`, and `docs` jobs, including a non-skipped Dependency Review step.
 - [ ] Dispatch `runner-smoke.yml` on the branch and require the multi-platform build to pass.
@@ -76,4 +76,22 @@
 - Revised-design `task lint` exited 0 after the same repository lint gates.
 - Revised-design `task test` exited 0 after all 13 non-e2e Go packages passed.
 - Independent review approved the implementation plan at `b47dd9d` with no blockers.
+- The Dependency Graph SBOM proof exited 0 with a non-empty creation timestamp after the setting was enabled.
+- The release promotion regression test failed against the old dependency list, then passed after `promote` required exactly `e2e` and `release-notes` with no job-level `if`.
+- The workflow regression tests passed, and the source inventory found 52 Action references across nine workflow files with one Dependency Review step.
+- All 16 approved Action references resolved from their public upstream repositories.
+- Go 1.27.0, golangci-lint v2.13.2, the ten direct modules, module verification, and `go mod tidy -diff` passed their exact assertions.
+- The public image digest and platform checks passed, the internal builder reference stayed byte-identical to the baseline, and the e2e workflow and suite use v0.11.3.
+- The audit classified all 44 changed module versions under allowed licenses, with no unknown or unacceptable license.
+- Pinned `govulncheck@v1.7.0` exited 0 with no reachable known vulnerability.
+- The complete 24-file branch diff passed whitespace and sensitive-information review from baseline `fcbc56d`.
+- `GOTOOLCHAIN=go1.27.0 task lint` exited 0 with every repository lint gate active.
+- `GOTOOLCHAIN=go1.27.0 task test` exited 0 after generation, formatting, vetting, envtest, and all 13 non-e2e Go packages.
+- The final generated-file comparison exited 0 with no drift in `config`, `api`, `internal`, `test`, `go.mod`, or `go.sum`.
 - E2e was not run during setup because it targets a real Kubernetes cluster.
+- Task 7 rebased all 18 commits onto `bfc6e2de46367b55765711cae9d6ca0c6307584b`; the only conflict kept the upstream e2e timeout handling and the Go 1.27 `errors.AsType` update.
+- The protected `CONTRIBUTING.md` and `tasks/todo.md` diff restored at its exact pre-rebase SHA-256 hash before this final task-state update.
+- Post-integration build-configuration, dashboard, metrics, and timeout-focused e2e unit tests exited 0.
+- Post-integration `GOTOOLCHAIN=go1.27.0 task lint`, `GOTOOLCHAIN=go1.27.0 task test`, and `mkdocs build --strict` exited 0 without generated-file drift.
+- Independent review approved the complete 25-path diff from the integration target with no findings, and a later fetch found `origin/main` unchanged.
+- Local real-cluster e2e was not run during Task 7, as required.
