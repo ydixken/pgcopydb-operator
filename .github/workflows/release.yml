@@ -166,7 +166,6 @@ jobs:
         with:
           # hack/stamp-chart.sh reads the tag history to build the changelog.
           fetch-depth: 0
-      - uses: azure/setup-helm@v5
       - name: Push chart as OCI
         # Chart version and appVersion both track the git tag (without the
         # leading v, Helm requires SemVer). stamp-chart.sh fills in the
@@ -189,15 +188,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      # The cluster runner is the minimal actions-runner image: git, curl, jq
-      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
-      # so this is a no-op on the hosted runner a fork's pull request gets.
-      - name: Install gh, which the runner image lacks
-        run: |
-          if ! command -v gh >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq gh
-          fi
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -240,8 +230,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: azure/setup-helm@v5
-      - uses: azure/setup-kubectl@v5
       - name: Require the Prometheus URL
         # The metrics specs Skip when no Prometheus knob is set. On this gate
         # a missing repository variable must fail loudly, or the release would
@@ -344,15 +332,6 @@ jobs:
     permissions:
       issues: write  # the workflow default is read-only
     steps:
-      # The cluster runner is the minimal actions-runner image: git, curl, jq
-      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
-      # so this is a no-op on the hosted runner a fork's pull request gets.
-      - name: Install gh, which the runner image lacks
-        run: |
-          if ! command -v gh >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq gh
-          fi
       - name: Open an issue against the candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

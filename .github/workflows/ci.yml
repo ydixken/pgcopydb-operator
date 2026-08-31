@@ -84,7 +84,10 @@ jobs:
           # tars and uploads them to GitHub's cache service on every run:
           # 444MB, 109s on this job and 173s on the test one.
           cache: false
+      # The runner image carries Helm. Only a fork's pull request, which lands
+      # on a hosted runner, still needs this.
       - uses: azure/setup-helm@v5
+        if: ${{ github.event.pull_request.head.repo.fork }}
       # The cluster runner is the minimal actions-runner image: git, curl, jq
       # and python3, where a hosted runner ships hundreds of tools. Idempotent,
       # so this is a no-op on the hosted runner a fork's pull request gets.
@@ -245,10 +248,17 @@ jobs:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
+      # The image carries python3 and mkdocs-material at the pin below.
       - uses: actions/setup-python@v7
+        if: ${{ github.event.pull_request.head.repo.fork }}
         with:
           python-version: "3.x"
       - name: mkdocs build --strict
         # Pinned to match the docs deploy workflow; a Renovate custom manager
         # bumps both together.
-        run: pip install mkdocs-material==9.7.7 && mkdocs build --strict
+        run: |
+          # The runner image carries mkdocs-material at this pin, and a system
+          # python refuses a system-wide install under PEP 668 anyway. Only a
+          # fork's pull request, on a hosted runner with setup-python, installs.
+          command -v mkdocs >/dev/null || pip install mkdocs-material==9.7.7
+          mkdocs build --strict

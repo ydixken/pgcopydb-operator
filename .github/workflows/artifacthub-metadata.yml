@@ -25,7 +25,6 @@ jobs:
     runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v7
-      - uses: oras-project/setup-oras@v2
       - name: Push repository metadata
         working-directory: charts/pgcopydb-operator
         run: |

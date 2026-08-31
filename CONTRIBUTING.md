@@ -56,7 +56,13 @@ The e2e job backs the first rule with something GitHub enforces rather than some
 
 `runner-smoke.yml` is a `workflow_dispatch` build that exercises the build runner and its Docker daemon without publishing anything. Run it after any change to that scale set.
 
-The runners boot `ghcr.io/actions/actions-runner`, which carries git, curl, jq, python3, a Docker client and little else, where a hosted runner ships hundreds of tools. Jobs therefore install what they use: a `setup-` action where one exists (Go, Helm, Python, oras), and an apt step where none does (`make`, `gh`, `pipx`). Those steps test for the tool first, so they cost nothing on the hosted runner a fork's pull request gets.
+The runners boot `ghcr.io/ydixken/pgcopydb-operator/github-runner`, built from [`images/github-runner/`](images/github-runner/) by [github-runner-image.yml](.github/workflows/github-runner-image.yml). The stock `actions-runner` it starts from carries git, curl, jq, python3 and a Docker client, where a hosted runner ships hundreds of tools, so every job used to install the difference at runtime. The image bakes it instead: Go, make, gh, psql, Helm, kubectl, promtool, oras, yamllint, mkdocs-material, and the Makefile's own tools at a baked `LOCALBIN` with the envtest binaries and a warm module cache. `verify.sh` runs inside the image before it is pushed, so one that is missing something never becomes the tag the scale sets boot.
+
+Versions are pinned so the image is reproducible and Renovate can see them, except Go, promtool and crd-ref-docs, which are read out of `go.mod`, `hack/ensure-promtool.sh` and `Taskfile.yml` at build time so the image cannot drift from what the Makefile and the docs gate use. Merging a Renovate bump rebuilds the image; the weekly schedule is for the apt packages, which move on their own.
+
+`actions/setup-go` stays in every job even though the image carries Go. A pull request that bumps the Go version in `go.mod` would otherwise deadlock: the image only rebuilds once that change is on `main`, so CI would be red with no way to merge the fix. `setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner.
+
+The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set. Nothing goes through GitHub's cache service: the jobs used to spend 109 and 173 seconds shipping 444MB of Go cache to the internet and pulling it back, and buildx would have done the same with the image layers.
 
 ## E2e tests
 
