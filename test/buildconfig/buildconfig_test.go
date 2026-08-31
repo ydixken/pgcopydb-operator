@@ -292,9 +292,25 @@ func TestWorkflowActionInventory(t *testing.T) {
 
 	files := 0
 	references := 0
+	localCalls := 0
 	dependencyReviews := 0
 	check := func(location, uses string) {
 		if uses == "" {
+			return
+		}
+		// A job may call another workflow in this repository instead of an
+		// action. Only a local path: a third-party reusable workflow would run
+		// on our runners with our secrets, which is the thing the pinned
+		// version list above exists to prevent.
+		if strings.HasPrefix(uses, "./") {
+			if !strings.HasPrefix(uses, "./.github/workflows/") || !strings.HasSuffix(uses, ".yml") {
+				t.Errorf("%s calls %q, which is not a workflow in this repository", location, uses)
+			}
+			localCalls++
+			return
+		}
+		if strings.Count(uses, "/") >= 2 && strings.Contains(uses, ".yml@") {
+			t.Errorf("%s calls a workflow from another repository: %q", location, uses)
 			return
 		}
 		references++
@@ -338,8 +354,13 @@ func TestWorkflowActionInventory(t *testing.T) {
 	if files != 10 {
 		t.Errorf("workflow inventory contains %d YAML files, want 10", files)
 	}
-	if references != 49 {
-		t.Errorf("workflow inventory contains %d action references, want 49", references)
+	if references != 51 {
+		t.Errorf("workflow inventory contains %d action references, want 51", references)
+	}
+	// release.yml calling pgcopydb-builder.yml is the only one; a second would
+	// mean the split got copied somewhere rather than reused.
+	if localCalls != 1 {
+		t.Errorf("workflow inventory makes %d local workflow calls, want 1", localCalls)
 	}
 	if dependencyReviews != 1 {
 		t.Errorf("workflow inventory contains %d dependency review references, want 1", dependencyReviews)
@@ -484,6 +505,14 @@ func TestSplitBuilderJoinsItsArchitectures(t *testing.T) {
 // never that it is multi-arch, so a single-arch pre-build would read as
 // "exists" and let an amd64 pgcopydb land inside the arm64 runner image.
 func TestBuilderPlatformsAgreeAcrossWorkflows(t *testing.T) {
+	// release.yml may build the builder itself or delegate to the workflow that
+	// does. Delegating is what keeps the per-architecture split in one file, so
+	// it satisfies the same requirement: what it ends up with is multi-arch.
+	if delegatesBuilder(t, releaseWorkflow) {
+		prebuild := builderPlatforms(t, builderWorkflow)
+		requireMultiArch(t, builderWorkflow, prebuild)
+		return
+	}
 	release := builderPlatforms(t, releaseWorkflow)
 	if release == "" {
 		t.Fatalf("%s: pgcopydb-builder build step declares no platforms", releaseWorkflow)
@@ -499,6 +528,22 @@ func TestBuilderPlatformsAgreeAcrossWorkflows(t *testing.T) {
 	}
 	requireMultiArch(t, releaseWorkflow, release)
 	requireMultiArch(t, builderWorkflow, prebuild)
+}
+
+// A release that neither builds the builder nor calls the workflow that does
+// would fall through both checks, so this answers only "does it call it".
+func delegatesBuilder(t *testing.T, path string) bool {
+	t.Helper()
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	for _, job := range wf.Jobs {
+		if strings.HasSuffix(job.Uses, "/pgcopydb-builder.yml") {
+			return true
+		}
+	}
+	return false
 }
 
 // Agreement alone is not enough: both files could agree on linux/amd64 only,

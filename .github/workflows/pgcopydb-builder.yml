@@ -13,6 +13,10 @@ name: pgcopydb builder image
 
 on:
   workflow_dispatch:
+  # release.yml calls this when the pinned tag is not published yet, so the
+  # split lives in one file rather than being copied into a job that already
+  # builds three images.
+  workflow_call:
   push:
     branches: [main]
     paths: [".github/workflows/pgcopydb-builder.yml", "images/pgcopydb-builder/Dockerfile"]
