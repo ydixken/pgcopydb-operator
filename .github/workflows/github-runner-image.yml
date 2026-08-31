@@ -46,60 +46,71 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # buildah rather than the dind sidecar: this builds the image the runner
-      # pods themselves boot, and handing that job to a privileged Docker
-      # daemon is more access than a build needs. buildah runs rootless here,
-      # as uid 1001, which the base image already has subuid and subgid ranges
-      # for. Once the new image is in service this step is a no-op, because it
-      # carries buildah itself.
-      - name: Install buildah, which the runner image lacks
-        run: |
-          if ! command -v buildah >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq buildah uidmap
-          fi
+      # The dind sidecar, like every other image this repository builds. buildah
+      # was tried first, to keep the build off a privileged daemon, and cannot
+      # work here: the runner pod runs under cri-containerd.apparmor.d, which
+      # denies mount as an LSM rule, so extracting a base layer fails for root
+      # and inside a user namespace alike. Capabilities do not override that.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
         # A date tag so a bad week can be rolled back to a named image, and
-        # :latest because that is the tag the scale sets track.
-        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Build
-        # vfs, not overlay: overlay wants either root or a kernel that will
-        # give an unprivileged user a mount, and this pod is neither. vfs costs
-        # disk and time on a weekly build, which is the cheap side of the trade.
-        # The context is the repository root, not images/github-runner, because
-        # the build reads go.mod, hack/ensure-promtool.sh and the source tree.
+        # :latest because that is the tag the scale sets track. The layer cache
+        # goes on the node beside the Go caches rather than through GitHub's
+        # cache service, which is the same round trip this repository already
+        # deleted from the lint and test jobs: 444MB and about two minutes a run
+        # to send a cache to the internet and pull it back.
         run: |
-          buildah bud \
-            --storage-driver vfs \
-            --platform linux/amd64 \
-            --file images/github-runner/Dockerfile \
-            --tag "$IMAGE:${{ steps.meta.outputs.date }}" \
-            --tag "$IMAGE:latest" \
-            .
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          if [ -d /cache ]; then
+            sudo mkdir -p /cache/buildx
+            [ -O /cache/buildx ] || sudo chown "$(id -u):$(id -g)" /cache/buildx
+            echo "cache=/cache/buildx" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v7
+        with:
+          # The repository root, not images/github-runner: the build reads
+          # go.mod, hack/ensure-promtool.sh and the source tree for the
+          # versions it pins and the caches it warms.
+          context: .
+          file: images/github-runner/Dockerfile
+          # amd64 only. Both scale sets run on this cluster's nodes and every
+          # one of them is amd64; an arm64 variant would be built under QEMU
+          # for nothing to pull it.
+          platforms: linux/amd64
+          # Loaded, not pushed, so the check below runs against the image
+          # before anything can boot it.
+          load: true
+          push: false
+          tags: |
+            ghcr.io/${{ github.repository }}/github-runner:${{ steps.meta.outputs.date }}
+            ghcr.io/${{ github.repository }}/github-runner:latest
+          # Empty on a hosted runner, where buildx then simply builds cold.
+          # src is missing on the first run per node and buildx accepts that.
+          cache-from: ${{ steps.meta.outputs.cache && format('type=local,src={0}', steps.meta.outputs.cache) || '' }}
+          cache-to: ${{ steps.meta.outputs.cache && format('type=local,dest={0},mode=max', steps.meta.outputs.cache) || '' }}
 
       - name: Prove the image carries what the jobs reach for
-        # Before the push, so a bad build never becomes the image anything
-        # boots. The script is a file in the repository rather than a heredoc:
-        # a heredoc inside a YAML block scalar cannot close, because its
-        # terminator has to sit at column zero and the block indents it.
+        # An image missing a tool turns every workflow red at once, and the
+        # scale sets boot the tag without asking. The script arrives on stdin
+        # rather than a bind mount: the daemon is a sidecar, so it cannot see
+        # this container's workspace.
         run: |
-          ctr=$(buildah --storage-driver vfs from --pull=never "$IMAGE:${{ steps.meta.outputs.date }}")
-          trap 'buildah --storage-driver vfs rm "$ctr" >/dev/null 2>&1 || true' EXIT
-          buildah --storage-driver vfs copy "$ctr" images/github-runner/verify.sh /tmp/verify.sh
           {
             echo "### Runner image \`$IMAGE:${{ steps.meta.outputs.date }}\`"
             echo
-            buildah --storage-driver vfs run "$ctr" -- bash /tmp/verify.sh
+            docker run --rm -i "$IMAGE:${{ steps.meta.outputs.date }}" \
+              bash -s < images/github-runner/verify.sh
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          buildah login --storage-driver vfs \
-            --username "${{ github.actor }}" --password-stdin ghcr.io <<< "$GHCR_TOKEN"
           for tag in "${{ steps.meta.outputs.date }}" latest; do
-            buildah push --storage-driver vfs "$IMAGE:$tag" "docker://$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
           done

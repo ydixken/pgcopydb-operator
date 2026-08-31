@@ -58,12 +58,12 @@ jobs:
             sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
             sudo chown "$(id -u):$(id -g)" /cache/go-build /cache/go-mod /cache/golangci
           fi
-          # The runner image bakes a warm module cache and a build cache of the
-          # dependency tree, but the exports below point Go at the node instead,
-          # which would leave the baked pair unread. Seed from the image the
-          # first time a node sees it: a cold node then starts warm, and every
-          # job after that reads what the previous one left, which is current
-          # where the image is a week old. cp -a on node disk, not a pull.
+          # The runner image bakes a warm module cache, but the exports below
+          # point Go at the node instead, which would leave it unread. Seed from
+          # the image the first time a node sees it: a cold node then starts
+          # without re-fetching every module, and every job after that reads what
+          # the previous one left. cp -a on node disk, not a pull. The build
+          # cache is not baked, so that half of the loop simply finds nothing.
           for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
                       "$HOME/.cache/go-build:/cache/go-build"; do
             src=${pair%:*} dst=${pair#*:}
@@ -174,12 +174,12 @@ jobs:
             sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
             sudo chown "$(id -u):$(id -g)" /cache/go-build /cache/go-mod /cache/golangci
           fi
-          # The runner image bakes a warm module cache and a build cache of the
-          # dependency tree, but the exports below point Go at the node instead,
-          # which would leave the baked pair unread. Seed from the image the
-          # first time a node sees it: a cold node then starts warm, and every
-          # job after that reads what the previous one left, which is current
-          # where the image is a week old. cp -a on node disk, not a pull.
+          # The runner image bakes a warm module cache, but the exports below
+          # point Go at the node instead, which would leave it unread. Seed from
+          # the image the first time a node sees it: a cold node then starts
+          # without re-fetching every module, and every job after that reads what
+          # the previous one left. cp -a on node disk, not a pull. The build
+          # cache is not baked, so that half of the loop simply finds nothing.
           for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
                       "$HOME/.cache/go-build:/cache/go-build"; do
             src=${pair%:*} dst=${pair#*:}

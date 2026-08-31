@@ -28,13 +28,14 @@ ARG YAMLLINT_VERSION=1.38.0
 # make drives the Makefile. gcc and libc6-dev are here because cgo is on by
 # default and a package that needs it fails confusingly without them;
 # build-essential would pull about 200MB for the one compiler we want.
-# buildah is here because this image is what builds the next one, and a job
-# that had to apt-get it first would pay that on every rebuild. uidmap goes
-# with it: buildah runs rootless as uid 1001 and needs newuidmap to map the
-# subuid range the base image already grants that user.
+#
+# No buildah, though this image is what builds the next one. That build goes
+# through the pod's dind sidecar instead, because the runner container runs
+# under cri-containerd.apparmor.d and that profile denies mount as an LSM rule,
+# which layer extraction needs and no capability overrides.
 RUN apt-get update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        make gcc libc6-dev gh postgresql-client python3-pip pipx buildah uidmap \
+        make gcc libc6-dev gh postgresql-client python3-pip pipx \
     && rm -rf /var/lib/apt/lists/*
 
 # System-wide rather than through pipx: pipx installs into ~/.local/bin, which
@@ -94,25 +95,37 @@ ENV PATH="/usr/local/go/bin:${PATH}" \
 # go build ./... leaves the whole dependency tree in the build cache. This
 # repository's own packages go stale with the next commit, which is what the
 # node cache under /cache is for; their dependencies do not.
-ENV LOCALBIN=/opt/toolchain/bin
+ENV LOCALBIN=/opt/toolchain/bin \
+    GOMODCACHE=/home/runner/go/pkg/mod \
+    GOCACHE=/home/runner/.cache/go-build
+
+# The module download is its own layer, keyed on go.mod and go.sum alone, so a
+# change anywhere else in the tree does not make the image re-fetch every
+# dependency. That ordering is worth real time: the download is the largest
+# single step in this build.
+COPY go.mod go.sum /tmp/src/
+RUN cd /tmp/src && go mod download
+
 COPY . /tmp/src
 RUN set -eux; \
     cd /tmp/src; \
     mkdir -p "$LOCALBIN"; \
-    export GOMODCACHE=/home/runner/go/pkg/mod GOCACHE=/home/runner/.cache/go-build; \
-    go mod download; \
     make controller-gen setup-envtest golangci-lint kustomize; \
     crd_ref="$(sed -n 's|.*go install \(github.com/elastic/crd-ref-docs@v[0-9.]*\).*|\1|p' Taskfile.yml | head -1)"; \
     [ -n "$crd_ref" ] || { echo "Taskfile.yml has no crd-ref-docs pin" >&2; exit 1; }; \
     GOBIN="$LOCALBIN" go install "$crd_ref"; \
-    go build ./... || true; \
+    go clean -cache; \
     cd /; rm -rf /tmp/src; \
-    chown -R runner:runner "$LOCALBIN" /home/runner/go /home/runner/.cache
+    chown -R runner:runner "$LOCALBIN" /home/runner/go
 
-# The module cache is baked at its default path and stays writable, so a job
-# needs no override and a go.sum that has moved since the last rebuild just
-# fetches the difference. The build cache is seeded with the dependency tree
-# only; this repository's own packages change per commit and belong on the node
-# under /cache, which the scale set mounts and the workflows point GOCACHE at.
+# The module cache is baked and stays writable, so a go.sum that has moved
+# since the last rebuild fetches only the difference. Modules are worth carrying
+# because they come off the network.
+#
+# The build cache is not, and `go clean -cache` above drops what building the
+# tools left behind. Compiling the dependency tree here cost 970MB of image, and
+# the jobs only read it on a node whose /cache is still empty: every node in the
+# fleet is warm, so it was pulled weekly and never read. Recomputing it costs
+# about 100 seconds, once, the first time a fresh node runs a job.
 
 USER runner

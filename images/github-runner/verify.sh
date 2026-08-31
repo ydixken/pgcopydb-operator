@@ -15,7 +15,7 @@ note() {
 
 # On PATH, because a workflow step calls these by name.
 for tool in go make gcc gh psql helm kubectl promtool oras yamllint mkdocs \
-    python3 pip jq git curl buildah; do
+    python3 pip jq git curl docker; do
     command -v "$tool" >/dev/null || note "missing on PATH: $tool"
 done
 
@@ -50,5 +50,4 @@ printf '| gh | %s |\n' "$(gh --version | head -1 | cut -d' ' -f3)"
 printf '| psql | %s |\n' "$(psql --version | cut -d' ' -f3)"
 printf '| yamllint | %s |\n' "$(yamllint --version | cut -d' ' -f2)"
 printf '| mkdocs-material | %s |\n' "$(pip show mkdocs-material | sed -n 's/^Version: //p')"
-printf '| buildah | %s |\n' "$(buildah --version | cut -d' ' -f3)"
 printf '| module cache | %s |\n' "$(du -sh "$mod" 2>/dev/null | cut -f1)"
