@@ -39,9 +39,20 @@ jobs:
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      # The buildx layer cache goes on the node, next to the Go caches, rather
+      # than through GitHub's cache service. Empty on a hosted runner, where
+      # buildx then simply builds cold.
+      - id: cache
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/buildx-pgcopydb-builder
+          [ -O /cache/buildx-pgcopydb-builder ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-pgcopydb-builder
+          echo "dir=/cache/buildx-pgcopydb-builder" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
           context: images/pgcopydb-builder
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/${{ github.repository }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
+          cache-from: ${{ steps.cache.outputs.dir && format('type=local,src={0}', steps.cache.outputs.dir) || '' }}
+          cache-to: ${{ steps.cache.outputs.dir && format('type=local,dest={0},mode=max', steps.cache.outputs.dir) || '' }}

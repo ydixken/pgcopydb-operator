@@ -28,6 +28,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The buildx layer cache goes on the node, next to the Go caches, rather
+      # than through GitHub's cache service. Empty on a hosted runner, where
+      # buildx then simply builds cold.
+      - id: cache
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/buildx-runner
+          [ -O /cache/buildx-runner ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-runner
+          echo "dir=/cache/buildx-runner" >> "$GITHUB_OUTPUT"
       - name: Build both platforms without pushing
         # The runner base is now the pgcopydb-builder image (private, ghcr.io),
         # so this needs the login above or it fails at pull access denied; the
@@ -37,3 +46,5 @@ jobs:
           context: images/runner
           platforms: linux/amd64,linux/arm64
           push: false
+          cache-from: ${{ steps.cache.outputs.dir && format('type=local,src={0}', steps.cache.outputs.dir) || '' }}
+          cache-to: ${{ steps.cache.outputs.dir && format('type=local,dest={0},mode=max', steps.cache.outputs.dir) || '' }}

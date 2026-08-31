@@ -35,6 +35,17 @@ mod=$(go env GOMODCACHE)
 [ -d "$mod" ] && [ -n "$(ls -A "$mod" 2>/dev/null)" ] ||
     note "missing: a warm module cache at $mod"
 
+# Every path Go writes to at job time has to belong to the runner. The image
+# builds as root, so a directory left behind by a build step is root-owned and
+# the first `go env` of the first job dies on it: that is exactly how
+# /home/runner/.cache/go-build shipped broken once.
+for dir in "$mod" "$HOME/.cache" "$HOME/go"; do
+    [ -e "$dir" ] || continue
+    [ -O "$dir" ] || note "not owned by the runner: $dir"
+    [ -w "$dir" ] || note "not writable by the runner: $dir"
+done
+go env GOCACHE >/dev/null 2>&1 || note "go env fails, usually an unwritable GOCACHE"
+
 if [ "$fail" -ne 0 ]; then
     echo "image verification failed" >&2
     exit 1
