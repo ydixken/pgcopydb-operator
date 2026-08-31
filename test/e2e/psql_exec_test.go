@@ -110,6 +110,7 @@ const (
 	psqlExecKubectl         = "kubectl"
 	psqlExecSubcommand      = "exec"
 	psqlExecProgram         = "psql"
+	psqlExecTestPod         = "source-1"
 )
 
 type psqlExecResult struct {
@@ -153,6 +154,7 @@ func (s *psqlExecState) command(ctx context.Context, name string, args ...string
 	s.results = s.results[1:]
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPSQLExecHelper$")
 	cmd.Env = append(os.Environ(),
+		"GORACE=atexit_sleep_ms=0",
 		psqlExecHelperEnv+"=1",
 		psqlExecHelperStdoutEnv+"="+result.stdout,
 		psqlExecHelperStderrEnv+"="+result.stderr,
@@ -331,7 +333,7 @@ func TestPSQLDBErrDoesNotRetryAmbiguousFailures(t *testing.T) {
 				"UPDATE orders SET amount = 2",
 				func(string) string {
 					primaryCalls++
-					return "source-1"
+					return psqlExecTestPod
 				},
 				func(time.Duration) { waits++ },
 				command,

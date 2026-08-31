@@ -1485,15 +1485,20 @@ func psqlDBErrWith(
 // write fails. The final marker query uses the primary captured at startup.
 type liveWriter struct {
 	stopCh chan struct{}
+	reaped chan struct{}
 	done   chan struct{}
 	// stopOnce lets the spec's cleanup call stop after the spec already did.
 	stopOnce sync.Once
 
+	ctx      context.Context
+	cancel   context.CancelFunc
 	primary  func(string) string
-	command  func(string, ...string) *exec.Cmd
+	command  commandFactory
 	interval time.Duration
+	timeout  time.Duration
 
 	mu   sync.Mutex
+	pod  string
 	last int
 	err  error
 }
@@ -1501,12 +1506,17 @@ type liveWriter struct {
 // startLiveWriter starts marker-tagged writes to sourceCluster and returns
 // immediately. Call stop to close and reap the persistent child.
 func startLiveWriter(marker string) *liveWriter {
+	writerCtx, cancel := context.WithCancel(context.Background())
 	w := &liveWriter{
 		stopCh:   make(chan struct{}),
+		reaped:   make(chan struct{}),
 		done:     make(chan struct{}),
+		ctx:      writerCtx,
+		cancel:   cancel,
 		primary:  primaryPod,
-		command:  exec.Command,
+		command:  exec.CommandContext,
 		interval: liveWriteInterval,
+		timeout:  e2eCommandTimeout,
 	}
 	go w.run(marker)
 	return w
@@ -1521,6 +1531,44 @@ func (w *liveWriter) recordErr(err error) {
 	if w.err == nil {
 		w.err = err
 	}
+}
+
+func (w *liveWriter) podName() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pod
+}
+
+func (w *liveWriter) readFinalMarker(marker, pod string) {
+	query := liveMarkerQuery(marker)
+	queryCtx, cancel := context.WithTimeout(context.Background(), w.timeout)
+	out, err := commandOutput(
+		queryCtx,
+		w.command,
+		"kubectl",
+		"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+		"psql", "-U", "postgres", appDB, "-tAc", query,
+	)
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) {
+		w.recordErr(fmt.Errorf(
+			"read final marker for cluster %s on pod %s with SQL %q timed out after %s: %w",
+			sourceCluster, pod, query, w.timeout, err,
+		))
+		return
+	}
+	if err != nil {
+		w.recordErr(fmt.Errorf("read final marker: %w", err))
+		return
+	}
+	last, err := parseLiveMarker(out)
+	if err != nil {
+		w.recordErr(fmt.Errorf("parse final marker: %w", err))
+		return
+	}
+	w.mu.Lock()
+	w.last = last
+	w.mu.Unlock()
 }
 
 func liveMarkerQuery(marker string) string {
@@ -1548,13 +1596,18 @@ func (w *liveWriter) run(marker string) {
 	// registration order, so a panic recovers before done closes, not after.
 	defer close(w.done)
 	defer GinkgoRecover()
+	defer w.cancel()
 
 	pod := w.primary(sourceCluster)
-	cmd := w.command("kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
+	w.mu.Lock()
+	w.pod = pod
+	w.mu.Unlock()
+	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		w.recordErr(fmt.Errorf("open persistent psql stdin: %w", err))
+		close(w.reaped)
 		return
 	}
 	if err := cmd.Start(); err != nil {
@@ -1562,6 +1615,7 @@ func (w *liveWriter) run(marker string) {
 		if closeErr := stdin.Close(); closeErr != nil {
 			w.recordErr(fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
 		}
+		close(w.reaped)
 		return
 	}
 
@@ -1572,22 +1626,8 @@ func (w *liveWriter) run(marker string) {
 		if err := cmd.Wait(); err != nil {
 			w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
 		}
-
-		query := liveMarkerQuery(marker)
-		out, err := w.command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", appDB, "-tAc", query).Output()
-		if err != nil {
-			w.recordErr(fmt.Errorf("read final marker: %w", err))
-			return
-		}
-		last, err := parseLiveMarker(out)
-		if err != nil {
-			w.recordErr(fmt.Errorf("parse final marker: %w", err))
-			return
-		}
-		w.mu.Lock()
-		w.last = last
-		w.mu.Unlock()
+		close(w.reaped)
+		w.readFinalMarker(marker, pod)
 	}()
 
 	ticker := time.NewTicker(w.interval)
@@ -1617,7 +1657,25 @@ func (w *liveWriter) run(marker string) {
 // stop ends the stream and returns the captured source pod's final marker.
 // Repeated calls share the first call's completed lifecycle and first error.
 func (w *liveWriter) stop() (int, error) {
-	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.stopOnce.Do(func() {
+		close(w.stopCh)
+		timer := time.NewTimer(w.timeout)
+		defer timer.Stop()
+		select {
+		case <-w.reaped:
+		case <-w.done:
+		case <-timer.C:
+			w.recordErr(fmt.Errorf(
+				"stop persistent psql for cluster %s on pod %s timed out after %s: %w",
+				sourceCluster, w.podName(), w.timeout, context.DeadlineExceeded,
+			))
+			w.cancel()
+			select {
+			case <-w.reaped:
+			case <-w.done:
+			}
+		}
+	})
 	<-w.done
 	w.mu.Lock()
 	defer w.mu.Unlock()
