@@ -28,7 +28,7 @@
 - [x] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
 - [x] Run the action inventory, `git diff --check`, `task lint`, and `task test` gates.
 - [x] Delegate independent code and workflow review, then resolve every finding.
-- [ ] Push `fix/issue-95-maintenance`, open the first pull request, and record its public URL.
+- [ ] Push `fix/issue-95-maintenance`, open the first pull request, and record its public URL (Task 8 remote validation in progress).
 - [ ] Confirm the PR `lint`, `test`, and `docs` jobs, including a non-skipped Dependency Review step.
 - [ ] Dispatch `runner-smoke.yml` on the branch and require the multi-platform build to pass.
 - [ ] Dispatch `e2e.yml` on the branch with tag v0.11.3 and scale 0.1, then confirm the environment rejects it before runner assignment.
