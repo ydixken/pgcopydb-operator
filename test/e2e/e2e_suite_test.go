@@ -28,6 +28,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -210,8 +211,8 @@ var (
 	// primaryTimeout bounds the wait for a cluster to carry exactly one
 	// primary. It only has to cover a CNPG promotion, not a bootstrap.
 	primaryTimeout = 2 * time.Minute
-	// liveWriteInterval caps the average write rate at one per interval: a
-	// tick buffered during a slow kubectl exec makes the next gap near zero.
+	// liveWriteInterval caps the average write rate at one per interval.
+	// The ticker drops ticks while a persistent pipe write is blocked.
 	liveWriteInterval = 200 * time.Millisecond
 )
 
@@ -1364,11 +1365,9 @@ func psql(cluster, sql string) string {
 	return psqlDB(cluster, appDB, sql)
 }
 
-// psqlDB runs one statement in the given database on the named CNPG cluster's
-// current primary, as the in-pod postgres superuser (peer auth on the unix
-// socket, no password involved), and returns trimmed stdout. See psqlDBErr for
-// the retry and failover behaviour; this is the Expect-wrapped form for spec
-// goroutines, which is every caller except the live writer.
+// psqlDB runs one statement as the in-pod postgres user on the current primary
+// and returns trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for
+// spec goroutines.
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	out, err := psqlDBErr(cluster, db, sql)
@@ -1394,14 +1393,9 @@ func (f *psqlFailure) Error() string {
 	return fmt.Sprintf("on %s: %s: %v", f.pod, f.stderr, f.err)
 }
 
-// psqlDBErr is psqlDB's retrying core, split out so the live writer can run
-// it without Expect: a Ginkgo assertion failing outside the spec goroutine
-// aborts the whole process instead of the one spec. kubectl exec is
-// deliberate: it reuses the same current context as the client and saves a
-// hand-rolled SPDY executor. Failures to even reach the pod get two retries,
-// each re-resolving the primary so a retry after a failover reaches the new
-// one; anything after connecting fails hard, because the statement may have
-// run and not every caller is idempotent.
+// psqlDBErr retries transient connection failures before a statement reaches
+// PostgreSQL. Each retry re-resolves the primary; connected failures stop
+// because the statement may have run and callers need not be idempotent.
 func psqlDBErr(cluster, db, sql string) (string, error) {
 	// Here for primaryPod's Eventually, not for an assertion of its own:
 	// without it a primary timeout is reported here, not at the calling spec.
@@ -1431,37 +1425,116 @@ func psqlDBErr(cluster, db, sql string) (string, error) {
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
 }
 
-// liveWriter commits one row into orders every liveWriteInterval until
-// stopped, so a spec can hold sourceCluster under write traffic through a
-// migration's base copy and streaming phase.
+// liveWriter sends ordered inserts through one psql child until stopped or a
+// write fails. The final marker query uses the primary captured at startup.
 type liveWriter struct {
 	stopCh chan struct{}
 	done   chan struct{}
 	// stopOnce lets the spec's cleanup call stop after the spec already did.
 	stopOnce sync.Once
 
+	primary  func(string) string
+	command  func(string, ...string) *exec.Cmd
+	interval time.Duration
+
 	mu   sync.Mutex
 	last int
 	err  error
 }
 
-// startLiveWriter starts committing marker-tagged rows to sourceCluster and
-// returns immediately; call stop to end it.
+// startLiveWriter starts marker-tagged writes to sourceCluster and returns
+// immediately. Call stop to close and reap the persistent child.
 func startLiveWriter(marker string) *liveWriter {
-	w := &liveWriter{stopCh: make(chan struct{}), done: make(chan struct{})}
+	w := &liveWriter{
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+		primary:  primaryPod,
+		command:  exec.Command,
+		interval: liveWriteInterval,
+	}
 	go w.run(marker)
 	return w
 }
 
-// run writes rows numbered from 1 until stopCh closes or a write fails. It
-// calls psqlDBErr, never psql, and defers GinkgoRecover so a Gomega failure
-// anywhere in this goroutine fails the spec instead of the whole process.
+func (w *liveWriter) recordErr(err error) {
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err == nil {
+		w.err = err
+	}
+}
+
+func liveMarkerQuery(marker string) string {
+	return fmt.Sprintf(
+		"SELECT COALESCE(MAX((substring(note FROM char_length('%s') + 2))::int), 0)"+
+			" FROM orders WHERE note LIKE '%s-%%'", marker, marker)
+}
+
+func parseLiveMarker(out []byte) (int, error) {
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		return 0, errors.New("final marker query returned no value")
+	}
+	last, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q as integer: %w", value, err)
+	}
+	return last, nil
+}
+
+// run resolves one primary, starts one stream, and never replaces either.
+// Every started child is closed, waited, and followed by one marker query.
 func (w *liveWriter) run(marker string) {
 	// GinkgoRecover must run before close(w.done): defers run in reverse
 	// registration order, so a panic recovers before done closes, not after.
 	defer close(w.done)
 	defer GinkgoRecover()
-	ticker := time.NewTicker(liveWriteInterval)
+
+	pod := w.primary(sourceCluster)
+	cmd := w.command("kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
+		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		w.recordErr(fmt.Errorf("open persistent psql stdin: %w", err))
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		w.recordErr(fmt.Errorf("start persistent psql: %w", err))
+		if closeErr := stdin.Close(); closeErr != nil {
+			w.recordErr(fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
+		}
+		return
+	}
+
+	defer func() {
+		if err := stdin.Close(); err != nil {
+			w.recordErr(fmt.Errorf("close persistent psql stdin: %w", err))
+		}
+		if err := cmd.Wait(); err != nil {
+			w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
+		}
+
+		query := liveMarkerQuery(marker)
+		out, err := w.command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+			"psql", "-U", "postgres", appDB, "-tAc", query).Output()
+		if err != nil {
+			w.recordErr(fmt.Errorf("read final marker: %w", err))
+			return
+		}
+		last, err := parseLiveMarker(out)
+		if err != nil {
+			w.recordErr(fmt.Errorf("parse final marker: %w", err))
+			return
+		}
+		w.mu.Lock()
+		w.last = last
+		w.mu.Unlock()
+	}()
+
+	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for n := 1; ; n++ {
 		select {
@@ -1469,22 +1542,24 @@ func (w *liveWriter) run(marker string) {
 			return
 		case <-ticker.C:
 		}
-		_, err := psqlDBErr(sourceCluster, appDB, fmt.Sprintf(
-			"INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d')", marker, n))
-		w.mu.Lock()
-		if err != nil {
-			w.err = err
-			w.mu.Unlock()
+
+		statement := fmt.Sprintf(
+			"INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d');\n",
+			marker, n,
+		)
+		written, err := io.WriteString(stdin, statement)
+		if err != nil || written != len(statement) {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			w.recordErr(fmt.Errorf("write live marker %d: %w", n, err))
 			return
 		}
-		w.last = n
-		w.mu.Unlock()
 	}
 }
 
-// stop ends the writer, waits for any in-flight insert, and returns last plus
-// the first write error. Rows 1 through last are committed on the source, and
-// last is a lower bound on the marker rows it holds, not an exact count.
+// stop ends the stream and returns the captured source pod's final marker.
+// Repeated calls share the first call's completed lifecycle and first error.
 func (w *liveWriter) stop() (int, error) {
 	w.stopOnce.Do(func() { close(w.stopCh) })
 	<-w.done

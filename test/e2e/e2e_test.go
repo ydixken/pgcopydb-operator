@@ -510,6 +510,9 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "the live writer failed after %d rows", last)
 		Expect(last).To(BeNumerically(">", 100),
 			"the writer committed only %d rows, too few to exercise a migration under load", last)
+		sourceLast := psql(sourceCluster, liveMarkerQuery(marker))
+		Expect(fmt.Sprint(last)).To(Equal(sourceLast),
+			"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
 
 		approveCutover(name)
 		// A follow migration with data verification can run two whole
@@ -520,10 +523,8 @@ var _ = Describe("Migration", Ordered, func() {
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 
 		By("checking every committed row arrived, with no gaps")
-		// Compared against the source, not against last: a dropped exec
-		// stream (transientExecError) can retry an INSERT that already
-		// committed, so last is a lower bound on the source's count, not
-		// the count itself.
+		// last is the source maximum after the psql child exits. Keep the count
+		// comparison to prove every row for this marker reached the target.
 		srcRows := psql(sourceCluster, fmt.Sprintf(
 			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))
 		Expect(psql(targetCluster, fmt.Sprintf(

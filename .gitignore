@@ -34,6 +34,7 @@ kubeconfig/
 
 # Agent worktrees are transient workspaces, never repo content.
 .claude/worktrees/
+.worktrees/
 
 # mkdocs build output (mkdocs.yml), served by GitHub Pages, never committed.
 site/
