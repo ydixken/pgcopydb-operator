@@ -209,6 +209,37 @@ func TestDetailReadsConditionTransitions(t *testing.T) {
 	}
 }
 
+// The verification tiles render four states off one gauge, and the two states
+// that carry no result are the ones easily lost. -1 is a check the spec does
+// not request; an absent series is one that has not run yet. Both used to read
+// "Pending", so a Migration that never opted in waited forever on a check
+// nobody had asked for.
+func TestVerificationTilesMapEveryState(t *testing.T) {
+	const metric = "pgcopydb_migration_verification_check"
+	want := map[string]string{"1": "PASS", "0": "FAIL", "-1": "Deactivated"}
+	var tiles int
+	for _, p := range load(t)["migration-detail.json"].AllPanels() {
+		if !p.Reads(metric) {
+			continue
+		}
+		tiles++
+		for value, text := range want {
+			switch mv, ok := p.ValueMapping(value); {
+			case !ok:
+				t.Errorf("%s: %s is unmapped, so that state renders as a bare number", p.Title, value)
+			case mv.Text != text:
+				t.Errorf("%s: %s maps to %q, want %q", p.Title, value, mv.Text, text)
+			}
+		}
+		if p.FieldConfig.Defaults.NoValue == "" {
+			t.Errorf("%s: no noValue, so a check still to run renders empty", p.Title)
+		}
+	}
+	if tiles != 2 {
+		t.Errorf("panels reading %s = %d, want 2 (schema and data)", metric, tiles)
+	}
+}
+
 func TestEveryRegisteredMetricIsConsumed(t *testing.T) {
 	var exprs []string
 	for _, d := range load(t) {
@@ -313,6 +344,33 @@ func TestParseErrors(t *testing.T) {
 	}
 	if _, err := Load(dir); err == nil {
 		t.Error("Load accepted an unreadable dashboard file")
+	}
+}
+
+func TestValueMapping(t *testing.T) {
+	d, err := Parse([]byte(`{
+	  "uid": "u", "title": "t",
+	  "panels": [{
+	    "title": "tile",
+	    "fieldConfig": {"defaults": {"mappings": [
+	      {"type": "range", "options": {"from": 0, "to": null, "result": {"text": "ignored"}}},
+	      {"type": "value", "options": {"-1": {"text": "Deactivated", "color": "red"}, "9": "malformed"}}
+	    ]}}
+	  }]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := d.Panels[0]
+	if mv, ok := p.ValueMapping("-1"); !ok || mv.Text != "Deactivated" || mv.Color != "red" {
+		t.Errorf("ValueMapping(-1) = %+v, %v, want Deactivated/red", mv, ok)
+	}
+	// A range mapping keys on from/to, not on the value, so it must not answer
+	// for one; an unmapped value and an unreadable option are both "no".
+	for _, value := range []string{"0", "from", "9"} {
+		if mv, ok := p.ValueMapping(value); ok {
+			t.Errorf("ValueMapping(%s) = %+v, want no mapping", value, mv)
+		}
 	}
 }
 

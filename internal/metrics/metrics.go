@@ -35,6 +35,18 @@ const (
 	labelName      = "name"
 )
 
+// verificationDeactivated is the pgcopydb_migration_verification_check value
+// for a check spec.verification does not request. An absent series already
+// means "requested, no result yet", so refusing one needs a value of its own.
+const verificationDeactivated = -1
+
+// The two pgcopydb compare checks, as the CRD's enum spells them and as
+// status.verification labels its results.
+const (
+	checkSchema = "schema"
+	checkData   = "data"
+)
+
 // perMigration collects every {namespace,name}-labeled vec, so registration
 // and Forget can never miss one.
 var perMigration []*prometheus.GaugeVec
@@ -80,7 +92,7 @@ var (
 		"1 when pgcopydb compare verification passed, 0 on mismatch (absent before a result).")
 
 	verifiedCheck = gauge("pgcopydb_migration_verification_check",
-		"1 when that pgcopydb compare check passed, 0 on mismatch (absent until it has run).",
+		"1 when that pgcopydb compare check passed, 0 on mismatch, -1 when the spec does not request it (absent until a requested check has run).",
 		"check")
 
 	sourceDatabaseSizeBytes = gauge("pgcopydb_migration_source_database_size_bytes",
@@ -191,14 +203,31 @@ func Record(m *v1beta1.Migration) {
 		verified.WithLabelValues(m.Namespace, m.Name).Set(0)
 	}
 	// Per check, because the condition collapses them and its reason names
-	// only the first mismatch. Absent until a check has actually run.
+	// only the first mismatch. A check the spec skips reads -1 rather than
+	// staying absent, which a dashboard cannot tell from one still to run.
 	verifiedCheck.DeletePartialMatch(prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name})
+	var want v1beta1.VerificationOptions
+	if m.Spec.Verification != nil {
+		want = *m.Spec.Verification
+	}
+	results := make(map[string]bool, len(m.Status.Verification))
 	for _, r := range m.Status.Verification {
-		v := 0.0
-		if r.Passed {
-			v = 1
+		results[r.Check] = r.Passed
+	}
+	for check, requested := range map[string]bool{checkSchema: want.Schema, checkData: want.Data} {
+		passed, ran := results[check]
+		switch {
+		// A result outranks the spec: turning a check off after it reported a
+		// mismatch leaves the result standing, and the tile must not hide it.
+		case ran:
+			v := 0.0
+			if passed {
+				v = 1
+			}
+			verifiedCheck.WithLabelValues(m.Namespace, m.Name, check).Set(v)
+		case !requested:
+			verifiedCheck.WithLabelValues(m.Namespace, m.Name, check).Set(verificationDeactivated)
 		}
-		verifiedCheck.WithLabelValues(m.Namespace, m.Name, r.Check).Set(v)
 	}
 }
 
