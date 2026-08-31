@@ -2,143 +2,204 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remove the per-row `kubectl exec` bottleneck from the e2e live writer while preserving one committed transaction per ordered row and its data-loss acceptance checks.
+**Goal:** Remove the live writer's per-row `kubectl exec` bottleneck while preserving one committed transaction per ordered row, lifecycle failures, and the data-loss acceptance checks.
 
-**Architecture:** `liveWriter` remains a specialized e2e helper. Its goroutine resolves the source primary once, starts one interactive `kubectl exec -i ... psql` child, and writes one `INSERT` statement per ticker event to that child's standard input. On shutdown, it closes and waits for that child, then runs a separate source query whose marker-scoped maximum is the authoritative `last` value used by the existing scenario.
+**Architecture:** `liveWriter` owns one persistent interactive psql child. Its three private function and duration fields default to `primaryPod`, `exec.Command`, and `liveWriteInterval` in `startLiveWriter`, then let package-local standard-library subprocess tests control the child without a reusable interface. After the stream closes and the child exits, the writer runs one separate marker query and uses its parsed result as `last`.
 
-**Tech Stack:** Go, `os/exec`, `sync`, Ginkgo v2, Gomega, the existing CNPG-backed `test/e2e` suite.
+**Tech Stack:** Go standard library, `os/exec`, Ginkgo v2, Gomega, CNPG-backed e2e tests.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-live-writer-throughput-design.md`
 
 ## Global Constraints
 
-- Do not add a dependency, a generic streaming helper, or a command abstraction. `liveWriter` has one caller and the standard library already supplies the process and pipe primitives.
-- Keep the writer's `sync.Once` cleanup guard and `defer GinkgoRecover()` in its goroutine.
-- Resolve the source primary once before starting the persistent child. Do not restart the child or re-resolve the primary to continue a failed write stream.
+- Do not add a dependency, a public test seam, a broad interface, or a reusable streaming helper. The private `primary`, `command`, and `interval` fields exist only to make this one e2e helper testable.
+- Keep `sync.Once` cleanup and `defer GinkgoRecover()` in the writer goroutine.
+- The persistent path resolves the source primary once, starts one `kubectl exec -i` child, and never reconnects or replaces that stream after a write failure.
 - The persistent child command is exactly `kubectl exec -i -n <e2e namespace> <source primary> -c postgres -- psql -U postgres app -q -v ON_ERROR_STOP=1`.
-- Every ticker event writes one ordered `INSERT` ending in a newline. psql autocommit makes each successful statement one committed transaction.
-- `stop` must close standard input, wait for psql, then execute a separate one-shot query for the source marker maximum. It returns the first lifecycle error and does not turn a failed persistent stream into a retry.
-- For marker `marker`, the authoritative query is exactly `SELECT COALESCE(MAX((substring(note FROM char_length('marker') + 2))::int), 0) FROM orders WHERE note LIKE 'marker-%'`, rendered with the scenario marker in both places.
-- A failure to resolve the initial primary, start the child, write a statement, close the stream, wait for psql, run the final query, or parse its scalar output must fail the spec. Preserve the first recorded error for `stop` to report.
-- Retain `last > 100`, source-target marker count equality, the target gap query, full data verification, and source slot plus target origin cleanup assertions.
-- Refresh the stale source-target-count comment in `test/e2e/e2e_test.go`. It must describe the authoritative source marker returned after psql shuts down, not retryable per-row exec behavior.
-- The e2e suite is untagged and its `BeforeSuite` reaches the current Kubernetes context. `task test` intentionally excludes `/e2e`; do not run `go test ./test/e2e/...` directly because that bypasses the Taskfile confirmation.
-- Run `task lint` and `task test` before completion. Run `task e2e` only after a human approves the displayed current-context prompt. Never use `task --yes` for e2e.
-- This repository is public. Do not commit or paste private cluster, endpoint, node, credential, or inventory details. Do not read or expose secret values.
-- No em dashes. No Claude session URLs. Keep comments within the repository limits.
+- Every ticker event writes one ordered newline-terminated `INSERT`. psql autocommit makes each successful statement one committed transaction.
+- If `cmd.Start` fails after `StdinPipe` succeeds, close stdin, record the Start error first, then record a close error only if it exists. Do not run the final query because no persistent child ran.
+- After a started child ends, close stdin, wait for it, then run one separate final query. Do not start a second persistent writer.
+- `liveMarkerQuery(marker string) string` must produce exactly `SELECT COALESCE(MAX((substring(note FROM char_length('marker') + 2))::int), 0) FROM orders WHERE note LIKE 'marker-%'` after marker substitution.
+- `parseLiveMarker(out []byte) (int, error)` must trim psql output and reject empty or non-integer output.
+- Resolve the primary once for the persistent stream and once for the separate final query. The latter is a read, not a stream replacement.
+- Preserve the first error from pipe setup, Start, write, close, Wait, final command, or marker parse. Each must make `stop` return a non-nil error.
+- Retain `last > 100`, source-target marker count equality, the target gap assertion, full data verification, and replication cleanup assertions.
+- `test/e2e` is untagged, but `go test ./test/e2e -run '^TestLiveWriter' -count=1` runs only standard tests whose names start with `TestLiveWriter`. It does not run `TestE2E` or `BeforeSuite`.
+- Run `task lint` and `task test` before completion. Run `task e2e` only after a human approves its current-context prompt. Never use `task --yes`.
+- This repository is public. Do not commit or paste private endpoints, cluster names, node names, credentials, or secret values.
+- No em dashes. No Claude session URLs. Keep comments within repository limits.
 
 ---
 
 ## File Map and Interfaces
 
-- `test/e2e/e2e_suite_test.go`: owns `liveWriter`, `startLiveWriter(marker string) *liveWriter`, `(*liveWriter).run(marker string)`, `(*liveWriter).stop() (int, error)`, and an unexported first-error recorder. This is the sole process-lifecycle implementation.
-- `test/e2e/e2e_test.go`: owns the `e2e-follow-load` acceptance scenario. It cross-checks `stop`'s returned marker against a separate source query, keeps the count and gap checks, and carries the corrected comment.
-- `tasks/todo.md`: records implementation, review, verification, e2e decision, and delivery results as the work happens.
+- `test/e2e/e2e_suite_test.go:1434-1494`: owns the persistent writer, `liveMarkerQuery`, `parseLiveMarker`, and private test seams.
+- `test/e2e/live_writer_test.go`: new standard-library subprocess tests. It has `TestLiveWriter...` tests and `TestLiveWriterHelper`, which acts as the controlled child only when its helper environment variable is set.
+- `test/e2e/e2e_test.go:484-547`: keeps the real-cluster scenario and cross-checks `last` against an independent source query. Its stale retry comment becomes a source-marker comment.
+- `tasks/todo.md`: records only completed review, verification, e2e-decision, and delivery facts.
 
-## Test Strategy
+## Test Strategy and TDD Order
 
-There is no credible local unit-test target for this process lifecycle without adding a single-use command seam solely for tests. Every file under `test/e2e` has no build tag, belongs to the Ginkgo package whose `BeforeSuite` reads the active kubeconfig and creates real fixtures, and `task test` excludes it through `go list ./... | grep -v /e2e`.
+Write the local tests first, run the exact named test command, and expect compilation to fail because the current writer has neither the injected fields nor the marker helpers. Implement only the private fields and functions required by those failures, then rerun the same command until it passes.
 
-The smallest automated behavioral seam is therefore the existing `e2e-follow-load` Ginkgo scenario. Task 1 makes its authoritative-marker expectation explicit before Task 2 changes the writer, and the guarded `task e2e` execution validates the persistent process, marker query, error propagation, target equality, gap check, full compare, and cleanup against the real fixture. `go vet ./test/e2e/...` is safe static compilation coverage and does not execute the suite.
+The helper subprocess is the test binary itself. `TestLiveWriterHelper` exits immediately unless `LIVE_WRITER_HELPER=1`; a parent test starts it with `os.Args[0]`, `-test.run=^TestLiveWriterHelper$`, and mode-specific environment. Stream mode records every input line and writes an EOF marker after stdin closes. Query mode prints the requested scalar. Failure modes either exit nonzero or let the injected command return a deliberately malformed `exec.Cmd`.
 
-The TDD order is deliberate: first make the existing scenario assert the source-authoritative marker, then replace the writer, then run the guarded acceptance test. There is no safe local red-test command for the process failure branches. A fake command seam would be production-only complexity for one e2e helper, and direct e2e execution would bypass the confirmation gate. The new assertion fails when `stop` returns an incorrect marker, while the real scenario remains the only credible process, stream, shutdown, query, and error-propagation test.
+Do not add a synthetic writer solely to make `StdinPipe` or OS-pipe `Close` fail. `exec.Cmd{Stdin: ...}` provides the practical pipe-setup failure, and the successful helper proves the normal EOF close and Wait lifecycle. Production code still records a Close error if one occurs.
 
-### Task 1: Make the scenario the authoritative-marker acceptance test
-
-**Files:**
-
-- Modify: `test/e2e/e2e_test.go:484-541`
-
-**Interfaces:**
-
-- Consumes: existing `startLiveWriter(marker string) *liveWriter`, `(*liveWriter).stop() (int, error)`, `psql(cluster, sql string) string`, and the `e2e-follow-load` constants `marker = "live-load"` and `last`.
-- Produces: an acceptance expectation that `stop` returns the separate source query's exact maximum numeric suffix, before source-target count and target-gap assertions run.
-
-- [ ] **Step 1: Write the acceptance assertion and replace the stale comment**
-
-Immediately after `Expect(last).To(BeNumerically(">", 100), ...)`, query the source independently and assert that its scalar output equals `fmt.Sprint(last)`.
-
-```go
-sourceLast := psql(sourceCluster, fmt.Sprintf(
-	"SELECT COALESCE(MAX((substring(note FROM char_length('%s') + 2))::int), 0)"+
-		" FROM orders WHERE note LIKE '%s-%%'", marker, marker))
-Expect(fmt.Sprint(last)).To(Equal(sourceLast),
-	"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
-```
-
-Replace the existing comment above `srcRows` with this two-line explanation.
-
-```go
-// last comes from the source after the psql child exits, so it is the
-// authoritative marker bound. Compare counts separately to check the target.
-```
-
-Leave the existing source-target `count(*)` assertion, target gap query, full data verification, and cleanup assertions intact.
-
-- [ ] **Step 2: Format and statically check the e2e package**
-
-Run:
-
-```bash
-gofmt -w test/e2e/e2e_test.go
-go vet ./test/e2e/...
-```
-
-Expected: `gofmt` makes no further change when rerun, and `go vet` exits 0 without executing the Ginkgo suite or contacting the cluster.
-
-Do not substitute a direct `go test ./test/e2e/...` run to force an expected failure. This acceptance assertion may pass against the old writer when no retry occurred, because its old in-memory counter was then equal to the source maximum. Its purpose is to lock the source-authoritative contract before the implementation removes that counter.
-
-- [ ] **Step 3: Commit the acceptance contract**
-
-Run:
-
-```bash
-git add test/e2e/e2e_test.go
-git commit -m "test(e2e): assert the live writer's source marker"
-```
-
-Expected: one small conventional commit containing only the scenario assertion and corrected comment.
-
-### Task 2: Replace per-row exec with one persistent psql child
+### Task 1: Add local live-writer tests before implementation
 
 **Files:**
 
-- Modify: `test/e2e/e2e_suite_test.go:1434-1500`
+- Create: `test/e2e/live_writer_test.go`
 
 **Interfaces:**
 
-- Consumes: `primaryPod(cluster string) string`, `sourceCluster`, `appDB`, `nsE2E`, `liveWriteInterval`, `GinkgoRecover`, `exec.Command`, `fmt`, `strconv`, `strings`, and `sync.Once`.
-- Produces: unchanged suite API `startLiveWriter(marker string) *liveWriter` and `(*liveWriter).stop() (int, error)`. `stop` returns the parsed source marker maximum when the lifecycle succeeds, or the first recorded lifecycle error.
+- Consumes after Task 2: `liveWriter{stopCh, done, primary, command, interval}`, `(*liveWriter).run(marker string)`, `(*liveWriter).stop() (int, error)`, `liveMarkerQuery(marker string) string`, and `parseLiveMarker(out []byte) (int, error)`.
+- Produces: package-local tests named `TestLiveWriter...`, plus `TestLiveWriterHelper(t *testing.T)` for child-process modes.
 
-- [ ] **Step 1: Keep the first-error state minimal**
+- [ ] **Step 1: Add the subprocess helpers and a test writer constructor**
 
-Retain `stopCh`, `done`, `stopOnce`, `mu`, `last`, and `err` on `liveWriter`.
+Use standard-library imports only: `bufio`, `errors`, `fmt`, `io`, `os`, `os/exec`, `path/filepath`, `strconv`, `strings`, `sync`, `testing`, and `time`, trimming imports after implementation.
 
-Add only this private method to preserve the earliest failure across setup, stream, shutdown, and final query.
+Write `liveWriterForTest` as a test-only literal constructor. It creates `stopCh` and `done`, assigns an injected `primary`, `command`, and short `interval`, then starts `go w.run(marker)`.
+
+Write `helperCommand(t, modes, env)` to return the exact production signature:
 
 ```go
-func (w *liveWriter) recordErr(err error) {
-	if err == nil {
-		return
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.err == nil {
-		w.err = err
-	}
+func helperCommand(t *testing.T, modes []string, env []string) func(string, ...string) *exec.Cmd
+```
+
+Its returned closure records the command name and arguments, consumes one mode per call, and starts the current test binary with `-test.run=^TestLiveWriterHelper$`, `LIVE_WRITER_HELPER=1`, and that mode. After `w.stop()`, tests inspect the recorded calls. They must see two calls after normal shutdown or a post-Start stream failure: first persistent stream, then final query. They must see only the initial call when `StdinPipe` or `Start` fails before a child starts.
+
+The closure starts each helper with this shape, then appends the supplied capture and signal paths to its environment.
+
+```go
+cmd := exec.Command(os.Args[0], "-test.run=^TestLiveWriterHelper$")
+cmd.Env = append(os.Environ(), append(env, "LIVE_WRITER_HELPER=1", "LIVE_WRITER_MODE="+mode)...)
+return cmd
+```
+
+Each parent test counts calls with an injected primary such as `func(string) string { primaryCalls++; return "source-0" }`. It reads `primaryCalls` and the recorded command slice only after `stop` returns, so the writer goroutine is finished before the assertions inspect them.
+
+`TestLiveWriterHelper` must implement these modes:
+
+- `stream`: read newline-delimited stdin into a capture file, write the first-line signal after receiving one line, write the EOF signal after `io.EOF`, then exit 0.
+- `stream-exit`: write a readiness signal and exit nonzero before accepting an insert.
+- `stream-wait-error`: read stdin through EOF, then exit nonzero.
+- `query-3`: print `3\n` and exit 0.
+- `query-error`: exit nonzero.
+- `query-bad`: print `not-an-int\n` and exit 0.
+
+Use a deadline-based `waitForFile` helper rather than a fixed sleep. It polls the signal file until its expected text appears or fails the test after one second.
+
+- [ ] **Step 2: Write the failing pure marker tests**
+
+Add table tests that require:
+
+```go
+if got := liveMarkerQuery("live-load"); got !=
+	"SELECT COALESCE(MAX((substring(note FROM char_length('live-load') + 2))::int), 0) FROM orders WHERE note LIKE 'live-load-%'" {
+	t.Fatalf("query = %q", got)
 }
 ```
 
-Do not add an interface, a factory, or an `exec.Command` replacement variable. This helper has one writer and one contract: retain the first error that makes the spec fail.
+Also require `parseLiveMarker([]byte(" 3\n")) == 3` and non-nil errors for `[]byte{} ` and `[]byte("not-an-int\n")`.
 
-- [ ] **Step 2: Replace the retrying per-tick call with one ordered stdin stream**
+- [ ] **Step 3: Write the failing lifecycle tests**
 
-At the start of `run`, retain `defer close(w.done)` and `defer GinkgoRecover()`.
+Write focused `t.Run` cases with these expectations:
 
-Resolve `primaryPod(sourceCluster)` once, construct this child, obtain its stdin pipe, and start it once.
+- Success: modes `stream`, `query-3`; `stop` returns `(3, nil)`; the capture holds ordered, newline-terminated inserts beginning with `<marker>-1`; EOF signal exists; exactly two command calls ran; the persistent call contains `exec -i`; the final call contains `psql -tAc` and `liveMarkerQuery(marker)`; injected primary was called exactly twice.
+- `StdinPipe`: the injected first command has its `Stdin` pre-set, so `StdinPipe` fails; `stop` returns that error; no final query call runs.
+- Start: the injected first command names a non-existent executable; `stop` returns an error containing `start persistent psql`; no final query call runs. This exercises the Start-failure path that closes the already-created stdin pipe. Do not add a fake pipe to observe its OS-level Close.
+- Write and no replacement: `stream-exit`, then `query-3`; wait for the helper readiness signal and then for `w.done`; `stop` returns a write error; exactly two commands ran, proving the second command is the required final query and no replacement stream started.
+- Wait: `stream-wait-error`, then `query-3`; wait for the first input signal, call `stop`, and require a `wait for persistent psql` error while the final query still ran.
+- Final command: `stream`, then `query-error`; require a `read final marker` error.
+- Parse: `stream`, then `query-bad`; require a `parse final marker` error.
+- First error: `stream-exit`, then `query-error`; require the write error, not the later final-query error.
+
+Use these concrete injections for the two pre-start failures.
 
 ```go
-cmd := exec.Command("kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
+stdinPipeFailure := func(string, ...string) *exec.Cmd {
+	cmd := helperCommand(t, []string{"stream"}, nil)("kubectl")
+	cmd.Stdin = strings.NewReader("")
+	return cmd
+}
+missing := filepath.Join(t.TempDir(), "missing")
+startFailure := func(string, ...string) *exec.Cmd {
+	return exec.Command(missing)
+}
+```
+
+- [ ] **Step 4: Prove the tests are red before Task 2**
+
+Run:
+
+```bash
+go test ./test/e2e -run '^TestLiveWriter' -count=1
+```
+
+Expected: FAIL at compile time because the current `liveWriter` has no `primary`, `command`, or `interval` fields, and `liveMarkerQuery` plus `parseLiveMarker` do not exist.
+
+- [ ] **Step 5: Do not commit the intentionally failing tests alone**
+
+Keep the test file staged only after Task 2 turns the exact command green. A red standalone commit would violate the repository rule that every commit is lint-clean.
+
+### Task 2: Implement the minimal persistent writer for the local tests
+
+**Files:**
+
+- Modify: `test/e2e/e2e_suite_test.go:1434-1494`
+- Test: `test/e2e/live_writer_test.go`
+
+**Interfaces:**
+
+- Consumes: the Task 1 tests and their required fields and helpers.
+- Produces: `startLiveWriter(marker string) *liveWriter`, `(*liveWriter).run(marker string)`, `(*liveWriter).stop() (int, error)`, `liveMarkerQuery(marker string) string`, and `parseLiveMarker(out []byte) (int, error)`.
+
+- [ ] **Step 1: Add only the private injectable fields and defaults**
+
+Extend `liveWriter` with:
+
+```go
+primary  func(string) string
+command  func(string, ...string) *exec.Cmd
+interval time.Duration
+```
+
+In `startLiveWriter`, initialize those fields with `primaryPod`, `exec.Command`, and `liveWriteInterval` beside the existing channels. Tests construct the same struct directly with their controlled functions. No field is exported and no interface is introduced.
+
+Retain `recordErr(err error)`, which locks `mu` and preserves the first non-nil error.
+
+- [ ] **Step 2: Add the marker helpers**
+
+Add these helpers beside `liveWriter`.
+
+```go
+func liveMarkerQuery(marker string) string {
+	return fmt.Sprintf(
+		"SELECT COALESCE(MAX((substring(note FROM char_length('%s') + 2))::int), 0)"+
+			" FROM orders WHERE note LIKE '%s-%%'", marker, marker)
+}
+
+func parseLiveMarker(out []byte) (int, error) {
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		return 0, errors.New("final marker query returned no value")
+	}
+	return strconv.Atoi(value)
+}
+```
+
+The query has one caller in production and one test oracle. Keeping it in a function prevents the source query from drifting from the final marker query.
+
+- [ ] **Step 3: Start one child and close stdin on Start failure**
+
+In `run`, defer `close(w.done)` and `GinkgoRecover()`, resolve `pod := w.primary(sourceCluster)` once, and construct the persistent command through `w.command`.
+
+```go
+cmd := w.command("kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
 	"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
 stdin, err := cmd.StdinPipe()
 if err != nil {
@@ -147,11 +208,48 @@ if err != nil {
 }
 if err := cmd.Start(); err != nil {
 	w.recordErr(fmt.Errorf("start persistent psql: %w", err))
+	if closeErr := stdin.Close(); closeErr != nil {
+		w.recordErr(fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
+	}
 	return
 }
 ```
 
-Run the ticker loop from `n := 1` upward. On each tick, render exactly one newline-terminated statement and write it to `stdin`.
+The Start error remains first. Closing stdin after Start failure avoids retaining the pipe writer even when no child was launched.
+
+- [ ] **Step 4: Stream writes once, then always close, wait, and query after a successful Start**
+
+Immediately after successful `Start`, defer this shutdown sequence:
+
+```go
+defer func() {
+	if err := stdin.Close(); err != nil {
+		w.recordErr(fmt.Errorf("close persistent psql stdin: %w", err))
+	}
+	if err := cmd.Wait(); err != nil {
+		w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
+	}
+
+	pod := w.primary(sourceCluster)
+	query := liveMarkerQuery(marker)
+	out, err := w.command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+		"psql", "-U", "postgres", appDB, "-tAc", query).Output()
+	if err != nil {
+		w.recordErr(fmt.Errorf("read final marker: %w", err))
+		return
+	}
+	last, err := parseLiveMarker(out)
+	if err != nil {
+		w.recordErr(fmt.Errorf("parse final marker: %w", err))
+		return
+	}
+	w.mu.Lock()
+	w.last = last
+	w.mu.Unlock()
+}()
+```
+
+Drive `time.NewTicker(w.interval)`. On each tick, write one statement and fail on either a returned write error or a short write:
 
 ```go
 statement := fmt.Sprintf(
@@ -166,160 +264,139 @@ if err != nil || written != len(statement) {
 }
 ```
 
-Add the `io` import only for `io.ErrShortWrite`.
+Do not call `psqlDBErr` in the ticker. After a stream error, return to the deferred close, Wait, and final read. The final read is not a replacement stream, and `recordErr` retains the stream error.
 
-Do not call `psqlDBErr` inside the ticker and do not increment a success counter for `last`. A failed pipe is terminal. The goroutine stops producing rows and its deferred shutdown completes, rather than replacing the stream or resolving a new primary.
+- [ ] **Step 5: Keep `stop` and comments accurate**
 
-- [ ] **Step 3: Close, wait, and read the authoritative source marker in deferred shutdown**
+Keep the existing `sync.Once` close, wait for `done`, and locked `last, err` return.
 
-Install the deferred shutdown immediately after a successful `cmd.Start`, so it runs on a normal stop and on a write failure.
+Replace the current `run` and `stop` comments. State that one psql child receives ordered inserts, and that `stop` returns the source maximum after the child exits rather than an in-memory lower bound.
 
-```go
-defer func() {
-	if err := stdin.Close(); err != nil {
-		w.recordErr(fmt.Errorf("close persistent psql stdin: %w", err))
-	}
-	if err := cmd.Wait(); err != nil {
-		w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
-	}
-
-	query := fmt.Sprintf(
-		"SELECT COALESCE(MAX((substring(note FROM char_length('%s') + 2))::int), 0)"+
-			" FROM orders WHERE note LIKE '%s-%%'", marker, marker)
-	pod := primaryPod(sourceCluster)
-	out, err := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-tAc", query).Output()
-	if err != nil {
-		w.recordErr(fmt.Errorf("read final marker: %w", err))
-		return
-	}
-	last, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		w.recordErr(fmt.Errorf("parse final marker %q: %w", strings.TrimSpace(string(out)), err))
-		return
-	}
-	w.mu.Lock()
-	w.last = last
-	w.mu.Unlock()
-}()
-```
-
-The final query is intentionally a separate, one-shot read after the persistent child exits. It may resolve the current source primary for that read, but it must never start another persistent child or use that resolution to resume inserts. Run the query even after a stream failure so shutdown reaches a known source state, while `recordErr` still returns the earliest failure to the scenario.
-
-- [ ] **Step 4: Keep `stop` as the only synchronization boundary**
-
-Keep `stop`'s `sync.Once` close and wait for `<-w.done` before reading `last` and `err` under `w.mu`.
-
-```go
-func (w *liveWriter) stop() (int, error) {
-	w.stopOnce.Do(func() { close(w.stopCh) })
-	<-w.done
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.last, w.err
-}
-```
-
-This permits the scenario and `DeferCleanup` to call `stop` safely. The cleanup call observes the same completed process and result rather than closing stdin, waiting, or querying a second time.
-
-- [ ] **Step 5: Format and statically check the changed package**
+- [ ] **Step 6: Turn the local test suite green**
 
 Run:
 
 ```bash
-gofmt -w test/e2e/e2e_suite_test.go
-gofmt -d test/e2e/e2e_suite_test.go test/e2e/e2e_test.go
+gofmt -w test/e2e/e2e_suite_test.go test/e2e/live_writer_test.go
+go test ./test/e2e -run '^TestLiveWriter' -count=1
 go vet ./test/e2e/...
 ```
 
-Expected: the `gofmt -d` command prints no diff, and `go vet` exits 0 without executing the real-cluster suite.
+Expected: PASS. The named test command runs the subprocess tests only, reports no `TestE2E` execution, and does not reach the Kubernetes API.
 
-The error branches are exercised by the helper's direct error recording and independently reviewed in Task 3. Do not induce a pipe, process, or primary failure on the shared cluster only to make this test red.
-
-- [ ] **Step 6: Commit the persistent writer**
+- [ ] **Step 7: Commit the tested writer and tests**
 
 Run:
 
 ```bash
-git add test/e2e/e2e_suite_test.go
+git add test/e2e/e2e_suite_test.go test/e2e/live_writer_test.go
 git commit -m "test(e2e): keep live writes in one psql session"
 ```
 
-Expected: a second small conventional commit. It changes only the writer implementation and its required standard-library import.
+Expected: one lint-clean conventional commit with the writer and its local tests together.
 
-### Task 3: Verify, review, and deliver the implementation
+### Task 3: Keep the real-cluster scenario authoritative
 
 **Files:**
 
-- Modify: `tasks/todo.md` (record actual results only)
+- Modify: `test/e2e/e2e_test.go:484-547`
 
 **Interfaces:**
 
-- Consumes: the acceptance scenario from Task 1 and persistent writer from Task 2.
-- Produces: recorded verification evidence, an implementation review result, the guarded e2e decision, and a pull request with required CI checks.
+- Consumes: `startLiveWriter(marker string) *liveWriter`, `(*liveWriter).stop() (int, error)`, and `liveMarkerQuery(marker string) string`.
+- Produces: real-cluster acceptance coverage for the source maximum, target count and gap, full comparison, and cleanup.
 
-- [ ] **Step 1: Run the repository gates**
+- [ ] **Step 1: Cross-check `last` before cutover approval**
+
+After the existing `last > 100` assertion and before `approveCutover(name)`, add:
+
+```go
+sourceLast := psql(sourceCluster, liveMarkerQuery(marker))
+Expect(fmt.Sprint(last)).To(Equal(sourceLast),
+	"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
+```
+
+The writer remains stopped before approval, so this source read is stable.
+
+- [ ] **Step 2: Replace the stale retry comment without weakening the assertions**
+
+Replace the full old comment above `srcRows` at lines 523-526 with:
+
+```go
+// last is the source maximum after the psql child exits. Keep the count
+// comparison to prove every row for this marker reached the target.
+```
+
+Keep the full section from line 484 through line 547 otherwise intact: the source-target `count(*)` equality, target `generate_series` gap check through `last`, `Verified` condition, source slot cleanup, target origin cleanup, and source plus target fixture cleanup.
+
+- [ ] **Step 3: Format, re-run local tests, and commit**
+
+Run:
+
+```bash
+gofmt -w test/e2e/e2e_test.go
+go test ./test/e2e -run '^TestLiveWriter' -count=1
+go vet ./test/e2e/...
+git add test/e2e/e2e_test.go
+git commit -m "test(e2e): check the live writer source marker"
+```
+
+Expected: the local command passes without starting `TestE2E`. The real scenario runs later through the guarded task.
+
+### Task 4: Verify, review, and deliver in fact order
+
+**Files:**
+
+- Modify: `tasks/todo.md` after each observed result
+
+**Interfaces:**
+
+- Consumes: the Task 1 through Task 3 commits and their command output.
+- Produces: a reviewable branch, a pull request, recorded verification facts, and CI evidence tied to the checked implementation SHA.
+
+- [ ] **Step 1: Run the repository gates and inspect the implementation diff**
 
 Run:
 
 ```bash
 task lint
 task test
-```
-
-Expected: both commands exit 0. `task test` validates all unit and envtest packages but deliberately excludes `test/e2e`, as verified from `Makefile`.
-
-- [ ] **Step 2: Review the exact behavioral diff**
-
-Run:
-
-```bash
 git diff --check main...HEAD
-git diff -- test/e2e/e2e_suite_test.go test/e2e/e2e_test.go
+git diff main...HEAD -- test/e2e/e2e_suite_test.go test/e2e/live_writer_test.go test/e2e/e2e_test.go
 git status --short
 ```
 
-Expected: no whitespace errors; the diff contains one persistent `kubectl exec -i` process, no per-tick `psqlDBErr` call, the exact marker query in the writer and scenario, the corrected comment, and no private-infrastructure facts.
+Expected: lint and test exit 0. The diff has one persistent stream, no per-tick `psqlDBErr`, the private test seams only, exact marker query helpers, local subprocess tests, the corrected scenario comment, and no private infrastructure facts.
 
-- [ ] **Step 3: Obtain an independent implementation review**
+- [ ] **Step 2: Obtain independent implementation review**
 
-Give a reviewer the spec, this plan, and the Task 1 and Task 2 diff.
+Give the reviewer the approved spec, this plan, and the implementation diff.
 
-The reviewer must confirm all of these points before the result is recorded in `tasks/todo.md`:
+The reviewer must check that Start closes stdin while preserving its first error, final marker command and parse failures use `recordErr`, one initial stream and one final query are the only command calls, tests cover the listed local failure modes, and the real scenario retains every assertion named in Task 3.
 
-- The process is started once against the startup primary and no write path retries or reconnects it.
-- Each inserted statement is ordered, newline-terminated, and autocommitted by the requested psql command.
-- `stop` closes stdin, waits, queries only the exact marker prefix, parses the scalar, and returns the first lifecycle error.
-- The test preserves the floor, source-target equality, target gap check, full compare, and cleanup assertions.
-- No new dependency or speculative abstraction was introduced.
+- [ ] **Step 3: Make the human-gated e2e decision**
 
-- [ ] **Step 4: Make the guarded real-cluster e2e decision**
-
-First inspect, but do not record or share the context value in a committed file:
+Inspect the current context without copying its value to a committed file:
 
 ```bash
 kubectl config current-context
 ```
 
-If the human approves running against that displayed context, run exactly:
+If the human approves the displayed prompt, run:
 
 ```bash
 task e2e
 ```
 
-Expected: Task asks for confirmation and the human answers it. The `e2e-follow-load` scenario passes with `last > 100`, source and target marker counts equal, target gap `0`, `Verified` true, and both cleanup assertions satisfied.
+Expected: Task asks for confirmation. The live-load spec passes with a source maximum over 100, equal marker counts, gap `0`, data verification, and cleanup.
 
-If the human does not approve, do not run any direct `go test ./test/e2e/...` substitute and do not use `task --yes`. Record the declined decision in `tasks/todo.md` and leave e2e verification pending.
+If approval is not given, do not run `go test ./test/e2e/...` as a substitute and do not use `task --yes`. Record a human-declined e2e decision and leave that verification pending.
 
-- [ ] **Step 5: Record results, push, create the pull request, and verify CI**
-
-Update `tasks/todo.md` with command results, review result, e2e decision, commit hashes, pull request URL, and CI result. Do not insert any private infrastructure values.
+- [ ] **Step 4: Push implementation, create or locate the pull request, and wait for checks**
 
 Run:
 
 ```bash
-git add tasks/todo.md
-git commit -m "docs: record live writer verification"
 git push -u origin fix/172-live-writer-throughput
 gh pr view --repo ydixken/pgcopydb-operator --json url,state 2>/dev/null || \
 	gh pr create --repo ydixken/pgcopydb-operator --base main --head fix/172-live-writer-throughput \
@@ -328,27 +405,42 @@ gh pr view --repo ydixken/pgcopydb-operator --json url,state 2>/dev/null || \
 ## Summary
 
 - replace per-row kubectl exec with one persistent e2e psql session
-- query the source marker after shutdown for the authoritative live-write bound
-- retain the live migration's count, gap, full compare, and cleanup checks
+- use the post-shutdown source marker as the live-write bound
+- add local subprocess tests and retain real-cluster acceptance coverage
 
 ## Verification
 
+- `go test ./test/e2e -run '^TestLiveWriter' -count=1`
 - `task lint`
 - `task test`
-- `task e2e` only when human-approved for the displayed current context
+- `task e2e` only after human approval
 EOF
 gh pr checks --repo ydixken/pgcopydb-operator --watch
 ```
 
-Expected: the pull request exists, required CI lint, test, and docs checks pass, and the e2e decision is transparent in the tracker and pull request.
+Expected: the implementation SHA is on the pull request and its required checks have reached a terminal result before any CI outcome is written to the tracker.
+
+- [ ] **Step 5: Record observed facts, then commit and push the tracker**
+
+Only after Step 4 completes, update `tasks/todo.md` with the exact command outcomes, review result, e2e decision, implementation SHA, pull request URL, and the checks result for that SHA. Do not claim later checks for the tracker-only commit have passed before they run.
+
+Run:
+
+```bash
+git add tasks/todo.md
+git commit -m "docs: record live writer verification"
+git push
+```
+
+Expected: the tracker records facts, not intentions. If the tracker commit starts a later check run, report its status separately rather than rewriting the recorded implementation-check result.
 
 ## Final Verification Checklist
 
-- [ ] `task lint` exited 0.
-- [ ] `task test` exited 0.
-- [ ] The implementation diff has no per-row `kubectl exec` or `psqlDBErr` call in `liveWriter`.
-- [ ] The source maximum query matches the exact marker-scoped SQL in the approved spec.
-- [ ] Every specified lifecycle failure reaches `stop` as the first error or fails the Ginkgo spec during initial primary resolution.
-- [ ] The corrected scenario comment describes the post-shutdown source marker rather than the old retry behavior.
-- [ ] The real-cluster e2e result is recorded as passed or human-declined, with no confirmation bypass.
-- [ ] The branch is pushed, the pull request exists, and required CI results are recorded.
+- [ ] The named local subprocess test command passed without invoking `TestE2E` or `BeforeSuite`.
+- [ ] `task lint` and `task test` exited 0.
+- [ ] Start failure closes stdin and retains Start as the first returned error.
+- [ ] The persistent path has one primary resolution and one psql child. Its final query is separate and does not resume writes.
+- [ ] The final query and parse failures flow through `recordErr`, and its source maximum SQL exactly matches the approved spec.
+- [ ] The scenario section at `test/e2e/e2e_test.go:484-547` still enforces the floor, count, gap, full compare, cleanup, and corrected source-marker comment.
+- [ ] The e2e result is recorded as passed or human-declined without bypassing confirmation.
+- [ ] The pull request checks were observed before tracker facts were committed and pushed.
