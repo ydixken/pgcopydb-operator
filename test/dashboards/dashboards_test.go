@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,6 +33,7 @@ import (
 const (
 	dashboardsDir = "../../charts/pgcopydb-operator/dashboards"
 	rulesFile     = "../../charts/pgcopydb-operator/rules/migrations.yaml"
+	phaseMetric   = "pgcopydb_migration_phase"
 )
 
 // ruleExprs reads every alert expression from the chart's rule file.
@@ -237,6 +239,72 @@ func TestVerificationTilesMapEveryState(t *testing.T) {
 	}
 	if tiles != 2 {
 		t.Errorf("panels reading %s = %d, want 2 (schema and data)", metric, tiles)
+	}
+}
+
+// A phase gauge series stands only until the next scrape marks it stale, so a
+// subquery stepping slower than the scrape walks straight past a short phase.
+// At [$__range:1m] the timeline returned five of seven phases for a completed
+// e2e-follow-auto, dropping Finalizing and Verifying outright.
+func TestPhaseTimelineStepsAtTheScrape(t *testing.T) {
+	// The scrape, matching the poll and the browser refresh, in seconds.
+	const scrape = 10
+	units := map[string]int{"s": 1, "m": 60, "h": 3600}
+	step := regexp.MustCompile(`\[\$__range:(\d+)([smh])\]`)
+	var found bool
+	for name, d := range load(t) {
+		for _, expr := range d.Exprs() {
+			if !slices.Contains(Metrics(expr), phaseMetric) {
+				continue
+			}
+			m := step.FindStringSubmatch(expr)
+			if m == nil {
+				continue
+			}
+			found = true
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatalf("%s: unparsable step %q", name, m[0])
+			}
+			if got := n * units[m[2]]; got > scrape {
+				t.Errorf("%s: subquery steps every %ds, want %ds or finer or it loses short phases:\n  %s",
+					name, got, scrape, expr)
+			}
+		}
+	}
+	if !found {
+		t.Error("no panel builds a timeline from pgcopydb_migration_phase")
+	}
+}
+
+// Both timelines are keyed on the series, and a scrape target's identity is
+// part of that: a restarted operator rescrapes the same transition under a new
+// pod label and every row appears twice. Aggregating by the labels that carry
+// meaning drops the target's.
+func TestTimelinesSurviveAnOperatorRestart(t *testing.T) {
+	want := map[string]string{
+		phaseMetric: "min by (phase)",
+		"pgcopydb_migration_condition_transition_timestamp_seconds": "max by (type, status)",
+	}
+	seen := map[string]bool{}
+	for _, expr := range load(t)["migration-detail.json"].Exprs() {
+		for metric, agg := range want {
+			// Only the timelines aggregate; the stat tiles read the same
+			// metrics at a point in time and reduce in Grafana instead.
+			if !slices.Contains(Metrics(expr), metric) || !strings.Contains(expr, "_over_time(") {
+				continue
+			}
+			seen[metric] = true
+			if !strings.Contains(expr, agg) {
+				t.Errorf("timeline over %s does not aggregate with %q, so it doubles its rows per operator pod:\n  %s",
+					metric, agg, expr)
+			}
+		}
+	}
+	for metric := range want {
+		if !seen[metric] {
+			t.Errorf("migration-detail.json has no timeline over %s", metric)
+		}
 	}
 }
 
