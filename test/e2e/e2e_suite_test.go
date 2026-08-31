@@ -1493,6 +1493,17 @@ func (w *liveWriter) stop() (int, error) {
 	return w.last, w.err
 }
 
+// psqlDiag runs a diagnostic query that must never fail a spec itself: it is
+// called from failure messages, where a second assertion would replace the
+// diagnosis with its own error. Returns the error text in place of the value.
+func psqlDiag(cluster, sql string) string {
+	out, err := psqlDBErr(cluster, appDB, sql)
+	if err != nil {
+		return "(query failed: " + err.Error() + ")"
+	}
+	return out
+}
+
 // waitFailed waits until the Migration in nsE2E is terminally Failed with the
 // given Failed-condition reason and returns it. Counterpart to waitPhase,
 // which treats Failed as a hard stop.
