@@ -234,19 +234,13 @@ func liveWriterForMarkerTest(
 	state *helperCommandState,
 ) *liveWriter {
 	t.Helper()
-	writerCtx, cancel := context.WithCancel(context.Background())
-	w := &liveWriter{
-		stopCh:   make(chan struct{}),
-		reaped:   make(chan struct{}),
-		done:     make(chan struct{}),
-		ctx:      writerCtx,
-		cancel:   cancel,
-		primary:  primary,
-		command:  command,
-		interval: time.Millisecond,
-		timeout:  liveWriterTestTimeout,
-	}
-	go w.run(marker)
+	w := startLiveWriterWith(
+		marker,
+		primary,
+		command,
+		time.Millisecond,
+		liveWriterTestTimeout,
+	)
 	t.Cleanup(func() { forceStopLiveWriter(t, w, state) })
 	return w
 }
@@ -539,6 +533,115 @@ func TestLiveWriterMarkerHelpers(t *testing.T) {
 				t.Fatalf("parseLiveMarker(%q) = %d, want %d", tt.out, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLiveWriterStartupBoundary(t *testing.T) {
+	paths := newHelperPaths(t)
+	baseCommand, state := helperCommand(t, []string{liveWriterModeStream}, paths.env())
+	primaryEntered := make(chan struct{})
+	releasePrimaryCh := make(chan struct{})
+	commandEntered := make(chan struct{})
+	releaseCommandCh := make(chan struct{})
+	releasePrimary := sync.OnceFunc(func() { close(releasePrimaryCh) })
+	releaseCommand := sync.OnceFunc(func() { close(releaseCommandCh) })
+	primaryCalls := 0
+	primary := func(cluster string) string {
+		primaryCalls++
+		if cluster != sourceCluster {
+			t.Errorf("primary cluster = %q, want %q", cluster, sourceCluster)
+		}
+		close(primaryEntered)
+		<-releasePrimaryCh
+		return liveWriterTestPod
+	}
+	command := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		close(commandEntered)
+		<-releaseCommandCh
+		return baseCommand(ctx, name, args...)
+	}
+
+	writerCh := make(chan *liveWriter, 1)
+	go func() {
+		writerCh <- startLiveWriterWith(
+			liveWriterTestMarker,
+			primary,
+			command,
+			time.Millisecond,
+			liveWriterTestTimeout,
+		)
+	}()
+
+	var w *liveWriter
+	t.Cleanup(func() {
+		releasePrimary()
+		releaseCommand()
+		if w == nil {
+			select {
+			case w = <-writerCh:
+			case <-time.After(liveWriterOuterTimeout):
+				t.Fatalf("live writer startup did not return within %s", liveWriterOuterTimeout)
+			}
+		}
+		forceStopLiveWriter(t, w, state)
+	})
+
+	select {
+	case <-primaryEntered:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("primary resolution did not start within %s", liveWriterOuterTimeout)
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	select {
+	case w = <-writerCh:
+		timer.Stop()
+		t.Fatal("live writer was exposed before primary resolution completed")
+	case <-timer.C:
+	}
+
+	releasePrimary()
+	select {
+	case w = <-writerCh:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer startup did not return within %s", liveWriterOuterTimeout)
+	}
+	select {
+	case <-commandEntered:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("persistent command was not constructed within %s", liveWriterOuterTimeout)
+	}
+
+	resultCh := make(chan liveWriterStopResult, 1)
+	go func() {
+		last, err := w.stop()
+		resultCh <- liveWriterStopResult{last: last, err: err}
+	}()
+	select {
+	case <-w.stopCh:
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer stop did not start within %s", liveWriterOuterTimeout)
+	}
+	releaseCommand()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil || result.last != 0 {
+			t.Fatalf("stop result = %#v, want zero marker and no error", result)
+		}
+	case <-time.After(liveWriterOuterTimeout):
+		t.Fatalf("live writer stop did not return within %s", liveWriterOuterTimeout)
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("primary calls = %d, want 1", primaryCalls)
+	}
+	requireLifecycleCalls(t, state, 1)
+	commandState := state.commandsSnapshot()[0]
+	if commandState.Process != nil || commandState.ProcessState != nil {
+		t.Fatalf(
+			"persistent command started after stop: process=%v state=%v",
+			commandState.Process,
+			commandState.ProcessState,
+		)
 	}
 }
 

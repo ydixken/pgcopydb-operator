@@ -1492,7 +1492,6 @@ type liveWriter struct {
 
 	ctx      context.Context
 	cancel   context.CancelFunc
-	primary  func(string) string
 	command  commandFactory
 	interval time.Duration
 	timeout  time.Duration
@@ -1503,9 +1502,25 @@ type liveWriter struct {
 	err  error
 }
 
-// startLiveWriter starts marker-tagged writes to sourceCluster and returns
-// immediately. Call stop to close and reap the persistent child.
+// startLiveWriter resolves the source primary before it returns the writer.
+// Call stop to close and reap the persistent child.
 func startLiveWriter(marker string) *liveWriter {
+	return startLiveWriterWith(
+		marker,
+		primaryPod,
+		exec.CommandContext,
+		liveWriteInterval,
+		e2eCommandTimeout,
+	)
+}
+
+func startLiveWriterWith(
+	marker string,
+	primary func(string) string,
+	command commandFactory,
+	interval, timeout time.Duration,
+) *liveWriter {
+	pod := primary(sourceCluster)
 	writerCtx, cancel := context.WithCancel(context.Background())
 	w := &liveWriter{
 		stopCh:   make(chan struct{}),
@@ -1513,10 +1528,10 @@ func startLiveWriter(marker string) *liveWriter {
 		done:     make(chan struct{}),
 		ctx:      writerCtx,
 		cancel:   cancel,
-		primary:  primaryPod,
-		command:  exec.CommandContext,
-		interval: liveWriteInterval,
-		timeout:  e2eCommandTimeout,
+		command:  command,
+		interval: interval,
+		timeout:  timeout,
+		pod:      pod,
 	}
 	go w.run(marker)
 	return w
@@ -1531,12 +1546,6 @@ func (w *liveWriter) recordErr(err error) {
 	if w.err == nil {
 		w.err = err
 	}
-}
-
-func (w *liveWriter) podName() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.pod
 }
 
 func (w *liveWriter) readFinalMarker(marker, pod string) {
@@ -1589,7 +1598,7 @@ func parseLiveMarker(out []byte) (int, error) {
 	return last, nil
 }
 
-// run resolves one primary, starts one stream, and never replaces either.
+// run starts one stream on the captured primary and never replaces either.
 // Every started child is closed, waited, and followed by one marker query.
 func (w *liveWriter) run(marker string) {
 	// GinkgoRecover must run before close(w.done): defers run in reverse
@@ -1598,12 +1607,15 @@ func (w *liveWriter) run(marker string) {
 	defer GinkgoRecover()
 	defer w.cancel()
 
-	pod := w.primary(sourceCluster)
-	w.mu.Lock()
-	w.pod = pod
-	w.mu.Unlock()
+	pod := w.pod
 	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	select {
+	case <-w.stopCh:
+		close(w.reaped)
+		return
+	default:
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		w.recordErr(fmt.Errorf("open persistent psql stdin: %w", err))
@@ -1667,7 +1679,7 @@ func (w *liveWriter) stop() (int, error) {
 		case <-timer.C:
 			w.recordErr(fmt.Errorf(
 				"stop persistent psql for cluster %s on pod %s timed out after %s: %w",
-				sourceCluster, w.podName(), w.timeout, context.DeadlineExceeded,
+				sourceCluster, w.pod, w.timeout, context.DeadlineExceeded,
 			))
 			w.cancel()
 			select {
