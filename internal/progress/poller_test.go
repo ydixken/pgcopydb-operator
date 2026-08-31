@@ -371,3 +371,131 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 		t.Errorf("the table list must come from the target:\n%s", scope)
 	}
 }
+
+// CloneStage decides a user-visible phase, so every way the probe can fail has
+// to land on "unknown" rather than on a confident wrong answer. Unknown is
+// both flags false, which leaves the caller reporting Cloning.
+
+func TestCloneStage(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		exec                *fakeExec
+		copying, finalizing bool
+	}{
+		{
+			name:    "copy workers busy",
+			exec:    &fakeExec{pod: "w", out: []byte("4 0\n")},
+			copying: true,
+		},
+		{
+			name:       "only the tail left",
+			exec:       &fakeExec{pod: "w", out: []byte("0 1\n")},
+			finalizing: true,
+		},
+		{
+			// Both counts zero is a worker that holds no backend the query
+			// counts: not connected yet, or already gone. Neither state.
+			name: "no counted backends",
+			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
+		},
+		{
+			// The copy is winding down while the tail has started. Still
+			// copying, because data is still moving.
+			name:    "both kinds active",
+			exec:    &fakeExec{pod: "w", out: []byte("2 3\n")},
+			copying: true,
+		},
+		{name: "no running pod", exec: &fakeExec{}},
+		{name: "pod lookup failed", exec: &fakeExec{podErr: errors.New("boom")}},
+		{name: "exec failed", exec: &fakeExec{pod: "w", execErr: errors.New("boom")}},
+		{name: "unparseable output", exec: &fakeExec{pod: "w", out: []byte("ERROR: nope\n")}},
+		{name: "empty output", exec: &fakeExec{pod: "w", out: nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewFromExec(tc.exec, nil)
+			copying, finalizing := p.CloneStage(context.Background(), "ns", "job")
+			if copying != tc.copying || finalizing != tc.finalizing {
+				t.Errorf("copying=%v finalizing=%v, want copying=%v finalizing=%v",
+					copying, finalizing, tc.copying, tc.finalizing)
+			}
+		})
+	}
+}
+
+// The probe must never open pgcopydb's SQLite catalog: doing that during a
+// copy is what killed workers and made the poll conditional in the first
+// place. It must also only count this worker's own backends, or another
+// migration's compare workers read as this clone's tail.
+func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
+	f := &fakeExec{pod: "w", out: []byte("0 1\n")}
+	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+
+	joined := strings.Join(f.argv, " ")
+	for _, forbidden := range []string{"pgcopydb", "--dir", "list progress"} {
+		if strings.Contains(joined, forbidden) && forbidden != "pgcopydb" {
+			t.Errorf("probe runs %q; it must not touch the pgcopydb catalog: %s", forbidden, joined)
+		}
+	}
+	if !strings.Contains(joined, "pg_stat_activity") {
+		t.Errorf("probe does not read pg_stat_activity: %s", joined)
+	}
+	if !strings.Contains(joined, "client_addr = inet_client_addr()") {
+		t.Errorf("probe is not scoped to this worker's own backends: %s", joined)
+	}
+}
+
+// The two counts are asked differently on purpose, so the predicate is pinned
+// by shape rather than by text: on a live worker all four copy workers stayed
+// connected for the whole base copy, and counting only the active ones read as
+// the tail while data was still moving.
+//
+// Both narrowings are pinned by absence, because a narrowing can be spelled
+// any number of ways and only its absence is checkable. The copy count may
+// name state exactly once, in the arm that falls back to the statement text,
+// and the row filter may not name it at all. The edit this guards against is
+// a likely one: anyone acting on a copy worker that lingers connected after
+// its queue drains reaches for exactly such a conjunction.
+func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
+	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
+	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
+	// to fail these checks the same way a lowercase one does.
+	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
+
+	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
+	if !ok {
+		t.Fatalf("probe no longer asks for two counts: %s", flat)
+	}
+	tailCount, afterFrom, ok := strings.Cut(rest, "from pg_stat_activity")
+	if !ok {
+		t.Fatalf("probe no longer reads pg_stat_activity: %s", flat)
+	}
+	// The SQL ends at the psql argument's closing quote; the URI prelude's
+	// own quotes are all behind us by here.
+	where, _, ok := strings.Cut(afterFrom, `"`)
+	if !ok {
+		t.Fatalf("cannot find the end of the probe query: %s", flat)
+	}
+
+	// A copy worker counts while it is connected, so the first arm of the
+	// copy count tests the name and nothing else.
+	primary, _, ok := strings.Cut(copyCount, " or ")
+	if !ok {
+		t.Fatalf("the copy count lost its statement-text fallback: %s", copyCount)
+	}
+	if !strings.Contains(primary, "application_name ilike '%copy worker%'") || strings.Contains(primary, "state") {
+		t.Errorf("copy workers are not counted by connection: %s", primary)
+	}
+	// One mention of state in the whole copy count, the fallback arm's own.
+	// A second one narrows the count however it is parenthesized, including
+	// a conjunction wrapped around every arm at once.
+	if n := strings.Count(copyCount, "state"); n != 1 {
+		t.Errorf("copy count names state %d times, want 1 (the fallback arm alone): %s", n, copyCount)
+	}
+	if !strings.Contains(tailCount, "state = 'active'") {
+		t.Errorf("the tail count dropped its active test: %s", tailCount)
+	}
+	if strings.Contains(where, "state") {
+		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
+	}
+}
