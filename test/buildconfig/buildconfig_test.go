@@ -52,6 +52,9 @@ const (
 	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
 )
 
+const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
+	"LicenseRef-scancode-google-patent-license-golang"
+
 func read(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -340,7 +343,7 @@ func TestWorkflowActionInventory(t *testing.T) {
 	}
 }
 
-func TestDependencyReviewGatesPullRequests(t *testing.T) {
+func TestDependencyReviewPolicy(t *testing.T) {
 	var wf workflow
 	if err := yaml.Unmarshal([]byte(read(t, ciWorkflow)), &wf); err != nil {
 		t.Fatalf("parse ci.yml: %v", err)
@@ -372,12 +375,15 @@ func TestDependencyReviewGatesPullRequests(t *testing.T) {
 		if step.With.FailOnScopes != "runtime, development, unknown" {
 			t.Errorf("dependency review fail-on-scopes is %q", step.With.FailOnScopes)
 		}
-		if step.With.AllowLicenses != "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT" {
+		if step.With.AllowLicenses != dependencyReviewAllowLicenses {
 			t.Errorf("dependency review allow-licenses is %q", step.With.AllowLicenses)
 		}
 	}
 	if reviews != 1 {
 		t.Errorf("lint job contains %d dependency review steps, want 1", reviews)
+	}
+	if strings.Contains(read(t, ciWorkflow), "allow-dependencies-licenses") {
+		t.Error("dependency review must not use an allow-dependencies-licenses exemption")
 	}
 }
 

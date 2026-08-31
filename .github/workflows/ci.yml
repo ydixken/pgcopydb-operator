@@ -28,7 +28,7 @@ jobs:
         with:
           fail-on-severity: moderate
           fail-on-scopes: runtime, development, unknown
-          allow-licenses: Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT
+          allow-licenses: Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, LicenseRef-scancode-google-patent-license-golang
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
