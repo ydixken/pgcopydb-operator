@@ -20,8 +20,8 @@
 - [x] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
 - [x] Obtain an independent review of the implementation.
 - [x] Run `task lint` and `task test` for the implementation.
-- [ ] Decide whether to run guarded `task e2e` against the current real cluster context.
-- [ ] Commit, push, open a pull request, and verify CI.
+- [x] Run guarded `task e2e` against the current real cluster context after human confirmation.
+- [x] Push the implementation, open a pull request, and verify its required checks.
 
 ## Review and results
 
@@ -39,7 +39,9 @@
 - Task 3: commit `70b835b` completed the persistent writer, local tests, source-max scenario assertion, and comment updates.
 - Task 3 focused test, e2e vet, `task lint`, and `task test`: passed.
 - Independent Task 3 review: APPROVED.
-- Real-cluster e2e: not run.
-- The query-empty fixture is a minor item deferred for final review.
-- Guarded e2e decision: pending implementation and human confirmation.
-- Commit, pull request, and CI: pending implementation and verification.
+- Task 4 focused test, e2e vet, `task lint`, and `task test`: passed at `21da875f5d1d1206957622295b71e9d0a0532497`.
+- Task 4 guarded e2e: human-confirmed `task e2e` failed in `BeforeSuite` because the suite operator Deployment did not become ready, so 0 scenarios ran.
+- Task 4 guarded e2e cleanup: `AfterSuite` completed after the `BeforeSuite` failure.
+- Implementation commit: `21da875f5d1d1206957622295b71e9d0a0532497`.
+- Pull request: https://github.com/ydixken/pgcopydb-operator/pull/174.
+- First required-check watch for `21da875f5d1d1206957622295b71e9d0a0532497`: docs, lint, and test passed.
