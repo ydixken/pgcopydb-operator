@@ -26,6 +26,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_info` | `mode` | Always 1; mode is `clone` or `follow` | always |
 | `pgcopydb_migration_start_time_seconds` | | Unix time the first attempt started | once started |
 | `pgcopydb_migration_completion_time_seconds` | | Unix time the migration completed | once completed |
+| `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time that condition last changed status, straight from its `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
 | `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch; `check` is `schema` or `data` | after that check has run |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size | worker running |
@@ -49,6 +50,15 @@ The "Exists" column is the contract for when a series is present:
   On a follow migration these series arrive with the drain verification, after cutover: the worker pod is gone by then, so the counters are read out of the verify Job's log instead.
   A plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
+- **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
+  A flip retires the old `{type,status}` pair and stamps a new one, so the endpoint never carries more than one series per condition type.
+  The retired pair keeps its samples in Prometheus, so query the timeline as `last_over_time(...[$__range])` rather than at the range end: that is what puts both sides of a flip back on the panel, and it is the only way to read a Migration that has since been deleted.
+
+Read the timeline off the condition transitions, not off the phase.
+`pgcopydb_migration_phase` is an instantaneous gauge, and the phase itself is a summary derived from the conditions.
+A phase shorter than the scrape interval is therefore never sampled: on a follow migration whose `Streaming` condition turned true one second before `CaughtUp` did, Prometheus ended up holding no `Streaming` sample at all, while every longer phase was captured.
+A transition timestamp cannot be missed that way, because the value keeps standing for as long as the condition holds, so every scrape carries the same instant the operator stamped when it set the condition.
+One case survives: a condition that changes twice inside a scrape interval publishes only the later of the two transitions, since the CR keeps one `lastTransitionTime` per condition and the earlier value is overwritten before anything reads it.
 
 Derived quantities stay in PromQL rather than becoming metrics: receive lag is `source - write`, apply backlog is `write - replay`, WAL generation is `rate(source_lsn_bytes)`, and percent done divides the done gauges by their totals.
 Receive lag reads high by one confirmation wherever `write` fell back to the slot's confirmed flush position.
@@ -62,7 +72,7 @@ The chart ships three dashboards, linked to each other through their shared `pgc
 
 - **Migration Detail** (uid `pgcopydb-migration`): one migration end to end.
   Two rows of stats lead: what it is doing and when, then how far along it is and whether each compare check passed.
-  Below them a phase timeline table, database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
+  Below them two timeline tables side by side, phases as sampled and condition transitions as stamped, then database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 

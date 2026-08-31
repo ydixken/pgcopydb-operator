@@ -184,6 +184,31 @@ func TestNoCounterFunctionsOnGauges(t *testing.T) {
 	}
 }
 
+// A timeline built from the phase gauge shows only the phases that outlived a
+// scrape. On e2e-follow-load the Streaming phase lasted one second and
+// Prometheus holds no sample of it, while the same transition sits in the CR
+// to the second. The detail dashboard must read the durable one, and must read
+// it over the range: Forget drops the series when the Migration is deleted, and
+// a flip retires the {type,status} pair the earlier transition was on, so a
+// selector resolved at the range end answers for neither.
+func TestDetailReadsConditionTransitions(t *testing.T) {
+	const metric = "pgcopydb_migration_condition_transition_timestamp_seconds"
+	var found bool
+	for _, expr := range load(t)["migration-detail.json"].Exprs() {
+		if !slices.Contains(Metrics(expr), metric) {
+			continue
+		}
+		found = true
+		if !strings.Contains(expr, "last_over_time(") || !strings.Contains(expr, "[$__range]") {
+			t.Errorf("panel reads %s only where the range ends; wrap it in last_over_time(...[$__range]):\n  %s",
+				metric, expr)
+		}
+	}
+	if !found {
+		t.Errorf("migration-detail.json has no panel reading %s", metric)
+	}
+}
+
 func TestEveryRegisteredMetricIsConsumed(t *testing.T) {
 	var exprs []string
 	for _, d := range load(t) {

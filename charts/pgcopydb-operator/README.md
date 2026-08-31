@@ -80,6 +80,8 @@ Thresholds and windows are starting points; promtool unit tests in the repositor
 `grafana.dashboards.enabled=true` ships the three dashboards in [dashboards/](dashboards/) (migration detail, fleet overview, operator health) as ConfigMaps labeled `grafana_dashboard: "1"` for Grafana's dashboard sidecar.
 The sidecar usually watches only Grafana's own namespace, so set `grafana.dashboards.namespace` to it.
 The `grafana_folder` annotation takes effect only when the sidecar's `folderAnnotation` setting names it.
+Migration detail carries two timeline tables: phases, sampled from `pgcopydb_migration_phase`, and condition transitions, read from `pgcopydb_migration_condition_transition_timestamp_seconds`.
+Only the second is exact, because a phase shorter than the scrape interval is never sampled while a transition timestamp keeps standing for as long as the condition holds.
 The [monitoring guide](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/operations/monitoring.md) covers the panels, the metric reference, and manual import.
 
 ## First Migration

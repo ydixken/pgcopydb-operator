@@ -113,6 +113,12 @@ var (
 	completionTimeSeconds = gauge("pgcopydb_migration_completion_time_seconds",
 		"Unix time the migration completed (absent until then).")
 
+	// The phase gauge is instantaneous, so a phase shorter than the scrape is
+	// never sampled; a transition time keeps standing while the condition does.
+	conditionTransitionSeconds = gauge("pgcopydb_migration_condition_transition_timestamp_seconds",
+		"Unix time the condition last changed status (absent until it has a transition time).",
+		"type", "status")
+
 	info = gauge("pgcopydb_migration_info",
 		"Always 1; the mode label carries clone or follow.", "mode")
 )
@@ -172,6 +178,7 @@ func Record(m *v1beta1.Migration) {
 		mode = "follow"
 	}
 	info.WithLabelValues(m.Namespace, m.Name, mode).Set(1)
+	recordConditionTransitions(m)
 	// Verified maps the condition: True is 1, False is 0, and no series while
 	// there is no result yet (a 0 before the compare ran would read as a
 	// mismatch on a dashboard).
@@ -192,6 +199,25 @@ func Record(m *v1beta1.Migration) {
 			v = 1
 		}
 		verifiedCheck.WithLabelValues(m.Namespace, m.Name, r.Check).Set(v)
+	}
+}
+
+// recordConditionTransitions publishes when each condition last changed. The CR
+// keeps one lastTransitionTime per condition, so a flip retires the old
+// {type,status} pair here; the history it leaves behind lives in Prometheus.
+func recordConditionTransitions(m *v1beta1.Migration) {
+	conditionTransitionSeconds.DeletePartialMatch(prometheus.Labels{
+		labelNamespace: m.Namespace, labelName: m.Name,
+	})
+	for _, c := range m.Status.Conditions {
+		// setCondition stamps this and the CRD requires it, so a zero time is
+		// a hand-built object, not a transition that happened in year 1.
+		if c.LastTransitionTime.IsZero() {
+			continue
+		}
+		conditionTransitionSeconds.
+			WithLabelValues(m.Namespace, m.Name, c.Type, string(c.Status)).
+			Set(float64(c.LastTransitionTime.Unix()))
 	}
 }
 
