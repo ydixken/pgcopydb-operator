@@ -77,3 +77,4 @@
 - Revised-design `task test` exited 0 after all 13 non-e2e Go packages passed.
 - Independent review approved the implementation plan at `b47dd9d` with no blockers.
 - E2e was not run during setup because it targets a real Kubernetes cluster.
+- Task 6 is blocked pending a replan that reconciles Task 4's approved eight-file lint boundary with the committed implementation plan.

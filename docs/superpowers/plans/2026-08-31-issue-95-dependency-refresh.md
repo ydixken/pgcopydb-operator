@@ -189,7 +189,8 @@ needs: [e2e, release-notes]
 ## File ownership map
 
 - Planning and evidence: `docs/superpowers/plans/2026-08-31-issue-95-dependency-refresh.md` contains this implementation plan, and `tasks/todo.md` carries delegated progress and final evidence.
-- Go graph and lint tooling: `go.mod`, `go.sum`, `.custom-gcl.yml`, and `Makefile` own the exact toolchain, direct module targets, tidy-generated indirect graph, and matching golangci-lint pins.
+- Go graph and lint tooling: `go.mod`, `go.sum`, `.custom-gcl.yml`, `Makefile`, and `.golangci.yml` own the exact toolchain, direct module targets, tidy-generated indirect graph, matching golangci-lint pins, and the `embedlit` policy exception.
+- Go 1.27 compatibility: `test/e2e/e2e_suite_test.go`, `internal/controller/error_paths_test.go`, and `internal/controller/migration_controller.go` own the required `errors.AsType` updates and narrow rate-limited `Requeue` staticcheck suppressions.
 - Public manager image pins: `Dockerfile` owns Go 1.27.0, the Go builder digest, and the Distroless digest.
 - Public runner image pins: `images/pgcopydb-builder/Dockerfile` and `images/runner/Dockerfile` own the Debian digest.
 - Internal builder pin: only `images/runner/Dockerfile` changes in the second pull request unless an existing exact-digest expectation also requires an update.
@@ -198,7 +199,7 @@ needs: [e2e, release-notes]
 - Release ordering: `.github/workflows/release.yml` owns the exact `promote.needs` dependency and the absence of a job-level `if`.
 - Release regression coverage: `test/buildconfig/buildconfig_test.go` owns parsed checks for the promotion prerequisites and job-level condition.
 - Local e2e default: `test/e2e/e2e_suite_test.go` owns the v0.11.3 default and its accurate comment, while `.github/workflows/e2e.yml` owns the matching public dispatch example.
-- No README, API, controller, chart, Renovate configuration, schema, or generated scaffold file changes belong in this work.
+- No README, API, chart, Renovate configuration, schema, or generated scaffold file changes belong in this work.
 
 Workers that share a file must run sequentially.
 A worker must not absorb a neighboring concern or edit a file outside this map without escalating to the Team Leader.
@@ -908,21 +909,25 @@ Expected: one lint-clean commit containing the workflow upgrades and their perma
 
 **Files:**
 
+- Modify: `.custom-gcl.yml`
+- Modify: `.golangci.yml`
+- Modify: `Makefile`
 - Modify: `go.mod`
 - Modify: `go.sum`
-- Modify: `Makefile`
-- Modify: `.custom-gcl.yml`
+- Modify: `test/e2e/e2e_suite_test.go`
+- Modify: `internal/controller/error_paths_test.go`
+- Modify: `internal/controller/migration_controller.go`
 - Verify: resolved module graph
 
 **Interfaces:**
 
 - Consumes: Official Go 1.27.0 toolchain, controller-runtime v0.24.1 compatibility with Kubernetes v0.36, and the existing custom golangci-lint builder.
-- Produces: Go directive 1.27.0, golangci-lint v2.13.2 in both pins, six approved direct module upgrades, and resolver-selected patch or pseudo-version indirect changes.
+- Produces: Go directive 1.27.0, golangci-lint v2.13.2 in both pins, an `embedlit` policy exception, six approved direct module upgrades, resolver-selected patch or pseudo-version indirect changes, two `errors.AsType` compatibility updates, and three rate-limited `Requeue` staticcheck suppressions.
 - Preserves: Ginkgo v2.32.1, `prometheus/client_golang` v1.24.1, controller-runtime v0.24.1, and `sigs.k8s.io/yaml` v1.6.0.
 
 **Worker:** Go dependency implementation worker.
 
-**Independent review gate:** A separate dependency reviewer inspects `go.mod`, `go.sum`, the resolved module graph, and both golangci-lint pins before accepting the commit.
+**Independent review gate:** A separate dependency reviewer inspects all eight files, the resolved module graph, both golangci-lint pins, the `embedlit` policy exception, and the compatibility edits before accepting the commit.
 
 - [ ] **Step 1: Confirm Go 1.27.0 is an official release**
 
@@ -937,7 +942,7 @@ Expected: exit 0 and output containing `go1.27.0`.
 
 If the official release history does not list it, stop without changing the toolchain.
 
-- [ ] **Step 2: Update both golangci-lint pins**
+- [ ] **Step 2: Update the golangci-lint pins and policy**
 
 Change `Makefile` to:
 
@@ -951,7 +956,15 @@ Change `.custom-gcl.yml` to:
 version: v2.13.2
 ```
 
+In `.golangci.yml`, add `embedlit` beside the existing `modernize.disable` entries.
+This defers optional Go 1.27 literal-style churn while preserving every other analyzer.
 Do not change the plugin list or replace its existing version policy.
+
+In `test/e2e/e2e_suite_test.go`, retain the two `errors.AsType` updates for `*psqlFailure` and `*exec.ExitError`.
+In `internal/controller/migration_controller.go`, retain the narrow adjacent `//nolint:staticcheck` directives for the silent rate-limited conflict retry and the rate-limited resume retry after the status patch.
+In `internal/controller/error_paths_test.go`, retain the corresponding directive for the intentional silent rate-limited `Requeue` assertion.
+Each directive must explain the rate-limited behavior it preserves.
+Do not replace either `ctrl.Result{Requeue: true}` with `RequeueAfter`.
 
 - [ ] **Step 3: Set the exact Go directive**
 
@@ -1092,17 +1105,25 @@ Expected: the installer builds the custom linter and the version output contains
 
 Do not remove the `bin` directory or any source file.
 
-- [ ] **Step 9: Inspect the dependency diff**
+- [ ] **Step 9: Inspect the dependency and compatibility diff**
 
 Run:
 
 ```sh
 set -euo pipefail
-git diff -- go.mod go.sum Makefile .custom-gcl.yml
+git diff -- \
+  .custom-gcl.yml \
+  .golangci.yml \
+  Makefile \
+  go.mod \
+  go.sum \
+  test/e2e/e2e_suite_test.go \
+  internal/controller/error_paths_test.go \
+  internal/controller/migration_controller.go
 git diff --check
 ```
 
-Expected: the direct `go.mod` block contains only the approved version changes.
+Expected: the direct `go.mod` block contains only the approved version changes, and the diff contains only the eight listed files.
 Every indirect change must be selected by the approved patch-only upgrade or `go mod tidy`.
 
 - [ ] **Step 10: Run the task gates with the exact toolchain**
@@ -1126,6 +1147,7 @@ set -euo pipefail
 test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = "go1.27.0"
 test "$(rg -c '^GOLANGCI_LINT_VERSION \\?= v2\\.13\\.2$' Makefile)" = 1
 test "$(rg -c '^version: v2\\.13\\.2$' .custom-gcl.yml)" = 1
+test "$(rg -c '^\s*- embedlit$' .golangci.yml)" = 1
 GOTOOLCHAIN=go1.27.0 go mod tidy -diff
 module_graph=$(GOTOOLCHAIN=go1.27.0 go list -m all)
 printf '%s\n' "$module_graph" |
@@ -1133,6 +1155,7 @@ printf '%s\n' "$module_graph" |
 ```
 
 Expected: all commands exit 0, and the tidy and forbidden-version checks print nothing.
+The reviewer also confirms the two `errors.AsType` updates and three narrow rate-limited `Requeue` staticcheck suppressions preserve existing behavior.
 
 - [ ] **Step 12: Commit the Go dependency refresh**
 
@@ -1140,11 +1163,20 @@ Run:
 
 ```sh
 set -euo pipefail
-git add go.mod go.sum Makefile .custom-gcl.yml
+git add \
+  .custom-gcl.yml \
+  .golangci.yml \
+  Makefile \
+  go.mod \
+  go.sum \
+  test/e2e/e2e_suite_test.go \
+  internal/controller/error_paths_test.go \
+  internal/controller/migration_controller.go
+test "$(git diff --cached --name-only | wc -l | tr -d ' ')" = 8
 git commit -m "chore(deps): upgrade Go and modules"
 ```
 
-Expected: one lint-clean commit containing only the Go directive, approved module changes, tidy output, and synchronized linter pins.
+Expected: one lint-clean commit containing exactly the eight listed files, the Go directive, approved module changes, tidy output, synchronized linter pins, the `embedlit` policy exception, and the required compatibility edits.
 
 ### Task 5: Refresh public image digests and the local e2e baseline
 
