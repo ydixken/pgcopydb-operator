@@ -33,7 +33,7 @@ on:
       scale:
         description: E2E_SCALE, the fixture size multiplier
         required: false
-        default: "0.1"
+        default: "0.25"
         type: string
 
 permissions:
@@ -93,7 +93,7 @@ jobs:
         env:
           # A tag push has no inputs, so fall back to the tag that triggered it.
           E2E_OPERATOR_TAG: ${{ inputs.tag || github.ref_name }}
-          E2E_SCALE: ${{ inputs.scale || '0.1' }}
+          E2E_SCALE: ${{ inputs.scale || '0.25' }}
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
