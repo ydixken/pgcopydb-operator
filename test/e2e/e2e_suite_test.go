@@ -32,6 +32,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1645,20 +1646,26 @@ func deleteMigration(name string) {
 	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 }
 
-// transientExecError reports whether kubectl exec failed before reaching the
-// pod (API-server hiccups happen on the shared dev cluster). Only those are
-// safe to retry for arbitrary SQL.
+var transientExecErrorPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^Unable to connect to the server: net/http: TLS handshake timeout$`),
+	regexp.MustCompile(`^The connection to the server \S+ was refused - did you specify the right host or port\?$`),
+	regexp.MustCompile(`^error: Internal error occurred: error dialing backend: \S(?:[^\r\n]*\S)?$`),
+	regexp.MustCompile(`^error: error sending request: Post "[^"\s]+": net/http: TLS handshake timeout$`),
+	regexp.MustCompile(`^error: error sending request: Post "[^"\s]+": dial tcp \S+: connect: connection refused$`),
+}
+
+// transientExecError reports a structured kubectl failure that occurred
+// before the remote command started, so arbitrary SQL is safe to retry.
 func transientExecError(stderr string) bool {
-	for _, marker := range []string{
-		"TLS handshake timeout",
-		"Unable to connect to the server",
-		"error dialing backend",
-		"connection refused",
-		// The kubelet occasionally drops an exec stream mid-request on the
-		// shared cluster; the apiserver surfaces it as this internal error.
-		"error sending request",
-	} {
-		if strings.Contains(stderr, marker) {
+	if trimmed, ok := strings.CutSuffix(stderr, "\n"); ok {
+		stderr = trimmed
+		stderr = strings.TrimSuffix(stderr, "\r")
+	}
+	if strings.ContainsAny(stderr, "\r\n") {
+		return false
+	}
+	for _, pattern := range transientExecErrorPatterns {
+		if pattern.MatchString(stderr) {
 			return true
 		}
 	}
