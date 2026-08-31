@@ -19,7 +19,12 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    # Self-hosted for our own runs, hosted for a fork's. The cluster runner
+    # sits in a namespace with no NetworkPolicy in front of it, so code from a
+    # fork must never reach it; runner-smoke.yml states the same rule. A push
+    # has no pull_request payload, so the expression falls through to the
+    # cluster runner there.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
       - name: Review dependency changes
@@ -29,23 +34,76 @@ jobs:
           fail-on-severity: moderate
           fail-on-scopes: runtime, development, unknown
           allow-licenses: Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, LicenseRef-scancode-google-patent-license-golang
+      # /cache is a directory on the node the runner landed on, so it is warm
+      # per node rather than per scale set. A hosted runner, which is what a
+      # fork's pull request gets, has no such path and runs cold.
+      - name: Point the Go and lint caches at the shared volume
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
+          # Only when the volume is fresh: a recursive chown would walk several
+          # hundred thousand cached files on every job.
+          [ -O /cache/go-build ] || sudo chown "$(id -u):$(id -g)" \
+            /cache /cache/go-build /cache/go-mod /cache/golangci
+          # This is the node's own filesystem, so the guard protects the node
+          # rather than a volume: filling it takes out every pod on the box,
+          # and a cold cache is a far cheaper failure. df, not du, because the
+          # directory holds hundreds of thousands of files and du walks them.
+          # Go already trims its build cache at five days unused, so this is a
+          # backstop and not the routine path.
+          avail=$(df -Pm /cache | awk 'NR == 2 {print $4}')
+          if [ "${avail:-0}" -lt 20000 ]; then
+            echo "Node disk down to ${avail}MB, cleared the build cache." >> "$GITHUB_STEP_SUMMARY"
+            sudo rm -rf /cache/go-build /cache/go-mod /cache/golangci
+            sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
+            sudo chown "$(id -u):$(id -g)" /cache/go-build /cache/go-mod /cache/golangci
+          fi
+          # The runner image bakes a warm module cache and a build cache of the
+          # dependency tree, but the exports below point Go at the node instead,
+          # which would leave the baked pair unread. Seed from the image the
+          # first time a node sees it: a cold node then starts warm, and every
+          # job after that reads what the previous one left, which is current
+          # where the image is a week old. cp -a on node disk, not a pull.
+          for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
+                      "$HOME/.cache/go-build:/cache/go-build"; do
+            src=${pair%:*} dst=${pair#*:}
+            [ -n "$src" ] && [ -d "$src" ] || continue
+            [ -z "$(ls -A "$dst" 2>/dev/null)" ] || continue
+            echo "Seeding $dst from the image's $src." >> "$GITHUB_STEP_SUMMARY"
+            cp -a "$src/." "$dst/" 2>/dev/null || true
+          done
+          {
+            echo "GOCACHE=/cache/go-build"
+            echo "GOMODCACHE=/cache/go-mod"
+            echo "GOLANGCI_LINT_CACHE=/cache/golangci"
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # The caches live on the node directory above. Left on, setup-go
+          # tars and uploads them to GitHub's cache service on every run:
+          # 444MB, 109s on this job and 173s on the test one.
+          cache: false
       - uses: azure/setup-helm@v5
-      # golangci-lint keeps an analysis cache that setup-go's GOCACHE does not
-      # cover, and it is what makes the step expensive: measured locally, a cold
-      # run costs 132s of CPU against 5.6s warm, and this runner has two cores.
-      # Kept outside the workspace so `yamllint --strict .` never walks into it.
-      # Restore-keys are safe because golangci-lint hash-validates its entries.
-      - name: Cache golangci-lint analysis
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/golangci-lint
-          key: golangci-${{ runner.os }}-${{ hashFiles('go.sum', '.golangci.yml', '.custom-gcl.yml') }}
-          restore-keys: golangci-${{ runner.os }}-
+      # The cluster runner is the minimal actions-runner image: git, curl, jq
+      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
+      # so this is a no-op on the hosted runner a fork's pull request gets.
+      - name: Install what the runner lacks
+        run: |
+          if ! command -v pipx >/dev/null || ! command -v make >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq pipx make
+          fi
+          # pipx installs into ~/.local/bin, which a hosted runner already has
+          # on PATH and the stock actions-runner image does not. Appending a
+          # path that is already there is harmless.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: yamllint
-        run: pipx install yamllint && yamllint --strict .
+        # The runner image carries yamllint; a hosted runner, which is what a
+        # fork's pull request gets, does not.
+        run: |
+          command -v yamllint >/dev/null || pipx install yamllint
+          yamllint --strict .
       - name: Chart CRD is current
         # The chart embeds controller-gen output; this fails on drift.
         run: ./hack/sync-chart-crd.sh --check
@@ -69,7 +127,12 @@ jobs:
         run: make lint
 
   test:
-    runs-on: ubuntu-latest
+    # Self-hosted for our own runs, hosted for a fork's. The cluster runner
+    # sits in a namespace with no NetworkPolicy in front of it, so code from a
+    # fork must never reach it; runner-smoke.yml states the same rule. A push
+    # has no pull_request payload, so the expression falls through to the
+    # cluster runner there.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     services:
       # The compare-data gate decides its verdict in SQL, and a server is the
       # only place that logic can be exercised. Without one TestCompareDataQuery
@@ -87,9 +150,69 @@ jobs:
           --health-retries 12
     steps:
       - uses: actions/checkout@v7
+      # /cache is a directory on the node the runner landed on, so it is warm
+      # per node rather than per scale set. A hosted runner, which is what a
+      # fork's pull request gets, has no such path and runs cold.
+      - name: Point the Go and lint caches at the shared volume
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
+          # Only when the volume is fresh: a recursive chown would walk several
+          # hundred thousand cached files on every job.
+          [ -O /cache/go-build ] || sudo chown "$(id -u):$(id -g)" \
+            /cache /cache/go-build /cache/go-mod /cache/golangci
+          # This is the node's own filesystem, so the guard protects the node
+          # rather than a volume: filling it takes out every pod on the box,
+          # and a cold cache is a far cheaper failure. df, not du, because the
+          # directory holds hundreds of thousands of files and du walks them.
+          # Go already trims its build cache at five days unused, so this is a
+          # backstop and not the routine path.
+          avail=$(df -Pm /cache | awk 'NR == 2 {print $4}')
+          if [ "${avail:-0}" -lt 20000 ]; then
+            echo "Node disk down to ${avail}MB, cleared the build cache." >> "$GITHUB_STEP_SUMMARY"
+            sudo rm -rf /cache/go-build /cache/go-mod /cache/golangci
+            sudo mkdir -p /cache/go-build /cache/go-mod /cache/golangci
+            sudo chown "$(id -u):$(id -g)" /cache/go-build /cache/go-mod /cache/golangci
+          fi
+          # The runner image bakes a warm module cache and a build cache of the
+          # dependency tree, but the exports below point Go at the node instead,
+          # which would leave the baked pair unread. Seed from the image the
+          # first time a node sees it: a cold node then starts warm, and every
+          # job after that reads what the previous one left, which is current
+          # where the image is a week old. cp -a on node disk, not a pull.
+          for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
+                      "$HOME/.cache/go-build:/cache/go-build"; do
+            src=${pair%:*} dst=${pair#*:}
+            [ -n "$src" ] && [ -d "$src" ] || continue
+            [ -z "$(ls -A "$dst" 2>/dev/null)" ] || continue
+            echo "Seeding $dst from the image's $src." >> "$GITHUB_STEP_SUMMARY"
+            cp -a "$src/." "$dst/" 2>/dev/null || true
+          done
+          {
+            echo "GOCACHE=/cache/go-build"
+            echo "GOMODCACHE=/cache/go-mod"
+            echo "GOLANGCI_LINT_CACHE=/cache/golangci"
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # The caches live on the volume above. Left on, setup-go tars and
+          # uploads them to GitHub's cache service on every run: 444MB, 109s on
+          # this job and 173s on the test one.
+          cache: false
+      # The cluster runner is the minimal actions-runner image: git, curl, jq
+      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
+      # so this is a no-op on the hosted runner a fork's pull request gets.
+      # psql is the one this suite genuinely needs rather than merely runs
+      # through: TestCompareDataQuery fails, not skips, when PGCOPYDB_TEST_PGURI
+      # is set and psql is missing, so a runner without it would have turned the
+      # compare-data gate red rather than quietly unrun.
+      - name: Install make and psql, which the runner image lacks
+        run: |
+          if ! command -v make >/dev/null || ! command -v psql >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq make postgresql-client
+          fi
       - name: Unit and envtest suites
         # make test downloads the envtest control-plane binaries itself.
         # The throwaway service above holds no data; the query only selects.
@@ -114,7 +237,12 @@ jobs:
           fail_ci_if_error: true
 
   docs:
-    runs-on: ubuntu-latest
+    # Self-hosted for our own runs, hosted for a fork's. The cluster runner
+    # sits in a namespace with no NetworkPolicy in front of it, so code from a
+    # fork must never reach it; runner-smoke.yml states the same rule. A push
+    # has no pull_request payload, so the expression falls through to the
+    # cluster runner there.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

@@ -50,11 +50,12 @@
   ],
   "customManagers": [
     {
-      "description": "mkdocs-material is pinned in two workflows and both builds must agree.",
+      "description": "mkdocs-material is pinned in two workflows and in the runner image, and all three must agree: the docs build and the staleness gate compare renderings.",
       "customType": "regex",
       "managerFilePatterns": [
         ".github/workflows/ci.yml",
-        ".github/workflows/docs.yml"
+        ".github/workflows/docs.yml",
+        "images/github-runner/Dockerfile"
       ],
       "matchStrings": ["mkdocs-material==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "depNameTemplate": "mkdocs-material",
@@ -109,6 +110,14 @@
       "matchStrings": ["operatorTag = \"(?<currentValue>v[^\"]+)\""],
       "depNameTemplate": "ghcr.io/ydixken/pgcopydb-operator",
       "datasourceTemplate": "docker"
+    },
+    {
+      "description": "The runner image pins its tools so the image is reproducible and a bump is visible. Merging one rebuilds the image, because github-runner-image.yml watches this file.",
+      "customType": "regex",
+      "managerFilePatterns": ["images/github-runner/Dockerfile"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\w+=(?<currentValue>\\S+)"
+      ]
     }
   ]
 }

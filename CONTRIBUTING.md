@@ -35,18 +35,28 @@ Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret. Codeco
 
 ## Self-hosted runners
 
-Two runner scale sets serve this repository, both backed by Actions Runner Controller on the dev cluster. Everything else stays on GitHub-hosted runners. The scale sets, their GitHub App credentials and their Helm values are declared outside this repository (see private ops notes); nothing here configures them beyond the `runs-on:` label.
+Two runner scale sets serve this repository, both backed by Actions Runner Controller on the dev cluster, and between them they run every job. The scale sets, their GitHub App credentials and their Helm values are declared outside this repository (see private ops notes); nothing here configures them beyond the `runs-on:` label.
 
-`github-runner-pgcopydb-operator` builds the release workflow's two images. Its jobs get no Kubernetes API access, so they cannot reach the cluster they run on. `github-runner-pgcopydb-e2e` is the deliberate exception: the e2e job installs a chart and drives real workloads, so that scale set does reach the API. Its ServiceAccount is scoped to the e2e namespaces, which GitOps owns; it can work inside them but cannot create or delete one, which is why the suite runs there with `E2E_MANAGE_NAMESPACES=false`.
+`github-runner-pgcopydb-operator` runs everything that is not e2e: both release images, the chart push, the release notes, the promotion tag, the docs deploy, the GitLab mirror, the Artifact Hub push, the weekly candidate, and the three CI jobs. Its jobs get no Kubernetes API access, so they cannot reach the cluster they run on. `github-runner-pgcopydb-e2e` is the deliberate exception: the e2e job installs a chart and drives real workloads, so that scale set does reach the API. Its ServiceAccount is scoped to the e2e namespaces, which GitOps owns; it can work inside them but cannot create or delete one, which is why the suite runs there with `E2E_MANAGE_NAMESPACES=false`.
 
 Two rules hold because this repository is public and both scale sets are real machines on a private cluster:
 
-- No workflow that can be triggered by a fork MAY target them. Today only tag pushes (`release.yml`) and manual dispatch (`runner-smoke.yml`) do.
+- No workflow that can be triggered by a fork MAY target them, on any code path a fork can reach.
 - `pull_request_target` MUST NOT be used in any workflow. It runs the base branch's copy of the workflow, with the base branch's secrets, against a fork's code, so the approval that gates a fork's first run never gets asked for.
+
+`ci.yml` runs on `pull_request`, so it is the one workflow a fork can trigger, and it picks its runner per event instead of pinning one:
+
+```yaml
+runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
+```
+
+A push carries no `pull_request` payload and falls through to the cluster runner, as does a pull request from a branch in this repository; only a fork's pull request lands on a hosted one. GitHub's own gate is at its strictest setting (`approval_policy` is `all_external_contributors`) and a public-repo fork run gets a read-only token and no secrets, but that gate is deliberately not what we lean on: the runner namespaces carry no NetworkPolicy, so an approved fork run would have unrestricted east-west access to the cluster, and approving a pull request should not double as a cluster-security decision. Confining them is [issue #182](https://github.com/ydixken/pgcopydb-operator/issues/182); until it lands, that expression is the control.
 
 The e2e job backs the first rule with something GitHub enforces rather than something we remember. Its `environment: e2e-cluster` carries a deployment branch and tag policy that permits `main` and `v*` and nothing else, evaluated before the job is dispatched. A fork pull request runs at `refs/pull/N/merge`, matches neither, and never reaches a machine that can talk to the cluster.
 
 `runner-smoke.yml` is a `workflow_dispatch` build that exercises the build runner and its Docker daemon without publishing anything. Run it after any change to that scale set.
+
+The runners boot `ghcr.io/actions/actions-runner`, which carries git, curl, jq, python3, a Docker client and little else, where a hosted runner ships hundreds of tools. Jobs therefore install what they use: a `setup-` action where one exists (Go, Helm, Python, oras), and an apt step where none does (`make`, `gh`, `pipx`). Those steps test for the tool first, so they cost nothing on the hosted runner a fork's pull request gets.
 
 ## E2e tests
 

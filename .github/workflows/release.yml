@@ -159,7 +159,7 @@ jobs:
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
 
   chart:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     needs: [manager-image, runner-image]
     steps:
       - uses: actions/checkout@v7
@@ -181,7 +181,7 @@ jobs:
 
   release-notes:
     # Last, so a release only appears once its artifacts are actually published.
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     needs: [chart]
     permissions:
       contents: write  # the workflow default is read-only
@@ -189,6 +189,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The cluster runner is the minimal actions-runner image: git, curl, jq
+      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
+      # so this is a no-op on the hosted runner a fork's pull request gets.
+      - name: Install gh, which the runner image lacks
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq gh
+          fi
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -298,7 +307,7 @@ jobs:
     # The recursion stops one level down. The tag pushed here has no -rc., so
     # in that run the e2e job's `if` skips, and promote skips with it.
     needs: [e2e, release-notes]
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v7
         with:
@@ -331,10 +340,19 @@ jobs:
     # red; the result check keeps it to an e2e failure, rather than firing on
     # a chart job that failed before e2e ever ran.
     if: failure() && needs.e2e.result == 'failure'
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     permissions:
       issues: write  # the workflow default is read-only
     steps:
+      # The cluster runner is the minimal actions-runner image: git, curl, jq
+      # and python3, where a hosted runner ships hundreds of tools. Idempotent,
+      # so this is a no-op on the hosted runner a fork's pull request gets.
+      - name: Install gh, which the runner image lacks
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq gh
+          fi
       - name: Open an issue against the candidate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   mirror:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v7
         with:

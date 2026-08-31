@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -36,8 +36,11 @@ jobs:
         # the Taskfile docs task); a diff means the API changed without
         # regenerating docs/reference/api.md.
         run: |
-          GOBIN=$(pwd)/bin go install github.com/elastic/crd-ref-docs@v0.3.0
-          bin/crd-ref-docs --source-path=api/v1beta1 --config=hack/crd-ref-docs.yaml \
+          # The runner image bakes this at the version the Taskfile pins; a
+          # hosted runner, which is what a fork's pull request gets, installs it.
+          tool="${LOCALBIN:-$(pwd)/bin}/crd-ref-docs"
+          [ -x "$tool" ] || GOBIN="$(dirname "$tool")" go install github.com/elastic/crd-ref-docs@v0.3.0
+          "$tool" --source-path=api/v1beta1 --config=hack/crd-ref-docs.yaml \
             --renderer=markdown --output-path=docs/reference/api.md
           git diff --exit-code docs/reference/api.md
       - uses: actions/setup-python@v7
