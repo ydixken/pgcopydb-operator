@@ -716,7 +716,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_attempts{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "max by (namespace, name) (pgcopydb_migration_attempts{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_attempts{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -731,7 +731,7 @@
             "mode": "thresholds"
           },
           "unit": "short",
-          "noValue": "0",
+          "noValue": "N/A",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -765,7 +765,8 @@
           "valueSize": 20
         }
       },
-      "interval": "10s"
+      "interval": "10s",
+      "description": "Worker Jobs created so far. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A. No fallback value: the operator records this gauge on every reconcile, so its absence only ever means the Migration is not here."
     },
     {
       "id": 5,
@@ -784,7 +785,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - pgcopydb_migration_start_time_seconds{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "max by (namespace, name) (pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"}) - max by (namespace, name) (pgcopydb_migration_start_time_seconds{namespace=\"$namespace\", name=\"$name\"}) or time() - max by (namespace, name) (pgcopydb_migration_start_time_seconds{namespace=\"$namespace\", name=\"$name\"}) or ((max by (namespace, name) (last_over_time(pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range])) - max by (namespace, name) (last_over_time(pgcopydb_migration_start_time_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range]))) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"})) or max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"} * -1)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -799,7 +800,7 @@
             "mode": "thresholds"
           },
           "unit": "s",
-          "noValue": "Not Started",
+          "noValue": "N/A",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -808,7 +809,18 @@
                 "value": null
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "Not Started",
+                  "index": 0
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -833,7 +845,7 @@
           "valueSize": 20
         }
       },
-      "description": "Keeps counting after completion; Completed at marks the end.",
+      "description": "How long the run took once it completed, and how long it has been going while it has not. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",
       "interval": "10s"
     },
     {
@@ -853,7 +865,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"} * 1000",
+          "expr": "max by (namespace, name) (pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"}) * 1000 or (max by (namespace, name) (last_over_time(pgcopydb_migration_completion_time_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range])) * 1000 unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"})) or max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"} * 0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -868,7 +880,7 @@
             "mode": "thresholds"
           },
           "unit": "time:HH:mm:ss",
-          "noValue": "Still Running",
+          "noValue": "N/A",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -877,7 +889,18 @@
                 "value": null
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Still Running",
+                  "index": 0
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -902,7 +925,8 @@
           "valueSize": 20
         }
       },
-      "interval": "10s"
+      "interval": "10s",
+      "description": "When the run ended. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A."
     },
     {
       "id": 23,
@@ -1300,7 +1324,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"schema\"}",
+          "expr": "max by (namespace, name) (pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"schema\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"schema\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"})) or max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"} * -2)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1331,7 +1355,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "Pending",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
@@ -1350,6 +1374,10 @@
                   "text": "Deactivated",
                   "color": "red",
                   "index": 2
+                },
+                "-2": {
+                  "text": "Pending",
+                  "index": 3
                 }
               }
             }
@@ -1386,7 +1414,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"data\"}",
+          "expr": "max by (namespace, name) (pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"data\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_verification_check{namespace=\"$namespace\", name=\"$name\", check=\"data\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"})) or max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"} * -2)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1417,7 +1445,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "Pending",
+          "noValue": "N/A",
           "mappings": [
             {
               "type": "value",
@@ -1436,6 +1464,10 @@
                   "text": "Deactivated",
                   "color": "red",
                   "index": 2
+                },
+                "-2": {
+                  "text": "Pending",
+                  "index": 3
                 }
               }
             }
@@ -2053,7 +2085,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "pgcopydb_migration_endpos_lsn_bytes{namespace=\"$namespace\", name=\"$name\"} - pgcopydb_migration_replay_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}",
+          "expr": "(max by (namespace, name) (pgcopydb_migration_endpos_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}) - max by (namespace, name) (pgcopydb_migration_replay_lsn_bytes{namespace=\"$namespace\", name=\"$name\"})) or ((max by (namespace, name) (last_over_time(pgcopydb_migration_endpos_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) - max by (namespace, name) (last_over_time(pgcopydb_migration_replay_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range]))) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"})) or max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"} * -1)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2068,7 +2100,7 @@
             "mode": "thresholds"
           },
           "unit": "bytes",
-          "noValue": "No Endpos",
+          "noValue": "N/A",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2077,7 +2109,18 @@
                 "value": null
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "No Endpos",
+                  "index": 0
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -2101,7 +2144,7 @@
           "valueSize": 48
         }
       },
-      "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done.",
+      "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",
       "interval": "10s"
     }
   ]

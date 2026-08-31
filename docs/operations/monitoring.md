@@ -144,7 +144,7 @@ Reading it:
 - **Phase** is the state the operator is in.
   **Current Work** is the activity inside that state, so `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
   The tile reaches Vacuum And Index Builds only after the operator has seen the copy running and then stop, so it does not appear while tables are still being copied.
-- **Elapsed** keeps counting after the migration finishes.
+- **Elapsed** is how long the run took once it completed, and how long it has been going while it has not.
   **Completed At** is where it ended, and reads Still Running until there is an end.
 - **Percent** is target size over source size, clamped at 100.
   It is the live progress reading during the base copy, because the catalog-derived counters beside it hold still until that copy finishes.
@@ -157,6 +157,10 @@ Reading it:
   A result outranks the spec, so switching a check off after it reported a mismatch still reads FAIL.
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
   It reads No Endpos until a cutover sets one, and 0 B once the target has caught up, which is what the screenshot shows.
+
+Every tile here is scoped to one Migration, so an empty result means that Migration is not in the dashboard's range and the tile reads N/A.
+Tiles that report a fact about the run rather than its current state (Attempts, Elapsed, Completed At, the two verification tiles, Cutover Drain) read over the range, so a Migration that has since been deleted keeps what it last reported instead of falling back to N/A.
+They read the range end first and give way to a live Migration, because a range wide enough to hold a deleted run is wide enough to hold an earlier run that reused the same name.
 
 ## Alerts
 
