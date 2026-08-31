@@ -21,8 +21,8 @@
 - [x] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
 - [ ] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
 - [x] Upgrade all 51 existing Action references and add the one approved Dependency Review reference.
-- [ ] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits (Task 4 Go, module, and toolchain upgrade in progress).
-- [ ] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged.
+- [x] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
+- [ ] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged (Task 5 public image and e2e baseline in progress).
 - [ ] Update the local e2e default tag and its test to v0.11.3.
 - [ ] Review every changed dependency license and block unresolved or unacceptable licenses.
 - [ ] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
