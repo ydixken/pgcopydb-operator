@@ -28,13 +28,14 @@ ARG YAMLLINT_VERSION=1.38.0
 # make drives the Makefile. gcc and libc6-dev are here because cgo is on by
 # default and a package that needs it fails confusingly without them;
 # build-essential would pull about 200MB for the one compiler we want.
-# buildah is here because this image is what builds the next one, and a job
-# that had to apt-get it first would pay that on every rebuild. uidmap goes
-# with it: buildah runs rootless as uid 1001 and needs newuidmap to map the
-# subuid range the base image already grants that user.
+#
+# No buildah, though this image is what builds the next one. That build goes
+# through the pod's dind sidecar instead, because the runner container runs
+# under cri-containerd.apparmor.d and that profile denies mount as an LSM rule,
+# which layer extraction needs and no capability overrides.
 RUN apt-get update -qq \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        make gcc libc6-dev gh postgresql-client python3-pip pipx buildah uidmap \
+        make gcc libc6-dev gh postgresql-client python3-pip pipx \
     && rm -rf /var/lib/apt/lists/*
 
 # System-wide rather than through pipx: pipx installs into ~/.local/bin, which
