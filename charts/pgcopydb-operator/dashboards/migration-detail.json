@@ -1453,7 +1453,7 @@
       "description": "When each phase was first seen in the dashboard range, so a phase entered before the range reads as the range start.",
       "gridPos": {
         "h": 6,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 7
       },
@@ -1519,6 +1519,96 @@
             "matcher": {
               "id": "byName",
               "options": "Entered"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "interval": "10s"
+    },
+    {
+      "id": 29,
+      "type": "table",
+      "title": "Condition Timeline",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "When each condition last changed status, straight from its lastTransitionTime, so a phase that lasted a second is still here. Read across the dashboard range rather than at its end: a condition that has since flipped keeps both of its rows, and a Migration that has since been deleted keeps its timeline.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 * last_over_time(pgcopydb_migration_condition_transition_timestamp_seconds{namespace=\"$namespace\", name=\"$name\"}[$__range])",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "namespace": true,
+              "name": true,
+              "job": true,
+              "instance": true,
+              "container": true,
+              "endpoint": true,
+              "pod": true,
+              "service": true,
+              "prometheus": true
+            },
+            "renameByName": {
+              "type": "Condition",
+              "status": "Status",
+              "Value": "Changed"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Changed"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Changed"
             },
             "properties": [
               {

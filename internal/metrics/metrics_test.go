@@ -281,6 +281,71 @@ func TestRecordTimestamps(t *testing.T) {
 	}
 }
 
+// The timestamps here are the real ones off migration e2e-follow-load, where
+// Streaming and CaughtUp flipped a second apart and no scrape landed between.
+func TestRecordConditionTransitions(t *testing.T) {
+	m := newMigration("ns1", "conditions")
+	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+
+	Record(m)
+	if got := testutil.CollectAndCount(conditionTransitionSeconds); got != 0 {
+		t.Fatalf("condition series without conditions = %d, want 0", got)
+	}
+
+	// An unstamped condition gets no series: a zero time would plot as year 1
+	// and drag the whole timeline back to it.
+	m.Status.Conditions = []metav1.Condition{{
+		Type: v1beta1.ConditionStreaming, Status: metav1.ConditionTrue, Reason: "Replaying",
+	}}
+	Record(m)
+	if got := testutil.CollectAndCount(conditionTransitionSeconds); got != 0 {
+		t.Fatalf("condition series without a transition time = %d, want 0", got)
+	}
+
+	streaming := metav1.Unix(1788157600, 0) // 2026-08-31T06:26:40Z
+	caughtUp := metav1.Unix(1788157601, 0)  // one second later
+	m.Status.Conditions = []metav1.Condition{
+		{
+			Type: v1beta1.ConditionStreaming, Status: metav1.ConditionTrue,
+			Reason: "Replaying", LastTransitionTime: streaming,
+		},
+		{
+			Type: v1beta1.ConditionCaughtUp, Status: metav1.ConditionTrue,
+			Reason: "LagBelowThreshold", LastTransitionTime: caughtUp,
+		},
+	}
+	Record(m)
+	if got := testutil.CollectAndCount(conditionTransitionSeconds); got != 2 {
+		t.Fatalf("condition series = %d, want 2", got)
+	}
+	for _, tc := range []struct {
+		condition string
+		want      float64
+	}{
+		{v1beta1.ConditionStreaming, 1788157600},
+		{v1beta1.ConditionCaughtUp, 1788157601},
+	} {
+		g := conditionTransitionSeconds.WithLabelValues("ns1", "conditions", tc.condition, "True")
+		if got := testutil.ToFloat64(g); got != tc.want {
+			t.Errorf("%s transition = %v, want %v", tc.condition, got, tc.want)
+		}
+	}
+
+	// A flip replaces the True series instead of adding a False one beside it.
+	// The count proves the True series is gone; do not probe it with
+	// WithLabelValues, that would resurrect it.
+	m.Status.Conditions[1].Status = metav1.ConditionFalse
+	m.Status.Conditions[1].LastTransitionTime = metav1.Unix(1788157650, 0)
+	Record(m)
+	if got := testutil.CollectAndCount(conditionTransitionSeconds); got != 2 {
+		t.Fatalf("condition series after a flip = %d, want 2", got)
+	}
+	g := conditionTransitionSeconds.WithLabelValues("ns1", "conditions", v1beta1.ConditionCaughtUp, "False")
+	if got := testutil.ToFloat64(g); got != 1788157650 {
+		t.Errorf("CaughtUp transition after flip = %v, want 1788157650", got)
+	}
+}
+
 func TestRecordInfoMode(t *testing.T) {
 	clone := newMigration("ns1", "info-clone")
 	follow := newMigration("ns1", "info-follow")
