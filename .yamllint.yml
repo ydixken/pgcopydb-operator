@@ -6,6 +6,7 @@ ignore:
   - config/
   # Transient agent worktrees; their content is linted when integrated.
   - .claude/worktrees/
+  - .worktrees/
   # mkdocs build output; its YAML files are verbatim copies of linted sources.
   - site/
   # Helm templates carry Go template syntax and are not plain YAML;

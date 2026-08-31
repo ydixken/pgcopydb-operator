@@ -1330,7 +1330,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "Not Run",
+          "noValue": "Pending",
           "mappings": [
             {
               "type": "value",
@@ -1410,7 +1410,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "noValue": "Not Run",
+          "noValue": "Pending",
           "mappings": [
             {
               "type": "value",
