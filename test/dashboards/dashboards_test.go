@@ -308,6 +308,81 @@ func TestTimelinesSurviveAnOperatorRestart(t *testing.T) {
 	}
 }
 
+// Every tile on the detail dashboard is scoped to one named Migration, so an
+// empty result means that Migration is not here and a noValue saying anything
+// else states a fact about an object it cannot see. "Still Running" stood on a
+// Migration finished half an hour earlier and deleted since, next to "Not
+// Started", "Pending" and an attempt count of 0 on the same run. A tile with
+// something to say about an event that has not happened says it with a mapped
+// sentinel, which only renders while the Migration is actually there.
+//
+// The rule is this dashboard's alone. A fleet tile counts a set, and an empty
+// set really does have zero active migrations in it.
+func TestDetailTilesReadNAWhenTheMigrationIsGone(t *testing.T) {
+	var tiles int
+	for _, p := range load(t)["migration-detail.json"].AllPanels() {
+		if p.Type != "stat" {
+			continue
+		}
+		tiles++
+		if got := p.FieldConfig.Defaults.NoValue; got != "N/A" {
+			t.Errorf("%q reads %q with no data, want N/A; say it with a mapped sentinel instead",
+				p.Title, got)
+		}
+	}
+	if tiles == 0 {
+		t.Error("migration-detail.json has no stat tiles; this check is guarding nothing")
+	}
+}
+
+// The sentinel is written into the expression as a multiple of the presence
+// gauge, so an unmapped one renders as a bare number: -2 where the tile meant
+// "Pending". Reading it back off the expression keeps the two in step.
+func TestSentinelFallbacksAreMapped(t *testing.T) {
+	sentinel := regexp.MustCompile(`pgcopydb_migration_info\{[^}]*\}\s*\*\s*(-?\d+)`)
+	var found int
+	for file, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			for _, tg := range p.Targets {
+				for _, m := range sentinel.FindAllStringSubmatch(tg.Expr, -1) {
+					found++
+					if _, ok := p.ValueMapping(m[1]); !ok {
+						t.Errorf("%s: %q falls back to %s and does not map it, so it renders as a number:\n  %s",
+							file, p.Title, m[1], tg.Expr)
+					}
+				}
+			}
+		}
+	}
+	if found == 0 {
+		t.Error("no panel falls back to a sentinel; this check is guarding nothing")
+	}
+}
+
+// A tile that reads history to survive a deleted Migration must stop reading it
+// the moment one is there, because a range wide enough to hold a deleted run is
+// wide enough to hold an earlier run that reused the name. Ungated, a live
+// migration's Completed At showed the previous run's timestamp, 49 minutes
+// before the one on screen had even started.
+func TestHistoryYieldsToALiveMigration(t *testing.T) {
+	for file, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			if p.Type != "stat" {
+				continue
+			}
+			for _, tg := range p.Targets {
+				if !strings.Contains(tg.Expr, "last_over_time(") {
+					continue
+				}
+				if !strings.Contains(tg.Expr, "unless") {
+					t.Errorf("%s: %q reads over the range without giving way to a live Migration:\n  %s",
+						file, p.Title, tg.Expr)
+				}
+			}
+		}
+	}
+}
+
 func TestEveryRegisteredMetricIsConsumed(t *testing.T) {
 	var exprs []string
 	for _, d := range load(t) {
