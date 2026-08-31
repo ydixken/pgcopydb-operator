@@ -58,9 +58,9 @@ The Go and tool targets are:
 - Keep `sigs.k8s.io/controller-runtime` at v0.24.1 and `sigs.k8s.io/yaml` at v1.6.0.
 
 - Go 1.27.0 must be an official release listed in the [Go release history](https://go.dev/doc/devel/release) before the image and module directive move.
-- Go tooling may refresh indirect modules that the exact direct targets require.
-- We will accept those indirect changes only when `go mod tidy` produces them, the module graph remains within the limits below, and all dependency, lint, and test gates pass.
-- We will not add a direct Go dependency or run an unconstrained upgrade across major versions.
+- Go tooling may refresh indirect modules that the exact direct targets and the approved patch-only test graph require.
+- We will accept resolver-selected indirect patch or pseudo-version changes from `go get -u=patch -t ./...` and `go mod tidy` only when the module graph remains within the limits below and all dependency, lint, and test gates pass.
+- We will not add a direct Go dependency or run an unconstrained minor or major upgrade.
 - All four direct Kubernetes modules therefore move together to v0.36.4 and stop there.
 - Kubernetes v0.37 and controller-runtime v0.25 are outside this change.
 - Indirect Kubernetes modules must remain on the v0.36 line unless the existing controller-runtime graph selects an older compatible v0.36 patch.
@@ -318,6 +318,7 @@ Expected: GitHub shows Dependency Graph as enabled.
 Run:
 
 ```sh
+set -euo pipefail
 created="$(gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created')"
 test -n "$created"
 test "$created" != "null"
@@ -333,6 +334,7 @@ A 404, permission error, empty value, or `null` is a failed prerequisite.
 Have the verification worker run:
 
 ```sh
+set -euo pipefail
 created="$(gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created')"
 test -n "$created"
 test "$created" != "null"
@@ -485,6 +487,7 @@ Expected: `e2e` and `release-notes` each depend on `chart`, while `promote` has 
 Run:
 
 ```sh
+set -euo pipefail
 git diff --check
 task lint
 task test
@@ -498,6 +501,7 @@ Expected: all three commands exit 0.
 The reviewer runs:
 
 ```sh
+set -euo pipefail
 go test ./test/buildconfig -run '^TestReleasePromotionWaitsForCandidateChecks$' -count=1
 git diff --check
 ```
@@ -511,6 +515,7 @@ The reviewer must reject a job-level `if`, including `always()`, `success()`, or
 Run:
 
 ```sh
+set -euo pipefail
 git add test/buildconfig/buildconfig_test.go .github/workflows/release.yml
 git commit -m "fix(release): wait for candidate release before promotion"
 ```
@@ -732,37 +737,38 @@ go test ./test/buildconfig -run '^(TestWorkflowActionInventory|TestDependencyRev
 
 Expected: FAIL because the workflows still use the old majors, contain 51 references, and have no Dependency Review step.
 
-- [ ] **Step 5: Confirm every approved major tag exists upstream**
+- [ ] **Step 5: Confirm every approved major ref exists upstream**
 
 Run:
 
 ```sh
-while read -r repository tag; do
-  test -n "$(git ls-remote --tags "https://github.com/${repository}.git" "refs/tags/${tag}")" ||
-    { printf 'missing %s@%s\n' "$repository" "$tag" >&2; exit 1; }
+set -euo pipefail
+while read -r repository ref; do
+  git ls-remote --exit-code "https://github.com/${repository}.git" "$ref" >/dev/null ||
+    { printf 'missing %s %s\n' "$repository" "$ref" >&2; exit 1; }
 done <<'EOF'
-actions/cache v6
-actions/checkout v7
-actions/configure-pages v6
-actions/dependency-review-action v4
-actions/deploy-pages v5
-actions/setup-go v7
-actions/setup-python v7
-actions/upload-pages-artifact v5
-azure/setup-helm v5
-azure/setup-kubectl v5
-codecov/codecov-action v7
-docker/build-push-action v7
-docker/login-action v4
-docker/setup-buildx-action v4
-docker/setup-qemu-action v4
-oras-project/setup-oras v2
+actions/cache refs/tags/v6
+actions/checkout refs/tags/v7
+actions/configure-pages refs/tags/v6
+actions/dependency-review-action refs/heads/v4
+actions/deploy-pages refs/tags/v5
+actions/setup-go refs/tags/v7
+actions/setup-python refs/tags/v7
+actions/upload-pages-artifact refs/tags/v5
+azure/setup-helm refs/tags/v5
+azure/setup-kubectl refs/tags/v5
+codecov/codecov-action refs/tags/v7
+docker/build-push-action refs/tags/v7
+docker/login-action refs/tags/v4
+docker/setup-buildx-action refs/tags/v4
+docker/setup-qemu-action refs/tags/v4
+oras-project/setup-oras refs/tags/v2
 EOF
 ```
 
 Expected: exit 0 with no output.
 
-If a major tag is absent, stop and report it.
+If an exact tag or the Dependency Review v4 branch is absent, stop and report it.
 Do not substitute another version.
 
 - [ ] **Step 6: Apply the mechanical major upgrades**
@@ -836,6 +842,7 @@ ok  	github.com/ydixken/pgcopydb-operator/test/buildconfig
 Run:
 
 ```sh
+set -euo pipefail
 test "$(rg '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 52
 test "$(rg -l '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 9
 test "$(rg -c 'uses: actions/dependency-review-action@v4' .github/workflows/ci.yml)" = 1
@@ -848,6 +855,7 @@ Expected: all commands exit 0 with no output.
 Run:
 
 ```sh
+set -euo pipefail
 git diff -- .github/workflows
 git diff --check
 ```
@@ -861,6 +869,7 @@ Reject changes to events, permissions, concurrency, environments, runner selecti
 Run:
 
 ```sh
+set -euo pipefail
 task lint
 task test
 ```
@@ -872,6 +881,7 @@ Expected: both commands exit 0 without skipped repository gates.
 The reviewer runs:
 
 ```sh
+set -euo pipefail
 go test ./test/buildconfig -run '^(TestWorkflowActionInventory|TestDependencyReviewGatesPullRequests|TestReleasePromotionWaitsForCandidateChecks)$' -count=1
 test "$(rg '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 52
 test "$(rg -l '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 9
@@ -887,6 +897,7 @@ The reviewer also inspects `.github/workflows/ci.yml` and confirms that Dependen
 Run:
 
 ```sh
+set -euo pipefail
 git add test/buildconfig/buildconfig_test.go .github/workflows
 git commit -m "ci: refresh actions and review dependencies"
 ```
@@ -906,7 +917,7 @@ Expected: one lint-clean commit containing the workflow upgrades and their perma
 **Interfaces:**
 
 - Consumes: Official Go 1.27.0 toolchain, controller-runtime v0.24.1 compatibility with Kubernetes v0.36, and the existing custom golangci-lint builder.
-- Produces: Go directive 1.27.0, golangci-lint v2.13.2 in both pins, six approved direct module upgrades, and only tidy-selected indirect changes.
+- Produces: Go directive 1.27.0, golangci-lint v2.13.2 in both pins, six approved direct module upgrades, and resolver-selected patch or pseudo-version indirect changes.
 - Preserves: Ginkgo v2.32.1, `prometheus/client_golang` v1.24.1, controller-runtime v0.24.1, and `sigs.k8s.io/yaml` v1.6.0.
 
 **Worker:** Go dependency implementation worker.
@@ -918,6 +929,7 @@ Expected: one lint-clean commit containing the workflow upgrades and their perma
 Run:
 
 ```sh
+set -euo pipefail
 curl -fsSL https://go.dev/doc/devel/release | rg -F 'go1.27.0'
 ```
 
@@ -951,11 +963,12 @@ GOTOOLCHAIN=go1.27.0 go mod edit -go=1.27.0
 
 Expected: exit 0.
 
-- [ ] **Step 4: Upgrade only the approved direct modules**
+- [ ] **Step 4: Pin the approved direct modules and refresh indirect patches**
 
 Run:
 
 ```sh
+set -euo pipefail
 GOTOOLCHAIN=go1.27.0 go get \
   github.com/onsi/gomega@v1.43.0 \
   github.com/prometheus/client_model@v0.6.3 \
@@ -963,21 +976,38 @@ GOTOOLCHAIN=go1.27.0 go get \
   k8s.io/apimachinery@v0.36.4 \
   k8s.io/client-go@v0.36.4 \
   k8s.io/streaming@v0.36.4
+GOTOOLCHAIN=go1.27.0 go get -u=patch -t ./...
 GOTOOLCHAIN=go1.27.0 go mod tidy
 ```
 
-Expected: both commands exit 0.
-`go mod tidy` may refresh indirect modules required by this exact graph.
+Expected: all three commands exit 0.
+The patch-only upgrade may select newer indirect patch releases or pseudo-versions required by the package and test graph.
+`go mod tidy` then removes graph entries that the resolved package and test graph does not need.
 
-Do not run `go get -u`, `go get ./...`, or an unconstrained module upgrade.
+Do not omit `-u=patch`, add a direct dependency, or run an unconstrained minor or major module upgrade.
 
 - [ ] **Step 5: Verify every direct dependency**
 
 Run:
 
 ```sh
-GOTOOLCHAIN=go1.27.0 go mod edit -json |
+set -euo pipefail
+direct_modules=$(GOTOOLCHAIN=go1.27.0 go mod edit -json |
   jq -r '.Go, (.Require[] | select(.Indirect | not) | "\(.Path) \(.Version)")'
+)
+expected_direct_modules='1.27.0
+github.com/onsi/ginkgo/v2 v2.32.1
+github.com/onsi/gomega v1.43.0
+github.com/prometheus/client_golang v1.24.1
+github.com/prometheus/client_model v0.6.3
+k8s.io/api v0.36.4
+k8s.io/apimachinery v0.36.4
+k8s.io/client-go v0.36.4
+k8s.io/streaming v0.36.4
+sigs.k8s.io/controller-runtime v0.24.1
+sigs.k8s.io/yaml v1.6.0'
+test "$direct_modules" = "$expected_direct_modules"
+printf '%s\n' "$direct_modules"
 ```
 
 Expected output:
@@ -1003,13 +1033,23 @@ Any added direct dependency or different version fails the task.
 Run:
 
 ```sh
-! GOTOOLCHAIN=go1.27.0 go list -m all | rg '^k8s\.io/\S+ v0\.37\.'
-GOTOOLCHAIN=go1.27.0 go list -m \
+set -euo pipefail
+module_graph=$(GOTOOLCHAIN=go1.27.0 go list -m all)
+printf '%s\n' "$module_graph" |
+  awk '$1 ~ /^k8s\.io\// && $2 ~ /^v0\.37\./ { found = 1 } END { exit found }'
+kubernetes_modules=$(GOTOOLCHAIN=go1.27.0 go list -m \
   k8s.io/api \
   k8s.io/apimachinery \
   k8s.io/client-go \
   k8s.io/streaming \
-  sigs.k8s.io/controller-runtime
+  sigs.k8s.io/controller-runtime)
+expected_kubernetes_modules='k8s.io/api v0.36.4
+k8s.io/apimachinery v0.36.4
+k8s.io/client-go v0.36.4
+k8s.io/streaming v0.36.4
+sigs.k8s.io/controller-runtime v0.24.1'
+test "$kubernetes_modules" = "$expected_kubernetes_modules"
+printf '%s\n' "$kubernetes_modules"
 ```
 
 Expected first command: exit 0 with no output.
@@ -1042,6 +1082,7 @@ Expected: exit 0 with no output.
 Remove only the generated linter entry so the Makefile cannot reuse the old binary:
 
 ```sh
+set -euo pipefail
 rm -f bin/golangci-lint
 GOTOOLCHAIN=go1.27.0 make golangci-lint
 bin/golangci-lint version | rg '2\.13\.2'
@@ -1056,18 +1097,20 @@ Do not remove the `bin` directory or any source file.
 Run:
 
 ```sh
+set -euo pipefail
 git diff -- go.mod go.sum Makefile .custom-gcl.yml
 git diff --check
 ```
 
 Expected: the direct `go.mod` block contains only the approved version changes.
-Every indirect change must come from `go mod tidy`.
+Every indirect change must be selected by the approved patch-only upgrade or `go mod tidy`.
 
 - [ ] **Step 10: Run the task gates with the exact toolchain**
 
 Run:
 
 ```sh
+set -euo pipefail
 GOTOOLCHAIN=go1.27.0 task lint
 GOTOOLCHAIN=go1.27.0 task test
 ```
@@ -1076,14 +1119,17 @@ Expected: both commands exit 0 without skipped repository gates.
 
 - [ ] **Step 11: Run the independent review**
 
-The reviewer runs:
+The reviewer reruns the exact direct and Kubernetes assertions from Steps 5 and 6, then runs:
 
 ```sh
+set -euo pipefail
 test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = "go1.27.0"
 test "$(rg -c '^GOLANGCI_LINT_VERSION \\?= v2\\.13\\.2$' Makefile)" = 1
 test "$(rg -c '^version: v2\\.13\\.2$' .custom-gcl.yml)" = 1
 GOTOOLCHAIN=go1.27.0 go mod tidy -diff
-! GOTOOLCHAIN=go1.27.0 go list -m all | rg '^k8s\.io/\S+ v0\.37\.'
+module_graph=$(GOTOOLCHAIN=go1.27.0 go list -m all)
+printf '%s\n' "$module_graph" |
+  awk '$1 ~ /^k8s\.io\// && $2 ~ /^v0\.37\./ { found = 1 } END { exit found }'
 ```
 
 Expected: all commands exit 0, and the tidy and forbidden-version checks print nothing.
@@ -1093,6 +1139,7 @@ Expected: all commands exit 0, and the tidy and forbidden-version checks print n
 Run:
 
 ```sh
+set -euo pipefail
 git add go.mod go.sum Makefile .custom-gcl.yml
 git commit -m "chore(deps): upgrade Go and modules"
 ```
@@ -1171,6 +1218,7 @@ e2e operatorTag default is v0.5.0, want v0.11.3
 Run:
 
 ```sh
+set -euo pipefail
 test "$(go run github.com/google/go-containerregistry/cmd/crane@v0.20.6 digest golang:1.27.0)" = \
   "sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146"
 test "$(go run github.com/google/go-containerregistry/cmd/crane@v0.20.6 digest gcr.io/distroless/static:nonroot)" = \
@@ -1188,6 +1236,7 @@ If any tag resolves to another index, stop and return the new public digest to t
 Run:
 
 ```sh
+set -euo pipefail
 for image in \
   "golang:1.27.0@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146" \
   "gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7" \
@@ -1274,6 +1323,7 @@ ok  	github.com/ydixken/pgcopydb-operator/test/buildconfig
 Run:
 
 ```sh
+set -euo pipefail
 rg -n '^FROM ' Dockerfile images/pgcopydb-builder/Dockerfile images/runner/Dockerfile
 test "$(
   git show HEAD:images/runner/Dockerfile |
@@ -1290,6 +1340,7 @@ Expected: every public image has the exact tag and digest above, and the interna
 Run:
 
 ```sh
+set -euo pipefail
 git diff --check
 GOTOOLCHAIN=go1.27.0 task lint
 GOTOOLCHAIN=go1.27.0 task test
@@ -1305,6 +1356,7 @@ It targets the current real-cluster context and requires a human confirmation pr
 The reviewer runs the digest and platform commands from Steps 3 and 4, followed by:
 
 ```sh
+set -euo pipefail
 go test ./test/buildconfig -run '^TestE2EDefaultRelease$' -count=1
 test "$(
   git show HEAD:images/runner/Dockerfile |
@@ -1321,6 +1373,7 @@ Expected: all commands pass.
 Run:
 
 ```sh
+set -euo pipefail
 git add \
   Dockerfile \
   images/pgcopydb-builder/Dockerfile \
@@ -1373,6 +1426,7 @@ Expected: no uncommitted paths after the branch line.
 Run:
 
 ```sh
+set -euo pipefail
 created="$(gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created')"
 test -n "$created"
 test "$created" != "null"
@@ -1385,6 +1439,7 @@ Expected: exit 0 with no output.
 Run:
 
 ```sh
+set -euo pipefail
 test "$(rg '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 52
 test "$(rg -l '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 9
 test "$(rg -c 'uses: actions/dependency-review-action@v4' .github/workflows/ci.yml)" = 1
@@ -1398,28 +1453,31 @@ Expected: all shell assertions pass and the Go package reports `ok`.
 Run:
 
 ```sh
+set -euo pipefail
 test "$(GOTOOLCHAIN=go1.27.0 go env GOVERSION)" = "go1.27.0"
 GOTOOLCHAIN=go1.27.0 go mod tidy -diff
-! GOTOOLCHAIN=go1.27.0 go list -m all | rg '^k8s\.io/\S+ v0\.37\.'
+module_graph=$(GOTOOLCHAIN=go1.27.0 go list -m all)
+printf '%s\n' "$module_graph" |
+  awk '$1 ~ /^k8s\.io\// && $2 ~ /^v0\.37\./ { found = 1 } END { exit found }'
 GOTOOLCHAIN=go1.27.0 go mod edit -json |
   jq -e '
     .Go == "1.27.0" and
-    ([.Require[] | select(.Indirect | not) | .Path] == [
-      "github.com/onsi/ginkgo/v2",
-      "github.com/onsi/gomega",
-      "github.com/prometheus/client_golang",
-      "github.com/prometheus/client_model",
-      "k8s.io/api",
-      "k8s.io/apimachinery",
-      "k8s.io/client-go",
-      "k8s.io/streaming",
-      "sigs.k8s.io/controller-runtime",
-      "sigs.k8s.io/yaml"
+    ([.Require[] | select(.Indirect | not) | "\(.Path) \(.Version)"] == [
+      "github.com/onsi/ginkgo/v2 v2.32.1",
+      "github.com/onsi/gomega v1.43.0",
+      "github.com/prometheus/client_golang v1.24.1",
+      "github.com/prometheus/client_model v0.6.3",
+      "k8s.io/api v0.36.4",
+      "k8s.io/apimachinery v0.36.4",
+      "k8s.io/client-go v0.36.4",
+      "k8s.io/streaming v0.36.4",
+      "sigs.k8s.io/controller-runtime v0.24.1",
+      "sigs.k8s.io/yaml v1.6.0"
     ])
   '
 ```
 
-Expected: the first three commands print nothing.
+Expected: the Go version, tidy, and module boundary assertions print nothing.
 The `jq` command prints `true`.
 All commands exit 0.
 
@@ -1428,6 +1486,7 @@ All commands exit 0.
 Run:
 
 ```sh
+set -euo pipefail
 changed_modules="$({
   git diff --unified=0 fcbc56d..HEAD -- go.mod |
     sed -n -E 's/^\+[[:space:]]+([^[:space:]]+)[[:space:]]+(v[^[:space:]]+).*/\1 \2/p'
@@ -1446,6 +1505,7 @@ An indirect change is acceptable only when the resolved graph requires it.
 Run:
 
 ```sh
+set -euo pipefail
 changed_modules="$({
   git diff --unified=0 fcbc56d..HEAD -- go.mod |
     sed -n -E 's/^\+[[:space:]]+([^[:space:]]+)[[:space:]]+(v[^[:space:]]+).*/\1 \2/p'
@@ -1507,6 +1567,7 @@ Expected: no output.
 Run:
 
 ```sh
+set -euo pipefail
 git diff --check fcbc56d..HEAD
 git diff --stat fcbc56d..HEAD
 git diff fcbc56d..HEAD -- \
@@ -1541,6 +1602,7 @@ Confirm all of the following:
 Run:
 
 ```sh
+set -euo pipefail
 GOTOOLCHAIN=go1.27.0 task lint
 GOTOOLCHAIN=go1.27.0 task test
 ```
@@ -1552,6 +1614,7 @@ Expected: both commands exit 0 without skipped repository gates.
 From the same branch with a clean worktree, the verification worker runs:
 
 ```sh
+set -euo pipefail
 git diff --check fcbc56d..HEAD
 test "$(rg '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 52
 test "$(rg -l '^\s*-?\s*uses:' .github/workflows | wc -l | tr -d ' ')" = 9
@@ -1622,6 +1685,7 @@ Expected: `tasks/todo.md` separates completed local work from pending remote wor
 Apply the humanizer skill to both edited files, then run:
 
 ```sh
+set -euo pipefail
 git diff --check
 rg -n 'Dependency Review|Implementation plan|Plan review' CONTRIBUTING.md tasks/todo.md
 ```
@@ -1635,6 +1699,7 @@ Neither file contains an em dash, en dash, private infrastructure fact, or secre
 Run:
 
 ```sh
+set -euo pipefail
 GOTOOLCHAIN=go1.27.0 task lint
 GOTOOLCHAIN=go1.27.0 task test
 ```
@@ -1647,6 +1712,7 @@ Do not run `task e2e` or any command containing `task --yes`.
 Give the reviewer the approved spec, Task 6 evidence, module license evidence, and these diffs:
 
 ```sh
+set -euo pipefail
 git diff --stat origin/main
 git diff origin/main
 ```
@@ -1669,6 +1735,7 @@ A finding blocks the commit until a worker fixes it, reruns the affected gate, a
 Run:
 
 ```sh
+set -euo pipefail
 git add CONTRIBUTING.md tasks/todo.md
 test "$(git diff --cached --name-only | wc -l | tr -d ' ')" = 2
 test -z "$(git diff --cached --name-only | rg -v '^(CONTRIBUTING.md|tasks/todo.md)$')"
@@ -1708,6 +1775,7 @@ The commit succeeds, and the final status shows `fix/issue-95-maintenance` with 
 Run:
 
 ```sh
+set -euo pipefail
 test "$(git branch --show-current)" = "fix/issue-95-maintenance"
 test -z "$(git status --porcelain)"
 git push --set-upstream origin fix/issue-95-maintenance
@@ -1720,6 +1788,7 @@ Expected: the push succeeds without a force option, and the remote branch points
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr create \
   --base main \
   --head fix/issue-95-maintenance \
@@ -1761,9 +1830,18 @@ The body tracks issue 95 without closing or editing Renovate's dashboard.
 Record the head and dispatch time, dispatch the workflow, then locate the new run instead of relying on `gh workflow run` to return a URL:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_head_sha=$(gh pr view "$first_pr_url" --json headRefOid --jq '.headRefOid')
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_branch_e2e_runs=$(
+  gh run list \
+    --workflow e2e.yml \
+    --branch fix/issue-95-maintenance \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run e2e.yml \
   --ref fix/issue-95-maintenance \
   -f tag=v0.11.3 \
@@ -1776,9 +1854,18 @@ for attempt in $(seq 1 60); do
     --branch fix/issue-95-maintenance \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$first_head_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$first_head_sha" \
+      --arg ref fix/issue-95-maintenance \
+      --argjson before "$before_branch_e2e_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$branch_e2e_run" && break
   test "$attempt" -lt 60 || {
     echo "feature-branch e2e run did not appear" >&2
@@ -1820,9 +1907,18 @@ Do not weaken the environment policy.
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_head_sha=$(gh pr view "$first_pr_url" --json headRefOid --jq '.headRefOid')
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_runner_smoke_runs=$(
+  gh run list \
+    --workflow runner-smoke.yml \
+    --branch fix/issue-95-maintenance \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run runner-smoke.yml --ref fix/issue-95-maintenance
 
 runner_smoke_run=
@@ -1832,9 +1928,18 @@ for attempt in $(seq 1 60); do
     --branch fix/issue-95-maintenance \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$first_head_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$first_head_sha" \
+      --arg ref fix/issue-95-maintenance \
+      --argjson before "$before_runner_smoke_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$runner_smoke_run" && break
   test "$attempt" -lt 60 || {
     echo "runner smoke run did not appear" >&2
@@ -1859,6 +1964,7 @@ The smoke build covers linux/amd64 and linux/arm64 without publishing an image.
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 gh pr checks "$first_pr_url" --watch --fail-fast
 test "$(gh pr checks "$first_pr_url" --required --json bucket --jq 'all(.[]; .bucket == "pass")')" = "true"
@@ -1874,6 +1980,7 @@ No required check is skipped, cancelled, missing, or inconclusive.
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_head_sha=$(gh pr view "$first_pr_url" --json headRefOid --jq '.headRefOid')
 ci_run_id=$(gh run list \
@@ -1903,6 +2010,7 @@ A moderate or higher vulnerability, disallowed license, unresolved license, or m
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_head_sha=$(gh pr view "$first_pr_url" --json headRefOid --jq '.headRefOid')
 mirror_run_id=$(gh run list \
@@ -1932,6 +2040,7 @@ Any failed, skipped, cancelled, missing, or inconclusive required result blocks 
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_head_sha=$(gh pr view "$first_pr_url" --json headRefOid --jq '.headRefOid')
 gh pr merge "$first_pr_url" --squash --match-head-commit "$first_head_sha"
@@ -1986,6 +2095,7 @@ Do not use `--admin`, force-push, or delete the branch.
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 test -n "$first_merge_sha"
@@ -2002,6 +2112,7 @@ If `main` advanced, stop and reconcile the new public history before continuing.
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 
@@ -2037,6 +2148,7 @@ The other records show successful `deploy`, `mirror`, and `build` jobs, respecti
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 builder_tag=$(git show "$first_merge_sha":images/pgcopydb-builder/Dockerfile |
@@ -2068,9 +2180,18 @@ Record that literal digest and the successful `pgcopydb builder image` run URL f
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_main_e2e_runs=$(
+  gh run list \
+    --workflow e2e.yml \
+    --branch main \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run e2e.yml --ref main -f tag=v0.11.3 -f scale=0.1
 
 main_e2e_run=
@@ -2080,9 +2201,18 @@ for attempt in $(seq 1 60); do
     --branch main \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$first_merge_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$first_merge_sha" \
+      --arg ref main \
+      --argjson before "$before_main_e2e_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$main_e2e_run" && break
   test "$attempt" -lt 60 || {
     echo "main e2e run did not appear" >&2
@@ -2149,6 +2279,7 @@ Expected: the reviewer approves the milestone and confirms that the digest came 
 Run:
 
 ```sh
+set -euo pipefail
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 test "$(gh api repos/ydixken/pgcopydb-operator/commits/main --jq '.sha')" = "$first_merge_sha"
@@ -2180,6 +2311,7 @@ If it differs, stop before creating the branch.
 Run:
 
 ```sh
+set -euo pipefail
 test -z "$(git status --porcelain)"
 first_pr_url=$(gh pr view fix/issue-95-maintenance --json url --jq '.url')
 first_merge_sha=$(gh pr view "$first_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
@@ -2202,6 +2334,7 @@ Do not write a shell variable, placeholder, or floating tag into the file.
 Then run:
 
 ```sh
+set -euo pipefail
 builder_tag=$(git show origin/main:images/pgcopydb-builder/Dockerfile |
   sed -n 's/^ARG PGCOPYDB_SHA=//p')
 builder_ref="ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:$builder_tag"
@@ -2224,6 +2357,7 @@ Only `images/runner/Dockerfile` changes.
 Run:
 
 ```sh
+set -euo pipefail
 git diff --check
 GOTOOLCHAIN=go1.27.0 task lint
 GOTOOLCHAIN=go1.27.0 task test
@@ -2238,6 +2372,7 @@ Give the reviewer the Task 9 builder run, both independent registry reads, the o
 After approval, run:
 
 ```sh
+set -euo pipefail
 git add images/runner/Dockerfile
 test "$(git diff --cached --name-only)" = "images/runner/Dockerfile"
 git diff --cached --check
@@ -2252,6 +2387,7 @@ Expected: one lint-clean commit contains only the published builder index pin.
 Run:
 
 ```sh
+set -euo pipefail
 git push --set-upstream origin fix/issue-95-builder-digest
 second_pr_url=$(gh pr create \
   --base main \
@@ -2284,6 +2420,7 @@ Expected: the push and pull request creation succeed without force options.
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 second_head_sha=$(gh pr view "$second_pr_url" --json headRefOid --jq '.headRefOid')
 gh pr checks "$second_pr_url" --watch --fail-fast
@@ -2315,9 +2452,18 @@ Dependency Review runs once and concludes `success`.
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 second_head_sha=$(gh pr view "$second_pr_url" --json headRefOid --jq '.headRefOid')
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_second_smoke_runs=$(
+  gh run list \
+    --workflow runner-smoke.yml \
+    --branch fix/issue-95-builder-digest \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run runner-smoke.yml --ref fix/issue-95-builder-digest
 
 second_smoke_run=
@@ -2327,9 +2473,18 @@ for attempt in $(seq 1 60); do
     --branch fix/issue-95-builder-digest \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$second_head_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$second_head_sha" \
+      --arg ref fix/issue-95-builder-digest \
+      --argjson before "$before_second_smoke_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$second_smoke_run" && break
   test "$attempt" -lt 60 || {
     echo "second branch runner smoke did not appear" >&2
@@ -2353,6 +2508,7 @@ Expected: the smoke run builds both configured platforms from the exact second p
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 second_head_sha=$(gh pr view "$second_pr_url" --json headRefOid --jq '.headRefOid')
 mirror_run_id=$(gh run list \
@@ -2377,6 +2533,7 @@ Expected: the mirror succeeds and the reviewer approves the exact head for merge
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 second_head_sha=$(gh pr view "$second_pr_url" --json headRefOid --jq '.headRefOid')
 gh pr merge "$second_pr_url" --squash --match-head-commit "$second_head_sha"
@@ -2402,6 +2559,7 @@ Do not use `--admin`, force-push, or delete the branch.
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 test "$(gh api repos/ydixken/pgcopydb-operator/commits/main --jq '.sha')" = "$final_main_sha"
@@ -2492,11 +2650,20 @@ These are the release effects the user approved.
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 test "$(gh api repos/ydixken/pgcopydb-operator/commits/main --jq '.sha')" = "$final_main_sha"
 
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_metadata_runs=$(
+  gh run list \
+    --workflow artifacthub-metadata.yml \
+    --branch main \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run artifacthub-metadata.yml --ref main
 
 metadata_run=
@@ -2506,9 +2673,18 @@ for attempt in $(seq 1 60); do
     --branch main \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$final_main_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$final_main_sha" \
+      --arg ref main \
+      --argjson before "$before_metadata_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$metadata_run" && break
   test "$attempt" -lt 60 || {
     echo "Artifact Hub metadata run did not appear" >&2
@@ -2537,6 +2713,7 @@ Extract the actual `Tag the next release candidate` step and execute it only thr
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 git fetch origin main --tags
@@ -2555,8 +2732,8 @@ test -n "$release_step"
 safe_release_step=$(printf '%s\n' "$release_step" |
   sed '/^[[:space:]]*git config user.name /,$d')
 printf '%s\n' "$safe_release_step" | rg '^tag="v\$major\.\$minor\.\$patch-rc\.\$n"$'
-test -z "$(printf '%s\n' "$safe_release_step" |
-  rg '^[[:space:]]*git (config|tag|push) ' || true)"
+printf '%s\n' "$safe_release_step" |
+  awk '/^[[:space:]]*git (config|tag|push) / { found = 1 } END { exit found }'
 
 candidate=$(
   {
@@ -2571,16 +2748,20 @@ trap - EXIT
 
 test "$latest" = "v0.11.3"
 test "$candidate" = "v0.12.0-rc.1"
-test -z "$(git ls-remote --tags origin "refs/tags/$candidate")"
-test -z "$(git ls-remote --tags origin refs/tags/v0.12.0)"
-if gh release view "$candidate" >/dev/null 2>&1; then
-  echo "$candidate already has a GitHub release" >&2
-  exit 1
-fi
-if gh release view v0.12.0 >/dev/null 2>&1; then
-  echo "v0.12.0 already has a GitHub release" >&2
-  exit 1
-fi
+for absent_ref in "refs/tags/$candidate" refs/tags/v0.12.0; do
+  if remote_ref=$(git ls-remote --exit-code --tags origin "$absent_ref"); then
+    printf 'tag already exists: %s\n' "$absent_ref" >&2
+    exit 1
+  else
+    ls_remote_exit=$?
+    test "$ls_remote_exit" -eq 2
+    test -z "$remote_ref"
+  fi
+done
+release_tags=$(gh release list --limit 1000 --json tagName | jq -r '.[].tagName')
+printf '%s\n' "$release_tags" |
+  awk -v candidate="$candidate" \
+    '$0 == candidate || $0 == "v0.12.0" { found = 1 } END { exit found }'
 printf '%s -> %s\n' "$latest" "$candidate"
 ```
 
@@ -2601,9 +2782,18 @@ Expected: the reviewer confirms v0.12.0-rc.1 and approves dispatch against the s
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
-dispatch_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+before_auto_release_runs=$(
+  gh run list \
+    --workflow auto-release.yml \
+    --branch main \
+    --event workflow_dispatch \
+    --limit 100 \
+    --json databaseId |
+    jq '[.[].databaseId]'
+)
 gh workflow run auto-release.yml --ref main
 
 auto_release_run=
@@ -2613,9 +2803,18 @@ for attempt in $(seq 1 60); do
     --branch main \
     --event workflow_dispatch \
     --limit 100 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$final_main_sha\" and .createdAt >= \"$dispatch_started\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r \
+      --arg sha "$final_main_sha" \
+      --arg ref main \
+      --argjson before "$before_auto_release_runs" '
+        [.[]
+         | .databaseId as $id
+         | select(.headSha == $sha and .headBranch == $ref
+                  and (($before | index($id)) == null))
+         | $id]
+        | first // empty
+      ')
   test -n "$auto_release_run" && break
   test "$attempt" -lt 60 || {
     echo "auto-release run did not appear" >&2
@@ -2630,7 +2829,7 @@ test "$(gh api \
   "repos/ydixken/pgcopydb-operator/actions/runs/$auto_release_run/jobs?per_page=100" \
   --jq '[.jobs[] | select(.name == "candidate").steps[] | select(.name == "Tag the next release candidate") | .conclusion]')" = '["success"]'
 
-candidate_target=$(git ls-remote origin 'refs/tags/v0.12.0-rc.1^{}' |
+candidate_target=$(git ls-remote --exit-code origin 'refs/tags/v0.12.0-rc.1^{}' |
   awk 'NR == 1 { print $1 }')
 test "$candidate_target" = "$final_main_sha"
 gh run view "$auto_release_run" --json url,workflowName,event,headSha,conclusion
@@ -2643,6 +2842,7 @@ Expected: the `Auto release` candidate job succeeds and its annotated v0.12.0-rc
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 candidate_release_run=
@@ -2652,9 +2852,11 @@ for attempt in $(seq 1 120); do
     --branch v0.12.0-rc.1 \
     --event push \
     --limit 20 \
-    --json databaseId,headSha \
-    --jq ".[] | select(.headSha == \"$final_main_sha\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r --arg sha "$final_main_sha" --arg ref v0.12.0-rc.1 '
+      [.[] | select(.headSha == $sha and .headBranch == $ref) | .databaseId]
+      | first // empty
+    ')
   test -n "$candidate_release_run" && break
   test "$attempt" -lt 120 || {
     echo "candidate release run did not appear" >&2
@@ -2718,6 +2920,7 @@ The `e2e` and `release-notes` jobs both start after `chart`, with no dependency 
 Run:
 
 ```sh
+set -euo pipefail
 test "$(gh release view v0.12.0-rc.1 --json isPrerelease --jq '.isPrerelease')" = "true"
 gh release view v0.12.0-rc.1 --json tagName,url,isPrerelease
 
@@ -2752,9 +2955,10 @@ Both candidate image indexes contain linux/amd64 and linux/arm64.
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
-stable_target=$(git ls-remote origin 'refs/tags/v0.12.0^{}' |
+stable_target=$(git ls-remote --exit-code origin 'refs/tags/v0.12.0^{}' |
   awk 'NR == 1 { print $1 }')
 test "$stable_target" = "$final_main_sha"
 
@@ -2766,17 +2970,21 @@ for attempt in $(seq 1 120); do
     --branch v0.12.0 \
     --event push \
     --limit 20 \
-    --json databaseId,headSha \
-    --jq ".[] | select(.headSha == \"$final_main_sha\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r --arg sha "$final_main_sha" --arg ref v0.12.0 '
+      [.[] | select(.headSha == $sha and .headBranch == $ref) | .databaseId]
+      | first // empty
+    ')
   stable_e2e_run=$(gh run list \
     --workflow e2e.yml \
     --branch v0.12.0 \
     --event push \
     --limit 20 \
-    --json databaseId,headSha \
-    --jq ".[] | select(.headSha == \"$final_main_sha\") | .databaseId" |
-    head -n 1)
+    --json databaseId,headBranch,headSha |
+    jq -r --arg sha "$final_main_sha" --arg ref v0.12.0 '
+      [.[] | select(.headSha == $sha and .headBranch == $ref) | .databaseId]
+      | first // empty
+    ')
   test -n "$stable_release_run" && test -n "$stable_e2e_run" && break
   test "$attempt" -lt 120 || {
     echo "stable release or stable e2e run did not appear" >&2
@@ -2799,6 +3007,7 @@ The stable `Release` and stable-tag `E2E` workflows both conclude `success`.
 Run:
 
 ```sh
+set -euo pipefail
 stable_release_jobs=$(gh api \
   "repos/ydixken/pgcopydb-operator/actions/runs/$stable_release_run/jobs?per_page=100")
 printf '%s\n' "$stable_release_jobs" | jq -e '
@@ -2843,6 +3052,7 @@ GitHub and the chart report stable v0.12.0.
 Run:
 
 ```sh
+set -euo pipefail
 for image in \
   ghcr.io/ydixken/pgcopydb-operator:v0.12.0 \
   ghcr.io/ydixken/pgcopydb-operator:latest \
@@ -2880,6 +3090,7 @@ Stable and `latest` resolve to the same manager digest and the same runner diges
 Run:
 
 ```sh
+set -euo pipefail
 second_pr_url=$(gh pr view fix/issue-95-builder-digest --json url --jq '.url')
 final_main_sha=$(gh pr view "$second_pr_url" --json mergeCommit --jq '.mergeCommit.oid')
 for tag in v0.12.0-rc.1 v0.12.0; do
@@ -2890,9 +3101,11 @@ for tag in v0.12.0-rc.1 v0.12.0; do
       --branch "$tag" \
       --event push \
       --limit 20 \
-      --json databaseId,headSha \
-      --jq ".[] | select(.headSha == \"$final_main_sha\") | .databaseId" |
-      head -n 1)
+      --json databaseId,headBranch,headSha |
+      jq -r --arg sha "$final_main_sha" --arg ref "$tag" '
+        [.[] | select(.headSha == $sha and .headBranch == $ref) | .databaseId]
+        | first // empty
+      ')
     test -n "$mirror_run" && break
     test "$attempt" -lt 60 || {
       echo "mirror run missing for $tag" >&2
