@@ -233,11 +233,11 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 		}
 	}
 	// Printed before the verdict, so the fast path's exit cannot skip it.
-	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `[ "$gap" -eq 0 ]`) {
+	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `if [ "$endpos"`) {
 		t.Fatalf("counters must be printed before the drain verdict:\n%s", script)
 	}
 	// The counters are read, never judged: no exit of any kind in the block.
-	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$gap"`)]
+	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$endpos"`)]
 	if strings.Contains(block, "exit ") {
 		t.Fatalf("the counters block must not be able to end the Job:\n%s", block)
 	}

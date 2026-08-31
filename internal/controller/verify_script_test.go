@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 // The stand-in for the runner image's pgcopydb, dispatching on argv: the two
@@ -61,6 +63,10 @@ esac
 `
 
 const verifyCompareMarker = "stub: compare data ran"
+
+// The refusal a human greps for, and the line whose exit status the controller
+// turns into DrainIncomplete.
+const wantRefused = "drain refuted"
 
 // runVerifyScript executes the shipped drain script under a real shell with
 // both stubs on PATH. compareReportPath is rewritten into the test's own
@@ -115,7 +121,10 @@ func runVerifyScript(t *testing.T, report string, env ...string) (string, int) {
 func TestVerifyScript_Verdict(t *testing.T) {
 	const endpos = "0/92E17EB0"
 	for _, tc := range []struct {
-		name        string
+		name string
+		// endpos defaults to the incident's, so only the unset-sentinel case
+		// carries one.
+		endpos      string
 		report      string
 		env         []string
 		code        int
@@ -134,7 +143,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			report:      reportRowcount,
 			env:         []string{"STUB_PROGRESS=0/92E17AA0", "STUB_GAP=1040", "STUB_DIFFERING=public.orders: source 20195 rows (checksum a1), target 20192 rows (checksum a1)"},
 			code:        1,
-			wantLog:     "drain refuted",
+			wantLog:     wantRefused,
 			wantCompare: true,
 		},
 		{
@@ -142,7 +151,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			report:      reportRowcount,
 			env:         []string{"STUB_PROGRESS=0/92E17E78", "STUB_GAP=56", "STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"},
 			code:        1,
-			wantLog:     "drain refuted",
+			wantLog:     wantRefused,
 			wantCompare: true,
 		},
 		{
@@ -153,10 +162,36 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			wantLog:     "drain verified: pgcopydb compare data found all migrated tables matching",
 			wantCompare: true,
 		},
+		{
+			// An origin reading past endpos is no more proof than one below
+			// it, and the fast path must not read the sign as an argument.
+			name:        "the origin reads past endpos",
+			report:      reportMatching,
+			env:         []string{"STUB_PROGRESS=0/92E17EC0", "STUB_GAP=-16"},
+			code:        0,
+			wantLog:     "drain verified: pgcopydb compare data found all migrated tables matching",
+			wantCompare: true,
+		},
+		{
+			// A work dir without a sentinel endpos reads 0/0, and a target
+			// that applied nothing coalesces to 0/0 too: a zero gap between
+			// two null LSNs must not read as a closed one.
+			name:        "no endpos to prove anything against",
+			endpos:      sentinel.ZeroLSN,
+			report:      reportRowcount,
+			env:         []string{"STUB_PROGRESS=" + sentinel.ZeroLSN, "STUB_GAP=0", "STUB_DIFFERING=public.orders: source 20195 rows (checksum a1), target 20192 rows (checksum a1)"},
+			code:        1,
+			wantLog:     wantRefused,
+			wantCompare: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ep := tc.endpos
+			if ep == "" {
+				ep = endpos
+			}
 			out, code := runVerifyScript(t, tc.report,
-				append(tc.env, "STUB_ENDPOS="+endpos, "STUB_REPLAY="+endpos)...)
+				append(tc.env, "STUB_ENDPOS="+ep, "STUB_REPLAY="+ep)...)
 			if code != tc.code {
 				t.Fatalf("exit = %d, want %d\n%s", code, tc.code, out)
 			}
@@ -167,7 +202,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 				t.Fatalf("content check ran = %v, want %v:\n%s", got, tc.wantCompare, out)
 			}
 			// The measurements a human reads off a refusal, on every path.
-			if !strings.Contains(out, "endpos="+endpos+" replay_lsn="+endpos) {
+			if !strings.Contains(out, "endpos="+ep+" replay_lsn="+ep) {
 				t.Fatalf("the drain line must carry endpos and replay_lsn:\n%s", out)
 			}
 		})
@@ -185,7 +220,7 @@ func TestVerifyScript_ComparePathIsFailurePath(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("a compare that could not run must fail the Job:\n%s", out)
 	}
-	if !strings.Contains(out, "drain refuted") {
+	if !strings.Contains(out, wantRefused) {
 		t.Fatalf("the refusal must name the drain:\n%s", out)
 	}
 }

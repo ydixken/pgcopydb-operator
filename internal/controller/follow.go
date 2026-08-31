@@ -242,12 +242,13 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // finishFollow runs after the worker Job exited 0. Exit 0 alone is NOT
 // trusted: after a crash inside the drain window, pgcopydb --resume exits 0
 // without replaying pending WAL ("endpos previously reached" tracks the
-// receive side). A verify Job proves the drain on the target: origin progress
-// near the recorded endpos passes directly, anything else is decided by
-// pgcopydb compare data (see buildVerifyJob); only proof gates
-// CutoverCompleted and the cleanup. On refuted drain the Migration fails
-// loudly with the slot intact, so the data stays recoverable (at the
-// documented cost of WAL retention on the source).
+// receive side). A verify Job proves the drain on the target: only origin
+// progress exactly at the recorded endpos passes on the LSN, and every other
+// reading, which is nearly every cutover, is decided by pgcopydb compare data
+// (see buildVerifyJob); only proof gates CutoverCompleted and the cleanup.
+// On refuted drain the Migration fails loudly with the slot intact, so the
+// data stays recoverable (at the documented cost of WAL retention on the
+// source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
 	m.Status.Phase = v1beta1.PhaseCuttingOver

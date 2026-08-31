@@ -30,6 +30,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
 const (
@@ -212,16 +213,23 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// time) are the same bytes seen from here. A byte tolerance guessed at
 	// that boundary blessed a cutover that had lost its last three commits,
 	// 1040 bytes below endpos against the 8192 it allowed (measured live,
-	// about 347 bytes per single-row commit).
+	// about 347 bytes per single-row commit). The null LSN is excluded from
+	// the equality: a work dir without a sentinel endpos reads 0/0, a target
+	// that applied nothing reads 0/0 through the coalesce, and the two
+	// matching would pass the gate on no evidence at all.
 	//
-	// Content path: every non-zero gap, the idle source included, which costs
-	// a whole-database scan inside the cutover window and is what the fast
-	// path buys by proving rather than tolerating. pgcopydb compare data
-	// checksums the migrated tables and passes only when the report shows
-	// every one of them matching; it runs through compare_data_strict,
-	// because the bare command logs a difference and still exits 0. Both
-	// live-found loss modes (resume-skips-replay, silent-apply) leave rows
-	// missing on the target, so content catches them.
+	// Content path: every other reading, which is nearly every cutover, so
+	// the whole-database scan inside the cutover window is the normal cost of
+	// a verdict and not an idle-source exception. endpos is the source's WAL
+	// head at the approval instant while the origin holds the last commit the
+	// apply committed, and the two coincide only when nothing wrote in
+	// between (56 bytes apart right after write activity, measured live).
+	// pgcopydb compare data checksums the migrated tables and passes only
+	// when the report shows every one of them matching; it runs through
+	// compare_data_strict, because the bare command logs a difference and
+	// still exits 0. Both live-found loss modes (resume-skips-replay,
+	// silent-apply) leave rows missing on the target, so content catches
+	// them.
 	// replay_lsn is printed and never compared: pgcopydb advances it past
 	// records it never applies (keepalives, filtered transactions), and it
 	// read normally through the live session_replication_role incident where
@@ -231,14 +239,17 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	script := `set -eu
 ` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
-progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '0/0')")
+progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
 gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
 echo "endpos=$endpos replay_lsn=$replay origin_progress=$progress origin_gap_bytes=$gap"
-` + cloneCountersBlock(progressGate) + `if [ "$gap" -eq 0 ]; then
+` + cloneCountersBlock(progressGate) + `if [ "$endpos" = "` + sentinel.ZeroLSN + `" ]; then
+  echo "the work dir reports no cutover endpos, so the origin has nothing to be measured against. Deciding by content."
+elif [ "$gap" -eq 0 ]; then
   echo "drain verified: origin progress $progress equals endpos $endpos, nothing left to apply"
   exit 0
+else
+  echo "the origin is $gap bytes from endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
 fi
-echo "origin progress is $gap bytes below endpos; unapplied commits and publication-filtered WAL are indistinguishable at any distance. Deciding by content."
 if compare_data_strict; then
   echo "drain verified: pgcopydb compare data found all migrated tables matching"
   exit 0
