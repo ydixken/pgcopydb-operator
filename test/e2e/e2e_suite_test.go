@@ -215,6 +215,8 @@ var (
 	// liveWriteInterval caps the average write rate at one per interval.
 	// The ticker drops ticks while a persistent pipe write is blocked.
 	liveWriteInterval = 200 * time.Millisecond
+	// e2eCommandTimeout bounds one subprocess attempt or shutdown wait.
+	e2eCommandTimeout = 30 * time.Second
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -1382,6 +1384,22 @@ func psqlDB(cluster, db, sql string) string {
 	return out
 }
 
+type commandFactory func(context.Context, string, ...string) *exec.Cmd
+
+func commandOutput(
+	ctx context.Context,
+	command commandFactory,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	cmd := command(ctx, name, args...)
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
+	return out, err
+}
+
 // psqlFailure is psqlDBErr's error result: the pod the last attempt ran
 // against and its stderr, so psqlDB can raise its exact failure message
 // without a second copy of the retry loop.
@@ -1394,6 +1412,10 @@ func (f *psqlFailure) Error() string {
 	return fmt.Sprintf("on %s: %s: %v", f.pod, f.stderr, f.err)
 }
 
+func (f *psqlFailure) Unwrap() error {
+	return f.err
+}
+
 // psqlDBErr retries transient connection failures before a statement reaches
 // PostgreSQL. Each retry re-resolves the primary; connected failures stop
 // because the statement may have run and callers need not be idempotent.
@@ -1401,27 +1423,60 @@ func psqlDBErr(cluster, db, sql string) (string, error) {
 	// Here for primaryPod's Eventually, not for an assertion of its own:
 	// without it a primary timeout is reported here, not at the calling spec.
 	GinkgoHelper()
+	return psqlDBErrWith(
+		cluster,
+		db,
+		sql,
+		primaryPod,
+		time.Sleep,
+		exec.CommandContext,
+		e2eCommandTimeout,
+	)
+}
+
+func psqlDBErrWith(
+	cluster, db, sql string,
+	primary func(string) string,
+	wait func(time.Duration),
+	command commandFactory,
+	timeout time.Duration,
+) (string, error) {
 	var lastErr error
 	var lastStderr string
 	var pod string
 	for attempt := 1; attempt <= 3; attempt++ {
-		pod = primaryPod(cluster)
-		cmd := exec.Command("kubectl", "exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", db, "-tAc", sql)
-		out, err := cmd.Output()
+		pod = primary(cluster)
+		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		out, err := commandOutput(
+			attemptCtx,
+			command,
+			"kubectl",
+			"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
+			"psql", "-U", "postgres", db, "-tAc", sql,
+		)
+		cancel()
 		if err == nil {
 			return strings.TrimSpace(string(out)), nil
 		}
 		lastErr = err
 		lastStderr = ""
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			lastStderr = string(ee.Stderr)
+		if errors.Is(err, context.DeadlineExceeded) {
+			lastErr = fmt.Errorf(
+				"psql %q for cluster %s on pod %s timed out after %s: %w",
+				sql, cluster, pod, timeout, err,
+			)
+			break
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			lastStderr = string(exitErr.Stderr)
 		}
 		if !transientExecError(lastStderr) {
 			break
 		}
-		time.Sleep(5 * time.Second)
+		if attempt < 3 {
+			wait(5 * time.Second)
+		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
 }
