@@ -43,13 +43,66 @@ type Target struct {
 	Datasource *Datasource `json:"datasource"`
 }
 
+// Mapping is one Grafana value mapping. Options carries a different shape per
+// type (a value mapping keys on the value, a range mapping on from/to/result),
+// so it stays raw until a caller asks about a specific value.
+type Mapping struct {
+	Type    string                     `json:"type"`
+	Options map[string]json.RawMessage `json:"options"`
+}
+
+// MappedValue is what a panel renders in place of one raw value.
+type MappedValue struct {
+	Text  string `json:"text"`
+	Color string `json:"color"`
+}
+
+// FieldConfig is the subset of a panel's field config these checks read.
+type FieldConfig struct {
+	Defaults struct {
+		NoValue  string    `json:"noValue"`
+		Mappings []Mapping `json:"mappings"`
+	} `json:"defaults"`
+}
+
 // Panel is a dashboard panel; a row panel nests its panels when collapsed.
 type Panel struct {
-	Title      string      `json:"title"`
-	Type       string      `json:"type"`
-	Datasource *Datasource `json:"datasource"`
-	Targets    []Target    `json:"targets"`
-	Panels     []Panel     `json:"panels"`
+	Title       string      `json:"title"`
+	Type        string      `json:"type"`
+	Datasource  *Datasource `json:"datasource"`
+	Targets     []Target    `json:"targets"`
+	Panels      []Panel     `json:"panels"`
+	FieldConfig FieldConfig `json:"fieldConfig"`
+}
+
+// ValueMapping reports how the panel renders value, and whether it maps it at
+// all. Only mappings of type "value" key on the value itself.
+func (p Panel) ValueMapping(value string) (MappedValue, bool) {
+	for _, m := range p.FieldConfig.Defaults.Mappings {
+		if m.Type != "value" {
+			continue
+		}
+		raw, ok := m.Options[value]
+		if !ok {
+			continue
+		}
+		var mv MappedValue
+		if err := json.Unmarshal(raw, &mv); err != nil {
+			return MappedValue{}, false
+		}
+		return mv, true
+	}
+	return MappedValue{}, false
+}
+
+// Reads reports whether any of the panel's targets query metric.
+func (p Panel) Reads(metric string) bool {
+	for _, t := range p.Targets {
+		if slices.Contains(Metrics(t.Expr), metric) {
+			return true
+		}
+	}
+	return false
 }
 
 // Variable is one templating variable.

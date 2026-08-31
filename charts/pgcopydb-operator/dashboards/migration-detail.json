@@ -1290,6 +1290,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "pgcopydb compare schema: tables, columns, indexes, constraints and sequence values as pgcopydb models them. Deactivated means spec.verification.schema is false, which is also the default, so a migration that never opted in reads Deactivated rather than waiting forever on a check nobody asked for. Pending means the check is requested and has not run yet. A result outranks the spec: switching a check off after it reported a mismatch still reads FAIL.",
       "gridPos": {
         "h": 3,
         "w": 4,
@@ -1344,6 +1345,11 @@
                   "text": "FAIL",
                   "color": "red",
                   "index": 1
+                },
+                "-1": {
+                  "text": "Deactivated",
+                  "color": "red",
+                  "index": 2
                 }
               }
             }
@@ -1370,6 +1376,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "pgcopydb compare data: per-table row counts and full-table checksums. Deactivated means spec.verification.data is false, which is also the default, so a migration that never opted in reads Deactivated rather than waiting forever on a check nobody asked for. Pending means the check is requested and has not run yet. A result outranks the spec: switching a check off after it reported a mismatch still reads FAIL.",
       "gridPos": {
         "h": 3,
         "w": 5,
@@ -1424,6 +1431,11 @@
                   "text": "FAIL",
                   "color": "red",
                   "index": 1
+                },
+                "-1": {
+                  "text": "Deactivated",
+                  "color": "red",
+                  "index": 2
                 }
               }
             }

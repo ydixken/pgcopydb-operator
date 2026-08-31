@@ -28,7 +28,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_completion_time_seconds` | | Unix time the migration completed | once completed |
 | `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time that condition last changed status, straight from its `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
-| `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch; `check` is `schema` or `data` | after that check has run |
+| `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it; `check` is `schema` or `data` | once the spec is read, minus a requested check with no result yet |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size | worker running |
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size; `rate()` of it is the copy throughput | worker running |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | patched runner |
@@ -153,7 +153,8 @@ Reading it:
   Clone Bytes stopping a few percent short of 100 while the other two reach it is the expected end state, for the reason given in that table.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
-  A check you did not enable stays Pending.
+  A check `spec.verification` does not request reads Deactivated, which both checks do by default.
+  A result outranks the spec, so switching a check off after it reported a mismatch still reads FAIL.
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
   It reads No Endpos until a cutover sets one, and 0 B once the target has caught up, which is what the screenshot shows.
 
