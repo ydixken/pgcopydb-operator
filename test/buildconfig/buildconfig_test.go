@@ -25,6 +25,7 @@ package buildconfig
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -204,12 +205,14 @@ type workflowStep struct {
 	Name string `json:"name"`
 	Uses string `json:"uses"`
 	If   string `json:"if"`
+	Run  string `json:"run"`
 	With struct {
 		AllowLicenses  string `json:"allow-licenses"`
 		Context        string `json:"context"`
 		FailOnScopes   string `json:"fail-on-scopes"`
 		FailOnSeverity string `json:"fail-on-severity"`
 		Platforms      string `json:"platforms"`
+		Outputs        string `json:"outputs"`
 	} `json:"with"`
 }
 
@@ -335,8 +338,8 @@ func TestWorkflowActionInventory(t *testing.T) {
 	if files != 10 {
 		t.Errorf("workflow inventory contains %d YAML files, want 10", files)
 	}
-	if references != 43 {
-		t.Errorf("workflow inventory contains %d action references, want 43", references)
+	if references != 49 {
+		t.Errorf("workflow inventory contains %d action references, want 49", references)
 	}
 	if dependencyReviews != 1 {
 		t.Errorf("workflow inventory contains %d dependency review references, want 1", dependencyReviews)
@@ -421,23 +424,60 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 }
 
 // Matches by context, not position: release.yml has three build-push-action
-// steps and only one builds images/pgcopydb-builder. Fatal on a miss, so a
-// missing step cannot read as an empty platform list to the caller.
+// steps and only one builds images/pgcopydb-builder. The union across every
+// matching step, not the first one's list, because pgcopydb-builder.yml builds
+// each architecture on a machine of that architecture and joins them after:
+// one step says linux/amd64 and another linux/arm64, and the tag that results
+// carries both. Fatal on a miss, so a missing step cannot read as an empty
+// platform list to the caller.
 func builderPlatforms(t *testing.T, path string) string {
 	t.Helper()
 	var wf workflow
 	if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
+	seen := map[string]bool{}
 	for _, job := range wf.Jobs {
 		for _, s := range job.Steps {
 			if strings.HasPrefix(s.Uses, "docker/build-push-action") && s.With.Context == "images/pgcopydb-builder" {
-				return s.With.Platforms
+				for p := range strings.SplitSeq(s.With.Platforms, ",") {
+					if p = strings.TrimSpace(p); p != "" {
+						seen[p] = true
+					}
+				}
 			}
 		}
 	}
-	t.Fatalf("%s has no docker/build-push-action step building images/pgcopydb-builder", path)
-	return ""
+	if len(seen) == 0 {
+		t.Fatalf("%s has no docker/build-push-action step building images/pgcopydb-builder", path)
+	}
+	return strings.Join(slices.Sorted(maps.Keys(seen)), ",")
+}
+
+// Building the two architectures separately buys a new way to fail: both get
+// pushed by digest and nothing ever writes the tag, so the existence check in
+// release.yml finds nothing and the next release rebuilds under emulation
+// without saying why. A split build has to join what it split.
+func TestSplitBuilderJoinsItsArchitectures(t *testing.T) {
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, builderWorkflow)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", builderWorkflow, err)
+	}
+	var byDigest, merges bool
+	for _, job := range wf.Jobs {
+		for _, s := range job.Steps {
+			if strings.Contains(s.With.Outputs, "push-by-digest=true") {
+				byDigest = true
+			}
+			if strings.Contains(s.Run, "imagetools create") {
+				merges = true
+			}
+		}
+	}
+	if byDigest && !merges {
+		t.Errorf("%s pushes by digest and never runs `docker buildx imagetools create`; "+
+			"the tag would name no architecture at all", builderWorkflow)
+	}
 }
 
 // The existence check in release.yml only proves the pre-built tag resolves,

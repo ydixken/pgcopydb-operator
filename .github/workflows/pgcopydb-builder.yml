@@ -2,6 +2,14 @@ name: pgcopydb builder image
 
 # Pre-builds the image release.yml would otherwise build inline on the next
 # tag. Safe to forget: runner-image builds it if it is missing.
+#
+# Built once per architecture on a machine of that architecture, then joined
+# into one manifest. It used to build both at once on the cluster runner, with
+# arm64 under QEMU, and that emulation was the whole cost: 933 of 964 seconds.
+# pgcopydb is a C project whose vendored sqlite3.c is a single 9MB translation
+# unit, so more cores do not help and emulation cannot be cached around, since
+# the cases that rebuild it at all (a pgcopydb commit, a Renovate bump of the
+# debian digest) invalidate the layer by definition.
 
 on:
   workflow_dispatch:
@@ -19,18 +27,18 @@ permissions:
   contents: read
   packages: write
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/pgcopydb-builder
+
 jobs:
-  build:
+  pin:
+    # Read once and handed to the others, so the two builds and the merge
+    # cannot disagree about which commit they are shipping.
     runs-on: github-runner-pgcopydb-operator
+    outputs:
+      sha: ${{ steps.pin.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - id: pin
         run: |
           sha=$(sed -n 's/^ARG PGCOPYDB_SHA=//p' images/pgcopydb-builder/Dockerfile)
@@ -39,20 +47,88 @@ jobs:
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  amd64:
+    needs: pin
+    runs-on: github-runner-pgcopydb-operator
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
       # The buildx layer cache goes on the node, next to the Go caches, rather
-      # than through GitHub's cache service. Empty on a hosted runner, where
-      # buildx then simply builds cold.
+      # than through GitHub's cache service.
       - id: cache
         run: |
           [ -d /cache ] || exit 0
           sudo mkdir -p /cache/buildx-pgcopydb-builder
           [ -O /cache/buildx-pgcopydb-builder ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-pgcopydb-builder
           echo "dir=/cache/buildx-pgcopydb-builder" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: images/pgcopydb-builder
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/${{ github.repository }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
+          platforms: linux/amd64
+          # By digest and untagged: the tag is the manifest the merge job
+          # writes, and a tag pushed here would briefly name one architecture.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ steps.cache.outputs.dir && format('type=local,src={0}', steps.cache.outputs.dir) || '' }}
           cache-to: ${{ steps.cache.outputs.dir && format('type=local,dest={0},mode=max', steps.cache.outputs.dir) || '' }}
+
+  arm64:
+    needs: pin
+    # A hosted arm64 runner, free for a public repository, and native. This is
+    # the one job in this repository that deliberately stays off the cluster:
+    # every node there is amd64, so the alternative is emulation.
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: images/pgcopydb-builder
+          platforms: linux/arm64
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+  merge:
+    needs: [pin, amd64, arm64]
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Join the two into one tag
+        # Only now does the tag exist, so nothing can pull a half-published
+        # manifest that names one architecture.
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:${{ needs.pin.outputs.sha }}" \
+            "$IMAGE@${{ needs.amd64.outputs.digest }}" \
+            "$IMAGE@${{ needs.arm64.outputs.digest }}"
+      - name: Prove the tag carries both architectures
+        # A manifest missing an architecture fails much later, in a runner pod
+        # on a cluster that cannot pull it.
+        run: |
+          got=$(docker buildx imagetools inspect --raw "$IMAGE:${{ needs.pin.outputs.sha }}" \
+                | jq -r '[.manifests[].platform | select(.os == "linux") | "\(.os)/\(.architecture)"] | sort | join(",")')
+          if [ "$got" != "linux/amd64,linux/arm64" ]; then
+            echo "::error::$IMAGE:${{ needs.pin.outputs.sha }} carries [$got]"
+            exit 1
+          fi
+          echo "Published \`$IMAGE:${{ needs.pin.outputs.sha }}\` for $got." >> "$GITHUB_STEP_SUMMARY"
