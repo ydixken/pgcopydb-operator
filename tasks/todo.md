@@ -17,11 +17,11 @@
 - [x] Get user approval for the implementation plan before implementation.
 - [x] Enable GitHub Dependency Graph through the repository Settings UI.
 - [x] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
-- [ ] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
+- [x] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
 - [x] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
 - [ ] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
-- [ ] Upgrade all 51 existing Action references and add the one approved Dependency Review reference (Task 3 Action-major and Dependency Review task in progress).
-- [ ] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
+- [x] Upgrade all 51 existing Action references and add the one approved Dependency Review reference.
+- [ ] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits (Task 4 Go, module, and toolchain upgrade in progress).
 - [ ] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged.
 - [ ] Update the local e2e default tag and its test to v0.11.3.
 - [ ] Review every changed dependency license and block unresolved or unacceptable licenses.
