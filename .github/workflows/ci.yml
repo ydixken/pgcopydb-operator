@@ -84,7 +84,10 @@ jobs:
           # tars and uploads them to GitHub's cache service on every run:
           # 444MB, 109s on this job and 173s on the test one.
           cache: false
+      # The runner image carries Helm. Only a fork's pull request, which lands
+      # on a hosted runner, still needs this.
       - uses: azure/setup-helm@v5
+        if: ${{ github.event.pull_request.head.repo.fork }}
       # The cluster runner is the minimal actions-runner image: git, curl, jq
       # and python3, where a hosted runner ships hundreds of tools. Idempotent,
       # so this is a no-op on the hosted runner a fork's pull request gets.
@@ -245,7 +248,9 @@ jobs:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
+      # The image carries python3 and mkdocs-material at the pin below.
       - uses: actions/setup-python@v7
+        if: ${{ github.event.pull_request.head.repo.fork }}
         with:
           python-version: "3.x"
       - name: mkdocs build --strict

@@ -62,8 +62,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: azure/setup-helm@v5
-      - uses: azure/setup-kubectl@v5
       - name: Wait for the release images to be published
         # A tag push starts this workflow and release.yml at the same time, and
         # release.yml still has to build and push the images this run installs.

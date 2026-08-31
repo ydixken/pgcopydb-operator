@@ -43,9 +43,6 @@ jobs:
           "$tool" --source-path=api/v1beta1 --config=hack/crd-ref-docs.yaml \
             --renderer=markdown --output-path=docs/reference/api.md
           git diff --exit-code docs/reference/api.md
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
       - run: pip install mkdocs-material==9.7.7
       - name: Build the site
         # --strict turns warnings (broken links, orphaned pages) into errors.
