@@ -17,7 +17,7 @@
 - [x] Review commit `dc96010` and record its remaining lifecycle-proof and stale-comment gaps.
 - [x] Correct the command-state proof, lifecycle assertions, and helper-comment coverage.
 - [x] Obtain an independent re-review of the corrected plan before implementation starts.
-- [ ] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
+- [x] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
 - [x] Obtain an independent review of the implementation.
 - [x] Run `task lint` and `task test` for the implementation.
 - [ ] Decide whether to run guarded `task e2e` against the current real cluster context.
@@ -36,8 +36,10 @@
 - Implementation: commit `ac8cad0` implemented the persistent writer.
 - Focused test, e2e vet, `task lint`, and `task test`: passed.
 - Independent implementation review: APPROVED.
+- Task 3: commit `70b835b` completed the persistent writer, local tests, source-max scenario assertion, and comment updates.
+- Task 3 focused test, e2e vet, `task lint`, and `task test`: passed.
+- Independent Task 3 review: APPROVED.
 - Real-cluster e2e: not run.
-- The scenario comment remains assigned to Task 3.
 - The query-empty fixture is a minor item deferred for final review.
 - Guarded e2e decision: pending implementation and human confirmation.
 - Commit, pull request, and CI: pending implementation and verification.
