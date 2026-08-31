@@ -41,7 +41,7 @@
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
 # renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:1393b60389cb66e12b3c139d1c82ae21a2d34541@sha256:5c666d934b32f8f4a03363068bab9c745e6fa915058c9ff28520ab20b6650f60 AS pgcopydb
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:e37d2bd4dd10b7ed7b415555ce3318202d9633cf@sha256:0b3a2afef9d6cc156aa59713bbb8ab7bd97597b978b7938c0e804ba26c044a59 AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
