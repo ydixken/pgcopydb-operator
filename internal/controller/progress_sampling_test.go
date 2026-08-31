@@ -323,7 +323,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		// It finishes, and its log carries the counters.
 		logs.out = "endpos=0/100 replay_lsn=0/100 origin_progress=0/100 origin_gap_bytes=0\n" +
 			verifyProgressPrefix + listProgressJSON + "\n" +
-			"drain verified: origin progress reached endpos within one WAL page\n"
+			"drain verified: origin progress 0/100 equals endpos 0/100, nothing left to apply\n"
 		finishJob(ctx, name+"-verify", true)
 		got = reconcileAndGet(ctx, r, name)
 		Expect(got.Status.Progress).NotTo(BeNil(), "the verify Job's counters never reached status")
@@ -359,7 +359,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 
 		// Truncated JSON, the shape a killed `list progress` would leave.
 		logs.out = verifyProgressPrefix + `{ "tables": { "total":` + "\n" +
-			"drain verified: origin progress reached endpos within one WAL page\n"
+			"drain verified: origin progress 0/100 equals endpos 0/100, nothing left to apply\n"
 		finishJob(ctx, name+"-verify", true)
 		got := reconcileAndGet(ctx, r, name)
 		Expect(got.Status.Progress).To(BeNil())

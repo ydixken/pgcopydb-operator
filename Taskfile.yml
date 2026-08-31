@@ -78,6 +78,34 @@ tasks:
       # defaults to 1h and would abort long tiers mid-run otherwise.
       - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.timeout=3h -ginkgo.label-filter='!chaos'
 
+  e2e:focus:
+    desc: >-
+      Run ONE e2e spec against the CURRENT kubectl context, selected by Ginkgo
+      focus regex. For iterating on a single failing scenario. FOCUS is
+      required. Defaults differ from e2e on purpose: scale 0.1 and kept
+      fixtures make a repeat run start in seconds rather than reseeding, and
+      namespaces are left alone because on the shared dev cluster teardown
+      would delete the Argo-provisioned system namespace. Override with
+      SCALE=, KEEP=, MANAGE_NS=.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    prompt: >-
+      e2e (focus "{{.FOCUS}}") will run against kubectl context
+      '{{.KUBE_CONTEXT}}', a real cluster. Continue?
+    preconditions:
+      - sh: test -n '{{.FOCUS}}'
+        msg: |
+          FOCUS is required, for example:
+            task e2e:focus FOCUS='loses no committed transaction'
+    env:
+      E2E_SCALE: '{{.SCALE | default "0.1"}}'
+      E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
+      E2E_MANAGE_NAMESPACES: '{{.MANAGE_NS | default "false"}}'
+    cmds:
+      - go test ./test/e2e/... -v -timeout 1h -ginkgo.v -ginkgo.timeout=1h
+        -ginkgo.label-filter='!chaos' -ginkgo.focus='{{.FOCUS}}'
+
   e2e:chaos:
     desc: >-
       Chaos e2e (pod kills, disk pressure, concurrent migrations; the specs

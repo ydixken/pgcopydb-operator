@@ -6,7 +6,7 @@ Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18, pat
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
 The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit `ea87951753f06361550c0a1357da7b42c3c55034`: upstream v0.18 plus the two fixes, sent upstream as [#1041](https://github.com/dimitri/pgcopydb/pull/1041) and [#1042](https://github.com/dimitri/pgcopydb/pull/1042).
-The version string is `0.18.2.gea87951`, what `git describe` prints for that commit with dashes as dots, and the build canary and the release smoke test both assert it exactly.
+The version string is `0.18.5.ge37d2bd`, what `git describe` prints for that commit with dashes as dots, and the build canary and the release smoke test both assert it exactly.
 Once an upstream release ships both fixes, revert here: swap `libgc1` for the `pgcopydb` package in the install line, drop the `COPY --from=pgcopydb` line, and point the version greps in this Dockerfile and the release workflow back at the release.
 `images/pgcopydb-builder` can then go away entirely.
 

@@ -529,7 +529,7 @@ var _ = Describe("Migration", Ordered, func() {
 			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))
 		Expect(psql(targetCluster, fmt.Sprintf(
 			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))).To(Equal(srcRows),
-			"target holds a different number of live rows than the source, which committed %d", last)
+			func() string { return writeLoadDiagnosis(marker, last, srcRows) })
 
 		firstGap := psql(targetCluster, fmt.Sprintf(
 			"SELECT coalesce(min(g), 0) FROM generate_series(1, %d) g"+
@@ -1144,6 +1144,36 @@ func failureMessage(m *v1beta1.Migration) string {
 		return c.Message
 	}
 	return "(no Failed condition message)"
+}
+
+// writeLoadDiagnosis explains a short cutover rather than only reporting one.
+// It runs only from the failed assertion, and separates the ways a live
+// migration can come out short: whether rows are missing or merely altered,
+// whether the missing ones are a contiguous tail or a hole, and whether they
+// are lost or still arriving. Without it a failure names a count and nothing
+// that says which mechanism produced it.
+func writeLoadDiagnosis(marker string, last int, srcRows string) string {
+	markerCount := fmt.Sprintf("SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker)
+	var b strings.Builder
+	fmt.Fprintf(&b, "target holds a different number of live rows than the source, which committed %d\n", last)
+	for _, c := range []string{sourceCluster, targetCluster} {
+		fmt.Fprintf(&b, "  %-12s orders total=%s marker=%s timeline=%s\n", c,
+			psqlDiag(c, "SELECT count(*) FROM orders"),
+			psqlDiag(c, markerCount),
+			psqlDiag(c, "SELECT timeline_id FROM pg_control_checkpoint()"))
+	}
+	// Equal totals with unequal marker counts is corruption, not loss, and
+	// sends the reader somewhere completely different.
+	fmt.Fprintf(&b, "  source marker count was %s when the compare passed\n", srcRows)
+	fmt.Fprintf(&b, "  target missing markers: %s\n", psqlDiag(targetCluster, fmt.Sprintf(
+		"SELECT coalesce(string_agg(g::text, ','), 'none') FROM generate_series(1, %d) g"+
+			" WHERE NOT EXISTS (SELECT 1 FROM orders WHERE note = '%s-' || g)", last, marker)))
+	// A target that catches up after the migration reported Completed is a
+	// different defect from one that never receives the rows at all.
+	time.Sleep(30 * time.Second)
+	fmt.Fprintf(&b, "  target marker count 30s later: %s (unchanged means lost, higher means applied late)",
+		psqlDiag(targetCluster, markerCount))
+	return b.String()
 }
 
 // rowCounts returns customers/orders/audit.events counts in one round trip:

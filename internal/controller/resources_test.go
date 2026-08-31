@@ -131,10 +131,9 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 
 // TestBuildVerifyJob_AuthAndPredicate covers the live-found verify-gate
 // defects: the script must run behind the passfile prelude (bare /bin/sh
-// failed auth and falsely refuted every drain), the fast path must tolerate
-// the origin trailing endpos by non-data WAL records, and an origin gap above
-// the tolerance must escalate to pgcopydb compare data instead of refusing
-// (idle sources grow the gap with publication-filtered WAL, no loss).
+// failed auth and falsely refuted every drain), the fast path must pass only
+// on an exactly closed gap, and every other gap must escalate to pgcopydb
+// compare data instead of being refused or waved through on distance.
 func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	m := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
@@ -171,14 +170,14 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 		t.Fatalf("verify job must pass the script as sh -c args, got %v", c.Args)
 	}
 	for _, want := range []string{
-		// Fast path: origin progress within one WAL page of endpos.
+		// Fast path: origin progress exactly at endpos, nothing outstanding.
 		"pg_replication_origin_progress",
-		`[ "$gap" -le 8192 ]`,
+		`[ "$gap" -eq 0 ]`,
 		// Diagnosis line: replay_lsn tells consumed-but-filtered apart from
 		// never-consumed in the Job log; it does not gate.
 		"--replay-lsn",
-		// Content path: an origin gap above the tolerance is decided by
-		// compare data, never refused on distance alone.
+		// Content path: any open gap is decided by compare data, never
+		// refused or passed on distance alone.
 		"compare data --dir /work/pgcopydb",
 	} {
 		if !strings.Contains(c.Args[1], want) {
@@ -190,7 +189,7 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	// script's only failure exit follows the compare invocation.
 	if !strings.HasSuffix(c.Args[1], "exit 1") ||
 		strings.Count(c.Args[1], "exit 1") != 1 ||
-		strings.Index(c.Args[1], "compare data") > strings.Index(c.Args[1], "exit 1") {
+		strings.Index(c.Args[1], "if compare_data_strict") > strings.Index(c.Args[1], "exit 1") {
 		t.Fatalf("verify script must refuse only after compare data:\n%s", c.Args[1])
 	}
 	// No poller wired, no counters asked for: the drain script stays exactly
@@ -209,8 +208,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.2.gea87951)") {
+	gate := progress.NewFromExec(nil, []string{"0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -234,11 +233,11 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 		}
 	}
 	// Printed before the verdict, so the fast path's exit cannot skip it.
-	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `[ "$gap" -le 8192 ]`) {
+	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `if [ "$endpos"`) {
 		t.Fatalf("counters must be printed before the drain verdict:\n%s", script)
 	}
 	// The counters are read, never judged: no exit of any kind in the block.
-	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$gap"`)]
+	block := script[strings.Index(script, "clone_progress=$("):strings.Index(script, `if [ "$endpos"`)]
 	if strings.Contains(block, "exit ") {
 		t.Fatalf("the counters block must not be able to end the Job:\n%s", block)
 	}
@@ -261,7 +260,7 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{"0.18.2.gea87951"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{"0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },

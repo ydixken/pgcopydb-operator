@@ -68,7 +68,7 @@ Each type is named for what `True` means. Seven are normal-true (True is the des
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Replication lag has been at or below `spec.follow.maxCatchupLag` on two consecutive samples. |
-| `CutoverCompleted` | normal-true | The drain is proven: origin progress at the cutover LSN, or a clean data compare when the origin alone cannot decide. |
+| `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN on the rare cutover where the two coincide. |
 | `Verified` | normal-true | The requested `pgcopydb compare` checks found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
 | `Failed` | abnormal-true | The migration failed for good. Terminal and absorbing. |
@@ -92,8 +92,8 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator wants a second consecutive one before turning `CaughtUp` True: a single sample can land while the worker is still confirming its raw receive position, where the lag reads near zero whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging` and the count starts over. |
-| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress reached the cutover LSN within one WAL page, or `pgcopydb compare data` found every migrated table matching (an idle source leaves the origin behind by publication-filtered WAL, which is not loss). Changes applied, sequences synced. |
-| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification found changes missing on the target (`pgcopydb compare data` backed the refusal); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
+| `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. Any other reading, in either direction, is decided by content, which is the path nearly every cutover takes, because publication-filtered WAL and unapplied commits measure alike. Changes applied, sequences synced. |
+| `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change (`pgcopydb compare data` either found a difference or produced no verdict); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
 | `Verified` | `Unknown` | `VerificationRunning` | A `pgcopydb compare` Job is running. |
 | `Verified` | `True` | `ComparePassed` | Every requested compare found source and target matching. |
 | `Verified` | `False` | `SchemaMismatch` | `pgcopydb compare schema` reported differences. |

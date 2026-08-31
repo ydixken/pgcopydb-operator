@@ -10,10 +10,10 @@
 FROM debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258 AS build
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-2-gea87951, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-5-ge37d2bd, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=ea87951753f06361550c0a1357da7b42c3c55034
-ARG PGCOPYDB_VERSION=0.18.2.gea87951
+ARG PGCOPYDB_SHA=e37d2bd4dd10b7ed7b415555ce3318202d9633cf
+ARG PGCOPYDB_VERSION=0.18.5.ge37d2bd
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.
