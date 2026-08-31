@@ -1,0 +1,9 @@
+# The build copies the repository in to warm the module and build caches, so
+# keep out everything that does not affect a compile. .git alone is most of it.
+.git
+.claude/worktrees
+.worktrees
+site
+bin
+cover.out
+docs/superpowers

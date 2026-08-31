@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   push:
-    runs-on: ubuntu-latest
+    runs-on: github-runner-pgcopydb-operator
     steps:
       - uses: actions/checkout@v7
       - uses: oras-project/setup-oras@v2

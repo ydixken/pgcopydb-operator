@@ -1,0 +1,105 @@
+name: GitHub runner image
+
+# The image both runner scale sets boot. Weekly, because the apt packages it
+# installs move without anything in this repository changing. Everything else
+# is pinned, so it moves through a Renovate pull request: merging one rebuilds
+# the image, because the paths filter below watches the Dockerfile. Go and
+# promtool come from go.mod and hack/ensure-promtool.sh, which the same filter
+# watches, so the image follows the versions the Makefile actually uses.
+#
+# Only this repository can reach the runners it builds for, so the schedule is
+# harmless on a fork: the job would build an image nothing runs.
+
+on:
+  schedule:
+    # Monday 04:00 UTC, before auto-release.yml cuts the weekly candidate, so a
+    # release is gated by the same image the week's CI ran on.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/github-runner-image.yml"
+      - "images/github-runner/Dockerfile"
+      - "images/github-runner/Dockerfile.dockerignore"
+      - "images/github-runner/verify.sh"
+      # The Go and promtool versions are read out of these at build time.
+      - "go.mod"
+      - "hack/ensure-promtool.sh"
+
+# A half-pushed image is worse than a queued second run, matching
+# pgcopydb-builder.yml. It also keeps two buildah runs off one node's storage.
+concurrency:
+  group: github-runner-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/github-runner
+
+jobs:
+  build:
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - uses: actions/checkout@v7
+
+      # buildah rather than the dind sidecar: this builds the image the runner
+      # pods themselves boot, and handing that job to a privileged Docker
+      # daemon is more access than a build needs. buildah runs rootless here,
+      # as uid 1001, which the base image already has subuid and subgid ranges
+      # for. Once the new image is in service this step is a no-op, because it
+      # carries buildah itself.
+      - name: Install buildah, which the runner image lacks
+        run: |
+          if ! command -v buildah >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq buildah uidmap
+          fi
+
+      - id: meta
+        # A date tag so a bad week can be rolled back to a named image, and
+        # :latest because that is the tag the scale sets track.
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        # vfs, not overlay: overlay wants either root or a kernel that will
+        # give an unprivileged user a mount, and this pod is neither. vfs costs
+        # disk and time on a weekly build, which is the cheap side of the trade.
+        # The context is the repository root, not images/github-runner, because
+        # the build reads go.mod, hack/ensure-promtool.sh and the source tree.
+        run: |
+          buildah bud \
+            --storage-driver vfs \
+            --platform linux/amd64 \
+            --file images/github-runner/Dockerfile \
+            --tag "$IMAGE:${{ steps.meta.outputs.date }}" \
+            --tag "$IMAGE:latest" \
+            .
+
+      - name: Prove the image carries what the jobs reach for
+        # Before the push, so a bad build never becomes the image anything
+        # boots. The script is a file in the repository rather than a heredoc:
+        # a heredoc inside a YAML block scalar cannot close, because its
+        # terminator has to sit at column zero and the block indents it.
+        run: |
+          ctr=$(buildah --storage-driver vfs from --pull=never "$IMAGE:${{ steps.meta.outputs.date }}")
+          trap 'buildah --storage-driver vfs rm "$ctr" >/dev/null 2>&1 || true' EXIT
+          buildah --storage-driver vfs copy "$ctr" images/github-runner/verify.sh /tmp/verify.sh
+          {
+            echo "### Runner image \`$IMAGE:${{ steps.meta.outputs.date }}\`"
+            echo
+            buildah --storage-driver vfs run "$ctr" -- bash /tmp/verify.sh
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          buildah login --storage-driver vfs \
+            --username "${{ github.actor }}" --password-stdin ghcr.io <<< "$GHCR_TOKEN"
+          for tag in "${{ steps.meta.outputs.date }}" latest; do
+            buildah push --storage-driver vfs "$IMAGE:$tag" "docker://$IMAGE:$tag"
+          done

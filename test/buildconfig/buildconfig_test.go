@@ -332,8 +332,8 @@ func TestWorkflowActionInventory(t *testing.T) {
 		}
 	}
 
-	if files != 9 {
-		t.Errorf("workflow inventory contains %d YAML files, want 9", files)
+	if files != 10 {
+		t.Errorf("workflow inventory contains %d YAML files, want 10", files)
 	}
 	if references != 52 {
 		t.Errorf("workflow inventory contains %d action references, want 52", references)
