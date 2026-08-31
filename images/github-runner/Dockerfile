@@ -115,8 +115,8 @@ RUN set -eux; \
     [ -n "$crd_ref" ] || { echo "Taskfile.yml has no crd-ref-docs pin" >&2; exit 1; }; \
     GOBIN="$LOCALBIN" go install "$crd_ref"; \
     go clean -cache; \
-    cd /; rm -rf /tmp/src; \
-    chown -R runner:runner "$LOCALBIN" /home/runner/go
+    cd /; rm -rf /tmp/src /home/runner/.cache/go-build; \
+    chown -R runner:runner "$LOCALBIN" /home/runner/go /home/runner/.cache
 
 # The module cache is baked and stays writable, so a go.sum that has moved
 # since the last rebuild fetches only the difference. Modules are worth carrying

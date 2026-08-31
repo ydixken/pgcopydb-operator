@@ -65,6 +65,15 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+      # The buildx layer cache goes on the node, next to the Go caches,
+      # rather than through GitHub's cache service. One directory per image,
+      # so rebuilding one cannot evict another's layers.
+      - id: cachemgr
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/buildx-manager
+          [ -O /cache/buildx-manager ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-manager
+          echo "dir=/cache/buildx-manager" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -75,6 +84,8 @@ jobs:
           # without it a released image reports "dev".
           build-args: |
             VERSION=${{ github.ref_name }}
+          cache-from: ${{ steps.cachemgr.outputs.dir && format('type=local,src={0}', steps.cachemgr.outputs.dir) || '' }}
+          cache-to: ${{ steps.cachemgr.outputs.dir && format('type=local,dest={0},mode=max', steps.cachemgr.outputs.dir) || '' }}
 
   runner-image:
     runs-on: github-runner-pgcopydb-operator
@@ -123,12 +134,23 @@ jobs:
           fi
       - name: Build the pgcopydb builder image
         if: steps.builder.outputs.exists != 'true'
+      # The buildx layer cache goes on the node, next to the Go caches,
+      # rather than through GitHub's cache service. One directory per image,
+      # so rebuilding one cannot evict another's layers.
+      - id: cachebld
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/buildx-pgcopydb-builder
+          [ -O /cache/buildx-pgcopydb-builder ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-pgcopydb-builder
+          echo "dir=/cache/buildx-pgcopydb-builder" >> "$GITHUB_OUTPUT"
         uses: docker/build-push-action@v7
         with:
           context: images/pgcopydb-builder
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}/pgcopydb-builder:${{ steps.pin.outputs.sha }}
+          cache-from: ${{ steps.cachebld.outputs.dir && format('type=local,src={0}', steps.cachebld.outputs.dir) || '' }}
+          cache-to: ${{ steps.cachebld.outputs.dir && format('type=local,dest={0},mode=max', steps.cachebld.outputs.dir) || '' }}
       - name: Decide whether this tag also moves :latest
         id: tags
         # See manager-image: an rc must not move the tag a `helm install`
@@ -143,12 +165,23 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+      # The buildx layer cache goes on the node, next to the Go caches,
+      # rather than through GitHub's cache service. One directory per image,
+      # so rebuilding one cannot evict another's layers.
+      - id: cacherun
+        run: |
+          [ -d /cache ] || exit 0
+          sudo mkdir -p /cache/buildx-runner
+          [ -O /cache/buildx-runner ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-runner
+          echo "dir=/cache/buildx-runner" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
           context: images/runner
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.list }}
+          cache-from: ${{ steps.cacherun.outputs.dir && format('type=local,src={0}', steps.cacherun.outputs.dir) || '' }}
+          cache-to: ${{ steps.cacherun.outputs.dir && format('type=local,dest={0},mode=max', steps.cacherun.outputs.dir) || '' }}
       - name: Smoke-test pgcopydb and pg_dump versions
         # The build canary already asserts versions on both platforms; this
         # proves the pushed image actually runs and carries the fork-built
