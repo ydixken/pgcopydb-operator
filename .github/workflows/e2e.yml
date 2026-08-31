@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published release tag to install, for example v0.5.0
+        description: Published release tag to install, for example v0.11.3
         required: false
         type: string
       scale:

@@ -49,6 +49,7 @@ const (
 	mainTest          = "../../cmd/main_test.go"
 	pollerTest        = "../../internal/progress/poller_test.go"
 	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
+	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
 )
 
 func read(t *testing.T, path string) string {
@@ -244,6 +245,17 @@ func TestReleasePromotionWaitsForCandidateChecks(t *testing.T) {
 	}
 	if promote.If != "" {
 		t.Errorf("release.yml promote has job-level if %q; default dependency handling must gate promotion", promote.If)
+	}
+}
+
+func TestE2EDefaultRelease(t *testing.T) {
+	re := regexp.MustCompile(`(?m)^var operatorTag = "([^"]+)"$`)
+	match := re.FindStringSubmatch(read(t, e2eSuite))
+	if match == nil {
+		t.Fatal("e2e suite declares no operatorTag default")
+	}
+	if got, want := match[1], "v0.11.3"; got != want {
+		t.Errorf("e2e operatorTag default is %s, want %s", got, want)
 	}
 }
 
