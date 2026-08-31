@@ -7,7 +7,8 @@
 - [x] Record approval for the selected design.
 - [x] Write the design specification.
 - [x] Self-review the design artifacts for scope, ambiguity, contradictions, and placeholders.
-- [ ] Draft the implementation plan.
+- [x] Draft the implementation plan.
+- [ ] Review the implementation plan before implementation starts.
 - [ ] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
 - [ ] Obtain an independent review of the implementation.
 - [ ] Run `task lint` and `task test` for the implementation.
@@ -17,6 +18,7 @@
 ## Review and results
 
 - Independent design review: corrected the e2e scenario scope, marker query, persistent-session failure boundary, and implementation coverage.
+- Implementation plan review: pending.
 - Implementation review:
 - Verification results:
 - Guarded e2e decision:
