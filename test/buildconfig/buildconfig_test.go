@@ -41,6 +41,7 @@ const (
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
 	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
+	promoteWorkflow   = "../../.github/workflows/promote.yml"
 	workflowDir       = "../../.github/workflows"
 	ciWorkflow        = "../../.github/workflows/ci.yml"
 	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
@@ -227,31 +228,47 @@ type workflow struct {
 	Jobs map[string]workflowJob `json:"jobs"`
 }
 
-func TestReleasePromotionWaitsForCandidateChecks(t *testing.T) {
+// Promotion is manual and lives in its own workflow, so a release can have
+// several candidates before one becomes it. That moved the gate out of the
+// dependency graph, where GitHub enforced it, and into a step that has to
+// check for itself: without this, a candidate whose e2e failed could be
+// promoted by typing its tag into the dispatch form.
+func TestPromotionChecksTheCandidatePassedE2e(t *testing.T) {
+	body := read(t, promoteWorkflow)
+
 	var wf workflow
-	if err := yaml.Unmarshal([]byte(read(t, releaseWorkflow)), &wf); err != nil {
-		t.Fatalf("parse release.yml: %v", err)
+	if err := yaml.Unmarshal([]byte(body), &wf); err != nil {
+		t.Fatalf("parse promote.yml: %v", err)
+	}
+	if _, ok := wf.Jobs["promote"]; !ok {
+		t.Fatal("promote.yml has no promote job")
+	}
+	if release, err := yaml.Marshal(mustParse(t, releaseWorkflow).Jobs); err == nil {
+		if strings.Contains(string(release), "Push the stable tag") {
+			t.Error("release.yml still pushes the stable tag; promotion must be the manual workflow alone")
+		}
 	}
 
-	promote, ok := wf.Jobs["promote"]
-	if !ok {
-		t.Fatal("release.yml has no promote job")
+	for _, want := range []struct{ needle, why string }{
+		{`select(.name == "e2e")`, "it must read the candidate's own e2e job"},
+		{`!= "success"`, "anything other than success, including skipped, must refuse"},
+		{"refusing to promote", "the refusal must say so rather than pass quietly"},
+		{"already exists", "a stable tag that exists must not be promoted over"},
+		{"RELEASE_TAG_KEY", "the stable tag must start release.yml, which GITHUB_TOKEN cannot"},
+	} {
+		if !strings.Contains(body, want.needle) {
+			t.Errorf("promote.yml is missing %q: %s", want.needle, want.why)
+		}
 	}
-	if len(promote.Needs) == 0 {
-		t.Fatal("release.yml promote job declares no prerequisites")
-	}
+}
 
-	var needs []string
-	if err := json.Unmarshal(promote.Needs, &needs); err != nil {
-		t.Fatalf("parse release.yml promote needs: %v", err)
+func mustParse(t *testing.T, path string) workflow {
+	t.Helper()
+	var wf workflow
+	if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
-	want := []string{"e2e", "release-notes"}
-	if !slices.Equal(needs, want) {
-		t.Errorf("release.yml promote needs %v, want exactly %v", needs, want)
-	}
-	if promote.If != "" {
-		t.Errorf("release.yml promote has job-level if %q; default dependency handling must gate promotion", promote.If)
-	}
+	return wf
 }
 
 func TestE2EDefaultRelease(t *testing.T) {
@@ -351,8 +368,8 @@ func TestWorkflowActionInventory(t *testing.T) {
 		}
 	}
 
-	if files != 10 {
-		t.Errorf("workflow inventory contains %d YAML files, want 10", files)
+	if files != 11 {
+		t.Errorf("workflow inventory contains %d YAML files, want 11", files)
 	}
 	if references != 51 {
 		t.Errorf("workflow inventory contains %d action references, want 51", references)

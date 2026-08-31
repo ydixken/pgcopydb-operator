@@ -324,45 +324,6 @@ jobs:
             kubectl delete clusters.postgresql.cnpg.io,jobs,pvc --all -n "$ns" --ignore-not-found --timeout=5m
           done
 
-  promote:
-    # Turning v0.4.1-rc.2 into v0.4.1 pushes a new tag and lets that tag run
-    # this whole workflow again; nothing is rebuilt here. The two runs are not
-    # byte-identical: the manager bakes GITHUB_REF_NAME into its binary via
-    # ldflags, and the chart's version and appVersion track it too, so both
-    # differ between the candidate and the stable release by construction.
-    # The runner's apt layers float on purpose, so a security update can land
-    # on the stable image even though the candidate predates it. What does
-    # hold still is the runner's pgcopydb layer: both runs copy it from the
-    # same pgcopydb-builder tag, keyed by the pinned commit rather than by
-    # GITHUB_REF_NAME.
-    #
-    # The recursion stops one level down. The tag pushed here has no -rc., so
-    # in that run the e2e job's `if` skips, and promote skips with it.
-    needs: [e2e, release-notes]
-    runs-on: github-runner-pgcopydb-operator
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Tags come with the full history only, and the check below has to
-          # see an existing stable tag rather than tag over it.
-          fetch-depth: 0
-          # Pushing under the deploy key is what makes this tag start another
-          # release run; see the same note in auto-release.yml. The key also
-          # carries the write, which is why this job needs no contents: write.
-          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
-      - name: Push the stable tag
-        run: |
-          stable="${GITHUB_REF_NAME%-rc.*}"
-          if git rev-parse -q --verify "refs/tags/$stable" >/dev/null; then
-            echo "$stable already exists, nothing to promote." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$stable" -m "$stable: promoted from $GITHUB_REF_NAME"
-          git push origin "$stable"
-          echo "Promoted $GITHUB_REF_NAME to $stable." >> "$GITHUB_STEP_SUMMARY"
-
   e2e-failed:
     # A failed candidate is otherwise silent: its artifacts stay published, the
     # GitHub release stays a prerelease, `latest` never moved, and the next

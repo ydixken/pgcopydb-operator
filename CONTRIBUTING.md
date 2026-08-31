@@ -119,7 +119,13 @@ Releases cut themselves. Every Monday at 08:00 UTC `auto-release.yml` reads what
 
 That tag starts `release.yml`, which publishes the manager and runner images (multi-arch) and the Helm chart as OCI, creates the GitHub release whose notes GitHub generates from the merged PRs, and runs the e2e suite against exactly those artifacts on the cluster.
 
-Pass, and the workflow pushes the stable tag `vX.Y.Z`, which starts the same workflow once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease. Fail, and nothing is promoted: the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main`, and the next candidate carries the fix.
+Fail, and the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main`, and the next candidate carries the fix.
+
+Pass, and nothing happens on its own. Promotion is [promote.yml](.github/workflows/promote.yml), dispatched by hand with the candidate tag. That is what lets several candidates stand between two releases: a candidate that is never promoted just stays a candidate, and rc.2 can supersede rc.1 without rc.1 having already become the release.
+
+Promoting pushes the stable tag `vX.Y.Z`, which starts `release.yml` once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease.
+
+The gate used to be `needs: [e2e, release-notes]`, which GitHub enforced. A manual promotion has to earn that back, so `promote.yml` reads the candidate's own release run and refuses unless its `e2e` job concluded `success`. Skipped, cancelled and never-ran are all refusals, not passes.
 
 > [!important]
 > A release candidate publishes under its own tag and never moves `latest`.
