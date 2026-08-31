@@ -14,8 +14,8 @@
 
 - [x] Write the implementation plan from the approved and reviewed design.
 - [x] Complete an independent review of the implementation plan before implementation.
-- [ ] Get user approval for the implementation plan before implementation.
-- [ ] Enable GitHub Dependency Graph through the repository Settings UI.
+- [x] Get user approval for the implementation plan before implementation.
+- [ ] Enable GitHub Dependency Graph through the repository Settings UI (Task 1 prerequisite in progress).
 - [ ] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
 - [ ] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
 - [ ] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
