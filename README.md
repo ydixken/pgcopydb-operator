@@ -52,7 +52,7 @@ images/pgcopydb-builder/   # publishes the pgcopydb binary the runner image copi
 images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
 test/e2e/                  # e2e suite: locally against your kubectl context, in CI against a release candidate
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
-.github/workflows/         # CI, weekly release and promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata
+.github/workflows/         # CI, weekly candidate and manual promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata
 Taskfile.yml               # task help | lint | test | e2e
 ```
 

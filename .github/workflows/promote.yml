@@ -1,0 +1,98 @@
+name: Promote a release candidate
+
+# Turns a candidate that passed its gate into the stable release, on purpose
+# and by hand. release.yml used to do this the moment e2e went green, which
+# made every candidate the release: there was no way to cut rc.2 over rc.1
+# without rc.1 already being vX.Y.Z. Several candidates can now stand between
+# two releases, and a candidate that is never promoted simply stays a
+# candidate.
+#
+# Pushing the stable tag starts release.yml again on the same commit, which is
+# what publishes the release proper and moves :latest.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: "Candidate tag to promote, for example v0.12.1-rc.2"
+        required: true
+        type: string
+
+# Two promotions at once would race for the same stable tag.
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  promote:
+    runs-on: github-runner-pgcopydb-operator
+    steps:
+      - name: Check the tag is a candidate
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          case "$CANDIDATE" in
+            v*-rc.*) ;;
+            *)
+              echo "::error::$CANDIDATE is not a candidate tag (vX.Y.Z-rc.N)"
+              exit 1 ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          # The tag history, so the checks below can see both tags. The deploy
+          # key rather than GITHUB_TOKEN for the push: a tag pushed with the
+          # workflow token starts no workflow, and the stable tag has to start
+          # release.yml. Same reasoning as auto-release.yml.
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
+      - name: Check the candidate exists and is not already promoted
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          if ! git rev-parse -q --verify "refs/tags/$CANDIDATE" >/dev/null; then
+            echo "::error::$CANDIDATE does not exist"
+            exit 1
+          fi
+          stable="${CANDIDATE%-rc.*}"
+          if git rev-parse -q --verify "refs/tags/$stable" >/dev/null; then
+            echo "::error::$stable already exists; $CANDIDATE cannot be promoted twice"
+            exit 1
+          fi
+          echo "stable=$stable" >> "$GITHUB_ENV"
+      - name: Check the candidate passed its gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE: ${{ inputs.candidate }}
+        # release.yml used to gate this with `needs: [e2e, release-notes]`, and
+        # a manual promotion has to earn that back rather than take the
+        # operator's word for it. An e2e job that was skipped, cancelled or
+        # never ran is not a pass.
+        run: |
+          run=$(gh run list --workflow=release.yml --branch "$CANDIDATE" \
+                  --limit 1 --json databaseId,conclusion -q '.[0]')
+          if [ -z "$run" ] || [ "$run" = "null" ]; then
+            echo "::error::no release.yml run found for $CANDIDATE"
+            exit 1
+          fi
+          id=$(printf '%s' "$run" | jq -r .databaseId)
+          e2e=$(gh api "repos/$GH_REPO/actions/runs/$id/jobs" \
+                  -q '[.jobs[] | select(.name == "e2e")] | .[0].conclusion // "missing"')
+          if [ "$e2e" != "success" ]; then
+            echo "::error::$CANDIDATE e2e concluded \"$e2e\" in run $id, refusing to promote"
+            exit 1
+          fi
+          echo "Candidate \`$CANDIDATE\` passed e2e in run $id." >> "$GITHUB_STEP_SUMMARY"
+      - name: Push the stable tag
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$stable" -m "$stable: promoted from $CANDIDATE" "$CANDIDATE^{}"
+          git push origin "$stable"
+          echo "Promoted \`$CANDIDATE\` to \`$stable\`." >> "$GITHUB_STEP_SUMMARY"
