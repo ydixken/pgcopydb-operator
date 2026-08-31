@@ -43,6 +43,7 @@ linters:
       disable:
         - omitzero
         - newexpr
+        - embedlit
   exclusions:
     generated: lax
     rules:

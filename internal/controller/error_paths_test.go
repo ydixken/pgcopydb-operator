@@ -124,6 +124,7 @@ func TestReconcile_ConflictRequeuesSilently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a conflict must not surface as an error, got %v", err)
 	}
+	//nolint:staticcheck // Assert the intentional silent rate-limited Requeue result.
 	if res != (ctrl.Result{Requeue: true}) {
 		t.Fatalf("result = %+v, want a bare requeue", res)
 	}

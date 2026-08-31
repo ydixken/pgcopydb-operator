@@ -1374,8 +1374,7 @@ func psql(cluster, sql string) string {
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	out, err := psqlDBErr(cluster, db, sql)
-	var f *psqlFailure
-	if errors.As(err, &f) {
+	if f, ok := errors.AsType[*psqlFailure](err); ok {
 		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
 	}
 	// psqlDBErr today only ever returns nil or *psqlFailure, but any other
@@ -1467,9 +1466,8 @@ func psqlDBErrWith(
 			)
 			break
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			lastStderr = string(exitErr.Stderr)
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			lastStderr = string(ee.Stderr)
 		}
 		if !transientExecError(lastStderr) {
 			break
