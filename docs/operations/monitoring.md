@@ -152,8 +152,8 @@ Reading it:
 - **Tables**, **Indexes**, and **Clone Bytes** come from pgcopydb's own catalogs, so they read N/A wherever the "patched runner" contract above does not hold.
   Clone Bytes stopping a few percent short of 100 while the other two reach it is the expected end state, for the reason given in that table.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
-  Each reads Not Run until its Job produces a result, then PASS or FAIL.
-  A check you did not enable stays Not Run.
+  Each reads Pending until its Job produces a result, then PASS or FAIL.
+  A check you did not enable stays Pending.
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
   It reads No Endpos until a cutover sets one, and 0 B once the target has caught up, which is what the screenshot shows.
 
