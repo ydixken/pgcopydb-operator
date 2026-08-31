@@ -13,7 +13,9 @@
 - [x] Revise the implementation plan for lifecycle cleanup and local subprocess tests.
 - [x] Review the broad revised plan and record why it still failed review.
 - [x] Decompose the correction into focused test-protocol and lifecycle studies.
-- [x] Integrate both studies into a copy-ready corrected implementation plan.
+- [x] Integrate both studies into a detailed implementation-plan draft.
+- [x] Review commit `dc96010` and record its remaining lifecycle-proof and stale-comment gaps.
+- [x] Correct the command-state proof, lifecycle assertions, and helper-comment coverage.
 - [ ] Obtain an independent re-review of the corrected plan before implementation starts.
 - [ ] Implement the persistent writer, update the adjacent source-target count assertion comment, and verify the marker-query and error paths.
 - [ ] Obtain an independent review of the implementation.
@@ -28,7 +30,8 @@
 - Testability research: confirmed `go test ./test/e2e -run '^TestLiveWriter' -count=1` skips `TestE2E` and `BeforeSuite`.
 - Broad revised plan review: failed because it re-resolved the primary for the final query, expected two primary calls, omitted complete helper and lifecycle test bodies, and stopped after the tracker push without checking that SHA.
 - Focused planning studies: specified the deterministic subprocess test protocol and the single-resolution close, Wait, and final-query lifecycle.
-- Corrected plan integration: complete with copy-ready tests and implementation, one captured pod, and two required-check watches.
+- Commit `dc96010` review: required proof that the persistent child was not started on `StdinPipe` failure, proof that Wait completed before every final query, and three omitted stale-comment replacements.
+- Review corrections: complete with locked command snapshots, process-state assertions, and exact bounded comment edits.
   Independent re-review is pending.
 - Implementation: pending until the corrected plan passes independent re-review.
 - Implementation review: pending.

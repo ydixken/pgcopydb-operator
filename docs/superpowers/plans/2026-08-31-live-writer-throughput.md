@@ -47,8 +47,11 @@ Three private fields default to `primaryPod`, `exec.Command`, and `liveWriteInte
 
 ## File map and interfaces
 
-- `test/e2e/live_writer_test.go`: create the standard-library helper process, deterministic file signals, command recorder, marker tests, and lifecycle tests.
-- `test/e2e/e2e_suite_test.go:1434-1494`: replace the per-row writer with one persistent child, marker helpers, private seams, and first-error lifecycle.
+- `test/e2e/live_writer_test.go`: create the standard-library helper process, deterministic file signals, command and process-state recorder, marker tests, and lifecycle tests.
+- `test/e2e/e2e_suite_test.go:213-215`: update the interval comment for persistent pipe writes.
+- `test/e2e/e2e_suite_test.go:1367-1371`: remove the obsolete claim that the live writer bypasses `psqlDB`.
+- `test/e2e/e2e_suite_test.go:1397-1404`: describe `psqlDBErr` without its obsolete live-writer purpose.
+- `test/e2e/e2e_suite_test.go:1434-1494`: replace the per-row writer with one persistent child, marker helpers, private seams, accurate writer comments, and first-error lifecycle.
 - `test/e2e/e2e_test.go:484-547`: keep the real-cluster scenario and replace the stale retry comment with the source-marker invariant.
 - `tasks/todo.md`: record observed review, verification, e2e, commit, PR, and CI facts after they happen.
 
@@ -63,6 +66,7 @@ Parent tests inject a command that records the requested production command but 
 Stream modes expose readiness, first-write, and EOF boundaries through exact file contents, so no fixed sleep decides lifecycle ordering.
 
 The tests expect two command calls after any successfully started stream: the persistent command and the required final query.
+The recorder retains every returned `*exec.Cmd` and observes that the first command already has `ProcessState` when the writer requests the second.
 They expect one primary lookup in every case.
 A third configured stream mode in the write-failure test remains unused, which proves the writer does not replace its failed stream.
 
@@ -137,11 +141,13 @@ type helperCall struct {
 }
 
 type helperCommandState struct {
-	t     *testing.T
-	mu    sync.Mutex
-	modes []string
-	env   []string
-	calls []helperCall
+	t                   *testing.T
+	mu                  sync.Mutex
+	modes               []string
+	env                 []string
+	calls               []helperCall
+	commands            []*exec.Cmd
+	firstWaitedAtSecond bool
 }
 
 func helperCommand(
@@ -157,13 +163,12 @@ func helperCommand(
 }
 
 func (s *helperCommandState) command(name string, args ...string) *exec.Cmd {
-	s.record(name, args)
-
 	s.mu.Lock()
+	s.recordRequestLocked(name, args)
 	if len(s.modes) == 0 {
 		s.mu.Unlock()
 		s.t.Errorf("unexpected command: %s %v", name, args)
-		return exec.Command(os.Args[0], "-test.run=^$")
+		return s.retainCommand(exec.Command(os.Args[0], "-test.run=^$"))
 	}
 	mode := s.modes[0]
 	s.modes = s.modes[1:]
@@ -176,16 +181,34 @@ func (s *helperCommandState) command(name string, args ...string) *exec.Cmd {
 		liveWriterHelperEnv+"=1",
 		liveWriterHelperModeEnv+"="+mode,
 	)
-	return cmd
+	return s.retainCommand(cmd)
 }
 
-func (s *helperCommandState) record(name string, args []string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *helperCommandState) recordRequestLocked(name string, args []string) {
+	if len(s.calls) == 1 {
+		s.firstWaitedAtSecond = len(s.commands) == 1 && s.commands[0].ProcessState != nil
+	}
 	s.calls = append(s.calls, helperCall{
 		name: name,
 		args: append([]string(nil), args...),
 	})
+}
+
+func (s *helperCommandState) retainCommand(cmd *exec.Cmd) *exec.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commands = append(s.commands, cmd)
+	return cmd
+}
+
+func (s *helperCommandState) recordCommand(
+	name string, args []string, cmd *exec.Cmd,
+) *exec.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordRequestLocked(name, args)
+	s.commands = append(s.commands, cmd)
+	return cmd
 }
 
 func (s *helperCommandState) callsSnapshot() []helperCall {
@@ -199,6 +222,18 @@ func (s *helperCommandState) callsSnapshot() []helperCall {
 		}
 	}
 	return calls
+}
+
+func (s *helperCommandState) commandsSnapshot() []*exec.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*exec.Cmd(nil), s.commands...)
+}
+
+func (s *helperCommandState) firstWaitedAtSecondSnapshot() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.firstWaitedAtSecond
 }
 
 type helperPaths struct {
@@ -338,9 +373,16 @@ func requireLifecycleCalls(
 	if len(calls) != wantCount {
 		t.Fatalf("command calls = %#v, want %d", calls, wantCount)
 	}
+	commands := state.commandsSnapshot()
+	if len(commands) != wantCount {
+		t.Fatalf("returned commands = %d, want %d", len(commands), wantCount)
+	}
 	requireCall(t, calls[0], helperCall{name: "kubectl", args: persistentArgs("source-1")})
 	if wantCount == 2 {
 		requireCall(t, calls[1], helperCall{name: "kubectl", args: finalQueryArgs("source-1", marker)})
+		if !state.firstWaitedAtSecondSnapshot() {
+			t.Fatal("final query was requested before the persistent command was waited")
+		}
 	}
 }
 
@@ -521,6 +563,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		_, err := w.stop()
 		requireError(t, err, "open persistent psql stdin")
 		requireLifecycleCalls(t, state, marker, 1)
+		commands := state.commandsSnapshot()
+		if commands[0].Process != nil {
+			t.Fatalf("persistent helper process = %#v, want nil", commands[0].Process)
+		}
 		if got := primaryCalls(); got != 1 {
 			t.Fatalf("primary calls = %d, want 1", got)
 		}
@@ -530,8 +576,7 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		state := &helperCommandState{t: t}
 		missing := filepath.Join(t.TempDir(), "missing")
 		command := func(name string, args ...string) *exec.Cmd {
-			state.record(name, args)
-			return exec.Command(missing)
+			return state.recordCommand(name, args, exec.Command(missing))
 		}
 		primary, primaryCalls := countingPrimary()
 		w := liveWriterForTest(t, marker, primary, command)
@@ -665,7 +710,7 @@ The repository requires every commit to remain lint-clean.
 
 **Files:**
 
-- Modify: `test/e2e/e2e_suite_test.go:1434-1494`
+- Modify: `test/e2e/e2e_suite_test.go:213-215,1367-1404,1434-1494`
 - Test: `test/e2e/live_writer_test.go`
 
 **Interfaces:**
@@ -850,7 +895,37 @@ The deferred lifecycle is registered only after `cmd.Start` succeeds.
 Once registered, it does not return early after close or Wait errors, so the final query always runs on `pod`.
 `recordErr` preserves the earliest failure while `last` still records a successful final query result.
 
-- [ ] **Step 3: Format and turn the named local suite green**
+- [ ] **Step 3: Replace the three helper comments made stale by the new writer**
+
+Replace the `liveWriteInterval` comment at `test/e2e/e2e_suite_test.go:213-215` with:
+
+```go
+// liveWriteInterval caps the average write rate at one per interval.
+// The ticker drops ticks while a persistent pipe write is blocked.
+liveWriteInterval = 200 * time.Millisecond
+```
+
+Replace the `psqlDB` function comment at `test/e2e/e2e_suite_test.go:1367-1371` with:
+
+```go
+// psqlDB runs one statement as the in-pod postgres user on the current primary
+// and returns trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for
+// spec goroutines.
+```
+
+Replace the `psqlDBErr` function comment at `test/e2e/e2e_suite_test.go:1397-1404` with:
+
+```go
+// psqlDBErr retries transient connection failures before a statement reaches
+// PostgreSQL. Each retry re-resolves the primary; connected failures stop
+// because the statement may have run and callers need not be idempotent.
+```
+
+The writer comments in Step 2 already replace the old per-row and lower-bound descriptions.
+Task 3 replaces the stale scenario comment.
+Do not change the behavior of `psqlDB` or `psqlDBErr`.
+
+- [ ] **Step 4: Format and turn the named local suite green**
 
 Run:
 
@@ -864,7 +939,7 @@ Expected: all `TestLiveWriter...` tests pass.
 The command does not execute `TestE2E`, `BeforeSuite`, or contact Kubernetes.
 `go vet` exits 0.
 
-- [ ] **Step 4: Commit the tested writer and local tests together**
+- [ ] **Step 5: Commit the tested writer and local tests together**
 
 Run:
 
@@ -958,7 +1033,8 @@ git diff main...HEAD -- test/e2e/e2e_suite_test.go test/e2e/live_writer_test.go 
 git status --short
 ```
 
-Expected: all three test or lint commands exit 0, `git diff --check` is silent, and the diff has one persistent child, one primary lookup, the same captured pod in both commands, no stream replacement, private test seams only, the exact marker query, and the retained scenario assertions.
+Expected: all three test or lint commands exit 0, and `git diff --check` is silent.
+The diff has one persistent child, one primary lookup, the same captured pod in both commands, no stream replacement, private test seams only, the exact marker query, the four corrected comment areas, and the retained scenario assertions.
 
 - [ ] **Step 2: Obtain independent implementation review**
 
@@ -972,8 +1048,10 @@ The reviewer must check:
 - `StdinPipe` and Start failures do not run the final query.
 - Start failure closes stdin after recording the Start error.
 - Every successfully started child closes stdin, waits, and queries in that order, even after write, close, or Wait errors.
+- The command recorder retains each child, proves `Process == nil` after `StdinPipe` failure, and proves `ProcessState != nil` before every final query request.
 - `recordErr` preserves the first error and final query success can still set `last`.
 - The lifecycle tests assert two command calls, `source-1` in both calls, one primary call, and no replacement stream.
+- The interval, `psqlDB`, `psqlDBErr`, writer, and scenario comments match their post-change behavior and remain within the comment limits.
 - The real scenario retains the floor, count, gap, full verification, and cleanup checks.
 
 If review finds a defect, correct it, rerun Step 1, and obtain another independent review before continuing.
@@ -1087,11 +1165,14 @@ Do not edit `tasks/todo.md` again to record that watch, because another tracker 
 - [ ] `go test ./test/e2e -run '^TestLiveWriter' -count=1` passed without invoking `TestE2E` or `BeforeSuite`.
 - [ ] `task lint`, `task test`, `go vet ./test/e2e/...`, and `git diff --check main...HEAD` exited 0.
 - [ ] Start failure records Start first, closes stdin, and does not final-query.
+- [ ] `StdinPipe` failure leaves the retained child with `Process == nil`.
 - [ ] Every successfully started child closes stdin, waits, and final-queries, including after write, close, or Wait errors.
+- [ ] Every final-query case observes the persistent child's non-nil `ProcessState` when the second command is requested.
 - [ ] `run` resolves the primary once, and both commands use the same captured pod.
 - [ ] The tests expect `source-1` in both commands, `primaryCalls() == 1`, exactly two post-Start command calls, and no replacement stream.
 - [ ] Empty and invalid marker output, final command failure, Wait failure, write failure, and first-error preservation have deterministic tests.
 - [ ] The scenario at `test/e2e/e2e_test.go:484-547` still enforces the floor, source-target count, target gap, full comparison, cleanup, and corrected source-marker comment.
+- [ ] The interval, `psqlDB`, `psqlDBErr`, and writer comments no longer describe the per-row implementation.
 - [ ] The guarded e2e result is recorded as passed or not approved, without bypassing the prompt or using `task --yes`.
 - [ ] The first required-check watch passed before the tracker commit, and the second passed for the verified remote `tracker_sha`.
 - [ ] The final handoff reports the second watch without creating another tracker update.
