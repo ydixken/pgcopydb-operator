@@ -24,10 +24,10 @@
 - [x] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
 - [x] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged.
 - [x] Update the local e2e default tag and its test to v0.11.3.
-- [ ] Review every changed dependency license and block unresolved or unacceptable licenses (Task 6 supply-chain audit and local verification in progress).
-- [ ] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
-- [ ] Run the action inventory, `git diff --check`, `task lint`, and `task test` gates.
-- [ ] Delegate independent code and workflow review, then resolve every finding.
+- [x] Review every changed dependency license and block unresolved or unacceptable licenses.
+- [x] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
+- [x] Run the action inventory, `git diff --check`, `task lint`, and `task test` gates.
+- [ ] Delegate independent code and workflow review, then resolve every finding (Task 7 documentation and final branch review in progress).
 - [ ] Push `fix/issue-95-maintenance`, open the first pull request, and record its public URL.
 - [ ] Confirm the PR `lint`, `test`, and `docs` jobs, including a non-skipped Dependency Review step.
 - [ ] Dispatch `runner-smoke.yml` on the branch and require the multi-platform build to pass.
@@ -77,4 +77,3 @@
 - Revised-design `task test` exited 0 after all 13 non-e2e Go packages passed.
 - Independent review approved the implementation plan at `b47dd9d` with no blockers.
 - E2e was not run during setup because it targets a real Kubernetes cluster.
-- Task 6 is blocked pending a replan that reconciles Task 4's approved eight-file lint boundary with the committed implementation plan.
