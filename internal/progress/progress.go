@@ -149,6 +149,123 @@ t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc 'select pg_database_size(current_databas
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
+// countsScript counts relations per side: tables, tables holding data,
+// indexes, and table bytes.
+//
+// pg_relation_size, not pg_total_relation_size: the latter adds indexes and
+// TOAST, which made an empty table with a primary key count as copied, and
+// inflated the byte denominator with indexes the target has not built yet.
+// Caught against a real pair, where a target holding one populated table out
+// of three reported two.
+//
+// Three round trips, not two, because the source has to be asked about the
+// target's tables rather than its own. pgcopydb restores only the in-scope
+// schema, so the target's table list is the filter already applied; counting
+// the source unscoped would report indexes and bytes for tables this migration
+// was told to leave behind. The list is asked for first and pasted into the
+// source query, quoted by quote_literal on the way out.
+//
+// A failed side prints empty and parses to no sample, never to zero. psql
+// touches no SQLite catalog, so unlike `list progress` this is safe while the
+// clone runs, which is why these numbers can be live at all.
+const countsScript = `scope=
+tables="select c.oid, n.nspname, c.relname from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind = 'r'
+    and n.nspname not in ('pg_catalog', 'information_schema')
+    and n.nspname not like 'pg_toast%'"
+counts="select (select count(*) from t) || ' ' ||
+  (select count(*) from t where pg_relation_size(t.oid) > 0) || ' ' ||
+  (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
+  (select coalesce(sum(pg_relation_size(t.oid)), 0) from t)"
+t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "with t as ($tables) $counts") || t=
+scope=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind = 'r'
+    and n.nspname not in ('pg_catalog', 'information_schema')
+    and n.nspname not like 'pg_toast%'") || scope=
+if [ -n "$scope" ]; then
+  s=$(psql "$PGCOPYDB_SOURCE_PGURI" -XtAc "with t as ($tables
+    and (n.nspname || '.' || c.relname) in ($scope)) $counts") || s=
+else
+  s=
+fi
+printf 'source=%s\ntarget=%s\n' "$s" "$t"
+`
+
+// RelationCounts is one sample of both databases, shaped for CloneProgress.
+type RelationCounts struct {
+	TablesTotal  int64
+	TablesDone   int64
+	IndexesTotal int64
+	IndexesDone  int64
+	BytesTotal   int64
+	BytesDone    int64
+}
+
+// RelationCounts samples both sides. The table denominator comes from the
+// target, because pgcopydb restores the whole in-scope schema before copying
+// any data, so that list is already filter-applied and no filter has to be
+// reimplemented here. Indexes go the other way: the target has none until
+// post-data, which is the thing being measured.
+func (p *Poller) RelationCounts(ctx context.Context, namespace, jobName string) (*RelationCounts, error) {
+	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
+	if err != nil {
+		return nil, err
+	}
+	if pod == "" {
+		return nil, nil
+	}
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + countsScript})
+	if err != nil {
+		return nil, err
+	}
+	return parseCounts(out), nil
+}
+
+// parseCounts reads the source= and target= lines, four integers each. A side
+// that is missing, short or not numeric yields no sample at all: half a pair
+// would report a denominator against an unrelated numerator.
+func parseCounts(out []byte) *RelationCounts {
+	var src, tgt []int64
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "source="); ok {
+			src = parseFields(v)
+		} else if v, ok := strings.CutPrefix(line, "target="); ok {
+			tgt = parseFields(v)
+		}
+	}
+	if len(src) != 4 || len(tgt) != 4 {
+		return nil
+	}
+	// No schema in the target yet, so there is nothing to report.
+	if tgt[0] == 0 {
+		return nil
+	}
+	return &RelationCounts{
+		TablesTotal:  tgt[0],
+		TablesDone:   tgt[1],
+		IndexesTotal: src[2],
+		IndexesDone:  tgt[2],
+		BytesTotal:   src[3],
+		BytesDone:    tgt[3],
+	}
+}
+
+// parseFields splits one psql row into integers, nil unless every field parsed.
+func parseFields(s string) []int64 {
+	fields := strings.Fields(s)
+	out := make([]int64, 0, len(fields))
+	for _, f := range fields {
+		v, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return nil
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // finalizingScript asks the target what pgcopydb is doing there, counting its
 // own backends by the work they are on. pgcopydb names its connections after
 // that work, "pgcopydb[54] copy worker" against "pgcopydb[32] VACUUM ANALYZE

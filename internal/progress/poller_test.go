@@ -396,3 +396,111 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
 	}
 }
+
+func TestRelationCounts(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		out  string
+		want *RelationCounts
+	}{
+		// Four fields a side: tables, tables holding data, indexes, bytes.
+		"mid copy": {
+			out: "source=60 60 85 48000000000\ntarget=60 23 0 12000000000\n",
+			want: &RelationCounts{
+				TablesTotal: 60, TablesDone: 23,
+				IndexesTotal: 85, IndexesDone: 0,
+				BytesTotal: 48000000000, BytesDone: 12000000000,
+			},
+		},
+		"index build under way": {
+			out: "source=60 60 85 48000000000\ntarget=60 60 41 47000000000\n",
+			want: &RelationCounts{
+				TablesTotal: 60, TablesDone: 60,
+				IndexesTotal: 85, IndexesDone: 41,
+				BytesTotal: 48000000000, BytesDone: 47000000000,
+			},
+		},
+		// The schema restore has not run yet. 0 of 0 is not progress, it is an
+		// absent sample, and reporting it would render "0 of 0" on a tile.
+		"target empty":  {out: "source=60 60 85 48000000000\ntarget=0 0 0 0\n"},
+		"source failed": {out: "source=\ntarget=60 23 0 12000000000\n"},
+		"target failed": {out: "source=60 60 85 48000000000\ntarget=\n"},
+		"short row":     {out: "source=60 60 85\ntarget=60 23 0 12\n"},
+		"not a number":  {out: "source=60 60 85 oom\ntarget=60 23 0 12\n"},
+		"no output":     {out: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeExec{pod: "p", out: []byte(tc.out)}
+			got, err := NewFromExec(f, nil).RelationCounts(ctx, "ns", "job")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("got %+v, want no sample", got)
+				}
+				return
+			}
+			if got == nil || *got != *tc.want {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRelationCounts_NoPodOrError(t *testing.T) {
+	ctx := context.Background()
+	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).RelationCounts(ctx, "ns", "job"); got != nil || err != nil {
+		t.Fatalf("no pod: got %+v, %v; want nil, nil", got, err)
+	}
+	f := &fakeExec{pod: "p", execErr: errors.New("boom")}
+	if _, err := NewFromExec(f, nil).RelationCounts(ctx, "ns", "job"); err == nil {
+		t.Fatal("exec failure must surface as an error")
+	}
+}
+
+// Counting a TOAST or system relation is wrong in a way that still looks
+// plausible on a tile, so the query has to exclude them by name.
+func TestRelationCountsScript_ExcludesSystemSchemas(t *testing.T) {
+	for _, want := range []string{"pg_catalog", "information_schema", "pg_toast", "relkind"} {
+		if !strings.Contains(countsScript, want) {
+			t.Errorf("countsScript does not mention %q", want)
+		}
+	}
+}
+
+// pg_total_relation_size adds indexes and TOAST to the table's own bytes, so
+// an empty table carrying a primary key reads as copied and the byte
+// denominator counts indexes the target has not built. Verified against a real
+// pair: a target holding one populated table of three reported two.
+func TestRelationCountsScript_MeasuresTheTableNotItsIndexes(t *testing.T) {
+	if strings.Contains(countsScript, "pg_total_relation_size") {
+		t.Error("countsScript uses pg_total_relation_size; an empty table with an " +
+			"index then counts as copied. Use pg_relation_size.")
+	}
+	if !strings.Contains(countsScript, "pg_relation_size") {
+		t.Error("countsScript measures no relation size at all")
+	}
+}
+
+// The source must be asked about the target's tables, not its own. pgcopydb
+// restores only the in-scope schema, so an unscoped source count reports
+// indexes and bytes for tables this migration was told to leave behind, and a
+// filtered migration then shows a denominator it can never reach.
+func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
+	for _, want := range []string{
+		"string_agg(quote_literal(", // the list is built, and quoted
+		"in ($scope)",               // and the source query uses it
+		`if [ -n "$scope" ]`,        // an empty list would be a syntax error
+	} {
+		if !strings.Contains(countsScript, want) {
+			t.Errorf("countsScript is missing %q", want)
+		}
+	}
+	// The scope is read off the target; asking the source would defeat it.
+	scope := countsScript[strings.Index(countsScript, "scope=$("):]
+	scope = scope[:strings.Index(scope, "\nif ")]
+	if !strings.Contains(scope, "PGCOPYDB_TARGET_PGURI") || strings.Contains(scope, "SOURCE") {
+		t.Errorf("the table list must come from the target:\n%s", scope)
+	}
+}
