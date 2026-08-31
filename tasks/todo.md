@@ -1,24 +1,76 @@
 # Issue 95 maintenance plan
 
-- [x] Create an isolated worktree and record the clean baseline.
-- [x] Read issue 95, the repository docs, and the affected code and workflows.
-- [x] Present a minimal design with trade-offs and get approval before implementation.
-- [x] Write the approved design to `docs/superpowers/specs/2026-08-31-issue-95-dependency-refresh-design.md`.
-- [x] Self-review the written spec for placeholders, contradictions, scope, ambiguity, and prohibited dashes.
-- [ ] Get the user's review of the written spec before planning implementation.
-- [ ] Add a deterministic check for each planned behavior or dependency change.
-- [ ] Fix the root causes, add tests, and update affected documentation.
-- [ ] Bump Go and existing dependencies after compatibility, license, and security checks.
-- [ ] Verify the GitHub Actions workflows, including CI, release, auto-release, and branch-safe trigger behavior.
-- [ ] Confirm the authorized candidate and stable real-cluster e2e gates, then verify their cleanup steps.
-- [ ] Delegate independent code review and lint, unit, workflow, release, and e2e verification.
-- [ ] Push the test branch and confirm every required GitHub Actions check before integration.
-- [ ] Record final command, CI, release, and e2e evidence in the review below.
+## Design gate
+
+- [x] Create an isolated worktree at `fix/issue-95-maintenance` and record the clean baseline.
+- [x] Read issue 95, repository documentation, affected code, and all nine workflows.
+- [x] Present the two-pull-request design with trade-offs and get user approval.
+- [x] Get user approval for the release promotion fix and permanent dependency gate.
+- [x] Revise `docs/superpowers/specs/2026-08-31-issue-95-dependency-refresh-design.md` with the approved gates and stop rules.
+- [x] Self-review the revised spec for placeholders, contradictions, exact mappings, semantic line breaks, prohibited dashes, private information, and runnable commands.
+- [ ] Complete an independent review of the revised written spec before implementation planning.
+
+## First pull request
+
+- [ ] Write the implementation plan from the approved and reviewed design.
+- [ ] Enable GitHub Dependency Graph through the repository Settings UI.
+- [ ] Confirm Dependency Graph with `gh api repos/ydixken/pgcopydb-operator/dependency-graph/sbom --jq '.sbom.creationInfo.created'`.
+- [ ] Add the conditional pull-request-only Dependency Review step to the required CI lint job with the approved severity, scopes, and license allowlist.
+- [ ] Add parsed regression coverage for the promotion job's exact `needs` list and empty job-level `if`.
+- [ ] Make `promote` depend on `e2e` and `release-notes` while keeping those candidate jobs parallel.
+- [ ] Upgrade all 51 existing Action references and add the one approved Dependency Review reference.
+- [ ] Upgrade Go, golangci-lint, and the approved direct and indirect Go modules within the compatibility limits.
+- [ ] Refresh the public base-image digests and keep the unpublished internal builder digest unchanged.
+- [ ] Update the local e2e default tag and its test to v0.11.3.
+- [ ] Review every changed dependency license and block unresolved or unacceptable licenses.
+- [ ] Run pinned `govulncheck@v1.7.0` in default non-JSON mode and require exit 0 with no reachable known vulnerability.
+- [ ] Run the action inventory, `git diff --check`, `task lint`, and `task test` gates.
+- [ ] Delegate independent code and workflow review, then resolve every finding.
+- [ ] Push `fix/issue-95-maintenance`, open the first pull request, and record its public URL.
+- [ ] Confirm the PR `lint`, `test`, and `docs` jobs, including a non-skipped Dependency Review step.
+- [ ] Dispatch `runner-smoke.yml` on the branch and require the multi-platform build to pass.
+- [ ] Dispatch `e2e.yml` on the branch with tag v0.11.3 and scale 0.1, then confirm the environment rejects it before runner assignment.
+- [ ] Merge the first pull request only after all first-pull-request gates pass.
+- [ ] Confirm post-merge `ci.yml`, `docs.yml`, and `mirror-to-gitlab.yml` on `main`.
+- [ ] Confirm `pgcopydb-builder.yml` publishes a linux/amd64 and linux/arm64 manifest from the first merge.
+- [ ] Dispatch the merged `e2e.yml` from `main` with tag v0.11.3 and scale 0.1, then require suite and cleanup success.
+
+## Builder digest pull request
+
+- [ ] Read the published builder index digest and verify its linux/amd64 and linux/arm64 manifests.
+- [ ] Create a second branch from the exact first-merge `main` commit.
+- [ ] Change only the internal builder digest and any narrowly required existing test expectation.
+- [ ] Run `git diff --check`, `task lint`, and `task test` on the digest-only change.
+- [ ] Push the second branch, open the digest pull request, and record its public URL.
+- [ ] Confirm the second PR `lint`, `test`, and `docs` jobs, including Dependency Review.
+- [ ] Dispatch `runner-smoke.yml` on the second branch and require success.
+- [ ] Merge the digest pull request only after all second-pull-request gates pass.
+- [ ] Confirm post-merge `ci.yml` and `mirror-to-gitlab.yml` on the final `main` commit.
+- [ ] Re-read the builder manifest and confirm `images/runner/Dockerfile` pins its exact index digest.
+
+## Metadata and full release chain
+
+- [ ] Dispatch `artifacthub-metadata.yml` on final `main` and require the ORAS metadata push to pass.
+- [ ] Reconcile the next expected version with public tag history, and stop if it is not v0.12.0-rc.1.
+- [ ] Dispatch `auto-release.yml` on final `main` and require the candidate job to publish v0.12.0-rc.1.
+- [ ] Confirm candidate manager images, runner images, Helm chart, and GitHub prerelease publication.
+- [ ] Confirm candidate `e2e` and `release-notes` start in parallel after `chart`.
+- [ ] Require candidate e2e at scale 0.1 and its cleanup step to pass.
+- [ ] Confirm `promote` starts only after candidate e2e and release creation pass, then publishes v0.12.0.
+- [ ] Confirm the stable release publishes the manager images, runner images, Helm chart, GitHub release, and intended `latest` tags.
+- [ ] Require stable-tag `e2e.yml` and its cleanup step to pass.
+- [ ] Confirm mirror runs for the candidate and stable tags.
+- [ ] Verify candidate, stable, and `latest` image indexes and both expected platforms.
+- [ ] Confirm all nine workflows have passed or produced their designed security-gate result on the intended trigger.
+- [ ] Delegate final review of the diff, command evidence, public workflow runs, release artifacts, and e2e results.
+- [ ] Record final command, CI, dependency, manifest, release, and e2e evidence in the review below.
 
 ## Review
 
 - Worktree setup is complete at commit `fcbc56dc813f9e026650bffd984e86c7d604241d`.
 - `go mod download` exited 0 with Go 1.27.0 on Darwin arm64.
-- `task lint` exited 0 after YAML, chart, documentation link, Prometheus rule, and Go lint checks.
-- `task test` exited 0 after all 13 non-e2e Go packages passed.
-- E2e was not run during setup because it targets the current real Kubernetes cluster.
+- Baseline `task lint` exited 0 after YAML, chart, documentation link, Prometheus rule, and Go lint checks.
+- Baseline `task test` exited 0 after all 13 non-e2e Go packages passed.
+- Revised-design `task lint` exited 0 after the same repository lint gates.
+- Revised-design `task test` exited 0 after all 13 non-e2e Go packages passed.
+- E2e was not run during setup because it targets a real Kubernetes cluster.
