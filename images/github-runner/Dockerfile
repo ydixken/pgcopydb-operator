@@ -114,14 +114,18 @@ RUN set -eux; \
     crd_ref="$(sed -n 's|.*go install \(github.com/elastic/crd-ref-docs@v[0-9.]*\).*|\1|p' Taskfile.yml | head -1)"; \
     [ -n "$crd_ref" ] || { echo "Taskfile.yml has no crd-ref-docs pin" >&2; exit 1; }; \
     GOBIN="$LOCALBIN" go install "$crd_ref"; \
-    go build ./... || true; \
+    go clean -cache; \
     cd /; rm -rf /tmp/src; \
-    chown -R runner:runner "$LOCALBIN" /home/runner/go /home/runner/.cache
+    chown -R runner:runner "$LOCALBIN" /home/runner/go
 
-# The module cache is baked at its default path and stays writable, so a job
-# needs no override and a go.sum that has moved since the last rebuild just
-# fetches the difference. The build cache is seeded with the dependency tree
-# only; this repository's own packages change per commit and belong on the node
-# under /cache, which the scale set mounts and the workflows point GOCACHE at.
+# The module cache is baked and stays writable, so a go.sum that has moved
+# since the last rebuild fetches only the difference. Modules are worth carrying
+# because they come off the network.
+#
+# The build cache is not, and `go clean -cache` above drops what building the
+# tools left behind. Compiling the dependency tree here cost 970MB of image, and
+# the jobs only read it on a node whose /cache is still empty: every node in the
+# fleet is warm, so it was pulled weekly and never read. Recomputing it costs
+# about 100 seconds, once, the first time a fresh node runs a job.
 
 USER runner
