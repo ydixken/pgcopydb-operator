@@ -22,8 +22,10 @@ package fixtures
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -68,11 +70,14 @@ func sqlFiles(t *testing.T) []string {
 	return out
 }
 
-// stages returns the fixture names run.sh runs, in order: the bare stage calls
-// plus the loop that runs the bulk loads concurrently.
+// stages returns the fixture names run.sh runs: bare stage calls, literal
+// loops, and arrays that a loop expands.
 func stages(t *testing.T, run string) []string {
 	t.Helper()
-	bare := regexp.MustCompile(`(?m)^\s*stage\s+([a-z_]+)\s*$`).FindAllStringSubmatch(run, -1)
+	// A stage may carry an argument, which is how seed_extra receives its
+	// shard index. The name is still literal in the file, which is all this
+	// needs to prove the stage has a fixture and the fixture is reached.
+	bare := regexp.MustCompile(`(?m)^\s*stage\s+([a-z_]+)(?:\s+"?\$?\w+"?)?\s*&?\s*$`).FindAllStringSubmatch(run, -1)
 	names := make([]string, 0, len(bare))
 	for _, m := range bare {
 		names = append(names, m[1])
@@ -80,10 +85,123 @@ func stages(t *testing.T, run string) []string {
 	for _, m := range regexp.MustCompile(`for \w+ in ([a-z_ ]+);`).FindAllStringSubmatch(run, -1) {
 		names = append(names, strings.Fields(m[1])...)
 	}
+	arrayLoops := regexp.MustCompile(`for\s+\w+\s+in\s+"\$\{(\w+)\[@\]\}";`)
+	for _, loop := range arrayLoops.FindAllStringSubmatchIndex(run, -1) {
+		array := run[loop[2]:loop[3]]
+		assignments := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(array) +
+			`\+?=\(([a-z_ ]*)\)\s*$`)
+		for _, assignment := range assignments.FindAllStringSubmatch(run[:loop[0]], -1) {
+			names = append(names, strings.Fields(assignment[1])...)
+		}
+	}
 	if len(names) == 0 {
 		t.Fatal("no stages parsed out of run.sh; the guards below would all pass vacuously")
 	}
 	return names
+}
+
+func TestStagesParsesAnIteratedArray(t *testing.T) {
+	run := `stages=(seed_small seed_events)
+stages+=(seed_documents)
+for s in "${stages[@]}"; do
+    stage "$s" &
+done`
+	want := []string{"seed_small", "seed_events", "seed_documents"}
+	if got := stages(t, run); !slices.Equal(got, want) {
+		t.Errorf("stages() = %v, want %v", got, want)
+	}
+}
+
+func TestStagesIgnoresArrayAppendsAfterTheLoop(t *testing.T) {
+	run := `stages=(seed_small)
+for s in "${stages[@]}"; do
+    stage "$s" &
+done
+stages+=(seed_late)`
+	want := []string{"seed_small"}
+	if got := stages(t, run); !slices.Equal(got, want) {
+		t.Errorf("stages() = %v, want %v", got, want)
+	}
+}
+
+func runFixtureScript(t *testing.T, tables, jobs string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	log := filepath.Join(tmp, "psql.log")
+	psql := `#!/bin/sh
+file=
+shards=
+shard=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f)
+            file=$2
+            shift 2
+            ;;
+        -v)
+            case "$2" in
+                extra_shards=*) shards=${2#extra_shards=} ;;
+                extra_shard=*) shard=${2#extra_shard=} ;;
+            esac
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+if [ -n "$file" ]; then
+    printf '%s extra_shards=%s extra_shard=%s\n' "$file" "$shards" "$shard" >> "$PSQL_LOG"
+    exit 0
+fi
+printf 'f\n'`
+	if err := os.WriteFile(filepath.Join(tmp, "psql"), []byte(psql), 0o755); err != nil {
+		t.Fatalf("writing fake psql: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "run.sh"))
+	cmd.Env = append(os.Environ(),
+		"PATH="+tmp+":"+os.Getenv("PATH"),
+		"PSQL_LOG="+log,
+		"SEED_SCALE=1",
+		"SEED_PROFILE=test",
+		"SEED_EXTRA_TABLES="+tables,
+		"SEED_EXTRA_MB="+tables,
+		"SEED_EXTRA_JOBS="+jobs,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run.sh failed: %v\n%s", err, out)
+	}
+	staged, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("reading psql log: %v", err)
+	}
+	return string(staged)
+}
+
+func TestRunShSkipsExtraConnectionsWithoutTables(t *testing.T) {
+	staged := runFixtureScript(t, "0", "4")
+	if strings.Contains(staged, "seed_extra.sql") {
+		t.Errorf("run.sh opened extra seed connections without extra tables:\n%s", staged)
+	}
+}
+
+func TestRunShStartsOneSessionPerExtraJob(t *testing.T) {
+	staged := runFixtureScript(t, "1", "3")
+	var got []string
+	for line := range strings.SplitSeq(staged, "\n") {
+		if strings.HasPrefix(line, "seed_extra.sql ") {
+			got = append(got, line)
+		}
+	}
+	slices.Sort(got)
+	want := []string{
+		"seed_extra.sql extra_shards=3 extra_shard=0",
+		"seed_extra.sql extra_shards=3 extra_shard=1",
+		"seed_extra.sql extra_shards=3 extra_shard=2",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("extra seed sessions = %v, want %v", got, want)
+	}
 }
 
 // includes returns the fixtures a file pulls in with \ir.
@@ -174,13 +292,121 @@ func tableBlock(t *testing.T, schema, table string) string {
 	return body
 }
 
+func dynamicConflictTargetExists(body, target string) bool {
+	const tableExpression = `format('x_%s', lpad(i::text, 3, '0'))`
+	body = regexp.MustCompile(`(?m)--.*$`).ReplaceAllString(body, "")
+	expr := regexp.QuoteMeta(tableExpression)
+	create := regexp.MustCompile(`(?s)EXECUTE\s+format\(\s*` +
+		`'CREATE TABLE IF NOT EXISTS %I\s*\(([^']*)\)'\s*,\s*` + expr + `\s*\);`).FindStringSubmatch(body)
+	insert := regexp.MustCompile(`(?s)EXECUTE\s+format\(\$f\$.*?INSERT INTO %I\b.*?` +
+		`ON CONFLICT\s*\(([^)]*)\).*?\$f\$\s*,\s*` + expr + `(?:\s*,|\s*\))`).FindStringSubmatch(body)
+	if create == nil || insert == nil || !sameConflictColumns(insert[1], target) {
+		return false
+	}
+	cols := conflictColumns(target)
+	if len(cols) == 1 {
+		inline := regexp.MustCompile(`(?im)(?:^|,)\s*` + regexp.QuoteMeta(cols[0]) +
+			`\s+[^,\n]*\b(?:PRIMARY KEY|UNIQUE)\b`)
+		if inline.MatchString(create[1]) {
+			return true
+		}
+	}
+	keys := regexp.MustCompile(`(?i)\b(?:PRIMARY KEY|UNIQUE)\s*\(([^)]*)\)`)
+	for _, key := range keys.FindAllStringSubmatch(create[1], -1) {
+		if sameConflictColumns(key[1], target) {
+			return true
+		}
+	}
+	return false
+}
+
+func conflictColumns(target string) []string {
+	cols := strings.Split(target, ",")
+	for i := range cols {
+		cols[i] = strings.TrimSpace(cols[i])
+	}
+	slices.Sort(cols)
+	return cols
+}
+
+func sameConflictColumns(a, b string) bool {
+	return slices.Equal(conflictColumns(a), conflictColumns(b))
+}
+
+func TestDynamicConflictTargetMustMatchDeclaredKey(t *testing.T) {
+	body := `EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %I (
+    id bigint PRIMARY KEY,
+    email text UNIQUE,
+    tenant_id bigint,
+    external_id text,
+    UNIQUE (external_id, tenant_id)
+)', format('x_%s', lpad(i::text, 3, '0')));
+EXECUTE format($f$
+    INSERT INTO %I (id, email, tenant_id, external_id)
+    ON CONFLICT (id) DO NOTHING
+$f$, format('x_%s', lpad(i::text, 3, '0')), 1);`
+	for _, tc := range []struct {
+		target string
+		want   bool
+	}{
+		{target: "id", want: true},
+		{target: "email", want: true},
+		{target: "tenant_id, external_id", want: true},
+		{target: "missing", want: false},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			paired := strings.Replace(body, "ON CONFLICT (id)", "ON CONFLICT ("+tc.target+")", 1)
+			if got := dynamicConflictTargetExists(paired, tc.target); got != tc.want {
+				t.Errorf("dynamicConflictTargetExists() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDynamicConflictTargetUsesThePairedExecutableTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "comment",
+			body: `-- CREATE TABLE IF NOT EXISTS %I (id bigint PRIMARY KEY)'
+EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %I (id bigint)',
+    format('x_%s', lpad(i::text, 3, '0')));
+EXECUTE format($f$
+    INSERT INTO %I (id) ON CONFLICT (id) DO NOTHING
+$f$, format('x_%s', lpad(i::text, 3, '0')), 1);`,
+		},
+		{
+			name: "different table expression",
+			body: `EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %I (id bigint PRIMARY KEY)',
+    format('y_%s', lpad(i::text, 3, '0')));
+EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %I (id bigint)',
+    format('x_%s', lpad(i::text, 3, '0')));
+EXECUTE format($f$
+    INSERT INTO %I (id) ON CONFLICT (id) DO NOTHING
+$f$, format('x_%s', lpad(i::text, 3, '0')), 1);`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if dynamicConflictTargetExists(tc.body, "id") {
+				t.Error("dynamic conflict target matched an unrelated CREATE template")
+			}
+		})
+	}
+}
+
 // TestOnConflictTargetsExistBeforeTheLoad is the constraint that limits how
 // much of schema.sql may be deferred: every bulk insert resolves ON CONFLICT
 // against an index, so that index has to exist before the insert runs, on that
 // table and not merely somewhere in the schema.
 func TestOnConflictTargetsExistBeforeTheLoad(t *testing.T) {
 	schema := read(t, "schema.sql")
-	stmt := regexp.MustCompile(`INSERT INTO ([\w.]+)[\s\S]*?ON CONFLICT \(([^)]*)\)`)
+	stmt := regexp.MustCompile(`INSERT INTO ([\w.%]+)[\s\S]*?ON CONFLICT \(([^)]*)\)`)
 	var found int
 	for _, name := range sqlFiles(t) {
 		if !strings.HasPrefix(name, "seed_") {
@@ -189,6 +415,18 @@ func TestOnConflictTargetsExistBeforeTheLoad(t *testing.T) {
 		for _, m := range stmt.FindAllStringSubmatch(read(t, name), -1) {
 			found++
 			table := strings.TrimPrefix(m[1], "public.")
+			// A stage that builds its tables dynamically inserts into %I, so
+			// there is no name to look up in schema.sql. The idempotency this
+			// test exists to protect still has to hold, so require the same
+			// file to declare the key its ON CONFLICT resolves against.
+			if table == "%I" {
+				body := read(t, name)
+				if !dynamicConflictTargetExists(body, m[2]) {
+					t.Errorf("%s inserts into a dynamic table conflicting on (%s) but"+
+						" declares no matching key in its own CREATE TABLE", name, m[2])
+				}
+				continue
+			}
 			block := tableBlock(t, schema, table)
 			cols := strings.Split(m[2], ",")
 			for i := range cols {
@@ -222,6 +460,55 @@ func TestOnConflictTargetsExistBeforeTheLoad(t *testing.T) {
 	if found != inserts || found == 0 {
 		t.Fatalf("%d of %d seed inserts resolve ON CONFLICT; every one has to, or a "+
 			"re-run duplicates instead of converging", found, inserts)
+	}
+}
+
+func TestExtraFixtureRejectsImpossibleShapes(t *testing.T) {
+	body := read(t, "seed_extra.sql")
+	for _, want := range []string{
+		"IF total_mb < n_tables THEN",
+		"IF shards < 1 OR shard < 0 OR shard >= shards THEN",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("seed_extra.sql does not enforce %q", want)
+		}
+	}
+}
+
+func TestExtraFixtureAllocatesTheExactTotalBeforeSharding(t *testing.T) {
+	body := read(t, "seed_extra.sql")
+	steps := []string{
+		"remaining_mb := total_mb - n_tables",
+		"cumulative_w := cumulative_w + weights[i]",
+		"next_allocated_mb := round(cumulative_w / total_w * remaining_mb)::bigint",
+		"mb := 1 + next_allocated_mb - allocated_mb",
+		"allocated_mb := next_allocated_mb",
+		"CONTINUE WHEN (i % shards) <> shard",
+	}
+	previous := -1
+	for _, step := range steps {
+		at := strings.Index(body, step)
+		if at < 0 {
+			t.Errorf("seed_extra.sql does not contain allocation step %q", step)
+			continue
+		}
+		if at < previous {
+			t.Errorf("seed_extra.sql performs %q before the preceding allocation step", step)
+		}
+		previous = at
+	}
+	allocationLoop := strings.LastIndex(body, "FOR i IN 1..n_tables LOOP")
+	if allocationLoop < 0 {
+		t.Fatal("seed_extra.sql has no allocation loop")
+	}
+	loopEnd := strings.Index(body[allocationLoop:], "END LOOP;")
+	if loopEnd < 0 {
+		t.Fatal("seed_extra.sql leaves the allocation loop unterminated")
+	}
+	loopEnd += allocationLoop
+	invariant := strings.Index(body, "IF allocated_mb + n_tables <> total_mb THEN")
+	if invariant < loopEnd {
+		t.Error("seed_extra.sql does not verify the exact total after the allocation loop")
 	}
 }
 

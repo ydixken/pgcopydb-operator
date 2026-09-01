@@ -1,4 +1,4 @@
--- Fixture schema for the e2e suite (profile v2). Runs as the app user against
+-- Fixture schema for the e2e suite (base fixture). Runs as the app user against
 -- the app database, so every object lands owned by app: superuser-owned
 -- objects break the clone with permission errors when restoring as app.
 -- Primary keys and unique constraints only: the non-unique secondary indexes

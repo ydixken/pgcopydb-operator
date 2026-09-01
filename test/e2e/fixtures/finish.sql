@@ -1,5 +1,5 @@
--- Fixture seed stage: everything that has to follow all three load stages
--- (profile v2). Runs alone; see run.sh.
+-- Fixture seed stage: everything that has to follow the concurrent load stages
+-- (base fixture). Runs alone; see run.sh.
 \ir prelude.sql
 
 -- The non-unique secondary indexes live here rather than in schema.sql so the
