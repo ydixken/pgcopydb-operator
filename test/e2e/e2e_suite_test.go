@@ -144,7 +144,7 @@ const (
 
 	// seedProfile names the fixture generation; bump it when the schema or
 	// the seeded shapes change so kept clusters get recreated.
-	baseSeedProfile = "v2"
+	baseSeedProfile = "v3"
 	// seedJobName and seedConfigMap are the seed Job and its mounted SQL.
 	seedJobName   = "e2e-seed"
 	seedConfigMap = "e2e-fixtures"
@@ -198,6 +198,7 @@ var (
 	cnpgInstances       = defaultCNPGInstances
 	extraTables         int
 	extraSizeMB         int
+	extraJobs           = 4
 	srcStorageSize      string
 	tgtStorageSize      string
 	workVolumeSize      string
@@ -244,6 +245,10 @@ func envTrue(name string) bool {
 	return os.Getenv(name) == "true"
 }
 
+func postgresIntAtLeast(n, minimum int) bool {
+	return n >= minimum && n <= math.MaxInt32
+}
+
 func init() {
 	// Fixture volumes take the suite-owned single-replica class at every tier.
 	// CNPG already keeps cnpgInstances copies of the data, so a replicating
@@ -271,15 +276,6 @@ func init() {
 		// basis is chosen so the round scales land on round volumes.
 		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(50), scaledSize(50), scaledSize(12)
 	}
-	// The extra tables land on both volumes, so both grow with them. Doubled,
-	// because the same bytes are written twice over a run's life: once by the
-	// seed and again by WAL, and a full volume stops the server rather than
-	// slowing it.
-	if extraSizeMB > 0 {
-		extraGi := (extraSizeMB*2 + 1023) / 1024
-		srcStorageSize = addGi(srcStorageSize, extraGi)
-		tgtStorageSize = addGi(tgtStorageSize, extraGi)
-	}
 	// E2E_STORAGE_CLASS pins the fixture volumes to one class, for clusters
 	// where several are marked default and binding is otherwise a coin flip.
 	// Set, it wins over the stress tier's ephemeral class too.
@@ -295,27 +291,52 @@ func init() {
 		cnpgInstances = n
 	}
 	// E2E_EXTRA_TABLES and E2E_EXTRA_SIZE_GB add a production-shaped spread of
-	// tables on top of the v2 fixture: many tables whose sizes are drawn from
-	// a normal distribution and normalised to the requested total. The v2
+	// tables on top of the base fixture: many tables whose sizes are drawn from
+	// a normal distribution and normalised to the requested total. The base
 	// fixture is deliberately lopsided, one table holding most of the bytes,
 	// which is the worst case for table-level parallelism and not what a real
 	// database looks like. Both must be set for either to take effect.
 	if v := os.Getenv("E2E_EXTRA_TABLES"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			panic("E2E_EXTRA_TABLES must be a non-negative integer, got " + strconv.Quote(v))
+		if err != nil || !postgresIntAtLeast(n, 0) {
+			panic("E2E_EXTRA_TABLES must be a non-negative PostgreSQL int, got " + strconv.Quote(v))
 		}
 		extraTables = n
 	}
 	if v := os.Getenv("E2E_EXTRA_SIZE_GB"); v != "" {
 		g, err := strconv.ParseFloat(v, 64)
-		if err != nil || g < 0 {
-			panic("E2E_EXTRA_SIZE_GB must be a non-negative number, got " + strconv.Quote(v))
+		mb := g * 1024
+		maxMB := min(int64((math.MaxInt-1023)/2), int64(math.MaxInt64/1750))
+		if err != nil || math.IsNaN(g) || math.IsInf(g, 0) || g < 0 || mb > float64(maxMB) {
+			panic("E2E_EXTRA_SIZE_GB must be finite, non-negative, and safely size the fixture, got " +
+				strconv.Quote(v))
 		}
-		extraSizeMB = int(g * 1024)
+		extraSizeMB = int(mb)
 	}
 	if (extraTables > 0) != (extraSizeMB > 0) {
 		panic("E2E_EXTRA_TABLES and E2E_EXTRA_SIZE_GB must be set together")
+	}
+	if extraTables > extraSizeMB {
+		panic("E2E_EXTRA_TABLES must not exceed the requested total MiB")
+	}
+	// The extra tables land on both volumes, so both grow with them. Doubled,
+	// because the same bytes are written twice over a run's life: once by the
+	// seed and again by WAL, and a full volume stops the server rather than
+	// slowing it.
+	if extraSizeMB > 0 {
+		extraGi := (extraSizeMB*2 + 1023) / 1024
+		srcStorageSize = addGi(srcStorageSize, extraGi)
+		tgtStorageSize = addGi(tgtStorageSize, extraGi)
+	}
+	// E2E_EXTRA_JOBS is how many sessions build the extra tables at once. One
+	// session writes at a fraction of what the server absorbs from several,
+	// so this is the knob that decides how long seeding takes.
+	if v := os.Getenv("E2E_EXTRA_JOBS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || !postgresIntAtLeast(n, 1) {
+			panic("E2E_EXTRA_JOBS must be a positive PostgreSQL int, got " + strconv.Quote(v))
+		}
+		extraJobs = n
 	}
 	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
 	// so a branch's controller can be exercised against real servers before it
@@ -407,6 +428,160 @@ func seedProfile() string {
 		return baseSeedProfile
 	}
 	return fmt.Sprintf("%s+x%dx%dMB", baseSeedProfile, extraTables, extraSizeMB)
+}
+
+func TestExtraFixtureVolumesGrowFromEnvironment(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "volume" {
+		for name, got := range map[string]string{
+			sourceCluster: srcStorageSize,
+			targetCluster: tgtStorageSize,
+		} {
+			if got != "27Gi" {
+				t.Errorf("%s volume = %s, want 27Gi", name, got)
+			}
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureVolumesGrowFromEnvironment$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=volume",
+		"E2E_SCALE=0.1",
+		"E2E_EXTRA_TABLES=10",
+		"E2E_EXTRA_SIZE_GB=10",
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("extra fixture subprocess failed: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureRejectsMoreTablesThanMegabytes(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "too-many-tables" {
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsMoreTablesThanMegabytes$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=too-many-tables",
+		"E2E_EXTRA_TABLES=2049",
+		"E2E_EXTRA_SIZE_GB=2",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("E2E_EXTRA_TABLES accepted more tables than the requested total MiB")
+	}
+	if !strings.Contains(string(out), "E2E_EXTRA_TABLES must not exceed the requested total MiB") {
+		t.Fatalf("unexpected rejection: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureRejectsUnsafeSizes(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "unsafe-size" {
+		return
+	}
+
+	for _, sizeGB := range []string{"NaN", "+Inf", "-Inf", "5146971002709.138671875"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsUnsafeSizes$")
+		cmd.Env = []string{
+			"E2E_TEST_CHILD=unsafe-size",
+			"E2E_EXTRA_TABLES=1",
+			"E2E_EXTRA_SIZE_GB=" + sizeGB,
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("E2E_EXTRA_SIZE_GB=%s was accepted", sizeGB)
+			continue
+		}
+		if !strings.Contains(string(out), "E2E_EXTRA_SIZE_GB must be finite, non-negative, and safely size the fixture") {
+			t.Errorf("E2E_EXTRA_SIZE_GB=%s: unexpected rejection: %v\n%s", sizeGB, err, out)
+		}
+	}
+}
+
+func TestExtraFixtureAcceptsLargestSafeRowCount(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "maximum-size" {
+		const wantMB = int64(5270498306774157)
+		if int64(extraSizeMB) != wantMB {
+			t.Errorf("extraSizeMB = %d, want %d", extraSizeMB, wantMB)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureAcceptsLargestSafeRowCount$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=maximum-size",
+		"E2E_EXTRA_TABLES=1",
+		"E2E_EXTRA_SIZE_GB=5146971002709.1376953125",
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("maximum safe extra size was rejected: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureRejectsTableCountAbovePostgresInt(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "too-many-postgres-tables" {
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsTableCountAbovePostgresInt$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=too-many-postgres-tables",
+		"E2E_EXTRA_TABLES=2147483648",
+		"E2E_EXTRA_SIZE_GB=2097152",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("E2E_EXTRA_TABLES accepted a value above the PostgreSQL int maximum")
+	}
+	if !strings.Contains(string(out), "E2E_EXTRA_TABLES must be a non-negative PostgreSQL int") {
+		t.Fatalf("unexpected rejection: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureAcceptsLargestPostgresJobCount(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "maximum-jobs" {
+		if extraJobs != math.MaxInt32 {
+			t.Errorf("extraJobs = %d, want %d", extraJobs, math.MaxInt32)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureAcceptsLargestPostgresJobCount$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=maximum-jobs",
+		"E2E_EXTRA_JOBS=2147483647",
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("maximum PostgreSQL job count was rejected: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureRejectsJobCountAbovePostgresInt(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "too-many-jobs" {
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsJobCountAbovePostgresInt$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=too-many-jobs",
+		"E2E_EXTRA_JOBS=2147483648",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("E2E_EXTRA_JOBS accepted a value above the PostgreSQL int maximum")
+	}
+	if !strings.Contains(string(out), "E2E_EXTRA_JOBS must be a positive PostgreSQL int") {
+		t.Fatalf("unexpected rejection: %v\n%s", err, out)
+	}
+}
+
+func TestPayloadGenerationDoesNotReuseV2Marker(t *testing.T) {
+	defer func(n, mb int) { extraTables, extraSizeMB = n, mb }(extraTables, extraSizeMB)
+	extraTables, extraSizeMB = 40, 8192
+
+	if got := seedProfile(); got == "v2+x40x8192MB" {
+		t.Errorf("seedProfile() = %q, which would reuse the old payload generation", got)
+	}
 }
 
 // scaleArg renders the scale for psql -v and SQL literals: plain decimal,
@@ -1086,6 +1261,7 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_PROFILE", Value: seedProfile()},
 							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
+							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
 							{Name: "PGDATABASE", Value: appDB},
 							{Name: "PGUSER", Value: appDB},

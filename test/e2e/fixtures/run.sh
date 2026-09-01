@@ -18,7 +18,8 @@ cd "$(dirname "$0")"
 stage() {
     psql -v ON_ERROR_STOP=1 -v "scale=$SEED_SCALE" -v "profile=$SEED_PROFILE" \
         -v "extra_tables=${SEED_EXTRA_TABLES:-0}" -v "extra_mb=${SEED_EXTRA_MB:-0}" \
-        -f "$1.sql" 2>&1 | sed "s|^|[$1] |"
+        -v "extra_shards=${SEED_EXTRA_JOBS:-4}" -v "extra_shard=${2:-0}" \
+        -f "$1.sql" 2>&1 | sed "s|^|[$1${2:+ $2}] |"
     return "${PIPESTATUS[0]}"
 }
 
@@ -37,18 +38,20 @@ if [ "$seeded" = t ]; then
     exit 0
 fi
 
-# seed_extra joins the concurrent group only when asked for. It is bound by
-# bytes like seed_documents, so it overlaps the row-bound stages usefully.
 stages=(seed_small seed_events seed_documents)
-if [ "${SEED_EXTRA_TABLES:-0}" -gt 0 ]; then
-    stages+=(seed_extra)
-fi
-
 pids=()
 for s in "${stages[@]}"; do
     stage "$s" &
     pids+=("$!")
 done
+# seed_extra is sharded across SEED_EXTRA_JOBS sessions, because one session
+# writes at a fraction of what the server absorbs from several.
+if [ "${SEED_EXTRA_TABLES:-0}" -gt 0 ]; then
+    for shard in $(seq 0 $(( ${SEED_EXTRA_JOBS:-4} - 1 ))); do
+        stage seed_extra "$shard" &
+        pids+=("$!")
+    done
+fi
 # Waited on one at a time so set -e reports the stage that actually failed.
 for p in "${pids[@]}"; do
     wait "$p"
