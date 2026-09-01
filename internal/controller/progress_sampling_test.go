@@ -83,6 +83,14 @@ func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.
 	return &c, nil
 }
 
+// setRelations changes what the next Sample answers, so a spec can prove a
+// later reading replaces an earlier one.
+func (f *fakeProgress) setRelations(c *progress.RelationCounts) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.relations = c
+}
+
 func (f *fakeProgress) Sample(context.Context, string, string) (*progress.Sample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -345,6 +353,44 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress).To(BeNil())
 		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+
+	It("moves the counts on every sample, not just the first", func() {
+		const name = "mig-counts-live"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// The copy is what these tiles watch, so a reading that sticks at the
+		// first sample is worse than none: a six-minute clone showed 1 of 17
+		// tables and 376KiB throughout, because the fields were only filled
+		// while they were still zero.
+		fake := &fakeProgress{
+			src: int64p(5000),
+			relations: &progress.RelationCounts{
+				TablesTotal: 17, TablesDone: 1, IndexesTotal: 41, IndexesDone: 0,
+				BytesTotal: 524312, BytesDone: 376,
+			},
+		}
+		r := newReconciler()
+		r.Progress = fake
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(1)))
+		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(376)))
+
+		fake.setRelations(&progress.RelationCounts{
+			TablesTotal: 17, TablesDone: 12, IndexesTotal: 41, IndexesDone: 8,
+			BytesTotal: 524312, BytesDone: 402000,
+		})
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(12)))
+		Expect(m.Status.Progress.IndexesDone).To(Equal(int64(8)))
+		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(402000)))
+
+		got, found := gaugeValue("pgcopydb_migration_clone_copied_bytes", migLabels(name))
+		Expect(found).To(BeTrue())
+		Expect(got).To(Equal(float64(402000)))
 	})
 
 	It("passes despite sampler errors", func() {

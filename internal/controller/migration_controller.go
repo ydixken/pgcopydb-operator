@@ -519,26 +519,26 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	}
 }
 
-// applyCounts fills the progress fields from the database estimate, leaving
-// any the catalog already answered. It is the live view during the copy; when
-// the catalog lands at clone completion or drain verification it replaces
-// this wholesale. The estimate leads pgcopydb slightly, because a table counts
-// as copied once it holds any data.
+// applyCounts writes the database estimate over whatever is there. Every
+// sample counts the databases afresh, so the newest reading is always the
+// truest one, and keeping an earlier one froze the tiles: the first sample of
+// a six-minute clone reported one table and 376KiB, and that is what the
+// dashboard showed until it finished.
+//
+// Precedence over pgcopydb's own accounting is not settled here. A plain
+// clone reads the catalog once the worker has exited, after the last sample;
+// a follow migration's estimate is dropped when the verify Job is created,
+// also after the last sample. Neither can be overwritten by a later estimate,
+// because no sample runs once the worker Job is gone.
 func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	if m.Status.Progress == nil {
 		m.Status.Progress = &v1beta1.CloneProgress{}
 	}
 	p := m.Status.Progress
-	if p.TablesTotal == 0 {
-		p.TablesTotal, p.TablesDone = c.TablesTotal, c.TablesDone
-	}
-	if p.IndexesTotal == 0 {
-		p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
-	}
-	if p.BytesTotal == nil {
-		p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
-		p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
-	}
+	p.TablesTotal, p.TablesDone = c.TablesTotal, c.TablesDone
+	p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
+	p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
+	p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
 }
 
 // settleProgress squares the counters off after a copy that succeeded. The

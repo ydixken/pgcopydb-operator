@@ -408,6 +408,31 @@ func TestStatTilesTakeTheirThresholdColour(t *testing.T) {
 	}
 }
 
+// A panel reading a _bytes metric has to be told the value is bytes. Grafana's
+// scaled units mean "this number already is gigabytes", so pointing one at a
+// byte count multiplies it by a billion: the Bytes tile shipped as decgbytes
+// and rendered a 537 MB fixture as 536.90 PB.
+func TestByteMetricsUseAByteUnit(t *testing.T) {
+	scaled := []string{"deckbytes", "decmbytes", "decgbytes", "dectbytes",
+		"kbytes", "mbytes", "gbytes", "tbytes"}
+	for name, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			unit := p.FieldConfig.Defaults.Unit
+			if !slices.Contains(scaled, unit) {
+				continue
+			}
+			for _, tg := range p.Targets {
+				for _, m := range Metrics(tg.Expr) {
+					if strings.HasSuffix(m, "_bytes") {
+						t.Errorf("%s: %q reads %s in bytes but renders it as %q",
+							name, p.Title, m, unit)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestCountTilesReadOverTheRange(t *testing.T) {
 	counters := []string{
 		"pgcopydb_migration_tables_done",

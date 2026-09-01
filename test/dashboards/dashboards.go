@@ -61,6 +61,7 @@ type MappedValue struct {
 type FieldConfig struct {
 	Defaults struct {
 		NoValue  string    `json:"noValue"`
+		Unit     string    `json:"unit"`
 		Mappings []Mapping `json:"mappings"`
 	} `json:"defaults"`
 }
