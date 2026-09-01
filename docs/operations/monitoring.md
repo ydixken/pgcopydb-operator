@@ -150,7 +150,8 @@ Reading it:
 - **Percent** is target size over source size, clamped at 100.
   It is the coarsest of the progress readings: whole databases, WAL and catalog overhead included, where the counters beside it weigh only the tables in scope.
   **ETA By Size** divides the remaining bytes by how fast the target is currently growing, and reads No ETA outside `Cloning`: index builds, the cutover drain, and verification do not move bytes at a rate worth extrapolating from.
-- **Tables**, **Indexes** and **Bytes** each read as two values, `copied 23` beside `of 60`, because Grafana cannot join two query results into one string.
+- **Tables**, **Indexes** and **Bytes** are six tiles, one per side: a `(Source)` total beside the `(Target)` figure measured against it.
+  One number per tile, because Grafana cannot join two query results into one string and two values in one tile leaves them at opposite edges of it.
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
   Bytes compares table bytes on disk on both sides, so pgcopydb's own wire tally never replaces it: a wire count under an on-disk total would read as a shortfall that is not there.
 - **Schema Verification** and **Data Verification** are one tile per compare check.

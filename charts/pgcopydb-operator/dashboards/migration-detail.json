@@ -247,7 +247,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "interval": "10s"
@@ -569,7 +569,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it.",
@@ -694,7 +694,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "interval": "10s"
@@ -762,7 +762,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "interval": "10s",
@@ -842,7 +842,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "description": "How long the run took once it completed, and how long it has been going while it has not. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",
@@ -922,7 +922,7 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "interval": "10s",
@@ -967,8 +967,8 @@
           "values": false
         },
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1096,43 +1096,99 @@
         "showPercentChange": false,
         "text": {
           "titleSize": 20,
-          "valueSize": 20
+          "valueSize": 32
         }
       },
       "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running.",
       "interval": "10s"
     },
     {
-      "id": 25,
+      "id": 30,
       "type": "stat",
-      "title": "Tables",
-      "description": "A table counts once it holds data, so a half-copied one already counts. A copy that exits 0 squares the count off to the total, because an in-scope table that is legitimately empty is invisible to this method and would otherwise leave the tile one short for good. A failed copy keeps the partial count, which is the number worth reading there. Counted with psql in both databases while the worker runs, on the same poll as the database sizes, so it moves every ten seconds, and not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. pgcopydb's own count replaces this where it can be read: at clone completion, or out of the verify Job after a live migration's cutover. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
+      "title": "Tables (Source)",
+      "description": "In-scope tables on the source. The source is asked only about the tables the target actually has, so a filtered migration counts only what it was asked to copy. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 3,
-        "w": 8,
         "x": 0,
-        "y": 7
+        "y": 7,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, name) (pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 32
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "interval": "10s"
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Tables (Target)",
+      "description": "Tables on the target holding data. A table counts once it holds any, so a half-copied one already counts. A copy that exits 0 squares this up to the source figure, because an in-scope table that is legitimately empty is invisible to a count that reads data on disk. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 7,
+        "w": 4,
+        "h": 3
       },
       "targets": [
         {
           "refId": "A",
           "expr": "max by (namespace, name) (pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_tables_done{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "copied",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "B",
-          "expr": "max by (namespace, name) (pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_tables_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1150,14 +1206,14 @@
           "values": false
         },
         "orientation": "vertical",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,
         "text": {
-          "titleSize": 12,
-          "valueSize": 26
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1183,36 +1239,92 @@
       "interval": "10s"
     },
     {
-      "id": 26,
+      "id": 32,
       "type": "stat",
-      "title": "Indexes",
-      "description": "The denominator is the source's index count for those same tables: the target builds indexes after the data, so their absence is exactly what is being measured and it cannot supply a total. A copy that exits 0 squares the count off to the total. excludeIndexes is not applied to the denominator, so a migration using it reads short. Counted with psql in both databases while the worker runs, on the same poll as the database sizes, so it moves every ten seconds, and not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. pgcopydb's own count replaces this where it can be read: at clone completion, or out of the verify Job after a live migration's cutover. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
+      "title": "Indexes (Source)",
+      "description": "Indexes on the source, for the tables the target has. The target cannot supply this: it builds indexes after the data, so their absence is what is being measured. excludeIndexes is not applied here, so a migration using it reads high. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 3,
-        "w": 8,
         "x": 8,
-        "y": 7
+        "y": 7,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, name) (pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 32
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "interval": "10s"
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Indexes (Target)",
+      "description": "Indexes built on the target so far. A copy that exits 0 squares this up to the source figure. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 7,
+        "w": 4,
+        "h": 3
       },
       "targets": [
         {
           "refId": "A",
           "expr": "max by (namespace, name) (pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_indexes_done{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "built",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "B",
-          "expr": "max by (namespace, name) (pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_indexes_total{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1230,14 +1342,14 @@
           "values": false
         },
         "orientation": "vertical",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,
         "text": {
-          "titleSize": 12,
-          "valueSize": 26
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1263,36 +1375,24 @@
       "interval": "10s"
     },
     {
-      "id": 27,
+      "id": 34,
       "type": "stat",
-      "title": "Bytes",
-      "description": "Table bytes on disk, the target's against the source's: pg_table_size, so a table's TOAST counts (where a document-heavy table keeps nearly all of its data) but its indexes do not. It excludes the WAL and catalog overhead that the Percent tile includes. pgcopydb's own byte tally never replaces this one, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. A copy that exits 0 squares the two figures off, since the sides otherwise end a little apart through fillfactor, bloat and alignment. A failed copy keeps its partial figures. Counted with psql in both databases while the worker runs, on the same poll as the database sizes, so it moves every ten seconds. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "title": "Bytes (Source)",
+      "description": "Table bytes on the source, pg_table_size: the table with its TOAST, without its indexes. A document-heavy table keeps nearly all of its data in TOAST, so leaving it out understates the table by orders of magnitude. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 3,
-        "w": 8,
         "x": 16,
-        "y": 7
+        "y": 7,
+        "w": 4,
+        "h": 3
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (namespace, name) (pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "cloned",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "instant": true,
-          "range": false
-        },
-        {
-          "refId": "B",
           "expr": "max by (namespace, name) (pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_clone_planned_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
-          "legendFormat": "of",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1310,14 +1410,82 @@
           "values": false
         },
         "orientation": "vertical",
-        "textMode": "value_and_name",
+        "textMode": "value",
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,
         "text": {
-          "titleSize": 12,
-          "valueSize": 26
+          "titleSize": 20,
+          "valueSize": 32
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "interval": "10s"
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "Bytes (Target)",
+      "description": "Table bytes on the target, measured the same way. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. A copy that exits 0 squares the two up: they otherwise end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 7,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (namespace, name) (pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}) or (max by (namespace, name) (last_over_time(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[$__range])) unless max by (namespace, name) (pgcopydb_migration_info{namespace=\"$namespace\", name=\"$name\"}))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "wideLayout": true,
+        "text": {
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1382,8 +1550,8 @@
           "values": false
         },
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1472,8 +1640,8 @@
           "values": false
         },
         "text": {
-          "valueSize": 20,
-          "titleSize": 20
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "fieldConfig": {
@@ -1710,7 +1878,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 13
       },
       "panels": []
     },
@@ -1726,7 +1894,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 17
+        "y": 14
       },
       "targets": [
         {
@@ -1798,7 +1966,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 17
+        "y": 14
       },
       "targets": [
         {
@@ -1867,7 +2035,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 21
       },
       "panels": []
     },
@@ -1883,7 +2051,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 25
+        "y": 22
       },
       "targets": [
         {
@@ -1973,7 +2141,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 25
+        "y": 22
       },
       "targets": [
         {
@@ -2053,7 +2221,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 29
       },
       "targets": [
         {
@@ -2116,7 +2284,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 29
       },
       "targets": [
         {
@@ -2177,7 +2345,8 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false,
         "text": {
-          "valueSize": 48
+          "titleSize": 20,
+          "valueSize": 32
         }
       },
       "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",

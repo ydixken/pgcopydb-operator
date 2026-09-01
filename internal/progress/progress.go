@@ -247,7 +247,11 @@ func parseSample(out []byte) *Sample {
 	// 0 of 0 is an absent sample, not progress.
 	if len(src) == 5 && len(tgt) == 5 && tgt[1] > 0 {
 		sample.Counts = &RelationCounts{
-			TablesTotal:  tgt[1],
+			// Every total is the source's, every done is the target's, so a
+			// dashboard can name the side it came from. The source is asked only
+			// about the tables the target has, so this counts the same set either
+			// way; taking it from the source is what makes the label true.
+			TablesTotal:  src[1],
 			TablesDone:   tgt[2],
 			IndexesTotal: src[3],
 			IndexesDone:  tgt[3],

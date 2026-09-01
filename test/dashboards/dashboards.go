@@ -82,6 +82,10 @@ type Panel struct {
 type PanelOptions struct {
 	ColorMode string `json:"colorMode"`
 	TextMode  string `json:"textMode"`
+	Text      *struct {
+		TitleSize float64 `json:"titleSize"`
+		ValueSize float64 `json:"valueSize"`
+	} `json:"text"`
 }
 
 // ValueMapping reports how the panel renders value, and whether it maps it at
