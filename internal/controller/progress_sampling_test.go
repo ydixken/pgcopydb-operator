@@ -47,6 +47,7 @@ type fakeProgress struct {
 	cpErr     error
 	src, tgt  *int64
 	relations *progress.RelationCounts
+	nilSample bool
 	sizesErr  error
 	cpCalls   int
 	sizeCalls int
@@ -88,6 +89,9 @@ func (f *fakeProgress) Sample(context.Context, string, string) (*progress.Sample
 	f.sizeCalls++
 	if f.sizesErr != nil {
 		return nil, f.sizesErr
+	}
+	if f.nilSample {
+		return nil, nil
 	}
 	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
 }
@@ -323,6 +327,24 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(41)))
+	})
+
+	It("takes no reading when the worker pod is already gone", func() {
+		const name = "mig-no-pod"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// The poller answers (nil, nil) when the Job has no running pod, which
+		// is the ordinary case moments after the worker exits. Nothing is
+		// written then, rather than a zero being read as a reading.
+		r := newReconciler()
+		r.Progress = &fakeProgress{nilSample: true}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
+		Expect(found).To(BeFalse())
 	})
 
 	It("passes despite sampler errors", func() {
