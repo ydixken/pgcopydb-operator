@@ -67,12 +67,20 @@ type FieldConfig struct {
 
 // Panel is a dashboard panel; a row panel nests its panels when collapsed.
 type Panel struct {
-	Title       string      `json:"title"`
-	Type        string      `json:"type"`
-	Datasource  *Datasource `json:"datasource"`
-	Targets     []Target    `json:"targets"`
-	Panels      []Panel     `json:"panels"`
-	FieldConfig FieldConfig `json:"fieldConfig"`
+	Title       string       `json:"title"`
+	Type        string       `json:"type"`
+	Datasource  *Datasource  `json:"datasource"`
+	Targets     []Target     `json:"targets"`
+	Panels      []Panel      `json:"panels"`
+	FieldConfig FieldConfig  `json:"fieldConfig"`
+	Options     PanelOptions `json:"options"`
+}
+
+// PanelOptions carries the per-type options a test asserts on. ColorMode
+// decides whether a stat tile paints its value with the threshold colour.
+type PanelOptions struct {
+	ColorMode string `json:"colorMode"`
+	TextMode  string `json:"textMode"`
 }
 
 // ValueMapping reports how the panel renders value, and whether it maps it at

@@ -141,13 +141,133 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 	return cp, nil
 }
 
-// sizesScript samples pg_database_size per side after the URI recovery
-// prelude; a failed side prints empty and parses to nil, never zero. psql
-// touches no SQLite catalog, so it is safe while the clone runs.
-const sizesScript = `s=$(psql "$PGCOPYDB_SOURCE_PGURI" -XtAc 'select pg_database_size(current_database())') || s=
-t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc 'select pg_database_size(current_database())') || t=
+// sampleScript asks each database for everything one poll needs, in one row:
+// its size, then its tables, the tables holding data, the indexes, and the
+// table bytes. Sizes and counts used to be two execs against the same two
+// connections, which is five psql invocations every ten seconds against a
+// database already under a bulk copy.
+//
+// Three round trips, not two, because the source has to be asked about the
+// target's tables rather than its own. pgcopydb restores only the in-scope
+// schema, so the target's table list is the filters already applied; counting
+// the source unscoped reports indexes and bytes for tables this migration was
+// told to leave behind, and a denominator it can never reach.
+//
+// pg_relation_size, not pg_total_relation_size: the latter adds indexes and
+// TOAST, so an empty table carrying a primary key counted as copied. Caught
+// against a real pair, where a target holding one populated table of three
+// reported two.
+//
+// A failed side prints empty and parses to no sample, never to zero. psql
+// touches no SQLite catalog, so unlike `list progress` this is safe while the
+// clone runs, which is why these numbers can be live at all.
+const sampleScript = `scope=
+tables="select c.oid, n.nspname, c.relname from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind = 'r'
+    and n.nspname not in ('pg_catalog', 'information_schema')
+    and n.nspname not like 'pg_toast%'"
+row="select pg_database_size(current_database()) || ' ' ||
+  (select count(*) from t) || ' ' ||
+  (select count(*) from t where pg_relation_size(t.oid) > 0) || ' ' ||
+  (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
+  (select coalesce(sum(pg_relation_size(t.oid)), 0) from t)"
+t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "with t as ($tables) $row") || t=
+scope=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where c.relkind = 'r'
+    and n.nspname not in ('pg_catalog', 'information_schema')
+    and n.nspname not like 'pg_toast%'") || scope=
+if [ -n "$scope" ]; then
+  s=$(psql "$PGCOPYDB_SOURCE_PGURI" -XtAc "with t as ($tables
+    and (n.nspname || '.' || c.relname) in ($scope)) $row") || s=
+else
+  s=
+fi
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
+
+// Sample is one poll of both databases: their sizes, and the relation counts
+// when the target has a schema to count.
+type Sample struct {
+	SourceSize *int64
+	TargetSize *int64
+	Counts     *RelationCounts
+}
+
+// RelationCounts is the progress half of a Sample, shaped for CloneProgress.
+type RelationCounts struct {
+	TablesTotal  int64
+	TablesDone   int64
+	IndexesTotal int64
+	IndexesDone  int64
+	BytesTotal   int64
+	BytesDone    int64
+}
+
+// Sample reads both databases from the Job's running pod. No pod is no sample
+// rather than an error: the worker exits and this keeps being called.
+func (p *Poller) Sample(ctx context.Context, namespace, jobName string) (*Sample, error) {
+	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
+	if err != nil {
+		return nil, err
+	}
+	if pod == "" {
+		return nil, nil
+	}
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + sampleScript})
+	if err != nil {
+		return nil, err
+	}
+	return parseSample(out), nil
+}
+
+// parseSample reads the source= and target= lines, five integers each. A side
+// that is missing, short or not numeric contributes nothing rather than zero.
+func parseSample(out []byte) *Sample {
+	var src, tgt []int64
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "source="); ok {
+			src = parseFields(v)
+		} else if v, ok := strings.CutPrefix(line, "target="); ok {
+			tgt = parseFields(v)
+		}
+	}
+	sample := &Sample{}
+	if len(src) == 5 {
+		sample.SourceSize = &src[0]
+	}
+	if len(tgt) == 5 {
+		sample.TargetSize = &tgt[0]
+	}
+	// Counts need both sides, and a target with no tables has no schema yet:
+	// 0 of 0 is an absent sample, not progress.
+	if len(src) == 5 && len(tgt) == 5 && tgt[1] > 0 {
+		sample.Counts = &RelationCounts{
+			TablesTotal:  tgt[1],
+			TablesDone:   tgt[2],
+			IndexesTotal: src[3],
+			IndexesDone:  tgt[3],
+			BytesTotal:   src[4],
+			BytesDone:    tgt[4],
+		}
+	}
+	return sample
+}
+
+// parseFields splits one psql row into integers, nil unless every field parsed.
+func parseFields(s string) []int64 {
+	fields := strings.Fields(s)
+	out := make([]int64, 0, len(fields))
+	for _, f := range fields {
+		v, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return nil
+		}
+		out = append(out, v)
+	}
+	return out
+}
 
 // finalizingScript asks the target what pgcopydb is doing there, counting its
 // own backends by the work they are on. pgcopydb names its connections after
@@ -205,45 +325,6 @@ func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (cop
 	// Only once no copy worker is left is the data across. A single remaining
 	// backend is the normal shape of the tail, not a sign of trouble.
 	return nCopy > 0, nCopy == 0 && nOther > 0
-}
-
-// DatabaseSizes samples both databases' sizes from the Job's running pod.
-// No running pod means (nil, nil, nil); a side whose query failed stays nil.
-func (p *Poller) DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error) {
-	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
-	if err != nil {
-		return nil, nil, err
-	}
-	if pod == "" {
-		return nil, nil, nil
-	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + sizesScript})
-	if err != nil {
-		return nil, nil, err
-	}
-	src, tgt = parseSizes(out)
-	return src, tgt, nil
-}
-
-// parseSizes reads the source=/target= lines; anything that is not a plain
-// integer leaves that side nil.
-func parseSizes(out []byte) (src, tgt *int64) {
-	for line := range strings.SplitSeq(string(out), "\n") {
-		if v, ok := strings.CutPrefix(line, "source="); ok {
-			src = parseSize(v)
-		} else if v, ok := strings.CutPrefix(line, "target="); ok {
-			tgt = parseSize(v)
-		}
-	}
-	return src, tgt
-}
-
-func parseSize(s string) *int64 {
-	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil {
-		return nil
-	}
-	return &n
 }
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`

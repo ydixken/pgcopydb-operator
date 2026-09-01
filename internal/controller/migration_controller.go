@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,6 +41,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -114,7 +116,10 @@ type LogReader interface {
 // value and an error never fails the pass.
 type ProgressOps interface {
 	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
-	DatabaseSizes(ctx context.Context, namespace, jobName string) (src, tgt *int64, err error)
+	// Sample reads both databases in one exec: their sizes, and the relation
+	// counts. Unlike CloneProgress it is safe on a pass with a live worker,
+	// which is what makes the progress fields move during a copy.
+	Sample(ctx context.Context, namespace, jobName string) (*progress.Sample, error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
 	// carries. The allowlist lives with the poller, so asking it keeps one
@@ -499,24 +504,65 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	if r.Progress == nil {
 		return
 	}
-	src, tgt, err := r.Progress.DatabaseSizes(ctx, m.Namespace, jobName)
+	s, err := r.Progress.Sample(ctx, m.Namespace, jobName)
 	if err != nil {
-		logf.FromContext(ctx).V(1).Info("database size sample failed", "job", jobName, "error", err)
-	} else {
-		// Metrics only, by design: sizes are observability, not state.
-		metrics.RecordDatabaseSizes(m.Namespace, m.Name, src, tgt)
+		logf.FromContext(ctx).V(1).Info("database sample failed", "job", jobName, "error", err)
+		return
 	}
+	if s == nil {
+		return
+	}
+	// Metrics only, by design: sizes are observability, not state.
+	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
+	if s.Counts != nil {
+		applyCounts(m, s.Counts)
+	}
+}
+
+// applyCounts fills the progress fields from the database estimate, leaving
+// any the catalog already answered. It is the live view during the copy; when
+// the catalog lands at clone completion or drain verification it replaces
+// this wholesale. The estimate leads pgcopydb slightly, because a table counts
+// as copied once it holds any data.
+func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
+	if m.Status.Progress == nil {
+		m.Status.Progress = &v1beta1.CloneProgress{}
+	}
+	p := m.Status.Progress
+	if p.TablesTotal == 0 {
+		p.TablesTotal, p.TablesDone = c.TablesTotal, c.TablesDone
+	}
+	if p.IndexesTotal == 0 {
+		p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
+	}
+	if p.BytesTotal == nil {
+		p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
+		p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
+	}
+}
+
+// settleProgress squares the counters off after a copy that succeeded. The
+// database count calls a table copied once it holds data, so an in-scope
+// table that is legitimately empty is never counted and the tile would sit
+// one short for good. A successful copy copied all of them. Only on success:
+// a failed run's partial count is the number worth reading.
+func settleProgress(m *v1beta1.Migration) {
+	p := m.Status.Progress
+	if p == nil {
+		return
+	}
+	p.TablesDone, p.IndexesDone = p.TablesTotal, p.IndexesTotal
 }
 
 // sampleCloneProgress best-effort fills status.progress from `list progress`,
 // once, by exec-ing into the pod. Its one caller is finishClone, never a pass
 // with a live worker: this is a pgcopydb command and it writes to the catalog.
-// A follow migration cannot use this route at all (its pod is gone by the time
-// the drain is over) and reads the same counters out of the verify Job's log
-// instead, see recordCloneProgress. A failed try leaves the field empty and
-// the next pass retries.
+// It overwrites what sampleProgress estimated from the databases, and that is
+// the point: the catalog is pgcopydb's own accounting, and the estimate leads
+// it. The caller runs this behind CloneCompleted, so it reads the pod once.
+// A failed try leaves whatever the estimate put there.
 func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
-	if r.Progress == nil || m.Status.Progress != nil {
+	if r.Progress == nil {
 		return
 	}
 	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)

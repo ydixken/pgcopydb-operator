@@ -2097,8 +2097,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: bytesTotal is the total bytes to copy, as reported
-                      by pgcopydb.
+                    description: |-
+                      bytesTotal is the total bytes to copy: the in-scope tables' size on the
+                      source, or pgcopydb's own figure once it has answered.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   indexesDone:
@@ -4250,8 +4251,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: bytesTotal is the total bytes to copy, as reported
-                      by pgcopydb.
+                    description: |-
+                      bytesTotal is the total bytes to copy: the in-scope tables' size on the
+                      source, or pgcopydb's own figure once it has answered.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   indexesDone:

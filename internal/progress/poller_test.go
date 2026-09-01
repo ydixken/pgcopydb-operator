@@ -214,46 +214,6 @@ func TestCloneProgress_Sample(t *testing.T) {
 	}
 }
 
-func TestDatabaseSizes(t *testing.T) {
-	ctx := context.Background()
-	for name, tc := range map[string]struct {
-		out      string
-		src, tgt *int64
-	}{
-		"both sides":     {"source=1073741824\ntarget=999\n", ptr(1073741824), ptr(999)},
-		"target failed":  {"source=42\ntarget=\n", ptr(42), nil},
-		"source garbage": {"source=oom-killed\ntarget=7\n", nil, ptr(7)},
-		"no output":      {"", nil, nil},
-	} {
-		f := &fakeExec{pod: "p", out: []byte(tc.out)}
-		src, tgt, err := NewFromExec(f, nil).DatabaseSizes(ctx, "ns", "job")
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		if !eq(src, tc.src) || !eq(tgt, tc.tgt) {
-			t.Errorf("%s: = (%v, %v), want (%v, %v)", name, deref(src), deref(tgt), deref(tc.src), deref(tc.tgt))
-		}
-		// The exec must restore the secretRef URIs before touching psql.
-		if !strings.HasPrefix(f.argv[2], conn.URIRecover()) {
-			t.Errorf("%s: script misses the URI recovery prelude", name)
-		}
-	}
-}
-
-func TestDatabaseSizes_Errors(t *testing.T) {
-	ctx := context.Background()
-
-	if src, tgt, err := NewFromExec(&fakeExec{pod: ""}, nil).DatabaseSizes(ctx, "ns", "job"); src != nil || tgt != nil || err != nil {
-		t.Fatalf("no pod: = (%v, %v, %v), want all nil", src, tgt, err)
-	}
-	if _, _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).DatabaseSizes(ctx, "ns", "job"); err == nil {
-		t.Fatal("pod lookup error: want it surfaced")
-	}
-	if _, _, err := NewFromExec(&fakeExec{pod: "p", execErr: errors.New("exec refused")}, nil).DatabaseSizes(ctx, "ns", "job"); err == nil {
-		t.Fatal("exec error: want it surfaced")
-	}
-}
-
 func ptr(n int64) *int64 { return &n }
 
 func eq(a, b *int64) bool {
@@ -263,16 +223,159 @@ func eq(a, b *int64) bool {
 	return *a == *b
 }
 
-func deref(p *int64) any {
-	if p == nil {
-		return nil
+func TestSample(t *testing.T) {
+	ctx := context.Background()
+	// Five fields a side: database size, tables, tables holding data, indexes,
+	// table bytes.
+	for name, tc := range map[string]struct {
+		out        string
+		src, tgt   *int64
+		wantCounts *RelationCounts
+	}{
+		"mid copy": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=536870912 60 23 0 12000000000\n",
+			src: ptr(1073741824), tgt: ptr(536870912),
+			wantCounts: &RelationCounts{
+				TablesTotal: 60, TablesDone: 23,
+				IndexesTotal: 85, IndexesDone: 0,
+				BytesTotal: 48000000000, BytesDone: 12000000000,
+			},
+		},
+		"index build under way": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=1000000000 60 60 41 47000000000\n",
+			src: ptr(1073741824), tgt: ptr(1000000000),
+			wantCounts: &RelationCounts{
+				TablesTotal: 60, TablesDone: 60,
+				IndexesTotal: 85, IndexesDone: 41,
+				BytesTotal: 48000000000, BytesDone: 47000000000,
+			},
+		},
+		// The schema restore has not run yet, so there is a size but nothing
+		// to count. 0 of 0 is an absent sample, not progress.
+		"target has no schema": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=8388608 0 0 0 0\n",
+			src: ptr(1073741824), tgt: ptr(8388608),
+		},
+		// One side unreadable: its size goes too, and counts need both.
+		"source failed": {
+			out: "source=\ntarget=536870912 60 23 0 12000000000\n",
+			tgt: ptr(536870912),
+		},
+		"target failed": {
+			out: "source=1073741824 60 60 85 48000000000\ntarget=\n",
+			src: ptr(1073741824),
+		},
+		// A source row that is short or not numeric kills the counts, which
+		// need both sides, but the target answered and its size still stands.
+		"short source row":    {out: "source=1 60 60 85\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"source not a number": {out: "source=1 60 60 85 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"no output":           {out: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeExec{pod: "p", out: []byte(tc.out)}
+			got, err := NewFromExec(f, nil).Sample(ctx, "ns", "job")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatal("got no sample at all")
+			}
+			if !eq(got.SourceSize, tc.src) || !eq(got.TargetSize, tc.tgt) {
+				t.Errorf("sizes = %v/%v, want %v/%v", got.SourceSize, got.TargetSize, tc.src, tc.tgt)
+			}
+			switch {
+			case tc.wantCounts == nil && got.Counts != nil:
+				t.Errorf("counts = %+v, want none", got.Counts)
+			case tc.wantCounts != nil && got.Counts == nil:
+				t.Errorf("no counts, want %+v", tc.wantCounts)
+			case tc.wantCounts != nil && *got.Counts != *tc.wantCounts:
+				t.Errorf("counts = %+v, want %+v", got.Counts, tc.wantCounts)
+			}
+		})
 	}
-	return *p
+}
+
+// The URI recovery prelude has to be in front of the script, or psql runs
+// with whatever the pod's environment happens to hold.
+func TestSample_RunsWithTheURIPrelude(t *testing.T) {
+	f := &fakeExec{pod: "p", out: []byte("source=\ntarget=\n")}
+	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" {
+		t.Fatalf("argv = %q, want sh -c <script>", f.argv)
+	}
+	if !strings.HasPrefix(f.argv[2], conn.URIRecover()) {
+		t.Error("the script does not start with the URI recovery prelude")
+	}
+	if !strings.Contains(f.argv[2], sampleScript) {
+		t.Error("the script is not sampleScript")
+	}
+}
+
+func TestSample_NoPodOrError(t *testing.T) {
+	ctx := context.Background()
+	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).Sample(ctx, "ns", "job"); got != nil || err != nil {
+		t.Fatalf("no pod: got %+v, %v; want nil, nil", got, err)
+	}
+	if _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).Sample(ctx, "ns", "job"); err == nil {
+		t.Fatal("a pod lookup failure must surface")
+	}
+	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: errors.New("refused")}, nil).Sample(ctx, "ns", "job"); err == nil {
+		t.Fatal("an exec failure must surface")
+	}
+}
+
+// Counting a TOAST or system relation is wrong in a way that still looks
+// plausible on a tile, so the query has to exclude them by name.
+func TestRelationCountsScript_ExcludesSystemSchemas(t *testing.T) {
+	for _, want := range []string{"pg_catalog", "information_schema", "pg_toast", "relkind"} {
+		if !strings.Contains(sampleScript, want) {
+			t.Errorf("sampleScript does not mention %q", want)
+		}
+	}
+}
+
+// pg_total_relation_size adds indexes and TOAST to the table's own bytes, so
+// an empty table carrying a primary key reads as copied and the byte
+// denominator counts indexes the target has not built. Verified against a real
+// pair: a target holding one populated table of three reported two.
+func TestRelationCountsScript_MeasuresTheTableNotItsIndexes(t *testing.T) {
+	if strings.Contains(sampleScript, "pg_total_relation_size") {
+		t.Error("sampleScript uses pg_total_relation_size; an empty table with an " +
+			"index then counts as copied. Use pg_relation_size.")
+	}
+	if !strings.Contains(sampleScript, "pg_relation_size") {
+		t.Error("sampleScript measures no relation size at all")
+	}
+}
+
+// The source must be asked about the target's tables, not its own. pgcopydb
+// restores only the in-scope schema, so an unscoped source count reports
+// indexes and bytes for tables this migration was told to leave behind, and a
+// filtered migration then shows a denominator it can never reach.
+func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
+	for _, want := range []string{
+		"string_agg(quote_literal(", // the list is built, and quoted
+		"in ($scope)",               // and the source query uses it
+		`if [ -n "$scope" ]`,        // an empty list would be a syntax error
+	} {
+		if !strings.Contains(sampleScript, want) {
+			t.Errorf("sampleScript is missing %q", want)
+		}
+	}
+	// The scope is read off the target; asking the source would defeat it.
+	scope := sampleScript[strings.Index(sampleScript, "scope=$("):]
+	scope = scope[:strings.Index(scope, "\nif ")]
+	if !strings.Contains(scope, "PGCOPYDB_TARGET_PGURI") || strings.Contains(scope, "SOURCE") {
+		t.Errorf("the table list must come from the target:\n%s", scope)
+	}
 }
 
 // CloneStage decides a user-visible phase, so every way the probe can fail has
 // to land on "unknown" rather than on a confident wrong answer. Unknown is
 // both flags false, which leaves the caller reporting Cloning.
+
 func TestCloneStage(t *testing.T) {
 	for _, tc := range []struct {
 		name                string

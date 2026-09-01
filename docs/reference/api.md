@@ -55,7 +55,9 @@ _Appears in:_
 
 
 
-CloneProgress mirrors pgcopydb list progress --json into status.
+CloneProgress carries how far the base copy has got. While the copy runs
+the operator counts relations on both databases with psql; pgcopydb's own
+`list progress` replaces that wherever it can be read.
 
 
 
@@ -68,7 +70,7 @@ _Appears in:_
 | `tablesDone` _integer_ |  |  | Optional: \{\} <br /> |
 | `indexesTotal` _integer_ |  |  | Optional: \{\} <br /> |
 | `indexesDone` _integer_ |  |  | Optional: \{\} <br /> |
-| `bytesTotal` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesTotal is the total bytes to copy, as reported by pgcopydb. |  | Optional: \{\} <br /> |
+| `bytesTotal` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesTotal is the total bytes to copy: the in-scope tables' size on the<br />source, or pgcopydb's own figure once it has answered. |  | Optional: \{\} <br /> |
 | `bytesDone` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesDone is the bytes copied so far. |  | Optional: \{\} <br /> |
 
 

@@ -33,6 +33,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -45,6 +46,8 @@ type fakeProgress struct {
 	cp        *v1beta1.CloneProgress
 	cpErr     error
 	src, tgt  *int64
+	relations *progress.RelationCounts
+	nilSample bool
 	sizesErr  error
 	cpCalls   int
 	sizeCalls int
@@ -80,11 +83,17 @@ func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.
 	return &c, nil
 }
 
-func (f *fakeProgress) DatabaseSizes(context.Context, string, string) (src, tgt *int64, err error) {
+func (f *fakeProgress) Sample(context.Context, string, string) (*progress.Sample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sizeCalls++
-	return f.src, f.tgt, f.sizesErr
+	if f.sizesErr != nil {
+		return nil, f.sizesErr
+	}
+	if f.nilSample {
+		return nil, nil
+	}
+	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
 }
 
 // counts returns (catalog polls, size samples) seen so far.
@@ -224,6 +233,118 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		logs.out = verifyProgressPrefix + `{"tables": {"total": 99, "done": 99}}` + "\n"
 		got = reconcileAndGet(ctx, r, name)
 		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
+	})
+
+	It("replaces the copy-time estimate with the verify Job's counters", func() {
+		const name = "mig-progress-estimate"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// A follow migration fills these twice: from the databases while the
+		// copy runs, then from pgcopydb's own catalog once the verify Job has
+		// read it. The second must win, and the first must not read as landed
+		// and lock the verify Job's line out.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src:       int64p(5000),
+			relations: &progress.RelationCounts{TablesTotal: 60, TablesDone: 59},
+		}
+		r.Sentinel = &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		logs := cloneDoneLogs()
+		r.Logs = logs
+		m := followMigration(name)
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+
+		got := reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil())
+		Expect(got.Status.Progress.TablesTotal).To(Equal(int64(60)))
+
+		// The base copy ends: the estimate goes, because no further estimate
+		// can arrive and an occupied field would stop the verify Job's line.
+		finishJob(ctx, name+"-run-1", true)
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).To(BeNil())
+
+		logs.out = verifyProgressPrefix + listProgressJSON + "\n"
+		finishJob(ctx, name+"-verify", true)
+		got = reconcileAndGet(ctx, r, name)
+		Expect(got.Status.Progress).NotTo(BeNil())
+		Expect(got.Status.Progress.TablesTotal).To(Equal(int64(2)))
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
+	})
+
+	It("squares the counters off when the copy succeeded", func() {
+		const name = "mig-settle"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// An in-scope table with no rows is invisible to a count that reads
+		// data on disk, so the estimate ends one short and stays there. Exit 0
+		// says every table was copied, empty ones included.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 59, IndexesTotal: 12, IndexesDone: 11,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(59)))
+
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(60)))
+		Expect(m.Status.Progress.IndexesDone).To(Equal(int64(12)))
+
+		got, found := gaugeValue("pgcopydb_migration_tables_done", migLabels(name))
+		Expect(found).To(BeTrue())
+		Expect(got).To(Equal(float64(60)))
+	})
+
+	It("leaves a failed copy's count where it stopped", func() {
+		const name = "mig-settle-failed"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// How far a failed run got is the number worth reading, so nothing
+		// rounds it up to the total here.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 41, IndexesTotal: 12, IndexesDone: 0,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		Expect(reconcileAndGet(ctx, r, name).Status.Progress.TablesDone).To(Equal(int64(41)))
+
+		finishJob(ctx, name+"-run-1", false)
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(41)))
+	})
+
+	It("takes no reading when the worker pod is already gone", func() {
+		const name = "mig-no-pod"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// The poller answers (nil, nil) when the Job has no running pod, which
+		// is the ordinary case moments after the worker exits. Nothing is
+		// written then, rather than a zero being read as a reading.
+		r := newReconciler()
+		r.Progress = &fakeProgress{nilSample: true}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
+		Expect(found).To(BeFalse())
 	})
 
 	It("passes despite sampler errors", func() {
@@ -435,6 +556,81 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, found = gaugeValue("pgcopydb_migration_attempts", migLabels(name))
 		Expect(found).To(BeFalse())
+	})
+
+	It("fills the progress fields from the live counts while the worker runs", func() {
+		const name = "mig-live-counts"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// No catalog sample: this is the plain clone case, whose worker pod is
+		// usually gone before `list progress` can be read, which is why these
+		// fields and the dashboard tiles were empty.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000), tgt: int64p(400),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 23,
+				IndexesTotal: 85, IndexesDone: 0,
+				BytesTotal: 48000, BytesDone: 12000,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		// While the worker is still alive, which the catalog read cannot do.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(23)))
+		Expect(m.Status.Progress.IndexesTotal).To(Equal(int64(85)))
+		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(12000)))
+
+		got, found := gaugeValue("pgcopydb_migration_tables_done", migLabels(name))
+		Expect(found).To(BeTrue())
+		Expect(got).To(Equal(float64(23)))
+	})
+
+	It("keeps pgcopydb's own counters when the catalog answered", func() {
+		const name = "mig-catalog-wins"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// The counts lead the catalog, because a table counts as copied once
+		// it holds any data, so the catalog wins where it answered.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			cp:        &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 7},
+			src:       int64p(5000),
+			relations: &progress.RelationCounts{TablesTotal: 60, TablesDone: 23},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		// A pass with the worker running, so the estimate is in the field
+		// before the catalog can answer. Without it this spec passes on a
+		// build where the catalog read is skipped entirely.
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).NotTo(BeNil())
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(7)))
+	})
+
+	It("writes nothing when the target has no schema to count yet", func() {
+		const name = "mig-no-schema"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// A sample with sizes but no counts: the restore has not run, and
+		// 0 of 0 would render on a tile as though it were progress.
+		r := newReconciler()
+		r.Progress = &fakeProgress{src: int64p(5000), tgt: int64p(8)}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
 	})
 })
 

@@ -574,7 +574,9 @@ const (
 	ConditionFailed          = "Failed"
 )
 
-// CloneProgress mirrors pgcopydb list progress --json into status.
+// CloneProgress carries how far the base copy has got. While the copy runs
+// the operator counts relations on both databases with psql; pgcopydb's own
+// `list progress` replaces that wherever it can be read.
 type CloneProgress struct {
 	// +optional
 	TablesTotal int64 `json:"tablesTotal,omitempty"`
@@ -584,7 +586,8 @@ type CloneProgress struct {
 	IndexesTotal int64 `json:"indexesTotal,omitempty"`
 	// +optional
 	IndexesDone int64 `json:"indexesDone,omitempty"`
-	// bytesTotal is the total bytes to copy, as reported by pgcopydb.
+	// bytesTotal is the total bytes to copy: the in-scope tables' size on the
+	// source, or pgcopydb's own figure once it has answered.
 	// +optional
 	BytesTotal *resource.Quantity `json:"bytesTotal,omitempty"`
 	// bytesDone is the bytes copied so far.
