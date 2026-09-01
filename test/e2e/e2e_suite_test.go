@@ -117,11 +117,17 @@ const (
 	fixtureSharedBuffers = "1GB"
 	fixtureCacheSize     = "3GB"
 
-	// cnpgInstances is the instance count of both fixture clusters. Three, so
-	// each cluster spans three nodes and a migration's SQL legs cross the
-	// real network the way a production migration does. Below three nodes
-	// CNPG co-locates instances and the suite still passes.
-	cnpgInstances = 3
+	// defaultCNPGInstances is the instance count of both fixture clusters.
+	// One: the migration's SQL legs still cross the real network, because the
+	// source, the target and the worker are separate pods, and provisioning
+	// two volumes instead of six takes minutes off every setup and teardown.
+	// What one instance gives up is intra-cluster streaming replication, which
+	// no scenario here asserts on.
+	//
+	// E2E_CNPG_INSTANCES raises it. The chaos scenarios want it: one of them
+	// kills a primary and expects the cluster to survive, which is a different
+	// test without a replica to fail over to.
+	defaultCNPGInstances = 1
 
 	// appDB is the CNPG-bootstrapped database and its owning role.
 	appDB = "app"
@@ -189,6 +195,7 @@ var (
 	pgTarget = 17
 
 	// Volume sizes are tier-dependent, so init sets them.
+	cnpgInstances       = defaultCNPGInstances
 	srcStorageSize      string
 	tgtStorageSize      string
 	workVolumeSize      string
@@ -267,6 +274,14 @@ func init() {
 	// Set, it wins over the stress tier's ephemeral class too.
 	if v := os.Getenv("E2E_STORAGE_CLASS"); v != "" {
 		fixtureStorageClass = v
+	}
+	// E2E_CNPG_INSTANCES trades the cross-node property for setup speed.
+	if v := os.Getenv("E2E_CNPG_INSTANCES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			panic("E2E_CNPG_INSTANCES must be a positive integer, got " + strconv.Quote(v))
+		}
+		cnpgInstances = n
 	}
 	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
 	// so a branch's controller can be exercised against real servers before it
@@ -1191,7 +1206,7 @@ func checkLonghornCapacity() {
 	var required int64
 	for _, size := range []string{srcStorageSize, tgtStorageSize} {
 		q := resource.MustParse(size)
-		required += q.Value() * cnpgInstances
+		required += q.Value() * int64(cnpgInstances)
 	}
 	work := resource.MustParse(workVolumeSize)
 	required += work.Value()

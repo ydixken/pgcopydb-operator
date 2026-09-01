@@ -81,6 +81,7 @@ Two tiers, and the environment variables a run reads:
 | Variable                      | Default | Effect                                                                                                                                                     |
 |-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `E2E_SCALE`                   | `1`     | Fixture size multiplier, sizing both the seeded data and the volumes. 1 seeds roughly 12GB on 50Gi volumes; 0.25 seeds 3GB on 13Gi, which is what CI runs. |
+| `E2E_CNPG_INSTANCES`          | `1`     | Instances per fixture CNPG cluster. One keeps setup and teardown short, and the migration still crosses the network because source, target and worker are separate pods. Raise it to 3 for the chaos scenarios, one of which kills a primary. |
 | `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets. Use `task e2e:stress`.                               |
 | `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed.                                        |
 | `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                                                              |
