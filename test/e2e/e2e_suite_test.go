@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -1088,18 +1089,72 @@ func longhornNodes() *unstructured.UnstructuredList {
 	return l
 }
 
+const (
+	// longhornProvisioner is the CSI driver name every Longhorn StorageClass
+	// carries, and how the suite recognises one it can copy settings from.
+	longhornProvisioner = "driver.longhorn.io"
+	// paramDataEngine decides which Longhorn engine provisions a volume, and
+	// paramReplicas how many copies it keeps.
+	paramDataEngine = "dataEngine"
+	paramReplicas   = "numberOfReplicas"
+)
+
+// ephemeralParams builds the parameters for the suite's own class, carrying
+// over the data engine the cluster's other Longhorn classes ask for.
+//
+// Longhorn reads an unset dataEngine as v1, so a class that omits it is
+// unprovisionable on a cluster running v2 only: every claim is denied by the
+// admission webhook with "v1-data-engine data engine is not enabled", and the
+// fixture pods sit unschedulable on pending claims that say nothing about
+// why. Copying rather than pinning keeps the suite working on either engine.
+func ephemeralParams(classes []storagev1.StorageClass) map[string]string {
+	p := map[string]string{paramReplicas: "1", "staleReplicaTimeout": "30"}
+	for _, sc := range classes {
+		if sc.Name == ephemeralStorageClass || sc.Provisioner != longhornProvisioner {
+			continue
+		}
+		if e := sc.Parameters[paramDataEngine]; e != "" {
+			p[paramDataEngine] = e
+			break
+		}
+	}
+	return p
+}
+
 // ensureEphemeralStorageClass creates the suite-owned single-replica Longhorn
-// StorageClass if it does not exist. It stays behind after the run: it is
-// configuration, not data, and reclaimPolicy Delete means volumes never
-// outlive their claims.
+// StorageClass, and replaces it when the cluster has moved on beneath it. It
+// stays behind after the run: it is configuration, not data, and reclaimPolicy
+// Delete means volumes never outlive their claims.
+//
+// Replacing means deleting first, because a StorageClass's parameters are
+// immutable. That is safe here: a class is consulted only when a volume is
+// provisioned, so bound claims from a kept fixture keep working, and the
+// replacement carries the same name.
 func ensureEphemeralStorageClass() {
 	GinkgoHelper()
+	var classes storagev1.StorageClassList
+	Expect(k8sClient.List(ctx, &classes)).To(Succeed(), "failed to list StorageClasses")
+	want := ephemeralParams(classes.Items)
+
+	var have storagev1.StorageClass
+	err := k8sClient.Get(ctx, client.ObjectKey{Name: ephemeralStorageClass}, &have)
+	switch {
+	case err == nil && maps.Equal(have.Parameters, want):
+		return
+	case err == nil:
+		By(fmt.Sprintf("replacing StorageClass %s: its parameters no longer match this cluster", ephemeralStorageClass))
+		Expect(k8sClient.Delete(ctx, &have)).To(Succeed(),
+			"failed to delete the stale StorageClass %s", ephemeralStorageClass)
+	case !apierrors.IsNotFound(err):
+		Expect(err).NotTo(HaveOccurred(), "failed to read StorageClass %s", ephemeralStorageClass)
+	}
+
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	sc := &storagev1.StorageClass{
 		ObjectMeta:    metav1.ObjectMeta{Name: ephemeralStorageClass},
-		Provisioner:   "driver.longhorn.io",
+		Provisioner:   longhornProvisioner,
 		ReclaimPolicy: &reclaim,
-		Parameters:    map[string]string{"numberOfReplicas": "1", "staleReplicaTimeout": "30"},
+		Parameters:    want,
 	}
 	if err := k8sClient.Create(ctx, sc); err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred(), "failed to create StorageClass %s", ephemeralStorageClass)
