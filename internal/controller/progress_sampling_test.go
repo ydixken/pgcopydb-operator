@@ -296,6 +296,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 			src: int64p(5000),
 			relations: &progress.RelationCounts{
 				TablesTotal: 60, TablesDone: 59, IndexesTotal: 12, IndexesDone: 11,
+				BytesTotal: 512000, BytesDone: 480000,
 			},
 		}
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
@@ -308,6 +309,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(60)))
 		Expect(m.Status.Progress.IndexesDone).To(Equal(int64(12)))
+		// Bytes settle too: a finished migration reporting 480 of 512 reads as
+		// though something was left behind.
+		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(m.Status.Progress.BytesTotal.Value()))
 
 		got, found := gaugeValue("pgcopydb_migration_tables_done", migLabels(name))
 		Expect(found).To(BeTrue())

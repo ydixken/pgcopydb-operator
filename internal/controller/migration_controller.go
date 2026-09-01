@@ -546,12 +546,20 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 // table that is legitimately empty is never counted and the tile would sit
 // one short for good. A successful copy copied all of them. Only on success:
 // a failed run's partial count is the number worth reading.
+//
+// Bytes settle for a related reason: the two sides end a little apart through
+// fillfactor, bloat and alignment, and a finished migration reporting 480 of
+// 512 invites the question of where the rest went.
 func settleProgress(m *v1beta1.Migration) {
 	p := m.Status.Progress
 	if p == nil {
 		return
 	}
 	p.TablesDone, p.IndexesDone = p.TablesTotal, p.IndexesTotal
+	if p.BytesTotal != nil {
+		done := p.BytesTotal.DeepCopy()
+		p.BytesDone = &done
+	}
 }
 
 // sampleCloneProgress best-effort fills status.progress from `list progress`,
@@ -570,6 +578,13 @@ func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta
 	case err != nil:
 		logf.FromContext(ctx).V(1).Info("progress sample failed", "job", jobName, "error", err)
 	case cp != nil:
+		// The catalog owns the object counts, which it counts exactly. It does
+		// not own the bytes: pgcopydb tallies what crossed the wire, while both
+		// figures on this tile are table bytes on disk, and mixing them puts a
+		// wire tally under an on-disk total. Keep ours wherever we have it.
+		if p := m.Status.Progress; p != nil && p.BytesTotal != nil {
+			cp.BytesTotal, cp.BytesDone = p.BytesTotal, p.BytesDone
+		}
 		m.Status.Progress = cp
 	}
 }
