@@ -153,10 +153,13 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 // the source unscoped reports indexes and bytes for tables this migration was
 // told to leave behind, and a denominator it can never reach.
 //
-// pg_relation_size, not pg_total_relation_size: the latter adds indexes and
-// TOAST, so an empty table carrying a primary key counted as copied. Caught
-// against a real pair, where a target holding one populated table of three
-// reported two.
+// pg_table_size: the table with its TOAST, without its indexes. The other two
+// are both wrong here, and each was measured against a real pair before this
+// settled. pg_total_relation_size adds the indexes, so an empty table carrying
+// a primary key counted as copied and a target holding one populated table of
+// three reported two. pg_relation_size counts only the main fork, so a table
+// of documents reported 256kB where pg_table_size reported 66MB: on an e2e
+// clone that read as 512MiB to copy while the target grew past 3GB.
 //
 // A failed side prints empty and parses to no sample, never to zero. psql
 // touches no SQLite catalog, so unlike `list progress` this is safe while the
@@ -169,9 +172,9 @@ tables="select c.oid, n.nspname, c.relname from pg_class c
     and n.nspname not like 'pg_toast%'"
 row="select pg_database_size(current_database()) || ' ' ||
   (select count(*) from t) || ' ' ||
-  (select count(*) from t where pg_relation_size(t.oid) > 0) || ' ' ||
+  (select count(*) from t where pg_table_size(t.oid) > 0) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
-  (select coalesce(sum(pg_relation_size(t.oid)), 0) from t)"
+  (select coalesce(sum(pg_table_size(t.oid)), 0) from t)"
 t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "with t as ($tables) $row") || t=
 scope=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -244,7 +247,11 @@ func parseSample(out []byte) *Sample {
 	// 0 of 0 is an absent sample, not progress.
 	if len(src) == 5 && len(tgt) == 5 && tgt[1] > 0 {
 		sample.Counts = &RelationCounts{
-			TablesTotal:  tgt[1],
+			// Every total is the source's, every done is the target's, so a
+			// dashboard can name the side it came from. The source is asked only
+			// about the tables the target has, so this counts the same set either
+			// way; taking it from the source is what makes the label true.
+			TablesTotal:  src[1],
 			TablesDone:   tgt[2],
 			IndexesTotal: src[3],
 			IndexesDone:  tgt[3],

@@ -150,9 +150,10 @@ Reading it:
 - **Percent** is target size over source size, clamped at 100.
   It is the coarsest of the progress readings: whole databases, WAL and catalog overhead included, where the counters beside it weigh only the tables in scope.
   **ETA By Size** divides the remaining bytes by how fast the target is currently growing, and reads No ETA outside `Cloning`: index builds, the cutover drain, and verification do not move bytes at a rate worth extrapolating from.
-- **Tables**, **Indexes** and **Bytes** each read as two values, `copied 23` beside `of 60`, because Grafana cannot join two query results into one string.
+- **Tables**, **Indexes** and **Bytes** are six tiles, one per side: a `(Source)` total beside the `(Target)` figure measured against it.
+  One number per tile, because Grafana cannot join two query results into one string and two values in one tile leaves them at opposite edges of it.
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
-  Bytes stopping a few percent short of the source figure while the other two reach their totals is the expected end state once pgcopydb's own accounting has replaced the estimate, for the reason given in that table: it counts bytes on the wire, and a relation on disk carries headers, padding and free space that a COPY stream does not move.
+  Bytes compares table bytes on disk on both sides, so pgcopydb's own wire tally never replaces it: a wire count under an on-disk total would read as a shortfall that is not there.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
   A check `spec.verification` does not request reads Deactivated, which both checks do by default.
@@ -198,7 +199,8 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - The tables, indexes and clone byte series move during the base copy, from the psql sample described above, and jump once when pgcopydb's own count replaces it (at clone completion, or at drain verification for a live migration).
   A small step at that moment is expected rather than a fault: the estimate counts a table as copied once it holds any data, so it leads a count of finished tables.
   A copy that exits 0 squares the table and index counts off to their totals, because an in-scope table that is legitimately empty is invisible to a count that reads data on disk and would otherwise leave the tile one short for good.
-  A failed copy keeps its partial count, which is the number worth reading there, and the byte figures are never squared off: two databases holding the same rows differ by padding, fillfactor and bloat.
+  The byte figures settle with them, because the two sides end a little apart through fillfactor, bloat and alignment, and a finished migration reporting 480 of 512 invites the question of where the rest went.
+  A failed copy keeps its partial figures, which are the ones worth reading there.
 - The `by size` percent-done series can read above 100 during `Finalizing`: index builds and pre-vacuum bloat put the target ahead of the source in bytes before space is reclaimed.
   The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.
 - The planned clone bytes come from pgcopydb's table-size statistics.

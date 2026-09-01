@@ -395,6 +395,25 @@ func TestHistoryYieldsToALiveMigration(t *testing.T) {
 // N/A among blue ones. Every stat tile there carries a single blue threshold,
 // so the colour is only ever reached through colorMode. Tiles that show a
 // name rather than a reading are exempt: there is no value to colour.
+// One stat tile at a different text size reads as a different kind of tile:
+// Cutover Drain shipped at 48 while everything around it was 20. A dashboard
+// may leave the size to Grafana, which fits the text to the panel, but where
+// tiles state a size they have to agree.
+func TestStatTilesShareOneTextSize(t *testing.T) {
+	for name, d := range load(t) {
+		sizes := map[float64]string{}
+		for _, p := range d.AllPanels() {
+			if p.Type != statPanel || p.Options.Text == nil || p.Options.Text.ValueSize == 0 {
+				continue
+			}
+			sizes[p.Options.Text.ValueSize] = p.Title
+		}
+		if len(sizes) > 1 {
+			t.Errorf("%s: stat panels state %d different value sizes: %v", name, len(sizes), sizes)
+		}
+	}
+}
+
 func TestStatTilesTakeTheirThresholdColour(t *testing.T) {
 	for name, d := range load(t) {
 		for _, p := range d.AllPanels() {
@@ -408,10 +427,38 @@ func TestStatTilesTakeTheirThresholdColour(t *testing.T) {
 	}
 }
 
+// A panel reading a _bytes metric has to be told the value is bytes. Grafana's
+// scaled units mean "this number already is gigabytes", so pointing one at a
+// byte count multiplies it by a billion: the Bytes tile shipped as decgbytes
+// and rendered a 537 MB fixture as 536.90 PB.
+func TestByteMetricsUseAByteUnit(t *testing.T) {
+	scaled := []string{"deckbytes", "decmbytes", "decgbytes", "dectbytes",
+		"kbytes", "mbytes", "gbytes", "tbytes"}
+	for name, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			unit := p.FieldConfig.Defaults.Unit
+			if !slices.Contains(scaled, unit) {
+				continue
+			}
+			for _, tg := range p.Targets {
+				for _, m := range Metrics(tg.Expr) {
+					if strings.HasSuffix(m, "_bytes") {
+						t.Errorf("%s: %q reads %s in bytes but renders it as %q",
+							name, p.Title, m, unit)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestCountTilesReadOverTheRange(t *testing.T) {
 	counters := []string{
+		"pgcopydb_migration_tables_total",
 		"pgcopydb_migration_tables_done",
+		"pgcopydb_migration_indexes_total",
 		"pgcopydb_migration_indexes_done",
+		"pgcopydb_migration_clone_planned_bytes",
 		"pgcopydb_migration_clone_copied_bytes",
 	}
 	var found int
@@ -436,8 +483,8 @@ func TestCountTilesReadOverTheRange(t *testing.T) {
 			}
 		}
 	}
-	if found != 3 {
-		t.Errorf("found %d count tiles, want 3 (Tables, Indexes, Bytes)", found)
+	if found != 6 {
+		t.Errorf("found %d count tiles, want 6 (source and target for tables, indexes, bytes)", found)
 	}
 }
 

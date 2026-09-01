@@ -340,13 +340,20 @@ func TestRelationCountsScript_ExcludesSystemSchemas(t *testing.T) {
 // an empty table carrying a primary key reads as copied and the byte
 // denominator counts indexes the target has not built. Verified against a real
 // pair: a target holding one populated table of three reported two.
-func TestRelationCountsScript_MeasuresTheTableNotItsIndexes(t *testing.T) {
+func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
+	// Both alternatives were measured against a real server, and both are
+	// wrong in a way that reached a dashboard.
 	if strings.Contains(sampleScript, "pg_total_relation_size") {
-		t.Error("sampleScript uses pg_total_relation_size; an empty table with an " +
-			"index then counts as copied. Use pg_relation_size.")
+		t.Error("sampleScript uses pg_total_relation_size; it adds the indexes, so an " +
+			"empty table carrying a primary key counts as copied. Use pg_table_size.")
 	}
-	if !strings.Contains(sampleScript, "pg_relation_size") {
-		t.Error("sampleScript measures no relation size at all")
+	if strings.Contains(sampleScript, "pg_relation_size") {
+		t.Error("sampleScript uses pg_relation_size; it counts only the main fork, so a " +
+			"table of documents measured 256kB where pg_table_size measured 66MB. " +
+			"Use pg_table_size.")
+	}
+	if !strings.Contains(sampleScript, "pg_table_size") {
+		t.Error("sampleScript measures no table size at all")
 	}
 }
 
