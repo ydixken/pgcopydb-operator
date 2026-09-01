@@ -31,10 +31,16 @@ import (
 // two large tables is the ordinary shape of a database.
 const (
 	// defaultRunnerCPU is what a worker requests when the Migration says
-	// nothing. Four, because pgcopydb runs four table jobs by default and a
-	// worker that requests less CPU than its own concurrency starves it: at
-	// one core, four COPY processes share one core and the copy is no faster
-	// than a serial one.
+	// nothing. Four, matching pgcopydb's own default table-jobs, so a worker
+	// never has fewer cores than the concurrency it was told to run.
+	//
+	// The headroom is generous rather than necessary. A copy worker traced
+	// mid-COPY measured 7-12% CPU: it spends its time waiting on socket round
+	// trips, roughly 14kB in flight per trip, not computing. Four cores are
+	// not what makes four jobs work, and a smaller request would very likely
+	// serve. Measured on one wide TOASTed table; a database of narrow rows
+	// puts more work per byte on the worker, so this stays as it is until
+	// that shape is measured too.
 	defaultRunnerCPU = "4"
 	// defaultRunnerMemory covers pgcopydb's per-process buffers at that
 	// concurrency. It is a request and not a limit, so a heavier run is
@@ -75,6 +81,12 @@ func EffectiveRunnerResources(r corev1.ResourceRequirements) corev1.ResourceRequ
 // second knob to keep in step. Never below pgcopydb's own default of four:
 // COPY spends most of its time on the network and on the servers, so a worker
 // with fewer cores than that still has something to overlap.
+//
+// Raising it past four buys nothing on a database with one dominant table,
+// because a table is one COPY stream unless pgcopydb splits it: measured 4
+// jobs at 103-131 MiB/s against 16 jobs at 102 MiB/s on the same fixture.
+// Splitting is what adds streams, and it has its own ceiling; see
+// defaultSplitMaxParts.
 func tableJobsFor(r corev1.ResourceRequirements) int32 {
 	// Requests always carries a CPU entry: EffectiveRunnerResources supplies
 	// one when the Migration did not, so there is no absent case to handle.

@@ -146,7 +146,7 @@ pgcopydb runs `VACUUM ANALYZE` per table alongside the copy, with a worker pool 
 The catch is ordering: a table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
 So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
 
-On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a fifth of the clone's wall clock.
+On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a third of the clone's wall clock: 19404ms with it against 13253ms without, in a clean pair with a fresh target database per arm.
 The operator reports it as the `Finalizing` phase precisely because it looks like a stall and is not: the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
 [Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
 
@@ -164,6 +164,33 @@ spec:
 > Run `ANALYZE` on the target yourself before pointing traffic at it, and the trade is a good one: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
 
 The operator does not skip it by default, because a migration target that silently lacks statistics is a worse failure than a slow one: it is invisible until a query plan goes wrong in production.
+
+## What the defaults are worth, measured
+
+Two source shapes on the same cluster, both cloned with binary COPY and the vacuum skipped, rates dividing source database size by wall clock.
+
+A **production-shaped** database, 15 tables totalling 1010MB with the largest at 31% of the bytes and none past the split threshold, so every stream comes from `tableJobs`:
+
+| `tableJobs` | wall clock | rate |
+|---|---|---|
+| 2 | 7548 ms | 139.7 MiB/s |
+| 4 | 4996 ms | 211.1 MiB/s |
+| 8 | 5299 ms | 199.0 MiB/s |
+| 16 | 5181 ms | 203.5 MiB/s |
+
+Throughput scales to four jobs and then flattens, which is where the default sits.
+
+The **one-dominant-table** shape, 2909MB with a single TOASTed table holding 73% of it, is the harder case and runs at roughly half the rate. There `tableJobs` cannot help, because a table is one COPY stream unless pgcopydb splits it, and splitting further makes it worse rather than better:
+
+| split threshold | max parts | rate |
+|---|---|---|
+| 512Mi (default) | 8 (default) | 102.4 MiB/s |
+| 256MB | 16 | 80.7 MiB/s |
+| 128MB | 32 | 57.2 MiB/s |
+
+More parts means more writers contending on one relation, and that costs more than the added parallelism returns. Leave both at their defaults.
+
+Why the ceiling is where it is: a copy worker traced mid-COPY sits at 7-12% CPU and moves roughly 14kB per socket round trip, one round trip at a time. Each stream is bound by round-trip latency rather than by CPU, disk or network, so throughput is the number of streams multiplied by what one stream sustains. That is why adding streams helps until the servers saturate, and why adding jobs with no streams to fill does nothing.
 
 ## Measuring
 

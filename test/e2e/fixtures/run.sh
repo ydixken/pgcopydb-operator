@@ -17,6 +17,7 @@ cd "$(dirname "$0")"
 # is psql's status, not sed's.
 stage() {
     psql -v ON_ERROR_STOP=1 -v "scale=$SEED_SCALE" -v "profile=$SEED_PROFILE" \
+        -v "extra_tables=${SEED_EXTRA_TABLES:-0}" -v "extra_mb=${SEED_EXTRA_MB:-0}" \
         -f "$1.sql" 2>&1 | sed "s|^|[$1] |"
     return "${PIPESTATUS[0]}"
 }
@@ -36,8 +37,15 @@ if [ "$seeded" = t ]; then
     exit 0
 fi
 
+# seed_extra joins the concurrent group only when asked for. It is bound by
+# bytes like seed_documents, so it overlaps the row-bound stages usefully.
+stages=(seed_small seed_events seed_documents)
+if [ "${SEED_EXTRA_TABLES:-0}" -gt 0 ]; then
+    stages+=(seed_extra)
+fi
+
 pids=()
-for s in seed_small seed_events seed_documents; do
+for s in "${stages[@]}"; do
     stage "$s" &
     pids+=("$!")
 done

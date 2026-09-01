@@ -144,7 +144,7 @@ const (
 
 	// seedProfile names the fixture generation; bump it when the schema or
 	// the seeded shapes change so kept clusters get recreated.
-	seedProfile = "v2"
+	baseSeedProfile = "v2"
 	// seedJobName and seedConfigMap are the seed Job and its mounted SQL.
 	seedJobName   = "e2e-seed"
 	seedConfigMap = "e2e-fixtures"
@@ -196,6 +196,8 @@ var (
 
 	// Volume sizes are tier-dependent, so init sets them.
 	cnpgInstances       = defaultCNPGInstances
+	extraTables         int
+	extraSizeMB         int
 	srcStorageSize      string
 	tgtStorageSize      string
 	workVolumeSize      string
@@ -269,6 +271,15 @@ func init() {
 		// basis is chosen so the round scales land on round volumes.
 		srcStorageSize, tgtStorageSize, workVolumeSize = scaledSize(50), scaledSize(50), scaledSize(12)
 	}
+	// The extra tables land on both volumes, so both grow with them. Doubled,
+	// because the same bytes are written twice over a run's life: once by the
+	// seed and again by WAL, and a full volume stops the server rather than
+	// slowing it.
+	if extraSizeMB > 0 {
+		extraGi := (extraSizeMB*2 + 1023) / 1024
+		srcStorageSize = addGi(srcStorageSize, extraGi)
+		tgtStorageSize = addGi(tgtStorageSize, extraGi)
+	}
 	// E2E_STORAGE_CLASS pins the fixture volumes to one class, for clusters
 	// where several are marked default and binding is otherwise a coin flip.
 	// Set, it wins over the stress tier's ephemeral class too.
@@ -282,6 +293,29 @@ func init() {
 			panic("E2E_CNPG_INSTANCES must be a positive integer, got " + strconv.Quote(v))
 		}
 		cnpgInstances = n
+	}
+	// E2E_EXTRA_TABLES and E2E_EXTRA_SIZE_GB add a production-shaped spread of
+	// tables on top of the v2 fixture: many tables whose sizes are drawn from
+	// a normal distribution and normalised to the requested total. The v2
+	// fixture is deliberately lopsided, one table holding most of the bytes,
+	// which is the worst case for table-level parallelism and not what a real
+	// database looks like. Both must be set for either to take effect.
+	if v := os.Getenv("E2E_EXTRA_TABLES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			panic("E2E_EXTRA_TABLES must be a non-negative integer, got " + strconv.Quote(v))
+		}
+		extraTables = n
+	}
+	if v := os.Getenv("E2E_EXTRA_SIZE_GB"); v != "" {
+		g, err := strconv.ParseFloat(v, 64)
+		if err != nil || g < 0 {
+			panic("E2E_EXTRA_SIZE_GB must be a non-negative number, got " + strconv.Quote(v))
+		}
+		extraSizeMB = int(g * 1024)
+	}
+	if (extraTables > 0) != (extraSizeMB > 0) {
+		panic("E2E_EXTRA_TABLES and E2E_EXTRA_SIZE_GB must be set together")
 	}
 	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
 	// so a branch's controller can be exercised against real servers before it
@@ -344,12 +378,35 @@ func scaled(n int64) int64 {
 // scaledSize sizes a fixture volume for the current scale, from the size the
 // same volume gets at scale 1. It never goes below an eighth of that: WAL,
 // indexes and the change spool need headroom that the row counts do not size.
+// addGi grows a "<n>Gi" size by whole gibibytes. The sizes here are all
+// written that way, so this stays string in, string out rather than dragging
+// resource.Quantity through the call sites.
+func addGi(size string, gi int) string {
+	n, err := strconv.Atoi(strings.TrimSuffix(size, "Gi"))
+	if err != nil {
+		panic("storage size is not a whole Gi value: " + size)
+	}
+	return strconv.Itoa(n+gi) + "Gi"
+}
+
 func scaledSize(fullScaleGi int) string {
 	gi := int(math.Round(float64(fullScaleGi) * scale))
 	if floor := (fullScaleGi + 7) / 8; gi < floor {
 		gi = floor
 	}
 	return strconv.Itoa(gi) + "Gi"
+}
+
+// seedProfile names the fixture generation the marker records. The extra
+// tables are folded in, so asking for a different spread invalidates a kept
+// fixture the same way bumping the base profile does: the marker will not
+// match and the source is rebuilt rather than silently reused at the old
+// shape.
+func seedProfile() string {
+	if extraTables == 0 {
+		return baseSeedProfile
+	}
+	return fmt.Sprintf("%s+x%dx%dMB", baseSeedProfile, extraTables, extraSizeMB)
 }
 
 // scaleArg renders the scale for psql -v and SQL literals: plain decimal,
@@ -490,7 +547,7 @@ var _ = BeforeSuite(func() {
 	waitClusterReady(sourceCluster)
 	waitClusterReady(targetCluster)
 
-	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile, scaleArg()))
+	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
 	ensureSeededSource()
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
@@ -863,7 +920,7 @@ func ensureSeededSource() {
 	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
 		match := psql(sourceCluster, fmt.Sprintf(
 			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
-			seedProfile, scaleArg()))
+			seedProfile(), scaleArg()))
 		if match != "t" {
 			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
 			recreateSourceCluster()
@@ -1003,7 +1060,7 @@ func runSeedJob() {
 	// cluster while one happens to be running (issue #146).
 	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", seedJobLogs(seedLogTail))
 	AddReportEntry("seed wall clock", fmt.Sprintf("%s at scale %s (profile %s)",
-		time.Since(started).Round(time.Second), scaleArg(), seedProfile))
+		time.Since(started).Round(time.Second), scaleArg(), seedProfile()))
 }
 
 func buildSeedJob() *batchv1.Job {
@@ -1026,7 +1083,9 @@ func buildSeedJob() *batchv1.Job {
 						Command: []string{"bash", "/fixtures/run.sh"},
 						Env: []corev1.EnvVar{
 							{Name: "SEED_SCALE", Value: scaleArg()},
-							{Name: "SEED_PROFILE", Value: seedProfile},
+							{Name: "SEED_PROFILE", Value: seedProfile()},
+							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
+							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
 							{Name: "PGDATABASE", Value: appDB},
 							{Name: "PGUSER", Value: appDB},

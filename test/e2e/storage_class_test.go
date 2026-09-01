@@ -100,3 +100,58 @@ func TestEphemeralParamsFollowsTheClusterDataEngine(t *testing.T) {
 		})
 	}
 }
+
+// A kept fixture is reused when the seed marker matches, so the marker has to
+// change when the requested shape does. Without the extra tables folded in, a
+// run asking for a different spread would silently reuse the old one.
+func TestSeedProfileTracksTheRequestedShape(t *testing.T) {
+	defer func(n, mb int) { extraTables, extraSizeMB = n, mb }(extraTables, extraSizeMB)
+
+	extraTables, extraSizeMB = 0, 0
+	if got := seedProfile(); got != baseSeedProfile {
+		t.Errorf("no extras: seedProfile() = %q, want %q", got, baseSeedProfile)
+	}
+
+	extraTables, extraSizeMB = 40, 8192
+	first := seedProfile()
+	if first == baseSeedProfile {
+		t.Errorf("with extras: seedProfile() = %q, want it to differ from the base", first)
+	}
+
+	extraTables, extraSizeMB = 40, 4096
+	if second := seedProfile(); second == first {
+		t.Errorf("a different total gave the same profile %q, so a kept fixture would be reused", second)
+	}
+
+	extraTables, extraSizeMB = 20, 8192
+	if third := seedProfile(); third == first {
+		t.Errorf("a different table count gave the same profile %q", third)
+	}
+}
+
+// The extra tables land on both volumes. addGi is what grows them, and it has
+// to reject anything it cannot parse rather than silently under-provision.
+// smallVolume is the size the 0.1 tier provisions, and the natural base case.
+const smallVolume = "7Gi"
+
+func TestAddGi(t *testing.T) {
+	for _, tc := range []struct {
+		size string
+		gi   int
+		want string
+	}{
+		{smallVolume, 0, smallVolume},
+		{smallVolume, 16, "23Gi"},
+		{"50Gi", 100, "150Gi"},
+	} {
+		if got := addGi(tc.size, tc.gi); got != tc.want {
+			t.Errorf("addGi(%q, %d) = %q, want %q", tc.size, tc.gi, got, tc.want)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("addGi accepted a size it cannot parse; it must panic rather than under-provision")
+		}
+	}()
+	addGi("500Mi", 1)
+}

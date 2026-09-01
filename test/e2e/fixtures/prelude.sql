@@ -10,6 +10,10 @@
 -- travels into e2e_scaled() (used inside the batched INSERTs) as a session
 -- setting. Each stage is its own psql process and needs its own copy.
 SELECT set_config('e2e.scale', :'scale', false);
+-- The extra-tables stage reads its own two settings the same way. Defaulted
+-- here so every stage can read them whether or not the caller passed them.
+SELECT set_config('e2e.extra_tables', :'extra_tables', false);
+SELECT set_config('e2e.extra_mb', :'extra_mb', false);
 
 -- One Time: line per table, which is what makes the Job log a per-phase
 -- profile of the seed instead of a list of table names (issue #146).
