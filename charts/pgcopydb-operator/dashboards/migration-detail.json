@@ -1106,7 +1106,7 @@
       "id": 25,
       "type": "stat",
       "title": "Tables",
-      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
+      "description": "A table counts once it holds data, so a half-copied one already counts. A copy that exits 0 squares the count off to the total, because an in-scope table that is legitimately empty is invisible to this method and would otherwise leave the tile one short for good. A failed copy keeps the partial count, which is the number worth reading there. Counted with psql in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. pgcopydb's own count replaces this where it can be read: at clone completion, or out of the verify Job after a live migration's cutover. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1151,7 +1151,7 @@
         },
         "orientation": "horizontal",
         "textMode": "value_and_name",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,
@@ -1186,7 +1186,7 @@
       "id": 26,
       "type": "stat",
       "title": "Indexes",
-      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
+      "description": "The denominator is the source's index count for those same tables: the target builds indexes after the data, so their absence is exactly what is being measured and it cannot supply a total. A copy that exits 0 squares the count off to the total. excludeIndexes is not applied to the denominator, so a migration using it reads short. Counted with psql in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. pgcopydb's own count replaces this where it can be read: at clone completion, or out of the verify Job after a live migration's cutover. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1231,7 +1231,7 @@
         },
         "orientation": "horizontal",
         "textMode": "value_and_name",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,
@@ -1266,7 +1266,7 @@
       "id": 27,
       "type": "stat",
       "title": "Bytes",
-      "description": "Counted in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. A table counts once it holds data, so a half-copied one already counts and a legitimately empty source table never does, which is why the last table can stay uncounted. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
+      "description": "Relation bytes on disk, the target's against the source's, so it excludes WAL and catalog overhead that the Percent tile includes. This one is not squared off at the end: two databases holding the same rows differ by padding, fillfactor and bloat, so a few percent apart is the normal end state rather than missing data. Counted with psql in the source and target databases while the worker runs, not read from pgcopydb's catalogs, which can only be opened once the copy has finished and so left this tile empty for every plain clone. The source is asked about the tables the target actually has, so a filtered migration counts only what it was asked to copy. pgcopydb's own count replaces this where it can be read: at clone completion, or out of the verify Job after a live migration's cutover. Read across the dashboard range because the sample stops when the worker pod exits. The live value wins and history is read only once the Migration is gone, so a run that has not been sampled yet cannot show the previous run under the same name.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1311,7 +1311,7 @@
         },
         "orientation": "horizontal",
         "textMode": "value_and_name",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center",
         "wideLayout": true,

@@ -541,6 +541,19 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	}
 }
 
+// settleProgress squares the counters off after a copy that succeeded. The
+// database count calls a table copied once it holds data, so an in-scope
+// table that is legitimately empty is never counted and the tile would sit
+// one short for good. A successful copy copied all of them. Only on success:
+// a failed run's partial count is the number worth reading.
+func settleProgress(m *v1beta1.Migration) {
+	p := m.Status.Progress
+	if p == nil {
+		return
+	}
+	p.TablesDone, p.IndexesDone = p.TablesTotal, p.IndexesTotal
+}
+
 // sampleCloneProgress best-effort fills status.progress from `list progress`,
 // once, by exec-ing into the pod. Its one caller is finishClone, never a pass
 // with a live worker: this is a pgcopydb command and it writes to the catalog.

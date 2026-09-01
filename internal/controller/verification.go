@@ -154,6 +154,10 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 		// with it exited, is its catalog nobody's. Best effort: the pod
 		// usually leaves Running along with the Job, and then there is nothing
 		// to sample, which is acceptable for a finished clone.
+		// Exit 0: every in-scope table was copied, whether or not any of them
+		// has rows for the count to see. This goes before the catalog read, not
+		// after, so pgcopydb's own accounting still has the last word.
+		settleProgress(m)
 		r.sampleCloneProgress(ctx, m, m.Status.JobName)
 	}
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")

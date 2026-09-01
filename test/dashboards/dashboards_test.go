@@ -35,6 +35,8 @@ const (
 	rulesFile     = "../../charts/pgcopydb-operator/rules/migrations.yaml"
 	phaseMetric   = "pgcopydb_migration_phase"
 	statPanel     = "stat"
+	// textModeName is a stat tile that shows a label, not a reading.
+	textModeName = "name"
 )
 
 // ruleExprs reads every alert expression from the chart's rule file.
@@ -388,6 +390,24 @@ func TestHistoryYieldsToALiveMigration(t *testing.T) {
 // so a tile reading only at the range end shows N/A for every finished
 // migration. Measured on e2e-follow-auto: no series at the range end, two over
 // six hours. The same defect the other run-fact tiles already had fixed.
+// A stat tile with colorMode "none" renders its value, and its noValue text,
+// in the default foreground: on the detail dashboard that reads as a white
+// N/A among blue ones. Every stat tile there carries a single blue threshold,
+// so the colour is only ever reached through colorMode. Tiles that show a
+// name rather than a reading are exempt: there is no value to colour.
+func TestStatTilesTakeTheirThresholdColour(t *testing.T) {
+	for name, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			if p.Type != statPanel || p.Options.ColorMode != "none" ||
+				p.Options.TextMode == textModeName {
+				continue
+			}
+			t.Errorf("%s: stat panel %q renders uncoloured; use value or background",
+				name, p.Title)
+		}
+	}
+}
+
 func TestCountTilesReadOverTheRange(t *testing.T) {
 	counters := []string{
 		"pgcopydb_migration_tables_done",

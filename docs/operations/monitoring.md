@@ -31,9 +31,9 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it; `check` is `schema` or `data` | once the spec is read, minus a requested check with no result yet |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size | worker running |
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size; `rate()` of it is the copy throughput | worker running |
-| `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | patched runner |
-| `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built / planned | patched runner |
-| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | patched runner |
+| `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | worker running |
+| `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built / planned | worker running |
+| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | worker running |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
@@ -45,10 +45,11 @@ The "Exists" column is the contract for when a series is present:
 
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
-- **patched runner**: the in-pod progress poll runs only on allowlisted runner versions; the bundled runner qualifies, a custom stock 0.18 image keeps these series dark (see the [troubleshooting row](../troubleshooting.md)).
-  The poll never runs against a live worker, because opening pgcopydb 0.18's catalogs while the copy writes them crashes it.
-  On a follow migration these series arrive with the drain verification, after cutover: the worker pod is gone by then, so the counters are read out of the verify Job's log instead.
-  A plain clone gets one best-effort sample as its worker exits, so its series MAY never appear when the pod is already gone.
+- **worker running** for the counters too, but they have two sources and the second is more exact.
+  While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables and bytes that exist on the target against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
+  This runs on any runner, because it touches no pgcopydb catalog.
+  Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see the [troubleshooting row](../troubleshooting.md)).
+  The estimate leads that accounting slightly, because a table counts as copied once it holds any data.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 - **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
   A flip retires the old `{type,status}` pair and stamps a new one, so the endpoint never carries more than one series per condition type.
@@ -147,10 +148,11 @@ Reading it:
 - **Elapsed** is how long the run took once it completed, and how long it has been going while it has not.
   **Completed At** is where it ended, and reads Still Running until there is an end.
 - **Percent** is target size over source size, clamped at 100.
-  It is the live progress reading during the base copy, because the catalog-derived counters beside it hold still until that copy finishes.
+  It is the coarsest of the progress readings: whole databases, WAL and catalog overhead included, where the counters beside it weigh only the tables in scope.
   **ETA By Size** divides the remaining bytes by how fast the target is currently growing, and reads No ETA outside `Cloning`: index builds, the cutover drain, and verification do not move bytes at a rate worth extrapolating from.
-- **Tables**, **Indexes**, and **Clone Bytes** come from pgcopydb's own catalogs, so they read N/A wherever the "patched runner" contract above does not hold.
-  Clone Bytes stopping a few percent short of 100 while the other two reach it is the expected end state, for the reason given in that table.
+- **Tables**, **Indexes** and **Bytes** each read as two values, `copied 23` beside `of 60`, because Grafana cannot join two query results into one string.
+  They read N/A before the target has a schema to count, and for a migration whose worker never ran.
+  Bytes stopping a few percent short of the source figure while the other two reach their totals is the expected end state once pgcopydb's own accounting has replaced the estimate, for the reason given in that table: it counts bytes on the wire, and a relation on disk carries headers, padding and free space that a COPY stream does not move.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
   A check `spec.verification` does not request reads Deactivated, which both checks do by default.
@@ -193,14 +195,17 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
 - The database sizes are live samples from the worker pod.
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
-- The tables, indexes, and clone byte series hold still during the base copy itself: nothing polls a live worker, so the size panels are the live view mid-copy and the percent-done panel fills in when the counters land, at clone completion for a plain clone and at drain verification for a live migration.
+- The tables, indexes and clone byte series move during the base copy, from the psql sample described above, and jump once when pgcopydb's own count replaces it (at clone completion, or at drain verification for a live migration).
+  A small step at that moment is expected rather than a fault: the estimate counts a table as copied once it holds any data, so it leads a count of finished tables.
+  A copy that exits 0 squares the table and index counts off to their totals, because an in-scope table that is legitimately empty is invisible to a count that reads data on disk and would otherwise leave the tile one short for good.
+  A failed copy keeps its partial count, which is the number worth reading there, and the byte figures are never squared off: two databases holding the same rows differ by padding, fillfactor and bloat.
 - The `by size` percent-done series can read above 100 during `Finalizing`: index builds and pre-vacuum bloat put the target ahead of the source in bytes before space is reclaimed.
   The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.
 - The planned clone bytes come from pgcopydb's table-size statistics.
   The copied/planned ratio stays a few percent short of 100 by construction: a relation's on-disk size carries page and tuple headers, alignment padding and free space that a COPY stream does not move.
 - Copy Throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
-- On a custom stock 0.18 runner the tables, indexes, and clone byte series stay absent; the percent-done panel shows `N/A` for them and the size-based panels keep working.
+- On a custom stock 0.18 runner these series still flow, because the psql sample needs no pgcopydb command; what that runner gives up is the exact count that would replace the estimate at the end.
 - The stalled-clone alert matches `Cloning` alone because the tail normally reads as `Finalizing`, which needs the phase probe to have seen this attempt's copy workers at least once.
   That probe runs on every poll, about every 10 seconds, so only a copy that finishes almost the instant it starts fails to set it and carries `Cloning` into its tail.
   Firing still takes an hour of flat target, which a copy that short does not plausibly produce.

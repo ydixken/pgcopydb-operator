@@ -272,6 +272,59 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Progress.TablesDone).To(Equal(int64(2)))
 	})
 
+	It("squares the counters off when the copy succeeded", func() {
+		const name = "mig-settle"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// An in-scope table with no rows is invisible to a count that reads
+		// data on disk, so the estimate ends one short and stays there. Exit 0
+		// says every table was copied, empty ones included.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 59, IndexesTotal: 12, IndexesDone: 11,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(59)))
+
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(60)))
+		Expect(m.Status.Progress.IndexesDone).To(Equal(int64(12)))
+
+		got, found := gaugeValue("pgcopydb_migration_tables_done", migLabels(name))
+		Expect(found).To(BeTrue())
+		Expect(got).To(Equal(float64(60)))
+	})
+
+	It("leaves a failed copy's count where it stopped", func() {
+		const name = "mig-settle-failed"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// How far a failed run got is the number worth reading, so nothing
+		// rounds it up to the total here.
+		r := newReconciler()
+		r.Progress = &fakeProgress{
+			src: int64p(5000),
+			relations: &progress.RelationCounts{
+				TablesTotal: 60, TablesDone: 41, IndexesTotal: 12, IndexesDone: 0,
+			},
+		}
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		Expect(reconcileAndGet(ctx, r, name).Status.Progress.TablesDone).To(Equal(int64(41)))
+
+		finishJob(ctx, name+"-run-1", false)
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
+		Expect(m.Status.Progress.TablesDone).To(Equal(int64(41)))
+	})
+
 	It("passes despite sampler errors", func() {
 		const name = "mig-progress-err"
 		defer removeMigration(ctx, name)

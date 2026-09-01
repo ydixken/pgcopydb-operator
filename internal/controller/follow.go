@@ -399,6 +399,13 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 		// empty field to know it may still write one. This runs before the nil
 		// check below because ensureJob reports no Job on the pass it creates
 		// one, and it runs on that pass only, so a landed count is never cleared.
+		//
+		// The estimate's last word goes to the gauges first, squared off: the base
+		// copy succeeded, and a tile left one table short for good is the confusing
+		// end state. Record leaves those gauges alone while the field is empty, so
+		// they hold that reading until the catalog line overwrites them.
+		settleProgress(m)
+		metrics.Record(m)
 		m.Status.Progress = nil
 	}
 	if err != nil || job == nil {
