@@ -10,6 +10,7 @@ Operating guide for AI agents and humans working in this repository. The keyword
 - **This repository is public.** Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project. E2e-relevant details live in private ops notes outside git. When a doc needs such a fact, it writes "see private ops notes".
 - Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
 - `task e2e` runs against a **real cluster**: whatever `kubectl config current-context` points at. Check the context before running, and never bypass the confirmation prompt (`task --yes` is forbidden for this target). The dev cluster is shared; keep e2e resources in the `pgcopydb-e2e` namespace and clean up.
+- An agent or script that cannot answer a prompt uses `task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=<context>`. It requires `EXPECT_CONTEXT` to name the current context, so the protection the prompt gives (a run cannot reach a cluster nobody meant) survives without a human at the keyboard. `task --yes` stays forbidden: it would answer any prompt, on any cluster, silently.
 - CI runs the same specs unattended when [release.yml](.github/workflows/release.yml) verifies a release candidate. That runner has one cluster and no prompt to answer. It does not soften the rule above: locally, a human answers the prompt.
 
 ## Mandatory skills

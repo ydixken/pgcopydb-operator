@@ -109,6 +109,36 @@ tasks:
         msg: |
           FOCUS is required, for example:
             task e2e:focus FOCUS='loses no committed transaction'
+    cmds:
+      - task: e2e:focus:run
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}'}
+
+  e2e:focus:unattended:
+    desc: >-
+      e2e:focus without the confirmation prompt, for an agent or a script that
+      cannot answer one. EXPECT_CONTEXT is required and must name the current
+      kubectl context: the prompt exists to stop a run reaching the wrong
+      cluster, so removing it means saying which cluster you meant. Everything
+      else behaves as e2e:focus.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    preconditions:
+      - sh: test -n '{{.FOCUS}}'
+        msg: |
+          FOCUS is required, for example:
+            task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=my-cluster
+      - sh: test '{{.EXPECT_CONTEXT}}' = '{{.KUBE_CONTEXT}}'
+        msg: |
+          EXPECT_CONTEXT must name the context this will run against.
+            current context: {{.KUBE_CONTEXT}}
+            EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
+    cmds:
+      - task: e2e:focus:run
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}'}
+
+  e2e:focus:run:
+    internal: true
     env:
       E2E_SCALE: '{{.SCALE | default "0.1"}}'
       E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
