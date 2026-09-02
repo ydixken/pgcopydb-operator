@@ -27,11 +27,13 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -121,6 +123,53 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 				"--platform=$BUILDPLATFORM itself, so the sed would duplicate the flag:\n %s",
 				strings.TrimSpace(line))
 		}
+	}
+}
+
+func TestGolangCILintDoesNotRebuildBakedCustomBinary(t *testing.T) {
+	localBin := t.TempDir()
+	linter := filepath.Join(localBin, "golangci-lint")
+	if err := os.WriteFile(linter, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Unix(1, 0)
+	newer := time.Unix(2, 0)
+	if err := os.Chtimes(linter, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(localBin, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("make", "-n", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin)
+	cmd.Dir = "../.."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry-run golangci-lint: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "go install") {
+		t.Fatalf("golangci-lint rebuilds because LOCALBIN is newer:\n%s", out)
+	}
+}
+
+func TestGolangCILintCustomBuildFailsClosed(t *testing.T) {
+	localBin := t.TempDir()
+	version := "test-version"
+	versioned := filepath.Join(localBin, "golangci-lint-"+version)
+	script := "#!/bin/sh\n[ \"${1:-}\" != custom ]\n"
+	if err := os.WriteFile(versioned, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(versioned, filepath.Join(localBin, "golangci-lint")); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("make", "-B", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin,
+		"GOLANGCI_LINT_VERSION="+version)
+	cmd.Dir = "../.."
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("golangci-lint ignored a failed custom build:\n%s", out)
 	}
 }
 
