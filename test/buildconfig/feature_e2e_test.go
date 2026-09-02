@@ -51,6 +51,7 @@ const (
 	trueValue                    = "true"
 	successValue                 = "success"
 	failureValue                 = "failure"
+	skippedValue                 = "skipped"
 	errorValue                   = "error"
 	unreadableValue              = "unreadable"
 	fullModeValue                = "full"
@@ -2724,24 +2725,79 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 	if cleanup.Env["HELPERS_OUTCOME"] != "${{ steps.helpers.outcome }}" {
 		t.Errorf("cleanup helper outcome = %q", cleanup.Env["HELPERS_OUTCOME"])
 	}
+	if cleanup.Env["SUITE_OUTCOME"] != "${{ steps.suite.outcome }}" {
+		t.Errorf("cleanup suite outcome = %q", cleanup.Env["SUITE_OUTCOME"])
+	}
 	if protectedStepIndex(t, cluster, "Write cluster helpers") >=
 		protectedStepIndex(t, cluster, "Attest runner image") {
 		t.Error("cluster mutation can start before helper setup succeeds")
 	}
 
-	for _, outcome := range []string{"skipped", "failure"} {
-		t.Run("helpers_"+outcome, func(t *testing.T) {
+	tests := []struct {
+		name           string
+		helpersOutcome string
+		suiteOutcome   string
+		wantArgs       string
+		wantCall       bool
+		wantError      bool
+	}{
+		{"suite success is strict", successValue, successValue, "", true, false},
+		{"suite failure recovers", successValue, failureValue, "recovery", true, false},
+		{"suite skipped recovers", successValue, skippedValue, "recovery", true, false},
+		{"unknown suite outcome fails", successValue, "cancelled", "", false, true},
+		{"skipped helpers are safe", skippedValue, skippedValue, "", false, false},
+		{"failed helpers are safe", failureValue, failureValue, "", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			if err := os.WriteFile(filepath.Join(dir, "cleanup"),
+				[]byte("#!/usr/bin/env bash\nprintf '%s' \"$*\" > \"$CALLS\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			cmd := exec.Command("bash", "-c", cleanup.Run)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HELPERS_OUTCOME=" + outcome}
-			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("cleanup after helper %s: %v\n%s", outcome, err, output)
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"FEATURE_E2E_HELPERS=" + dir,
+				"CALLS=" + calls,
+				"HELPERS_OUTCOME=" + tt.helpersOutcome,
+				"SUITE_OUTCOME=" + tt.suiteOutcome,
+			}
+			output, err := cmd.CombinedOutput()
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("cleanup accepted suite outcome %q", tt.suiteOutcome)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("cleanup routing failed: %v\n%s", err, output)
+			}
+			got, readErr := os.ReadFile(calls)
+			if !tt.wantCall {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("cleanup ran without helpers: %q, err %v", got, readErr)
+				}
+				return
+			}
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(got) != tt.wantArgs {
+				t.Fatalf("cleanup args = %q, want %q", got, tt.wantArgs)
 			}
 		})
 	}
 
 	t.Run("missing_cleanup_after_helpers", func(t *testing.T) {
 		cmd := exec.Command("bash", "-c", cleanup.Run)
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HELPERS_OUTCOME=success"}
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HELPERS_OUTCOME=success",
+			"SUITE_OUTCOME=success",
+			"FEATURE_E2E_HELPERS=" + t.TempDir(),
+		}
 		if err := cmd.Run(); err == nil {
 			t.Fatal("cleanup succeeded without its helper after helper setup")
 		}
@@ -3722,6 +3778,28 @@ func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // O
 			!strings.Contains(fixture.readLog(), "install:occupied\n") {
 			t.Fatalf("occupied fixed slot was reported as a successful reinstall: %v\n%s",
 				retry.err, retry.output)
+		}
+	})
+
+	t.Run("pre-controller recovery requires a proven empty slot", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err != nil {
+			t.Fatalf("proven empty recovery failed: %v\n%s", result.err, result.output)
+		}
+		if strings.Contains(fixture.readLog(), "uninstall\n") {
+			t.Fatal("empty recovery invoked Helm uninstall")
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", "")
+		fixture.write("rendered.yaml", "")
+		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err == nil {
+			t.Fatal("empty rendered-manifest evidence was accepted")
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", "")
+		fixture.write("release", featureControllerName)
+		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err == nil {
+			t.Fatal("occupied fixed Helm slot was accepted")
 		}
 	})
 

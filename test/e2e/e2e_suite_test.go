@@ -1541,12 +1541,39 @@ func seedJobLogs(lines int) string {
 	return string(out)
 }
 
+func TestEnsureFixtureStorageLeavesExplicitDefaultNamedClassAlone(t *testing.T) {
+	t.Setenv("E2E_STORAGE_CLASS", ephemeralStorageClass)
+	oldCtx, oldClient, oldClass := ctx, k8sClient, fixtureStorageClass
+	t.Cleanup(func() {
+		ctx, k8sClient, fixtureStorageClass = oldCtx, oldClient, oldClass
+	})
+	ctx = context.Background()
+	fixtureStorageClass = ephemeralStorageClass
+	k8sClient = clientfake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		List: func(
+			context.Context,
+			client.WithWatch,
+			client.ObjectList,
+			...client.ListOption,
+		) error {
+			return errors.New("unexpected storage discovery")
+		},
+	}).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(func() { ensureFixtureStorage() }); err != nil {
+		t.Fatalf("explicit StorageClass triggered cluster discovery: %v", err)
+	}
+}
+
 // ensureFixtureStorage prepares the class the fixture volumes bind to and
 // refuses a run that would not fit. Longhorn is optional: without it the
 // suite-owned class could never bind, so the fixtures fall back to the
 // cluster default and there is no capacity to read. E2E_STORAGE_CLASS is left
 // alone, because whoever pins a class owns the capacity question with it.
 func ensureFixtureStorage() {
+	if os.Getenv("E2E_STORAGE_CLASS") != "" {
+		return
+	}
 	GinkgoHelper()
 	if fixtureStorageClass != ephemeralStorageClass {
 		return
