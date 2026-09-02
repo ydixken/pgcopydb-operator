@@ -284,6 +284,7 @@ jobs:
           docker buildx imagetools inspect "$MANAGER_REF" >/dev/null
           docker buildx imagetools inspect "$RUNNER_REF" >/dev/null
       - name: Write cluster helpers
+        id: helpers
         run: |
           set -euo pipefail
           FEATURE_E2E_HELPERS=$RUNNER_TEMP/feature-e2e
@@ -1356,8 +1357,15 @@ jobs:
       - name: Cleanup feature resources
         id: cleanup
         if: always()
+        env:
+          HELPERS_OUTCOME: ${{ steps.helpers.outcome }}
         run: |
-          "$FEATURE_E2E_HELPERS/cleanup"
+          set -euo pipefail
+          case "$HELPERS_OUTCOME" in
+            success) "$FEATURE_E2E_HELPERS/cleanup" ;;
+            skipped | failure) ;;
+            *) echo "::error::cluster helper outcome is invalid"; exit 1 ;;
+          esac
       - name: Require suite and cleanup success
         if: always()
         env:
