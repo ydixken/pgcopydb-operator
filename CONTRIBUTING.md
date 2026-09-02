@@ -174,7 +174,8 @@ The workflow posts `failure` only for a test assertion after manager and runner 
 Both modes serialize with release candidate and published-release E2E, preserve the shared namespaces and fixtures, and fail if cleanup cannot be verified.
 
 > [!important]
-> The protected environment owns the expected context and exclusive-controller attestation.
+> The protected environment owns the expected context and the non-secret `E2E_EXCLUSIVE_CONTROLLER` attestation.
+> Set the attestation to literal `true` only when private ops notes confirm the exclusive-controller policy; a missing or different value stops the job before cluster access.
 > GitHub stores `E2E_PROMETHEUS_URL` as an Actions secret, so it masks the complete value before step environment logging; the workflow registers it again before shell use.
 > For setup and incident handling, see private ops notes.
 > Do not copy or log those values.

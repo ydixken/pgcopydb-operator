@@ -2696,6 +2696,41 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 	}
 }
 
+func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	cluster := wf.Jobs["cluster"]
+	helpers := protectedStepNamed(t, cluster, "Write cluster helpers")
+	cleanup := protectedStepNamed(t, cluster, "Cleanup feature resources")
+	if helpers.ID != "helpers" {
+		t.Errorf("cluster helper step ID = %q, want helpers", helpers.ID)
+	}
+	if cleanup.Env["HELPERS_OUTCOME"] != "${{ steps.helpers.outcome }}" {
+		t.Errorf("cleanup helper outcome = %q", cleanup.Env["HELPERS_OUTCOME"])
+	}
+	if protectedStepIndex(t, cluster, "Write cluster helpers") >=
+		protectedStepIndex(t, cluster, "Attest runner image") {
+		t.Error("cluster mutation can start before helper setup succeeds")
+	}
+
+	for _, outcome := range []string{"skipped", "failure"} {
+		t.Run("helpers_"+outcome, func(t *testing.T) {
+			cmd := exec.Command("bash", "-c", cleanup.Run)
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HELPERS_OUTCOME=" + outcome}
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("cleanup after helper %s: %v\n%s", outcome, err, output)
+			}
+		})
+	}
+
+	t.Run("missing_cleanup_after_helpers", func(t *testing.T) {
+		cmd := exec.Command("bash", "-c", cleanup.Run)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HELPERS_OUTCOME=success"}
+		if err := cmd.Run(); err == nil {
+			t.Fatal("cleanup succeeded without its helper after helper setup")
+		}
+	})
+}
+
 func TestFeatureE2EProtectsPrometheusURLBeforeRunnerUse(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
 	cluster := wf.Jobs["cluster"]
