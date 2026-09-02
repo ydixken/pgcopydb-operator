@@ -217,6 +217,10 @@ jobs:
     outputs:
       suite: ${{ steps.suite.outcome }}
       cleanup: ${{ steps.cleanup.outcome }}
+      suite_ran: ${{ steps.suite.outputs.suite_ran }}
+      suite_completed: ${{ steps.suite.outputs.suite_completed }}
+      manager_attested: ${{ steps.suite.outputs.manager_attested }}
+      runner_attested: ${{ steps.runner-attestation.outputs.runner_attested }}
     env:
       MANAGER_REF: ghcr.io/${{ github.repository }}:feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
       RUNNER_REF: ghcr.io/${{ github.repository }}/runner:feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
@@ -288,39 +292,287 @@ jobs:
 
           cat > "$FEATURE_E2E_HELPERS/attest-image" <<'EOF_ATTEST'
           #!/usr/bin/env bash
+          set +x
           set -euo pipefail
-          namespace=$1
-          selector=$2
-          container=$3
-          expected_ref=$4
-          [[ "$expected_ref" =~ @sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::attestation reference is not immutable"
+          [ "$#" -eq 1 ] || {
+            echo "::error::attestation component is invalid"
             exit 1
           }
-          pods=$(kubectl get pods -n "$namespace" -l "$selector" -o json)
-          count=$(jq --arg container "$container" --arg image "$expected_ref" '
-            [.items[] | select(any(.spec.containers[];
-              .name == $container and .image == $image))] | length
-          ' <<<"$pods")
-          [ "$count" -eq 1 ] || {
-            echo "::error::expected exactly one eligible controller or canary Pod"
+          component=$1
+          owner_file=${FEATURE_E2E_OWNER_FILE:-}
+          [ -n "$owner_file" ] || {
+            echo "::error::attestation ownership is invalid"
             exit 1
           }
-          image_id=$(jq -er --arg container "$container" --arg image "$expected_ref" '
-            .items[] | select(any(.spec.containers[];
-              .name == $container and .image == $image)) |
-            .status.containerStatuses[] | select(.name == $container) | .imageID
-          ' <<<"$pods")
-          case "$image_id" in
-            *@sha256:*) actual_digest="sha256:${image_id##*@sha256:}" ;;
-            *://sha256:*) actual_digest="sha256:${image_id##*://sha256:}" ;;
-            *) echo "::error::runtime imageID has no digest"; exit 1 ;;
+          owner_value=$(<"$owner_file") 2>/dev/null || {
+            echo "::error::attestation ownership is invalid"
+            exit 1
+          }
+          [ "${FEATURE_E2E_OWNER_KEY:-}" = pgcopydb-operator.io/feature-e2e-run ] &&
+            [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]] || {
+              echo "::error::attestation ownership is invalid"
+              exit 1
+            }
+          owner_selector="pgcopydb-operator.io/feature-e2e-run=$owner_value"
+          case "$component" in
+            manager)
+              namespace=pgcopydb-e2e-system
+              container=manager
+              expected_ref=${MANAGER_REF:-}
+              [[ "$expected_ref" =~ ^ghcr\.io/ydixken/pgcopydb-operator:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] || {
+                echo "::error::attestation reference is invalid"
+                exit 1
+              }
+              expected_runner_ref=${RUNNER_REF:-}
+              [[ "$expected_runner_ref" =~ ^ghcr\.io/ydixken/pgcopydb-operator/runner:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] || {
+                echo "::error::attestation reference is invalid"
+                exit 1
+              }
+              resources=$(kubectl get deployments,replicasets,pods -n "$namespace" \
+                -l "$owner_selector" -o json 2>/dev/null) || {
+                  echo "::error::unable to inspect the manager ownership chain"
+                  exit 1
+                }
+              pods=$(jq -cer \
+                --arg namespace "$namespace" \
+                --arg owner_key "$FEATURE_E2E_OWNER_KEY" \
+                --arg owner_value "$owner_value" \
+                --arg manager_ref "$expected_ref" \
+                --arg runner_arg "--runner-image=$expected_runner_ref" '
+                def valid_uid:
+                  type == "string" and
+                  test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+                def generated_from($name):
+                  if type != "string" then false
+                  else startswith($name + "-") and length > (($name | length) + 1)
+                  end;
+                def valid_runner_args($runner_arg):
+                  if type != "array" then false
+                  else
+                    all(.[]; type == "string") and
+                    ([.[] | select(type == "string") |
+                      select(. == "--runner-image" or startswith("--runner-image="))] |
+                      length == 1) and
+                    ([.[] | select(. == $runner_arg)] | length == 1)
+                  end;
+                def valid_manager($manager_ref; $runner_arg):
+                  if type != "array" then false
+                  else
+                    [.[] | select(type == "object" and .name == "manager")] as $managers |
+                    ($managers | length) == 1 and
+                    $managers[0].image == $manager_ref and
+                    ($managers[0].args | valid_runner_args($runner_arg))
+                  end;
+                def controlled_by($api_version; $kind; $name; $uid):
+                  (.metadata.ownerReferences | type == "array") and
+                  ([.metadata.ownerReferences[] |
+                    select(.controller == true)] | length == 1) and
+                  ([.metadata.ownerReferences[] |
+                    select(.controller == true and .apiVersion == $api_version and
+                      .kind == $kind and .name == $name and .uid == $uid)] | length == 1);
+                if type == "object" and .apiVersion == "v1" and
+                   .kind == "List" and (.items | type) == "array"
+                then .items else error("invalid resource list") end |
+                if all(.[];
+                  type == "object" and
+                  (.kind == "Deployment" or .kind == "ReplicaSet" or .kind == "Pod") and
+                  (.metadata | type == "object") and
+                  .metadata.namespace == $namespace and
+                  (.metadata.labels | type == "object") and
+                  .metadata.labels[$owner_key] == $owner_value)
+                then . else error("invalid run-owned resource") end |
+                [ .[] | select(.kind == "Deployment") ] as $deployments |
+                [ .[] | select(.kind == "ReplicaSet") ] as $replica_sets |
+                [ .[] | select(.kind == "Pod") ] as $pods |
+                if ($deployments | length) == 1 and
+                   ($replica_sets | length) == 1 and
+                   ($pods | length) == 1
+                then
+                  $deployments[0] as $deployment |
+                  $replica_sets[0] as $replica_set |
+                  $pods[0] as $pod |
+                  if $deployment.apiVersion == "apps/v1" and
+                     $deployment.metadata.name == "pgcopydb-e2e" and
+                     ($deployment.metadata.uid | valid_uid) and
+                     $deployment.metadata.labels["app.kubernetes.io/instance"] == "pgcopydb-e2e" and
+                     $deployment.metadata.labels["app.kubernetes.io/name"] == "pgcopydb-operator" and
+                     $replica_set.apiVersion == "apps/v1" and
+                     ($replica_set.metadata.name |
+                       generated_from($deployment.metadata.name)) and
+                     ($replica_set.metadata.uid | valid_uid) and
+                     $deployment.metadata.uid != $replica_set.metadata.uid and
+                     $replica_set.metadata.labels["app.kubernetes.io/instance"] == "pgcopydb-e2e" and
+                     $replica_set.metadata.labels["app.kubernetes.io/name"] == "pgcopydb-operator" and
+                     ($replica_set | controlled_by("apps/v1"; "Deployment";
+                       $deployment.metadata.name; $deployment.metadata.uid)) and
+                     $pod.apiVersion == "v1" and
+                     ($pod.metadata.name | generated_from($replica_set.metadata.name)) and
+                     ($pod.metadata.uid | valid_uid) and
+                     $deployment.metadata.uid != $pod.metadata.uid and
+                     $replica_set.metadata.uid != $pod.metadata.uid and
+                     $pod.metadata.labels["app.kubernetes.io/instance"] == "pgcopydb-e2e" and
+                     $pod.metadata.labels["app.kubernetes.io/name"] == "pgcopydb-operator" and
+                     ($pod | controlled_by("apps/v1"; "ReplicaSet";
+                       $replica_set.metadata.name; $replica_set.metadata.uid)) and
+                     ($pod.status.conditions | type == "array") and
+                     ([$pod.status.conditions[] |
+                       select(.type == "Ready")] | length == 1) and
+                     ([$pod.status.conditions[] |
+                       select(.type == "Ready" and .status == "True")] | length == 1) and
+                     ($deployment.spec.template.spec.containers |
+                       valid_manager($manager_ref; $runner_arg)) and
+                     ($replica_set.spec.template.spec.containers |
+                       valid_manager($manager_ref; $runner_arg)) and
+                     ($pod.spec.containers |
+                       valid_manager($manager_ref; $runner_arg))
+                  then {apiVersion:"v1", kind:"PodList", items:[$pod]}
+                  else error("invalid manager ownership chain") end
+                else error("manager ownership chain is not unique") end
+              ' <<<"$resources" 2>/dev/null) || {
+                echo "::error::manager ownership chain is invalid"
+                exit 1
+              }
+              ;;
+            runner)
+              namespace=pgcopydb-e2e
+              selector="job-name=feature-e2e-runner-attest,$owner_selector"
+              container=runner
+              expected_ref=${RUNNER_REF:-}
+              [[ "$expected_ref" =~ ^ghcr\.io/ydixken/pgcopydb-operator/runner:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] || {
+                echo "::error::attestation reference is invalid"
+                exit 1
+              }
+              pods=$(kubectl get pods -n "$namespace" -l "$selector" -o json 2>/dev/null) || {
+                echo "::error::unable to inspect runtime Pods"
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::attestation component is invalid"
+              exit 1
+              ;;
           esac
+          expected_image=${expected_ref%@*}
+          expected_image=${expected_image%:*}
           top_digest=${expected_ref##*@}
-          raw=$(docker buildx imagetools inspect "$expected_ref" --raw)
+          count=$(jq -er '
+            .items | if type == "array" then length else error("invalid Pod list") end
+          ' <<<"$pods" 2>/dev/null) || {
+            echo "::error::runtime Pod data is invalid"
+            exit 1
+          }
+          [ "$count" -eq 1 ] || {
+            echo "::error::expected exactly one controller or canary Pod"
+            exit 1
+          }
+          jq -e --arg container "$container" --arg image "$expected_ref" '
+            (.items[0].spec.containers | type == "array") and
+            ([.items[0].spec.containers[] |
+              select(.name == $container)] | length == 1) and
+            ([.items[0].spec.containers[] |
+              select(.name == $container and .image == $image)] | length == 1)
+          ' <<<"$pods" >/dev/null 2>&1 || {
+            echo "::error::runtime Pod data is invalid"
+            exit 1
+          }
+          image_id=$(jq -er --arg container "$container" '
+            .items[0].status.containerStatuses |
+            if type == "array" then . else error("invalid container statuses") end |
+            [.[] |
+              select(.name == $container)] |
+            if length == 1 and ((.[0].imageID | type) == "string") then
+              .[0].imageID
+            else
+              error("invalid container status")
+            end
+          ' <<<"$pods" 2>/dev/null) || {
+            echo "::error::runtime imageID is missing or malformed"
+            exit 1
+          }
+          runtime_ref=${image_id#docker-pullable://}
+          runtime_image=${runtime_ref%@*}
+          actual_digest=${runtime_ref##*@}
+          [ "$runtime_ref" = "$runtime_image@$actual_digest" ] &&
+            [ "$runtime_image" = "$expected_image" ] &&
+            [[ "$actual_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::runtime imageID is missing or malformed"
+              exit 1
+            }
+          raw=$(docker buildx imagetools inspect "$expected_ref" --raw 2>/dev/null) || {
+            echo "::error::unable to inspect the requested manifest"
+            exit 1
+          }
           jq -e --arg actual "$actual_digest" --arg top "$top_digest" '
-            $actual == $top or any(.manifests[]?; .digest == $actual)
-          ' <<<"$raw" >/dev/null || {
+            def allowed_manifest_media_type:
+              . == "application/vnd.oci.image.manifest.v1+json" or
+              . == "application/vnd.docker.distribution.manifest.v2+json";
+            def optional_string($key):
+              (has($key) | not) or ((.[$key] | type) == "string");
+            def optional_string_array($key):
+              (has($key) | not) or
+              (((.[$key] | type) == "array") and
+               all(.[$key][]; type == "string"));
+            def valid_annotations:
+              (has("annotations") | not) or
+              (((.annotations | type) == "object") and
+               all(.annotations | to_entries[];
+                 ((.key | type) == "string") and
+                 ((.value | type) == "string")));
+            def valid_descriptor:
+              type == "object" and
+              (.mediaType | allowed_manifest_media_type) and
+              ((.digest | type) == "string") and
+              (.digest | test("^sha256:[0-9a-f]{64}$")) and
+              ((.size | type) == "number") and .size > 0 and
+              ((.size | floor) == .size) and
+              valid_annotations and
+              optional_string_array("urls") and
+              optional_string("data") and
+              optional_string("artifactType") and
+              ((.platform | type) == "object") and
+              ((.platform.os | type) == "string") and
+              (.platform.os | length) > 0 and
+              ((.platform.architecture | type) == "string") and
+              (.platform.architecture | length) > 0 and
+              (.platform | optional_string("variant")) and
+              (.platform | optional_string("os.version")) and
+              (.platform | optional_string_array("os.features")) and
+              (.platform | optional_string_array("features"));
+            def attestation_marker:
+              ((.annotations? | type) == "object") and
+              .annotations["vnd.docker.reference.type"] == "attestation-manifest";
+            def runtime_platform:
+              .platform.os == "linux" and
+              (.platform.architecture == "amd64" or
+               .platform.architecture == "arm64");
+            def valid_runtime_descriptor:
+              valid_descriptor and runtime_platform and (attestation_marker | not);
+            def valid_attestation_descriptor($runtime_digests):
+              valid_descriptor and
+              .platform.os == "unknown" and
+              .platform.architecture == "unknown" and
+              attestation_marker and
+              (.annotations["vnd.docker.reference.digest"] as $reference |
+                (($reference | type) == "string") and
+                ($reference | test("^sha256:[0-9a-f]{64}$")) and
+                (($runtime_digests | index($reference)) != null));
+            ([.manifests[]? | select(valid_runtime_descriptor) |
+              .digest]) as $runtime_digests |
+            (type == "object" and .schemaVersion == 2) and
+            (.mediaType == "application/vnd.oci.image.index.v1+json" or
+             .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and
+            (.manifests | type == "array" and length > 0) and
+            all(.manifests[];
+              valid_runtime_descriptor or valid_attestation_descriptor($runtime_digests)) and
+            ([.manifests[] | select(valid_runtime_descriptor and
+              .platform.architecture == "amd64")]
+              | length == 1) and
+            ([.manifests[] | select(valid_runtime_descriptor and
+              .platform.architecture == "arm64")]
+              | length == 1) and
+            ([.manifests[].digest] | length == (unique | length)) and
+            ($actual == $top or ($runtime_digests | index($actual)) != null)
+          ' <<<"$raw" >/dev/null 2>&1 || {
             echo "::error::runtime imageID does not belong to the requested manifest"
             exit 1
           }
@@ -431,7 +683,63 @@ jobs:
           cat > "$FEATURE_E2E_HELPERS/bin/helm" <<'EOF_HELM'
           #!/usr/bin/env bash
           set -euo pipefail
-          "$REAL_HELM" "$@"
+          helm_args=("$@")
+          if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
+            [ "$#" -ge 6 ] &&
+              [ "$3" = ../../charts/pgcopydb-operator ] &&
+              [ "$4" = -n ] && [ "$5" = pgcopydb-e2e-system ] &&
+              [ "$6" = --wait ] || {
+                echo "::error::feature controller Helm argument is unsupported"
+                exit 1
+              }
+            candidate_args=("${@:7}")
+            while [ "${#candidate_args[@]}" -gt 0 ]; do
+              arg=${candidate_args[0]}
+              case "$arg" in
+                -f|--values|--set|--set-string|--set-json)
+                  [ "${#candidate_args[@]}" -ge 2 ] || {
+                    echo "::error::feature controller Helm argument is unsupported"
+                    exit 1
+                  }
+                  value=${candidate_args[1]}
+                  [ -n "$value" ] && [[ "$value" != -* ]] || {
+                    echo "::error::feature controller Helm argument is unsupported"
+                    exit 1
+                  }
+                  candidate_args=("${candidate_args[@]:2}")
+                  ;;
+                -f=*|--values=*|--set=*|--set-string=*|--set-json=*)
+                  value=${arg#*=}
+                  [ -n "$value" ] || {
+                    echo "::error::feature controller Helm argument is unsupported"
+                    exit 1
+                  }
+                  candidate_args=("${candidate_args[@]:1}")
+                  ;;
+                *)
+                  echo "::error::feature controller Helm argument is unsupported"
+                  exit 1
+                  ;;
+              esac
+              case "$arg" in
+                --set|--set-string|--set-json|--set=*|--set-string=*|--set-json=*)
+                  [[ "$value" == ?*=* ]] || {
+                    echo "::error::feature controller Helm argument is unsupported"
+                    exit 1
+                  }
+                  normalized=${value//\\/}
+                  case "$normalized" in
+                    *fullnameOverride*)
+                      echo "::error::feature controller name override is reserved"
+                      exit 1
+                      ;;
+                  esac
+                  ;;
+              esac
+            done
+            helm_args+=(--set-string fullnameOverride=pgcopydb-e2e)
+          fi
+          "$REAL_HELM" "${helm_args[@]}"
           if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
             owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
             [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]]
@@ -444,28 +752,7 @@ jobs:
               --type=merge -p "$patch" >/dev/null
             kubectl rollout status deployment/pgcopydb-e2e -n pgcopydb-e2e-system \
               --timeout=5m >/dev/null
-            "$FEATURE_E2E_HELPERS/attest-image" \
-              pgcopydb-e2e-system \
-              "app.kubernetes.io/instance=pgcopydb-e2e,app.kubernetes.io/name=pgcopydb-operator,$owner_selector" \
-              manager "$MANAGER_REF"
-            deployments=$(kubectl get deployments -n pgcopydb-e2e-system \
-              -l "$owner_selector" -o json)
-            ready=$(kubectl get pods -n pgcopydb-e2e-system \
-              -l "$owner_selector" -o json |
-              jq '[.items[] | select(any(.status.conditions[]?;
-                .type == "Ready" and .status == "True"))] | length')
-            [ "$ready" -eq 1 ] || {
-              echo "::error::feature controller is not uniquely Ready"
-              exit 1
-            }
-            count=$(jq --arg expected "--runner-image=$RUNNER_REF" '
-              [.items[] | .spec.template.spec.containers[] |
-                select(.name == "manager") | .args[] | select(. == $expected)] | length
-            ' <<<"$deployments")
-            [ "$count" -eq 1 ] || {
-              echo "::error::manager does not carry the immutable runner reference"
-              exit 1
-            }
+            "$FEATURE_E2E_HELPERS/attest-image" manager
             : > "$FEATURE_E2E_HELPERS/manager-attested"
           fi
           EOF_HELM
@@ -494,6 +781,7 @@ jobs:
             exit 1
           }
       - name: Attest runner image
+        id: runner-attestation
         run: |
           set -euo pipefail
           owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
@@ -531,9 +819,8 @@ jobs:
           EOF
           kubectl wait job/feature-e2e-runner-attest -n pgcopydb-e2e \
             --for=condition=complete --timeout=2m >/dev/null
-          "$FEATURE_E2E_HELPERS/attest-image" pgcopydb-e2e \
-            "job-name=feature-e2e-runner-attest,$FEATURE_E2E_OWNER_KEY=$owner_value" \
-            runner "$RUNNER_REF"
+          "$FEATURE_E2E_HELPERS/attest-image" runner
+          printf 'runner_attested=true\n' >> "$GITHUB_OUTPUT"
       - name: Run non-chaos suite
         id: suite
         continue-on-error: true
@@ -549,13 +836,16 @@ jobs:
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
         run: |
           set -euo pipefail
-          rm -f "$FEATURE_E2E_HELPERS/manager-attested"
+          suite_report=$FEATURE_E2E_HELPERS/suite-report.json
+          rm -f "$FEATURE_E2E_HELPERS/manager-attested" "$suite_report"
           export PATH="$FEATURE_E2E_HELPERS/bin:$PATH"
           export E2E_RUN_LABEL_VALUE
           E2E_RUN_LABEL_VALUE=$(<"$FEATURE_E2E_OWNER_FILE")
           [[ "$E2E_RUN_LABEL_VALUE" =~ ^[0-9a-f]{32}$ ]]
           test_args=(
             ./test/e2e/...
+            -run
+            '^TestE2E$'
             -v
             -timeout 4h
             -ginkgo.v
@@ -563,6 +853,7 @@ jobs:
             -ginkgo.poll-progress-after=15m
             -ginkgo.label-filter=!chaos
             -ginkgo.fail-on-empty
+            "-ginkgo.json-report=$suite_report"
           )
           if [ "$RUN_MODE" = focus ]; then
             test_args+=("-ginkgo.focus=$E2E_FOCUS")
@@ -571,10 +862,66 @@ jobs:
           go test "${test_args[@]}"
           suite_result=$?
           set -e
+          printf 'suite_ran=true\n' >> "$GITHUB_OUTPUT"
           [ -f "$FEATURE_E2E_HELPERS/manager-attested" ] || {
             echo "::error::manager attestation did not complete"
             exit 1
           }
+          printf 'manager_attested=true\n' >> "$GITHUB_OUTPUT"
+          jq -e --argjson result "$suite_result" '
+            (type == "array" and length == 1) and
+            (.[0] as $report |
+              ($report.SuiteDescription == "pgcopydb-operator e2e suite") and
+              ($report.PreRunStats.TotalSpecs |
+                type == "number" and . > 0 and floor == .) and
+              ($report.PreRunStats.SpecsThatWillRun |
+                type == "number" and . > 0 and floor == .) and
+              ($report.PreRunStats.SpecsThatWillRun <= $report.PreRunStats.TotalSpecs) and
+              ($report | has("SpecialSuiteFailureReasons")) and
+              ($report.SpecialSuiteFailureReasons == null or
+                ($report.SpecialSuiteFailureReasons | type == "array" and length == 0)) and
+              ($report.SpecReports | type == "array") and
+              (([$report.SpecReports[] | select(.LeafNodeType == "It")] | length) ==
+                $report.PreRunStats.TotalSpecs) and
+              all($report.SpecReports[];
+                (.State == "passed" or .State == "pending" or
+                  .State == "skipped" or .State == "failed") and
+                (if has("AdditionalFailures") then
+                  (.AdditionalFailures |
+                    if type == "array" then length == 0 else false end)
+                else true end) and
+                (if has("Failure") then
+                  (.Failure |
+                    if type == "object" then
+                      (has("AdditionalFailure") | not)
+                    else false end)
+                else true end)) and
+              if $result == 0 then
+                $report.SuiteSucceeded == true and
+                all($report.SpecReports[]; .State != "failed")
+              elif $result == 1 then
+                $report.SuiteSucceeded == false and
+                ([$report.SpecReports[] | select(.State == "failed")] | length) > 0 and
+                all($report.SpecReports[];
+                  if .State == "failed" then
+                    .LeafNodeType == "It" and
+                    (.Failure |
+                      type == "object" and
+                      (.Message | type == "string" and length > 0) and
+                      (.Location |
+                        type == "object" and
+                        (.FileName | type == "string" and length > 0) and
+                        (.LineNumber |
+                          type == "number" and . > 0 and floor == .)) and
+                      .FailureNodeContext == "leaf-node" and
+                      .FailureNodeType == "It")
+                  else true end)
+              else false end)
+          ' "$suite_report" >/dev/null || {
+            echo "::error::suite completion report is missing, malformed, or unsafe"
+            exit 1
+          }
+          printf 'suite_completed=true\n' >> "$GITHUB_OUTPUT"
           exit "$suite_result"
       - name: Cleanup feature resources
         id: cleanup
@@ -611,6 +958,10 @@ jobs:
           CLUSTER_RESULT: ${{ needs.cluster.result }}
           SUITE_OUTCOME: ${{ needs.cluster.outputs.suite }}
           CLEANUP_OUTCOME: ${{ needs.cluster.outputs.cleanup }}
+          SUITE_RAN: ${{ needs.cluster.outputs.suite_ran }}
+          SUITE_COMPLETED: ${{ needs.cluster.outputs.suite_completed }}
+          MANAGER_ATTESTED: ${{ needs.cluster.outputs.manager_attested }}
+          RUNNER_ATTESTED: ${{ needs.cluster.outputs.runner_attested }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -618,11 +969,20 @@ jobs:
           [ "$RUN_MODE" = focus ] && context=feature-e2e/focus
           if [ "$CLUSTER_RESULT" = success ] && \
              [ "$SUITE_OUTCOME" = success ] && \
-             [ "$CLEANUP_OUTCOME" = success ]; then
+             [ "$CLEANUP_OUTCOME" = success ] && \
+             [ "$SUITE_RAN" = true ] && \
+             [ "$SUITE_COMPLETED" = true ] && \
+             [ "$MANAGER_ATTESTED" = true ] && \
+             [ "$RUNNER_ATTESTED" = true ]; then
             state=success
             description='Feature e2e passed'
-          elif [ "$SUITE_OUTCOME" = failure ] && \
-               [ "$CLEANUP_OUTCOME" = success ]; then
+          elif [ "$CLUSTER_RESULT" = failure ] && \
+               [ "$SUITE_OUTCOME" = failure ] && \
+               [ "$CLEANUP_OUTCOME" = success ] && \
+               [ "$SUITE_RAN" = true ] && \
+               [ "$SUITE_COMPLETED" = true ] && \
+               [ "$MANAGER_ATTESTED" = true ] && \
+               [ "$RUNNER_ATTESTED" = true ]; then
             state=failure
             description='Feature e2e assertions failed'
           else
