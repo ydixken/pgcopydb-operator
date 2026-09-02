@@ -94,6 +94,8 @@ const (
 	helmSetFlag                  = "--set"
 	helmSetStringFlag            = "--set-string"
 	helmSetJSONFlag              = "--set-json"
+	helmPostRendererFlag         = "--post-renderer"
+	featurePostRendererPlugin    = "feature-e2e-postrenderer"
 	appsV1                       = "apps/v1"
 	namespaceKey                 = "namespace"
 	labelsKey                    = "labels"
@@ -1959,7 +1961,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		{"set-file separate flag", []string{"--set-file", `full\nameOverride=/dev/stdin`}},
 		{"set-file equals flag", []string{`--set-file=full\nameOverride=/dev/stdin`}},
 		{"option terminator", []string{"--"}},
-		{"post-renderer separate flag", []string{"--post-renderer", "candidate-renderer"}},
+		{"post-renderer separate flag", []string{helmPostRendererFlag, "candidate-renderer"}},
 		{"post-renderer equals flag", []string{"--post-renderer=candidate-renderer"}},
 		{"post-renderer-args separate flag", []string{"--post-renderer-args", "candidate-argument"}},
 		{"post-renderer-args equals flag", []string{"--post-renderer-args=candidate-argument"}},
@@ -2078,6 +2080,120 @@ func requireTrustedFeatureHelmRender(t *testing.T, helmArgs []string) {
 	t.Fatal("helm template rendered no Deployment")
 }
 
+func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
+	helmPath, err := exec.LookPath("helm")
+	if err != nil {
+		t.Skip("helm is unavailable")
+	}
+	version, err := exec.Command(helmPath, "version", "--template", "{{.Version}}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read Helm version: %v\n%s", err, version)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(version)), "v4.") {
+		t.Skipf("Helm 4 is required for this integration test, found %s", strings.TrimSpace(string(version)))
+	}
+	if _, err := exec.LookPath(kubectlCommand); err != nil {
+		t.Skip("kubectl is unavailable")
+	}
+
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	plugin := extractFeatureGeneratedFile(t, helpers,
+		"plugins/"+featurePostRendererPlugin+"/plugin.yaml", "HELM_PLUGIN")
+	postRenderer := extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER")
+	renderSafety := buildFeatureRenderSafety(t,
+		extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY"))
+	helmWrapper := extractFeatureHelmHeredoc(t, helpers)
+	if !strings.Contains(helmWrapper,
+		`export HELM_PLUGINS="$FEATURE_E2E_HELPERS/plugins"`) {
+		t.Fatal("feature Helm wrapper does not scope HELM_PLUGINS to the run-owned plugin directory")
+	}
+	if !strings.Contains(helpers,
+		`ln -s ../../post-renderer "$FEATURE_E2E_HELPERS/plugins/feature-e2e-postrenderer/post-renderer"`) {
+		t.Fatal("cluster helpers do not register the trusted post-renderer executable")
+	}
+	if strings.Contains(helpers, `printf 'HELM_PLUGINS=`) {
+		t.Fatal("cluster helpers export HELM_PLUGINS beyond the Helm wrapper operation")
+	}
+
+	dir := t.TempDir()
+	pluginRoot := filepath.Join(dir, "plugins")
+	pluginDir := filepath.Join(pluginRoot, featurePostRendererPlugin)
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, file := range map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		filepath.Join(dir, "owner"):             {imageAttestationOwnerValue, 0o600},
+		filepath.Join(dir, "post-renderer"):     {postRenderer, 0o700},
+		filepath.Join(pluginDir, "plugin.yaml"): {plugin, 0o600},
+	} {
+		if err := os.WriteFile(path, []byte(file.body), file.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(renderSafety, filepath.Join(dir, "bin", "render-safety")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../post-renderer", filepath.Join(pluginDir, "post-renderer")); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{
+		helmTemplateCommand, featureControllerName, featureFixtureChart,
+		"--namespace", featureControllerNS,
+		helmSetFlag, "crds.install=false",
+		helmSetFlag, "rbac.create=false",
+		helmSetFlag, "serviceAccount.create=false",
+		helmSetFlag, "serviceAccount.name=pgcopydb-e2e-manager",
+		helmSetFlag, "leaderElection.enabled=false",
+		helmSetStringFlag, "fullnameOverride=" + featureControllerName,
+		helmPostRendererFlag, featurePostRendererPlugin,
+	}
+	cmd := exec.Command(helmPath, args...)
+	cmd.Env = append(os.Environ(),
+		"HELM_PLUGINS="+pluginRoot,
+		"FEATURE_E2E_HELPERS="+dir,
+		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
+		"FEATURE_E2E_OWNER_FILE="+filepath.Join(dir, "owner"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Helm 4 post-renderer plugin failed: %v\n%s", err, output)
+	}
+
+	decoder := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(output), 4096)
+	objects := 0
+	for {
+		var document map[string]any
+		if err := decoder.Decode(&document); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if len(document) == 0 {
+			continue
+		}
+		metadata, ok := document[metadataKey].(map[string]any)
+		if !ok {
+			t.Fatalf("rendered %v has no metadata", document[kindKey])
+		}
+		labels, ok := metadata[labelsKey].(map[string]any)
+		if !ok || labels[imageAttestationOwnerKey] != imageAttestationOwnerValue {
+			t.Fatalf("rendered %v is not owned by the feature run", document[kindKey])
+		}
+		objects++
+	}
+	if objects == 0 {
+		t.Fatal("Helm 4 post-renderer plugin rendered no objects")
+	}
+}
+
 func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
 	t.Helper()
 	want := make([]string, 0, 6+len(candidate)+5)
@@ -2088,10 +2204,9 @@ func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
 	want = append(want, candidate...)
 	want = append(want,
 		helmSetStringFlag, "fullnameOverride="+featureControllerName,
-		"--atomic", "--timeout=5m", "--post-renderer",
+		"--atomic", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
 	)
-	if len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) ||
-		filepath.Base(got[len(got)-1]) != "post-renderer" {
+	if !slices.Equal(got, want) {
 		t.Errorf("effective Helm arguments = %q, want trusted suffix after %q", got, want)
 	}
 }
@@ -3692,6 +3807,8 @@ func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // O
 	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
 	scripts := featureOwnershipScripts{
 		postRenderer: extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER"),
+		plugin: extractFeatureGeneratedFile(t, helpers,
+			"plugins/"+featurePostRendererPlugin+"/plugin.yaml", "HELM_PLUGIN"),
 		renderSafety: buildFeatureRenderSafety(t,
 			extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY")),
 		ownership: extractFeatureGeneratedFile(t, helpers, "ownership", "OWNERSHIP"),
@@ -3851,7 +3968,7 @@ items:
 		}
 		args := strings.Fields(fixture.read("helm-args"))
 		for _, want := range []string{
-			"--atomic", "--timeout=5m", "--post-renderer", fixture.path("post-renderer"),
+			"--atomic", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
 		} {
 			if !slices.Contains(args, want) {
 				t.Errorf("trusted Helm arguments are missing %q: %v", want, args)
@@ -4047,6 +4164,7 @@ const (
 
 type featureOwnershipScripts struct {
 	postRenderer string
+	plugin       string
 	renderSafety string
 	ownership    string
 	helm         string
@@ -4086,14 +4204,19 @@ func newFeatureOwnershipFixture(
 	t.Helper()
 	dir := t.TempDir()
 	fixture := &featureOwnershipFixture{t: t, dir: dir, owner: imageAttestationOwnerValue}
-	if err := os.Mkdir(filepath.Join(dir, "bin"), 0o755); err != nil {
+	pluginDir := filepath.Join(dir, "plugins", featurePostRendererPlugin)
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	files := map[string]struct {
 		body string
 		mode os.FileMode
 	}{
-		"post-renderer":    {scripts.postRenderer, 0o700},
+		"post-renderer": {scripts.postRenderer, 0o700},
+		"plugins/" + featurePostRendererPlugin + "/plugin.yaml": {scripts.plugin, 0o600},
 		"ownership":        {scripts.ownership, 0o600},
 		"bin/feature-helm": {scripts.helm, 0o700},
 		"cleanup":          {scripts.cleanup, 0o700},
@@ -4126,6 +4249,9 @@ metadata:
 		fixture.writeMode(name, file.body, file.mode)
 	}
 	if err := os.Symlink(scripts.renderSafety, fixture.path("bin/render-safety")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../post-renderer", filepath.Join(pluginDir, "post-renderer")); err != nil {
 		t.Fatal(err)
 	}
 	fixture.write("scenario", scenario)
@@ -4239,7 +4365,9 @@ case "${1:-}" in
         --post-renderer) post_renderer=${args[$((i+1))]:-} ;;
       esac
     done
-    [ "$atomic" = true ] && [ -x "$post_renderer" ] || exit 90
+    [ "$atomic" = true ] && [ "$post_renderer" = feature-e2e-postrenderer ] || exit 90
+    post_renderer="$HELM_PLUGINS/$post_renderer/post-renderer"
+    [ -x "$post_renderer" ] || exit 90
     manifest=$(<"$FAKE_MANIFEST")
     [ "$scenario" != malformed-render ] || manifest='kind: []'
     if ! printf '%s\n' "$manifest" | "$post_renderer" > "$FEATURE_E2E_HELPERS/rendered.yaml"; then
