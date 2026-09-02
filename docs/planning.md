@@ -6,7 +6,7 @@ The operator's preflight checks only the items listed in the coverage notes belo
 
 pgcopydb is a migration tool, not a backup system.
 
-## Customer checklist
+## Migration checklist
 
 - [ ] Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move or be excluded?
 - [ ] What are the source, target, pgcopydb, pg_dump, and pg_restore versions, and is the target compatible with required extensions, types, collations, and locales?
@@ -21,7 +21,7 @@ pgcopydb is a migration tool, not a backup system.
 - [ ] Who stops source writes, confirms quiescence, sets the end position, waits for replay, switches clients, and authorizes cutover?
 - [ ] Which validation checks must pass, when is rollback still safe, who decides, and when are replication resources cleaned up?
 - [ ] What backup system protects the source, and when was the last successful test restore or point-in-time recovery?
-- [ ] Can the customer create an isolated rehearsal environment from representative production data with no production write path and approved masking, access, retention, and teardown controls?
+- [ ] Can you create an isolated rehearsal environment from representative production data with no production write path and approved masking, access, retention, and teardown controls?
 
 ## Operator preflight coverage
 
