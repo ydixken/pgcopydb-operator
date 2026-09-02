@@ -1071,8 +1071,10 @@ jobs:
             "$REAL_HELM" uninstall pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
               --wait --timeout=5m --ignore-not-found >/dev/null
           else
-            echo "::error::labelled feature render is unavailable for recovery"
-            exit 1
+            [ ! -e "$FEATURE_E2E_HELPERS/rendered.yaml" ] || {
+              echo "::error::labelled feature render is invalid for recovery"
+              exit 1
+            }
           fi
 
           for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
@@ -1358,10 +1360,17 @@ jobs:
         if: always()
         env:
           HELPERS_OUTCOME: ${{ steps.helpers.outcome }}
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
         run: |
           set -euo pipefail
           case "$HELPERS_OUTCOME" in
-            success) "$FEATURE_E2E_HELPERS/cleanup" ;;
+            success)
+              case "$SUITE_OUTCOME" in
+                success) "$FEATURE_E2E_HELPERS/cleanup" ;;
+                failure | skipped) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
+                *) echo "::error::suite outcome is invalid for cleanup"; exit 1 ;;
+              esac
+              ;;
             skipped | failure) ;;
             *) echo "::error::cluster helper outcome is invalid"; exit 1 ;;
           esac
