@@ -132,6 +132,7 @@ jobs:
             cd trusted
             FEATURE_E2E_BASE="$GITHUB_WORKSPACE/trusted" \
             FEATURE_E2E_HEAD="$GITHUB_WORKSPACE/candidate" \
+            FEATURE_E2E_HELM="$(command -v helm)" \
               go test ./test/buildconfig \
                 -run '^TestFeatureE2ECandidateCompatibility$' -count=1
           )
@@ -222,6 +223,7 @@ jobs:
       manager_attested: ${{ steps.suite.outputs.manager_attested }}
       runner_attested: ${{ steps.runner-attestation.outputs.runner_attested }}
     env:
+      E2E_OPERATOR_NAMESPACE: pgcopydb-e2e
       MANAGER_REF: ghcr.io/${{ github.repository }}:feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
       RUNNER_REF: ghcr.io/${{ github.repository }}/runner:feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
     steps:
@@ -266,11 +268,17 @@ jobs:
           }
       - name: Validate immutable inputs
         env:
-          E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
+          E2E_PROMETHEUS_URL: ${{ secrets.E2E_PROMETHEUS_URL }}
         run: |
           set -euo pipefail
+          set +x
+          printf '::add-mask::%s\n' "$E2E_PROMETHEUS_URL"
           [ -n "$E2E_PROMETHEUS_URL" ] || {
             echo "::error::Prometheus URL is not configured"
+            exit 1
+          }
+          [ "$E2E_OPERATOR_NAMESPACE" = pgcopydb-e2e ] || {
+            echo "::error::feature operator namespace is invalid"
             exit 1
           }
           [[ "$MANAGER_REF" =~ ^ghcr\.io/ydixken/pgcopydb-operator:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]]
@@ -316,7 +324,7 @@ jobs:
           owner_selector="pgcopydb-operator.io/feature-e2e-run=$owner_value"
           case "$component" in
             manager)
-              namespace=pgcopydb-e2e-system
+              namespace=$E2E_OPERATOR_NAMESPACE
               container=manager
               expected_ref=${MANAGER_REF:-}
               [[ "$expected_ref" =~ ^ghcr\.io/ydixken/pgcopydb-operator:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]] || {
@@ -578,36 +586,440 @@ jobs:
           }
           EOF_ATTEST
 
-          cat > "$FEATURE_E2E_HELPERS/cleanup" <<'EOF_CLEANUP'
+          cat > "$FEATURE_E2E_HELPERS/render-safety.go" <<'EOF_RENDER_SAFETY'
+          package main
+
+          import (
+            "fmt"
+            "io"
+            "os"
+            "strings"
+
+            k8syaml "k8s.io/apimachinery/pkg/util/yaml"
+          )
+
+          const ownerKey = "pgcopydb-operator.io/feature-e2e-run"
+
+          func main() {
+            if len(os.Args) != 2 || os.Getenv("FEATURE_E2E_OWNER_KEY") != ownerKey {
+              fail()
+            }
+            owner, err := os.ReadFile(os.Getenv("FEATURE_E2E_OWNER_FILE"))
+            if err != nil || !validOwner(string(owner)) {
+              fail()
+            }
+            input, err := os.Open(os.Args[1])
+            if err != nil {
+              fail()
+            }
+            defer input.Close()
+            decoder := k8syaml.NewYAMLOrJSONDecoder(input, 4096)
+            resources := 0
+            for {
+              var document map[string]any
+              err := decoder.Decode(&document)
+              if err == io.EOF {
+                break
+              }
+              if err != nil || len(document) == 0 {
+                fail()
+              }
+              count, ok := validateObject(document, string(owner))
+              if !ok {
+                fail()
+              }
+              resources += count
+            }
+            if resources == 0 {
+              fail()
+            }
+          }
+
+          func fail() {
+            fmt.Fprintln(os.Stderr, "::error::feature chart render is unsafe")
+            os.Exit(1)
+          }
+
+          func validOwner(value string) bool {
+            if len(value) != 32 {
+              return false
+            }
+            for _, character := range value {
+              if !strings.ContainsRune("0123456789abcdef", character) {
+                return false
+              }
+            }
+            return true
+          }
+
+          func validateObject(object map[string]any, owner string) (int, bool) {
+            apiVersion, apiOK := object["apiVersion"].(string)
+            kind, kindOK := object["kind"].(string)
+            if !apiOK || apiVersion == "" || !kindOK || kind == "" || kind == "Namespace" {
+              return 0, false
+            }
+            if kind == "List" {
+              if apiVersion != "v1" {
+                return 0, false
+              }
+              items, ok := object["items"].([]any)
+              if !ok || len(items) == 0 {
+                return 0, false
+              }
+              count := 0
+              for _, item := range items {
+                member, ok := item.(map[string]any)
+                if !ok {
+                  return 0, false
+                }
+                nested, ok := validateObject(member, owner)
+                if !ok {
+                  return 0, false
+                }
+                count += nested
+              }
+              return count, true
+            }
+            if strings.HasSuffix(kind, "List") || kind == "PodTemplate" {
+              return 0, false
+            }
+            metadata, ok := object["metadata"].(map[string]any)
+            if !ok || !hasLabel(metadata, owner) {
+              return 0, false
+            }
+            paths, ok := templatePaths(apiVersion, kind, object)
+            if !ok {
+              return 0, false
+            }
+            for _, path := range paths {
+              template, ok := nestedMap(object, path...)
+              if !ok {
+                return 0, false
+              }
+              metadata, ok := template["metadata"].(map[string]any)
+              if !ok || !hasLabel(metadata, owner) {
+                return 0, false
+              }
+            }
+            return 1, true
+          }
+
+          func templatePaths(apiVersion, kind string, object map[string]any) ([][]string, bool) {
+            switch {
+            case apiVersion == "apps/v1" &&
+              (kind == "Deployment" || kind == "ReplicaSet" ||
+                kind == "DaemonSet" || kind == "StatefulSet"):
+              return [][]string{{"spec", "template"}}, true
+            case apiVersion == "batch/v1" && kind == "Job":
+              return [][]string{{"spec", "template"}}, true
+            case apiVersion == "batch/v1" && kind == "CronJob":
+              return [][]string{{"spec", "jobTemplate"},
+                {"spec", "jobTemplate", "spec", "template"}}, true
+            case apiVersion == "v1" && kind == "ReplicationController":
+              return [][]string{{"spec", "template"}}, true
+            }
+            if _, ok := nestedMap(object, "spec", "template"); ok {
+              return nil, false
+            }
+            if _, ok := nestedMap(object, "spec", "jobTemplate"); ok {
+              return nil, false
+            }
+            return nil, true
+          }
+
+          func nestedMap(object map[string]any, path ...string) (map[string]any, bool) {
+            current := object
+            for _, name := range path {
+              next, ok := current[name].(map[string]any)
+              if !ok {
+                return nil, false
+              }
+              current = next
+            }
+            return current, true
+          }
+
+          func hasLabel(metadata map[string]any, owner string) bool {
+            labels, ok := metadata["labels"].(map[string]any)
+            if !ok {
+              return false
+            }
+            value, ok := labels[ownerKey].(string)
+            return ok && value == owner
+          }
+          EOF_RENDER_SAFETY
+
+          go build -o "$FEATURE_E2E_HELPERS/bin/render-safety" \
+            "$FEATURE_E2E_HELPERS/render-safety.go"
+
+          cat > "$FEATURE_E2E_HELPERS/post-renderer" <<'EOF_POST_RENDERER'
           #!/usr/bin/env bash
+          set +x
           set -euo pipefail
           owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
-          [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]] || {
-            echo "::error::feature ownership value is invalid"
+          [ "${FEATURE_E2E_OWNER_KEY:-}" = pgcopydb-operator.io/feature-e2e-run ] &&
+            [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]] || {
+              echo "::error::feature ownership is invalid"
+              exit 1
+            }
+          render_dir=$FEATURE_E2E_HELPERS/post-render
+          input=$render_dir/manifest.yaml
+          output=$FEATURE_E2E_HELPERS/rendered.yaml
+          install -d -m 0700 "$render_dir"
+          : > "$output"
+          cat > "$input"
+          [ -s "$input" ] || {
+            echo "::error::feature chart rendered no objects"
             exit 1
           }
-          owner_selector="$FEATURE_E2E_OWNER_KEY=$owner_value"
+          {
+            printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization'
+            printf '%s\n' 'resources:' '- manifest.yaml' 'labels:' '- pairs:'
+            printf '    %s: %s\n' "$FEATURE_E2E_OWNER_KEY" "$owner_value"
+            printf '%s\n' '  includeSelectors: false' '  includeTemplates: true'
+          } > "$render_dir/kustomization.yaml"
+          kubectl kustomize "$render_dir" > "$output.tmp" 2>/dev/null || {
+            echo "::error::feature chart render cannot be labelled"
+            exit 1
+          }
+          [ -s "$output.tmp" ] || {
+            echo "::error::feature chart rendered no labelled objects"
+            exit 1
+          }
+          "$FEATURE_E2E_HELPERS/bin/render-safety" "$output.tmp" || exit 1
+          mv "$output.tmp" "$output"
+          cat "$output"
+          EOF_POST_RENDERER
+
+          cat > "$FEATURE_E2E_HELPERS/ownership" <<'EOF_OWNERSHIP'
+          feature_owner_value() {
+            FEATURE_OWNER_VALUE=$(<"$FEATURE_E2E_OWNER_FILE")
+            [ "${FEATURE_E2E_OWNER_KEY:-}" = pgcopydb-operator.io/feature-e2e-run ] &&
+              [[ "$FEATURE_OWNER_VALUE" =~ ^[0-9a-f]{32}$ ]] || {
+                echo "::error::feature ownership is invalid"
+                return 1
+              }
+            FEATURE_OWNER_SELECTOR="$FEATURE_E2E_OWNER_KEY=$FEATURE_OWNER_VALUE"
+          }
+
+          feature_controller_list() {
+            kubectl get deployments -n "$E2E_OPERATOR_NAMESPACE" \
+              -l "$FEATURE_OWNER_SELECTOR" -o json 2>/dev/null || {
+                echo "::error::unable to inspect the feature controller"
+                return 1
+              }
+          }
+
+          feature_valid_controller() {
+            local document=$1
+            local expected_uid=${2:-}
+            jq -er \
+              --arg owner_key "$FEATURE_E2E_OWNER_KEY" \
+              --arg owner_value "$FEATURE_OWNER_VALUE" \
+              --arg expected_uid "$expected_uid" \
+              --arg namespace "$E2E_OPERATOR_NAMESPACE" '
+              select((type == "object" and .apiVersion == "v1" and .kind == "List") and
+              (.items | type == "array" and length == 1) and
+              (.items[0] | type == "object" and .apiVersion == "apps/v1" and
+                .kind == "Deployment") and
+              (.items[0].metadata | type == "object") and
+              .items[0].metadata.name == "pgcopydb-e2e" and
+              .items[0].metadata.namespace == $namespace and
+              (.items[0].metadata.uid | type == "string" and
+                test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+              ($expected_uid == "" or .items[0].metadata.uid == $expected_uid) and
+              (.items[0].metadata.labels | type == "object") and
+              .items[0].metadata.labels[$owner_key] == $owner_value and
+              (.items[0].metadata.annotations | type == "object") and
+              .items[0].metadata.annotations["meta.helm.sh/release-name"] == "pgcopydb-e2e" and
+              .items[0].metadata.annotations["meta.helm.sh/release-namespace"] ==
+                $namespace) |
+              .items[0].metadata.uid
+            ' <<<"$document" 2>/dev/null
+          }
+
+          feature_capture_controller() {
+            local controllers uid
+            feature_owner_value
+            controllers=$(feature_controller_list)
+            uid=$(feature_valid_controller "$controllers") || {
+              echo "::error::feature controller ownership is invalid"
+              return 1
+            }
+            umask 077
+            printf '%s' "$uid" > "$FEATURE_E2E_HELPERS/controller.uid"
+          }
+
+          feature_revalidate_controller() {
+            local captured controllers named
+            feature_owner_value
+            [ -s "$FEATURE_E2E_HELPERS/controller.uid" ] || {
+              echo "::error::feature controller was never captured"
+              return 1
+            }
+            captured=$(<"$FEATURE_E2E_HELPERS/controller.uid")
+            [[ "$captured" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+              echo "::error::captured feature controller UID is invalid"
+              return 1
+            }
+            controllers=$(feature_controller_list)
+            if jq -e '.items | type == "array" and length == 0' \
+              <<<"$controllers" >/dev/null 2>&1; then
+              named=$(kubectl get deployment.apps/pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
+                --ignore-not-found -o json 2>/dev/null) || {
+                  echo "::error::unable to inspect the feature controller"
+                  return 1
+                }
+              [ -z "$named" ] && return 3
+              echo "::error::feature controller ownership changed"
+              return 1
+            fi
+            feature_valid_controller "$controllers" "$captured" >/dev/null || {
+              echo "::error::feature controller ownership changed"
+              return 1
+            }
+          }
+
+          feature_uninstall_controller() {
+            local validation=0
+            feature_revalidate_controller || validation=$?
+            [ "$validation" -eq 0 ] || [ "$validation" -eq 3 ] || return 1
+            "$REAL_HELM" uninstall pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
+              --wait --timeout=5m >/dev/null
+          }
+          EOF_OWNERSHIP
+
+          cat > "$FEATURE_E2E_HELPERS/cleanup" <<'EOF_CLEANUP'
+          #!/usr/bin/env bash
+          set +x
+          set -euo pipefail
+          mode=${1:-normal}
+          [ "$mode" = normal ] || [ "$mode" = recovery ] || {
+            echo "::error::feature cleanup mode is invalid"
+            exit 1
+          }
+          . "$FEATURE_E2E_HELPERS/ownership"
+          feature_owner_value
+          owner_selector=$FEATURE_OWNER_SELECTOR
           expected_dir=$FEATURE_E2E_HELPERS/expected
           install -d -m 0700 "$expected_dir"
 
-          capture_expected() {
+          capture_owned() {
             local file=$1
-            shift
-            "$@" -l "$owner_selector" -o name > "$file"
-          }
-          require_expected() {
-            local file=$1
-            local description=$2
-            shift 2
-            local actual name
-            [ -s "$file" ] || return 0
-            actual=$("$@" -l "$owner_selector" -o name)
-            while IFS= read -r name; do
-              grep -Fqx -- "$name" <<<"$actual" || {
-                echo "::error::expected run-owned $description is absent"
+            local api_version=$2
+            local kind=$3
+            local resource=$4
+            local namespace=$5
+            local document
+            document=$(kubectl get "$resource" -n "$namespace" \
+              -l "$owner_selector" -o json 2>/dev/null) || {
+                echo "::error::unable to capture run-owned $kind resources"
                 return 1
               }
-            done < "$file"
+            jq -e \
+              --arg api_version "$api_version" --arg kind "$kind" \
+              --arg namespace "$namespace" --arg owner_key "$FEATURE_E2E_OWNER_KEY" \
+              --arg owner_value "$FEATURE_OWNER_VALUE" '
+              type == "object" and .apiVersion == "v1" and .kind == "List" and
+              (.items | type == "array") and
+              all(.items[];
+                type == "object" and .apiVersion == $api_version and .kind == $kind and
+                (.metadata | type == "object") and
+                (.metadata.name | type == "string" and
+                  test("^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")) and
+                .metadata.namespace == $namespace and
+                (.metadata.uid | type == "string" and
+                  test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and
+                (.metadata.labels | type == "object") and
+                .metadata.labels[$owner_key] == $owner_value)
+            ' <<<"$document" >/dev/null 2>&1 || {
+              echo "::error::run-owned $kind capture is invalid"
+              return 1
+            }
+            printf '%s' "$document" > "$file"
+          }
+          cleanup_owned() {
+            local file=$1
+            local api_version=$2
+            local kind=$3
+            local resource=$4
+            local namespace=$5
+            local item name uid current after after_uid delete_path delete_options propagation deadline
+            propagation=Background
+            [ "$kind" != Job ] || propagation=Foreground
+            while IFS= read -r item; do
+              name=$(jq -er '.metadata.name' <<<"$item")
+              uid=$(jq -er '.metadata.uid' <<<"$item")
+              current=$(kubectl get "$resource/$name" -n "$namespace" \
+                --ignore-not-found -o json 2>/dev/null) || {
+                  echo "::error::unable to revalidate run-owned $kind"
+                  return 1
+                }
+              [ -n "$current" ] || continue
+              jq -e \
+                --arg api_version "$api_version" --arg kind "$kind" --arg name "$name" \
+                --arg namespace "$namespace" --arg uid "$uid" \
+                --arg owner_key "$FEATURE_E2E_OWNER_KEY" \
+                --arg owner_value "$FEATURE_OWNER_VALUE" '
+                type == "object" and .apiVersion == $api_version and .kind == $kind and
+                (.metadata | type == "object") and .metadata.name == $name and
+                .metadata.namespace == $namespace and .metadata.uid == $uid and
+                (.metadata.labels | type == "object") and
+                .metadata.labels[$owner_key] == $owner_value
+              ' <<<"$current" >/dev/null 2>&1 || {
+                echo "::error::run-owned $kind ownership changed"
+                return 1
+              }
+              case "$resource" in
+                migrations.pgcopydb-operator.io)
+                  delete_path="/apis/pgcopydb-operator.io/v1beta1/namespaces/$namespace/migrations/$name"
+                  ;;
+                jobs)
+                  delete_path="/apis/batch/v1/namespaces/$namespace/jobs/$name"
+                  ;;
+                *)
+                  echo "::error::unsupported run-owned cleanup resource"
+                  return 1
+                  ;;
+              esac
+              delete_options=$(jq -cn --arg uid "$uid" --arg propagation "$propagation" '
+                {apiVersion:"v1",kind:"DeleteOptions",preconditions:{uid:$uid},
+                  propagationPolicy:$propagation}
+              ')
+              if ! kubectl delete --raw "$delete_path" -f - \
+                <<<"$delete_options" >/dev/null 2>&1; then
+                after=$(kubectl get "$resource/$name" -n "$namespace" \
+                  --ignore-not-found -o json 2>/dev/null) || {
+                    echo "::error::unable to confirm failed run-owned $kind deletion"
+                    return 1
+                  }
+                [ -z "$after" ] && continue
+                echo "::error::run-owned $kind UID-preconditioned deletion failed"
+                return 1
+              fi
+              deadline=$((SECONDS + 300))
+              while :; do
+                after=$(kubectl get "$resource/$name" -n "$namespace" \
+                  --ignore-not-found -o json 2>/dev/null) || {
+                    echo "::error::unable to confirm run-owned $kind deletion"
+                    return 1
+                  }
+                [ -n "$after" ] || break
+                after_uid=$(jq -er '.metadata.uid' <<<"$after") || {
+                  echo "::error::run-owned $kind deletion state is invalid"
+                  return 1
+                }
+                [ "$after_uid" = "$uid" ] || {
+                  echo "::error::run-owned $kind was replaced during deletion"
+                  return 1
+                }
+                [ "$SECONDS" -lt "$deadline" ] || {
+                  echo "::error::run-owned $kind deletion timed out"
+                  return 1
+                }
+                sleep 1
+              done
+            done < <(jq -c '.items[]' "$file")
           }
           require_empty() {
             local description=$1
@@ -622,45 +1034,48 @@ jobs:
 
           for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
             expected="$expected_dir/migrations-$namespace"
-            capture_expected "$expected" kubectl get migrations.pgcopydb-operator.io -n "$namespace"
-            require_expected "$expected" Migrations \
-              kubectl get migrations.pgcopydb-operator.io -n "$namespace"
-            if [ -s "$expected" ]; then
-              kubectl delete migrations.pgcopydb-operator.io -n "$namespace" \
-                -l "$owner_selector" --wait=true --timeout=5m >/dev/null
-            fi
+            capture_owned "$expected" pgcopydb-operator.io/v1beta1 Migration \
+              migrations.pgcopydb-operator.io "$namespace"
+            cleanup_owned "$expected" pgcopydb-operator.io/v1beta1 Migration \
+              migrations.pgcopydb-operator.io "$namespace"
           done
           for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
             expected="$expected_dir/jobs-$namespace"
-            capture_expected "$expected" kubectl get jobs -n "$namespace"
-            require_expected "$expected" Jobs kubectl get jobs -n "$namespace"
-            if [ -s "$expected" ]; then
-              kubectl delete jobs -n "$namespace" -l "$owner_selector" \
-                --cascade=foreground --wait=true --timeout=5m >/dev/null
-            fi
+            capture_owned "$expected" batch/v1 Job jobs "$namespace"
+            cleanup_owned "$expected" batch/v1 Job jobs "$namespace"
           done
 
-          controller_expected=$expected_dir/controller
-          capture_expected "$controller_expected" kubectl get deployments -n pgcopydb-e2e-system
-          [ "$(wc -l < "$controller_expected")" -eq 1 ] || {
-            echo "::error::expected one run-owned feature controller"
+          if [ "$mode" = recovery ] && [ ! -s "$FEATURE_E2E_HELPERS/controller.uid" ]; then
+            controllers=$(feature_controller_list)
+            if ! jq -e '.items | type == "array" and length == 0' \
+              <<<"$controllers" >/dev/null 2>&1; then
+              feature_capture_controller
+            else
+              named=$(kubectl get deployment.apps/pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
+                --ignore-not-found -o json 2>/dev/null) || {
+                  echo "::error::unable to inspect the feature controller"
+                  exit 1
+                }
+              [ -z "$named" ] || {
+                echo "::error::feature controller ownership is invalid"
+                exit 1
+              }
+            fi
+          fi
+          if [ -s "$FEATURE_E2E_HELPERS/controller.uid" ]; then
+            feature_uninstall_controller
+          elif [ "$mode" = normal ]; then
+            echo "::error::feature controller was never captured"
             exit 1
-          }
-          require_expected "$controller_expected" "feature controller" \
-            kubectl get deployments -n pgcopydb-e2e-system
-          controller=$(<"$controller_expected")
-          release=$(kubectl get "$controller" -n pgcopydb-e2e-system \
-            -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')
-          [ -n "$release" ] || {
-            echo "::error::run-owned feature controller has no Helm release"
+          elif [ -s "$FEATURE_E2E_HELPERS/rendered.yaml" ]; then
+            kubectl delete -f "$FEATURE_E2E_HELPERS/rendered.yaml" \
+              -l "$owner_selector" --ignore-not-found --wait=true --timeout=5m >/dev/null
+            "$REAL_HELM" uninstall pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
+              --wait --timeout=5m --ignore-not-found >/dev/null
+          else
+            echo "::error::labelled feature render is unavailable for recovery"
             exit 1
-          }
-          [[ "$release" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
-            echo "::error::run-owned feature controller has an invalid Helm release"
-            exit 1
-          }
-          "$REAL_HELM" uninstall "$release" -n pgcopydb-e2e-system \
-            --wait --timeout=5m >/dev/null
+          fi
 
           for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
             require_empty "Migrations in $namespace" \
@@ -669,11 +1084,22 @@ jobs:
               kubectl get jobs -n "$namespace"
           done
           require_empty "feature controller Deployments" \
-            kubectl get deployments -n pgcopydb-e2e-system
+            kubectl get deployments -n "$E2E_OPERATOR_NAMESPACE"
           require_empty "feature controller Pods" \
-            kubectl get pods -n pgcopydb-e2e-system
-          remaining=$("$REAL_HELM" list -n pgcopydb-e2e-system -q \
-            --filter "^${release}$")
+            kubectl get pods -n "$E2E_OPERATOR_NAMESPACE"
+          if [ -s "$FEATURE_E2E_HELPERS/rendered.yaml" ]; then
+            remaining=$(kubectl get -f "$FEATURE_E2E_HELPERS/rendered.yaml" \
+              -l "$owner_selector" --ignore-not-found -o name 2>/dev/null) || {
+                echo "::error::unable to inspect rendered feature objects"
+                exit 1
+              }
+            [ -z "$remaining" ] || {
+              echo "::error::run-owned rendered objects remain after cleanup"
+              exit 1
+            }
+          fi
+          remaining=$("$REAL_HELM" list -n "$E2E_OPERATOR_NAMESPACE" -q \
+            --filter '^pgcopydb-e2e$')
           [ -z "$remaining" ] || {
             echo "::error::feature Helm release remains after cleanup"
             exit 1
@@ -682,12 +1108,13 @@ jobs:
 
           cat > "$FEATURE_E2E_HELPERS/bin/helm" <<'EOF_HELM'
           #!/usr/bin/env bash
+          set +x
           set -euo pipefail
           helm_args=("$@")
           if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
             [ "$#" -ge 6 ] &&
               [ "$3" = ../../charts/pgcopydb-operator ] &&
-              [ "$4" = -n ] && [ "$5" = pgcopydb-e2e-system ] &&
+              [ "$4" = -n ] && [ "$5" = "$E2E_OPERATOR_NAMESPACE" ] &&
               [ "$6" = --wait ] || {
                 echo "::error::feature controller Helm argument is unsupported"
                 exit 1
@@ -737,28 +1164,33 @@ jobs:
                   ;;
               esac
             done
-            helm_args+=(--set-string fullnameOverride=pgcopydb-e2e)
+            helm_args+=(
+              --set-string fullnameOverride=pgcopydb-e2e
+              --atomic
+              --timeout=5m
+              --post-renderer "$FEATURE_E2E_HELPERS/post-renderer"
+            )
           fi
-          "$REAL_HELM" "${helm_args[@]}"
+          install_result=0
+          "$REAL_HELM" "${helm_args[@]}" || install_result=$?
           if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
-            owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
-            [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]]
-            owner_selector="$FEATURE_E2E_OWNER_KEY=$owner_value"
-            "$REAL_HELM" get manifest pgcopydb-e2e -n pgcopydb-e2e-system |
-              kubectl label -f - "$FEATURE_E2E_OWNER_KEY=$owner_value" --overwrite >/dev/null
-            patch=$(jq -cn --arg key "$FEATURE_E2E_OWNER_KEY" --arg value "$owner_value" \
-              '{metadata:{labels:{($key):$value}},spec:{template:{metadata:{labels:{($key):$value}}}}}')
-            kubectl patch deployment pgcopydb-e2e -n pgcopydb-e2e-system \
-              --type=merge -p "$patch" >/dev/null
-            kubectl rollout status deployment/pgcopydb-e2e -n pgcopydb-e2e-system \
+            if [ "$install_result" -ne 0 ]; then
+              "$FEATURE_E2E_HELPERS/cleanup" recovery
+              exit "$install_result"
+            fi
+            . "$FEATURE_E2E_HELPERS/ownership"
+            feature_capture_controller
+            kubectl rollout status deployment/pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
               --timeout=5m >/dev/null
             "$FEATURE_E2E_HELPERS/attest-image" manager
             : > "$FEATURE_E2E_HELPERS/manager-attested"
           fi
+          exit "$install_result"
           EOF_HELM
 
           chmod 0755 "$FEATURE_E2E_HELPERS/attest-image" \
-            "$FEATURE_E2E_HELPERS/cleanup" "$FEATURE_E2E_HELPERS/bin/helm"
+            "$FEATURE_E2E_HELPERS/post-renderer" "$FEATURE_E2E_HELPERS/cleanup" \
+            "$FEATURE_E2E_HELPERS/bin/helm"
           {
             printf 'REAL_HELM=%s\n' "$REAL_HELM"
             printf 'FEATURE_E2E_HELPERS=%s\n' "$FEATURE_E2E_HELPERS"
@@ -768,7 +1200,7 @@ jobs:
       - name: Require an empty feature slot
         run: |
           set -euo pipefail
-          releases=$("$REAL_HELM" list -n pgcopydb-e2e-system -q \
+          releases=$("$REAL_HELM" list -n "$E2E_OPERATOR_NAMESPACE" -q \
             --filter '^pgcopydb-e2e$')
           [ -z "$releases" ] || {
             echo "::error::feature controller slot is occupied"
@@ -833,7 +1265,7 @@ jobs:
           E2E_MANAGE_NAMESPACES: "false"
           E2E_KEEP_FIXTURES: "true"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
-          E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
+          E2E_PROMETHEUS_URL: ${{ secrets.E2E_PROMETHEUS_URL }}
         run: |
           set -euo pipefail
           suite_report=$FEATURE_E2E_HELPERS/suite-report.json

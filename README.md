@@ -50,7 +50,7 @@ docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml
 docs/examples/             # Migration resources with short explanations
 images/pgcopydb-builder/   # publishes the pgcopydb binary the runner image copies in, keyed on its source commit
 images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
-test/e2e/                  # e2e suite: locally against your kubectl context, in CI against a release candidate
+test/e2e/                  # e2e suite: local runs, trusted feature PR runs, and release candidate CI
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # CI, weekly candidate and manual promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata
 Taskfile.yml               # task help | lint | test | e2e
@@ -64,7 +64,6 @@ task lint   # the pre-commit gate (yamllint + make lint)
 task test   # unit and envtest suites
 task e2e    # e2e against your CURRENT kubectl context (local only; prompts first)
             # E2E_SCALE sizes the seeded fixtures (default 1 = ~12GB); task e2e:stress runs the ~120GB tier
-            # fixtures are two 3-instance CNPG clusters, spread across nodes so the copy crosses the network
             # task e2e:matrix runs the PG version combos 14->18, 18->18, 15->17 at scale 0.1
 
 ```

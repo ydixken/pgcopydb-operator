@@ -16,9 +16,10 @@ limitations under the License.
 
 // Package e2e exercises the operator on the cluster behind the current
 // kubectl context. The suite brings its own operator: helm installs a
-// throwaway instance into pgcopydb-e2e-system that watches only the fixture
-// namespaces. AfterSuite removes it unless a protected feature workflow owns
-// ordered teardown. The production installation in pgcopydb-system is never
+// throwaway instance into E2E_OPERATOR_NAMESPACE, which defaults to
+// pgcopydb-e2e-system and watches only the fixture namespaces. AfterSuite
+// removes it unless a protected feature workflow owns ordered teardown.
+// The production installation in pgcopydb-system is never
 // touched, checked, or relied on. Fixtures stay inside pgcopydb-e2e and
 // pgcopydb-e2e-x, the sanctioned e2e area on the shared dev cluster.
 package e2e
@@ -70,8 +71,8 @@ const (
 	nsE2E = "pgcopydb-e2e"
 	// nsX hosts the cross-namespace scenario (secrets local, hosts remote).
 	nsX = "pgcopydb-e2e-x"
-	// nsOperator hosts the suite's throwaway operator install.
-	nsOperator = "pgcopydb-e2e-system"
+	// defaultOperatorNamespace preserves the local and release install scope.
+	defaultOperatorNamespace = "pgcopydb-e2e-system"
 	// helmRelease prefixes every rendered resource name, keeping the install
 	// distinct from the production one.
 	helmRelease = "pgcopydb-e2e"
@@ -165,6 +166,8 @@ const (
 	// CNPG has already replicated do not triple themselves again underneath.
 	ephemeralStorageClass = "longhorn-e2e-ephemeral"
 )
+
+var nsOperator = envDefault("E2E_OPERATOR_NAMESPACE", defaultOperatorNamespace)
 
 var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
 
@@ -294,6 +297,43 @@ var runnerTag = operatorTag
 // set to exactly "true".
 func envTrue(name string) bool {
 	return os.Getenv(name) == "true"
+}
+
+func envDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func TestOperatorNamespaceSelector(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "operator-namespace" {
+		if want := os.Getenv("E2E_OPERATOR_NAMESPACE_WANT"); nsOperator != want {
+			t.Errorf("nsOperator = %q, want %q", nsOperator, want)
+		}
+		return
+	}
+
+	for _, tt := range []struct {
+		name      string
+		namespace string
+		want      string
+	}{
+		{name: "default", want: "pgcopydb-e2e-system"},
+		{name: "feature workflow", namespace: "pgcopydb-e2e", want: "pgcopydb-e2e"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestOperatorNamespaceSelector$")
+			cmd.Env = []string{
+				"E2E_TEST_CHILD=operator-namespace",
+				"E2E_OPERATOR_NAMESPACE=" + tt.namespace,
+				"E2E_OPERATOR_NAMESPACE_WANT=" + tt.want,
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("operator namespace subprocess failed: %v\n%s", err, out)
+			}
+		})
+	}
 }
 
 func postgresIntAtLeast(n, minimum int) bool {

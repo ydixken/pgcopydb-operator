@@ -36,73 +36,77 @@ import (
 )
 
 const (
-	featureWorkflow        = "../../.github/workflows/feature-e2e.yml"
-	publishedE2EWorkflow   = "../../.github/workflows/e2e.yml"
-	protectedClusterGroup  = "e2e-cluster"
-	resolveJob             = "resolve"
-	pendingStatusJob       = "pending-status"
-	managerImageJob        = "manager-image"
-	runnerImageJob         = "runner-image"
-	permissionContents     = "contents"
-	permissionPackages     = "packages"
-	permissionRead         = "read"
-	permissionWrite        = "write"
-	falseValue             = "false"
-	trueValue              = "true"
-	successValue           = "success"
-	failureValue           = "failure"
-	errorValue             = "error"
-	unreadableValue        = "unreadable"
-	fullModeValue          = "full"
-	focusModeValue         = "focus"
-	roleKind               = "Role"
-	roleBindingKind        = "RoleBinding"
-	clusterRoleKind        = "ClusterRole"
-	clusterRoleBindingKind = "ClusterRoleBinding"
-	schemaDescriptionKey   = "description"
-	schemaTypeKey          = "type"
-	schemaKeepValue        = "keep"
-	schemaRemoveValue      = "remove"
-	schemaStringType       = "string"
-	itemsKey               = "items"
-	nameKey                = "name"
-	imageKey               = "image"
-	metadataKey            = "metadata"
-	specKey                = "spec"
-	containersKey          = "containers"
-	statusKey              = "status"
-	apiVersionKey          = "apiVersion"
-	sidecarName            = "sidecar"
-	imageIDKey             = "imageID"
-	kubectlCommand         = "kubectl"
-	replacementUID         = "44444444-4444-4444-8444-444444444444"
-	conditionTrueValue     = "True"
-	replacementName        = "replacement"
-	deploymentKind         = "Deployment"
-	leaderElectArg         = "--leader-elect"
-	readyConditionType     = "Ready"
-	featureControllerName  = "pgcopydb-e2e"
-	featureControllerNS    = "pgcopydb-e2e-system"
-	featureFixtureChart    = "../../charts/pgcopydb-operator"
-	helmInstallCommand     = "install"
-	helmTemplateCommand    = "template"
-	helmSetFlag            = "--set"
-	helmSetStringFlag      = "--set-string"
-	helmSetJSONFlag        = "--set-json"
-	appsV1                 = "apps/v1"
-	namespaceKey           = "namespace"
-	labelsKey              = "labels"
-	replicasKey            = "replicas"
-	replicaSetKind         = "ReplicaSet"
-	featureReplicaSetName  = "pgcopydb-e2e-7d4c"
-	blockOwnerDeletionKey  = "blockOwnerDeletion"
-	podKind                = "Pod"
-	podListKind            = "PodList"
-	kindKey                = "kind"
-	uidKey                 = "uid"
-	resourceVersionKey     = "resourceVersion"
-	controllerKey          = "controller"
-	wrongManagerImage      = "ghcr.io/fixture/wrong:latest"
+	featureWorkflow              = "../../.github/workflows/feature-e2e.yml"
+	publishedE2EWorkflow         = "../../.github/workflows/e2e.yml"
+	protectedClusterGroup        = "e2e-cluster"
+	resolveJob                   = "resolve"
+	pendingStatusJob             = "pending-status"
+	managerImageJob              = "manager-image"
+	runnerImageJob               = "runner-image"
+	permissionContents           = "contents"
+	permissionPackages           = "packages"
+	permissionRead               = "read"
+	permissionWrite              = "write"
+	falseValue                   = "false"
+	trueValue                    = "true"
+	successValue                 = "success"
+	failureValue                 = "failure"
+	errorValue                   = "error"
+	unreadableValue              = "unreadable"
+	fullModeValue                = "full"
+	focusModeValue               = "focus"
+	roleKind                     = "Role"
+	roleBindingKind              = "RoleBinding"
+	clusterRoleKind              = "ClusterRole"
+	clusterRoleBindingKind       = "ClusterRoleBinding"
+	customResourceDefinitionKind = "CustomResourceDefinition"
+	listKind                     = "List"
+	schemaDescriptionKey         = "description"
+	schemaTypeKey                = "type"
+	schemaKeepValue              = "keep"
+	schemaRemoveValue            = "remove"
+	schemaStringType             = "string"
+	itemsKey                     = "items"
+	nameKey                      = "name"
+	imageKey                     = "image"
+	metadataKey                  = "metadata"
+	specKey                      = "spec"
+	containersKey                = "containers"
+	statusKey                    = "status"
+	stateKey                     = "state"
+	apiVersionKey                = "apiVersion"
+	sidecarName                  = "sidecar"
+	imageIDKey                   = "imageID"
+	kubectlCommand               = "kubectl"
+	replacementUID               = "44444444-4444-4444-8444-444444444444"
+	conditionTrueValue           = "True"
+	replacementName              = "replacement"
+	rollbackFailureNoController  = "rollback-failure-no-controller"
+	deploymentKind               = "Deployment"
+	leaderElectArg               = "--leader-elect"
+	readyConditionType           = "Ready"
+	featureControllerName        = "pgcopydb-e2e"
+	featureControllerNS          = "pgcopydb-e2e"
+	featureFixtureChart          = "../../charts/pgcopydb-operator"
+	helmInstallCommand           = "install"
+	helmTemplateCommand          = "template"
+	helmSetFlag                  = "--set"
+	helmSetStringFlag            = "--set-string"
+	helmSetJSONFlag              = "--set-json"
+	appsV1                       = "apps/v1"
+	namespaceKey                 = "namespace"
+	labelsKey                    = "labels"
+	replicasKey                  = "replicas"
+	replicaSetKind               = "ReplicaSet"
+	featureReplicaSetName        = "pgcopydb-e2e-7d4c"
+	blockOwnerDeletionKey        = "blockOwnerDeletion"
+	podKind                      = "Pod"
+	podListKind                  = "PodList"
+	kindKey                      = "kind"
+	uidKey                       = "uid"
+	resourceVersionKey           = "resourceVersion"
+	controllerKey                = "controller"
+	wrongManagerImage            = "ghcr.io/fixture/wrong:latest"
 )
 
 type protectedInput struct {
@@ -231,9 +235,10 @@ func protectedWithString(t *testing.T, step protectedStep, key string) string {
 }
 
 type compatibilitySnapshot struct {
-	CRDs    map[string]string
-	RBAC    map[string]string
-	Builder map[string]string
+	CRDs               map[string]string
+	RBAC               map[string]string
+	RenderedPrivileges []string
+	Builder            map[string]string
 }
 
 func writeCompatibilityFixture(t *testing.T, root, name, body string) {
@@ -454,17 +459,161 @@ func compatibilityTree(t *testing.T, root, relative string) map[string]string {
 	return files
 }
 
+func compatibilityRenderedPrivileges(t *testing.T, root string) []string {
+	t.Helper()
+	helm := os.Getenv("FEATURE_E2E_HELM")
+	if !filepath.IsAbs(helm) {
+		t.Fatal("FEATURE_E2E_HELM must name the trusted Helm executable by absolute path")
+	}
+	chart := filepath.Join(root, "charts", "pgcopydb-operator")
+	args := []string{
+		helmTemplateCommand, featureControllerName, chart,
+		"--namespace", featureControllerNS,
+		"--include-crds", "--skip-tests",
+		helmSetFlag, "crds.install=true",
+		helmSetFlag, "image.tag=feature-fixture@sha256:" + strings.Repeat("a", 64),
+		helmSetFlag, "runner.image.tag=feature-fixture@sha256:" + strings.Repeat("b", 64),
+		helmSetFlag, "watchNamespaces={pgcopydb-e2e,pgcopydb-e2e-x}",
+		helmSetFlag, "leaderElection.enabled=true",
+		helmSetFlag, "metrics.enabled=true",
+		helmSetFlag, "metrics.serviceMonitor.enabled=true",
+		helmSetFlag, "rbac.create=true",
+		helmSetFlag, "serviceAccount.create=true",
+		helmSetFlag, "serviceAccount.name=pgcopydb-e2e-manager",
+		helmSetStringFlag, "fullnameOverride=" + featureControllerName,
+	}
+	output, err := exec.Command(helm, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("render fixed feature chart %s: %v\n%s", chart, err, output)
+	}
+
+	documents := make(map[string]string)
+	decoder := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(output), 4096)
+	for index := 0; ; index++ {
+		var document map[string]any
+		if err := decoder.Decode(&document); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("decode fixed feature chart %s document %d: %v", chart, index, err)
+		}
+		if len(document) == 0 {
+			continue
+		}
+		objects, err := compatibilityRenderedObjects(document)
+		if err != nil {
+			t.Fatalf("flatten fixed feature chart %s document %d: %v", chart, index, err)
+		}
+		for _, object := range objects {
+			kind, _ := object[kindKey].(string)
+			isCRD := kind == customResourceDefinitionKind
+			isRBAC := kind == roleKind || kind == roleBindingKind ||
+				kind == clusterRoleKind || kind == clusterRoleBindingKind
+			if !isCRD && !isRBAC {
+				continue
+			}
+			identity, err := normalizeCompatibilityRenderedIdentity(object)
+			if err != nil {
+				t.Fatalf("identify fixed feature chart %s document %d: %v", chart, index, err)
+			}
+			if isCRD {
+				removeDescriptions(object)
+			}
+			canonical, err := json.Marshal(object)
+			if err != nil {
+				t.Fatalf("canonicalize fixed feature chart %s document %d: %v", chart, index, err)
+			}
+			if _, exists := documents[identity]; exists {
+				t.Fatalf("duplicate rendered privilege identity %s", identity)
+			}
+			documents[identity] = string(canonical)
+		}
+	}
+
+	normalized := make([]string, 0, len(documents))
+	for identity, document := range documents {
+		normalized = append(normalized, identity+"\x00"+document)
+	}
+	slices.Sort(normalized)
+	return normalized
+}
+
+func compatibilityRenderedObjects(document map[string]any) ([]map[string]any, error) {
+	kind, ok := document[kindKey].(string)
+	if !ok || kind == "" {
+		return nil, fmt.Errorf("rendered object has no kind")
+	}
+	if kind != listKind {
+		if strings.HasSuffix(kind, listKind) {
+			return nil, fmt.Errorf("unsupported rendered privilege List kind %s", kind)
+		}
+		if _, exists := document[itemsKey]; exists {
+			return nil, fmt.Errorf("unsupported rendered privilege List envelope %s", kind)
+		}
+		return []map[string]any{document}, nil
+	}
+	if document[apiVersionKey] != "v1" {
+		return nil, fmt.Errorf("unsupported rendered privilege List API version")
+	}
+	items, ok := document[itemsKey].([]any)
+	if !ok || len(items) == 0 {
+		return nil, fmt.Errorf("rendered privilege List has no items")
+	}
+	objects := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("rendered privilege List has an invalid item")
+		}
+		flattened, err := compatibilityRenderedObjects(object)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, flattened...)
+	}
+	return objects, nil
+}
+
+func normalizeCompatibilityRenderedIdentity(document map[string]any) (string, error) {
+	apiVersion, _ := document[apiVersionKey].(string)
+	kind, _ := document[kindKey].(string)
+	metadata, ok := document[metadataKey].(map[string]any)
+	if apiVersion == "" || kind == "" || !ok {
+		return "", fmt.Errorf("target resource has no API version, kind, or metadata")
+	}
+	name, _ := metadata[nameKey].(string)
+	if name == "" {
+		return "", fmt.Errorf("%s target resource has no name", kind)
+	}
+	namespace := ""
+	if kind == roleKind || kind == roleBindingKind {
+		value, exists := metadata[namespaceKey]
+		if exists {
+			var ok bool
+			namespace, ok = value.(string)
+			if !ok {
+				return "", fmt.Errorf("%s/%s has a non-string namespace", kind, name)
+			}
+		}
+		if namespace == "" {
+			namespace = featureControllerNS
+			metadata[namespaceKey] = namespace
+		}
+	}
+	return apiVersion + "/" + kind + "/" + namespace + "/" + name, nil
+}
+
 func loadCompatibilitySnapshot(t *testing.T, root string) compatibilitySnapshot {
 	t.Helper()
 	snapshot := compatibilitySnapshot{
 		CRDs: compatibilityDocuments(t, root, "config/crd/bases",
-			func(kind string) bool { return kind == "CustomResourceDefinition" }, true),
+			func(kind string) bool { return kind == customResourceDefinitionKind }, true),
 		RBAC: compatibilityDocuments(t, root, "config/rbac",
 			func(kind string) bool {
 				return kind == roleKind || kind == roleBindingKind ||
 					kind == clusterRoleKind || kind == clusterRoleBindingKind
 			}, false),
-		Builder: compatibilityTree(t, root, "images/pgcopydb-builder"),
+		RenderedPrivileges: compatibilityRenderedPrivileges(t, root),
+		Builder:            compatibilityTree(t, root, "images/pgcopydb-builder"),
 	}
 	if len(snapshot.CRDs) == 0 || len(snapshot.Builder) == 0 {
 		t.Fatal("compatibility input is missing CRDs or pgcopydb-builder files")
@@ -479,6 +628,21 @@ func loadCompatibilitySnapshot(t *testing.T, root string) compatibilitySnapshot 
 		}
 		if !found {
 			t.Fatalf("compatibility input is missing %s documents", kind)
+		}
+	}
+	for _, kind := range []string{
+		customResourceDefinitionKind, roleKind, roleBindingKind, clusterRoleKind, clusterRoleBindingKind,
+	} {
+		found := false
+		for _, document := range snapshot.RenderedPrivileges {
+			identity, _, ok := strings.Cut(document, "\x00")
+			if ok && strings.Contains(identity, "/"+kind+"/") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("rendered privilege input is missing %s documents", kind)
 		}
 	}
 	return snapshot
@@ -499,6 +663,9 @@ func TestFeatureE2ECandidateCompatibility(t *testing.T) {
 	}
 	if !maps.Equal(baseSnapshot.RBAC, headSnapshot.RBAC) {
 		t.Error("candidate changes Role, RoleBinding, ClusterRole, or ClusterRoleBinding documents")
+	}
+	if !slices.Equal(baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges) {
+		t.Error("candidate changes rendered CRD, Role, RoleBinding, ClusterRole, or ClusterRoleBinding documents")
 	}
 	if !maps.Equal(baseSnapshot.Builder, headSnapshot.Builder) {
 		t.Error("candidate changes images/pgcopydb-builder")
@@ -652,7 +819,8 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 		"make -C trusted controller-gen", "../trusted/bin/controller-gen",
 		"git status --porcelain -- config/crd/bases config/rbac",
 		"../trusted/hack/sync-chart-crd.sh --check", "../trusted/hack/sync-chart-rbac.sh --check",
-		"FEATURE_E2E_BASE", "FEATURE_E2E_HEAD", "TestFeatureE2ECandidateCompatibility",
+		"FEATURE_E2E_BASE", "FEATURE_E2E_HEAD", "FEATURE_E2E_HELM",
+		"TestFeatureE2ECandidateCompatibility",
 		"pgcopydb-builder:", "candidate_ref", "trusted_ref",
 		"docker buildx imagetools inspect",
 	} {
@@ -1196,7 +1364,7 @@ func imageAttestationPodsForContainer(
 	for i, imageID := range imageIDs {
 		status := map[string]any{
 			nameKey: containerName, imageKey: image, "ready": true, "restartCount": 0,
-			"started": true, "state": map[string]any{"running": map[string]any{}},
+			"started": true, stateKey: map[string]any{"running": map[string]any{}},
 		}
 		if imageID != nil {
 			status[imageIDKey] = imageID
@@ -1321,7 +1489,7 @@ func runImageAttestationFixture(
 	ownerSelector := imageAttestationOwnerKey + "=" + imageAttestationOwnerValue
 	expectedRef := fixture.managerRef
 	kubectlResponse := fixture.pods
-	expectedKubectlArgs := "get deployments,replicasets,pods -n pgcopydb-e2e-system -l " +
+	expectedKubectlArgs := "get deployments,replicasets,pods -n " + featureControllerNS + " -l " +
 		ownerSelector + " -o json"
 	if fixture.component == imageAttestationManagerComponent {
 		kubectlResponse = managerCorrelationResourcesForPods(
@@ -1368,6 +1536,7 @@ export SHELLOPTS
 	}
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
+		"E2E_OPERATOR_NAMESPACE="+featureControllerNS,
 		"ATTEST_PATH="+attestPath,
 		"FIXTURE_COMPONENT="+fixture.component,
 		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
@@ -1395,6 +1564,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	helm := extractFeatureHelmHeredoc(t, helpers)
+	ownership := extractFeatureGeneratedFile(t, helpers, "ownership", "OWNERSHIP")
 	const (
 		topDigest     = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 		amd64Digest   = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -1666,7 +1836,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		}, false},
 		{"wrong Deployment namespace", func(t *testing.T, document map[string]any) {
 			managerCorrelationMetadata(t, managerCorrelationItem(t, document, deploymentKind, 0))[namespaceKey] =
-				featureControllerName
+				replacementName
 		}, false},
 		{"wrong Deployment name", func(t *testing.T, document map[string]any) {
 			managerCorrelationMetadata(t, managerCorrelationItem(t, document, deploymentKind, 0))[nameKey] =
@@ -1682,7 +1852,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		}, false},
 		{"wrong ReplicaSet namespace", func(t *testing.T, document map[string]any) {
 			managerCorrelationMetadata(t, managerCorrelationItem(t, document, replicaSetKind, 0))[namespaceKey] =
-				featureControllerName
+				replacementName
 		}, false},
 		{"missing ReplicaSet instance label", func(t *testing.T, document map[string]any) {
 			delete(managerCorrelationLabels(t, managerCorrelationItem(t, document, replicaSetKind, 0)),
@@ -1716,7 +1886,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		}, false},
 		{"wrong Pod namespace", func(t *testing.T, document map[string]any) {
 			managerCorrelationMetadata(t, managerCorrelationItem(t, document, podKind, 0))[namespaceKey] =
-				featureControllerName
+				replacementName
 		}, false},
 		{"missing Pod instance label", func(t *testing.T, document map[string]any) {
 			delete(managerCorrelationLabels(t, managerCorrelationItem(t, document, podKind, 0)),
@@ -1751,15 +1921,10 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 				tt.mutate(t, document)
 			}
 			resources := marshalManagerCorrelationDocument(t, document)
-			result := runManagerCorrelationFixture(t, helm, attest, managerRef, runnerRef, registry, resources)
-			wantHelmArgs := []string{
-				helmInstallCommand, featureControllerName, featureFixtureChart,
-				"-n", featureControllerNS, "--wait",
-				helmSetStringFlag, "fullnameOverride=" + featureControllerName,
-			}
-			if !slices.Equal(result.helmArgs, wantHelmArgs) {
-				t.Errorf("effective Helm arguments = %q, want %q", result.helmArgs, wantHelmArgs)
-			}
+			result := runManagerCorrelationFixture(
+				t, helm, ownership, attest, managerRef, runnerRef, registry, resources,
+			)
+			requireFeatureHelmArgs(t, result.helmArgs, nil)
 			if (result.err == nil) != tt.wantSuccess {
 				t.Errorf("manager correlation error = %v, output:\n%s", result.err, result.output)
 			}
@@ -1817,8 +1982,9 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 	}
 	for _, tt := range rejectedHelmArgs {
 		t.Run(tt.name+" is rejected before Helm", func(t *testing.T) {
-			result := runManagerCorrelationFixture(t, helm, attest, managerRef, runnerRef, registry, resources,
-				tt.args...)
+			result := runManagerCorrelationFixture(
+				t, helm, ownership, attest, managerRef, runnerRef, registry, resources, tt.args...,
+			)
 			if result.err == nil {
 				t.Error("candidate Helm argument unexpectedly succeeded")
 			}
@@ -1856,18 +2022,14 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 	}
 	for _, tt := range safeHelmArgs {
 		t.Run(tt.name+" preserves the trusted name on retries", func(t *testing.T) {
-			wantHelmArgs := append([]string{helmInstallCommand, featureControllerName, featureFixtureChart}, tt.args...)
-			wantHelmArgs = slices.Insert(wantHelmArgs, 3, "-n", featureControllerNS, "--wait")
-			wantHelmArgs = append(wantHelmArgs, helmSetStringFlag, "fullnameOverride="+featureControllerName)
 			for range 2 {
-				result := runManagerCorrelationFixture(t, helm, attest, managerRef, runnerRef, registry, resources,
-					tt.args...)
+				result := runManagerCorrelationFixture(
+					t, helm, ownership, attest, managerRef, runnerRef, registry, resources, tt.args...,
+				)
 				if result.err != nil {
 					t.Errorf("safe candidate Helm argument failed: %v\n%s", result.err, result.output)
 				}
-				if !slices.Equal(result.helmArgs, wantHelmArgs) {
-					t.Errorf("effective Helm arguments = %q, want %q", result.helmArgs, wantHelmArgs)
-				}
+				requireFeatureHelmArgs(t, result.helmArgs, tt.args)
 				if !result.attested {
 					t.Error("safe candidate did not reach manager attestation")
 				}
@@ -1888,8 +2050,9 @@ func requireTrustedFeatureHelmRender(t *testing.T, helmArgs []string) {
 	if err != nil {
 		t.Skip("helm is unavailable")
 	}
+	trustedSuffix := 4
 	templateArgs := append([]string{helmTemplateCommand}, helmArgs[1:5]...)
-	templateArgs = append(templateArgs, helmArgs[6:]...)
+	templateArgs = append(templateArgs, helmArgs[6:len(helmArgs)-trustedSuffix]...)
 	output, err := exec.Command(helmPath, templateArgs...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, output)
@@ -1914,6 +2077,24 @@ func requireTrustedFeatureHelmRender(t *testing.T, helmArgs []string) {
 	t.Fatal("helm template rendered no Deployment")
 }
 
+func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
+	t.Helper()
+	want := make([]string, 0, 6+len(candidate)+5)
+	want = append(want,
+		helmInstallCommand, featureControllerName, featureFixtureChart,
+		"-n", featureControllerNS, "--wait",
+	)
+	want = append(want, candidate...)
+	want = append(want,
+		helmSetStringFlag, "fullnameOverride="+featureControllerName,
+		"--atomic", "--timeout=5m", "--post-renderer",
+	)
+	if len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) ||
+		filepath.Base(got[len(got)-1]) != "post-renderer" {
+		t.Errorf("effective Helm arguments = %q, want trusted suffix after %q", got, want)
+	}
+}
+
 func extractFeatureHelmHeredoc(t *testing.T, helpers string) string {
 	t.Helper()
 	const startMarker = `cat > "$FEATURE_E2E_HELPERS/bin/helm" <<'EOF_HELM'` + "\n"
@@ -1931,7 +2112,6 @@ func extractFeatureHelmHeredoc(t *testing.T, helpers string) string {
 
 func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[string]any {
 	const (
-		namespace     = "pgcopydb-e2e-system"
 		deploymentUID = "11111111-1111-4111-8111-111111111111"
 		replicaSetUID = "22222222-2222-4222-8222-222222222222"
 		ownerKey      = "pgcopydb-operator.io/feature-e2e-run"
@@ -1954,13 +2134,17 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 	deployment := map[string]any{
 		apiVersionKey: appsV1, kindKey: deploymentKind,
 		metadataKey: map[string]any{
-			nameKey: featureControllerName, namespaceKey: namespace, uidKey: deploymentUID,
+			nameKey: featureControllerName, namespaceKey: featureControllerNS, uidKey: deploymentUID,
 			labelsKey: labels(ownerValue), resourceVersionKey: "101",
+			"annotations": map[string]any{
+				"meta.helm.sh/release-name":      featureControllerName,
+				"meta.helm.sh/release-namespace": featureControllerNS,
+			},
 		},
 		specKey: map[string]any{
 			replicasKey: 1,
 			"selector":  map[string]any{"matchLabels": labels(ownerValue)},
-			"template": map[string]any{
+			helmTemplateCommand: map[string]any{
 				metadataKey: map[string]any{labelsKey: labels(ownerValue)},
 				specKey:     map[string]any{containersKey: []any{managerContainer()}},
 			},
@@ -1970,7 +2154,7 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 	replicaSet := map[string]any{
 		apiVersionKey: appsV1, kindKey: replicaSetKind,
 		metadataKey: map[string]any{
-			nameKey: featureReplicaSetName, namespaceKey: namespace, uidKey: replicaSetUID,
+			nameKey: featureReplicaSetName, namespaceKey: featureControllerNS, uidKey: replicaSetUID,
 			labelsKey: labels(ownerValue), resourceVersionKey: "102",
 			"ownerReferences": []any{map[string]any{
 				apiVersionKey: appsV1, kindKey: deploymentKind, nameKey: featureControllerName,
@@ -1980,7 +2164,7 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 		specKey: map[string]any{
 			replicasKey: 1,
 			"selector":  map[string]any{"matchLabels": labels(ownerValue)},
-			"template": map[string]any{
+			helmTemplateCommand: map[string]any{
 				metadataKey: map[string]any{labelsKey: labels(ownerValue)},
 				specKey:     map[string]any{containersKey: []any{managerContainer()}},
 			},
@@ -1990,7 +2174,7 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 	pod := map[string]any{
 		apiVersionKey: "v1", kindKey: podKind,
 		metadataKey: map[string]any{
-			nameKey: "pgcopydb-e2e-7d4c-first", namespaceKey: namespace,
+			nameKey: "pgcopydb-e2e-7d4c-first", namespaceKey: featureControllerNS,
 			uidKey: "33333333-3333-4333-8333-333333333333", labelsKey: labels(ownerValue),
 			resourceVersionKey: "103",
 			"ownerReferences": []any{map[string]any{
@@ -2008,7 +2192,7 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 			"containerStatuses": []any{map[string]any{
 				nameKey: imageAttestationManagerComponent, imageKey: managerRef, imageIDKey: imageID,
 				"ready": true, "restartCount": 0, "started": true,
-				"state": map[string]any{"running": map[string]any{}},
+				stateKey: map[string]any{"running": map[string]any{}},
 			}},
 		},
 	}
@@ -2016,22 +2200,22 @@ func managerCorrelationDocument(managerRef, runnerRef, imageID string) map[strin
 	unrelated := []any{
 		map[string]any{
 			apiVersionKey: appsV1, kindKey: deploymentKind,
-			metadataKey: map[string]any{nameKey: "customer", namespaceKey: namespace,
+			metadataKey: map[string]any{nameKey: "customer", namespaceKey: featureControllerNS,
 				uidKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", labelsKey: unrelatedLabels},
 		},
 		map[string]any{
 			apiVersionKey: appsV1, kindKey: replicaSetKind,
-			metadataKey: map[string]any{nameKey: "customer-7d4c", namespaceKey: namespace,
+			metadataKey: map[string]any{nameKey: "customer-7d4c", namespaceKey: featureControllerNS,
 				uidKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", labelsKey: unrelatedLabels},
 		},
 		map[string]any{
 			apiVersionKey: "v1", kindKey: podKind,
-			metadataKey: map[string]any{nameKey: "customer-first", namespaceKey: namespace,
+			metadataKey: map[string]any{nameKey: "customer-first", namespaceKey: featureControllerNS,
 				uidKey: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", labelsKey: unrelatedLabels},
 		},
 	}
 	return map[string]any{
-		apiVersionKey: "v1", kindKey: "List",
+		apiVersionKey: "v1", kindKey: listKind,
 		itemsKey:    append([]any{deployment, replicaSet, pod}, unrelated...),
 		metadataKey: map[string]any{resourceVersionKey: "103"},
 	}
@@ -2066,7 +2250,7 @@ func managerCorrelationResourcesForPods(
 			pod[metadataKey] = metadata
 		}
 		metadata[nameKey] = fmt.Sprintf("pgcopydb-e2e-7d4c-%d", i)
-		metadata[namespaceKey] = "pgcopydb-e2e-system"
+		metadata[namespaceKey] = featureControllerNS
 		metadata[uidKey] = fmt.Sprintf("%08x-3333-4333-8333-333333333333", i+1)
 		metadata[labelsKey] = map[string]any{
 			"app.kubernetes.io/instance": featureControllerName,
@@ -2165,7 +2349,7 @@ func managerCorrelationPodSpec(t *testing.T, item map[string]any) map[string]any
 	t.Helper()
 	spec := item[specKey].(map[string]any)
 	if item[kindKey] == deploymentKind || item[kindKey] == replicaSetKind {
-		template := spec["template"].(map[string]any)
+		template := spec[helmTemplateCommand].(map[string]any)
 		spec = template[specKey].(map[string]any)
 	}
 	return spec
@@ -2269,7 +2453,7 @@ type managerCorrelationResult struct {
 
 func runManagerCorrelationFixture(
 	t *testing.T,
-	helm, attest, managerRef, runnerRef, registry, resources string,
+	helm, ownership, attest, managerRef, runnerRef, registry, resources string,
 	installArgs ...string,
 ) managerCorrelationResult {
 	t.Helper()
@@ -2288,10 +2472,12 @@ func runManagerCorrelationFixture(
 		body string
 		mode os.FileMode
 	}{
-		ownerPath:     {imageAttestationOwnerValue, 0o600},
-		resourcesPath: {resources, 0o600},
-		attestPath:    {attest, 0o700},
-		helmPath:      {helm, 0o700},
+		ownerPath:                           {imageAttestationOwnerValue, 0o600},
+		resourcesPath:                       {resources, 0o600},
+		attestPath:                          {attest, 0o700},
+		helmPath:                            {helm, 0o700},
+		filepath.Join(dir, "ownership"):     {ownership, 0o600},
+		filepath.Join(dir, "post-renderer"): {"#!/usr/bin/env bash\ncat\n", 0o700},
 	} {
 		if err := os.WriteFile(path, []byte(fixture.body), fixture.mode); err != nil {
 			t.Fatal(err)
@@ -2311,15 +2497,22 @@ if [ "${1:-}" = label ]; then
 fi
 if [ "${1:-}" = patch ]; then
   [ "$2" = deployment ] && [ "$3" = pgcopydb-e2e ] && [ "$4" = -n ] &&
-    [ "$5" = pgcopydb-e2e-system ] && [ "$6" = --type=merge ] && [ "$7" = -p ] && [ -n "$8" ] || exit 98
+    [ "$5" = "$E2E_OPERATOR_NAMESPACE" ] && [ "$6" = --type=merge ] && [ "$7" = -p ] && [ -n "$8" ] || exit 98
   exit 0
 fi
 if [ "${1:-}" = rollout ]; then
-  [ "$*" = "rollout status deployment/pgcopydb-e2e -n pgcopydb-e2e-system --timeout=5m" ] || exit 98
+  [ "$*" = "rollout status deployment/pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --timeout=5m" ] || exit 98
   exit 0
 fi
 if [ "${1:-}" = get ]; then
-  expected="get deployments,replicasets,pods -n pgcopydb-e2e-system"
+  if [ "$*" = "get deployments -n $E2E_OPERATOR_NAMESPACE -l $FEATURE_E2E_OWNER_KEY=$FAKE_OWNER_VALUE -o json" ]; then
+    jq -c --arg key "$FEATURE_E2E_OWNER_KEY" --arg value "$FAKE_OWNER_VALUE" '
+      .items = [.items[] |
+        select(.kind == "Deployment" and .metadata.labels[$key] == $value)]
+    ' "$FAKE_RESOURCES_PATH"
+    exit 0
+  fi
+  expected="get deployments,replicasets,pods -n $E2E_OPERATOR_NAMESPACE"
   expected="$expected -l $FEATURE_E2E_OWNER_KEY=$FAKE_OWNER_VALUE -o json"
   [ "$*" = "$expected" ] || exit 98
   jq -c --arg key "$FEATURE_E2E_OWNER_KEY" --arg value "$FAKE_OWNER_VALUE" '
@@ -2337,7 +2530,7 @@ if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
   printf '%s\n' "$@" > "$FAKE_HELM_ARGS_PATH"
   exit 0
 fi
-if [ "$*" = "get manifest pgcopydb-e2e -n pgcopydb-e2e-system" ]; then
+if [ "$*" = "get manifest pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE" ]; then
   printf '%s\n' 'apiVersion: apps/v1' 'kind: Deployment' 'metadata:' '  name: pgcopydb-e2e'
   exit 0
 fi
@@ -2363,6 +2556,7 @@ printf '%s' "$FAKE_REGISTRY"
 	cmd := exec.Command(helmPath, cmdArgs...)
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
+		"E2E_OPERATOR_NAMESPACE="+featureControllerNS,
 		"REAL_HELM="+filepath.Join(bin, "real-helm"),
 		"FEATURE_E2E_HELPERS="+dir,
 		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
@@ -2453,7 +2647,9 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 	helpers := protectedStepNamed(t, cluster, "Write cluster helpers").Run
 	for _, want := range []string{
 		imageIDKey, "imagetools inspect", "--runner-image=", "FEATURE_E2E_OWNER_KEY",
-		"FEATURE_E2E_OWNER_FILE", "require_expected", `-l "$owner_selector"`, "require_empty",
+		"FEATURE_E2E_OWNER_FILE", "capture_owned", "cleanup_owned", `-l "$owner_selector"`,
+		`kubectl delete --raw "$delete_path"`, "preconditions:{uid:$uid}",
+		"propagation=Foreground", "require_empty",
 	} {
 		if !strings.Contains(helpers, want) {
 			t.Errorf("cluster helpers are missing %q", want)
@@ -2472,9 +2668,10 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 			t.Errorf("cleanup contains forbidden target %q", banned)
 		}
 	}
-	migrations := strings.Index(helpers, "kubectl delete migrations.pgcopydb-operator.io")
-	jobs := strings.Index(helpers, "kubectl delete jobs")
-	controller := strings.Index(helpers, `"$REAL_HELM" uninstall "$release"`)
+	cleanup := extractCleanupHeredoc(t, helpers)
+	migrations := strings.Index(cleanup, "migrations.pgcopydb-operator.io")
+	jobs := strings.Index(cleanup, "batch/v1 Job jobs")
+	controller := strings.Index(cleanup, "feature_uninstall_controller")
 	if migrations < 0 || jobs <= migrations || controller <= jobs {
 		t.Error("cleanup does not delete run-owned Migrations, Jobs, and controller in order")
 	}
@@ -2496,6 +2693,91 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 		if !strings.Contains(final.Run, want) && final.Env[want] == "" {
 			t.Errorf("final status is missing %q", want)
 		}
+	}
+}
+
+func TestFeatureE2EProtectsPrometheusURLBeforeRunnerUse(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	cluster := wf.Jobs["cluster"]
+	validateIndex := protectedStepIndex(t, cluster, "Validate immutable inputs")
+	validate := cluster.Steps[validateIndex]
+	const secretSource = "${{ secrets.E2E_PROMETHEUS_URL }}"
+	if strings.Contains(read(t, featureWorkflow), "vars.E2E_PROMETHEUS_URL") {
+		t.Fatal("Prometheus URL enters a non-secret runner-rendered expression")
+	}
+	if validate.Env["E2E_PROMETHEUS_URL"] != secretSource {
+		t.Fatal("Prometheus URL is not mapped from the GitHub Actions secret")
+	}
+	for _, step := range cluster.Steps[:validateIndex] {
+		if step.Env["E2E_PROMETHEUS_URL"] != "" || strings.Contains(step.Run, "E2E_PROMETHEUS_URL") {
+			t.Fatal("Prometheus URL is available before the masking step")
+		}
+	}
+
+	maskCommand := `printf '::add-mask::%s\n' "$E2E_PROMETHEUS_URL"`
+	xtraceOffIndex := strings.Index(validate.Run, "set +x")
+	maskIndex := strings.Index(validate.Run, maskCommand)
+	firstReference := strings.Index(validate.Run, "$E2E_PROMETHEUS_URL")
+	nonemptyIndex := strings.Index(validate.Run, `[ -n "$E2E_PROMETHEUS_URL" ]`)
+	if xtraceOffIndex < 0 || maskIndex <= xtraceOffIndex ||
+		firstReference != maskIndex+strings.Index(maskCommand, "$E2E_PROMETHEUS_URL") ||
+		nonemptyIndex <= maskIndex {
+		t.Fatal("Prometheus URL is not masked in full with xtrace disabled before validation")
+	}
+	suiteIndex := protectedStepIndex(t, cluster, "Run non-chaos suite")
+	if suiteIndex <= validateIndex {
+		t.Fatal("feature suite can use the Prometheus URL before masking")
+	}
+	if cluster.Steps[suiteIndex].Env["E2E_PROMETHEUS_URL"] != secretSource {
+		t.Fatal("Prometheus URL is not mapped from the GitHub Actions secret into the suite")
+	}
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := "https://prometheus.invalid:9090/private/api?token=test-value"
+	sha := strings.Repeat("1", 40)
+	digest := strings.Repeat("2", 64)
+	runValidation := func(url string) ([]byte, error) {
+		cmd := exec.Command("bash", "-x", "-c", validate.Run)
+		cmd.Env = []string{
+			"PATH=" + bin + ":" + os.Getenv("PATH"),
+			"E2E_PROMETHEUS_URL=" + url,
+			"E2E_OPERATOR_NAMESPACE=pgcopydb-e2e",
+			"MANAGER_REF=ghcr.io/ydixken/pgcopydb-operator:feature-" + sha + "@sha256:" + digest,
+			"RUNNER_REF=ghcr.io/ydixken/pgcopydb-operator/runner:feature-" + sha + "@sha256:" + digest,
+		}
+		return cmd.CombinedOutput()
+	}
+	output, err := runValidation(sentinel)
+	if err != nil {
+		t.Fatal("Prometheus validation step failed")
+	}
+	masked := false
+	for line := range strings.SplitSeq(strings.TrimSuffix(string(output), "\n"), "\n") {
+		if line == "::add-mask::"+sentinel {
+			masked = true
+			continue
+		}
+		if strings.Contains(line, sentinel) {
+			t.Fatal("Prometheus URL was emitted outside the masking command")
+		}
+	}
+	if !masked {
+		t.Fatal("complete Prometheus URL was not registered for masking")
+	}
+
+	output, err = runValidation("")
+	if err == nil {
+		t.Fatal("missing Prometheus URL did not fail validation")
+	}
+	if !bytes.Contains(output, []byte("::error::Prometheus URL is not configured")) {
+		t.Fatalf("missing Prometheus URL failed without the safe diagnostic: %s", output)
 	}
 }
 
@@ -2618,6 +2900,25 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 	}
 }
 
+func TestFeatureE2EUsesApprovedOperatorNamespace(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	cluster := wf.Jobs["cluster"]
+	if got := cluster.Env["E2E_OPERATOR_NAMESPACE"]; got != "pgcopydb-e2e" {
+		t.Errorf("feature operator namespace = %q, want pgcopydb-e2e", got)
+	}
+	if strings.Contains(protectedRuns(cluster), "pgcopydb-e2e-system") {
+		t.Error("protected feature lifecycle still references pgcopydb-e2e-system")
+	}
+	if got := protectedStepNamed(t, cluster, "Run non-chaos suite").Env["E2E_MANAGE_NAMESPACES"]; got != falseValue {
+		t.Errorf("feature E2E_MANAGE_NAMESPACES = %q, want false", got)
+	}
+	for _, path := range []string{publishedE2EWorkflow, releaseWorkflow} {
+		if strings.Contains(read(t, path), "E2E_OPERATOR_NAMESPACE") {
+			t.Errorf("%s overrides the normal operator namespace default", path)
+		}
+	}
+}
+
 func runFinalStatusFixture(
 	t *testing.T, script, cluster, suite, cleanup, suiteRan, suiteCompleted, manager, runner string,
 ) string {
@@ -2627,7 +2928,7 @@ func runFinalStatusFixture(
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(dir, "state")
+	statePath := filepath.Join(dir, stateKey)
 	gh := `#!/usr/bin/env bash
 set -euo pipefail
 for arg in "$@"; do
@@ -3254,81 +3555,13 @@ func TestFeatureE2ECleanupOwnership(t *testing.T) {
 			t.Fatalf("cleanup contains forbidden authority %q", banned)
 		}
 	}
-
-	const owner = "0123456789abcdef0123456789abcdef"
-	baseState := strings.Join([]string{
-		"migrations.pgcopydb-operator.io|pgcopydb-e2e|migration.pgcopydb-operator.io/run-owned|" + owner,
-		"jobs|pgcopydb-e2e|job.batch/run-worker|" + owner,
-		"jobs|pgcopydb-e2e|job.batch/run-cleanup|" + owner,
-		"jobs|pgcopydb-e2e|job.batch/feature-e2e-runner-attest|" + owner,
-		"deployments|pgcopydb-e2e-system|deployment.apps/pgcopydb-e2e|" + owner,
-		"pods|pgcopydb-e2e-system|pod/pgcopydb-e2e-manager|" + owner,
-		"migrations.pgcopydb-operator.io|pgcopydb-e2e|migration.pgcopydb-operator.io/customer|",
-		"jobs|pgcopydb-e2e|job.batch/unrelated|someone-else",
-	}, "\n") + "\n"
-
-	t.Run("owned resources only", func(t *testing.T) {
-		result := runCleanupFixture(t, cleanup, owner, baseState, "")
-		if result.err != nil {
-			t.Fatalf("cleanup failed: %v\n%s", result.err, result.output)
+	for _, required := range []string{
+		`-l "$owner_selector"`, "feature_uninstall_controller", "require_empty",
+	} {
+		if !strings.Contains(cleanup, required) {
+			t.Errorf("cleanup is missing %q", required)
 		}
-		if strings.Contains(result.output, owner) {
-			t.Fatal("cleanup printed the ownership value")
-		}
-		if got, want := strings.Fields(result.log), []string{"migration", "job", controllerKey}; !slices.Equal(got, want) {
-			t.Fatalf("deletion order = %v, want %v", got, want)
-		}
-		if strings.Contains(result.state, "|"+owner+"\n") {
-			t.Fatalf("run-owned resources remain:\n%s", result.state)
-		}
-		for _, survivor := range []string{"migration.pgcopydb-operator.io/customer", "job.batch/unrelated"} {
-			if !strings.Contains(result.state, survivor) {
-				t.Errorf("cleanup deleted %s", survivor)
-			}
-		}
-	})
-
-	t.Run("missing captured resource", func(t *testing.T) {
-		result := runCleanupFixture(t, cleanup, owner, baseState, "migrations.pgcopydb-operator.io")
-		if result.err == nil || !strings.Contains(result.output, "expected run-owned Migrations is absent") {
-			t.Fatalf("missing captured Migration did not fail closed: %v\n%s", result.err, result.output)
-		}
-	})
-
-	t.Run("fixed feature name without ownership", func(t *testing.T) {
-		state := "deployments|pgcopydb-e2e-system|deployment.apps/pgcopydb-e2e|\n" +
-			"pods|pgcopydb-e2e-system|pod/pgcopydb-e2e-manager|\n"
-		result := runCleanupFixture(t, cleanup, owner, state, "")
-		if result.err == nil {
-			t.Fatal("unowned fixed-name controller was accepted")
-		}
-		if !strings.Contains(result.state, "deployment.apps/pgcopydb-e2e") {
-			t.Fatal("unowned fixed-name controller was deleted")
-		}
-	})
-
-	for _, badOwner := range []string{"", "not-a-valid-owner"} {
-		name := "empty owner"
-		if badOwner != "" {
-			name = "malformed owner"
-		}
-		t.Run(name, func(t *testing.T) {
-			result := runCleanupFixture(t, cleanup, badOwner, baseState, "")
-			if result.err == nil || !strings.Contains(result.output, "feature ownership value is invalid") {
-				t.Fatalf("owner %q did not fail closed: %v\n%s", badOwner, result.err, result.output)
-			}
-			if result.state != baseState {
-				t.Fatal("invalid ownership changed fake API state")
-			}
-		})
 	}
-}
-
-type cleanupFixtureResult struct {
-	output string
-	state  string
-	log    string
-	err    error
 }
 
 func extractCleanupHeredoc(t *testing.T, helpers string) string {
@@ -3346,130 +3579,935 @@ func extractCleanupHeredoc(t *testing.T, helpers string) string {
 	return helpers[start : start+end]
 }
 
-func runCleanupFixture(
-	t *testing.T,
-	cleanup, owner, state, dropAfterCapture string,
-) cleanupFixtureResult {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.Mkdir(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cleanupPath := filepath.Join(dir, "cleanup")
-	ownerPath := filepath.Join(dir, "owner")
-	statePath := filepath.Join(dir, "state")
-	logPath := filepath.Join(dir, "log")
-	for path, body := range map[string]string{
-		cleanupPath: cleanup,
-		ownerPath:   owner,
-		statePath:   state,
-		logPath:     "",
-	} {
-		mode := os.FileMode(0o600)
-		if path == cleanupPath {
-			mode = 0o700
-		}
-		if err := os.WriteFile(path, []byte(body), mode); err != nil {
-			t.Fatal(err)
-		}
+func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // One fake API owns the lifecycle contract.
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	scripts := featureOwnershipScripts{
+		postRenderer: extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER"),
+		renderSafety: buildFeatureRenderSafety(t,
+			extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY")),
+		ownership: extractFeatureGeneratedFile(t, helpers, "ownership", "OWNERSHIP"),
+		helm:      extractFeatureHelmHeredoc(t, helpers),
+		cleanup:   extractCleanupHeredoc(t, helpers),
 	}
 
-	kubectl := `#!/usr/bin/env bash
+	t.Run("partial install is labelled before native rollback", func(t *testing.T) {
+		for _, scenario := range []string{
+			"rollback-success", "rollback-failure", rollbackFailureNoController,
+		} {
+			t.Run(scenario, func(t *testing.T) {
+				initialState := ""
+				if scenario == rollbackFailureNoController {
+					initialState = "services|customer-system|service/customer|" +
+						"88888888-8888-4888-8888-888888888888|someone-else|customer|customer-system|false\n"
+				}
+				fixture := newFeatureOwnershipFixture(t, scripts, scenario, initialState)
+				result := fixture.install()
+				if result.err == nil {
+					t.Fatal("failed install unexpectedly succeeded")
+				}
+				if strings.Contains(result.output+fixture.readLog(), fixture.owner) {
+					t.Fatal("install or recovery printed the ownership value")
+				}
+				if !strings.Contains(fixture.readLog(), "create:labelled") {
+					t.Fatal("partial install was not labelled before creation")
+				}
+				if scenario == "rollback-success" && fixture.hasOwnedState() {
+					t.Fatal("successful native rollback left run-owned chart objects")
+				}
+				if strings.HasPrefix(scenario, "rollback-failure") &&
+					!strings.Contains(fixture.readLog(), "rollback:failed") {
+					t.Fatal("failed native rollback was not observed")
+				}
+				if scenario == rollbackFailureNoController {
+					if fixture.hasOwnedState() {
+						t.Fatal("bounded recovery left a partial run-owned chart object")
+					}
+					if !strings.Contains(fixture.readLog(), "uninstall\n") {
+						t.Fatal("bounded recovery did not release the fixed Helm slot")
+					}
+					if release := strings.TrimSpace(fixture.read("release")); release != "" {
+						t.Fatalf("bounded recovery left release %q", release)
+					}
+					fixture.write("scenario", "success")
+					if retry := fixture.install(); retry.err != nil {
+						t.Fatalf("clean reinstall failed: %v\n%s", retry.err, retry.output)
+					}
+					if !strings.Contains(fixture.read(stateKey),
+						"deployments|"+featureControllerNS+"|deployment.apps/pgcopydb-e2e|") ||
+						strings.TrimSpace(fixture.read("controller.uid")) != featureControllerUID ||
+						!strings.Contains(fixture.readLog(), "rollout:ready\n") {
+						t.Fatal("clean reinstall did not reach the expected Ready controller state")
+					}
+					if !strings.Contains(fixture.read(stateKey), "service/customer") {
+						t.Fatal("bounded recovery deleted an unrelated resource")
+					}
+					if cleanup := fixture.cleanup(); cleanup.err != nil {
+						t.Fatalf("final cleanup failed: %v\n%s", cleanup.err, cleanup.output)
+					}
+					if fixture.hasOwnedState() || strings.TrimSpace(fixture.read("release")) != "" {
+						t.Fatal("final cleanup left run-owned state or the fixed Helm slot occupied")
+					}
+					if !strings.Contains(fixture.read(stateKey), "service/customer") {
+						t.Fatal("final cleanup deleted an unrelated resource")
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("failed no-controller recovery cannot claim reinstall success", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts,
+			"rollback-failure-no-controller-uninstall-failure", "")
+		if result := fixture.install(); result.err == nil {
+			t.Fatal("install succeeded despite failed recovery uninstall")
+		}
+		if release := strings.TrimSpace(fixture.read("release")); release != featureControllerName {
+			t.Fatalf("failed recovery release = %q, want occupied fixed slot", release)
+		}
+		fixture.write("scenario", "success")
+		if retry := fixture.install(); retry.err == nil ||
+			!strings.Contains(fixture.readLog(), "install:occupied\n") {
+			t.Fatalf("occupied fixed slot was reported as a successful reinstall: %v\n%s",
+				retry.err, retry.output)
+		}
+	})
+
+	t.Run("Namespace render is rejected before creation", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			manifest string
+		}{
+			{"top level", "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: forbidden\n"},
+			{"List member", `apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: forbidden
+`},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+				fixture.write("manifest.yaml", tt.manifest)
+				result := fixture.install()
+				if result.err == nil {
+					t.Fatal("Namespace render unexpectedly succeeded")
+				}
+				if strings.Contains(fixture.readLog(), "create:labelled") {
+					t.Fatal("Namespace render reached fake Kubernetes creation")
+				}
+				if strings.Contains(result.output+fixture.readLog(), fixture.owner) {
+					t.Fatal("Namespace rejection printed the ownership value")
+				}
+			})
+		}
+	})
+
+	t.Run("successful install labels the complete render and captures exact ownership", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+		result := fixture.install()
+		if result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		rendered := fixture.read("rendered.yaml")
+		if got := strings.Count(rendered, imageAttestationOwnerKey+": "+fixture.owner); got != 3 {
+			t.Fatalf("rendered ownership labels = %d, want 3\n%s", got, rendered)
+		}
+		if got := strings.TrimSpace(fixture.read("controller.uid")); got != featureControllerUID {
+			t.Fatalf("captured controller UID = %q", got)
+		}
+		args := strings.Fields(fixture.read("helm-args"))
+		for _, want := range []string{
+			"--atomic", "--timeout=5m", "--post-renderer", fixture.path("post-renderer"),
+		} {
+			if !slices.Contains(args, want) {
+				t.Errorf("trusted Helm arguments are missing %q: %v", want, args)
+			}
+		}
+		if strings.Contains(result.output+fixture.readLog(), fixture.owner) {
+			t.Fatal("successful install printed the ownership value")
+		}
+	})
+
+	t.Run("cleanup rejects ownership changes before Helm", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			mutation string
+		}{
+			{"missing label", "missing-label"},
+			{"wrong label", "wrong-label"},
+			{"wrong release", "wrong-release"},
+			{"wrong release namespace", "wrong-release-namespace"},
+			{"wrong namespace", "wrong-namespace"},
+			{"wrong name", "wrong-name"},
+			{"different UID", "different-uid"},
+			{"unowned replacement", "unowned-replacement"},
+			{"customer release redirect", "customer-release"},
+			{"ambiguous owned controller", "ambiguous"},
+			{"unreadable controller", "unreadable"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+				if result := fixture.install(); result.err != nil {
+					t.Fatalf("install failed: %v\n%s", result.err, result.output)
+				}
+				fixture.write("mutation", tt.mutation)
+				before := strings.Count(fixture.readLog(), "uninstall\n")
+				result := fixture.cleanup()
+				if result.err == nil {
+					t.Fatal("unsafe controller was accepted")
+				}
+				after := strings.Count(fixture.readLog(), "uninstall\n")
+				if after != before {
+					t.Fatal("cleanup invoked Helm after controller ownership changed")
+				}
+			})
+		}
+	})
+
+	t.Run("captured deletion race is idempotent but never observed absence is not", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "not-found")
+		if result := fixture.cleanup(); result.err != nil {
+			t.Fatalf("captured NotFound was not idempotent: %v\n%s", result.err, result.output)
+		}
+		if !strings.Contains(fixture.readLog(), "uninstall\n") {
+			t.Fatal("captured NotFound did not recover the exact release")
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", "")
+		fixture.write("release", "pgcopydb-e2e")
+		result := fixture.cleanup()
+		if result.err == nil || strings.Contains(fixture.readLog(), "uninstall\n") {
+			t.Fatalf("never-observed absence was accepted: %v\n%s", result.err, result.output)
+		}
+	})
+
+	t.Run("captured resource races are safe and replacements are rejected", func(t *testing.T) {
+		state := "migrations.pgcopydb-operator.io|pgcopydb-e2e|" +
+			"migration.pgcopydb-operator.io/owned|" + migrationUID + "|" +
+			imageAttestationOwnerValue + "|||false\n"
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", state)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "drop-migration")
+		if result := fixture.cleanup(); result.err != nil {
+			t.Fatalf("captured Migration NotFound was not idempotent: %v\n%s", result.err, result.output)
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", state)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "replace-migration")
+		result := fixture.cleanup()
+		if result.err == nil || strings.Contains(fixture.readLog(), "delete:migration\n") {
+			t.Fatalf("replacement Migration was deleted: %v\n%s", result.err, result.output)
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", state)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "replace-on-delete")
+		result = fixture.cleanup()
+		if result.err == nil || strings.Contains(fixture.readLog(), "delete:migration\n") {
+			t.Fatalf("UID precondition deleted a replacement Migration: %v\n%s", result.err, result.output)
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "success", state)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "replace-after-delete")
+		result = fixture.cleanup()
+		if result.err == nil || !strings.Contains(fixture.read(stateKey),
+			"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
+			t.Fatalf("replacement during deletion did not survive: %v\n%s", result.err, result.output)
+		}
+	})
+
+	t.Run("cleanup order is label-only and rejects owned remainder", func(t *testing.T) {
+		initial := strings.Join([]string{
+			"migrations.pgcopydb-operator.io|pgcopydb-e2e|migration.pgcopydb-operator.io/owned|" +
+				migrationUID + "|" + imageAttestationOwnerValue + "|||false",
+			"jobs|pgcopydb-e2e|job.batch/owned|" + jobUID + "|" + imageAttestationOwnerValue + "|||false",
+			"migrations.pgcopydb-operator.io|pgcopydb-e2e|migration.pgcopydb-operator.io/customer|" +
+				customerMigrationUID + "|||||false",
+			"jobs|pgcopydb-e2e|job.batch/customer|" + customerJobUID + "|someone-else|||false",
+			"deployments|customer-system|deployment.apps/customer|" + customerControllerUID +
+				"|someone-else|customer|customer-system|false",
+			"pods|customer-system|pod/customer|" + customerPodUID + "|someone-else|customer|customer-system|false",
+		}, "\n") + "\n"
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", initial)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		if result := fixture.cleanup(); result.err != nil {
+			t.Fatalf("cleanup failed: %v\n%s", result.err, result.output)
+		}
+		log := fixture.readLog()
+		migration := strings.Index(log, "delete:migration\n")
+		job := strings.Index(log, "delete:job\n")
+		controller := strings.Index(log, "uninstall\n")
+		if migration < 0 || job <= migration || controller <= job {
+			t.Fatalf("cleanup order is unsafe:\n%s", log)
+		}
+		state := fixture.read(stateKey)
+		for _, survivor := range []string{
+			"migration.pgcopydb-operator.io/customer", "job.batch/customer",
+			"deployment.apps/customer", "pod/customer",
+		} {
+			if !strings.Contains(state, survivor) {
+				t.Errorf("cleanup deleted %s", survivor)
+			}
+		}
+
+		fixture = newFeatureOwnershipFixture(t, scripts, "remainder", initial)
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		if result := fixture.cleanup(); result.err == nil {
+			t.Fatal("owned remainder was accepted")
+		}
+	})
+
+	t.Run("rendered object read errors fail cleanup", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		fixture.write("mutation", "rendered-unreadable")
+		result := fixture.cleanup()
+		if result.err == nil || !strings.Contains(result.output,
+			"unable to inspect rendered feature objects") {
+			t.Fatalf("rendered object read error was accepted: %v\n%s", result.err, result.output)
+		}
+	})
+
+	t.Run("malformed render fails closed before creation", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "malformed-render", "")
+		result := fixture.install()
+		if result.err == nil || strings.Contains(fixture.readLog(), "create:labelled") {
+			t.Fatalf("malformed render reached creation: %v\n%s", result.err, result.output)
+		}
+		if strings.Contains(result.output+fixture.readLog(), fixture.owner) {
+			t.Fatal("render failure printed the ownership value")
+		}
+	})
+}
+
+const (
+	featureControllerUID  = "11111111-1111-4111-8111-111111111111"
+	migrationUID          = "22222222-2222-4222-8222-222222222222"
+	jobUID                = "33333333-3333-4333-8333-333333333333"
+	customerMigrationUID  = "44444444-4444-4444-8444-444444444444"
+	customerJobUID        = "55555555-5555-4555-8555-555555555555"
+	customerControllerUID = "66666666-6666-4666-8666-666666666666"
+	customerPodUID        = "77777777-7777-4777-8777-777777777777"
+)
+
+type featureOwnershipScripts struct {
+	postRenderer string
+	renderSafety string
+	ownership    string
+	helm         string
+	cleanup      string
+}
+
+type featureOwnershipFixture struct {
+	t     *testing.T
+	dir   string
+	owner string
+}
+
+type featureOwnershipResult struct {
+	output string
+	err    error
+}
+
+func extractFeatureGeneratedFile(t *testing.T, helpers, name, marker string) string {
+	t.Helper()
+	startMarker := fmt.Sprintf("cat > \"$FEATURE_E2E_HELPERS/%s\" <<'EOF_%s'\n", name, marker)
+	start := strings.Index(helpers, startMarker)
+	if start < 0 {
+		t.Fatalf("cluster helpers have no %s heredoc", name)
+	}
+	start += len(startMarker)
+	endMarker := "\nEOF_" + marker + "\n"
+	end := strings.Index(helpers[start:], endMarker)
+	if end < 0 {
+		t.Fatalf("cluster %s heredoc is not terminated", name)
+	}
+	return helpers[start : start+end]
+}
+
+func newFeatureOwnershipFixture(
+	t *testing.T, scripts featureOwnershipScripts, scenario, initialState string,
+) *featureOwnershipFixture {
+	t.Helper()
+	dir := t.TempDir()
+	fixture := &featureOwnershipFixture{t: t, dir: dir, owner: imageAttestationOwnerValue}
+	if err := os.Mkdir(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		"post-renderer":    {scripts.postRenderer, 0o700},
+		"ownership":        {scripts.ownership, 0o600},
+		"bin/feature-helm": {scripts.helm, 0o700},
+		"cleanup":          {scripts.cleanup, 0o700},
+		"owner":            {fixture.owner, 0o600},
+		stateKey:           {initialState, 0o600},
+		"release":          {"", 0o600},
+		"log":              {"", 0o600},
+		"helm-args":        {"", 0o600},
+		"mutation":         {"", 0o600},
+		"manifest.yaml": {`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgcopydb-e2e
+  namespace: pgcopydb-e2e
+spec:
+  template:
+    metadata: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgcopydb-e2e-metrics
+  namespace: pgcopydb-e2e
+`, 0o600},
+		"attest-image": {"#!/usr/bin/env bash\nexit 0\n", 0o700},
+		"bin/helm":     {featureOwnershipHelmFixture, 0o700},
+		"bin/kubectl":  {featureOwnershipKubectlFixture, 0o700},
+	}
+	for name, file := range files {
+		fixture.writeMode(name, file.body, file.mode)
+	}
+	if err := os.Symlink(scripts.renderSafety, fixture.path("bin/render-safety")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.write("scenario", scenario)
+	return fixture
+}
+
+func buildFeatureRenderSafety(t *testing.T, source string) string {
+	t.Helper()
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "render-safety.go")
+	binaryPath := filepath.Join(dir, "render-safety")
+	if err := os.WriteFile(sourcePath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build render safety helper: %v\n%s", err, output)
+	}
+	return binaryPath
+}
+
+func (f *featureOwnershipFixture) path(name string) string {
+	f.t.Helper()
+	return filepath.Join(f.dir, name)
+}
+
+func (f *featureOwnershipFixture) write(name, body string) {
+	f.t.Helper()
+	f.writeMode(name, body, 0o600)
+}
+
+func (f *featureOwnershipFixture) writeMode(name, body string, mode os.FileMode) {
+	f.t.Helper()
+	if err := os.WriteFile(f.path(name), []byte(body), mode); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *featureOwnershipFixture) read(name string) string {
+	f.t.Helper()
+	body, err := os.ReadFile(f.path(name))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return string(body)
+}
+
+func (f *featureOwnershipFixture) readLog() string {
+	f.t.Helper()
+	return f.read("log")
+}
+
+func (f *featureOwnershipFixture) hasOwnedState() bool {
+	f.t.Helper()
+	return strings.Contains(f.read(stateKey), "|"+f.owner+"|")
+}
+
+func (f *featureOwnershipFixture) install() featureOwnershipResult {
+	f.t.Helper()
+	return f.run(f.path("bin/feature-helm"), helmInstallCommand, featureControllerName,
+		featureFixtureChart, "-n", featureControllerNS, "--wait")
+}
+
+func (f *featureOwnershipFixture) cleanup() featureOwnershipResult {
+	f.t.Helper()
+	return f.run(f.path("cleanup"))
+}
+
+func (f *featureOwnershipFixture) run(command string, args ...string) featureOwnershipResult {
+	f.t.Helper()
+	cmd := exec.Command(command, args...)
+	cmd.Env = append(os.Environ(),
+		"PATH="+f.path("bin")+":"+os.Getenv("PATH"),
+		"E2E_OPERATOR_NAMESPACE="+featureControllerNS,
+		"REAL_HELM="+f.path("bin/helm"),
+		"FEATURE_E2E_HELPERS="+f.dir,
+		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
+		"FEATURE_E2E_OWNER_FILE="+f.path("owner"),
+		"FAKE_STATE="+f.path(stateKey),
+		"FAKE_RELEASE="+f.path("release"),
+		"FAKE_LOG="+f.path("log"),
+		"FAKE_ARGS="+f.path("helm-args"),
+		"FAKE_MUTATION="+f.path("mutation"),
+		"FAKE_SCENARIO="+f.path("scenario"),
+		"FAKE_MANIFEST="+f.path("manifest.yaml"),
+		"FAKE_OWNER="+f.owner,
+		"FAKE_TEST_BINARY="+os.Args[0],
+		"FEATURE_E2E_KUSTOMIZE_HELPER=1",
+	)
+	output, err := cmd.CombinedOutput()
+	return featureOwnershipResult{output: string(output), err: err}
+}
+
+const featureOwnershipHelmFixture = `#!/usr/bin/env bash
 set -euo pipefail
-command=$1
-shift
-resource=$1
-shift
+scenario=$(<"$FAKE_SCENARIO")
+case "${1:-}" in
+  install)
+    [ ! -s "$FAKE_RELEASE" ] || {
+      printf 'install:occupied\n' >> "$FAKE_LOG"
+      exit 96
+    }
+    printf '%s ' "$@" > "$FAKE_ARGS"
+    post_renderer=
+    atomic=false
+    args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+      case "${args[$i]}" in
+        --atomic) atomic=true ;;
+        --post-renderer) post_renderer=${args[$((i+1))]:-} ;;
+      esac
+    done
+    [ "$atomic" = true ] && [ -x "$post_renderer" ] || exit 90
+    manifest=$(<"$FAKE_MANIFEST")
+    [ "$scenario" != malformed-render ] || manifest='kind: []'
+    if ! printf '%s\n' "$manifest" | "$post_renderer" > "$FEATURE_E2E_HELPERS/rendered.yaml"; then
+      exit 91
+    fi
+    [ "$(grep -c "$FEATURE_E2E_OWNER_KEY: $FAKE_OWNER" "$FEATURE_E2E_HELPERS/rendered.yaml")" -eq 3 ] || exit 92
+    printf 'create:labelled\n' >> "$FAKE_LOG"
+    controller="deployments|$E2E_OPERATOR_NAMESPACE|deployment.apps/pgcopydb-e2e|"
+    controller+="11111111-1111-4111-8111-111111111111|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
+    service="services|$E2E_OPERATOR_NAMESPACE|service/pgcopydb-e2e-metrics|"
+    service+="88888888-8888-4888-8888-888888888888|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
+    printf '%s\n' "$controller" "$service" >> "$FAKE_STATE"
+    printf 'pgcopydb-e2e' > "$FAKE_RELEASE"
+    case "$scenario" in
+      rollback-success)
+        awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+        mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+        : > "$FAKE_RELEASE"
+        printf 'rollback:succeeded\n' >> "$FAKE_LOG"
+        exit 1
+        ;;
+      rollback-failure)
+        printf 'rollback:failed\n' >> "$FAKE_LOG"
+        exit 1
+        ;;
+      rollback-failure-no-controller|rollback-failure-no-controller-uninstall-failure)
+        awk -F'|' '$1 != "deployments"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+        mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+        printf 'rollback:failed\n' >> "$FAKE_LOG"
+        exit 1
+        ;;
+    esac
+    ;;
+  uninstall)
+    case "$*" in
+      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --wait --timeout=5m"|\
+      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --wait --timeout=5m --ignore-not-found") ;;
+      *) exit 93 ;;
+    esac
+    printf 'uninstall\n' >> "$FAKE_LOG"
+    if [ "$scenario" = uninstall-failure ] ||
+       [ "$scenario" = rollback-failure-no-controller-uninstall-failure ]; then
+      exit 1
+    fi
+    awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    if [ "$scenario" = remainder ]; then
+      remainder="services|$E2E_OPERATOR_NAMESPACE|service/remains|"
+      remainder+="99999999-9999-4999-8999-999999999999|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
+      printf '%s\n' "$remainder" >> "$FAKE_STATE.tmp"
+    fi
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    : > "$FAKE_RELEASE"
+    ;;
+  list)
+    [ "$*" = "list -n $E2E_OPERATOR_NAMESPACE -q --filter ^pgcopydb-e2e$" ] || exit 94
+    [ ! -s "$FAKE_RELEASE" ] || printf 'pgcopydb-e2e\n'
+    ;;
+  *) exit 95 ;;
+esac
+`
+
+const featureOwnershipKubectlFixture = `#!/usr/bin/env bash
+set -euo pipefail
+mutation=$(<"$FAKE_MUTATION")
+if [ "${1:-}" = kustomize ]; then
+  directory=$2
+  [ -s "$directory/manifest.yaml" ] || exit 80
+  grep -Fq "includeTemplates: true" "$directory/kustomization.yaml" || exit 82
+  grep -Fq "$FEATURE_E2E_OWNER_KEY: $FAKE_OWNER" "$directory/kustomization.yaml" || exit 83
+  printf 'kustomize:input\n' >> "$FAKE_LOG"
+  exec "$FAKE_TEST_BINARY" -test.run '^TestFeatureE2EKustomizeHelper$' -- \
+    "$directory/manifest.yaml"
+fi
+command=${1:-}
+shift || true
+resource=${1:-}
+shift || true
 namespace=
 selector=
+output=
+name=
+from_file=false
+ignore_not_found=false
+raw_path=
+if [ "$resource" = --raw ]; then
+  raw_path=${1:-}
+  shift || true
+  resource=raw
+fi
+if [ "$resource" = -f ]; then
+  resource_file=${1:-}
+  shift || true
+  from_file=true
+fi
+if [[ "$resource" == */* ]]; then
+  name=${resource#*/}
+  resource=${resource%%/*}
+  [ "$resource" != migrations.pgcopydb-operator.io ] || resource=migrations.pgcopydb-operator.io
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -n) namespace=$2; shift 2 ;;
     -l) selector=$2; shift 2 ;;
     -o) output=$2; shift 2 ;;
+    --ignore-not-found) ignore_not_found=true; shift ;;
+    --wait=true|--cascade=foreground) shift ;;
+    --timeout=*) shift ;;
+    -f) resource_file=$2; from_file=true; shift 2 ;;
     *) shift ;;
   esac
 done
-owner=${selector#*=}
-if [ "$command" = get ] && [[ "$resource" == */* ]]; then
-  awk -F'|' -v name="$resource" -v ns="$namespace" \
-    '$2 == ns && $3 == name { found=1 } END { exit !found }' "$FAKE_STATE"
-  printf 'pgcopydb-e2e'
+if [ "$command" = rollout ]; then
+  printf 'rollout:ready\n' >> "$FAKE_LOG"
   exit 0
 fi
+if [ "$command" = get ] && [ "$mutation" = unreadable ] && [ "$resource" = deployments ]; then
+  exit 79
+fi
+if [ "$command" = get ] && [ "$mutation" = rendered-unreadable ] && [ "$from_file" = true ]; then
+  exit 79
+fi
+owner=${selector#*=}
+row_json() {
+  local row=$1 resource_name=$2 ns=$3 object_name=$4 uid=$5 object_owner=$6 release=$7 release_ns=$8
+  case "$mutation" in
+    missing-label) object_owner= ;;
+    wrong-label|unowned-replacement) object_owner=someone-else ;;
+    wrong-release|customer-release) release=customer ;;
+    wrong-release-namespace) release_ns=customer-system ;;
+    wrong-namespace) ns=customer-system ;;
+    wrong-name) object_name=deployment.apps/customer ;;
+    different-uid|unowned-replacement) uid=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa ;;
+  esac
+  jq -cn --arg resource "$resource_name" --arg namespace "$ns" --arg name "${object_name#*/}" \
+    --arg uid "$uid" --arg owner "$object_owner" --arg release "$release" --arg release_ns "$release_ns" '
+    {apiVersion:(if $resource == "deployments" then "apps/v1"
+       elif $resource == "jobs" then "batch/v1"
+       elif $resource == "migrations.pgcopydb-operator.io" then "pgcopydb-operator.io/v1beta1"
+       else "v1" end),
+     kind:(if $resource == "deployments" then "Deployment" elif $resource == "jobs" then "Job"
+       elif $resource == "migrations.pgcopydb-operator.io" then "Migration" else "Service" end),
+     metadata:{name:$name,namespace:$namespace,uid:$uid,labels:{},annotations:{}}} |
+    .metadata.labels[env.FEATURE_E2E_OWNER_KEY]=$owner |
+    .metadata.annotations["meta.helm.sh/release-name"]=$release |
+    .metadata.annotations["meta.helm.sh/release-namespace"]=$release_ns'
+}
 if [ "$command" = get ]; then
-  awk -F'|' -v resource="$resource" -v ns="$namespace" -v owner="$owner" \
-    '$1 == resource && $2 == ns && $4 == owner { print $3 }' "$FAKE_STATE"
-  if [ "${FAKE_DROP_AFTER_CAPTURE:-}" = "$resource" ] && [ ! -e "$FAKE_STATE.drop" ]; then
-    tmp=$FAKE_STATE.tmp
-    awk -F'|' -v resource="$resource" -v ns="$namespace" -v owner="$owner" \
-      '!( $1 == resource && $2 == ns && $4 == owner )' "$FAKE_STATE" > "$tmp"
-    mv "$tmp" "$FAKE_STATE"
-    : > "$FAKE_STATE.drop"
+  if [ "$mutation" = not-found ] && [ "$resource" = deployments ]; then
+    [ "$output" != json ] || printf '{"apiVersion":"v1","kind":"List","items":[]}'
+    exit 0
+  fi
+  rows=()
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS='|' read -r row_resource row_ns row_name row_uid row_owner row_release row_release_ns row_chart <<< "$row"
+    if [ "$from_file" = true ]; then
+      [ "$row_chart" = true ] || continue
+    else
+      [ "$row_resource" = "$resource" ] || continue
+    fi
+    [ -z "$namespace" ] || [ "$row_ns" = "$namespace" ] || continue
+    [ -z "$name" ] || [ "${row_name#*/}" = "$name" ] || continue
+    [ -z "$selector" ] || [ "$row_owner" = "$owner" ] || continue
+    rows+=("$(
+      row_json "$row" "$row_resource" "$row_ns" "$row_name" \
+        "$row_uid" "$row_owner" "$row_release" "$row_release_ns"
+    )")
+  done < "$FAKE_STATE"
+  if [ "$mutation" = drop-migration ] && [ "$resource" = migrations.pgcopydb-operator.io ] &&
+     [ -n "$selector" ] && [ ! -e "$FAKE_STATE.drop-migration" ]; then
+    awk -F'|' -v owner="$owner" \
+      '!( $1 == "migrations.pgcopydb-operator.io" && $5 == owner )' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    : > "$FAKE_STATE.drop-migration"
+  fi
+  if [ "$mutation" = replace-migration ] && [ "$resource" = migrations.pgcopydb-operator.io ] &&
+     [ -n "$selector" ] && [ ! -e "$FAKE_STATE.replace-migration" ]; then
+    awk -F'|' 'BEGIN { OFS="|" }
+      $1 == "migrations.pgcopydb-operator.io" { $4="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }
+      { print }' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    : > "$FAKE_STATE.replace-migration"
+  fi
+  if [ "$mutation" = ambiguous ] && [ "$resource" = deployments ] && [ -n "$selector" ] && [ "${#rows[@]}" -eq 1 ]; then
+    rows+=("${rows[0]}")
+  fi
+  if [ "$from_file" = true ] && [ "${#rows[@]}" -eq 0 ] && [ "$ignore_not_found" = false ]; then
+    exit 1
+  fi
+  if [ "$output" = json ]; then
+    if [ -n "$name" ]; then
+      [ "${#rows[@]}" -eq 0 ] || printf '%s' "${rows[0]}"
+    else
+      printf '%s\n' "${rows[@]}" | jq -sc '{apiVersion:"v1",kind:"List",items:.}'
+    fi
+  elif [ "$output" = name ]; then
+    printf '%s\n' "${rows[@]}" | jq -r '.kind + "/" + .metadata.name'
   fi
   exit 0
 fi
 if [ "$command" = delete ]; then
+  if [ "$resource" = raw ]; then
+    IFS=/ read -r _ api_root group version namespace_segment namespace resource name <<< "$raw_path"
+    [ "$api_root" = apis ] && [ "$namespace_segment" = namespaces ] || exit 76
+    case "$group/$version/$resource" in
+      pgcopydb-operator.io/v1beta1/migrations) resource=migrations.pgcopydb-operator.io ;;
+      batch/v1/jobs) resource=jobs ;;
+      *) exit 76 ;;
+    esac
+    delete_options=$(cat)
+    uid=$(jq -er '.preconditions.uid' <<< "$delete_options")
+    propagation=$(jq -er '.propagationPolicy' <<< "$delete_options")
+    if [ "$resource" = jobs ]; then
+      [ "$propagation" = Foreground ] || exit 75
+    else
+      [ "$propagation" = Background ] || exit 75
+    fi
+    if [ "$mutation" = replace-on-delete ] && [ "$resource" = migrations.pgcopydb-operator.io ]; then
+      awk -F'|' 'BEGIN { OFS="|" }
+        $1 == "migrations.pgcopydb-operator.io" { $4="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }
+        { print }' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+      mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    fi
+    matched=$(awk -F'|' -v resource="$resource" -v namespace="$namespace" \
+      -v name="$name" -v uid="$uid" \
+      '$1 == resource && $2 == namespace && substr($3, index($3, "/") + 1) == name && $4 == uid { count++ }
+       END { print count + 0 }' "$FAKE_STATE")
+    [ "$matched" -eq 1 ] || exit 74
+    case "$resource" in
+      migrations.pgcopydb-operator.io) printf 'delete:migration\n' >> "$FAKE_LOG" ;;
+      jobs) printf 'delete:job\n' >> "$FAKE_LOG" ;;
+    esac
+    awk -F'|' -v resource="$resource" -v namespace="$namespace" \
+      -v name="$name" -v uid="$uid" \
+      '!( $1 == resource && $2 == namespace &&
+        substr($3, index($3, "/") + 1) == name && $4 == uid )' \
+      "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    if [ "$mutation" = replace-after-delete ] && [ "$resource" = migrations.pgcopydb-operator.io ]; then
+      printf '%s\n' \
+        "migrations.pgcopydb-operator.io|$namespace|migration.pgcopydb-operator.io/$name|"\
+"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa|someone-else|||false" >> "$FAKE_STATE"
+    fi
+    exit 0
+  fi
+  if [ "$from_file" = true ]; then
+    printf 'delete:rendered\n' >> "$FAKE_LOG"
+    awk -F'|' -v owner="$owner" '!( $5 == owner && $8 == "true" )' \
+      "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    exit 0
+  fi
   case "$resource" in
-    migrations.pgcopydb-operator.io) printf 'migration\n' >> "$FAKE_LOG" ;;
-    jobs) printf 'job\n' >> "$FAKE_LOG" ;;
-    *) exit 1 ;;
+    migrations.pgcopydb-operator.io) printf 'delete:migration\n' >> "$FAKE_LOG" ;;
+    jobs) printf 'delete:job\n' >> "$FAKE_LOG" ;;
+    *) exit 78 ;;
   esac
-  tmp=$FAKE_STATE.tmp
-  awk -F'|' -v resource="$resource" -v ns="$namespace" -v owner="$owner" \
-    '!( $1 == resource && $2 == ns && $4 == owner )' "$FAKE_STATE" > "$tmp"
-  mv "$tmp" "$FAKE_STATE"
+  awk -F'|' -v resource="$resource" -v namespace="$namespace" -v owner="$owner" \
+    -v name="$name" -v fake_owner="$FAKE_OWNER" \
+    '!( $1 == resource && $2 == namespace && $5 == fake_owner &&
+      (name == "" || substr($3, index($3, "/") + 1) == name) )' \
+    "$FAKE_STATE" > "$FAKE_STATE.tmp"
+  mv "$FAKE_STATE.tmp" "$FAKE_STATE"
   exit 0
 fi
-exit 1
+exit 77
 `
-	helm := `#!/usr/bin/env bash
-set -euo pipefail
-case "$1" in
-  uninstall)
-    printf 'controller\n' >> "$FAKE_LOG"
-    tmp=$FAKE_STATE.tmp
-    awk -F'|' -v owner="$FAKE_OWNER" \
-      '!( ($1 == "deployments" || $1 == "pods") && $2 == "pgcopydb-e2e-system" && $4 == owner )' \
-      "$FAKE_STATE" > "$tmp"
-    mv "$tmp" "$FAKE_STATE"
-    ;;
-  list) ;;
-  *) exit 1 ;;
-esac
-`
-	for name, body := range map[string]string{kubectlCommand: kubectl, "helm": helm} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
 
-	cmd := exec.Command("bash", cleanupPath)
-	cmd.Env = append(os.Environ(),
-		"PATH="+bin+":"+os.Getenv("PATH"),
-		"FEATURE_E2E_OWNER_KEY=pgcopydb-operator.io/feature-e2e-run",
-		"FEATURE_E2E_OWNER_FILE="+ownerPath,
-		"FEATURE_E2E_HELPERS="+dir,
-		"REAL_HELM="+filepath.Join(bin, "helm"),
-		"FAKE_STATE="+statePath,
-		"FAKE_LOG="+logPath,
-		"FAKE_OWNER="+owner,
-		"FAKE_DROP_AFTER_CAPTURE="+dropAfterCapture,
-	)
-	output, err := cmd.CombinedOutput()
-	finalState, readErr := os.ReadFile(statePath)
-	if readErr != nil {
-		t.Fatal(readErr)
+func TestFeatureE2EKustomizeHelper(t *testing.T) {
+	t.Helper()
+	if os.Getenv("FEATURE_E2E_KUSTOMIZE_HELPER") != "1" {
+		return
 	}
-	log, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		t.Fatal(readErr)
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || separator+2 != len(os.Args) {
+		fmt.Fprintln(os.Stderr, "invalid render fixture arguments")
+		os.Exit(2)
 	}
-	return cleanupFixtureResult{output: string(output), state: string(finalState), log: string(log), err: err}
+	input, err := os.Open(os.Args[separator+1])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unable to read render fixture")
+		os.Exit(2)
+	}
+	defer func() { _ = input.Close() }()
+
+	decoder := k8syaml.NewYAMLOrJSONDecoder(input, 4096)
+	objects := []map[string]any{}
+	for {
+		var document map[string]any
+		if err := decoder.Decode(&document); err == io.EOF {
+			break
+		} else if err != nil || len(document) == 0 {
+			fmt.Fprintln(os.Stderr, "invalid render fixture")
+			os.Exit(2)
+		}
+		flattened, err := featureKustomizeFixtureObjects(document)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid render fixture")
+			os.Exit(2)
+		}
+		objects = append(objects, flattened...)
+	}
+	if len(objects) == 0 {
+		fmt.Fprintln(os.Stderr, "empty render fixture")
+		os.Exit(2)
+	}
+	for index, object := range objects {
+		featureKustomizeFixtureLabel(object, imageAttestationOwnerKey, imageAttestationOwnerValue)
+		body, err := yaml.Marshal(object)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "unable to encode render fixture")
+			os.Exit(2)
+		}
+		if index > 0 {
+			fmt.Print("---\n")
+		}
+		fmt.Print(string(body))
+	}
+	os.Exit(0)
+}
+
+func featureKustomizeFixtureObjects(document map[string]any) ([]map[string]any, error) {
+	kind, ok := document[kindKey].(string)
+	if !ok || kind == "" {
+		return nil, fmt.Errorf("invalid kind")
+	}
+	if kind != listKind {
+		return []map[string]any{document}, nil
+	}
+	items, ok := document[itemsKey].([]any)
+	if !ok || len(items) == 0 {
+		return nil, fmt.Errorf("invalid List")
+	}
+	objects := []map[string]any{}
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid List member")
+		}
+		flattened, err := featureKustomizeFixtureObjects(object)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, flattened...)
+	}
+	return objects, nil
+}
+
+func featureKustomizeFixtureLabel(object map[string]any, key, value string) {
+	featureKustomizeFixtureMetadataLabel(object, key, value)
+	apiVersion, _ := object[apiVersionKey].(string)
+	kind, _ := object[kindKey].(string)
+	paths := [][]string{}
+	switch {
+	case apiVersion == appsV1 && slices.Contains(
+		[]string{deploymentKind, replicaSetKind, "DaemonSet", "StatefulSet"}, kind,
+	):
+		paths = append(paths, []string{specKey, helmTemplateCommand})
+	case apiVersion == "batch/v1" && kind == "Job":
+		paths = append(paths, []string{specKey, helmTemplateCommand})
+	case apiVersion == "batch/v1" && kind == "CronJob":
+		paths = append(paths,
+			[]string{specKey, "jobTemplate"},
+			[]string{specKey, "jobTemplate", specKey, helmTemplateCommand},
+		)
+	case apiVersion == "v1" && kind == "ReplicationController":
+		paths = append(paths, []string{specKey, helmTemplateCommand})
+	}
+	for _, path := range paths {
+		current := object
+		for _, name := range path {
+			next, ok := current[name].(map[string]any)
+			if !ok {
+				next = map[string]any{}
+				current[name] = next
+			}
+			current = next
+		}
+		featureKustomizeFixtureMetadataLabel(current, key, value)
+	}
+}
+
+func featureKustomizeFixtureMetadataLabel(object map[string]any, key, value string) {
+	metadata, ok := object[metadataKey].(map[string]any)
+	if !ok {
+		metadata = map[string]any{}
+		object[metadataKey] = metadata
+	}
+	labels, ok := metadata[labelsKey].(map[string]any)
+	if !ok {
+		labels = map[string]any{}
+		metadata[labelsKey] = labels
+	}
+	labels[key] = value
 }
 
 func TestCompatibilitySnapshotIgnoresOnlyCRDDescriptions(t *testing.T) {
+	t.Setenv("FEATURE_E2E_HELM", newCompatibilityHelmFixture(t))
 	base, head := t.TempDir(), t.TempDir()
 	crd := func(
 		metadataDescription, topDescription, fieldDescription, fieldType,
@@ -3527,6 +4565,8 @@ metadata:
 	writeCompatibilityFixture(t, head, "images/pgcopydb-builder/Dockerfile", "FROM scratch\n")
 	writeCompatibilityFixture(t, base, "images/pgcopydb-builder/README.md", "builder\n")
 	writeCompatibilityFixture(t, head, "images/pgcopydb-builder/README.md", "builder\n")
+	writeCompatibilityChart(t, base)
+	writeCompatibilityChart(t, head)
 
 	baseSnapshot := loadCompatibilitySnapshot(t, base)
 	headSnapshot := loadCompatibilitySnapshot(t, head)
@@ -3608,4 +4648,258 @@ metadata:
 	if maps.Equal(baseSnapshot.Builder, headSnapshot.Builder) {
 		t.Fatal("pgcopydb-builder executable-bit change was accepted")
 	}
+}
+
+func TestFeatureE2ECandidateCompatibilityRejectsCompleteRenderedPrivilegeDrift(t *testing.T) {
+	t.Setenv("FEATURE_E2E_HELM", newCompatibilityHelmFixture(t))
+	t.Run("comparison profile includes existing gated privileges", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		baseSnapshot := loadCompatibilitySnapshot(t, base)
+		headSnapshot := loadCompatibilitySnapshot(t, head)
+		if !slices.Equal(baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges) {
+			t.Fatal("identical fixed privilege renders differ")
+		}
+		for _, kind := range []string{
+			customResourceDefinitionKind, roleKind, roleBindingKind, clusterRoleKind, clusterRoleBindingKind,
+		} {
+			found := false
+			for _, document := range baseSnapshot.RenderedPrivileges {
+				if strings.Contains(document, "/"+kind+"/") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("comparison profile omitted existing gated %s", kind)
+			}
+		}
+	})
+
+	tests := []struct {
+		name string
+		path string
+		kind string
+	}{
+		{"added chart CRD", "crds/extra-crd.yaml", customResourceDefinitionKind},
+		{"added chart Role", "templates/extra-role.yaml", roleKind},
+		{"added independent RoleBinding template", "templates/manual-rolebinding.yaml", roleBindingKind},
+		{"added chart ClusterRole", "templates/extra-clusterrole.yaml", clusterRoleKind},
+		{"added independent ClusterRoleBinding template", "templates/manual-clusterrolebinding.yaml",
+			clusterRoleBindingKind},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, head := newCompatibilityChartRoots(t)
+			writeCompatibilityFixture(t, head, "charts/pgcopydb-operator/"+tt.path,
+				compatibilityPrivilegeManifest(tt.kind, "extra"))
+			requireFeatureCompatibilityRejected(t, base, head)
+		})
+	}
+
+	t.Run("removed rendered target resource", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		writeCompatibilityFixture(t, base,
+			"charts/pgcopydb-operator/templates/manual-rolebinding.yaml",
+			compatibilityPrivilegeManifest(roleBindingKind, "removed"))
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("matching incomplete rendered inventory", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		for _, root := range []string{base, head} {
+			if err := os.Remove(filepath.Join(root, "charts", "pgcopydb-operator",
+				"templates", "rolebinding.yaml")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("duplicate rendered target identity", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		manifest := compatibilityPrivilegeManifest(roleKind, "duplicate")
+		writeCompatibilityFixture(t, base,
+			"charts/pgcopydb-operator/templates/role.yaml", manifest)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/role.yaml", manifest)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/duplicate-role.yaml",
+			strings.Replace(manifest, "metadata:\n", "metadata:\n  namespace: pgcopydb-e2e\n", 1))
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("typed target List is rejected", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/role-list.yaml", `apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleList
+items: []
+`)
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("arbitrary typed List is rejected", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/other-list.yaml", `apiVersion: fixture.example/v1
+kind: FooList
+items: []
+`)
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("non-List items envelope is rejected", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/items-envelope.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envelope
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: enveloped
+`)
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+
+	t.Run("exact v1 List duplicate identity is rejected", func(t *testing.T) {
+		base, head := newCompatibilityChartRoots(t)
+		writeCompatibilityFixture(t, head,
+			"charts/pgcopydb-operator/templates/role-list.yaml", `apiVersion: v1
+kind: List
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: existing-role
+      namespace: pgcopydb-e2e
+`)
+		requireFeatureCompatibilityRejected(t, base, head)
+	})
+}
+
+func newCompatibilityChartRoots(t *testing.T) (string, string) {
+	t.Helper()
+	base, head := t.TempDir(), t.TempDir()
+	for _, root := range []string{base, head} {
+		writeCompatibilityFixture(t, root, "config/crd/bases/migration.yaml", `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: migrations.pgcopydb-operator.io
+spec:
+  versions: []
+`)
+		for _, kind := range []string{roleKind, roleBindingKind, clusterRoleKind, clusterRoleBindingKind} {
+			writeCompatibilityFixture(t, root, "config/rbac/"+strings.ToLower(kind)+".yaml",
+				compatibilityPrivilegeManifest(kind, strings.ToLower(kind)))
+		}
+		writeCompatibilityFixture(t, root, "images/pgcopydb-builder/Dockerfile", "FROM scratch\n")
+		writeCompatibilityChart(t, root)
+	}
+	return base, head
+}
+
+func writeCompatibilityChart(t *testing.T, root string) {
+	t.Helper()
+	writeCompatibilityFixture(t, root, "charts/pgcopydb-operator/Chart.yaml", `apiVersion: v2
+name: pgcopydb-operator
+version: 0.1.0
+`)
+	writeCompatibilityFixture(t, root, "charts/pgcopydb-operator/values.yaml", "{}\n")
+	writeCompatibilityFixture(t, root, "charts/pgcopydb-operator/templates/configmap.yaml", `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fixture
+`)
+	writeCompatibilityFixture(t, root, "charts/pgcopydb-operator/templates/crd.yaml",
+		"{{- if .Values.crds.install }}\n"+
+			compatibilityPrivilegeManifest(customResourceDefinitionKind, "existing")+
+			"{{- end }}\n")
+	for path, kind := range map[string]string{
+		"clusterrole.yaml":        clusterRoleKind,
+		"clusterrolebinding.yaml": clusterRoleBindingKind,
+		"role.yaml":               roleKind,
+		"rolebinding.yaml":        roleBindingKind,
+	} {
+		condition := ".Values.rbac.create"
+		if kind == roleKind || kind == roleBindingKind {
+			condition = "and .Values.rbac.create .Values.leaderElection.enabled"
+		}
+		writeCompatibilityFixture(t, root, "charts/pgcopydb-operator/templates/"+path,
+			"{{- if "+condition+" }}\n"+
+				compatibilityPrivilegeManifest(kind, "existing-"+strings.ToLower(kind))+
+				"{{- end }}\n")
+	}
+}
+
+func compatibilityPrivilegeManifest(kind, name string) string {
+	apiVersion := "rbac.authorization.k8s.io/v1"
+	if kind == customResourceDefinitionKind {
+		apiVersion = "apiextensions.k8s.io/v1"
+	}
+	return fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata:\n  name: %s\n", apiVersion, kind, name)
+}
+
+func requireFeatureCompatibilityRejected(t *testing.T, base, head string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestFeatureE2ECandidateCompatibility$", "-test.count=1")
+	cmd.Env = compatibilityFixtureEnv(base, head)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("candidate compatibility unexpectedly succeeded:\n%s", output)
+	}
+	if !bytes.Contains(output, []byte("candidate changes rendered")) &&
+		!bytes.Contains(output, []byte("duplicate rendered privilege identity")) &&
+		!bytes.Contains(output, []byte("rendered privilege input is missing")) &&
+		!bytes.Contains(output, []byte("unsupported rendered privilege List")) {
+		t.Fatalf("candidate compatibility failed outside the rendered privilege guard: %v\n%s", err, output)
+	}
+}
+
+func compatibilityFixtureEnv(base, head string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, value := range os.Environ() {
+		if strings.HasPrefix(value, "FEATURE_E2E_BASE=") ||
+			strings.HasPrefix(value, "FEATURE_E2E_HEAD=") {
+			continue
+		}
+		env = append(env, value)
+	}
+	return append(env, "FEATURE_E2E_BASE="+base, "FEATURE_E2E_HEAD="+head)
+}
+
+func newCompatibilityHelmFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "helm")
+	body := `#!/bin/sh
+set -eu
+[ "$#" -ge 3 ] && [ "$1" = template ] && [ "$2" = pgcopydb-e2e ] || exit 70
+chart=$3
+shift 3
+manager_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+runner_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+expected='--namespace pgcopydb-e2e --include-crds --skip-tests --set crds.install=true'
+expected="$expected --set image.tag=feature-fixture@sha256:$manager_digest"
+expected="$expected --set runner.image.tag=feature-fixture@sha256:$runner_digest"
+expected="$expected --set watchNamespaces={pgcopydb-e2e,pgcopydb-e2e-x}"
+expected="$expected --set leaderElection.enabled=true --set metrics.enabled=true"
+expected="$expected --set metrics.serviceMonitor.enabled=true --set rbac.create=true"
+expected="$expected --set serviceAccount.create=true"
+expected="$expected --set serviceAccount.name=pgcopydb-e2e-manager"
+expected="$expected --set-string fullnameOverride=pgcopydb-e2e"
+[ "$*" = "$expected" ] || exit 71
+for directory in "$chart/crds" "$chart/templates"; do
+  [ -d "$directory" ] || continue
+  find "$directory" -type f \( -name '*.yaml' -o -name '*.yml' \) -print
+done | LC_ALL=C sort | while IFS= read -r file; do
+  printf '%s\n' '---'
+  sed '/^{{/d' "$file"
+done
+`
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
