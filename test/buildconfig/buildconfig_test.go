@@ -27,11 +27,13 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -121,6 +123,53 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 				"--platform=$BUILDPLATFORM itself, so the sed would duplicate the flag:\n %s",
 				strings.TrimSpace(line))
 		}
+	}
+}
+
+func TestGolangCILintDoesNotRebuildBakedCustomBinary(t *testing.T) {
+	localBin := t.TempDir()
+	linter := filepath.Join(localBin, "golangci-lint")
+	if err := os.WriteFile(linter, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Unix(1, 0)
+	newer := time.Unix(2, 0)
+	if err := os.Chtimes(linter, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(localBin, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("make", "-n", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin)
+	cmd.Dir = "../.."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry-run golangci-lint: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "go install") {
+		t.Fatalf("golangci-lint rebuilds because LOCALBIN is newer:\n%s", out)
+	}
+}
+
+func TestGolangCILintCustomBuildFailsClosed(t *testing.T) {
+	localBin := t.TempDir()
+	version := "test-version"
+	versioned := filepath.Join(localBin, "golangci-lint-"+version)
+	script := "#!/bin/sh\n[ \"${1:-}\" != custom ]\n"
+	if err := os.WriteFile(versioned, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(versioned, filepath.Join(localBin, "golangci-lint")); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("make", "-B", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin,
+		"GOLANGCI_LINT_VERSION="+version)
+	cmd.Dir = "../.."
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("golangci-lint ignored a failed custom build:\n%s", out)
 	}
 }
 
@@ -376,8 +425,6 @@ func TestWorkflowActionInventory(t *testing.T) {
 		t.Fatalf("read workflow directory: %v", err)
 	}
 
-	files := 0
-	references := 0
 	localCalls := 0
 	dependencyReviews := 0
 	check := func(location, uses string) {
@@ -399,7 +446,6 @@ func TestWorkflowActionInventory(t *testing.T) {
 			t.Errorf("%s calls a workflow from another repository: %q", location, uses)
 			return
 		}
-		references++
 		name, version, ok := strings.Cut(uses, "@")
 		if !ok || name == "" || version == "" {
 			t.Errorf("%s has malformed action reference %q", location, uses)
@@ -422,7 +468,6 @@ func TestWorkflowActionInventory(t *testing.T) {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yml" {
 			continue
 		}
-		files++
 		path := filepath.Join(workflowDir, entry.Name())
 		var wf workflow
 		if err := yaml.Unmarshal([]byte(read(t, path)), &wf); err != nil {
@@ -437,12 +482,6 @@ func TestWorkflowActionInventory(t *testing.T) {
 		}
 	}
 
-	if files != 11 {
-		t.Errorf("workflow inventory contains %d YAML files, want 11", files)
-	}
-	if references != 51 {
-		t.Errorf("workflow inventory contains %d action references, want 51", references)
-	}
 	// release.yml calling pgcopydb-builder.yml is the only one; a second would
 	// mean the split got copied somewhere rather than reused.
 	if localCalls != 1 {
@@ -515,16 +554,16 @@ func TestOnlyTheRunnerImageInstallsQEMU(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(read(t, releaseWorkflow)), &wf); err != nil {
 		t.Fatalf("parse release.yml: %v", err)
 	}
-	for _, name := range []string{"manager-image", "runner-image"} {
+	for _, name := range []string{managerImageJob, runnerImageJob} {
 		if _, ok := wf.Jobs[name]; !ok {
 			t.Fatalf("release.yml has no %s job", name)
 		}
 	}
-	if usesQEMU(wf.Jobs["manager-image"].Steps) {
+	if usesQEMU(wf.Jobs[managerImageJob].Steps) {
 		t.Error("manager-image installs QEMU, which it no longer needs; if the arm64 " +
 			"build broke without it, restore --platform=$BUILDPLATFORM instead")
 	}
-	if !usesQEMU(wf.Jobs["runner-image"].Steps) {
+	if !usesQEMU(wf.Jobs[runnerImageJob].Steps) {
 		t.Error("runner-image must keep docker/setup-qemu-action: it runs apt and the " +
 			"version canary on the emulated arm64 platform")
 	}

@@ -22,6 +22,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it. The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
 1. Run `task lint` (and `task test` once Go code exists). Both MUST be clean before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
+1. For a behavior pull request, require successful `lint`, `test`, and `docs` checks, then run the full feature E2E gate against the exact current pull request head SHA.
 
 `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
 The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
@@ -86,7 +87,7 @@ Two tiers, and the environment variables a run reads:
 
 | Variable                      | Default | Effect                                                                                                                                                     |
 |-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `E2E_SCALE`                   | `1`     | Fixture size multiplier, sizing both the seeded data and the volumes. 1 seeds roughly 12GB on 50Gi volumes; 0.25 seeds 3GB on 13Gi, which is what CI runs. |
+| `E2E_SCALE`                   | `1`     | Fixture and volume multiplier: 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.25, roughly 3GB on 13Gi.                                  |
 | `E2E_CNPG_INSTANCES`          | `1`     | Instances per fixture CNPG cluster. One keeps setup and teardown short, and the migration still crosses the network because source, target and worker are separate pods. Raise it to 3 for the chaos scenarios, one of which kills a primary. |
 | `E2E_EXTRA_TABLES`            | unset   | Adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`. The base fixture is deliberately lopsided (one table holds 73% of the bytes); this gives it a production shape. Must be set with `E2E_EXTRA_SIZE_GB`. |
 | `E2E_EXTRA_SIZE_GB`           | unset   | Total size of the extra tables. Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL. Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape. |
@@ -103,7 +104,10 @@ Two tiers, and the environment variables a run reads:
 | `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                                                             |
 | `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.                                                |
 
-Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: a 0.1 run gets 7/7/2Gi and the 0.25 CI tier gets 13/13/3Gi. `max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright. The floor is there because WAL, indexes and the change spool need headroom that the row counts alone do not size. Source and target sizes are per instance, so a three-instance cluster provisions three of them; the work volume is one per migration and does not multiply.
+Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: a 0.1 run gets 7/7/2Gi and the 0.25 release candidate tier gets 13/13/3Gi.
+`max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright.
+The floor is there because WAL, indexes and the change spool need headroom that the row counts alone do not size.
+Source and target sizes are per instance, so raising `E2E_CNPG_INSTANCES` multiplies those volumes; the work volume is one per migration and does not multiply.
 
 The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion. They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target. Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl. With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red. They assert metrics of the installed operator, so point `E2E_OPERATOR_TAG` at a build that exports them when the pinned default predates the metrics work.
 
@@ -111,7 +115,7 @@ A kept cluster the run cannot adopt in place is deleted and recreated before the
 
 `task e2e:matrix` runs the full suite (chaos specs excluded) three times at `E2E_SCALE=0.1`, one version combo per run: PG 14 to 18, 18 to 18, and 15 to 17. One confirmation prompt up front covers all three; each combo is echoed before it starts. The fixture namespaces stay up between combos (only a cluster on the wrong major gets recreated) and the last combo tears them down. A failing combo does not stop the rest: the task prints a pass/fail summary at the end and exits nonzero if any combo failed. The matrix is upgrade-direction only because pgcopydb needs `pg_dump` at least at the target's major and a newer major's dump does not restore into an older server. PG14 appears as a source only because the follow-mode target contract includes `GRANT SET ON PARAMETER session_replication_role`, which PostgreSQL grew in 15 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md)).
 
-Every tier puts the fixture volumes on a `longhorn-e2e-ephemeral` StorageClass (numberOfReplicas 1, reclaimPolicy Delete) that the suite creates if absent, and refuses to start (Skip) unless the `nodes.longhorn.io` CRs report enough available storage for the requested volumes times 1.2 headroom.
+When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; feature and release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
 One Longhorn replica is deliberate: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
@@ -131,6 +135,52 @@ Two specs cover this. One reads what was rendered onto the pods, an anti-affinit
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
 `release.yml` runs this suite too, against a release candidate rather than a branch: `E2E_SCALE=0.25`, chaos excluded, `E2E_OPERATOR_TAG` set to the candidate so it installs the images that run was built from, and `E2E_MANAGE_NAMESPACES=false` because there the namespaces belong to GitOps and the CI identity may not create one. It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden. `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
+
+### Feature pull request E2E
+
+The manual `feature-e2e.yml` workflow tests a feature or bug-fix branch without cutting a release candidate or entering a release-producing path.
+It always runs from trusted `main`, resolves one open same-repository pull request once to its exact head SHA, and builds the manager and runner images from that SHA.
+Both image references are immutable digests.
+Before any Migration, exactly one eligible Ready feature controller must run the expected manager digest and configure the expected runner digest, and a runner canary must run that runner digest.
+An image mismatch stops the run before a Migration is created.
+The non-chaos suite runs at `E2E_SCALE=0.1`; release candidate E2E remains separate at `E2E_SCALE=0.25`.
+The feature controller uses the existing `pgcopydb-e2e` namespace, and the suite creates or deletes no namespaces.
+Run-labelled cleanup handles a partial install so the same Helm release can be installed again, and preserves unrelated customer resources and shared fixtures.
+
+Run the full merge gate after pushing the pull request head:
+
+1. Resolve the pull request number and dispatch the trusted workflow.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f focus=
+   ```
+
+The full run posts the gating `feature-e2e` status to the resolved SHA.
+Any later commit requires a new full run because an older SHA cannot satisfy the merge gate.
+
+Use focused mode only to diagnose one scenario:
+
+1. Dispatch an existing non-chaos scenario by its Ginkgo name.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=focus \
+     -f focus='completes a fresh clone with matching rows and sequences'
+   ```
+
+A focused run posts only the non-gating `feature-e2e/focus` status and cannot satisfy the full merge gate.
+The workflow posts `failure` only for a test assertion after manager and runner attestations and verified cleanup; every unsafe or incomplete execution posts `error`.
+Both modes serialize with release candidate and published-release E2E, preserve the shared namespaces and fixtures, and fail if cleanup cannot be verified.
+
+> [!important]
+> The protected environment owns the expected context and exclusive-controller attestation.
+> GitHub stores `E2E_PROMETHEUS_URL` as an Actions secret, so it masks the complete value before step environment logging; the workflow registers it again before shell use.
+> For setup and incident handling, see private ops notes.
+> Do not copy or log those values.
+
+Feature E2E creates no release candidate, tag, GitHub release, chart publication, `latest` tag, or production deployment.
+It does not reuse `auto-release.yml`, `release.yml`, `promote.yml`, or a published-release E2E path.
 
 ## Releasing
 

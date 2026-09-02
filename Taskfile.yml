@@ -70,11 +70,11 @@ tasks:
   e2e:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
-      This task is local only; CI runs the same specs itself, on a release
-      candidate. Confirms the context before running. E2E_SCALE (default 1,
-      ~12GB seeded data) sizes the fixtures and their volumes, which are
-      provisioned once per CNPG instance (three per cluster). Chaos
-      scenarios are excluded; use e2e:chaos for those.
+      This task is local only; trusted feature PR and release candidate CI
+      invoke the same specs directly. Confirms the context before running.
+      E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures and their
+      volumes, which are provisioned once per CNPG instance (one per cluster
+      by default). Chaos scenarios are excluded; use e2e:chaos for those.
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context
@@ -186,10 +186,10 @@ tasks:
   e2e:stress:
     desc: >-
       Stress e2e (E2E_STRESS=true, scale 10, ~120GB fixtures per instance)
-      against the CURRENT kubectl context. Every tier uses the
-      longhorn-e2e-ephemeral StorageClass, which the suite creates if absent,
-      and skips unless the nodes.longhorn.io CRs report enough available
-      storage. Local only.
+      against the CURRENT kubectl context. When E2E_STORAGE_CLASS is unset and
+      the suite-owned path is selected, the suite creates and capacity-checks
+      its ephemeral StorageClass; callers that supply an existing class use it
+      and skip suite-owned setup and capacity checking. Local only.
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context

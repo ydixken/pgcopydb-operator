@@ -51,8 +51,14 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 
 - The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
 - kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
-- CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)). [ci.yml](.github/workflows/ci.yml) runs lint, tests and the docs build on every push and pull request, and those three are the required checks on `main`. [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, [auto-release.yml](.github/workflows/auto-release.yml) cuts the candidate once a week, and [promote.yml](.github/workflows/promote.yml) turns a candidate into the release, dispatched by hand so several candidates can stand between two releases.
-- E2e runs in **two places**. Locally, `task e2e` targets the dev cluster through the developer's own kubeconfig context and asks first. In CI, `release.yml` runs the same specs against a release candidate at `E2E_SCALE=0.25`, on a runner scale set that may reach the dev cluster, inside namespaces it neither creates nor deletes. The tier is a throughput compromise: 0.1 covers every scenario and finishes sooner, but its fixtures are too small for the copy rate to mean anything, so the gate pays for the larger ones to get a number worth reading off it.
+- CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)).
+  Base CI remains lint, tests and the docs build through [ci.yml](.github/workflows/ci.yml).
+  A behavior pull request additionally requires a successful full `feature-e2e` result on its exact current head SHA before merge.
+  [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, [auto-release.yml](.github/workflows/auto-release.yml) cuts the candidate once a week, and [promote.yml](.github/workflows/promote.yml) turns a candidate into the release.
+- Local, trusted-main feature, and release E2E are distinct paths.
+  Local `task e2e` keeps the current-context confirmation rules in Caution.
+  Feature full and focused runs use `E2E_SCALE=0.1`, while release candidate E2E remains at `E2E_SCALE=0.25`.
+  Feature runs publish no release artifact, and only the full `feature-e2e` context can satisfy the merge gate.
 
 ## The solution ladder ("ponytail")
 
@@ -70,6 +76,7 @@ Some things are **never** cut on the way down: validation, error handling, secur
 ## Verification before done
 
 - Run `task lint` (and `task test` once Go code exists) before declaring anything done. Both MUST be clean.
+- A behavior pull request is not ready to merge until its exact current head has a successful full `feature-e2e` result.
 - Don't claim green without the command output to back it. "It should pass" is not a result.
 - Keep commits small and [conventional](CONTRIBUTING.md#commits-and-pull-requests). Every commit MUST be lint-clean on its own.
 

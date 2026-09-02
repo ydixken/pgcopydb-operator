@@ -41,7 +41,10 @@ import (
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
-const pgoutputPlugin = "pgoutput"
+const (
+	pgoutputPlugin  = "pgoutput"
+	featureRunOwner = "run-owner"
+)
 
 // Schema fixtures for the clone-rights filter tests, hoisted for goconst.
 const (
@@ -65,6 +68,73 @@ func passwordMigration() *v1beta1.Migration {
 			},
 			Target: v1beta1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
 		},
+	}
+}
+
+func TestFeatureE2ERunOwnerLabelPropagation(t *testing.T) {
+	const customerLabel = "customer.example/label"
+	cases := []struct {
+		name      string
+		labels    map[string]string
+		wantOwner string
+	}{
+		{
+			name: "reserved feature owner",
+			labels: map[string]string{
+				labelFeatureE2ERun: featureRunOwner,
+				customerLabel:      "preserve-on-migration-only",
+			},
+			wantOwner: featureRunOwner,
+		},
+		{
+			name:   "customer labels only",
+			labels: map[string]string{customerLabel: featureRunOwner},
+		},
+		{name: "no labels"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Labels = tc.labels
+			m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeSchemas: []string{testSchemaExc}}
+
+			worker, err := buildJob(m, "img", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup, err := buildCleanupJob(m, "img")
+			if err != nil {
+				t.Fatal(err)
+			}
+			filters := buildFiltersConfigMap(m)
+			if filters == nil {
+				t.Fatal("filters ConfigMap was not built")
+			}
+
+			dependents := []struct {
+				name   string
+				labels map[string]string
+			}{
+				{name: "worker Job", labels: worker.Labels},
+				{name: "worker Pod template", labels: worker.Spec.Template.Labels},
+				{name: "cleanup Job", labels: cleanup.Labels},
+				{name: "cleanup Pod template", labels: cleanup.Spec.Template.Labels},
+				{name: "work PVC", labels: buildWorkPVC(m).Labels},
+				{name: "filters ConfigMap", labels: filters.Labels},
+			}
+			for _, dependent := range dependents {
+				gotOwner, hasOwner := dependent.labels[labelFeatureE2ERun]
+				wantOwner := tc.wantOwner != ""
+				if hasOwner != wantOwner || gotOwner != tc.wantOwner {
+					t.Errorf("%s feature owner = %q, present = %t; want %q, present = %t",
+						dependent.name, gotOwner, hasOwner, tc.wantOwner, wantOwner)
+				}
+				if _, copied := dependent.labels[customerLabel]; copied {
+					t.Errorf("%s copied an unrelated Migration label", dependent.name)
+				}
+			}
+		})
 	}
 }
 
