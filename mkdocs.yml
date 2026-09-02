@@ -33,11 +33,14 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.highlight
   - pymdownx.inlinehilite
+  - pymdownx.tasklist:
+      custom_checkbox: true
 
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Installation: installation.md
+  - Migration planning: planning.md
   - Configuration: configuration.md
   - Examples: examples.md
   - Operations:

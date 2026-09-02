@@ -1,6 +1,7 @@
 # Live migration
 
 `spec.follow.enabled: true` turns the clone into a live migration: the base copy runs under a replication slot, then logical replication streams and applies every change until you cut over. Start from [05-live-migration.yaml](../examples/05-live-migration.yaml). The [follow-specific prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) (wal_level, REPLICATION attribute, target grants, replica identities) are strict, and two of them fail silently when missed, so the operator checks the ones it can reach before any data moves (see [preflight](#preflight) below).
+Use the [Planning checklist](../planning.md) to agree the operating plan, cutover ownership, recovery criteria, and rehearsal before enabling follow mode.
 
 The phases of a live migration:
 

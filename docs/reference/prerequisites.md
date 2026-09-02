@@ -3,6 +3,7 @@
 What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes cluster before the operator can run it. The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone --follow`), cutover, and cleanup. Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/). The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply exactly the grants below.
+Use the [Planning checklist](../planning.md) to record scope, operating, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
 ## Summary
 
