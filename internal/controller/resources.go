@@ -34,9 +34,10 @@ import (
 )
 
 const (
-	labelMigration = "pgcopydb-operator.io/migration"
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	managerName    = "pgcopydb-operator"
+	labelMigration     = "pgcopydb-operator.io/migration"
+	labelFeatureE2ERun = "pgcopydb-operator.io/feature-e2e-run"
+	labelManagedBy     = "app.kubernetes.io/managed-by"
+	managerName        = "pgcopydb-operator"
 
 	// runnerUID matches the runner image's non-root user (distroless
 	// nonroot convention, uid 65532).
@@ -51,10 +52,14 @@ const (
 )
 
 func labels(m *v1beta1.Migration) map[string]string {
-	return map[string]string{
+	result := map[string]string{
 		labelManagedBy: managerName,
 		labelMigration: m.Name,
 	}
+	if value := m.Labels[labelFeatureE2ERun]; value != "" {
+		result[labelFeatureE2ERun] = value
+	}
+	return result
 }
 
 func workPVCName(m *v1beta1.Migration) string   { return m.Name + "-work" }

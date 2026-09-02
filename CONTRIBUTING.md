@@ -22,10 +22,14 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it. The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
 1. Run `task lint` (and `task test` once Go code exists). Both MUST be clean before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
+1. For a behavior pull request, require successful `lint`, `test`, and `docs` checks, then run the full feature E2E gate against the exact current pull request head SHA.
 
 `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
 The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
+
+> [!note]
+> The bounded workflow bootstrap uses existing CI and an independent security review because the trusted workflow is not on `main` yet.
 
 The `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
 That variable is what runs `TestCompareDataQuery`, the only test that exercises the SQL deciding the `pgcopydb compare data` verdict; without it the test skips.
@@ -131,6 +135,45 @@ Two specs cover this. One reads what was rendered onto the pods, an anti-affinit
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
 `release.yml` runs this suite too, against a release candidate rather than a branch: `E2E_SCALE=0.25`, chaos excluded, `E2E_OPERATOR_TAG` set to the candidate so it installs the images that run was built from, and `E2E_MANAGE_NAMESPACES=false` because there the namespaces belong to GitOps and the CI identity may not create one. It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden. `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
+
+### Feature pull request E2E
+
+The manual `feature-e2e.yml` workflow always runs from trusted `main` and resolves one open same-repository pull request once to its exact head SHA.
+It builds and deploys the manager and runner from that SHA, runs the non-chaos suite at `E2E_SCALE=0.1`, cleans only resources carrying the current run's unprinted ownership label, and posts a result.
+Release candidate E2E remains separate at `E2E_SCALE=0.25`.
+
+Run the full merge gate after pushing the pull request head:
+
+1. Resolve the pull request number and dispatch the trusted workflow.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f focus=
+   ```
+
+The full run posts the gating `feature-e2e` status to the resolved SHA.
+Any later commit requires a new full run because an older SHA cannot satisfy the merge gate.
+
+Use focused mode only to diagnose one scenario:
+
+1. Dispatch an existing non-chaos scenario by its Ginkgo name.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=focus \
+     -f focus='completes a fresh clone with matching rows and sequences'
+   ```
+
+A focused run posts only the non-gating `feature-e2e/focus` status and cannot satisfy the full merge gate.
+Both modes serialize with release candidate and published-release E2E, preserve the shared namespaces and fixtures, and fail if cleanup cannot be verified.
+
+> [!important]
+> The protected environment owns the expected context and exclusive-controller attestation.
+> For setup and incident handling, see private ops notes.
+> Do not copy or log those values.
+
+Feature E2E creates no release candidate, tag, GitHub release, chart publication, `latest` tag, or production deployment.
+It does not invoke a release workflow or published-release E2E path.
 
 ## Releasing
 

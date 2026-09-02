@@ -17,10 +17,10 @@ limitations under the License.
 // Package e2e exercises the operator on the cluster behind the current
 // kubectl context. The suite brings its own operator: helm installs a
 // throwaway instance into pgcopydb-e2e-system that watches only the fixture
-// namespaces, and AfterSuite always removes it again. The production
-// installation in pgcopydb-system is never touched, checked, or relied on.
-// Fixtures stay inside pgcopydb-e2e and pgcopydb-e2e-x, the sanctioned e2e
-// area on the shared dev cluster.
+// namespaces. AfterSuite removes it unless a protected feature workflow owns
+// ordered teardown. The production installation in pgcopydb-system is never
+// touched, checked, or relied on. Fixtures stay inside pgcopydb-e2e and
+// pgcopydb-e2e-x, the sanctioned e2e area on the shared dev cluster.
 package e2e
 
 import (
@@ -53,10 +53,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
@@ -81,6 +83,9 @@ const (
 	chartPath = "../../charts/pgcopydb-operator"
 	// fieldOwner identifies this suite's server-side applies.
 	fieldOwner = "pgcopydb-e2e-suite"
+	// labelFeatureE2ERun isolates objects owned by one protected feature run.
+	labelFeatureE2ERun     = "pgcopydb-operator.io/feature-e2e-run"
+	featureRunOwnerFixture = "0123456789abcdef0123456789abcdef"
 
 	sourceCluster = "e2e-source"
 	targetCluster = "e2e-target"
@@ -162,6 +167,52 @@ const (
 )
 
 var cnpgGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
+
+var featureE2ERunValue = os.Getenv("E2E_RUN_LABEL_VALUE")
+
+var featureE2ERunPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+func validateFeatureE2ERunValue() error {
+	if featureE2ERunValue != "" && !featureE2ERunPattern.MatchString(featureE2ERunValue) {
+		return errors.New("E2E_RUN_LABEL_VALUE must be 32 lowercase hexadecimal characters")
+	}
+	return nil
+}
+
+func labelFeatureMigration(m *v1beta1.Migration) error {
+	if err := validateFeatureE2ERunValue(); err != nil || featureE2ERunValue == "" {
+		return err
+	}
+	if m.Labels == nil {
+		m.Labels = make(map[string]string)
+	}
+	m.Labels[labelFeatureE2ERun] = featureE2ERunValue
+	return nil
+}
+
+func requireFeatureMigrationOwnership(m *v1beta1.Migration) error {
+	if featureE2ERunValue != "" && m.Labels[labelFeatureE2ERun] != featureE2ERunValue {
+		return errors.New("Migration is not owned by the current feature e2e run")
+	}
+	return nil
+}
+
+type featureLabelingClient struct {
+	client.Client
+}
+
+func (c featureLabelingClient) Create(
+	ctx context.Context,
+	obj client.Object,
+	opts ...client.CreateOption,
+) error {
+	if migration, ok := obj.(*v1beta1.Migration); ok {
+		if err := labelFeatureMigration(migration); err != nil {
+			return err
+		}
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
 
 // fixturesFS carries the fixture SQL and the script that stages it (see
 // fixtures/run.sh) into the seed Job via a ConfigMap. The whole directory,
@@ -584,6 +635,161 @@ func TestPayloadGenerationDoesNotReuseV2Marker(t *testing.T) {
 	}
 }
 
+func TestFeatureRunMigrationLabel(t *testing.T) {
+	old := featureE2ERunValue
+	t.Cleanup(func() { featureE2ERunValue = old })
+	featureE2ERunValue = featureRunOwnerFixture
+	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{
+		Labels: map[string]string{"customer.example/label": "keep"},
+	}}
+	if err := labelFeatureMigration(m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Labels[labelFeatureE2ERun]; got != featureRunOwnerFixture {
+		t.Fatalf("feature ownership label = %q", got)
+	}
+	if got := m.Labels["customer.example/label"]; got != "keep" {
+		t.Fatalf("customer label = %q", got)
+	}
+	if err := requireFeatureMigrationOwnership(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireFeatureMigrationOwnership(&v1beta1.Migration{}); err == nil {
+		t.Fatal("unowned feature Migration was accepted for deletion")
+	}
+	featureE2ERunValue = "not-a-valid-label"
+	if err := labelFeatureMigration(&v1beta1.Migration{}); err == nil {
+		t.Fatal("malformed feature ownership value was accepted")
+	}
+}
+
+func TestFeatureMigrationDeletion(t *testing.T) {
+	key := client.ObjectKey{Namespace: nsE2E, Name: "feature-owned"}
+	migration := func(uid, runOwner string) *v1beta1.Migration {
+		labels := map[string]string{}
+		if runOwner != "" {
+			labels[labelFeatureE2ERun] = runOwner
+		}
+		return &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{
+			Namespace: key.Namespace,
+			Name:      key.Name,
+			UID:       types.UID(uid),
+			Labels:    labels,
+		}}
+	}
+	newClient := func(fns interceptor.Funcs, objects ...client.Object) client.Client {
+		t.Helper()
+		scheme := runtime.NewScheme()
+		if err := v1beta1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		return clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+			WithInterceptorFuncs(fns).Build()
+	}
+
+	t.Run("owned", func(t *testing.T) {
+		c := newClient(interceptor.Funcs{}, migration("owned-uid", featureRunOwnerFixture))
+		if err := runFeatureMigrationDeletion(t, c, key); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Get(context.Background(), key, &v1beta1.Migration{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("owned Migration still exists: %v", err)
+		}
+	})
+
+	t.Run("unowned", func(t *testing.T) {
+		c := newClient(interceptor.Funcs{}, migration("unowned-uid", ""))
+		if err := runFeatureMigrationDeletion(t, c, key); err == nil {
+			t.Fatal("unowned Migration was accepted")
+		}
+		if err := c.Get(context.Background(), key, &v1beta1.Migration{}); err != nil {
+			t.Fatalf("unowned Migration was deleted: %v", err)
+		}
+	})
+
+	t.Run("already absent", func(t *testing.T) {
+		c := newClient(interceptor.Funcs{})
+		if err := runFeatureMigrationDeletion(t, c, key); err != nil {
+			t.Fatalf("absent Migration deletion failed: %v", err)
+		}
+	})
+
+	t.Run("delete race", func(t *testing.T) {
+		c := newClient(interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return apierrors.NewNotFound(schema.GroupResource{
+					Group: v1beta1.GroupVersion.Group, Resource: "migrations",
+				}, key.Name)
+			},
+		}, migration("raced-uid", featureRunOwnerFixture))
+		if err := runFeatureMigrationDeletion(t, c, key); err != nil {
+			t.Fatalf("deletion race failed: %v", err)
+		}
+	})
+
+	t.Run("replacement", func(t *testing.T) {
+		original := migration("original-uid", featureRunOwnerFixture)
+		replacement := migration("replacement-uid", "")
+		gets := 0
+		c := newClient(interceptor.Funcs{
+			Get: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				key client.ObjectKey,
+				obj client.Object,
+				opts ...client.GetOption,
+			) error {
+				gets++
+				if gets > 1 {
+					return cl.Get(ctx, key, obj, opts...)
+				}
+				original.DeepCopyInto(obj.(*v1beta1.Migration))
+				return nil
+			},
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				options := (&client.DeleteOptions{}).ApplyOptions(opts)
+				if options.Preconditions != nil && options.Preconditions.UID != nil &&
+					*options.Preconditions.UID == original.UID {
+					return apierrors.NewConflict(schema.GroupResource{
+						Group: v1beta1.GroupVersion.Group, Resource: "migrations",
+					}, key.Name, errors.New("object was replaced"))
+				}
+				return cl.Delete(ctx, obj)
+			},
+		}, replacement)
+		if err := runFeatureMigrationDeletion(t, c, key); err == nil {
+			t.Fatal("replacement Migration deletion was accepted")
+		}
+		stored := &v1beta1.Migration{}
+		if err := c.Get(context.Background(), key, stored); err != nil {
+			t.Fatalf("replacement Migration was deleted: %v", err)
+		}
+		if stored.UID != replacement.UID {
+			t.Fatalf("stored UID = %q, want replacement UID %q", stored.UID, replacement.UID)
+		}
+	})
+}
+
+func runFeatureMigrationDeletion(
+	t *testing.T,
+	c client.Client,
+	key client.ObjectKey,
+) error {
+	t.Helper()
+	oldCtx, oldClient, oldOwner := ctx, k8sClient, featureE2ERunValue
+	t.Cleanup(func() {
+		ctx, k8sClient, featureE2ERunValue = oldCtx, oldClient, oldOwner
+	})
+	ctx, k8sClient, featureE2ERunValue = context.Background(), c, featureRunOwnerFixture
+	RegisterTestingT(t)
+	return InterceptGomegaFailure(func() { deleteMigration(key.Name) })
+}
+
 // scaleArg renders the scale for psql -v and SQL literals: plain decimal,
 // no exponent, so numeric parses it exactly.
 func scaleArg() string {
@@ -602,13 +808,7 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	ctx = context.Background()
-
-	// The suite targets whatever the current kubectl context points at, per
-	// the task e2e contract. Say so loudly before touching anything.
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if raw, err := rules.Load(); err == nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "e2e running against kubectl context %q\n", raw.CurrentContext)
-	}
+	Expect(validateFeatureE2ERunValue()).To(Succeed())
 
 	cfg, err := config.GetConfig()
 	Expect(err).NotTo(HaveOccurred(), "no usable kubeconfig; aborting")
@@ -620,8 +820,9 @@ var _ = BeforeSuite(func() {
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1beta1.AddToScheme(scheme)).To(Succeed())
-	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
+	baseClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
+	k8sClient = featureLabelingClient{Client: baseClient}
 
 	By("checking the Migration CRD exists (the suite does not manage it)")
 	crd := &unstructured.Unstructured{}
@@ -661,7 +862,7 @@ var _ = BeforeSuite(func() {
 	// that a crashed run left behind.
 	By("checking no other e2e run holds the operator release")
 	if err := exec.Command("helm", "status", helmRelease, "-n", nsOperator).Run(); err == nil {
-		if !envTrue("E2E_FORCE") {
+		if featureE2ERunValue != "" || !envTrue("E2E_FORCE") {
 			Fail("helm release " + helmRelease + " already exists in " + nsOperator +
 				": another e2e run is active, or a crashed run left it behind. The suite is" +
 				" single-tenant per cluster; wait for the other run to finish, or rerun with" +
@@ -676,7 +877,9 @@ var _ = BeforeSuite(func() {
 	// controller converges either way (attempts derive from persisted status,
 	// Job creation tolerates AlreadyExists), so the specs assert terminal
 	// phase, attempts, Jobs, and data, never event counts or timing.
-	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+	if featureE2ERunValue == "" {
+		helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+	}
 	values := []string{
 		"crds.install=false",
 		"image.tag=" + operatorTag,
@@ -710,8 +913,10 @@ var _ = BeforeSuite(func() {
 		ensureNamespace(nsX)
 	}
 
-	By("deleting leftover Migrations from previous runs")
-	purgeMigrations(2 * time.Minute)
+	if featureE2ERunValue == "" {
+		By("deleting leftover Migrations from previous runs")
+		purgeMigrations(2 * time.Minute)
+	}
 
 	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
 		pgSource, pgTarget))
@@ -739,6 +944,9 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
+	if featureE2ERunValue != "" {
+		return
+	}
 	// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
 	// needs a live controller to run the cleanup Job and release, and that
 	// cleanup is what drops the replication slots. A failed or timed-out
@@ -2061,12 +2269,39 @@ func purgeMigrations(timeout time.Duration) {
 
 func deleteMigration(name string) {
 	GinkgoHelper()
-	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
-	if err := k8sClient.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
-		Expect(err).NotTo(HaveOccurred(), "failed to delete Migration %s", name)
+	m := &v1beta1.Migration{}
+	key := client.ObjectKey{Namespace: nsE2E, Name: name}
+	if featureE2ERunValue != "" {
+		err := k8sClient.Get(ctx, key, m)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		Expect(err).NotTo(HaveOccurred(), "failed to get feature Migration %s", name)
+		Expect(requireFeatureMigrationOwnership(m)).To(Succeed(),
+			"refusing to delete unowned feature Migration %s", name)
+		Expect(m.UID).NotTo(BeEmpty(), "refusing to delete feature Migration %s without a UID", name)
+		uid := m.UID
+		err = k8sClient.Delete(ctx, m, client.Preconditions{UID: &uid})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if apierrors.IsConflict(err) {
+			Expect(err).NotTo(HaveOccurred(), "refusing to delete replaced feature Migration %s", name)
+		}
+		Expect(err).NotTo(HaveOccurred(), "failed to delete feature Migration %s", name)
+	} else {
+		m.SetNamespace(nsE2E)
+		m.SetName(name)
+		if err := k8sClient.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete Migration %s", name)
+		}
 	}
 	Eventually(func(g Gomega) {
-		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, &v1beta1.Migration{})
+		current := &v1beta1.Migration{}
+		err := k8sClient.Get(ctx, key, current)
+		if featureE2ERunValue != "" && err == nil && current.UID != m.UID {
+			StopTrying(fmt.Sprintf("refusing to delete replacement feature Migration %s", name)).Now()
+		}
 		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Migration %s still terminating", name)
 	}, 5*time.Minute, 2*time.Second).Should(Succeed())
 }

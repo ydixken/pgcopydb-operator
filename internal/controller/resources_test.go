@@ -41,7 +41,10 @@ import (
 )
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
-const pgoutputPlugin = "pgoutput"
+const (
+	pgoutputPlugin  = "pgoutput"
+	featureRunOwner = "run-owner"
+)
 
 // Schema fixtures for the clone-rights filter tests, hoisted for goconst.
 const (
@@ -65,6 +68,33 @@ func passwordMigration() *v1beta1.Migration {
 			},
 			Target: v1beta1.PostgresConnection{Host: "t", Database: "d", Username: "u"},
 		},
+	}
+}
+
+func TestFeatureE2ERunLabelPropagatesToDependentJobs(t *testing.T) {
+	m := passwordMigration()
+	m.Labels = map[string]string{
+		labelFeatureE2ERun:       featureRunOwner,
+		"customer.example/label": "preserve-on-migration-only",
+	}
+	worker, err := buildJob(m, "img", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup, err := buildCleanupJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []*batchv1.Job{worker, cleanup} {
+		if got := job.Labels[labelFeatureE2ERun]; got != featureRunOwner {
+			t.Errorf("%s ownership label = %q", job.Name, got)
+		}
+		if got := job.Spec.Template.Labels[labelFeatureE2ERun]; got != featureRunOwner {
+			t.Errorf("%s Pod ownership label = %q", job.Name, got)
+		}
+		if _, copied := job.Labels["customer.example/label"]; copied {
+			t.Errorf("%s copied an unrelated Migration label", job.Name)
+		}
 	}
 }
 

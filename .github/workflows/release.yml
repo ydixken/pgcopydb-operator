@@ -286,6 +286,10 @@ jobs:
     needs: [chart]
     runs-on: github-runner-pgcopydb-e2e
     environment: e2e-cluster
+    concurrency:
+      # Every protected cluster run queues on the same single-tenant fixture.
+      group: e2e-cluster
+      cancel-in-progress: false
     timeout-minutes: 260
     steps:
       - uses: actions/checkout@v7

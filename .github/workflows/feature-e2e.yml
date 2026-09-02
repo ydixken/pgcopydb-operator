@@ -1,0 +1,634 @@
+name: Feature E2E
+
+"on":
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open same-repository pull request number
+        required: true
+        type: string
+      mode:
+        description: Full merge gate or one focused diagnostic
+        required: true
+        default: full
+        type: choice
+        options: [full, focus]
+      focus:
+        description: Ginkgo focus expression, required only for focus mode
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+  MANAGER_IMAGE: ghcr.io/${{ github.repository }}
+  RUNNER_IMAGE: ghcr.io/${{ github.repository }}/runner
+
+jobs:
+  resolve:
+    if: github.repository == 'ydixken/pgcopydb-operator' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {contents: read, pull-requests: read}
+    outputs:
+      pr: ${{ steps.resolve.outputs.pr }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      focus: ${{ steps.resolve.outputs.focus }}
+    steps:
+      - name: Resolve pull request
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_FOCUS: ${{ inputs.focus }}
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be positive"; exit 1; }
+          case "$INPUT_MODE" in
+            full) [ -z "$INPUT_FOCUS" ] || { echo "::error::focus must be empty for full"; exit 1; } ;;
+            focus) case "$INPUT_FOCUS" in *[![:space:]]*) ;; *) echo "::error::focus is required"; exit 1 ;; esac ;;
+            *) echo "::error::mode must be full or focus"; exit 1 ;;
+          esac
+          sanitized=$(printf '%s' "$INPUT_FOCUS" | LC_ALL=C tr -d '\000-\037\177')
+          [ "$sanitized" = "$INPUT_FOCUS" ] || { echo "::error::focus contains a control character"; exit 1; }
+          pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${INPUT_PR}")
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .state == "open" and .base.ref == "main" and
+            .base.repo.full_name == $repo and .head.repo.full_name == $repo
+          ' <<<"$pr_json" >/dev/null || { echo "::error::pull request is not trusted"; exit 1; }
+          sha=$(jq -er '.head.sha' <<<"$pr_json")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head is not a full SHA"; exit 1; }
+          printf 'pr=%s\nsha=%s\nmode=%s\nfocus=%s\n' \
+            "$INPUT_PR" "$sha" "$INPUT_MODE" "$INPUT_FOCUS" >> "$GITHUB_OUTPUT"
+
+  pending-status:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {statuses: write}
+    steps:
+      - name: Publish pending status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          RUN_MODE: ${{ needs.resolve.outputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          context=feature-e2e
+          [ "$RUN_MODE" = focus ] && context=feature-e2e/focus
+          description='Feature e2e is running'
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending -f context="$context" \
+            -f description="$description" -f target_url="$RUN_URL" >/dev/null
+
+  preflight:
+    needs: [resolve, pending-status]
+    runs-on: github-runner-pgcopydb-operator
+    timeout-minutes: 30
+    permissions: {contents: read, packages: read}
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check candidate compatibility
+        run: |
+          set -euo pipefail
+          make -C trusted controller-gen
+          (
+            cd candidate
+            ../trusted/bin/controller-gen rbac:roleName=manager-role crd webhook \
+              paths="./..." output:crd:artifacts:config=config/crd/bases
+            generated_drift=$(git status --porcelain -- config/crd/bases config/rbac)
+            [ -z "$generated_drift" ] || {
+              echo "::error::generated CRD or RBAC files are stale"
+              exit 1
+            }
+            ../trusted/hack/sync-chart-crd.sh --check
+            ../trusted/hack/sync-chart-rbac.sh --check
+          )
+          (
+            cd trusted
+            FEATURE_E2E_BASE="$GITHUB_WORKSPACE/trusted" \
+            FEATURE_E2E_HEAD="$GITHUB_WORKSPACE/candidate" \
+              go test ./test/buildconfig \
+                -run '^TestFeatureE2ECandidateCompatibility$' -count=1
+          )
+          builder_ref() {
+            local file=$1
+            local image='ghcr\.io/ydixken/pgcopydb-operator/pgcopydb-builder'
+            [ "$(grep -c '^FROM .*pgcopydb-builder:' "$file")" -eq 1 ]
+            sed -nE \
+              "s|^FROM (${image}:[^[:space:]]+@sha256:[0-9a-f]{64}) AS pgcopydb$|\1|p" \
+              "$file"
+          }
+          trusted_ref=$(builder_ref trusted/images/runner/Dockerfile)
+          candidate_ref=$(builder_ref candidate/images/runner/Dockerfile)
+          [ -n "$trusted_ref" ]
+          [ "$candidate_ref" = "$trusted_ref" ]
+          docker buildx imagetools inspect "$candidate_ref" >/dev/null
+
+  manager-image:
+    needs: [resolve, preflight]
+    runs-on: github-runner-pgcopydb-operator
+    timeout-minutes: 90
+    permissions: {contents: read, packages: write}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push manager
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.MANAGER_IMAGE }}:feature-${{ needs.resolve.outputs.sha }}
+          build-args: VERSION=feature-${{ needs.resolve.outputs.sha }}
+
+  runner-image:
+    needs: [resolve, preflight]
+    runs-on: github-runner-pgcopydb-operator
+    timeout-minutes: 150
+    permissions: {contents: read, packages: write}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push runner
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: images/runner
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.RUNNER_IMAGE }}:feature-${{ needs.resolve.outputs.sha }}
+
+  cluster:
+    needs: [resolve, manager-image, runner-image]
+    runs-on: github-runner-pgcopydb-e2e
+    environment: e2e-cluster
+    timeout-minutes: 300
+    permissions: {contents: read, packages: read}
+    concurrency:
+      group: e2e-cluster
+      cancel-in-progress: false
+    outputs:
+      suite: ${{ steps.suite.outcome }}
+      cleanup: ${{ steps.cleanup.outcome }}
+    env:
+      MANAGER_REF: ghcr.io/${{ github.repository }}:feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
+      RUNNER_REF: ghcr.io/${{ github.repository }}/runner:feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Require exclusive controller policy
+        env:
+          E2E_EXCLUSIVE_CONTROLLER: ${{ vars.E2E_EXCLUSIVE_CONTROLLER }}
+        run: |
+          set -euo pipefail
+          [ "$E2E_EXCLUSIVE_CONTROLLER" = "true" ] || {
+            echo "::error::exclusive controller policy is not attested"
+            exit 1
+          }
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mask and confirm Kubernetes context
+        env:
+          E2E_EXPECT_CONTEXT: ${{ secrets.E2E_EXPECT_CONTEXT }}
+        run: |
+          set -euo pipefail
+          [ -n "$E2E_EXPECT_CONTEXT" ] || {
+            echo "::error::expected Kubernetes context is not configured"
+            exit 1
+          }
+          printf '::add-mask::%s\n' "$E2E_EXPECT_CONTEXT"
+          actual=$(kubectl config current-context)
+          [ -n "$actual" ] || {
+            echo "::error::Kubernetes context is empty"
+            exit 1
+          }
+          printf '::add-mask::%s\n' "$actual"
+          [ "$actual" = "$E2E_EXPECT_CONTEXT" ] || {
+            echo "::error::Kubernetes context mismatch"
+            exit 1
+          }
+      - name: Validate immutable inputs
+        env:
+          E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
+        run: |
+          set -euo pipefail
+          [ -n "$E2E_PROMETHEUS_URL" ] || {
+            echo "::error::Prometheus URL is not configured"
+            exit 1
+          }
+          [[ "$MANAGER_REF" =~ ^ghcr\.io/ydixken/pgcopydb-operator:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]]
+          [[ "$RUNNER_REF" =~ ^ghcr\.io/ydixken/pgcopydb-operator/runner:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$MANAGER_REF" >/dev/null
+          docker buildx imagetools inspect "$RUNNER_REF" >/dev/null
+      - name: Write cluster helpers
+        run: |
+          set -euo pipefail
+          FEATURE_E2E_HELPERS=$RUNNER_TEMP/feature-e2e
+          REAL_HELM=$(command -v helm)
+          FEATURE_E2E_OWNER_KEY=pgcopydb-operator.io/feature-e2e-run
+          FEATURE_E2E_OWNER_FILE=$FEATURE_E2E_HELPERS/owner
+          install -d -m 0755 "$FEATURE_E2E_HELPERS/bin"
+          umask 077
+          od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$FEATURE_E2E_OWNER_FILE"
+          [[ "$(<"$FEATURE_E2E_OWNER_FILE")" =~ ^[0-9a-f]{32}$ ]]
+          [ "$(stat -c '%a' "$FEATURE_E2E_OWNER_FILE")" = 600 ]
+
+          cat > "$FEATURE_E2E_HELPERS/attest-image" <<'EOF_ATTEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          namespace=$1
+          selector=$2
+          container=$3
+          expected_ref=$4
+          [[ "$expected_ref" =~ @sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::attestation reference is not immutable"
+            exit 1
+          }
+          pods=$(kubectl get pods -n "$namespace" -l "$selector" -o json)
+          count=$(jq --arg container "$container" --arg image "$expected_ref" '
+            [.items[] | select(any(.spec.containers[];
+              .name == $container and .image == $image))] | length
+          ' <<<"$pods")
+          [ "$count" -eq 1 ] || {
+            echo "::error::expected exactly one eligible controller or canary Pod"
+            exit 1
+          }
+          image_id=$(jq -er --arg container "$container" --arg image "$expected_ref" '
+            .items[] | select(any(.spec.containers[];
+              .name == $container and .image == $image)) |
+            .status.containerStatuses[] | select(.name == $container) | .imageID
+          ' <<<"$pods")
+          case "$image_id" in
+            *@sha256:*) actual_digest="sha256:${image_id##*@sha256:}" ;;
+            *://sha256:*) actual_digest="sha256:${image_id##*://sha256:}" ;;
+            *) echo "::error::runtime imageID has no digest"; exit 1 ;;
+          esac
+          top_digest=${expected_ref##*@}
+          raw=$(docker buildx imagetools inspect "$expected_ref" --raw)
+          jq -e --arg actual "$actual_digest" --arg top "$top_digest" '
+            $actual == $top or any(.manifests[]?; .digest == $actual)
+          ' <<<"$raw" >/dev/null || {
+            echo "::error::runtime imageID does not belong to the requested manifest"
+            exit 1
+          }
+          EOF_ATTEST
+
+          cat > "$FEATURE_E2E_HELPERS/cleanup" <<'EOF_CLEANUP'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
+          [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]] || {
+            echo "::error::feature ownership value is invalid"
+            exit 1
+          }
+          owner_selector="$FEATURE_E2E_OWNER_KEY=$owner_value"
+          expected_dir=$FEATURE_E2E_HELPERS/expected
+          install -d -m 0700 "$expected_dir"
+
+          capture_expected() {
+            local file=$1
+            shift
+            "$@" -l "$owner_selector" -o name > "$file"
+          }
+          require_expected() {
+            local file=$1
+            local description=$2
+            shift 2
+            local actual name
+            [ -s "$file" ] || return 0
+            actual=$("$@" -l "$owner_selector" -o name)
+            while IFS= read -r name; do
+              grep -Fqx -- "$name" <<<"$actual" || {
+                echo "::error::expected run-owned $description is absent"
+                return 1
+              }
+            done < "$file"
+          }
+          require_empty() {
+            local description=$1
+            shift
+            local result
+            result=$("$@" -l "$owner_selector" -o name)
+            [ -z "$result" ] || {
+              echo "::error::run-owned $description remain after cleanup"
+              return 1
+            }
+          }
+
+          for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
+            expected="$expected_dir/migrations-$namespace"
+            capture_expected "$expected" kubectl get migrations.pgcopydb-operator.io -n "$namespace"
+            require_expected "$expected" Migrations \
+              kubectl get migrations.pgcopydb-operator.io -n "$namespace"
+            if [ -s "$expected" ]; then
+              kubectl delete migrations.pgcopydb-operator.io -n "$namespace" \
+                -l "$owner_selector" --wait=true --timeout=5m >/dev/null
+            fi
+          done
+          for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
+            expected="$expected_dir/jobs-$namespace"
+            capture_expected "$expected" kubectl get jobs -n "$namespace"
+            require_expected "$expected" Jobs kubectl get jobs -n "$namespace"
+            if [ -s "$expected" ]; then
+              kubectl delete jobs -n "$namespace" -l "$owner_selector" \
+                --cascade=foreground --wait=true --timeout=5m >/dev/null
+            fi
+          done
+
+          controller_expected=$expected_dir/controller
+          capture_expected "$controller_expected" kubectl get deployments -n pgcopydb-e2e-system
+          [ "$(wc -l < "$controller_expected")" -eq 1 ] || {
+            echo "::error::expected one run-owned feature controller"
+            exit 1
+          }
+          require_expected "$controller_expected" "feature controller" \
+            kubectl get deployments -n pgcopydb-e2e-system
+          controller=$(<"$controller_expected")
+          release=$(kubectl get "$controller" -n pgcopydb-e2e-system \
+            -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')
+          [ -n "$release" ] || {
+            echo "::error::run-owned feature controller has no Helm release"
+            exit 1
+          }
+          [[ "$release" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
+            echo "::error::run-owned feature controller has an invalid Helm release"
+            exit 1
+          }
+          "$REAL_HELM" uninstall "$release" -n pgcopydb-e2e-system \
+            --wait --timeout=5m >/dev/null
+
+          for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
+            require_empty "Migrations in $namespace" \
+              kubectl get migrations.pgcopydb-operator.io -n "$namespace"
+            require_empty "worker or cleanup Jobs in $namespace" \
+              kubectl get jobs -n "$namespace"
+          done
+          require_empty "feature controller Deployments" \
+            kubectl get deployments -n pgcopydb-e2e-system
+          require_empty "feature controller Pods" \
+            kubectl get pods -n pgcopydb-e2e-system
+          remaining=$("$REAL_HELM" list -n pgcopydb-e2e-system -q \
+            --filter "^${release}$")
+          [ -z "$remaining" ] || {
+            echo "::error::feature Helm release remains after cleanup"
+            exit 1
+          }
+          EOF_CLEANUP
+
+          cat > "$FEATURE_E2E_HELPERS/bin/helm" <<'EOF_HELM'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          "$REAL_HELM" "$@"
+          if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
+            owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
+            [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]]
+            owner_selector="$FEATURE_E2E_OWNER_KEY=$owner_value"
+            "$REAL_HELM" get manifest pgcopydb-e2e -n pgcopydb-e2e-system |
+              kubectl label -f - "$FEATURE_E2E_OWNER_KEY=$owner_value" --overwrite >/dev/null
+            patch=$(jq -cn --arg key "$FEATURE_E2E_OWNER_KEY" --arg value "$owner_value" \
+              '{metadata:{labels:{($key):$value}},spec:{template:{metadata:{labels:{($key):$value}}}}}')
+            kubectl patch deployment pgcopydb-e2e -n pgcopydb-e2e-system \
+              --type=merge -p "$patch" >/dev/null
+            kubectl rollout status deployment/pgcopydb-e2e -n pgcopydb-e2e-system \
+              --timeout=5m >/dev/null
+            "$FEATURE_E2E_HELPERS/attest-image" \
+              pgcopydb-e2e-system \
+              "app.kubernetes.io/instance=pgcopydb-e2e,app.kubernetes.io/name=pgcopydb-operator,$owner_selector" \
+              manager "$MANAGER_REF"
+            deployments=$(kubectl get deployments -n pgcopydb-e2e-system \
+              -l "$owner_selector" -o json)
+            ready=$(kubectl get pods -n pgcopydb-e2e-system \
+              -l "$owner_selector" -o json |
+              jq '[.items[] | select(any(.status.conditions[]?;
+                .type == "Ready" and .status == "True"))] | length')
+            [ "$ready" -eq 1 ] || {
+              echo "::error::feature controller is not uniquely Ready"
+              exit 1
+            }
+            count=$(jq --arg expected "--runner-image=$RUNNER_REF" '
+              [.items[] | .spec.template.spec.containers[] |
+                select(.name == "manager") | .args[] | select(. == $expected)] | length
+            ' <<<"$deployments")
+            [ "$count" -eq 1 ] || {
+              echo "::error::manager does not carry the immutable runner reference"
+              exit 1
+            }
+            : > "$FEATURE_E2E_HELPERS/manager-attested"
+          fi
+          EOF_HELM
+
+          chmod 0755 "$FEATURE_E2E_HELPERS/attest-image" \
+            "$FEATURE_E2E_HELPERS/cleanup" "$FEATURE_E2E_HELPERS/bin/helm"
+          {
+            printf 'REAL_HELM=%s\n' "$REAL_HELM"
+            printf 'FEATURE_E2E_HELPERS=%s\n' "$FEATURE_E2E_HELPERS"
+            printf 'FEATURE_E2E_OWNER_KEY=%s\n' "$FEATURE_E2E_OWNER_KEY"
+            printf 'FEATURE_E2E_OWNER_FILE=%s\n' "$FEATURE_E2E_OWNER_FILE"
+          } >> "$GITHUB_ENV"
+      - name: Require an empty feature slot
+        run: |
+          set -euo pipefail
+          releases=$("$REAL_HELM" list -n pgcopydb-e2e-system -q \
+            --filter '^pgcopydb-e2e$')
+          [ -z "$releases" ] || {
+            echo "::error::feature controller slot is occupied"
+            exit 1
+          }
+          canary=$(kubectl get job feature-e2e-runner-attest -n pgcopydb-e2e \
+            --ignore-not-found -o name)
+          [ -z "$canary" ] || {
+            echo "::error::feature runner slot is occupied"
+            exit 1
+          }
+      - name: Attest runner image
+        run: |
+          set -euo pipefail
+          owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
+          [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]]
+          kubectl apply -f - >/dev/null <<EOF
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: feature-e2e-runner-attest
+            namespace: pgcopydb-e2e
+            labels:
+              $FEATURE_E2E_OWNER_KEY: $owner_value
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: 120
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: feature-e2e-runner-attest
+                  $FEATURE_E2E_OWNER_KEY: $owner_value
+              spec:
+                automountServiceAccountToken: false
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  seccompProfile: {type: RuntimeDefault}
+                containers:
+                  - name: runner
+                    image: $RUNNER_REF
+                    imagePullPolicy: IfNotPresent
+                    command: [pgcopydb, --version]
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities: {drop: [ALL]}
+          EOF
+          kubectl wait job/feature-e2e-runner-attest -n pgcopydb-e2e \
+            --for=condition=complete --timeout=2m >/dev/null
+          "$FEATURE_E2E_HELPERS/attest-image" pgcopydb-e2e \
+            "job-name=feature-e2e-runner-attest,$FEATURE_E2E_OWNER_KEY=$owner_value" \
+            runner "$RUNNER_REF"
+      - name: Run non-chaos suite
+        id: suite
+        continue-on-error: true
+        env:
+          RUN_MODE: ${{ needs.resolve.outputs.mode }}
+          E2E_FOCUS: ${{ needs.resolve.outputs.focus }}
+          E2E_OPERATOR_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
+          E2E_RUNNER_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
+          E2E_SCALE: "0.1"
+          E2E_MANAGE_NAMESPACES: "false"
+          E2E_KEEP_FIXTURES: "true"
+          E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
+          E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
+        run: |
+          set -euo pipefail
+          rm -f "$FEATURE_E2E_HELPERS/manager-attested"
+          export PATH="$FEATURE_E2E_HELPERS/bin:$PATH"
+          export E2E_RUN_LABEL_VALUE
+          E2E_RUN_LABEL_VALUE=$(<"$FEATURE_E2E_OWNER_FILE")
+          [[ "$E2E_RUN_LABEL_VALUE" =~ ^[0-9a-f]{32}$ ]]
+          test_args=(
+            ./test/e2e/...
+            -v
+            -timeout 4h
+            -ginkgo.v
+            -ginkgo.timeout=4h
+            -ginkgo.poll-progress-after=15m
+            -ginkgo.label-filter=!chaos
+            -ginkgo.fail-on-empty
+          )
+          if [ "$RUN_MODE" = focus ]; then
+            test_args+=("-ginkgo.focus=$E2E_FOCUS")
+          fi
+          set +e
+          go test "${test_args[@]}"
+          suite_result=$?
+          set -e
+          [ -f "$FEATURE_E2E_HELPERS/manager-attested" ] || {
+            echo "::error::manager attestation did not complete"
+            exit 1
+          }
+          exit "$suite_result"
+      - name: Cleanup feature resources
+        id: cleanup
+        if: always()
+        run: |
+          "$FEATURE_E2E_HELPERS/cleanup"
+      - name: Require suite and cleanup success
+        if: always()
+        env:
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+          CLEANUP_OUTCOME: ${{ steps.cleanup.outcome }}
+        run: |
+          set -euo pipefail
+          [ "$SUITE_OUTCOME" = success ] && [ "$CLEANUP_OUTCOME" = success ]
+
+  final-status:
+    needs:
+      - resolve
+      - pending-status
+      - preflight
+      - manager-image
+      - runner-image
+      - cluster
+    if: always() && needs.resolve.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {statuses: write}
+    steps:
+      - name: Publish final status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          RUN_MODE: ${{ needs.resolve.outputs.mode }}
+          CLUSTER_RESULT: ${{ needs.cluster.result }}
+          SUITE_OUTCOME: ${{ needs.cluster.outputs.suite }}
+          CLEANUP_OUTCOME: ${{ needs.cluster.outputs.cleanup }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          context=feature-e2e
+          [ "$RUN_MODE" = focus ] && context=feature-e2e/focus
+          if [ "$CLUSTER_RESULT" = success ] && \
+             [ "$SUITE_OUTCOME" = success ] && \
+             [ "$CLEANUP_OUTCOME" = success ]; then
+            state=success
+            description='Feature e2e passed'
+          elif [ "$SUITE_OUTCOME" = failure ] && \
+               [ "$CLEANUP_OUTCOME" = success ]; then
+            state=failure
+            description='Feature e2e assertions failed'
+          else
+            state=error
+            description='Feature e2e could not complete safely'
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state="$state" -f context="$context" \
+            -f description="$description" -f target_url="$RUN_URL" >/dev/null
