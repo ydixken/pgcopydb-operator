@@ -17,5 +17,6 @@ Where to go:
 - [Argo CD health checks](operations/argocd.md): GitOps health for `Migration` resources.
 - [Troubleshooting](troubleshooting.md): symptoms mapped to causes and fixes.
 - [Prerequisites](reference/prerequisites.md): what your endpoints must provide; read this before a live migration.
+- [Planning checklist](planning.md): decisions to settle before creating a `Migration`.
 - [CRD reference](reference/api.md): every `Migration` field with defaults and validation.
 - [Conditions and reasons](reference/conditions.md): the condition types and reason strings as API contract.
