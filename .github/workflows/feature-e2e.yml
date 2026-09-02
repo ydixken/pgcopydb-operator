@@ -115,11 +115,9 @@ jobs:
       - name: Check candidate compatibility
         run: |
           set -euo pipefail
-          make -C trusted controller-gen
+          make -C candidate -f ../trusted/Makefile manifests
           (
             cd candidate
-            ../trusted/bin/controller-gen rbac:roleName=manager-role crd webhook \
-              paths="./..." output:crd:artifacts:config=config/crd/bases
             generated_drift=$(git status --porcelain -- config/crd/bases config/rbac)
             [ -z "$generated_drift" ] || {
               echo "::error::generated CRD or RBAC files are stale"

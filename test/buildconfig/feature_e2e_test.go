@@ -816,7 +816,7 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 	}
 	preflight := protectedRuns(wf.Jobs["preflight"])
 	for _, want := range []string{
-		"make -C trusted controller-gen", "../trusted/bin/controller-gen",
+		"make -C candidate -f ../trusted/Makefile manifests",
 		"git status --porcelain -- config/crd/bases config/rbac",
 		"../trusted/hack/sync-chart-crd.sh --check", "../trusted/hack/sync-chart-rbac.sh --check",
 		"FEATURE_E2E_BASE", "FEATURE_E2E_HEAD", "FEATURE_E2E_HELM",
