@@ -2589,6 +2589,23 @@ printf '%s' "$FAKE_REGISTRY"
 	}
 }
 
+func TestFeatureE2EClusterUsesDaemonlessRegistryInspection(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	cluster := wf.Jobs["cluster"]
+	if steps := protectedStepsUsing(cluster, "docker/setup-buildx-action@v4"); len(steps) != 0 {
+		t.Fatalf("cluster setup-buildx steps = %d, want 0", len(steps))
+	}
+	if steps := protectedStepsUsing(cluster, "docker/login-action@v4"); len(steps) != 1 {
+		t.Errorf("cluster login steps = %d, want 1", len(steps))
+	}
+	inputs := protectedStepNamed(t, cluster, "Validate immutable inputs").Run
+	for _, ref := range []string{"$MANAGER_REF", "$RUNNER_REF"} {
+		if !strings.Contains(inputs, `docker buildx imagetools inspect "`+ref+`"`) {
+			t.Errorf("immutable input validation does not inspect %s", ref)
+		}
+	}
+}
+
 func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // One graph owns the safety ordering.
 	wf := parseProtectedWorkflow(t, featureWorkflow)
 	body := read(t, featureWorkflow)
