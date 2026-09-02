@@ -11,7 +11,7 @@ pgcopydb is a migration tool, not a backup system.
 1. Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move or be excluded?
 2. What are the source, target, pgcopydb, pg_dump, and pg_restore versions, and is the target compatible with required extensions, types, collations, and locales?
 3. What downtime, RPO, RTO, maintenance window, load impact, and acceptance criteria are agreed?
-4. Where will pgcopydb run, can it maintain TLS-verified connections to both endpoints, and which least-privilege roles and credential process will it use?
+4. Where will pgcopydb run, can it maintain TLS-verified connections to both endpoints, and which roles and credential process will it use?
 5. What are the database size, largest relations, write and WAL rates, largest transaction, growth, and available connection, compute, I/O, network, and work-disk capacity?
 6. Does the downtime requirement justify follow mode, and has a plain clone rehearsal established copy time and resource use?
 7. Is logical decoding ready, including logical WAL, slot and WAL sender capacity, plugin availability, HBA access, retention limits, and slot behavior after failover?
