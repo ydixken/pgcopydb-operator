@@ -290,7 +290,8 @@ jobs:
           REAL_HELM=$(command -v helm)
           FEATURE_E2E_OWNER_KEY=pgcopydb-operator.io/feature-e2e-run
           FEATURE_E2E_OWNER_FILE=$FEATURE_E2E_HELPERS/owner
-          install -d -m 0755 "$FEATURE_E2E_HELPERS/bin"
+          install -d -m 0755 "$FEATURE_E2E_HELPERS/bin" \
+            "$FEATURE_E2E_HELPERS/plugins/feature-e2e-postrenderer"
           umask 077
           od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$FEATURE_E2E_OWNER_FILE"
           [[ "$(<"$FEATURE_E2E_OWNER_FILE")" =~ ^[0-9a-f]{32}$ ]]
@@ -789,6 +790,18 @@ jobs:
           cat "$output"
           EOF_POST_RENDERER
 
+          cat > "$FEATURE_E2E_HELPERS/plugins/feature-e2e-postrenderer/plugin.yaml" <<'EOF_HELM_PLUGIN'
+          name: feature-e2e-postrenderer
+          version: "1.0.0"
+          type: postrenderer/v1
+          apiVersion: v1
+          runtime: subprocess
+          runtimeConfig:
+            platformCommand:
+              - command: "${HELM_PLUGIN_DIR}/post-renderer"
+          EOF_HELM_PLUGIN
+          ln -s ../../post-renderer "$FEATURE_E2E_HELPERS/plugins/feature-e2e-postrenderer/post-renderer"
+
           cat > "$FEATURE_E2E_HELPERS/ownership" <<'EOF_OWNERSHIP'
           feature_owner_value() {
             FEATURE_OWNER_VALUE=$(<"$FEATURE_E2E_OWNER_FILE")
@@ -1168,8 +1181,9 @@ jobs:
               --set-string fullnameOverride=pgcopydb-e2e
               --atomic
               --timeout=5m
-              --post-renderer "$FEATURE_E2E_HELPERS/post-renderer"
+              --post-renderer feature-e2e-postrenderer
             )
+            export HELM_PLUGINS="$FEATURE_E2E_HELPERS/plugins"
           fi
           install_result=0
           "$REAL_HELM" "${helm_args[@]}" || install_result=$?
