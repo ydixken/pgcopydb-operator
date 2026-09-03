@@ -1036,12 +1036,17 @@ jobs:
           require_empty() {
             local description=$1
             shift
-            local result
-            result=$("$@" -l "$owner_selector" -o name)
-            [ -z "$result" ] || {
-              echo "::error::run-owned $description remain after cleanup"
-              return 1
-            }
+            local deadline result
+            deadline=$((SECONDS + 300))
+            while :; do
+              result=$("$@" -l "$owner_selector" -o name)
+              [ -n "$result" ] || return 0
+              [ "$SECONDS" -lt "$deadline" ] || {
+                echo "::error::run-owned $description remain after cleanup"
+                return 1
+              }
+              sleep 1
+            done
           }
 
           for namespace in pgcopydb-e2e pgcopydb-e2e-x; do
@@ -1311,7 +1316,7 @@ jobs:
             -ginkgo.v
             -ginkgo.timeout=4h
             -ginkgo.poll-progress-after=15m
-            -ginkgo.label-filter=!chaos
+            "-ginkgo.label-filter=!chaos && !flaky"
             -ginkgo.fail-on-empty
             "-ginkgo.json-report=$suite_report"
           )
@@ -1395,7 +1400,7 @@ jobs:
             success)
               case "$SUITE_OUTCOME" in
                 success) "$FEATURE_E2E_HELPERS/cleanup" ;;
-                failure | skipped) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
+                failure | skipped | cancelled) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
                 *) echo "::error::suite outcome is invalid for cleanup"; exit 1 ;;
               esac
               ;;

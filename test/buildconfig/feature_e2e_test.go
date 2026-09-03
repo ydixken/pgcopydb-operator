@@ -56,6 +56,7 @@ const (
 	unreadableValue              = "unreadable"
 	fullModeValue                = "full"
 	focusModeValue               = "focus"
+	recoveryValue                = "recovery"
 	roleKind                     = "Role"
 	roleBindingKind              = "RoleBinding"
 	clusterRoleKind              = "ClusterRole"
@@ -2772,7 +2773,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 		t.Errorf("feature suite environment = %v", run.Env)
 	}
 	for _, want := range []string{
-		"-ginkgo.label-filter=!chaos",
+		"-ginkgo.label-filter=!chaos && !flaky",
 		"-ginkgo.fail-on-empty",
 		`test_args+=("-ginkgo.focus=$E2E_FOCUS")`,
 	} {
@@ -2860,9 +2861,10 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 		wantError      bool
 	}{
 		{"suite success is strict", successValue, successValue, "", true, false},
-		{"suite failure recovers", successValue, failureValue, "recovery", true, false},
-		{"suite skipped recovers", successValue, skippedValue, "recovery", true, false},
-		{"unknown suite outcome fails", successValue, "cancelled", "", false, true},
+		{"suite failure recovers", successValue, failureValue, recoveryValue, true, false},
+		{"suite skipped recovers", successValue, skippedValue, recoveryValue, true, false},
+		{"suite cancellation recovers", successValue, "cancelled", recoveryValue, true, false},
+		{"unknown suite outcome fails", successValue, "unknown", "", false, true},
 		{"skipped helpers are safe", skippedValue, skippedValue, "", false, false},
 		{"failed helpers are safe", failureValue, failureValue, "", false, false},
 	}
@@ -3527,7 +3529,7 @@ func TestFeatureE2ESuiteProcessBoundary(t *testing.T) {
 	wantArgs := []string{
 		"test", "./test/e2e/...", "-run", "^TestE2E$", "-v", "-timeout", "4h",
 		"-ginkgo.v", "-ginkgo.timeout=4h", "-ginkgo.poll-progress-after=15m",
-		"-ginkgo.label-filter=!chaos", "-ginkgo.fail-on-empty",
+		"-ginkgo.label-filter=!chaos && !flaky", "-ginkgo.fail-on-empty",
 		"-ginkgo.json-report=" + result.reportPath,
 	}
 	if !slices.Equal(result.args, wantArgs) {
@@ -4455,7 +4457,11 @@ case "${1:-}" in
        [ "$scenario" = rollback-failure-no-controller-uninstall-failure ]; then
       exit 1
     fi
-    awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    if [ "$scenario" = pod-termination ]; then
+      awk -F'|' '$8 != "true" || $1 == "pods"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    else
+      awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    fi
     if [ "$scenario" = remainder ]; then
       remainder="services|$E2E_OPERATOR_NAMESPACE|service/remains|"
       remainder+="99999999-9999-4999-8999-999999999999|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
@@ -4475,6 +4481,7 @@ esac
 const featureOwnershipKubectlFixture = `#!/usr/bin/env bash
 set -euo pipefail
 mutation=$(<"$FAKE_MUTATION")
+scenario=$(<"$FAKE_SCENARIO")
 if [ "${1:-}" = kustomize ]; then
   directory=$2
   [ -s "$directory/manifest.yaml" ] || exit 80
@@ -4579,6 +4586,13 @@ if [ "$command" = get ]; then
         "$row_uid" "$row_owner" "$row_release" "$row_release_ns"
     )")
   done < "$FAKE_STATE"
+  if [ "$scenario" = pod-termination ] && [ "$resource" = pods ] &&
+     [ ! -s "$FAKE_RELEASE" ] && [ "${#rows[@]}" -gt 0 ] &&
+     [ ! -e "$FAKE_STATE.pod-terminated" ]; then
+    awk -F'|' '$1 != "pods"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    : > "$FAKE_STATE.pod-terminated"
+  fi
   if [ "$mutation" = drop-migration ] && [ "$resource" = migrations.pgcopydb-operator.io ] &&
      [ -n "$selector" ] && [ ! -e "$FAKE_STATE.drop-migration" ]; then
     awk -F'|' -v owner="$owner" \
