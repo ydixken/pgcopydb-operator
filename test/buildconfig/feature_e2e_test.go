@@ -1493,7 +1493,8 @@ func runImageAttestationFixture(
 	expectedRef := fixture.managerRef
 	kubectlResponse := fixture.pods
 	expectedKubectlArgs := "get deployments,replicasets,pods -n " + featureControllerNS + " -l " +
-		ownerSelector + " -o json"
+		ownerSelector + ",app.kubernetes.io/instance=" + featureControllerName +
+		",app.kubernetes.io/name=pgcopydb-operator -o json"
 	if fixture.component == imageAttestationManagerComponent {
 		kubectlResponse = managerCorrelationResourcesForPods(
 			t, fixture.managerRef, fixture.runnerRef, fixture.pods,
@@ -2204,7 +2205,7 @@ func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
 	want = append(want, candidate...)
 	want = append(want,
 		helmSetStringFlag, "fullnameOverride="+featureControllerName,
-		"--atomic", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
+		"--rollback-on-failure", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
 	)
 	if !slices.Equal(got, want) {
 		t.Errorf("effective Helm arguments = %q, want trusted suffix after %q", got, want)
@@ -2629,7 +2630,9 @@ if [ "${1:-}" = get ]; then
     exit 0
   fi
   expected="get deployments,replicasets,pods -n $E2E_OPERATOR_NAMESPACE"
-  expected="$expected -l $FEATURE_E2E_OWNER_KEY=$FAKE_OWNER_VALUE -o json"
+  expected="$expected -l $FEATURE_E2E_OWNER_KEY=$FAKE_OWNER_VALUE"
+  expected="$expected,app.kubernetes.io/instance=pgcopydb-e2e"
+  expected="$expected,app.kubernetes.io/name=pgcopydb-operator -o json"
   [ "$*" = "$expected" ] || exit 98
   jq -c --arg key "$FEATURE_E2E_OWNER_KEY" --arg value "$FAKE_OWNER_VALUE" '
     if (.items | type) == "array" then
@@ -3968,7 +3971,7 @@ items:
 		}
 		args := strings.Fields(fixture.read("helm-args"))
 		for _, want := range []string{
-			"--atomic", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
+			"--rollback-on-failure", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
 		} {
 			if !slices.Contains(args, want) {
 				t.Errorf("trusted Helm arguments are missing %q: %v", want, args)
@@ -3976,6 +3979,40 @@ items:
 		}
 		if strings.Contains(result.output+fixture.readLog(), fixture.owner) {
 			t.Fatal("successful install printed the ownership value")
+		}
+	})
+
+	t.Run("post-install attestation failure frees the fixed slot before retry", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
+		fixture.writeMode("attest-image", "#!/usr/bin/env bash\nexit 42\n", 0o700)
+		if result := fixture.install(); result.err == nil {
+			t.Fatal("failed post-install attestation unexpectedly succeeded")
+		}
+		if fixture.hasOwnedState() || strings.TrimSpace(fixture.read("release")) != "" {
+			t.Fatal("post-install attestation failure left owned state or the fixed Helm slot")
+		}
+		if !strings.Contains(fixture.readLog(), "uninstall\n") {
+			t.Fatal("post-install attestation failure did not run bounded recovery")
+		}
+		fixture.writeMode("attest-image", "#!/usr/bin/env bash\nexit 0\n", 0o700)
+		if retry := fixture.install(); retry.err != nil {
+			t.Fatalf("clean retry after post-install failure failed: %v\n%s", retry.err, retry.output)
+		}
+		if cleanup := fixture.cleanup(); cleanup.err != nil {
+			t.Fatalf("cleanup after clean retry failed: %v\n%s", cleanup.err, cleanup.output)
+		}
+	})
+
+	t.Run("foreground uninstall waits for the controller Pod", func(t *testing.T) {
+		fixture := newFeatureOwnershipFixture(t, scripts, "pod-termination", "")
+		if result := fixture.install(); result.err != nil {
+			t.Fatalf("install failed: %v\n%s", result.err, result.output)
+		}
+		if cleanup := fixture.cleanup(); cleanup.err != nil {
+			t.Fatalf("foreground cleanup failed: %v\n%s", cleanup.err, cleanup.output)
+		}
+		if fixture.hasOwnedState() {
+			t.Fatal("foreground cleanup returned before the controller Pod disappeared")
 		}
 	})
 
@@ -4357,15 +4394,15 @@ case "${1:-}" in
     }
     printf '%s ' "$@" > "$FAKE_ARGS"
     post_renderer=
-    atomic=false
+    rollback_on_failure=false
     args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
       case "${args[$i]}" in
-        --atomic) atomic=true ;;
+        --rollback-on-failure) rollback_on_failure=true ;;
         --post-renderer) post_renderer=${args[$((i+1))]:-} ;;
       esac
     done
-    [ "$atomic" = true ] && [ "$post_renderer" = feature-e2e-postrenderer ] || exit 90
+    [ "$rollback_on_failure" = true ] && [ "$post_renderer" = feature-e2e-postrenderer ] || exit 90
     post_renderer="$HELM_PLUGINS/$post_renderer/post-renderer"
     [ -x "$post_renderer" ] || exit 90
     manifest=$(<"$FAKE_MANIFEST")
@@ -4380,6 +4417,11 @@ case "${1:-}" in
     service="services|$E2E_OPERATOR_NAMESPACE|service/pgcopydb-e2e-metrics|"
     service+="88888888-8888-4888-8888-888888888888|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
     printf '%s\n' "$controller" "$service" >> "$FAKE_STATE"
+    if [ "$scenario" = pod-termination ]; then
+      pod="pods|$E2E_OPERATOR_NAMESPACE|pod/pgcopydb-e2e-fixture|"
+      pod+="77777777-7777-4777-8777-777777777777|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
+      printf '%s\n' "$pod" >> "$FAKE_STATE"
+    fi
     printf 'pgcopydb-e2e' > "$FAKE_RELEASE"
     case "$scenario" in
       rollback-success)
@@ -4403,8 +4445,9 @@ case "${1:-}" in
     ;;
   uninstall)
     case "$*" in
-      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --wait --timeout=5m"|\
-      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --wait --timeout=5m --ignore-not-found") ;;
+      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --cascade foreground --wait --timeout=5m"|\
+      "uninstall pgcopydb-e2e -n $E2E_OPERATOR_NAMESPACE --cascade foreground --wait "\
+"--timeout=5m --ignore-not-found") ;;
       *) exit 93 ;;
     esac
     printf 'uninstall\n' >> "$FAKE_LOG"

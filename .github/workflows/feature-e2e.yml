@@ -335,8 +335,9 @@ jobs:
                 echo "::error::attestation reference is invalid"
                 exit 1
               }
+              manager_selector="$owner_selector,app.kubernetes.io/instance=pgcopydb-e2e,app.kubernetes.io/name=pgcopydb-operator"
               resources=$(kubectl get deployments,replicasets,pods -n "$namespace" \
-                -l "$owner_selector" -o json 2>/dev/null) || {
+                -l "$manager_selector" -o json 2>/dev/null) || {
                   echo "::error::unable to inspect the manager ownership chain"
                   exit 1
                 }
@@ -896,7 +897,7 @@ jobs:
             feature_revalidate_controller || validation=$?
             [ "$validation" -eq 0 ] || [ "$validation" -eq 3 ] || return 1
             "$REAL_HELM" uninstall pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
-              --wait --timeout=5m >/dev/null
+              --cascade foreground --wait --timeout=5m >/dev/null
           }
           EOF_OWNERSHIP
 
@@ -1080,9 +1081,10 @@ jobs:
             exit 1
           elif [ -s "$FEATURE_E2E_HELPERS/rendered.yaml" ]; then
             kubectl delete -f "$FEATURE_E2E_HELPERS/rendered.yaml" \
-              -l "$owner_selector" --ignore-not-found --wait=true --timeout=5m >/dev/null
+              -l "$owner_selector" --ignore-not-found --cascade=foreground \
+              --wait=true --timeout=5m >/dev/null
             "$REAL_HELM" uninstall pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
-              --wait --timeout=5m --ignore-not-found >/dev/null
+              --cascade foreground --wait --timeout=5m --ignore-not-found >/dev/null
           else
             [ ! -e "$FEATURE_E2E_HELPERS/rendered.yaml" ] || {
               echo "::error::labelled feature render is invalid for recovery"
@@ -1179,7 +1181,7 @@ jobs:
             done
             helm_args+=(
               --set-string fullnameOverride=pgcopydb-e2e
-              --atomic
+              --rollback-on-failure
               --timeout=5m
               --post-renderer feature-e2e-postrenderer
             )
@@ -1188,16 +1190,28 @@ jobs:
           install_result=0
           "$REAL_HELM" "${helm_args[@]}" || install_result=$?
           if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
+            if [ "$install_result" -eq 0 ]; then
+              . "$FEATURE_E2E_HELPERS/ownership" || install_result=$?
+            fi
+            if [ "$install_result" -eq 0 ]; then
+              feature_capture_controller || install_result=$?
+            fi
+            if [ "$install_result" -eq 0 ]; then
+              kubectl rollout status deployment/pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
+                --timeout=5m >/dev/null || install_result=$?
+            fi
+            if [ "$install_result" -eq 0 ]; then
+              "$FEATURE_E2E_HELPERS/attest-image" manager || install_result=$?
+            fi
+            if [ "$install_result" -eq 0 ]; then
+              : > "$FEATURE_E2E_HELPERS/manager-attested" || install_result=$?
+            fi
             if [ "$install_result" -ne 0 ]; then
-              "$FEATURE_E2E_HELPERS/cleanup" recovery
+              recovery_result=0
+              "$FEATURE_E2E_HELPERS/cleanup" recovery || recovery_result=$?
+              [ "$recovery_result" -eq 0 ] || exit "$recovery_result"
               exit "$install_result"
             fi
-            . "$FEATURE_E2E_HELPERS/ownership"
-            feature_capture_controller
-            kubectl rollout status deployment/pgcopydb-e2e -n "$E2E_OPERATOR_NAMESPACE" \
-              --timeout=5m >/dev/null
-            "$FEATURE_E2E_HELPERS/attest-image" manager
-            : > "$FEATURE_E2E_HELPERS/manager-attested"
           fi
           exit "$install_result"
           EOF_HELM
