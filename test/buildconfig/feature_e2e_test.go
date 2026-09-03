@@ -4457,7 +4457,11 @@ case "${1:-}" in
        [ "$scenario" = rollback-failure-no-controller-uninstall-failure ]; then
       exit 1
     fi
-    awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    if [ "$scenario" = pod-termination ]; then
+      awk -F'|' '$8 != "true" || $1 == "pods"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    else
+      awk -F'|' '$8 != "true"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    fi
     if [ "$scenario" = remainder ]; then
       remainder="services|$E2E_OPERATOR_NAMESPACE|service/remains|"
       remainder+="99999999-9999-4999-8999-999999999999|$FAKE_OWNER|pgcopydb-e2e|$E2E_OPERATOR_NAMESPACE|true"
@@ -4477,6 +4481,7 @@ esac
 const featureOwnershipKubectlFixture = `#!/usr/bin/env bash
 set -euo pipefail
 mutation=$(<"$FAKE_MUTATION")
+scenario=$(<"$FAKE_SCENARIO")
 if [ "${1:-}" = kustomize ]; then
   directory=$2
   [ -s "$directory/manifest.yaml" ] || exit 80
@@ -4581,6 +4586,13 @@ if [ "$command" = get ]; then
         "$row_uid" "$row_owner" "$row_release" "$row_release_ns"
     )")
   done < "$FAKE_STATE"
+  if [ "$scenario" = pod-termination ] && [ "$resource" = pods ] &&
+     [ ! -s "$FAKE_RELEASE" ] && [ "${#rows[@]}" -gt 0 ] &&
+     [ ! -e "$FAKE_STATE.pod-terminated" ]; then
+    awk -F'|' '$1 != "pods"' "$FAKE_STATE" > "$FAKE_STATE.tmp"
+    mv "$FAKE_STATE.tmp" "$FAKE_STATE"
+    : > "$FAKE_STATE.pod-terminated"
+  fi
   if [ "$mutation" = drop-migration ] && [ "$resource" = migrations.pgcopydb-operator.io ] &&
      [ -n "$selector" ] && [ ! -e "$FAKE_STATE.drop-migration" ]; then
     awk -F'|' -v owner="$owner" \
