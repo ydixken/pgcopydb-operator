@@ -56,6 +56,7 @@ const (
 	unreadableValue              = "unreadable"
 	fullModeValue                = "full"
 	focusModeValue               = "focus"
+	recoveryValue                = "recovery"
 	roleKind                     = "Role"
 	roleBindingKind              = "RoleBinding"
 	clusterRoleKind              = "ClusterRole"
@@ -2860,9 +2861,10 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 		wantError      bool
 	}{
 		{"suite success is strict", successValue, successValue, "", true, false},
-		{"suite failure recovers", successValue, failureValue, "recovery", true, false},
-		{"suite skipped recovers", successValue, skippedValue, "recovery", true, false},
-		{"unknown suite outcome fails", successValue, "cancelled", "", false, true},
+		{"suite failure recovers", successValue, failureValue, recoveryValue, true, false},
+		{"suite skipped recovers", successValue, skippedValue, recoveryValue, true, false},
+		{"suite cancellation recovers", successValue, "cancelled", recoveryValue, true, false},
+		{"unknown suite outcome fails", successValue, "unknown", "", false, true},
 		{"skipped helpers are safe", skippedValue, skippedValue, "", false, false},
 		{"failed helpers are safe", failureValue, failureValue, "", false, false},
 	}

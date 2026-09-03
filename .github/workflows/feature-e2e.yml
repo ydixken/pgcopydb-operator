@@ -1395,7 +1395,7 @@ jobs:
             success)
               case "$SUITE_OUTCOME" in
                 success) "$FEATURE_E2E_HELPERS/cleanup" ;;
-                failure | skipped) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
+                failure | skipped | cancelled) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
                 *) echo "::error::suite outcome is invalid for cleanup"; exit 1 ;;
               esac
               ;;
