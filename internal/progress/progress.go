@@ -220,6 +220,11 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string) (*Sample
 	}
 	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + sampleScript})
 	if err != nil {
+		// The container can exit after RunningPod selects it and before the
+		// exec upgrade reaches the kubelet. That is the same no-sample state.
+		if running, lookupErr := p.exec.RunningPod(ctx, namespace, jobName); lookupErr == nil && running == "" {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return parseSample(out), nil
