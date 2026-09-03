@@ -34,12 +34,14 @@ const patchedVersion = "0.18.5.ge37d2bd"
 // fakeExec scripts the podexec surface: tests choose the pod lookup result
 // and the exec output, and read back what was executed.
 type fakeExec struct {
-	pod     string
-	podErr  error
-	out     []byte
-	execErr error
-	argv    []string
-	calls   int
+	pod          string
+	podErr       error
+	out          []byte
+	execErr      error
+	argv         []string
+	calls        int
+	goneOnExec   bool
+	podErrOnExec error
 }
 
 func (f *fakeExec) RunningPod(context.Context, string, string) (string, error) {
@@ -50,6 +52,12 @@ func (f *fakeExec) RunningPod(context.Context, string, string) (string, error) {
 func (f *fakeExec) InPod(_ context.Context, _, _ string, argv []string) ([]byte, error) {
 	f.calls++
 	f.argv = argv
+	if f.goneOnExec {
+		f.pod = ""
+	}
+	if f.podErrOnExec != nil {
+		f.podErr = f.podErrOnExec
+	}
 	return f.out, f.execErr
 }
 
@@ -321,8 +329,29 @@ func TestSample_NoPodOrError(t *testing.T) {
 	if _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).Sample(ctx, "ns", "job"); err == nil {
 		t.Fatal("a pod lookup failure must surface")
 	}
-	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: errors.New("refused")}, nil).Sample(ctx, "ns", "job"); err == nil {
-		t.Fatal("an exec failure must surface")
+	execErr := errors.New("refused")
+	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: execErr}, nil).Sample(ctx, "ns", "job"); !errors.Is(err, execErr) {
+		t.Fatalf("exec failure = %v, want original error", err)
+	}
+}
+
+func TestSample_ContainerExitDuringExecIsNoSample(t *testing.T) {
+	f := &fakeExec{pod: "p", execErr: errors.New("container gone"), goneOnExec: true}
+	got, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job")
+	if got != nil || err != nil {
+		t.Fatalf("got %+v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestSample_PodRecheckFailurePreservesExecError(t *testing.T) {
+	execErr := errors.New("exec refused")
+	f := &fakeExec{pod: "p", execErr: execErr, podErrOnExec: errors.New("API unavailable")}
+	_, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job")
+	if !errors.Is(err, execErr) {
+		t.Fatalf("got %v; want original exec error", err)
+	}
+	if f.calls != 3 {
+		t.Fatalf("calls = %d, want pod lookup, exec, and pod recheck", f.calls)
 	}
 }
 
