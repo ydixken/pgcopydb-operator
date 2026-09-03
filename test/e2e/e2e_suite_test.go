@@ -336,6 +336,27 @@ func TestOperatorNamespaceSelector(t *testing.T) {
 	}
 }
 
+func TestMetricsJobFollowsInstalledFullname(t *testing.T) {
+	original := featureE2ERunValue
+	t.Cleanup(func() { featureE2ERunValue = original })
+
+	for _, tt := range []struct {
+		name  string
+		owner string
+		want  string
+	}{
+		{name: "local or release", want: "pgcopydb-e2e-pgcopydb-operator-metrics"},
+		{name: "feature workflow", owner: featureRunOwnerFixture, want: "pgcopydb-e2e-metrics"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			featureE2ERunValue = tt.owner
+			if got := metricsJob(); got != tt.want {
+				t.Errorf("metrics job = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func postgresIntAtLeast(n, minimum int) bool {
 	return n >= minimum && n <= math.MaxInt32
 }
