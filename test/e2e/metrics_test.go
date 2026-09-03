@@ -184,11 +184,14 @@ func promValue(g Gomega, expr string) float64 {
 	return s[0]
 }
 
-// metricsJob derives the e2e install's Prometheus job label: a ServiceMonitor
-// target's job defaults to its Service name, and the chart names the metrics
-// Service <fullname>-metrics with fullname = release[-chartname].
+// metricsJob returns the Service name Prometheus uses as the job label.
+// The feature wrapper fixes the fullname to the release name.
+// Local and release runs keep Helm's default release-chart fullname.
 func metricsJob() string {
 	full := helmRelease
+	if featureE2ERunValue != "" {
+		return full + "-metrics"
+	}
 	if chart := filepath.Base(chartPath); !strings.Contains(full, chart) {
 		full += "-" + chart
 	}
