@@ -2773,7 +2773,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 		t.Errorf("feature suite environment = %v", run.Env)
 	}
 	for _, want := range []string{
-		"-ginkgo.label-filter=!chaos",
+		"-ginkgo.label-filter=!chaos && !flaky",
 		"-ginkgo.fail-on-empty",
 		`test_args+=("-ginkgo.focus=$E2E_FOCUS")`,
 	} {
@@ -3529,7 +3529,7 @@ func TestFeatureE2ESuiteProcessBoundary(t *testing.T) {
 	wantArgs := []string{
 		"test", "./test/e2e/...", "-run", "^TestE2E$", "-v", "-timeout", "4h",
 		"-ginkgo.v", "-ginkgo.timeout=4h", "-ginkgo.poll-progress-after=15m",
-		"-ginkgo.label-filter=!chaos", "-ginkgo.fail-on-empty",
+		"-ginkgo.label-filter=!chaos && !flaky", "-ginkgo.fail-on-empty",
 		"-ginkgo.json-report=" + result.reportPath,
 	}
 	if !slices.Equal(result.args, wantArgs) {

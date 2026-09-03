@@ -44,9 +44,8 @@ import (
 // metricsMigration is the follow Migration the metrics specs drive.
 const metricsMigration = "e2e-metrics"
 
-// The counters a follow migration gets only from the verify Job after cutover.
-// Both specs below name them through these constants: spelled twice, a typo in
-// the absence list would pass vacuously while the presence list caught nothing.
+// The live counters a follow migration gets from PostgreSQL while it runs and
+// retains through the verify Job after cutover.
 const (
 	mCloneCopied  = "pgcopydb_migration_clone_copied_bytes"
 	mClonePlanned = "pgcopydb_migration_clone_planned_bytes"
@@ -326,27 +325,24 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			}
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
-		// Absence is the assertion here. Nothing may read pgcopydb's catalogs
-		// from a live worker, so these counters arrive only with the verify Job
-		// after cutover, which the terminal spec asserts. The anchors prove
-		// this migration's series are reaching Prometheus at the same instant,
-		// so an empty result below is neither a typo nor a dead scrape; the
-		// waitPhase above is what proves a worker is running.
-		By("asserting the clone counters stay absent while a worker is live")
+		// These counters come from psql against the source and target. Their
+		// presence is the live-progress contract and does not imply that the
+		// operator read pgcopydb's catalog from the worker.
+		By("asserting the clone counters are live while the worker is streaming")
 		Eventually(func(g Gomega) {
 			g.Expect(promVector(g, e2eSeries("pgcopydb_migration_phase")+" == 1")).To(HaveLen(1),
-				"anchor: the phase series must answer, or the absences below prove nothing")
-			for _, m := range []string{
-				"pgcopydb_migration_source_database_size_bytes",
-				"pgcopydb_migration_target_database_size_bytes",
-			} {
-				g.Expect(promVector(g, e2eSeries(m))).To(HaveLen(1),
-					"anchor: %s must answer, or the absences below prove nothing", m)
-			}
+				"anchor: the phase series must answer while checking live progress")
 			for _, m := range cloneCounterMetrics {
-				g.Expect(promVector(g, e2eSeries(m))).To(BeEmpty(),
-					"%s has a series mid-stream: something is polling a live worker", m)
+				g.Expect(promVector(g, e2eSeries(m))).To(HaveLen(1), "%s has no live series", m)
 			}
+			copied := promValue(g, e2eSeries(mCloneCopied))
+			planned := promValue(g, e2eSeries(mClonePlanned))
+			done := promValue(g, e2eSeries(mTablesDone))
+			total := promValue(g, e2eSeries(mTablesTotal))
+			g.Expect(copied).To(BeNumerically(">", 0))
+			g.Expect(planned).To(BeNumerically(">", 0))
+			g.Expect(done).To(BeNumerically(">", 0))
+			g.Expect(done).To(BeNumerically("<=", total))
 		}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("asserting the LSN gauges and the derived lags")

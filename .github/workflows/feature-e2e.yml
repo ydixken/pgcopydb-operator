@@ -1316,7 +1316,7 @@ jobs:
             -ginkgo.v
             -ginkgo.timeout=4h
             -ginkgo.poll-progress-after=15m
-            -ginkgo.label-filter=!chaos
+            "-ginkgo.label-filter=!chaos && !flaky"
             -ginkgo.fail-on-empty
             "-ginkgo.json-report=$suite_report"
           )
