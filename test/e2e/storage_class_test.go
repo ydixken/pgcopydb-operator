@@ -17,11 +17,27 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
+	"errors"
 	"maps"
+	"slices"
 	"testing"
+	"time"
 
+	. "github.com/onsi/gomega"
+
+	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // sc is a StorageClass reduced to what ephemeralParams reads.
@@ -154,4 +170,465 @@ func TestAddGi(t *testing.T) {
 		}
 	}()
 	addGi("500Mi", 1)
+}
+
+func TestFixtureStorageReadiness(t *testing.T) {
+	desired := resource.MustParse("50Gi")
+	undersized := resource.MustParse(smallVolume)
+	minimumFilesystem := desired.Value() * 95 / 100
+
+	for _, tc := range []struct {
+		name       string
+		objects    func() []client.Object
+		filesystem func(string) (int64, error)
+		wantReady  bool
+	}{
+		{
+			name:       "converged",
+			objects:    func() []client.Object { return fixtureStorageObjects(desired, desired) },
+			filesystem: func(string) (int64, error) { return minimumFilesystem, nil },
+			wantReady:  true,
+		},
+		{
+			name: "CNPG request absent",
+			objects: func() []client.Object {
+				objects := fixtureStorageObjects(desired, desired)
+				unstructured.RemoveNestedField(objects[0].(*unstructured.Unstructured).Object,
+					"spec", "storage", "size")
+				return objects
+			},
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name:       "PVC absent",
+			objects:    func() []client.Object { return fixtureStorageObjects(desired, desired)[:1] },
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name: "PVC request absent",
+			objects: func() []client.Object {
+				objects := fixtureStorageObjects(desired, desired)
+				objects[1].(*corev1.PersistentVolumeClaim).Spec.Resources.Requests = nil
+				return objects
+			},
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name:       "PVC request short",
+			objects:    func() []client.Object { return fixtureStorageObjects(undersized, desired) },
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name: "PVC capacity absent",
+			objects: func() []client.Object {
+				objects := fixtureStorageObjects(desired, desired)
+				objects[1].(*corev1.PersistentVolumeClaim).Status.Capacity = nil
+				return objects
+			},
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name:       "PVC capacity short",
+			objects:    func() []client.Object { return fixtureStorageObjects(desired, undersized) },
+			filesystem: func(string) (int64, error) { return desired.Value(), nil },
+		},
+		{
+			name:    "mounted filesystem short",
+			objects: func() []client.Object { return fixtureStorageObjects(desired, desired) },
+			filesystem: func(string) (int64, error) {
+				return minimumFilesystem - 1, nil
+			},
+		},
+		{
+			name:       "mounted filesystem absent",
+			objects:    func() []client.Object { return fixtureStorageObjects(desired, desired) },
+			filesystem: func(string) (int64, error) { return 0, errors.New("filesystem unavailable") },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStorageTestState(t, storageTestClient(t, tc.objects()...), tc.filesystem)
+			err := fixtureStorageReady(sourceCluster, desired.String())
+			if tc.wantReady && err != nil {
+				t.Fatalf("fixtureStorageReady() error = %v", err)
+			}
+			if !tc.wantReady && err == nil {
+				t.Fatal("fixtureStorageReady() accepted storage that had not converged")
+			}
+		})
+	}
+}
+
+func TestFilesystemCapacityFloorAccountsOnlyForMetadata(t *testing.T) {
+	desired := resource.MustParse("50Gi")
+	if got, want := filesystemCapacityFloor(desired.Value()), desired.Value()*95/100; got != want {
+		t.Fatalf("filesystemCapacityFloor() = %d, want %d", got, want)
+	}
+}
+
+func TestFixtureStorageWaitFailsClosed(t *testing.T) {
+	desired := resource.MustParse("50Gi")
+	withStorageTestState(t, storageTestClient(t, fixtureStorageObjects(desired, desired)[0]),
+		func(string) (int64, error) { return desired.Value(), nil })
+	storageReadyTimeout, storageReadyPollInterval = 30*time.Millisecond, time.Millisecond
+	RegisterTestingT(t)
+
+	started := time.Now()
+	if err := InterceptGomegaFailure(func() { waitFixtureStorageReady(sourceCluster, desired.String()) }); err == nil {
+		t.Fatal("storage wait accepted an absent PVC")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("storage wait exceeded its bounded timeout: %s", elapsed)
+	}
+}
+
+func TestCreateWaitsForWorkVolumeReadiness(t *testing.T) {
+	desired := resource.MustParse("12Gi")
+	undersized := resource.MustParse("2Gi")
+
+	for _, tc := range []struct {
+		name      string
+		objects   []client.Object
+		wantError bool
+	}{
+		{name: "ready", objects: []client.Object{workPVC("migration", desired, desired)}},
+		{name: "absent", wantError: true},
+		{name: "capacity short", objects: []client.Object{workPVC("migration", desired, undersized)}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStorageTestState(t, storageTestClient(t, tc.objects...), nil)
+			storageReadyTimeout, storageReadyPollInterval = 30*time.Millisecond, time.Millisecond
+			RegisterTestingT(t)
+			m := &v1beta1.Migration{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "migration"},
+				Spec:       v1beta1.MigrationSpec{WorkVolume: v1beta1.WorkVolume{Size: desired}},
+			}
+
+			err := InterceptGomegaFailure(func() { create(m) })
+			if tc.wantError && err == nil {
+				t.Fatal("create() did not fail closed while its work volume was unready")
+			}
+			if !tc.wantError && err != nil {
+				t.Fatalf("create() failed with a ready work volume: %v", err)
+			}
+		})
+	}
+}
+
+func TestStaleSourceRebuildsBeforeStorageApply(t *testing.T) {
+	desired := resource.MustParse("50Gi")
+	objects := fixtureStorageObjects(desired, desired)
+	target := cnpgCluster(targetCluster, smallVolume, 17)
+	target.SetUID(types.UID("target-cluster-uid"))
+	objects = append(objects, target)
+
+	events := make([]string, 0, 3)
+	applied := false
+	clusterDeleted := false
+	fresh := cnpgCluster(sourceCluster, desired.String(), 17)
+	_ = unstructured.SetNestedField(fresh.Object, int64(1), "status", "readyInstances")
+	freshPVC := fixturePVC(sourceCluster, desired, desired)
+	freshPVC.SetUID(types.UID("fresh-source-pvc-uid"))
+	c := storageTestClientWithInterceptors(t, interceptor.Funcs{
+		Apply: func(
+			ctx context.Context,
+			c client.WithWatch,
+			_ runtime.ApplyConfiguration,
+			_ ...client.ApplyOption,
+		) error {
+			oldPVC := &corev1.PersistentVolumeClaim{}
+			err := c.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: sourceCluster + "-1"}, oldPVC)
+			if err == nil {
+				events = append(events, "apply source while old PVC exists")
+			} else {
+				events = append(events, "apply source at 50Gi")
+			}
+			applied = true
+			return nil
+		},
+		Delete: func(
+			ctx context.Context,
+			c client.WithWatch,
+			obj client.Object,
+			opts ...client.DeleteOption,
+		) error {
+			events = append(events, "delete "+obj.GetName())
+			applied = false
+			err := c.Delete(ctx, obj, opts...)
+			clusterDeleted = true
+			return err
+		},
+		Get: func(
+			ctx context.Context,
+			c client.WithWatch,
+			key client.ObjectKey,
+			obj client.Object,
+			opts ...client.GetOption,
+		) error {
+			if applied && key.Namespace == nsE2E && key.Name == sourceCluster {
+				fresh.DeepCopyInto(obj.(*unstructured.Unstructured))
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		List: func(
+			ctx context.Context,
+			c client.WithWatch,
+			list client.ObjectList,
+			opts ...client.ListOption,
+		) error {
+			pvcs := list.(*corev1.PersistentVolumeClaimList)
+			if applied {
+				pvcs.Items = []corev1.PersistentVolumeClaim{*freshPVC}
+				return nil
+			}
+			if err := c.List(ctx, pvcs, opts...); err != nil {
+				return err
+			}
+			if clusterDeleted {
+				for i := range pvcs.Items {
+					if err := c.Delete(ctx, &pvcs.Items[i]); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	}, objects...)
+	withStorageTestState(t, c, func(string) (int64, error) { return desired.Value(), nil })
+	storageReadyTimeout, storageReadyPollInterval = 100*time.Millisecond, time.Millisecond
+	oldSize := srcStorageSize
+	t.Cleanup(func() { srcStorageSize = oldSize })
+	srcStorageSize = desired.String()
+	RegisterTestingT(t)
+
+	if err := InterceptGomegaFailure(func() { prepareSourceCluster(true) }); err != nil {
+		t.Fatalf("prepareSourceCluster() failed: %v", err)
+	}
+	if got, want := events, []string{"delete " + sourceCluster, "apply source at 50Gi"}; !slices.Equal(got, want) {
+		t.Fatalf("stale source lifecycle = %v, want %v", got, want)
+	}
+	preserved := &unstructured.Unstructured{}
+	preserved.SetGroupVersionKind(cnpgGVK)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: nsE2E, Name: targetCluster}, preserved); err != nil {
+		t.Fatalf("target cluster was not preserved: %v", err)
+	}
+	if preserved.GetUID() != types.UID("target-cluster-uid") {
+		t.Fatalf("target cluster UID = %q, want preserved UID", preserved.GetUID())
+	}
+}
+
+func TestTargetStorageExpansionPreservesObjects(t *testing.T) {
+	desired := resource.MustParse("50Gi")
+	for _, tc := range []struct {
+		name      string
+		current   resource.Quantity
+		requested resource.Quantity
+	}{
+		{name: "expands 7Gi to 50Gi", current: resource.MustParse(smallVolume), requested: desired},
+		{name: "retains 50Gi when 7Gi is requested", current: desired, requested: resource.MustParse(smallVolume)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targetUID := types.UID("target-cluster-uid")
+			pvcUID := types.UID("target-pvc-uid")
+			target := cnpgCluster(targetCluster, tc.current.String(), 17)
+			target.SetUID(targetUID)
+			pvc := fixturePVC(targetCluster, tc.current, tc.current)
+			pvc.SetUID(pvcUID)
+
+			applied := false
+			deletes := 0
+			readyTarget := cnpgCluster(targetCluster, desired.String(), 17)
+			readyTarget.SetUID(targetUID)
+			_ = unstructured.SetNestedField(readyTarget.Object, int64(1), "status", "readyInstances")
+			readyPVC := fixturePVC(targetCluster, desired, desired)
+			readyPVC.SetUID(pvcUID)
+			c := storageTestClientWithInterceptors(t, interceptor.Funcs{
+				Apply: func(
+					context.Context,
+					client.WithWatch,
+					runtime.ApplyConfiguration,
+					...client.ApplyOption,
+				) error {
+					applied = true
+					return nil
+				},
+				Delete: func(
+					ctx context.Context,
+					c client.WithWatch,
+					obj client.Object,
+					opts ...client.DeleteOption,
+				) error {
+					deletes++
+					return c.Delete(ctx, obj, opts...)
+				},
+				Get: func(
+					ctx context.Context,
+					c client.WithWatch,
+					key client.ObjectKey,
+					obj client.Object,
+					opts ...client.GetOption,
+				) error {
+					if applied && key.Namespace == nsE2E && key.Name == targetCluster {
+						readyTarget.DeepCopyInto(obj.(*unstructured.Unstructured))
+						return nil
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				List: func(
+					ctx context.Context,
+					c client.WithWatch,
+					list client.ObjectList,
+					opts ...client.ListOption,
+				) error {
+					if applied {
+						list.(*corev1.PersistentVolumeClaimList).Items = []corev1.PersistentVolumeClaim{*readyPVC}
+						return nil
+					}
+					return c.List(ctx, list, opts...)
+				},
+			}, target, pvc)
+			withStorageTestState(t, c, func(string) (int64, error) { return desired.Value(), nil })
+			storageReadyTimeout, storageReadyPollInterval = 100*time.Millisecond, time.Millisecond
+			oldSize := tgtStorageSize
+			t.Cleanup(func() { tgtStorageSize = oldSize })
+			tgtStorageSize = tc.requested.String()
+			RegisterTestingT(t)
+
+			if err := InterceptGomegaFailure(prepareTargetCluster); err != nil {
+				t.Fatalf("prepareTargetCluster() failed: %v", err)
+			}
+			if !applied {
+				t.Fatal("target storage was not applied in place")
+			}
+			if deletes != 0 {
+				t.Fatalf("target expansion deleted %d objects", deletes)
+			}
+			if readyTarget.GetUID() != targetUID || readyPVC.GetUID() != pvcUID {
+				t.Fatal("target cluster or PVC identity changed during in-place expansion")
+			}
+		})
+	}
+}
+
+func TestFeatureShapeMismatchFailsBeforeDelete(t *testing.T) {
+	for _, name := range []string{sourceCluster, targetCluster} {
+		t.Run(name, func(t *testing.T) {
+			cluster := cnpgCluster(name, smallVolume, 17)
+			uid := types.UID(name + "-uid")
+			cluster.SetUID(uid)
+			withStorageTestState(t, storageTestClient(t, cluster), nil)
+			oldOwner := featureE2ERunValue
+			t.Cleanup(func() { featureE2ERunValue = oldOwner })
+			featureE2ERunValue = featureRunOwnerFixture
+			RegisterTestingT(t)
+
+			if err := InterceptGomegaFailure(func() { deleteMismatchedCluster(name) }); err == nil {
+				t.Fatal("feature shape mismatch was allowed to delete a fixture cluster")
+			}
+			preserved := &unstructured.Unstructured{}
+			preserved.SetGroupVersionKind(cnpgGVK)
+			if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, preserved); err != nil {
+				t.Fatalf("fixture cluster was deleted: %v", err)
+			}
+			if preserved.GetUID() != uid {
+				t.Fatalf("fixture cluster UID = %q, want %q", preserved.GetUID(), uid)
+			}
+		})
+	}
+
+	t.Run("non-feature keeps existing rebuild behavior", func(t *testing.T) {
+		cluster := cnpgCluster(sourceCluster, smallVolume, 17)
+		withStorageTestState(t, storageTestClient(t, cluster), nil)
+		oldOwner := featureE2ERunValue
+		t.Cleanup(func() { featureE2ERunValue = oldOwner })
+		featureE2ERunValue = ""
+		RegisterTestingT(t)
+
+		if err := InterceptGomegaFailure(func() { deleteMismatchedCluster(sourceCluster) }); err != nil {
+			t.Fatalf("non-feature shape rebuild failed: %v", err)
+		}
+		remaining := &unstructured.Unstructured{}
+		remaining.SetGroupVersionKind(cnpgGVK)
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: sourceCluster}, remaining); err == nil {
+			t.Fatal("non-feature shape mismatch did not keep the existing rebuild behavior")
+		}
+	})
+}
+
+func fixtureStorageObjects(request, capacity resource.Quantity) []client.Object {
+	cluster := cnpgCluster(sourceCluster, "50Gi", 17)
+	cluster.SetUID(types.UID("source-cluster-uid"))
+	return []client.Object{cluster, fixturePVC(sourceCluster, request, capacity)}
+}
+
+func fixturePVC(cluster string, request, capacity resource.Quantity) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: nsE2E,
+			Name:      cluster + "-1",
+			UID:       types.UID(cluster + "-pvc-uid"),
+			Labels: map[string]string{
+				labelCNPGCluster:  cluster,
+				labelCNPGInstance: cluster + "-1",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: request},
+		}},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase:    corev1.ClaimBound,
+			Capacity: corev1.ResourceList{corev1.ResourceStorage: capacity},
+		},
+	}
+	return pvc
+}
+
+func workPVC(migration string, request, capacity resource.Quantity) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: migration + "-work"},
+		Spec: corev1.PersistentVolumeClaimSpec{Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: request},
+		}},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase:    corev1.ClaimBound,
+			Capacity: corev1.ResourceList{corev1.ResourceStorage: capacity},
+		},
+	}
+}
+
+func storageTestClient(t *testing.T, objects ...client.Object) client.Client {
+	return storageTestClientWithInterceptors(t, interceptor.Funcs{}, objects...)
+}
+
+func storageTestClientWithInterceptors(
+	t *testing.T,
+	interceptors interceptor.Funcs,
+	objects ...client.Object,
+) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
+		WithInterceptorFuncs(interceptors).Build()
+}
+
+func withStorageTestState(t *testing.T, c client.Client, filesystem func(string) (int64, error)) {
+	t.Helper()
+	oldCtx, oldClient := ctx, k8sClient
+	oldFilesystem := mountedFilesystemCapacity
+	oldTimeout, oldInterval := storageReadyTimeout, storageReadyPollInterval
+	t.Cleanup(func() {
+		ctx, k8sClient = oldCtx, oldClient
+		mountedFilesystemCapacity = oldFilesystem
+		storageReadyTimeout, storageReadyPollInterval = oldTimeout, oldInterval
+	})
+	ctx, k8sClient = context.Background(), c
+	if filesystem != nil {
+		mountedFilesystemCapacity = filesystem
+	}
 }

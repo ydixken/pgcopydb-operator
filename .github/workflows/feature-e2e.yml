@@ -13,6 +13,12 @@ name: Feature E2E
         default: full
         type: choice
         options: [full, focus]
+      scale:
+        description: Fixture scale multiplier
+        required: true
+        default: "0.1"
+        type: choice
+        options: ["0.1", "1.0"]
       focus:
         description: Ginkgo focus expression, required only for focus mode
         required: false
@@ -37,6 +43,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       mode: ${{ steps.resolve.outputs.mode }}
       focus: ${{ steps.resolve.outputs.focus }}
+      scale: ${{ steps.resolve.outputs.scale }}
     steps:
       - name: Resolve pull request
         id: resolve
@@ -45,6 +52,7 @@ jobs:
           INPUT_PR: ${{ inputs.pr }}
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_FOCUS: ${{ inputs.focus }}
+          INPUT_SCALE: ${{ inputs.scale }}
         run: |
           set -euo pipefail
           [[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be positive"; exit 1; }
@@ -52,6 +60,10 @@ jobs:
             full) [ -z "$INPUT_FOCUS" ] || { echo "::error::focus must be empty for full"; exit 1; } ;;
             focus) case "$INPUT_FOCUS" in *[![:space:]]*) ;; *) echo "::error::focus is required"; exit 1 ;; esac ;;
             *) echo "::error::mode must be full or focus"; exit 1 ;;
+          esac
+          case "$INPUT_SCALE" in
+            0.1 | 1.0) ;;
+            *) echo "::error::scale must be 0.1 or 1.0"; exit 1 ;;
           esac
           sanitized=$(printf '%s' "$INPUT_FOCUS" | LC_ALL=C tr -d '\000-\037\177')
           [ "$sanitized" = "$INPUT_FOCUS" ] || { echo "::error::focus contains a control character"; exit 1; }
@@ -62,8 +74,8 @@ jobs:
           ' <<<"$pr_json" >/dev/null || { echo "::error::pull request is not trusted"; exit 1; }
           sha=$(jq -er '.head.sha' <<<"$pr_json")
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head is not a full SHA"; exit 1; }
-          printf 'pr=%s\nsha=%s\nmode=%s\nfocus=%s\n' \
-            "$INPUT_PR" "$sha" "$INPUT_MODE" "$INPUT_FOCUS" >> "$GITHUB_OUTPUT"
+          printf 'pr=%s\nsha=%s\nmode=%s\nfocus=%s\nscale=%s\n' \
+            "$INPUT_PR" "$sha" "$INPUT_MODE" "$INPUT_FOCUS" "$INPUT_SCALE" >> "$GITHUB_OUTPUT"
 
   pending-status:
     needs: resolve
@@ -1294,7 +1306,7 @@ jobs:
           E2E_FOCUS: ${{ needs.resolve.outputs.focus }}
           E2E_OPERATOR_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
           E2E_RUNNER_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
-          E2E_SCALE: "0.1"
+          E2E_SCALE: ${{ needs.resolve.outputs.scale }}
           E2E_MANAGE_NAMESPACES: "false"
           E2E_KEEP_FIXTURES: "true"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}

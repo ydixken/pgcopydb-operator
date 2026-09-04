@@ -56,6 +56,8 @@ const (
 	unreadableValue              = "unreadable"
 	fullModeValue                = "full"
 	focusModeValue               = "focus"
+	featureDefaultScale          = "0.1"
+	featureFullScale             = "1.0"
 	recoveryValue                = "recovery"
 	roleKind                     = "Role"
 	roleBindingKind              = "RoleBinding"
@@ -715,8 +717,8 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 		t.Fatalf("feature triggers = %v, want workflow_dispatch only", got)
 	}
 	inputs := wf.On["workflow_dispatch"].Inputs
-	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{"focus", "mode", "pr"}) {
-		t.Fatalf("feature inputs = %v, want focus, mode, pr", got)
+	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{"focus", "mode", "pr", "scale"}) {
+		t.Errorf("feature inputs = %v, want focus, mode, pr, scale", got)
 	}
 	if in := inputs["pr"]; !in.Required || in.Type != "string" {
 		t.Errorf("pr input = %+v, want required string", in)
@@ -728,6 +730,10 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 	if in := inputs["focus"]; in.Required || in.Type != "string" || in.Default != "" {
 		t.Errorf("focus input = %+v", in)
 	}
+	if in := inputs["scale"]; !in.Required || in.Type != "choice" || in.Default != featureDefaultScale ||
+		!slices.Equal(in.Options, []string{featureDefaultScale, featureFullScale}) {
+		t.Errorf("scale input = %+v", in)
+	}
 	resolve := wf.Jobs[resolveJob]
 	if resolve.If != "github.repository == 'ydixken/pgcopydb-operator' && github.ref == 'refs/heads/main'" {
 		t.Errorf("resolve trust guard = %q", resolve.If)
@@ -738,10 +744,17 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 	if got := protectedNeeds(t, wf.Jobs["preflight"]); !slices.Equal(got, []string{resolveJob, pendingStatusJob}) {
 		t.Errorf("preflight needs = %v, want resolve and pending-status", got)
 	}
-	run := protectedStepNamed(t, resolve, "Resolve pull request").Run
+	if got := resolve.Outputs["scale"]; got != "${{ steps.resolve.outputs.scale }}" {
+		t.Errorf("resolved scale output = %q", got)
+	}
+	resolver := protectedStepNamed(t, resolve, "Resolve pull request")
+	if got := resolver.Env["INPUT_SCALE"]; got != "${{ inputs.scale }}" {
+		t.Errorf("resolver scale input = %q", got)
+	}
+	run := resolver.Run
 	for _, want := range []string{
 		`[[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]]`, `case "$INPUT_MODE" in`,
-		`tr -d '\000-\037\177'`, `.state == "open"`, `.base.ref == "main"`,
+		`case "$INPUT_SCALE" in`, `tr -d '\000-\037\177'`, `.state == "open"`, `.base.ref == "main"`,
 		`.base.repo.full_name == $repo`, `.head.repo.full_name == $repo`,
 		`[[ "$sha" =~ ^[0-9a-f]{40}$ ]]`, `GITHUB_OUTPUT`,
 	} {
@@ -755,6 +768,68 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 				t.Errorf("%s/%s interpolates input into shell source", jobName, step.Name)
 			}
 		}
+	}
+}
+
+func TestFeatureE2EScaleResolver(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	resolver := protectedStepNamed(t, wf.Jobs[resolveJob], "Resolve pull request")
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	for _, tt := range []struct {
+		scale     string
+		wantError bool
+	}{
+		{scale: featureDefaultScale},
+		{scale: featureFullScale},
+		{scale: "0.2", wantError: true},
+	} {
+		t.Run(tt.scale, func(t *testing.T) {
+			dir := t.TempDir()
+			ghCalled := filepath.Join(dir, "gh-called")
+			outputPath := filepath.Join(dir, "output")
+			gh := `#!/usr/bin/env bash
+set -euo pipefail
+: > "$GH_CALLED"
+printf '%s\n' '{"state":"open","base":{"ref":"main","repo":'` +
+				`'{"full_name":"ydixken/pgcopydb-operator"}},"head":{"repo":'` +
+				`'{"full_name":"ydixken/pgcopydb-operator"},"sha":"` + sha + `"}}'
+`
+			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "-c", resolver.Run)
+			cmd.Env = append(os.Environ(),
+				"PATH="+dir+":"+os.Getenv("PATH"),
+				"GH_CALLED="+ghCalled,
+				"GH_TOKEN=test-token",
+				"GITHUB_OUTPUT="+outputPath,
+				"GITHUB_REPOSITORY=ydixken/pgcopydb-operator",
+				"INPUT_PR=1",
+				"INPUT_MODE=full",
+				"INPUT_FOCUS=",
+				"INPUT_SCALE="+tt.scale,
+			)
+			output, err := cmd.CombinedOutput()
+			if tt.wantError {
+				if err == nil {
+					t.Error("resolver accepted an unlisted scale")
+				}
+				if _, statErr := os.Stat(ghCalled); !os.IsNotExist(statErr) {
+					t.Error("resolver contacted GitHub before rejecting the scale")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolver rejected scale %s: %v\n%s", tt.scale, err, output)
+			}
+			resolved, readErr := os.ReadFile(outputPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(resolved), "scale="+tt.scale+"\n") {
+				t.Errorf("resolver output = %q, want scale=%s", resolved, tt.scale)
+			}
+		})
 	}
 }
 
@@ -2768,7 +2843,8 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 		}
 	}
 	run := protectedStepNamed(t, cluster, "Run non-chaos suite")
-	if run.Env["E2E_SCALE"] != "0.1" || run.Env["E2E_MANAGE_NAMESPACES"] != falseValue ||
+	if run.Env["E2E_SCALE"] != "${{ needs.resolve.outputs.scale }}" ||
+		run.Env["E2E_MANAGE_NAMESPACES"] != falseValue ||
 		run.Env["E2E_KEEP_FIXTURES"] != trueValue {
 		t.Errorf("feature suite environment = %v", run.Env)
 	}

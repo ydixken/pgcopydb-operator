@@ -860,6 +860,10 @@ func scaleArg() string {
 var (
 	ctx       context.Context
 	k8sClient client.Client
+
+	storageReadyTimeout       = clusterReadyTimeout
+	storageReadyPollInterval  = 5 * time.Second
+	mountedFilesystemCapacity = readMountedFilesystemCapacity
 )
 
 func TestE2E(t *testing.T) {
@@ -983,13 +987,15 @@ var _ = BeforeSuite(func() {
 		pgSource, pgTarget))
 	ensureClusterShape(sourceCluster, pgSource)
 	ensureClusterShape(targetCluster, pgTarget)
-	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
-	applyCluster(cnpgCluster(targetCluster, tgtStorageSize, pgTarget))
-	waitClusterReady(sourceCluster)
-	waitClusterReady(targetCluster)
+	staleSource := sourceSeedIsStale()
+	if staleSource {
+		By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+	}
+	prepareSourceCluster(staleSource)
+	prepareTargetCluster()
 
 	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
-	ensureSeededSource()
+	runSeedJob()
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
 	resetTargetObjects()
@@ -1338,6 +1344,152 @@ func waitClusterReady(name string) {
 	}, clusterReadyTimeout, 5*time.Second).Should(Succeed())
 }
 
+// filesystemCapacityFloor allows a 5% margin only for ext4 filesystem
+// metadata, not for an incomplete volume expansion.
+func filesystemCapacityFloor(desired int64) int64 {
+	return desired * 95 / 100
+}
+
+func fixtureStorageReady(name, size string) error {
+	desired, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("parse storage size for CNPG cluster %s: %w", name, err)
+	}
+
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, c); err != nil {
+		return fmt.Errorf("get CNPG cluster %s: %w", name, err)
+	}
+	got, found, err := unstructured.NestedString(c.Object, "spec", "storage", "size")
+	if err != nil || !found {
+		return fmt.Errorf("CNPG cluster %s has no storage request", name)
+	}
+	request, err := resource.ParseQuantity(got)
+	if err != nil {
+		return fmt.Errorf("parse CNPG cluster %s storage request: %w", name, err)
+	}
+	if request.Cmp(desired) != 0 {
+		return fmt.Errorf("CNPG cluster %s requests %s, want %s", name, request.String(), desired.String())
+	}
+
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	if err := k8sClient.List(ctx, pvcs, client.InNamespace(nsE2E),
+		client.MatchingLabels{labelCNPGCluster: name}); err != nil {
+		return fmt.Errorf("list PVCs for CNPG cluster %s: %w", name, err)
+	}
+	if len(pvcs.Items) != cnpgInstances {
+		return fmt.Errorf("CNPG cluster %s has %d PVCs, want %d", name, len(pvcs.Items), cnpgInstances)
+	}
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if err := pvcStorageReady(pvc, desired); err != nil {
+			return fmt.Errorf("CNPG cluster %s: %w", name, err)
+		}
+		instance := pvc.Labels[labelCNPGInstance]
+		if instance == "" {
+			return fmt.Errorf("PVC %s/%s has no CNPG instance label", pvc.Namespace, pvc.Name)
+		}
+		capacity, err := mountedFilesystemCapacity(instance)
+		if err != nil {
+			return fmt.Errorf("read mounted filesystem capacity for CNPG instance %s: %w", instance, err)
+		}
+		minimum := filesystemCapacityFloor(desired.Value())
+		if capacity < minimum {
+			return fmt.Errorf("CNPG instance %s filesystem capacity is %d bytes, want at least %d",
+				instance, capacity, minimum)
+		}
+	}
+	return nil
+}
+
+func waitFixtureStorageReady(name, size string) {
+	GinkgoHelper()
+	Eventually(func() error {
+		return fixtureStorageReady(name, size)
+	}, storageReadyTimeout, storageReadyPollInterval).Should(Succeed(),
+		"storage for CNPG cluster %s did not converge to %s", name, size)
+}
+
+func prepareSourceCluster(staleSeed bool) {
+	if staleSeed {
+		recreateSourceCluster()
+		return
+	}
+	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
+	waitClusterReady(sourceCluster)
+	waitFixtureStorageReady(sourceCluster, srcStorageSize)
+}
+
+func prepareTargetCluster() {
+	size := effectiveTargetStorageSize()
+	applyCluster(cnpgCluster(targetCluster, size, pgTarget))
+	waitClusterReady(targetCluster)
+	waitFixtureStorageReady(targetCluster, size)
+}
+
+func effectiveTargetStorageSize() string {
+	GinkgoHelper()
+	desired, err := resource.ParseQuantity(tgtStorageSize)
+	Expect(err).NotTo(HaveOccurred(), "invalid target storage size %q", tgtStorageSize)
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	err = k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: targetCluster}, c)
+	if apierrors.IsNotFound(err) {
+		return desired.String()
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", targetCluster)
+	currentSize, found, err := unstructured.NestedString(c.Object, "spec", "storage", "size")
+	Expect(err).NotTo(HaveOccurred(), "failed to read target storage request")
+	Expect(found).To(BeTrue(), "CNPG cluster %s has no storage request", targetCluster)
+	current, err := resource.ParseQuantity(currentSize)
+	Expect(err).NotTo(HaveOccurred(), "invalid target storage request %q", currentSize)
+	if current.Cmp(desired) > 0 {
+		return current.String()
+	}
+	return desired.String()
+}
+
+func pvcStorageReady(pvc *corev1.PersistentVolumeClaim, desired resource.Quantity) error {
+	if pvc.Status.Phase != corev1.ClaimBound {
+		return fmt.Errorf("PVC %s/%s is %s, want Bound", pvc.Namespace, pvc.Name, pvc.Status.Phase)
+	}
+	request, found := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if !found {
+		return fmt.Errorf("PVC %s/%s has no storage request", pvc.Namespace, pvc.Name)
+	}
+	if request.Cmp(desired) < 0 {
+		return fmt.Errorf("PVC %s/%s requests %s, want at least %s",
+			pvc.Namespace, pvc.Name, request.String(), desired.String())
+	}
+	capacity, found := pvc.Status.Capacity[corev1.ResourceStorage]
+	if !found {
+		return fmt.Errorf("PVC %s/%s reports no storage capacity", pvc.Namespace, pvc.Name)
+	}
+	if capacity.Cmp(desired) < 0 {
+		return fmt.Errorf("PVC %s/%s capacity is %s, want at least %s",
+			pvc.Namespace, pvc.Name, capacity.String(), desired.String())
+	}
+	return nil
+}
+
+func readMountedFilesystemCapacity(instance string) (int64, error) {
+	out, err := exec.Command("kubectl", "exec", "-n", nsE2E, instance, "-c", "postgres", "--",
+		"df", "-B1", "--output=size", "/var/lib/postgresql/data").Output()
+	if err != nil {
+		return 0, fmt.Errorf("kubectl exec df: %w", err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return 0, errors.New("df returned no filesystem capacity")
+	}
+	capacity, err := strconv.ParseInt(fields[len(fields)-1], 10, 64)
+	if err != nil || capacity <= 0 {
+		return 0, fmt.Errorf("parse df filesystem capacity %q", fields[len(fields)-1])
+	}
+	return capacity, nil
+}
+
 // resetTargetObjects wipes the fixture objects from the target. Needed
 // because pg_restore --clean only drops objects present in the incoming dump,
 // so a populated target from an earlier run would break the no-dropIfExists
@@ -1354,23 +1506,24 @@ func resetTargetObjects() {
 	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 
-// ensureSeededSource brings the source database to the requested fixture
-// profile and scale. A kept cluster whose e2e_seed marker matches costs one
-// early-exiting Job; a mismatching marker (different profile or scale) means
-// the data on disk is wrong in ways reseeding cannot fix (a smaller scale
-// leaves surplus rows), so the cluster is recreated from scratch.
-func ensureSeededSource() {
+// sourceSeedIsStale reports whether a kept source carries the wrong fixture
+// profile or scale. Absence is fresh: the next apply creates the cluster.
+func sourceSeedIsStale() bool {
 	GinkgoHelper()
+	c := &unstructured.Unstructured{}
+	c.SetGroupVersionKind(cnpgGVK)
+	err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: sourceCluster}, c)
+	if apierrors.IsNotFound(err) {
+		return false
+	}
+	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", sourceCluster)
 	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
 		match := psql(sourceCluster, fmt.Sprintf(
 			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
 			seedProfile(), scaleArg()))
-		if match != "t" {
-			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
-			recreateSourceCluster()
-		}
+		return match != "t"
 	}
-	runSeedJob()
+	return false
 }
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
@@ -1380,8 +1533,20 @@ func ensureSeededSource() {
 func recreateSourceCluster() {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
+	waitSourceVolumesDeleted()
 	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
 	waitClusterReady(sourceCluster)
+	waitFixtureStorageReady(sourceCluster, srcStorageSize)
+}
+
+func waitSourceVolumesDeleted() {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		pvcs := &corev1.PersistentVolumeClaimList{}
+		g.Expect(k8sClient.List(ctx, pvcs, client.InNamespace(nsE2E),
+			client.MatchingLabels{labelCNPGCluster: sourceCluster})).To(Succeed())
+		g.Expect(pvcs.Items).To(BeEmpty(), "source PVCs still terminating")
+	}, storageReadyTimeout, storageReadyPollInterval).Should(Succeed())
 }
 
 // deleteCluster deletes a CNPG cluster (volumes included) and waits until it
@@ -1424,21 +1589,28 @@ func ensureClusterShape(name string, major int) {
 	if got, _, _ := unstructured.NestedInt64(c.Object, "spec", "instances"); got != int64(cnpgInstances) {
 		By(fmt.Sprintf("deleting %s: kept cluster has %d instances, this run wants %d",
 			name, got, cnpgInstances))
-		deleteCluster(name)
+		deleteMismatchedCluster(name)
 		return
 	}
 	if got, _, _ := unstructured.NestedString(c.Object, "spec", "storage", "storageClass"); got != fixtureStorageClass {
 		By(fmt.Sprintf("deleting %s: kept cluster is on storage class %q, this run wants %q",
 			name, got, fixtureStorageClass))
-		deleteCluster(name)
+		deleteMismatchedCluster(name)
 		return
 	}
 	// The kept instances have to answer psql before the major can be read.
 	waitClusterReady(name)
 	if got := serverMajor(name); got != major {
 		By(fmt.Sprintf("deleting %s: kept cluster runs PG %d, this run wants PG %d", name, got, major))
-		deleteCluster(name)
+		deleteMismatchedCluster(name)
 	}
+}
+
+func deleteMismatchedCluster(name string) {
+	GinkgoHelper()
+	Expect(featureE2ERunValue).To(BeEmpty(),
+		"refusing to rebuild mismatched fixture %s during protected feature E2E", name)
+	deleteCluster(name)
 }
 
 // serverMajor asks the cluster's primary for its PostgreSQL major version.
