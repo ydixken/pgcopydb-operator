@@ -1114,6 +1114,25 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 func create(m *v1beta1.Migration) {
 	GinkgoHelper()
 	Expect(k8sClient.Create(ctx, m)).To(Succeed(), "failed to create Migration %s/%s", m.Namespace, m.Name)
+	waitWorkVolumeReady(m)
+}
+
+func waitWorkVolumeReady(m *v1beta1.Migration) {
+	GinkgoHelper()
+	Expect(m.Spec.WorkVolume.Size.IsZero()).To(BeFalse(),
+		"Migration %s/%s has no explicit work volume size", m.Namespace, m.Name)
+	Eventually(func() error {
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{
+			Namespace: m.Namespace,
+			Name:      m.Name + "-work",
+		}, pvc); err != nil {
+			return fmt.Errorf("get work PVC for Migration %s/%s: %w", m.Namespace, m.Name, err)
+		}
+		return pvcStorageReady(pvc, m.Spec.WorkVolume.Size)
+	}, storageReadyTimeout, storageReadyPollInterval).Should(Succeed(),
+		"work volume for Migration %s/%s did not converge to %s",
+		m.Namespace, m.Name, m.Spec.WorkVolume.Size.String())
 }
 
 // waitCompleted waits for phase Completed within the standard clone budget.

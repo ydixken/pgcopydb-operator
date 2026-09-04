@@ -143,7 +143,10 @@ It always runs from trusted `main`, resolves one open same-repository pull reque
 Both image references are immutable digests.
 Before any Migration, exactly one eligible Ready feature controller must run the expected manager digest and configure the expected runner digest, and a runner canary must run that runner digest.
 An image mismatch stops the run before a Migration is created.
-The non-chaos suite runs at `E2E_SCALE=0.1`; release candidate E2E remains separate at `E2E_SCALE=0.25`.
+The feature workflow accepts `E2E_SCALE=0.1` (the default) or `E2E_SCALE=1.0`; release candidate E2E remains separate at `E2E_SCALE=0.25`.
+The `1.0` choice rebuilds a kept source whose seed marker is for another scale at 50Gi, expands the target to 50Gi in place, and requests a 12Gi work volume for each Migration.
+A later lower-scale run retains the expanded target because a bound PVC cannot shrink.
+Before continuing, the suite waits for the CNPG request, bound PVC request and capacity, and mounted database filesystem to reach the requested size.
 The feature controller uses the existing `pgcopydb-e2e` namespace, and the suite creates or deletes no namespaces.
 Run-labelled cleanup handles a partial install so the same Helm release can be installed again, and preserves unrelated customer resources and shared fixtures.
 
@@ -153,7 +156,7 @@ Run the full merge gate after pushing the pull request head:
 
    ```sh
    PR=$(gh pr view --json number --jq .number)
-   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f focus=
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f scale=0.1 -f focus=
    ```
 
 The full run posts the gating `feature-e2e` status to the resolved SHA.
@@ -165,7 +168,7 @@ Use focused mode only to diagnose one scenario:
 
    ```sh
    PR=$(gh pr view --json number --jq .number)
-   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=focus \
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=focus -f scale=0.1 \
      -f focus='completes a fresh clone with matching rows and sequences'
    ```
 
