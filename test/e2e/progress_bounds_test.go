@@ -186,8 +186,11 @@ func holdProgressLock(cluster, table string) func() {
 		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout=150000",
 		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")
 	Expect(cmd.Start()).To(Succeed())
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
 	released := false
 	release := func() {
 		if released {
@@ -200,11 +203,23 @@ func holdProgressLock(cluster, table string) func() {
 		Expect(psql(cluster, progressBlockerCount)).To(Equal("0"))
 	}
 	DeferCleanup(release)
+	assertRunning := func() {
+		select {
+		case <-done:
+			StopTrying(fmt.Sprintf("progress lock process exited before readiness (status %d)",
+				cmd.ProcessState.ExitCode())).Now()
+		default:
+		}
+	}
+	// Remote lock setup has its own observation budget, separate from sampler deadlines.
 	Eventually(func() string {
-		return psql(cluster, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING(pid) "+
+		assertRunning()
+		count := psql(cluster, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING(pid) "+
 			"WHERE a.application_name='e2e_progress_blocker' AND l.relation='"+table+"'::regclass "+
 			"AND l.mode='AccessExclusiveLock' AND l.granted")
-	}, 10*time.Second, 200*time.Millisecond).Should(Equal("1"))
+		assertRunning()
+		return count
+	}, time.Minute, 200*time.Millisecond).Should(Equal("1"))
 	return release
 }
 
