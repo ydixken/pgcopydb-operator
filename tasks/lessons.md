@@ -15,3 +15,5 @@
   Keep exact-head CI, review, merge, privilege, and publication gates intact.
 - Treat physical storage counters as nonmonotonic across recovery.
   Require valid changed positive values and preserve the CI-only verification policy.
+- Use focused CI when a failed full suite lacks the evidence for one assertion.
+  A focused success is diagnostic evidence and never replaces the required full exact-head merge gate.

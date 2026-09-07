@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,7 @@ var _ = Describe("Progress sampler bounds", func() {
 			Expect(baseline.BytesDone).NotTo(BeNil())
 			Expect(baseline.BytesTotal.Value()).To(BeNumerically(">", 0))
 			Expect(baseline.BytesDone.Value()).To(BeNumerically(">", 0))
-			release := holdProgressLock(cluster, table)
+			release := holdProgressLock([]string{sourceKey, targetKey}[side], cluster, table)
 			func() {
 				defer release()
 				for range 3 {
@@ -196,18 +197,114 @@ func TestProgressProbePublicationOwnership(t *testing.T) {
 		progressProbeTable+"'::regclass AND attname='payload'"); got != "e" {
 		t.Fatal("the progress fixture payload does not use uncompressed external storage")
 	}
+	if got := runSQL(probeURI, progressLockSnapshotSQL(progressProbeTable)); got != "0 0 0 0 0 0 0" {
+		t.Fatal("unowned progress lock snapshot was not empty")
+	}
+	lockedSnapshot := "SET application_name='e2e_progress_blocker'; BEGIN; LOCK " +
+		progressProbeTable + " IN ACCESS EXCLUSIVE MODE; " + progressLockSnapshotSQL(progressProbeTable) + "; COMMIT"
+	if got := runSQL(probeURI, lockedSnapshot); got != "1 1 0 0 0 0 0" {
+		t.Fatal("owned progress lock snapshot did not identify the granted lock")
+	}
 }
 
 const progressBlockerCount = "SELECT count(*) FROM pg_stat_activity WHERE application_name='e2e_progress_blocker'"
 
-func holdProgressLock(cluster, table string) func() {
+func progressLockSnapshotSQL(table string) string {
+	return `WITH owned AS (
+  SELECT pid, wait_event_type FROM pg_stat_activity
+  WHERE datname=current_database() AND application_name='e2e_progress_blocker'
+), exclusive AS (
+  SELECT l.granted FROM pg_locks l JOIN owned USING (pid)
+  WHERE l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+    AND l.relation='` + table + `'::regclass AND l.mode='AccessExclusiveLock'
+), blockers AS (
+  SELECT DISTINCT unnest(pg_blocking_pids(pid)) AS pid FROM owned
+)
+SELECT (SELECT count(*) FROM owned) || ' ' ||
+  (SELECT count(*) FROM exclusive WHERE granted) || ' ' ||
+  (SELECT count(*) FROM exclusive WHERE NOT granted) || ' ' ||
+  (SELECT count(*) FROM owned WHERE wait_event_type='Lock') || ' ' ||
+  (SELECT count(*) FROM blockers) || ' ' ||
+  (SELECT count(*) FROM blockers JOIN pg_stat_activity USING (pid)
+    WHERE application_name LIKE 'pgcopydb%') || ' ' ||
+  (SELECT count(*) FROM blockers JOIN pg_stat_activity USING (pid)
+    WHERE state IN ('idle in transaction', 'idle in transaction (aborted)'))`
+}
+
+func parseProgressLockSnapshot(raw string) ([7]int64, bool) {
+	var counts [7]int64
+	fields := strings.Fields(raw)
+	if len(fields) != len(counts) {
+		return counts, false
+	}
+	for i, field := range fields {
+		n, err := strconv.ParseInt(field, 10, 64)
+		if err != nil || n < 0 {
+			return [7]int64{}, false
+		}
+		counts[i] = n
+	}
+	return counts, true
+}
+
+func TestProgressLockSnapshotProjection(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want [7]int64
+		ok   bool
+	}{
+		{raw: "0 0 0 0 0 0 0\n", ok: true},
+		{raw: "1 0 1 1 2 1 1", want: [7]int64{1, 0, 1, 1, 2, 1, 1}, ok: true},
+		{raw: ""},
+		{raw: "1 0 0"},
+		{raw: "1 0 0 0 0 0 0 extra"},
+		{raw: "1 0 0 0 0 0 PRIVATE_OUTPUT"},
+		{raw: "1 0 0 0 0 0 -1"},
+		{raw: "1 0 0 0 0 0 9223372036854775808"},
+	} {
+		if got, ok := parseProgressLockSnapshot(tc.raw); got != tc.want || ok != tc.ok {
+			t.Fatal("progress lock snapshot escaped its numeric projection")
+		}
+	}
+}
+
+func holdProgressLock(side, cluster, table string) func() {
 	GinkgoHelper()
+	readPrimary := func() (corev1.Pod, bool) {
+		lookupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		pods := &corev1.PodList{}
+		err := k8sClient.List(lookupCtx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
+			labelCNPGCluster: cluster, labelCNPGRole: rolePrimary,
+		})
+		if err != nil || len(pods.Items) != 1 {
+			return corev1.Pod{}, false
+		}
+		return pods.Items[0], true
+	}
+	var holder corev1.Pod
+	Eventually(func() bool {
+		var ok bool
+		holder, ok = readPrimary()
+		return ok
+	}, primaryTimeout, 2*time.Second).Should(BeTrue(), "%s lock primary lookup failed", side)
+	pinnedSQL := func(sql string) (string, bool) {
+		queryCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		out, err := commandOutput(queryCtx, exec.CommandContext, "kubectl", "exec", "-n", nsE2E,
+			holder.Name, "-c", "postgres", "--", "psql", "-U", "postgres", appDB, "-XqtA",
+			"-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000", "-c", sql)
+		return strings.TrimSpace(string(out)), err == nil
+	}
 	lockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	cmd := exec.CommandContext(lockCtx, "kubectl", "exec", "-n", nsE2E, primaryPod(cluster), "-c", "postgres", "--",
+	cmd := exec.CommandContext(lockCtx, "kubectl", "exec", "-n", nsE2E, holder.Name, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-XqtA", "-v", "ON_ERROR_STOP=1",
 		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout=150000",
 		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")
-	Expect(cmd.Start()).To(Succeed())
+	if err := cmd.Start(); err != nil {
+		cancel()
+		Fail(side + " lock process could not start")
+	}
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -219,29 +316,55 @@ func holdProgressLock(cluster, table string) func() {
 			return
 		}
 		released = true
-		psql(cluster, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='e2e_progress_blocker'")
+		_, terminated := pinnedSQL("SELECT pg_terminate_backend(pid) FROM pg_stat_activity " +
+			"WHERE datname=current_database() AND application_name='e2e_progress_blocker'")
 		cancel()
 		<-done
-		Expect(psql(cluster, progressBlockerCount)).To(Equal("0"))
+		count, checked := pinnedSQL(progressBlockerCount)
+		Expect(terminated).To(BeTrue(), "%s lock cleanup request failed", side)
+		Expect(checked && count == "0").To(BeTrue(), "%s lock cleanup absence check failed", side)
 	}
 	DeferCleanup(release)
-	assertRunning := func() {
+	primaryMatch, snapshotValid := true, false
+	var snapshot [7]int64
+	diagnostic := func() string {
+		live, exitCode := true, -1
 		select {
 		case <-done:
-			StopTrying(fmt.Sprintf("progress lock process exited before readiness (status %d)",
-				cmd.ProcessState.ExitCode())).Now()
+			live, exitCode = false, cmd.ProcessState.ExitCode()
+		default:
+		}
+		return fmt.Sprintf("%s lock: process_live=%t exit_status=%d primary_match=%t snapshot_valid=%t "+
+			"owned=%d granted=%d waiting=%d lock_waiting=%d blockers=%d worker_blockers=%d idle_transaction_blockers=%d",
+			side, live, exitCode, primaryMatch, snapshotValid,
+			snapshot[0], snapshot[1], snapshot[2], snapshot[3], snapshot[4], snapshot[5], snapshot[6])
+	}
+	assertBound := func() {
+		current, ok := readPrimary()
+		primaryMatch = ok && current.Name == holder.Name && current.UID == holder.UID
+		if !primaryMatch {
+			StopTrying("progress lock primary drift or lookup failure: " + diagnostic()).Now()
+		}
+		select {
+		case <-done:
+			StopTrying("progress lock process exited before readiness: " + diagnostic()).Now()
 		default:
 		}
 	}
 	// Remote lock setup has its own observation budget, separate from sampler deadlines.
-	Eventually(func() string {
-		assertRunning()
-		count := psql(cluster, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING(pid) "+
-			"WHERE a.application_name='e2e_progress_blocker' AND l.relation='"+table+"'::regclass "+
-			"AND l.mode='AccessExclusiveLock' AND l.granted")
-		assertRunning()
-		return count
-	}, time.Minute, 200*time.Millisecond).Should(Equal("1"))
+	Eventually(func(g Gomega) {
+		assertBound()
+		raw, queried := pinnedSQL(progressLockSnapshotSQL(table))
+		counts, valid := parseProgressLockSnapshot(raw)
+		snapshotValid = queried && valid
+		if snapshotValid {
+			snapshot = counts
+		}
+		assertBound()
+		g.Expect(snapshotValid).To(BeTrue(), diagnostic())
+		g.Expect(snapshot[0]).To(Equal(int64(1)), diagnostic())
+		g.Expect(snapshot[1]).To(Equal(int64(1)), diagnostic())
+	}, time.Minute, 200*time.Millisecond).Should(Succeed())
 	return release
 }
 
