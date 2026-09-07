@@ -316,6 +316,17 @@ func holdProgressLock(side, cluster, table string) func() {
 			return
 		}
 		released = true
+		// A former primary is still ours to clean up; a same-name replacement is not.
+		current := &corev1.Pod{}
+		lookupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		err := k8sClient.Get(lookupCtx, client.ObjectKey{Namespace: nsE2E, Name: holder.Name}, current)
+		stop()
+		if err != nil || holder.UID == "" || current.UID != holder.UID {
+			cancel()
+			<-done
+			Fail(side + " lock cleanup refused: captured_pod_uid_match=false")
+			return
+		}
 		_, terminated := pinnedSQL("SELECT pg_terminate_backend(pid) FROM pg_stat_activity " +
 			"WHERE datname=current_database() AND application_name='e2e_progress_blocker'")
 		cancel()
