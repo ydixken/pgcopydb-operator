@@ -433,7 +433,7 @@ type VerificationResult struct {
 type CutoverMode string
 
 const (
-	// CutoverManual waits for spec.cutover.approved.
+	// CutoverManual waits for approval and confirmed catch-up.
 	CutoverManual CutoverMode = "Manual"
 	// CutoverAutomatic cuts over as soon as the migration is caught up.
 	CutoverAutomatic CutoverMode = "Automatic"
@@ -448,8 +448,8 @@ type CutoverSpec struct {
 	// +optional
 	Mode CutoverMode `json:"mode,omitempty"`
 
-	// approved triggers the cutover in Manual mode. Mutable. Setting it back
-	// to false after the cutover started has no effect.
+	// approved arms Manual cutover; confirmed catch-up starts it. Mutable.
+	// Setting it back to false after cutover started has no effect.
 	// +optional
 	Approved bool `json:"approved,omitempty"`
 }

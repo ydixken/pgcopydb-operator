@@ -354,6 +354,102 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeTrue())
 	})
 
+	DescribeTable("keeps early manual approval waiting for usable low lag",
+		func(name string, state *sentinel.State) {
+			defer removeMigration(ctx, name)
+			fake := &fakeSentinel{}
+			r := followReconciler(fake)
+			r.Logs = cloneDoneLogs()
+			m := followMigration(name, v1beta1.CutoverManual)
+			m.Spec.Cutover.Approved = true
+			Expect(k8sClient.Create(ctx, m)).To(Succeed())
+			passPreflight(r, name)
+			reconcileAndGet(ctx, r, name)
+			fake.state = state
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+			caughtUp := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
+			Expect(caughtUp).NotTo(BeNil())
+			Expect(caughtUp.Status).To(Equal(metav1.ConditionFalse))
+			Expect(caughtUp.Reason).To(Equal(reasonLagging))
+			Expect(m.Status.Replication).NotTo(BeNil())
+			Expect(sentinel.EndposSet(m.Status.Replication.Endpos)).To(BeFalse())
+			Expect(fake.setCount()).To(BeZero())
+			Expect(fake.nudgeCount()).To(BeZero())
+			Expect(drainEvents(r.Recorder.(*events.FakeRecorder))).NotTo(ContainElement(ContainSubstring("CutoverStarted")))
+		},
+		Entry("high lag", "mig-early-high", &sentinel.State{WriteLSN: laggingWriteLSN, ReplayLSN: laggingReplayLSN, SourceHead: laggingHeadLSN}),
+		Entry("missing replay", "mig-early-missing", &sentinel.State{WriteLSN: caughtUpLSN, SourceHead: caughtUpLSN}),
+		Entry("malformed replay", "mig-early-malformed", &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: "invalid", SourceHead: caughtUpLSN}),
+	)
+
+	It("arms early manual approval through clone and confirms catch-up before cutting over once", func() {
+		const name = "mig-early-confirm"
+		defer removeMigration(ctx, name)
+		low := &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN}
+		high := &sentinel.State{WriteLSN: laggingWriteLSN, ReplayLSN: laggingReplayLSN, SourceHead: laggingHeadLSN}
+		fake := &fakeSentinel{state: low}
+		r := followReconciler(fake)
+		logs := copyingLogs()
+		r.Logs = logs
+		m := followMigration(name, v1beta1.CutoverManual)
+		m.Spec.Cutover.Approved = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name)
+		for range 2 {
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+			Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeFalse())
+			Expect(m.Status.Replication.LagBytes).NotTo(BeNil())
+			Expect(*m.Status.Replication.LagBytes).To(BeZero())
+			Expect(fake.setCount()).To(BeZero())
+			Expect(fake.nudgeCount()).To(BeZero())
+		}
+		logs.tsOut += cloneDoneLine
+		for _, sample := range []struct {
+			state  *sentinel.State
+			reason string
+		}{
+			{high, reasonLagging},
+			{low, reasonConfirmingCatchUp},
+			{high, reasonLagging},
+			{low, reasonConfirmingCatchUp},
+		} {
+			fake.state = sample.state
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+			caughtUp := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
+			Expect(caughtUp).NotTo(BeNil())
+			Expect(caughtUp.Status).To(Equal(metav1.ConditionFalse))
+			Expect(caughtUp.Reason).To(Equal(sample.reason))
+			Expect(sentinel.EndposSet(m.Status.Replication.Endpos)).To(BeFalse())
+			Expect(fake.setCount()).To(BeZero())
+			Expect(fake.nudgeCount()).To(BeZero())
+			Expect(drainEvents(r.Recorder.(*events.FakeRecorder))).NotTo(ContainElement(ContainSubstring("CutoverStarted")))
+		}
+		m = confirmCaughtUp(ctx, r, name)
+		Expect(m.Spec.Cutover.Approved).To(BeTrue())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCaughtUp)).To(BeTrue())
+		Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+		Expect(fake.setCount()).To(Equal(1))
+		Expect(fake.nudgeCount()).To(Equal(1))
+		for range 2 {
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
+			Expect(m.Status.Replication.Endpos).To(Equal(caughtUpLSN))
+		}
+		Expect(fake.setCount()).To(Equal(1))
+		started := 0
+		for _, event := range drainEvents(r.Recorder.(*events.FakeRecorder)) {
+			if strings.Contains(event, "CutoverStarted") {
+				started++
+			}
+		}
+		Expect(started).To(Equal(1))
+	})
+
 	It("polls at one cadence through the base copy and on into streaming", func() {
 		const name = "mig-clone-cadence"
 		defer removeMigration(ctx, name)

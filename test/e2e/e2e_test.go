@@ -460,6 +460,8 @@ var _ = Describe("Migration", Ordered, func() {
 		psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
 	})
 
+	It("holds early Manual approval until a paused backlog catches up", earlyManualCutover)
+
 	It("runs an Automatic cutover to completion unattended", func() {
 		const name = "e2e-follow-auto"
 		// Schema verification on top: after cutover and cleanup the compare
