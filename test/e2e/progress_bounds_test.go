@@ -1,0 +1,193 @@
+/*
+Copyright 2026 pgcopydb-operator contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"slices"
+	"strings"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+)
+
+// The follow worker keeps real observation traffic running between held locks.
+var _ = Describe("Progress sampler bounds", func() {
+	It("releases blocked source and target samplers across repeated polls and recovers", func() {
+		const name = "e2e-progress-bounds"
+		const table = "public.progress_lock_probe"
+		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+		psql(sourceCluster, "CREATE TABLE "+table+" (id integer PRIMARY KEY, payload text); "+
+			"INSERT INTO "+table+" VALUES (0, 'baseline')")
+		DeferCleanup(func() {
+			deleteMigration(name)
+			Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+			Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+			psql(sourceCluster, "DROP TABLE IF EXISTS "+table)
+			psql(targetCluster, "DROP TABLE IF EXISTS "+table)
+		})
+		create(newFollowMigration(name, v1beta1.CutoverManual))
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		readMigration := func() *v1beta1.Migration {
+			m := &v1beta1.Migration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+			return m
+		}
+		Eventually(func() bool {
+			m := readMigration()
+			return m.Status.Progress != nil && m.Status.Progress.TablesTotal > 0
+		}, time.Minute, time.Second).Should(BeTrue(), "successful baseline sampling is required")
+		pods := &corev1.PodList{}
+		Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+			client.MatchingLabels{"job-name": name + "-run-1"})).To(Succeed())
+		Expect(pods.Items).To(HaveLen(1))
+		runner := pods.Items[0].Name
+		workers := runnerProgressProcesses(runner, false)
+		Expect(workers).NotTo(BeEmpty(), "a pgcopydb worker must be observed before testing cleanup")
+		for side, cluster := range []string{sourceCluster, targetCluster} {
+			waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
+			baseline := readMigration().Status.Progress.DeepCopy()
+			release := holdProgressLock(cluster, table)
+			func() {
+				defer release()
+				for range 3 {
+					var backend string
+					Eventually(func() string {
+						backend = psql(cluster, `SELECT a.pid::text FROM pg_stat_activity a
+WHERE a.pid<>pg_backend_pid() AND a.query LIKE 'with t as (%' AND a.wait_event_type='Lock'
+AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
+AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
+						return backend
+					}, time.Minute, 200*time.Millisecond).ShouldNot(BeEmpty(),
+						"must observe a sampler waiting on the test-owned relation lock")
+					Expect(strings.Fields(backend)).To(HaveLen(1), "previous polls must not accumulate backends")
+					processes := runnerProgressProcesses(runner, true)
+					Expect(processes).NotTo(BeEmpty(), "must observe actual psql process identities before checking cleanup")
+					Eventually(func() string {
+						return psql(cluster, "SELECT count(*) FROM pg_stat_activity WHERE pid="+backend)
+					}, 6*time.Second, 200*time.Millisecond).Should(Equal("0"),
+						"blocked SQL session must disappear while the blocker stays alive")
+					Eventually(func() bool {
+						current := runnerProgressProcesses(runner, true)
+						for _, pid := range processes {
+							if slices.Contains(current, pid) {
+								return false
+							}
+						}
+						return true
+					}, 2*time.Second, 200*time.Millisecond).Should(BeTrue(),
+						"the observed sampler process cohort must exit within its remote budget")
+					Expect(psql(cluster, progressBlockerCount)).To(Equal("1"))
+					Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
+						"sampling cancellation must preserve the worker processes")
+					m := readMigration()
+					Expect(m.Status.Progress).To(Equal(baseline))
+					Expect(m.Status.Attempts).To(Equal(int32(1)))
+					Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
+				}
+			}()
+			psql(sourceCluster, fmt.Sprintf("INSERT INTO %s SELECT i, repeat(md5(i::text), 100) "+
+				"FROM generate_series(%d,%d) i", table, side*1000+1, (side+1)*1000))
+			Eventually(func() bool {
+				m := readMigration()
+				if m.Status.Progress == nil || m.Status.Progress.BytesTotal == nil || m.Status.Progress.BytesDone == nil {
+					return false
+				}
+				return m.Status.Progress.BytesTotal.Value() > baseline.BytesTotal.Value() &&
+					m.Status.Progress.BytesDone.Value() > baseline.BytesDone.Value()
+			}, time.Minute, time.Second).Should(BeTrue(),
+				"sampling must recover after unlocking")
+		}
+		approveCutover(name)
+		expectSingleAttempt(waitCompleted(name, nsE2E))
+		Expect(psql(targetCluster, "SELECT count(*) FROM "+table)).To(Equal("2001"))
+		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
+	})
+})
+
+const progressBlockerCount = "SELECT count(*) FROM pg_stat_activity WHERE application_name='e2e_progress_blocker'"
+
+func holdProgressLock(cluster, table string) func() {
+	GinkgoHelper()
+	lockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	cmd := exec.CommandContext(lockCtx, "kubectl", "exec", "-n", nsE2E, primaryPod(cluster), "-c", "postgres", "--",
+		"psql", "-U", "postgres", appDB, "-XqtA", "-v", "ON_ERROR_STOP=1",
+		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout=150000",
+		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")
+	Expect(cmd.Start()).To(Succeed())
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		psql(cluster, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='e2e_progress_blocker'")
+		cancel()
+		<-done
+		Expect(psql(cluster, progressBlockerCount)).To(Equal("0"))
+	}
+	DeferCleanup(release)
+	Eventually(func() string {
+		return psql(cluster, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING(pid) "+
+			"WHERE a.application_name='e2e_progress_blocker' AND l.relation='"+table+"'::regclass "+
+			"AND l.mode='AccessExclusiveLock' AND l.granted")
+	}, 10*time.Second, 200*time.Millisecond).Should(Equal("1"))
+	return release
+}
+
+func runnerProgressProcesses(pod string, sampler bool) []string {
+	GinkgoHelper()
+	kind := "worker"
+	if sampler {
+		kind = "sampler"
+	}
+	commandCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Only process identities leave the pod; cmdline may contain credentials.
+	script := `kind=$1
+for p in /proc/[0-9]*; do
+  [ -r "$p/comm" ] || continue
+  read -r comm < "$p/comm" || continue
+  case "$kind:$comm" in
+    sampler:psql)
+      args=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null) || continue
+      case "$args" in *'with t as ('*|*string_agg*) ;; *) continue ;; esac ;;
+    worker:pgcopydb*) [ "$p" = /proc/1 ] || continue ;;
+    *) continue ;;
+  esac
+  read -r stat < "$p/stat" || continue
+  stat=${stat##*) }
+  set -- $stat
+  n=1
+  while [ "$n" -lt 20 ]; do shift; n=$((n+1)); done
+  printf '%s:%s\n' "${p##*/}" "$1"
+done`
+	out, err := exec.CommandContext(commandCtx, "kubectl", "exec", "-n", nsE2E, pod,
+		"-c", "pgcopydb", "--", "sh", "-c", script, "sh", kind).Output()
+	Expect(err).NotTo(HaveOccurred(), "could not inspect runner process identities")
+	return strings.Fields(string(out))
+}

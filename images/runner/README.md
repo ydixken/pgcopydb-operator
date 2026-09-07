@@ -38,8 +38,12 @@ Both were built, measured and rejected.
 
 **Wolfi** is glibc and worked correctly, at zero findings and 111 MB. It was rejected because `cgr.dev` images sit behind Chainguard's catalog tiers, where the public tier serves only `:latest`, so the base would be a dependency on a vendor's pricing terms. Wolfi's packages are Apache-2.0, but the images are a product.
 
-Staying on Debian keeps glibc, a free base, and an intact package database, so a scanner reports the truth rather than the absence of anything to enumerate. A `scratch` image assembled from copied binaries would also report near zero, while still containing openssl, krb5 and readline.
+Staying on Debian keeps glibc, a free base, and metadata for the retained packages, so a scanner can enumerate them despite the purged dependencies.
+A `scratch` image assembled from copied binaries would also report near zero, while still containing openssl, krb5 and readline.
 
 ## Canary
 
-Every assertion in the build-time canary stands for a way this image has actually broken: version drift off the pinned pgcopydb build or client 18; a purge that takes GNU sed with it; a libc whose getopt stops permuting; and perl surviving the purge. The base image is pinned by tag and digest, and Renovate bumps both together.
+The build-time canary checks the pinned pgcopydb build, client 18, GNU sed, GNU `timeout`, getopt argument permutation, and the absence of perl after package purging.
+Progress sampling requires GNU `timeout` with `--signal=TERM --kill-after=1s 6s`; custom runners MUST provide this command as well as psql.
+The canary executes that invocation after purging, because a missing timeout command would suppress all database progress readings.
+The base image is pinned by tag and digest, and Renovate bumps both together.

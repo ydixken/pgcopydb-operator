@@ -29,8 +29,9 @@ The pull request `lint` job runs GitHub Dependency Review and rejects new depend
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
 
 The `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
-That variable is what runs `TestCompareDataQuery`, the only test that exercises the SQL deciding the `pgcopydb compare data` verdict; without it the test skips.
-Set it when you touch that query: `PGCOPYDB_TEST_PGURI=postgres://user:pw@host/db make test` against any reachable server, since the query reads a JSON literal and touches no table.
+That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
+Set it to a disposable PostgreSQL instance when running `task test`, with permission to create and drop test databases.
+The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret. Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job. The coverage total is printed in the job summary either way. `codecov.yml` excludes the `zz_generated*.go` files controller-gen writes, so the Codecov number reflects hand-written code.
 

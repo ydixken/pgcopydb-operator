@@ -497,6 +497,10 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
 	// to fail these checks the same way a lowercase one does.
 	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
+	_, flat, foundSQL := strings.Cut(flat, `"select `)
+	if !foundSQL {
+		t.Fatal("probe SQL is missing")
+	}
 
 	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
 	if !ok {

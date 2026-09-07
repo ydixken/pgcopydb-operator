@@ -164,7 +164,7 @@ func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (
 // A failed side prints empty and parses to no sample, never to zero. psql
 // touches no SQLite catalog, so unlike `list progress` this is safe while the
 // clone runs, which is why these numbers can be live at all.
-const sampleScript = `scope=
+const sampleScript = progressSQL + `scope=
 tables="select c.oid, n.nspname, c.relname from pg_class c
   join pg_namespace n on n.oid = c.relnamespace
   where c.relkind = 'r'
@@ -175,19 +175,27 @@ row="select pg_database_size(current_database()) || ' ' ||
   (select count(*) from t where pg_table_size(t.oid) > 0) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
   (select coalesce(sum(pg_table_size(t.oid)), 0) from t)"
-t=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "with t as ($tables) $row") || t=
-scope=$(psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with t as ($tables) $row") || t=
+scope=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
   from pg_class c join pg_namespace n on n.oid = c.relnamespace
   where c.relkind = 'r'
     and n.nspname not in ('pg_catalog', 'information_schema')
     and n.nspname not like 'pg_toast%'") || scope=
 if [ -n "$scope" ]; then
-  s=$(psql "$PGCOPYDB_SOURCE_PGURI" -XtAc "with t as ($tables
+  s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as ($tables
     and (n.nspname || '.' || c.relname) in ($scope)) $row") || s=
 else
   s=
 fi
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
+`
+
+// SQL cancellation releases server work; timeout also bounds connection hangs
+// after the local exec stream closes. SET overrides conflicting URI options.
+const progressSQL = `progress_sql() {
+  timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA -v ON_ERROR_STOP=1 \
+    -c 'SET statement_timeout = 5000' -c "$2"
+}
 `
 
 // Sample is one poll of both databases: their sizes, and the relation counts
@@ -303,7 +311,7 @@ func parseFields(s string) []int64 {
 //
 // psql against the target touches no SQLite catalog, so it is safe while the
 // clone runs. Reading `list progress` is not, which is why this exists.
-const finalizingScript = `psql "$PGCOPYDB_TARGET_PGURI" -XtAc "select
+const finalizingScript = progressSQL + `progress_sql "$PGCOPYDB_TARGET_PGURI" "select
   count(*) filter (where application_name ilike '%copy worker%'
                       or (state = 'active' and query ilike 'copy %')) || ' ' ||
   count(*) filter (where state = 'active'

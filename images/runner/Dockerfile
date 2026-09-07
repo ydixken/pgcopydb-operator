@@ -97,19 +97,16 @@ COPY --from=pgcopydb /pgcopydb /usr/lib/postgresql/18/bin/pgcopydb
 # makes this the only path to the client tools.
 ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 
-# Canary: every assertion here stands for a way the image has actually broken.
-# Version drift (a pgcopydb that is not the pinned fork build, or PGDG moving
-# off client 18); a purge that took GNU sed with it (removing libacl1 did
-# exactly that, and the prelude escapes passwords with sed); a libc whose
-# getopt does not permute, which is how Alpine failed with "unrecognized
-# option: dir" only once Jobs ran on a cluster; and perl surviving the purge,
-# which would mean the report never improved. Running pgcopydb at all also
-# proves its runtime libraries survived into this stage.
+# Purging packages can break the remaining tools through shared libraries.
+# Run the worker, credential escaping, and sampler timeout after purging so
+# a missing runtime capability fails the image build.
 RUN set -eux; \
     pgcopydb --version | grep -qF '0.18.5.ge37d2bd'; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \
+    timeout --version | grep -qF 'GNU coreutils'; \
+    timeout --signal=TERM --kill-after=1s 6s true; \
     sed --version | grep -qF 'GNU sed'; \
     printf 'a:b' | sed -e 's/:/\\:/g' | grep -qF 'a\:b'; \
     pgcopydb clone --dir /tmp/canary --not-consistent 2>&1 \
