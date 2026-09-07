@@ -162,7 +162,7 @@ collect() {
 self=$(start_time "$$")
 before=$(collect)
 after=$(collect)
-test -n "$self" && test "$self" = "$(start_time "$$")" && test "$before" = "$after"
+test -n "$self" && test "$self" = "$(start_time "$$")" && test "$before" = "$after" || exit 1
 printf '%s\n' "$before"
 NODE_METADATA
 }

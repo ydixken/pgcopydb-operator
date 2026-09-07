@@ -1853,6 +1853,7 @@ func TestFeatureE2EKindNodeMetadata(t *testing.T) {
 	for _, scenario := range []string{
 		successValue, "namespace mismatch", "namespace changed", "root changed", "volume changed",
 		"start changed", "missing mount", "stat failed", "malformed start",
+		"empty reader start", "reader start changed",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -1876,6 +1877,8 @@ func TestFeatureE2EKindNodeMetadata(t *testing.T) {
 			}
 			args := []string{"-c", `mkdir -p "$1/proc/$$"
 sed "s/900 0/$2 0/" "$1/proc/1/stat" > "$1/proc/$$/stat"
+printf '%s\n' "$$" > "$1/reader-pid"
+if [ "$FAKE_METADATA_SCENARIO" = 'empty reader start' ]; then : > "$1/proc/$$/stat"; fi
 exec /bin/sh "$1/reader.sh"`, "reader", dir, "800"}
 			cmd := exec.Command("sh", args...)
 			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
@@ -1894,6 +1897,8 @@ exec /bin/sh "$1/reader.sh"`, "reader", dir, "800"}
 				}
 			} else if err == nil {
 				t.Fatalf("accepted %s: %s", scenario, output)
+			} else if (scenario == "empty reader start" || scenario == "reader start changed") && len(output) != 0 {
+				t.Fatalf("invalid reader lifetime emitted metadata: %s", output)
 			}
 		})
 	}
@@ -1905,6 +1910,9 @@ scenario=$FAKE_METADATA_SCENARIO
 root=$FAKE_METADATA_ROOT
 case "$*" in
   *'/self/ns/mnt')
+    if [[ "$scenario" == 'reader start changed' ]]; then
+      sed -i.bak 's/800 0/801 0/' "$root/proc/$(cat "$root/reader-pid")/stat"
+    fi
     [[ ! -f "$root/namespace-read" ]] && touch "$root/namespace-read" || touch "$root/second-read"
     if [[ "$scenario" == 'namespace mismatch' ||
           ( "$scenario" == 'namespace changed' && -f "$root/second-read" ) ]]; then
