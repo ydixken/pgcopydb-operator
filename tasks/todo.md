@@ -102,6 +102,8 @@
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
   Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
   The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.
+  The progress recovery oracle accepts changed positive physical counters because storage size is not monotonic.
+  CI runs functional validation, while local work is limited to formatting and `task lint`.
   Collector fix `7a276036300c58242213be67ba2dca1346c6e3f1` has static approval.
   After this policy commit, require one exact-head CI and full shared baseline before the ordinary PR 251 merge.
   Runtime implementation may continue unpublished during that CI wait.

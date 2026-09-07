@@ -38,6 +38,11 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
+const (
+	sourceKey = "source"
+	targetKey = "target"
+)
+
 // Placement is configuration, and configuration that stops working fails
 // silently: the suite would still pass on a single node, just slower and over
 // loopback instead of the wire. Deliberately its own container rather than a
@@ -247,7 +252,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const uriSecretName = "e2e-uris"
 		By("building libpq URIs from the app secrets and storing them in one Secret")
 		data := map[string][]byte{}
-		for key, cluster := range map[string]string{"source": sourceCluster, "target": targetCluster} {
+		for key, cluster := range map[string]string{sourceKey: sourceCluster, targetKey: targetCluster} {
 			sec := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
 			// url.UserPassword escapes the generated password, whatever is in it.
@@ -268,7 +273,7 @@ var _ = Describe("Migration", Ordered, func() {
 
 		m := newMigration("e2e-uri", nsE2E, v1beta1.CloneOptions{DropIfExists: true})
 		m.Spec.Source = v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "source"}}
+			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: sourceKey}}
 		m.Spec.Target = v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: uriSecretName}, Key: "target"}}
 		create(m)

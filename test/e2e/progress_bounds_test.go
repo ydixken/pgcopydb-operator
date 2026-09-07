@@ -73,6 +73,11 @@ var _ = Describe("Progress sampler bounds", func() {
 		for side, cluster := range []string{sourceCluster, targetCluster} {
 			waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
 			baseline := readMigration().Status.Progress.DeepCopy()
+			Expect(baseline).NotTo(BeNil())
+			Expect(baseline.BytesTotal).NotTo(BeNil())
+			Expect(baseline.BytesDone).NotTo(BeNil())
+			Expect(baseline.BytesTotal.Value()).To(BeNumerically(">", 0))
+			Expect(baseline.BytesDone.Value()).To(BeNumerically(">", 0))
 			release := holdProgressLock(cluster, table)
 			func() {
 				defer release()
@@ -114,15 +119,27 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 			}()
 			psql(sourceCluster, fmt.Sprintf("INSERT INTO %s SELECT i, repeat(md5(i::text), 100) "+
 				"FROM generate_series(%d,%d) i", table, side*1000+1, (side+1)*1000))
-			Eventually(func() bool {
+			Eventually(func(g Gomega) {
 				m := readMigration()
-				if m.Status.Progress == nil || m.Status.Progress.BytesTotal == nil || m.Status.Progress.BytesDone == nil {
-					return false
-				}
-				return m.Status.Progress.BytesTotal.Value() > baseline.BytesTotal.Value() &&
-					m.Status.Progress.BytesDone.Value() > baseline.BytesDone.Value()
-			}, time.Minute, time.Second).Should(BeTrue(),
+				detail := fmt.Sprintf("after %s lock: phase=%s attempts=%d baseline bytesTotal=%d bytesDone=%d",
+					[]string{sourceKey, targetKey}[side], m.Status.Phase, m.Status.Attempts,
+					baseline.BytesTotal.Value(), baseline.BytesDone.Value())
+				g.Expect(m.Status.Progress).NotTo(BeNil(), detail)
+				g.Expect(m.Status.Progress.BytesTotal).NotTo(BeNil(), detail)
+				g.Expect(m.Status.Progress.BytesDone).NotTo(BeNil(), detail)
+				total, done := m.Status.Progress.BytesTotal.Value(), m.Status.Progress.BytesDone.Value()
+				detail += fmt.Sprintf(" current bytesTotal=%d bytesDone=%d", total, done)
+				g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending), detail)
+				g.Expect(m.Status.Attempts).To(Equal(int32(1)), detail)
+				g.Expect(total).To(BeNumerically(">", 0), detail)
+				g.Expect(done).To(BeNumerically(">", 0), detail)
+				// Physical table-size sums can decrease; changed paired counters prove a fresh sample.
+				g.Expect(total).NotTo(Equal(baseline.BytesTotal.Value()), detail)
+				g.Expect(done).NotTo(Equal(baseline.BytesDone.Value()), detail)
+			}, time.Minute, time.Second).Should(Succeed(),
 				"sampling must recover after unlocking")
+			Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
+				"sampling recovery must preserve the worker processes")
 		}
 		approveCutover(name)
 		expectSingleAttempt(waitCompleted(name, nsE2E))
@@ -135,6 +152,7 @@ const progressProbeTable = "public.progress_lock_probe"
 
 func progressProbeSetupSQL(role string) string {
 	return "SET ROLE " + role + "; CREATE TABLE " + progressProbeTable + " (id integer PRIMARY KEY, payload text); " +
+		"ALTER TABLE " + progressProbeTable + " ALTER COLUMN payload SET STORAGE EXTERNAL; " +
 		"INSERT INTO " + progressProbeTable + " VALUES (0, 'baseline')"
 }
 
@@ -173,6 +191,10 @@ func TestProgressProbePublicationOwnership(t *testing.T) {
 	if got := runSQL(probeURI, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
 		progressProbeTable+"'::regclass"); got != role {
 		t.Fatal("the progress fixture is not owned by its migration role")
+	}
+	if got := runSQL(probeURI, "SELECT attstorage FROM pg_attribute WHERE attrelid='"+
+		progressProbeTable+"'::regclass AND attname='payload'"); got != "e" {
+		t.Fatal("the progress fixture payload does not use uncompressed external storage")
 	}
 }
 

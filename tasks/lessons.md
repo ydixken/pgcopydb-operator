@@ -13,3 +13,5 @@
 - Do not add local test, diagnostic, documentation-build, smoke, or skill-evaluation gates.
 - Use CI wait time for approved unpublished local batch work.
   Keep exact-head CI, review, merge, privilege, and publication gates intact.
+- Treat physical storage counters as nonmonotonic across recovery.
+  Require valid changed positive values and preserve the CI-only verification policy.
