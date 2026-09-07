@@ -280,6 +280,15 @@ type compatibilitySnapshot struct {
 	Builder            map[string]string
 }
 
+type compatibilityDocument map[string]any
+
+func (document *compatibilityDocument) UnmarshalJSON(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	// CRD defaults and bounds can exceed float64's exact integer range.
+	decoder.UseNumber()
+	return decoder.Decode((*map[string]any)(document))
+}
+
 func writeCompatibilityFixture(t *testing.T, root, name, body string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))
@@ -423,7 +432,7 @@ func compatibilityDocuments(
 		}
 		decoder := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(body), 4096)
 		for index := 0; ; index++ {
-			var document map[string]any
+			var document compatibilityDocument
 			if err := decoder.Decode(&document); err == io.EOF {
 				break
 			} else if err != nil {
@@ -443,7 +452,7 @@ func compatibilityDocuments(
 				return fmt.Errorf("%s document %d has no identity", path, index)
 			}
 			if ignoreDescriptions {
-				removeDescriptions(document)
+				removeDescriptions(map[string]any(document))
 			}
 			canonical, err := json.Marshal(document)
 			if err != nil {
@@ -529,7 +538,7 @@ func compatibilityRenderedPrivileges(t *testing.T, root string) []string {
 	documents := make(map[string]string)
 	decoder := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(output), 4096)
 	for index := 0; ; index++ {
-		var document map[string]any
+		var document compatibilityDocument
 		if err := decoder.Decode(&document); err == io.EOF {
 			break
 		} else if err != nil {
