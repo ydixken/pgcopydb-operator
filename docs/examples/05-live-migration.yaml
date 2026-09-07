@@ -30,7 +30,7 @@ spec:
     # allowMissingReplicaIdentity: ["public.audit_log"]  # read-only tables only
   cutover:
     mode: Manual  # the default: stop writes to the source, then approve
-    # approved: true  # flip this to freeze the stream and drain
+    # approved: true  # arms cutover; confirmed catch-up starts the drain
     # mode: Automatic  # instead: cut over unattended once CaughtUp holds
   # suspend: true  # pauses between attempts; the slot keeps retaining WAL
   workVolume:

@@ -253,8 +253,8 @@ spec:
                 properties:
                   approved:
                     description: |-
-                      approved triggers the cutover in Manual mode. Mutable. Setting it back
-                      to false after the cutover started has no effect.
+                      approved arms Manual cutover; confirmed catch-up starts it. Mutable.
+                      Setting it back to false after cutover started has no effect.
                     type: boolean
                   mode:
                     default: Manual
@@ -2407,8 +2407,8 @@ spec:
                 properties:
                   approved:
                     description: |-
-                      approved triggers the cutover in Manual mode. Mutable. Setting it back
-                      to false after the cutover started has no effect.
+                      approved arms Manual cutover; confirmed catch-up starts it. Mutable.
+                      Setting it back to false after cutover started has no effect.
                     type: boolean
                   mode:
                     default: Manual

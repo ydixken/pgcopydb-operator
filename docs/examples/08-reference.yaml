@@ -88,7 +88,7 @@ spec:
     maxCatchupLag: 16Mi         # lag under which CaughtUp goes True
   cutover:
     mode: Manual                # Manual (default) | Automatic (cut over at CaughtUp)
-    approved: false             # Manual mode: flip to true to freeze and drain
+    approved: false             # Manual: arms cutover after confirmed catch-up
   verification:
     schema: true                # pgcopydb compare schema after completion
     data: true                  # full-table checksums on both sides; enable deliberately

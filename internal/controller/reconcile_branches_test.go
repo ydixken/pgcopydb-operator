@@ -304,6 +304,9 @@ var _ = Describe("Migration Controller resilience", func() {
 		fresh := getM(name)
 		fresh.Spec.Cutover.Approved = true
 		Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(fake.setCount()).To(BeZero())
 
 		// Setting the endpos fails transiently: warn, keep streaming, retry.
 		fake.setErr = stderrors.New("pod restarting")

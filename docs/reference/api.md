@@ -128,7 +128,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Manual` | CutoverManual waits for spec.cutover.approved.<br /> |
+| `Manual` | CutoverManual waits for approval and confirmed catch-up.<br /> |
 | `Automatic` | CutoverAutomatic cuts over as soon as the migration is caught up.<br /> |
 
 
@@ -148,7 +148,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `mode` _[CutoverMode](#cutovermode)_ | mode selects Manual (default) or Automatic cutover. | Manual | Enum: [Manual Automatic] <br />Optional: \{\} <br /> |
-| `approved` _boolean_ | approved triggers the cutover in Manual mode. Mutable. Setting it back<br />to false after the cutover started has no effect. |  | Optional: \{\} <br /> |
+| `approved` _boolean_ | approved arms Manual cutover; confirmed catch-up starts it. Mutable.<br />Setting it back to false after cutover started has no effect. |  | Optional: \{\} <br /> |
 
 
 #### Filters

@@ -64,13 +64,32 @@ Granting the migration's source role `pg_read_all_stats` is optional, and sharpe
 
 ## Manual cutover runbook
 
-Manual is the default mode. Cutover freezes the stream at the source's current LSN: anything written after that instant never reaches the target. So the order matters.
+Manual is the default mode.
+Cutover freezes the stream at the source's current LSN: anything written after that instant never reaches the target.
+So the order matters.
+
+Manual approval arms cutover, which starts only when the controller's two-sample `CaughtUp` verdict is true.
+Early approval leaves the Migration in `Streaming` while that verdict is false, including the first confirming sample, and leaves endpos unset.
+The second qualifying sample starts cutover without another approval edit.
+Approval does not stop source writes or freeze the stream while catch-up is pending.
+
+> [!warning]
+> Operators MUST stop source writes before cutover freezes the stream, in both Manual and Automatic modes.
+> The operator does not fence source writes or terminate source sessions.
 
 1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`). It returns up to one poll interval (about 10 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
 2. Stop writes to the source (stop the application, revoke access, whatever your setup calls quiescing).
 3. Approve: `kubectl patch pgm billing --type=merge -p '{"spec":{"cutover":{"approved":true}}}'`.
-4. The operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits. Phase: `CuttingOver`.
-5. The operator does not trust the worker's exit code: a verify Job (`<name>-verify`) proves the drain on the target. The fast path passes only when the target's replication origin sits exactly on the cutover LSN, because the origin advances inside the apply's own commits and equality is the one reading that proves nothing is outstanding. Any remaining distance is decided by content, never by its size: from outside, unapplied commits and the publication-filtered WAL an idle source leaves behind (autovacuum, catalog churn, which pgcopydb never applies) are the same bytes. The Job then runs `pgcopydb compare data` and takes the verdict from the report `--json` prints, because the command logs a differing table and exits 0 regardless. It passes only when the report accounts for every migrated table and each one matches on row count and checksum; a compare that could not run, and a report the Job cannot read, refuse rather than pass. Nearly every cutover takes that path, and not only an idle one: the cutover LSN is the source's WAL head at the instant you approve, the origin holds the last commit the target applied, and anything in between (an autovacuum tick, a checkpoint, another database on the same cluster) leaves the two apart, measured live at 56 bytes right after write activity. So size the write-downtime window for a `compare data` over the whole database, and treat the exact-LSN pass as the exception it is. Only that proof sets `CutoverCompleted`. A refuted drain fails the Migration instead (see `DrainIncomplete` in [troubleshooting](../troubleshooting.md)).
+4. Once approval and confirmed catch-up both hold, the operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits. Phase: `CuttingOver`.
+5. The operator does not trust the worker's exit code: a verify Job (`<name>-verify`) proves the drain on the target.
+   The fast path passes only when the target's replication origin sits exactly on the cutover LSN, because the origin advances inside the apply's own commits and equality is the one reading that proves nothing is outstanding.
+   Any remaining distance is decided by content, never by its size: from outside, unapplied commits and the publication-filtered WAL an idle source leaves behind (autovacuum, catalog churn, which pgcopydb never applies) are the same bytes.
+   The Job then runs `pgcopydb compare data` and takes the verdict from the report `--json` prints, because the command logs a differing table and exits 0 regardless.
+   It passes only when the report accounts for every migrated table and each one matches on row count and checksum; a compare that could not run, and a report the Job cannot read, refuse rather than pass.
+   Nearly every cutover takes that path, and not only an idle one: the cutover LSN is the source's WAL head when approval and confirmed catch-up both hold, the origin holds the last commit the target applied, and anything in between (an autovacuum tick, a checkpoint, another database on the same cluster) leaves the two apart.
+   So size the write-downtime window for a `compare data` over the whole database, and treat the exact-LSN pass as the exception it is.
+   Only that proof sets `CutoverCompleted`.
+   A refuted drain fails the Migration instead (see `DrainIncomplete` in [troubleshooting](../troubleshooting.md)).
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin. Then `Complete` goes True, phase `Completed`.
 7. Point the application at the target.
 
@@ -84,4 +103,7 @@ Keeping that set empty is what step 2 is for, and [Automatic mode](#automatic-mo
 
 ## Automatic mode
 
-`cutover.mode: Automatic` skips the approval: the operator cuts over the moment `CaughtUp` first goes True. Use it only when the source is already quiesced (a decommissioned system, a maintenance window that started before the Migration). Against a source still taking writes, "caught up" is a moving target crossed at an arbitrary moment, and every write after the freeze is lost to the target. When in doubt, use Manual.
+`cutover.mode: Automatic` skips approval and starts cutover when the same two-sample `CaughtUp` verdict first goes True.
+Use it only when the source is already quiesced (a decommissioned system, a maintenance window that started before the Migration).
+Against a source still taking writes, "caught up" is a moving target crossed at an arbitrary moment, and every write after the freeze is lost to the target.
+When in doubt, use Manual.

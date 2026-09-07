@@ -101,7 +101,7 @@ func cutoverWanted(m *v1beta1.Migration, caughtUp bool) bool {
 	default:
 		// Manual is the default mode: the user flips approved once writes to
 		// the source are stopped.
-		return m.Spec.Cutover.Approved
+		return m.Spec.Cutover.Approved && caughtUp
 	}
 }
 
