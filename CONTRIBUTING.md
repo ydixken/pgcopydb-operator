@@ -141,6 +141,7 @@ Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`
 
 The manual `feature-e2e.yml` workflow tests a feature or bug-fix branch without cutting a release candidate or entering a release-producing path.
 It always runs from trusted `main`, resolves one open same-repository pull request once to its exact head SHA, and builds the manager and runner images from that SHA.
+The workflow loads the cluster helpers and suite launcher from a separate trusted-main checkout, while the suite runs from the candidate checkout.
 Both image references are immutable digests.
 Before any Migration, exactly one eligible Ready feature controller must run the expected manager digest and configure the expected runner digest, and a runner canary must run that runner digest.
 An image mismatch stops the run before a Migration is created.

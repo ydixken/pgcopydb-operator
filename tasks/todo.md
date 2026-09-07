@@ -99,7 +99,7 @@
 ## Runtime safety implementation plan
 
 - [ ] Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
-- [ ] Fix #242 progress sampler process and database-connection leaks.
+- [x] Fix #242 progress sampler process and database-connection leaks.
 - [ ] Fix #211 manual cutover so approval also requires the existing caught-up verdict.
 - [ ] Fix #215 replication cleanup outcome reporting and cleanup postcondition checks.
 - [ ] Fix #243 newly started worker-session keepalives and orphan-connection coverage.
@@ -109,6 +109,17 @@
 - [ ] Fix #210 initial `Pending` status and explicit requeue.
 - [ ] Investigate #200 slow reconcile passes and land only the measured scheduling correction.
 - [ ] Complete task reviews, whole-branch review, lint, tests, strict documentation validation, and exact-head full `feature-e2e` evidence.
+
+## Runtime safety evidence
+
+- #242 merged through [PR #250](https://github.com/ydixken/pgcopydb-operator/pull/250).
+  [Full feature E2E](https://github.com/ydixken/pgcopydb-operator/actions/runs/34134512551) verified head `21d10c3864973c8e877a8cafa99f5b24f3318fa6`, including the sampler scenario and cleanup.
+  Post-merge [CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188021), [docs](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188028), and [mirror](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188030) passed on `9419372db414c96731abda6ebad13ac99ce7e1b8`.
+- #211 local implementation and independent review accepted source commits `efde537fbc708b7836c4f2b219bc88d79dd83a4f` and `56952f8ba1e989df2305407abc6399c63ec204cc`.
+  Its integrated candidate still requires review and full exact-head feature E2E.
+- #215 local review accepted scoped commits `5cbaf39c17d3677a618aa36665eb84118e328de4` and `72c4e7f1577abb25cfb83d3b94346e643899809f`.
+  Publish it only after the disposable prerequisite is merged and live-validated.
+  Acceptance requires full exact-head isolated E2E with a non-skipped cleanup scenario and its `cleanup-alert-after-job-ttl` evidence entry.
 
 ## Runtime safety exclusions
 
