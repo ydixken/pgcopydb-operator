@@ -95,3 +95,22 @@
 - Post-integration `GOTOOLCHAIN=go1.27.0 task lint`, `GOTOOLCHAIN=go1.27.0 task test`, and `mkdocs build --strict` exited 0 without generated-file drift.
 - Independent review approved the complete 25-path diff from the integration target with no findings, and a later fetch found `origin/main` unchanged.
 - Local real-cluster e2e was not run during Task 7, as required.
+
+## Runtime safety implementation plan
+
+- [ ] Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
+- [ ] Fix #242 progress sampler process and database-connection leaks.
+- [ ] Fix #211 manual cutover so approval also requires the existing caught-up verdict.
+- [ ] Fix #215 replication cleanup outcome reporting and cleanup postcondition checks.
+- [ ] Fix #243 newly started worker-session keepalives and orphan-connection coverage.
+- [ ] Fix #223 extension availability preflight checks.
+- [ ] Fix #221 optional same-major PostgreSQL version gate and generated API artifacts.
+- [ ] Fix #209 split-table disabling, CEL validation, and generated API artifacts.
+- [ ] Fix #210 initial `Pending` status and explicit requeue.
+- [ ] Investigate #200 slow reconcile passes and land only the measured scheduling correction.
+- [ ] Complete task reviews, whole-branch review, lint, tests, strict documentation validation, and exact-head full `feature-e2e` evidence.
+
+## Runtime safety exclusions
+
+- [x] Defer #88, including pgcopydb fork, SQLite contention, builder publication, and runner digest work.
+- [x] Exclude source write fencing from the #211 catch-up guard.
