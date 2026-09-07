@@ -2,19 +2,34 @@
 
 ## Scope
 
-This plan implements the approved runtime safety work for issues #242, #211, #215, #243, #223, #221, #209, #210, and #200.
+This plan implements the approved runtime safety work for issues #242, #211, #215, #243, #223, #221, #209, #210, and #200 through three remaining pull requests.
 Issue #88 remains deferred.
 This plan excludes the pgcopydb fork, SQLite contention work, builder publication, runner digest changes, and source-write fencing changes.
 
 ## Global constraints
 
-- Use normal feature branches in the primary checkout and implement tasks sequentially because controller, API, and workflow changes share interfaces.
+- Use normal feature branches in the primary checkout.
+- Retain per-issue implementation commits, focused tests, and local specification and quality reviews before integrating approved related issues into a batch.
+- Complete an integration review and the focused local checks for every changed issue before pushing a batch.
+- Run `task lint`, `task test`, and strict documentation validation before publishing each batch.
+- Push each locally reviewed batch once, then require full `feature-e2e` on that batch's exact final head.
+- A later code change or failed check requires a fresh exact-head full E2E result.
 - Preserve public API group, identities, existing RBAC, candidate-SHA validation, generated-artifact checks, and current validation rules except for the approved optional API fields and the guarded split-table CEL rule.
 - Do not log SQL, connection strings, credentials, or private cluster information.
 - Every behavior change needs focused regression coverage, current documentation, `task lint`, `task test`, strict documentation validation, and a full `feature-e2e` result for the exact final head before merge.
 - Do not run local real-cluster E2E without the repository's required context confirmation flow.
 - The isolated kind workflow may receive only its disposable cluster kubeconfig.
 - #200 is investigation-first and remains open until a measured slow-pass cause has a discriminating regression and a fix.
+
+## Delivery batches
+
+PR 1 delivers the disposable feature-E2E prerequisite.
+It must merge through the trusted workflow and complete one additive-disposable live validation before PR 2 or PR 3 can merge.
+PR 2 groups #211, #215, #243, and #223 as runtime-safety work.
+PR 3 groups #221, #209, and #210 as configuration and lifecycle work, plus only confirmed #200 changes.
+Leave #200 open if investigation has not produced a measured cause, discriminating regression, and concrete fix.
+Keep #88 deferred.
+The per-issue reviews remain evidence for their own commits, while each batch requires a whole-batch integration review before push.
 
 ## Shared prerequisite: disposable-cluster E2E
 
@@ -55,7 +70,7 @@ Publish cleanup status before completion or finalizer release when status is wri
 Before reporting success, verify that the replication slot, target origin, and operator-managed publication are absent.
 Do not remove caller-owned publications.
 Cover cleanup failure and deletion paths, extend condition metrics, and update alerts, dashboards, runbooks, and E2E teardown.
-Publish this task only after the disposable prerequisite is merged and live-validated.
+Do not merge its batch until the disposable prerequisite is merged and live-validated.
 The full isolated gate must prove that cleanup failure status, metrics, and a firing alert survive cleanup Job TTL expiry.
 
 ## Task 4: Fix #243 orphaned worker connections
@@ -113,5 +128,8 @@ Do not close #200 after instrumentation or scheduling compensation alone.
 For each task, start with a regression that fails against existing behavior.
 Do not treat absent fixtures, skipped scenarios, or missing observations as success.
 Run excluded resume coverage explicitly where required and verify cleanup of test-owned locks, processes, privileges, and replication state.
-Run task-level implementation and review loops before the next task.
-After the final task, complete an independent whole-branch review and collect exact command and CI evidence before merge.
+Run task-level implementation and review loops before batch integration.
+Before pushing each batch, complete an independent whole-batch review and collect focused local command evidence.
+After push, collect base CI, the built-image canary where applicable, cleanup evidence, and a full exact-head `feature-e2e` result.
+The #215 batch acceptance retains its non-skipped isolated `cleanup-alert-after-job-ttl` report entry.
+The #243 batch acceptance retains explicit isolated packet-loss expiry-proof selection and nonempty execution evidence.
