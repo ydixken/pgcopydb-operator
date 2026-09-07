@@ -139,15 +139,44 @@ cleanup_observer() {
   observer=
   [[ ! -f "$state/state.json" ]] || save '.observer = null'
 }
+node_metadata() {
+  timeout --kill-after=10s 30 docker exec -i "$1" /bin/sh -c 'exec timeout --kill-after=5s 20s /bin/sh -s' <<'NODE_METADATA'
+set -eu
+for tool in stat awk; do command -v "$tool" >/dev/null || exit 1; done
+start_time() { awk '{sub(/^.*\) /, ""); if ($20 !~ /^[0-9]+$/) exit 1; print $20}' "/proc/$1/stat"; }
+identity() {
+  value=$(stat -Lc %d:%i "$1") || exit 1
+  type=$(stat -f -c %T "$1") || exit 1
+  printf '%s:%s\n' "$value" "$type"
+}
+collect() {
+  own=$(stat -Lc %i /proc/self/ns/mnt)
+  node=$(stat -Lc %i /proc/1/ns/mnt)
+  test "$own" = "$node" || exit 1
+  printf '%s %s\n' "$(start_time 1)" "$own"
+  identity /
+  identity /var
+  awk '$5=="/" {root=$0; r++} $5=="/var" {volume=$0; v++}
+    END {if(r!=1 || v!=1) exit 1; print root; print volume}' /proc/self/mountinfo
+}
+self=$(start_time "$$")
+before=$(collect)
+after=$(collect)
+test -n "$self" && test "$self" = "$(start_time "$$")" && test "$before" = "$after"
+printf '%s\n' "$before"
+NODE_METADATA
+}
 capacity() {
-  local pid=${1:-0} start=${2:-} root merged upper volume details existing
+  local pid=${1:-0} start=${2:-} root merged= upper= volume details existing profile node_id= metadata=
   timeout --kill-after=10s 30 docker info --format '{{json .}}' > "$work/docker.json"
-  jq -e '.OSType == "linux" and .CgroupVersion == "2" and .Driver == "overlay2" and
+  jq -e '.OSType == "linux" and .CgroupVersion == "2" and
     (.NCPU | type == "number" and . >= 8) and (.MemTotal | type == "number" and . >= 17179869184) and
     (.DockerRootDir | type == "string" and test("^/[A-Za-z0-9_./-]+$") and (contains("..") | not)) and
     (.DriverStatus | type == "array") and
-    ([.DriverStatus[][] | tostring | ascii_downcase | contains("snapshotter")] | any | not)
+    ((.Driver=="overlay2" and ([.DriverStatus[][] | tostring | ascii_downcase | contains("snapshotter")] | any | not)) or
+     (.Driver=="overlayfs" and [.DriverStatus[] | select(.[0]=="driver-type")]==[["driver-type","io.containerd.snapshotter.v1"]]))
   ' "$work/docker.json" >/dev/null || fail kind-capacity-unproved
+  profile=$(jq -r 'if .Driver=="overlay2" then "overlay2" else "containerd" end' "$work/docker.json")
   root=$(jq -r '.DockerRootDir' "$work/docker.json")
   existing=$(timeout --kill-after=10s 30 docker ps -aq --no-trunc --filter "name=^/$cluster-capacity$") || fail kind-observer-unproved
   [[ -z "$existing" ]] || fail kind-observer-occupied
@@ -168,22 +197,31 @@ capacity() {
   if [[ "$pid" != 0 ]]; then
     verify_node
     jq -e '[.[0].Mounts[]? | select(.Destination=="/var")]|length==1' "$work/node.json" >/dev/null || fail kind-storage-unproved
+    node_id=$(jq -r '.[0].Id' "$work/node.json")
+    if [[ "$profile" == containerd ]]; then
+      cp "$work/node.json" "$work/node-before.json"
+      node_metadata "$node_id" > "$work/node-metadata-before" || fail kind-storage-unproved
+      metadata=$(<"$work/node-metadata-before")
+    fi
     details=$(jq -sc '.[0]+.[1]' <(printf '%s' "$details") "$work/node.json")
   fi
-  jq -e --arg root "$root" 'all(.[];
+  jq -e --arg root "$root" --arg profile "$profile" 'all(.[];
+    if $profile=="containerd" then (.GraphDriver==null or .GraphDriver.Name=="overlayfs") and .GraphDriver.Data==null else
     .GraphDriver.Name=="overlay2" and
     (.GraphDriver.Data.UpperDir | startswith($root+"/overlay2/") and endswith("/diff")) and
-    .GraphDriver.Data.MergedDir==(.GraphDriver.Data.UpperDir|rtrimstr("/diff")+"/merged")) and
+    .GraphDriver.Data.MergedDir==(.GraphDriver.Data.UpperDir|rtrimstr("/diff")+"/merged") end) and
     all(.[].Mounts[]? | select(.Destination=="/var");
       .Type=="volume" and .Driver=="local" and (.Source|startswith($root+"/volumes/") and endswith("/_data")))
   ' <<< "$details" >/dev/null || fail kind-storage-unproved
-  merged=$(jq -r --arg root "$root" '[.[].GraphDriver.Data.MergedDir | sub("^"+$root;"/capacity/storage")]|join(":")' <<< "$details")
-  upper=$(jq -r --arg root "$root" '[.[].GraphDriver.Data.UpperDir | sub("^"+$root;"/capacity/storage")]|join(":")' <<< "$details")
+  if [[ "$profile" == overlay2 ]]; then
+    merged=$(jq -r --arg root "$root" '[.[].GraphDriver.Data.MergedDir | sub("^"+$root;"/capacity/storage")]|join(":")' <<< "$details")
+    upper=$(jq -r --arg root "$root" '[.[].GraphDriver.Data.UpperDir | sub("^"+$root;"/capacity/storage")]|join(":")' <<< "$details")
+  fi
   volume=$(jq -r --arg root "$root" '[.[].Mounts[]? | select(.Destination=="/var") | .Source |
     sub("^"+$root;"/capacity/storage")]|join(":")' <<< "$details")
-  [[ "$merged$upper$volume" =~ ^[A-Za-z0-9_./:-]+$ && "$merged$upper$volume" != *..* ]] || fail kind-storage-unproved
+  [[ "$merged$upper$volume" =~ ^[A-Za-z0-9_./:-]*$ && "$merged$upper$volume" != *..* ]] || fail kind-storage-unproved
   # Arguments arrive through stdin so inspection can bind the observer's own layer before it runs.
-  { printf 'set -- %q %q %q %q %q\n' "$pid" "$start" "$merged" "$upper" "$volume"; cat <<'CAPACITY'
+  { printf 'set -- %q %q %q %q %q %q %q %q %q %q\n' "$pid" "$start" "$merged" "$upper" "$volume" "$profile" "$root" "$observer" "$node_id" "$metadata"; cat <<'CAPACITY'
 set -euo pipefail
 exec 2>/dev/null
 die() { exit 1; }
@@ -194,6 +232,13 @@ for tool in stat awk readlink df getconf; do command -v "$tool" >/dev/null || di
 [[ $(stat -f -c %t /capacity/cgroup) == 63677270 ]] || die
 awk '$5=="/capacity/cgroup" { if ($4!="/" || $6 !~ /(^|,)ro(,|$)/ || $0 !~ / - cgroup2 /) exit 1; n++ }
      index($5,"/capacity/cgroup/")==1 { exit 1 } END { if(n!=1) exit 1 }' /proc/self/mountinfo || die
+start_time() {
+  local value
+  value=$(<"/proc/$1/stat") || die
+  value=${value##*) }
+  awk '{if ($20 !~ /^[0-9]+$/) exit 1; print $20}' <<< "$value"
+}
+if [[ "$6" == overlay2 ]]; then
 awk -v allowed="$3" 'BEGIN {split(allowed,a,":"); for(i in a) owned[a[i]]=1}
      $5=="/capacity/storage" { n++; if ($6 !~ /(^|,)ro(,|$)/ || $0 ~ / - overlay /) exit 1 }
      index($5,"/capacity/storage/")==1 {
@@ -211,15 +256,103 @@ for path in "${backing[@]}"; do
   [[ "$path" == /capacity/storage/* && "$path" != *..* && -d "$path" &&
      $(readlink -f "$path") == "$path" && $(stat -c %d "$path") == "$(stat -c %d /capacity/storage)" ]] || die
 done
+else
+  die() { printf 'kind-storage-unproved\n'; exit 1; }
+  storage_host_root=$7
+  mountinfo=$(</proc/self/mountinfo)
+  mount_record() {
+    awk -v path="$1" '$5==path {n++; for(i=7;i<=NF;i++) if($i=="-") {
+      if(NF!=i+3) exit 1; print $3, $4, $(i+1), $(i+2), $(i+3)}} END {if(n!=1)exit 1}' <<< "$mountinfo"
+  }
+  storage_record=$(mount_record /capacity/storage) || die
+  read -r storage_device storage_root storage_type storage_source storage_options <<< "$storage_record"
+  [[ "$storage_type" != overlay && "$storage_root" =~ ^/[A-Za-z0-9_./-]*$ && "$storage_root" != *..* ]] || die
+  backing_device=$(stat -c %d /capacity/storage)
+  owned_mount() {
+    [[ "$1" =~ ^[a-f0-9]{64}$ ]] || die
+    awk -v suffix="/$1/rootfs" 'index($5,"/capacity/storage/")==1 &&
+      substr($5,length($5)-length(suffix)+1)==suffix {n++; print $5} END{if(n!=1)exit 1}' <<< "$mountinfo"
+  }
+  file_identity() {
+    local identity type
+    identity=$(stat -Lc %d:%i "$1") || die
+    type=$(stat -f -c %T "$1") || die
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ && -n "$type" ]] || die
+    printf '%s:%s' "$identity" "$type"
+  }
+  canonical_backing() {
+    local path=$1
+    [[ "$path" == "$storage_host_root"/* ]] || die
+    path="/capacity/storage${path#"$storage_host_root"}"
+    [[ "$path" =~ ^/[A-Za-z0-9_./-]+$ && "$path" != *..* && -d "$path" &&
+       $(readlink -f "$path") == "$path" && $(stat -c %d "$path") == "$backing_device" ]] || die
+  }
+  check_overlay() {
+    local record=$1 device mountroot type source options option upper= work= lower= extra= path
+    read -r device mountroot type source options extra <<< "$record"
+    [[ "$type" == overlay && "$mountroot" == / && "$source" == overlay && -z "$extra" ]] || die
+    awk -F, '{for(i=1;i<=NF;i++) {split($i,a,"="); if($i=="" || seen[a[1]]++)exit 1}}' <<< "$options" || die
+    IFS=, read -r -a option_list <<< "$options"
+    for option in "${option_list[@]}"; do
+      case "$option" in
+        rw|ro) [[ -z "$extra" ]] || die; extra=$option ;;
+        upperdir=*) [[ -z "$upper" ]] || die; upper=${option#*=} ;;
+        workdir=*) [[ -z "$work" ]] || die; work=${option#*=} ;;
+        lowerdir=*) [[ -z "$lower" ]] || die; lower=${option#*=} ;;
+        index=off|metacopy=off|redirect_dir=off|xino=off|userxattr) ;;
+        *) die ;;
+      esac
+    done
+    [[ -n "$extra" && "$upper" == */snapshots/*/fs && "$work" == "${upper%/fs}/work" &&
+       "${upper%/fs}" =~ /snapshots/[0-9]+$ && -n "$lower" && "$lower" != :* && "$lower" != *: && "$lower" != *::* ]] || die
+    canonical_backing "$upper"
+    canonical_backing "$work"
+    IFS=: read -r -a lowers <<< "$lower"
+    for path in "${lowers[@]}"; do
+      [[ "$path" =~ /snapshots/[0-9]+/fs$ ]] || die
+      canonical_backing "$path"
+    done
+  }
+  observer_mount=$(owned_mount "$8") || die
+  observer_record=$(mount_record "$observer_mount") || die
+  own_record=$(mount_record /) || die
+  [[ "$own_record" == "$observer_record" && $(readlink -f "$observer_mount") == "$observer_mount" ]] || die
+  own_stat=$(file_identity /) || die
+  self_start=$(start_time "$$") || die
+  [[ "$own_stat" == "$(file_identity "$observer_mount")" ]] || die
+  check_overlay "$own_record"
+  node_mount=
+  if [[ "$1" != 0 ]]; then
+    node_mount=$(owned_mount "$9") || die
+    node_record=$(mount_record "$node_mount") || die
+    check_overlay "$node_record"
+    node_metadata=()
+    while IFS= read -r line; do node_metadata+=("$line"); done <<< "${10}"
+    [[ ${#node_metadata[@]} == 5 && "${node_metadata[0]}" =~ ^[0-9]+\ [1-9][0-9]*$ &&
+       "${node_metadata[0]%% *}" == "$(start_time "$1")" &&
+       "${node_metadata[1]}" == "$(file_identity "$node_mount")" &&
+       "${node_metadata[2]}" == "$(file_identity "$5")" ]] || die
+    reader_mountinfo="$mountinfo"
+    mountinfo="${node_metadata[3]}"$'\n'"${node_metadata[4]}"
+    [[ "$(mount_record /)" == "$node_record" ]] || die
+    read -r volume_device volume_root volume_type volume_source volume_options <<< "$(mount_record /var)"
+    mountinfo="$reader_mountinfo"
+    [[ "$volume_device" == "$storage_device" && "$volume_type" == "$storage_type" &&
+       "$volume_root" == "${storage_root%/}${5#/capacity/storage}" &&
+       "$volume_source" == "$storage_source" && "$volume_options" == "$storage_options" ]] || die
+    canonical_backing "$7${5#/capacity/storage}"
+  fi
+  awk -v observer="$observer_mount" -v node="$node_mount" '
+    $5=="/capacity/storage" {n++; if($6 !~ /(^|,)ro(,|$)/)exit 1}
+    index($5,"/capacity/storage/")==1 {
+      if(($5!=observer && $5!=node) || $6 !~ /(^|,)ro(,|$)/)exit 1}
+    END{if(n!=1)exit 1}' <<< "$mountinfo" || die
+  [[ "$mountinfo" == "$(</proc/self/mountinfo)" && "$own_stat" == "$(file_identity /)" &&
+     "$own_stat" == "$(file_identity "$observer_mount")" && "$self_start" == "$(start_time "$$")" ]] || die
+fi
 df -Pk /capacity/storage | awk 'NR==2 {if ($4 !~ /^[0-9]+$/ || $4<33554432) exit 1; n++} END {if(n!=1) exit 1}' || die
 [[ $(getconf _NPROCESSORS_ONLN) =~ ^[0-9]+$ && $(getconf _NPROCESSORS_ONLN) -ge 8 ]] || die
 awk '$1=="MemTotal:" {if($2 !~ /^[0-9]+$/ || $2<16777216 || $3!="kB") exit 1; n++} END {if(n!=1) exit 1}' /proc/meminfo || die
-start_time() {
-  local value
-  value=$(<"/proc/$1/stat") || die
-  value=${value##*) }
-  awk '{if ($20 !~ /^[0-9]+$/) exit 1; print $20}' <<< "$value"
-}
 walk() {
   local process=$1 expected=$2 before membership path quota period memory
   before=$(start_time "$process") || die
@@ -256,6 +389,14 @@ CAPACITY
     >/dev/null || fail kind-capacity-unproved
   jq -e --argjson pid "$pid" '.nodePID == $pid and (.nodeStartTime | test("^[0-9]+$")) and
     (.observerStartTime | test("^[1-9][0-9]*$"))' "$work/capacity.json" >/dev/null || fail kind-capacity-unproved
+  if [[ "$profile" == containerd && "$pid" != 0 ]]; then
+    verify_node
+    jq -e -s '.[0][0] as $before | .[1][0] as $after |
+      $before.GraphDriver==$after.GraphDriver and $before.Mounts==$after.Mounts' \
+      "$work/node-before.json" "$work/node.json" >/dev/null || fail kind-storage-unproved
+    node_metadata "$node_id" > "$work/node-metadata-after" || fail kind-storage-unproved
+    cmp -s "$work/node-metadata-before" "$work/node-metadata-after" || fail kind-storage-unproved
+  fi
   cleanup_observer || fail kind-observer-cleanup-failed
 }
 

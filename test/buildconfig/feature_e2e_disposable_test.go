@@ -1332,6 +1332,7 @@ func TestFeatureE2EKindArguments(t *testing.T) {
 
 //nolint:gocyclo // Each branch checks a distinct bootstrap or recovery boundary.
 func TestFeatureE2EKindBootstrap(t *testing.T) {
+	const containerdValid = "containerd-valid"
 	for _, scenario := range []string{
 		successValue, "architecture", featureDockerCommand, "kind-checksum", "cnpg-checksum", "monitoring-checksum",
 		"cpu", "memory", featureStorageKey, "cgroup", "submount", "observer", "observer-cleanup",
@@ -1342,6 +1343,8 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 		"crd-absence-failed",
 		"ready-initial-missing", "ready-initial-wrong", "ready-initial-nodes",
 		"ready-installed-missing", "ready-installed-empty", "ready-kubeconfig-missing", "ready-kubeconfig-empty",
+		containerdValid, "containerd-metadata-timeout", "containerd-metadata-drift", "containerd-pid-drift",
+		"containerd-unsupported-driver", "containerd-partial-graphdriver", "containerd-cleanup",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1357,7 +1360,7 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 			writeCompatibilityFixture(t, dir, "candidate.yaml", `{ "candidate": true }`)
 			writeCompatibilityFixture(t, dir, "unrelated-cluster", "preserve")
 			for _, command := range []string{
-				"uname", "stat", featureDockerCommand, "curl", "sha256sum", "kind", "kubectl", "helm", "go",
+				"uname", "stat", featureDockerCommand, "curl", "sha256sum", "kind", "kubectl", "helm", "go", "timeout",
 			} {
 				path := filepath.Join(dir, "bin", command)
 				writeCompatibilityFixture(t, dir, "bin/"+command, featureKindCommandFixture)
@@ -1370,6 +1373,10 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 				t.Fatal(err)
 			}
 			activeScenario := scenario
+			realTimeout, err := exec.LookPath("timeout")
+			if err != nil {
+				t.Fatal(err)
+			}
 			postCreate := strings.HasPrefix(scenario, "ready-") || strings.HasPrefix(scenario, "teardown-")
 			if postCreate {
 				activeScenario = successValue
@@ -1383,7 +1390,7 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 				cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"), "RUNNER_TEMP="+dir,
 					"FEATURE_E2E_KIND_STATE="+state, "KUBECONFIG="+filepath.Join(state, "kubeconfig"),
 					"GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=2", "FAKE_KIND_ROOT="+dir,
-					"FAKE_KIND_SCENARIO="+activeScenario)
+					"FAKE_KIND_SCENARIO="+activeScenario, "FAKE_REAL_TIMEOUT="+realTimeout)
 				return cmd.CombinedOutput()
 			}
 			output, err := run("create")
@@ -1392,12 +1399,25 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 					t.Fatal("unrelated cluster removed")
 				}
 			}()
-			if scenario != successValue && !postCreate {
+			if scenario != successValue && scenario != containerdValid && !postCreate {
 				if err == nil {
 					t.Fatalf("accepted %s: %s", scenario, output)
 				}
 				if strings.Contains(string(output), "PRIVATE_SENTINEL") {
 					t.Fatalf("leaked command output: %s", output)
+				}
+				if strings.HasPrefix(scenario, "containerd-") {
+					calls, readErr := os.ReadFile(filepath.Join(dir, "calls"))
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if scenario != "containerd-unsupported-driver" &&
+						!strings.Contains(string(calls), "\ndocker rm -f "+strings.Repeat("0", 63)+"2\n") {
+						t.Fatal("storage failure omitted exact owned observer cleanup")
+					}
+					if strings.Contains(scenario, "metadata-") && !strings.Contains(string(calls), "\ndocker exec -i ") {
+						t.Fatal("metadata failure did not reach the reader")
+					}
 				}
 				if scenario == "observer-ownership" {
 					calls, err := os.ReadFile(filepath.Join(dir, "calls"))
@@ -1423,6 +1443,13 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("create: %v %s", err, output)
+			}
+			if scenario == containerdValid {
+				calls, readErr := os.ReadFile(filepath.Join(dir, "calls"))
+				if readErr != nil || strings.Count(string(calls), "\ndocker exec -i ") != 2 ||
+					strings.Count(string(calls), "timeout --kill-after=10s 30 docker exec -i ") != 2 {
+					t.Fatalf("node metadata must bracket backing checks: %v %s", readErr, calls)
+				}
 			}
 			body, err := os.ReadFile(filepath.Join(state, "state.json"))
 			if err != nil {
@@ -1505,6 +1532,7 @@ scenario=$FAKE_KIND_SCENARIO
 root=$FAKE_KIND_ROOT
 printf '%s %s\n' "$tool" "$*" >> "$root/calls"
 case "$tool" in
+timeout) exec "$FAKE_REAL_TIMEOUT" "$@" ;;
 stat) if command -v gstat >/dev/null; then exec gstat "$@"; else exec /usr/bin/stat "$@"; fi ;;
 uname) [[ "$scenario" != architecture ]] || { echo unknown; exit; }; [[ "$1" == -s ]] && echo Linux || echo x86_64 ;;
 sha256sum)
@@ -1536,7 +1564,10 @@ kind)
   esac ;;
 docker)
   case "$1" in
-    info) [[ "$scenario" != docker ]] || { echo PRIVATE_SENTINEL >&2; exit 1; }; echo '{"OSType":"linux","CgroupVersion":"2","Driver":"overlay2","DockerRootDir":"/var/lib/docker","NCPU":8,"MemTotal":17179869184,"DriverStatus":[]}' ;;
+    info) [[ "$scenario" != docker ]] || { echo PRIVATE_SENTINEL >&2; exit 1; }
+      echo '{"OSType":"linux","CgroupVersion":"2","Driver":"overlay2","DockerRootDir":"/var/lib/docker","NCPU":8,"MemTotal":17179869184,"DriverStatus":[]}' |
+        jq --arg s "$scenario" 'if $s|startswith("containerd-") then .Driver="overlayfs" | .DriverStatus=[["driver-type","io.containerd.snapshotter.v1"]] |
+          if $s=="containerd-unsupported-driver" then .Driver="unknown" else . end else . end' ;;
     ps)
       if [[ "$*" == *'label=io.x-k8s.kind.cluster=pgcopydb-feature-123-2'* ]]; then
         [[ "$scenario" != absence-failed ]] || exit 1
@@ -1560,7 +1591,9 @@ docker)
           "MergedDir":"/var/lib/docker/overlay2/observer/merged"}},"State":{"Running":false,"ExitCode":0}}]' |
           jq --arg scenario "$scenario" 'if $scenario=="upper-outside" then .[0].GraphDriver.Data.UpperDir="/other/diff"
             elif $scenario=="observer-ownership" then .[0].Config.Labels["pgcopydb-operator.io/feature-run"]="foreign"
-            else . end'
+            else . end | if $scenario|startswith("containerd-") then .[0].GraphDriver={"Name":"overlayfs"} |
+              if $scenario=="containerd-partial-graphdriver" then .[0].GraphDriver.Data={"UpperDir":"/unproved"}
+              elif $scenario=="containerd-valid" then del(.[0].GraphDriver) else . end else . end'
       else
         id=0000000000000000000000000000000000000000000000000000000000000001
         [[ "$scenario" != node-identity ]] || id=0000000000000000000000000000000000000000000000000000000000000003
@@ -1572,13 +1605,31 @@ docker)
           "Mounts":[{"Destination":"/var","Type":"volume","Driver":"local","Source":"/var/lib/docker/volumes/node/_data"}],
           "State":{"Running":true,"Pid":77,"StartedAt":"2026-09-07T00:00:00Z"}}]\n' "$id" |
           jq --arg scenario "$scenario" 'if $scenario=="partial-stopped" then .[0].State.Running=false | .[0].State.Pid=0
-            elif $scenario=="node-pid-zero" then .[0].State.Pid=0 else . end'
+            elif $scenario=="node-pid-zero" then .[0].State.Pid=0 else . end |
+            if $scenario=="containerd-valid" then del(.[0].GraphDriver)
+            elif $scenario|startswith("containerd-") then .[0].GraphDriver={"Name":"overlayfs"} else . end' |
+          jq --arg scenario "$scenario" --arg drift "$(test -e "$root/reader-before" && echo yes || echo no)" '
+            if $scenario=="containerd-pid-drift" and $drift=="yes" then .[0].State.Pid=78 else . end'
       fi ;;
+    exec)
+      [[ "$*" == "exec -i $(printf '%064d' 1) /bin/sh -c exec timeout --kill-after=5s 20s /bin/sh -s" ]] || exit 96
+      [[ "$scenario" != containerd-metadata-timeout ]] || { echo PRIVATE_SENTINEL; exit 124; }
+      if [[ -f "$root/reader-before" ]]; then
+        cmp -s "$root/reader-before" - || exit 97
+        [[ -f "$root/node-backing-checked" ]] || exit 98
+        [[ "$scenario" != containerd-metadata-drift ]] || { echo changed; exit; }
+      else cat > "$root/reader-before"; fi
+      printf '900 4026532000\n1:100:overlayfs\n1:200:ext2/ext3\nroot mount\nvolume mount\n' ;;
     start)
       cat > "$root/observer-script"
+      if [[ "$scenario" == containerd-* && "$(cat "$root/observer-pid")" == 77 ]]; then
+        [[ -f "$root/reader-before" ]] || exit 99
+        touch "$root/node-backing-checked"
+      fi
       case "$scenario" in cpu|memory|storage|cgroup|submount|observer) echo PRIVATE_SENTINEL >&2; exit 1 ;; esac
       printf '{"nodePID":%s,"nodeStartTime":"900","observerStartTime":"800"}\n' "$(cat "$root/observer-pid")" ;;
-    rm) [[ "$scenario" != observer-cleanup ]] || exit 1; rm -f "$root/observer" ;;
+    rm) [[ "$*" == "rm -f $(printf '%064d' 2)" ]] || exit 100
+      [[ "$scenario" != observer-cleanup && "$scenario" != containerd-cleanup ]] || exit 1; rm -f "$root/observer" ;;
     *) exit 84 ;;
   esac ;;
 kubectl)
@@ -1786,6 +1837,92 @@ func checkFeatureMonitoringSpec(t *testing.T, documents []compatibilityDocument)
 	}
 }
 
+func TestFeatureE2EKindNodeMetadata(t *testing.T) {
+	body, err := os.ReadFile("../../hack/feature-e2e-kind.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, reader, found := strings.Cut(string(body), "<<'NODE_METADATA'\n")
+	if !found {
+		t.Fatal("shipped node metadata reader missing")
+	}
+	reader, _, found = strings.Cut(reader, "\nNODE_METADATA\n")
+	if !found {
+		t.Fatal("shipped node metadata terminator missing")
+	}
+	for _, scenario := range []string{
+		successValue, "namespace mismatch", "namespace changed", "root changed", "volume changed",
+		"start changed", "missing mount", "stat failed", "malformed start",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := "1 (node) S " + strings.Repeat("0 ", 18) + "900 0\n"
+			if scenario == "malformed start" {
+				start = "invalid\n"
+			}
+			writeCompatibilityFixture(t, dir, "proc/1/stat", start)
+			mounts := "31 0 0:3 / / rw - overlay overlay rw,lowerdir=/lower,upperdir=/upper,workdir=/work\n"
+			if scenario != "missing mount" {
+				mounts += "32 31 0:2 /docker/volumes/node/_data /var rw - ext4 /dev/test rw\n"
+			}
+			writeCompatibilityFixture(t, dir, "proc/self/mountinfo", mounts)
+			writeCompatibilityFixture(t, dir, "reader.sh", strings.ReplaceAll(reader, "/proc/", dir+"/proc/"))
+			writeCompatibilityFixture(t, dir, "bin/stat", featureKindMetadataStatFixture)
+			if err := os.Chmod(filepath.Join(dir, "bin/stat"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-c", `mkdir -p "$1/proc/$$"
+sed "s/900 0/$2 0/" "$1/proc/1/stat" > "$1/proc/$$/stat"
+exec /bin/sh "$1/reader.sh"`, "reader", dir, "800"}
+			cmd := exec.Command("sh", args...)
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
+				"FAKE_METADATA_SCENARIO="+scenario, "FAKE_METADATA_ROOT="+dir)
+			output, err := cmd.CombinedOutput()
+			if scenario == successValue {
+				if err != nil || !strings.HasPrefix(string(output), "900 4026532000\n1:100:overlayfs\n1:200:ext2/ext3\n") {
+					t.Fatalf("metadata: %v %s", err, output)
+				}
+				args[len(args)-1] = "801"
+				second := exec.Command("sh", args...)
+				second.Env = cmd.Env
+				secondOutput, secondErr := second.CombinedOutput()
+				if secondErr != nil || string(secondOutput) != string(output) {
+					t.Fatalf("transient reader identity changed stable node evidence: %v %s", secondErr, secondOutput)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted %s: %s", scenario, output)
+			}
+		})
+	}
+}
+
+const featureKindMetadataStatFixture = `#!/usr/bin/env bash
+set -eu
+scenario=$FAKE_METADATA_SCENARIO
+root=$FAKE_METADATA_ROOT
+case "$*" in
+  *'/self/ns/mnt')
+    [[ ! -f "$root/namespace-read" ]] && touch "$root/namespace-read" || touch "$root/second-read"
+    if [[ "$scenario" == 'namespace mismatch' ||
+          ( "$scenario" == 'namespace changed' && -f "$root/second-read" ) ]]; then
+      echo 4026532001
+    else echo 4026532000; fi ;;
+  *'/1/ns/mnt') echo 4026532000 ;;
+  *'%d:%i /')
+    [[ "$scenario" != 'stat failed' ]] || exit 1
+    [[ "$scenario" != 'start changed' ]] || sed -i.bak 's/900 0/901 0/' "$root/proc/1/stat"
+    [[ "$scenario" == 'root changed' && -f "$root/second-read" ]] && echo 1:101 || echo 1:100 ;;
+  *'%d:%i /var') [[ "$scenario" == 'volume changed' && -f "$root/second-read" ]] && echo 1:201 || echo 1:200 ;;
+  *'%T /') echo overlayfs ;;
+  *'%T /var') echo ext2/ext3 ;;
+  *) exit 1 ;;
+esac
+`
+
+//nolint:gocyclo // Mutations exercise individual kernel evidence boundaries in the shipped body.
 func TestFeatureE2EKindCapacityBody(t *testing.T) {
 	body, err := os.ReadFile("../../hack/feature-e2e-kind.sh")
 	if err != nil {
@@ -1803,6 +1940,12 @@ func TestFeatureE2EKindCapacityBody(t *testing.T) {
 		successValue, featureOwnedMerged, "ancestor cpu", "ancestor memory", "ancestor cpuset", "unknown namespace",
 		"masked cgroup", "storage submount", "storage floor", "cpu floor", "memory floor", "missing limit",
 		"malformed limit", "pid reused", "different backing", "unowned merged",
+		"containerd valid", "containerd rootfs guess", "containerd upper outside", "containerd work outside",
+		"containerd lower outside", "containerd first lower outside", "containerd lower missing",
+		"containerd snapshot mismatch",
+		"containerd separate backing", "containerd hidden mount", "containerd malformed options", "containerd unknown option",
+		"containerd node start", "containerd node namespace", "containerd node root", "containerd node volume",
+		"containerd observer root", "containerd duplicate option",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -1824,8 +1967,70 @@ func TestFeatureE2EKindCapacityBody(t *testing.T) {
 			write("proc/observer-cgroup", "0::/parent/observer\n")
 			write("proc/77/cgroup", "0::/parent/node\n")
 			write("proc/meminfo", "MemTotal: 16777216 kB\n")
+			profile, metadata := "overlay2", ""
+			merged := dir + "/capacity/storage/overlay2/layer/merged"
+			upper := dir + "/capacity/storage/overlay2/layer/diff"
+			volume := ""
 			mounts := "1 0 0:1 / /capacity/cgroup ro - cgroup2 cgroup ro\n" +
 				"2 0 0:2 /docker /capacity/storage ro - ext4 /dev/test ro\n"
+			if strings.HasPrefix(scenario, "containerd ") {
+				profile = "containerd"
+				mounts = strings.ReplaceAll(mounts, "- ext4 /dev/test ro", "- ext4 /dev/test rw")
+				merged, upper = "", ""
+				volume = dir + "/capacity/storage/volumes/node/_data"
+				write("capacity/storage/volumes/node/_data/marker", "")
+				for _, layer := range []string{"10/fs", "10/work", "9/fs", "8/fs"} {
+					write("capacity/storage/containerd/snapshots/"+layer+"/marker", "")
+				}
+				options := "rw,lowerdir=/docker/containerd/snapshots/9/fs:/docker/containerd/snapshots/8/fs," +
+					"upperdir=/docker/containerd/snapshots/10/fs,workdir=/docker/containerd/snapshots/10/work"
+				switch scenario {
+				case "containerd upper outside":
+					options = strings.ReplaceAll(options, "upperdir=/docker/", "upperdir=/elsewhere/")
+				case "containerd work outside":
+					options = strings.ReplaceAll(options, "workdir=/docker/", "workdir=/elsewhere/")
+				case "containerd lower outside":
+					options = strings.ReplaceAll(options, ":/docker/", ":/elsewhere/")
+				case "containerd first lower outside":
+					options = strings.ReplaceAll(options, "lowerdir=/docker/", "lowerdir=/elsewhere/")
+				case "containerd lower missing":
+					options = strings.ReplaceAll(options, "/8/fs", "/7/fs")
+				case "containerd snapshot mismatch":
+					options = strings.ReplaceAll(options, "/10/work", "/11/work")
+				case "containerd malformed options":
+					options = strings.ReplaceAll(options, "lowerdir=", "lowerdir=:")
+				case "containerd unknown option":
+					options += ",unproved=on"
+				case "containerd duplicate option":
+					options += ",workdir=/docker/containerd/snapshots/10/work"
+				}
+				observerID, nodeID := strings.Repeat("0", 63)+"2", strings.Repeat("0", 63)+"1"
+				observerMount := "/capacity/storage/runtime/" + observerID + "/rootfs"
+				nodeMount := "/capacity/storage/runtime/" + nodeID + "/rootfs"
+				write(strings.TrimPrefix(observerMount, "/")+"/marker", "")
+				write(strings.TrimPrefix(nodeMount, "/")+"/marker", "")
+				mounts += "3 0 0:3 / / rw - overlay overlay " + options + "\n"
+				mounts += "4 2 0:3 / " + observerMount + " ro - overlay overlay " + options + "\n"
+				mounts += "5 2 0:3 / " + nodeMount + " ro - overlay overlay " + options + "\n"
+				metadata = "900 4026532000\n1:100:overlayfs\n1:200:ext2/ext3\n" +
+					"31 0 0:3 / / rw - overlay overlay " + options + "\n" +
+					"32 31 0:2 /docker/volumes/node/_data /var rw - ext4 /dev/test rw"
+				write("proc/77/ns/mnt", "")
+				switch scenario {
+				case "containerd rootfs guess":
+					mounts = strings.ReplaceAll(mounts, nodeID+"/rootfs", "unowned/rootfs")
+				case "containerd hidden mount":
+					mounts += "6 2 0:2 /masked /capacity/storage/containerd/snapshots ro - ext4 /dev/test ro\n"
+				case "containerd node start":
+					metadata = strings.Replace(metadata, "900 ", "901 ", 1)
+				case "containerd node namespace":
+					metadata = strings.Replace(metadata, "4026532000", "unknown", 1)
+				case "containerd node root":
+					metadata = strings.Replace(metadata, "1:100:", "1:101:", 1)
+				case "containerd node volume":
+					metadata = strings.Replace(metadata, "1:200:", "1:201:", 1)
+				}
+			}
 			switch scenario {
 			case featureOwnedMerged:
 				mounts += "3 2 0:3 / /capacity/storage/overlay2/layer/merged ro - overlay overlay ro\n"
@@ -1866,17 +2071,19 @@ func TestFeatureE2EKindCapacityBody(t *testing.T) {
 			cmd := exec.Command("bash", "-c", `mkdir -p "$1/proc/$$"
 cp "$1/proc/observer-stat" "$1/proc/$$/stat"
 cp "$1/proc/observer-cgroup" "$1/proc/$$/cgroup"
-exec bash "$1/probe.sh" 77 "$2" "$3" "$4" ""`, "capacity", dir, start,
-				dir+"/capacity/storage/overlay2/layer/merged", dir+"/capacity/storage/overlay2/layer/diff")
+exec bash "$1/probe.sh" 77 "$2" "$3" "$4" "$5" "$6" /docker "$7" "$8" "$9"`, "capacity", dir, start,
+				merged, upper, volume, profile, strings.Repeat("0", 63)+"2", strings.Repeat("0", 63)+"1", metadata)
 			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
 				"FAKE_CAPACITY_SCENARIO="+scenario)
 			output, err := cmd.CombinedOutput()
-			if scenario == successValue || scenario == featureOwnedMerged {
+			if scenario == successValue || scenario == featureOwnedMerged || scenario == "containerd valid" {
 				if err != nil || !strings.Contains(string(output), `"nodeStartTime":"900"`) {
 					t.Fatalf("capacity: %v %s", err, output)
 				}
 			} else if err == nil {
 				t.Fatalf("accepted %s: %s", scenario, output)
+			} else if strings.HasPrefix(scenario, "containerd ") && string(output) != "kind-storage-unproved\n" {
+				t.Fatalf("did not reach containerd storage rejection: %v %s", err, output)
 			}
 		})
 	}
@@ -1891,6 +2098,14 @@ stat)
     *'%i '*'/proc/self/ns/cgroup')
       [[ "$FAKE_CAPACITY_SCENARIO" == 'unknown namespace' ]] && echo 4000 || echo 4026531835 ;;
     *'%t '*'/capacity/cgroup') echo 63677270 ;;
+    *'%i '*'/ns/mnt') echo 4026532000 ;;
+    *'%d:%i '*'/volumes/node/_data') echo 1:200 ;;
+    *'%d:%i '*'/0000000000000000000000000000000000000000000000000000000000000002/rootfs')
+      [[ "$FAKE_CAPACITY_SCENARIO" == 'containerd observer root' ]] && echo 1:101 || echo 1:100 ;;
+    *'%d:%i '*) echo 1:100 ;;
+    *'%T '*'/volumes/node/_data') echo ext2/ext3 ;;
+    *'%T '*) echo overlayfs ;;
+    *'%d '*'/snapshots/8/fs') [[ "$FAKE_CAPACITY_SCENARIO" == 'containerd separate backing' ]] && echo 2 || echo 1 ;;
     *'%d '*'/overlay2/layer/diff') [[ "$FAKE_CAPACITY_SCENARIO" == 'different backing' ]] && echo 2 || echo 1 ;;
     *'%d '*) echo 1 ;;
     *) exit 1 ;;

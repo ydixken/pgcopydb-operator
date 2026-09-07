@@ -100,6 +100,7 @@
 
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
   Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
+  The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.
 - [ ] PR 2: Integrate locally reviewed runtime-safety work for #211 manual cutover, #215 cleanup outcomes, #243 worker-session keepalives, and #223 extension preflight.
   Retain #215's non-skipped isolated cleanup-alert report entry and #243's selected packet-loss expiry proof.
 - [ ] PR 3: Integrate locally reviewed configuration and lifecycle work for #221 same-major version gating, #209 split-table disabling, and #210 initial Pending status.
@@ -111,6 +112,7 @@
 - PR 1's workflow integration passed SQL-enabled `task test`, `task lint`, and `mkdocs build --strict` locally.
   Workflow fixtures cover exclusive routing, native Helm rule enforcement, Migration-bound runtime report entries, exact-head status, cleanup, and teardown failures.
   Independent integration review and the delivery gates above remain required; local checks do not establish live runner capacity or disposable-cluster success.
+  The approved collector correction requires focused actual-script fixtures, independent review, and fresh base CI plus one shared full exact-head E2E result after its final head changes.
 - #242 merged through [PR #250](https://github.com/ydixken/pgcopydb-operator/pull/250).
   [Full feature E2E](https://github.com/ydixken/pgcopydb-operator/actions/runs/34134512551) verified head `21d10c3864973c8e877a8cafa99f5b24f3318fa6`, including the sampler scenario and cleanup.
   Post-merge [CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188021), [docs](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188028), and [mirror](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188030) passed on `9419372db414c96731abda6ebad13ac99ce7e1b8`.

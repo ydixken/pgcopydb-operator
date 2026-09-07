@@ -45,6 +45,8 @@ Preserve immutable candidate-SHA checking and existing CI trust restrictions.
 Require full-suite success, metrics assertions, and successful teardown before publishing `feature-e2e` for the candidate SHA.
 Test workflow configuration and failure paths without a live cluster.
 Prove effective Docker-daemon capacity and storage provenance before enabling this route.
+Support the unchanged classic overlay2 collector and the approved bounded containerd-overlayfs collector only when it proves exact node, rootfs, volume, and backing-filesystem identity.
+Reject unproven, separate, or masked snapshot and volume backing; do not claim capacity for every compressed content store.
 Keep the shared profile's alert rules disabled.
 Enable the owned isolated operator rule only after proving that Prometheus has no alert-delivery destinations.
 Keep `suite_profile=baseline` independent of future runtime report entries and preserve the cleanup-after-Job-TTL scenario in baseline selection.

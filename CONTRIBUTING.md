@@ -242,9 +242,12 @@ The helper derives the cluster name from numeric `GITHUB_RUN_ID` and `GITHUB_RUN
 It records ownership, node identities, lifecycle stages, and bound readiness evidence in `state.json`, and stores the candidate CRD read-back in `installed-crd.json`.
 The caller MUST run owned suite cleanup before destruction and treat either cleanup or destruction failure as a failed run.
 
-We support Linux cgroup v2 with provable initial cgroup namespace visibility and classic Docker `overlay2` storage.
+We support Linux cgroup v2 with provable initial cgroup namespace visibility and either classic Docker `overlay2` or a verified containerd `overlayfs` layout.
+The containerd path requires a fixed, bounded metadata reader in the exact owned node and a restricted read-only observer to agree on the node root, local volume, and every overlay layer's backing filesystem.
+Missing or changed evidence fails the run; the collector does not infer snapshot paths from absent classic graph-driver metadata.
 The observer checks the complete visible cgroup ancestry and requires at least 8 CPU, 16 GiB memory, and 32 GiB available on the verified Docker backing filesystem.
 These checks establish capacity ceilings, not reservations.
+The storage check covers the inspected layers and local volume, not every compressed content store.
 Unknown ancestry, separate snapshot stores, unexplained mounts, occupied names, or changed ownership fail the run.
 The helper pins kind 0.33.0, Kubernetes 1.36.4, CloudNativePG chart 0.29.0, and kube-prometheus-stack chart 90.0.0, with verified archive checksums and image digests.
 
