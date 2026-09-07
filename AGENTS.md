@@ -9,9 +9,16 @@ Operating guide for AI agents and humans working in this repository. The keyword
 - Standing authorization (2026-08-07): agents MAY push, open PRs, and merge autonomously for this project's development, and MUST verify results (CI runs, e2e) after doing so. Force-pushes to `main` remain forbidden.
 - **This repository is public.** Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project. E2e-relevant details live in private ops notes outside git. When a doc needs such a fact, it writes "see private ops notes".
 - Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
-- `task e2e` runs against a **real cluster**: whatever `kubectl config current-context` points at. Check the context before running, and never bypass the confirmation prompt (`task --yes` is forbidden for this target). The dev cluster is shared; keep e2e resources in the `pgcopydb-e2e` namespace and clean up.
-- An agent or script that cannot answer a prompt uses `task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=<context>`. It requires `EXPECT_CONTEXT` to name the current context, so the protection the prompt gives (a run cannot reach a cluster nobody meant) survives without a human at the keyboard. `task --yes` stays forbidden: it would answer any prompt, on any cluster, silently.
-- CI runs the same specs unattended when [release.yml](.github/workflows/release.yml) verifies a release candidate. That runner has one cluster and no prompt to answer. It does not soften the rule above: locally, a human answers the prompt.
+- Agents run formatting and `task lint` locally only.
+- CI runs functional, unit, envtest, integration, E2E, and documentation checks.
+- For human-operated local E2E, `task e2e` targets the current `kubectl` context and requires its confirmation prompt.
+  Never bypass that prompt with `task --yes`.
+  The dev cluster is shared, so keep E2E resources in the `pgcopydb-e2e` namespace and clean up.
+- A human or script that cannot answer a prompt uses `task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=<context>`.
+  It requires `EXPECT_CONTEXT` to name the current context, so a run cannot reach an unintended cluster.
+  `task --yes` remains forbidden because it could answer any prompt silently.
+- CI runs the same specs unattended when [release.yml](.github/workflows/release.yml) verifies a release candidate.
+  That runner has one cluster and no prompt to answer.
 
 ## Mandatory skills
 
@@ -44,8 +51,8 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 |-------------|-------------------------------------------------------------------------------------------------------------|
 | `task help` | List all tasks.                                                                                              |
 | `task lint` | yamllint always; golangci-lint once `go.mod` exists (skips with a message before that).                      |
-| `task test` | Unit tests via kubebuilder's `make test` once scaffolded (skips with a message before that).                 |
-| `task e2e`  | E2e tests against the current kubectl context. Prompts for confirmation; see Caution.                        |
+| `task test` | Unit tests via kubebuilder's `make test` once scaffolded. CI runs this target.                               |
+| `task e2e`  | Human-operated E2E against the current kubectl context. See Caution.                                         |
 
 ## Architecture key points
 
@@ -75,7 +82,8 @@ Some things are **never** cut on the way down: validation, error handling, secur
 
 ## Verification before done
 
-- Run `task lint` (and `task test` once Go code exists) before declaring anything done. Both MUST be clean.
+- Format touched files and run `task lint` locally before declaring a change ready for CI.
+- CI MUST run functional tests and documentation checks.
 - A behavior pull request is not ready to merge until its exact current head has a successful full `feature-e2e` result.
 - Don't claim green without the command output to back it. "It should pass" is not a result.
 - Keep commits small and [conventional](CONTRIBUTING.md#commits-and-pull-requests). Every commit MUST be lint-clean on its own.

@@ -42,7 +42,8 @@
 - [ ] Read the published builder index digest and verify its linux/amd64 and linux/arm64 manifests.
 - [ ] Create a second branch from the exact first-merge `main` commit.
 - [ ] Change only the internal builder digest and any narrowly required existing test expectation.
-- [ ] Run `git diff --check`, `task lint`, and `task test` on the digest-only change.
+- [ ] Run `git diff --check`, format touched files, and run `task lint` on the digest-only change.
+  Require CI tests and documentation validation before merge.
 - [ ] Push the second branch, open the digest pull request, and record its public URL.
 - [ ] Confirm the second PR `lint`, `test`, and `docs` jobs, including Dependency Review.
 - [ ] Dispatch `runner-smoke.yml` on the second branch and require success.
@@ -101,11 +102,15 @@
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
   Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
   The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.
-- [ ] PR 2: Integrate locally reviewed runtime-safety work for #211 manual cutover, #215 cleanup outcomes, #243 worker-session keepalives, and #223 extension preflight.
+  Collector fix `7a276036300c58242213be67ba2dca1346c6e3f1` has static approval.
+  After this policy commit, require one exact-head CI and full shared baseline before the ordinary PR 251 merge.
+  Runtime implementation may continue unpublished during that CI wait.
+- [ ] PR 2: Integrate independently reviewed runtime-safety work for #211 manual cutover, #215 cleanup outcomes, #243 worker-session keepalives, and #223 extension preflight.
   Retain #215's non-skipped isolated cleanup-alert report entry and #243's selected packet-loss expiry proof.
-- [ ] PR 3: Integrate locally reviewed configuration and lifecycle work for #221 same-major version gating, #209 split-table disabling, and #210 initial Pending status.
+- [ ] PR 3: Integrate independently reviewed configuration and lifecycle work for #221 same-major version gating, #209 split-table disabling, and #210 initial Pending status.
   Include #200 only after a measured cause, discriminating regression, and concrete fix are confirmed.
-- [ ] For each batch, complete integration review, focused local checks, `task lint`, `task test`, strict documentation validation, and exact-head full `feature-e2e` evidence.
+- [ ] For each batch, complete integration review, local formatting, and `task lint`.
+  CI must complete tests, strict documentation validation, and exact-head full `feature-e2e` evidence.
 
 ## Runtime safety evidence
 
@@ -119,7 +124,7 @@
 - #211 local implementation and independent review accepted source commits `efde537fbc708b7836c4f2b219bc88d79dd83a4f` and `56952f8ba1e989df2305407abc6399c63ec204cc`.
   Its PR 2 integration candidate still requires whole-batch review and full exact-head feature E2E.
 - #215 local review accepted scoped commits `5cbaf39c17d3677a618aa36665eb84118e328de4` and `72c4e7f1577abb25cfb83d3b94346e643899809f`.
-  Include it in the locally reviewed PR 2, published after the disposable prerequisite reaches trusted main.
+  Include it in the independently reviewed PR 2, published after the disposable prerequisite reaches trusted main.
   PR 2's full additive-disposable runtime-safety run provides the first live disposable validation and its merge gate, without a separate smoke PR or run.
   Acceptance requires full exact-head isolated E2E with a non-skipped cleanup scenario and its `cleanup-alert-after-job-ttl` evidence entry.
 
