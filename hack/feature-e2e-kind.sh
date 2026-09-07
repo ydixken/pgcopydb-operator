@@ -447,8 +447,10 @@ main() {
     save '.stage="ready"'
   elif [[ "$command" == verify-ready ]]; then
     load_state
+    [[ -s "$KUBECONFIG" && -s "$state/installed-crd.json" ]] || fail kind-readiness-invalid
     jq -e '. as $s | {runID,runAttempt,cluster,context,kubeconfig,candidateSHA256,nodes} as $b |
       .owned == true and .stage == "ready" and .teardown == "pending" and (.nodes|length)==1 and
+      .evidence.initialAbsence == ($b | .nodes=[]) and
       (["capacity","kubeconfig","node","network","storage","cnpg","monitoring","candidateCRD","noDelivery"] |
         all(. as $key | $s.evidence[$key] == $b))' "$state/state.json" >/dev/null || fail kind-readiness-invalid
     verify_node

@@ -213,6 +213,8 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 		"ready-node", "ready-binding", "ready-delivery", "teardown-timeout", "teardown-remains", "absence-failed",
 		"observer-partial", "upper-outside", "observer-ownership", "partial-stopped", "node-pid-zero", "pvc-pending",
 		"crd-absence-failed",
+		"ready-initial-missing", "ready-initial-wrong", "ready-initial-nodes",
+		"ready-installed-missing", "ready-installed-empty", "ready-kubeconfig-missing", "ready-kubeconfig-empty",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
@@ -305,26 +307,53 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 			}
 			if postCreate {
 				action := "verify-ready"
+				mutation := ""
 				switch scenario {
 				case "ready-node":
 					activeScenario = featureNodeIdentity
 				case "ready-delivery":
 					activeScenario = "alert-delivery"
 				case "ready-binding":
-					result["runAttempt"] = 3
-					body, err = json.Marshal(result)
-					if err != nil {
-						t.Fatal(err)
+					mutation = ".runAttempt = 3"
+				case "ready-initial-missing":
+					mutation = "del(.evidence.initialAbsence)"
+				case "ready-initial-wrong":
+					mutation = `.evidence.initialAbsence.candidateSHA256 = "wrong-candidate"`
+				case "ready-initial-nodes":
+					mutation = ".evidence.initialAbsence.nodes = .nodes"
+				case "ready-installed-missing", "ready-installed-empty", "ready-kubeconfig-missing", "ready-kubeconfig-empty":
+					file := filepath.Join(state, "installed-crd.json")
+					if strings.HasPrefix(scenario, "ready-kubeconfig-") {
+						file = filepath.Join(state, "kubeconfig")
 					}
-					if err = os.WriteFile(filepath.Join(state, "state.json"), body, 0o600); err != nil {
+					if strings.HasSuffix(scenario, "-missing") {
+						err = os.Remove(file)
+					} else {
+						err = os.WriteFile(file, nil, 0o600)
+					}
+					if err != nil {
 						t.Fatal(err)
 					}
 				default:
 					action = "destroy"
 					activeScenario = scenario
 				}
+				if mutation != "" {
+					body, err = exec.Command("jq", mutation, filepath.Join(state, "state.json")).Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = os.WriteFile(filepath.Join(state, "state.json"), body, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if output, err = run(action); err == nil {
 					t.Fatalf("accepted %s: %s", scenario, output)
+				}
+				if strings.HasPrefix(scenario, "ready-installed-") || strings.HasPrefix(scenario, "ready-kubeconfig-") {
+					if output, err = run("destroy"); err != nil {
+						t.Fatalf("partial-file teardown after %s: %v %s", scenario, err, output)
+					}
 				}
 				return
 			}
