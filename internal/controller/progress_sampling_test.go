@@ -423,6 +423,49 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
 	})
 
+	It("retains prior progress through timeout and partial polls", func() {
+		const name = "mig-progress-timeouts"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(5000), tgt: int64p(1000), copying: true,
+			relations: &progress.RelationCounts{TablesTotal: 5, TablesDone: 2,
+				IndexesTotal: 4, IndexesDone: 1, BytesTotal: 4000, BytesDone: 900}}
+		r := newReconciler()
+		r.Progress = fake
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		baseline := reconcileAndGet(ctx, r, name)
+		Expect(baseline.Status.Progress).NotTo(BeNil())
+		for _, tc := range []struct {
+			src, tgt               *int64
+			err                    error
+			wantSource, wantTarget float64
+		}{
+			{nil, nil, context.DeadlineExceeded, 5000, 1000},
+			{nil, int64p(1200), nil, 5000, 1200},
+			{int64p(5500), nil, nil, 5500, 1200},
+			{nil, nil, nil, 5500, 1200},
+		} {
+			fake.mu.Lock()
+			fake.src, fake.tgt, fake.sizesErr = tc.src, tc.tgt, tc.err
+			fake.relations, fake.copying = nil, false
+			fake.mu.Unlock()
+			m := reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Progress).To(Equal(baseline.Status.Progress))
+			Expect(m.Status.Phase).To(Equal(baseline.Status.Phase))
+			Expect(m.Status.Conditions).To(Equal(baseline.Status.Conditions))
+			for metric, want := range map[string]float64{
+				"pgcopydb_migration_source_database_size_bytes": tc.wantSource,
+				"pgcopydb_migration_target_database_size_bytes": tc.wantTarget,
+				"pgcopydb_migration_clone_copied_bytes":         900,
+			} {
+				got, found := gaugeValue(metric, migLabels(name))
+				Expect(found).To(BeTrue())
+				Expect(got).To(Equal(want))
+			}
+		}
+	})
+
 	It("never polls the catalog while the worker is alive", func() {
 		const name = "mig-progress-quiesce"
 		defer removeMigration(ctx, name)

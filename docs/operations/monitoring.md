@@ -47,7 +47,7 @@ The "Exists" column is the contract for when a series is present:
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **worker running** for the counters too, but they have two sources and the second is more exact.
   While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables and bytes that exist on the target against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
-  This runs on any runner, because it touches no pgcopydb catalog.
+  This requires psql and GNU `timeout` in the runner and touches no pgcopydb catalog.
   Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see the [troubleshooting row](../troubleshooting.md)).
   The estimate leads that accounting slightly, because a table counts as copied once it holds any data.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
@@ -56,6 +56,14 @@ The "Exists" column is the contract for when a series is present:
   The retired pair keeps its samples in Prometheus, so query the timeline as `last_over_time(...[$__range])` rather than at the range end: that is what puts both sides of a flip back on the panel, and it is the only way to read a Migration that has since been deleted.
 
 Read the timeline off the condition transitions, not off the phase.
+
+Each database observation, including the clone-stage probe, sets a five-second SQL `statement_timeout` explicitly before querying.
+Connection-string options cannot disable that bound.
+GNU `timeout` sends TERM after six seconds and KILL one second later, so a stalled connection also releases its remote processes even if the exec stream closes early.
+The three sequential size and scope queries have a combined process budget of 21 seconds, below the 30-second exec timeout.
+A failed side retains its last size gauge while a usable reading updates the other side.
+Relation counts need both sides, so a partial poll preserves the prior progress counters.
+A failed stage probe preserves the established phase; sampling failures do not complete or fail a migration.
 `pgcopydb_migration_phase` is an instantaneous gauge, and the phase itself is a summary derived from the conditions.
 A phase shorter than the scrape interval is therefore never sampled: on a follow migration whose `Streaming` condition turned true one second before `CaughtUp` did, Prometheus ended up holding no `Streaming` sample at all, while every longer phase was captured.
 A transition timestamp cannot be missed that way, because the value keeps standing for as long as the condition holds, so every scrape carries the same instant the operator stamped when it set the condition.
@@ -207,7 +215,7 @@ Each release candidate then runs a live gate: the e2e suite drives a real follow
   The copied/planned ratio stays a few percent short of 100 by construction: a relation's on-disk size carries page and tuple headers, alignment padding and free space that a COPY stream does not move.
 - Copy Throughput's target growth is clamped at 0: vacuum reclaims space during `Finalizing`, and the resulting negative slope is real but meaningless as a byte rate.
   Clone copy needs no such clamp: a retry resumes from the same work-dir catalog, and an interrupted table's killed `COPY` leaves no partial bytes credited, so the tally never runs backward.
-- On a custom stock 0.18 runner these series still flow, because the psql sample needs no pgcopydb command; what that runner gives up is the exact count that would replace the estimate at the end.
+- On a custom stock 0.18 runner with psql and GNU `timeout`, these series still flow because sampling needs no pgcopydb command; that runner gives up the exact count that would replace the estimate at the end.
 - The stalled-clone alert matches `Cloning` alone because the tail normally reads as `Finalizing`, which needs the phase probe to have seen this attempt's copy workers at least once.
   That probe runs on every poll, about every 10 seconds, so only a copy that finishes almost the instant it starts fails to set it and carries `Cloning` into its tail.
   Firing still takes an hour of flat target, which a copy that short does not plausibly produce.
