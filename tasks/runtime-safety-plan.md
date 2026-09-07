@@ -24,7 +24,10 @@ This plan excludes the pgcopydb fork, SQLite contention work, builder publicatio
 ## Delivery batches
 
 PR 1 delivers the disposable feature-E2E prerequisite.
-It must merge through the trusted workflow and complete one additive-disposable live validation before PR 2 or PR 3 can merge.
+It must merge through the existing trusted shared baseline on its exact head.
+After PR 1 reaches trusted main, publish the completed, locally reviewed PR 2.
+PR 2's full additive-disposable runtime-safety run provides the first live disposable validation and its merge gate.
+Require capacity, schema, no-alert-delivery, metrics, runtime proofs, cleanup, and teardown to pass before merging PR 2, then proceed to PR 3.
 PR 2 groups #211, #215, #243, and #223 as runtime-safety work.
 PR 3 groups #221, #209, and #210 as configuration and lifecycle work, plus only confirmed #200 changes.
 Leave #200 open if investigation has not produced a measured cause, discriminating regression, and concrete fix.

@@ -188,6 +188,26 @@ Both modes serialize with release candidate and published-release E2E, preserve 
 Feature E2E creates no release candidate, tag, GitHub release, chart publication, `latest` tag, or production deployment.
 It does not reuse `auto-release.yml`, `release.yml`, `promote.yml`, or a published-release E2E path.
 
+### Disposable bootstrap helper
+
+The trusted `hack/feature-e2e-kind.sh` helper provides `create`, `verify-ready`, and `destroy` for one run-owned kind cluster.
+The caller MUST create a private directory under `RUNNER_TEMP`, export its canonical path as `FEATURE_E2E_KIND_STATE`, and set `KUBECONFIG` to that directory's `kubeconfig` before calling any entrypoint.
+The helper derives the cluster name from numeric `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`.
+It records ownership, node identities, lifecycle stages, and bound readiness evidence in `state.json`, and stores the candidate CRD read-back in `installed-crd.json`.
+The caller MUST run owned suite cleanup before destruction and treat either cleanup or destruction failure as a failed run.
+
+We support Linux cgroup v2 with provable initial cgroup namespace visibility and classic Docker `overlay2` storage.
+The observer checks the complete visible cgroup ancestry and requires at least 8 CPU, 16 GiB memory, and 32 GiB available on the verified Docker backing filesystem.
+These checks establish capacity ceilings, not reservations.
+Unknown ancestry, separate snapshot stores, unexplained mounts, occupied names, or changed ownership fail the run.
+The helper pins kind 0.33.0, Kubernetes 1.36.4, CloudNativePG chart 0.29.0, and kube-prometheus-stack chart 90.0.0, with verified archive checksums and image digests.
+
+`verify-ready` checks the recorded run binding, exact live node identities, and fresh Prometheus evidence before the trusted Helm wrapper can enable isolated rules.
+Monitoring disables alert delivery, checks rendered and live Prometheus specifications, and requires empty loaded and discovered Alertmanager destinations.
+The helper keeps temporary monitoring evidence private, removes it on exit, and emits fixed error codes without configuration contents.
+The installed-CRD comparison runs from trusted source through `TestFeatureE2EInstalledCRDCompatibility`, using explicit `FEATURE_E2E_CANDIDATE_CRD` and `FEATURE_E2E_INSTALLED_CRD` paths.
+It preserves integer precision and normalizes only server metadata, status, schema descriptions, and the default `None` conversion strategy.
+
 ## Releasing
 
 Releases cut themselves. Every Monday at 08:00 UTC `auto-release.yml` reads what landed since the last stable tag and pushes a release candidate: `vX.Y.Z-rc.1`, a patch bump unless a `feat:` commit is in the range, in which case a minor one. A week with nothing merged ends with no tag and a green run, which is not a failure. When a candidate for the same version already exists the number counts up, rather than reusing a tag whose images are published.
