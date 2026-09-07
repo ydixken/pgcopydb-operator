@@ -2,6 +2,7 @@ package buildconfig
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	gingkotypes "github.com/onsi/ginkgo/v2/types"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
@@ -31,7 +33,1132 @@ const (
 	featureStorageKey       = "storage"
 	featureMatchLabelsKey   = "matchLabels"
 	featureInstanceLabel    = "app.kubernetes.io/instance"
+	featureDisposableJob    = "disposable"
+	featureBaselineProfile  = "baseline"
+	featureRuntimeProfile   = "runtime-safety"
+	featureMetricsText      = "Migration metrics"
+	featureExpiryEntry      = "dead-worker-session-expiry"
+	featureCleanupEntry     = "cleanup-alert-after-job-ttl"
+	featureExpiryLeaf       = "expires abandoned source and target sessions after packet loss and resumes"
+	featureCleanupLeaf      = "records exhausted cleanup after proven drain and restores retained replication state"
+	featurePreflightJob     = "preflight"
+	featureHelpersStep      = "Write cluster helpers"
+	featureSuiteStep        = "Run non-chaos suite"
+	featureFocusText        = "one scenario"
+	featureMissingValue     = "missing"
+	featureCleanupOutput    = "cleanup"
+	featureManagerOutput    = "manager_attested"
+	featureRunnerOutput     = "runner_attested"
+	featureSuiteRanOutput   = "suite_ran"
+	featureCompleteOutput   = "suite_completed"
+	featureCancelledValue   = "cancelled"
+	featureUnknownProfile   = "unknown profile"
+	featureChoiceType       = "choice"
+	featureResolvedSHA      = "${{ needs.resolve.outputs.sha }}"
+	featurePassingShell     = "#!/usr/bin/env bash\nexit 0\n"
+	featureSharedTarget     = "shared"
+	featureSuiteOutput      = "suite"
+	featureRuleEnabled      = "metrics.prometheusRule.enabled=true"
+	featureOtherValue       = "other"
+	featureOwnerFile        = "owner"
+	featureSchemaFile       = "schema-profile"
+	featureValuesFlag       = "--values"
 )
+
+func TestFeatureE2EProfileInputs(t *testing.T) {
+	inputs := parseProtectedWorkflow(t, featureWorkflow).On["workflow_dispatch"].Inputs
+	for name, options := range map[string][]string{
+		"schema_validation": {identicalSchemaProfile, disposableSchemaProfile},
+		"suite_profile":     {featureBaselineProfile, featureRuntimeProfile},
+	} {
+		if in := inputs[name]; !in.Required || in.Type != featureChoiceType ||
+			in.Default != options[0] || !slices.Equal(in.Options, options) {
+			t.Errorf("%s input = %+v", name, in)
+		}
+	}
+}
+
+func TestFeatureE2EProfileResolver(t *testing.T) {
+	resolver := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs[resolveJob], "Resolve pull request")
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	for _, tt := range []struct {
+		name, schema, suite, mode, scale, focus string
+		wantError                               bool
+	}{
+		{name: "defaults", mode: fullModeValue, scale: featureDefaultScale},
+		{
+			name:   featureSharedTarget,
+			schema: identicalSchemaProfile,
+			suite:  featureBaselineProfile,
+			mode:   fullModeValue,
+			scale:  featureFullScale,
+		},
+		{
+			name:   "isolated baseline",
+			schema: disposableSchemaProfile,
+			suite:  featureBaselineProfile,
+			mode:   fullModeValue,
+			scale:  featureDefaultScale,
+		},
+		{
+			name:   "isolated focus",
+			schema: disposableSchemaProfile,
+			suite:  featureBaselineProfile,
+			mode:   focusModeValue,
+			scale:  featureDefaultScale,
+			focus:  featureFocusText,
+		},
+		{
+			name:   "runtime",
+			schema: disposableSchemaProfile,
+			suite:  featureRuntimeProfile,
+			mode:   fullModeValue,
+			scale:  featureDefaultScale,
+		},
+		{
+			name:      "unknown schema",
+			schema:    featureInvalidInput,
+			suite:     featureBaselineProfile,
+			mode:      fullModeValue,
+			scale:     featureDefaultScale,
+			wantError: true,
+		},
+		{
+			name:      "unknown suite",
+			schema:    identicalSchemaProfile,
+			suite:     featureInvalidInput,
+			mode:      fullModeValue,
+			scale:     featureDefaultScale,
+			wantError: true,
+		},
+		{
+			name:      "isolated large",
+			schema:    disposableSchemaProfile,
+			suite:     featureBaselineProfile,
+			mode:      fullModeValue,
+			scale:     featureFullScale,
+			wantError: true,
+		},
+		{
+			name:      "shared runtime",
+			schema:    identicalSchemaProfile,
+			suite:     featureRuntimeProfile,
+			mode:      fullModeValue,
+			scale:     featureDefaultScale,
+			wantError: true,
+		},
+		{
+			name:      "focused runtime",
+			schema:    disposableSchemaProfile,
+			suite:     featureRuntimeProfile,
+			mode:      focusModeValue,
+			scale:     featureDefaultScale,
+			focus:     featureFocusText,
+			wantError: true,
+		},
+		{
+			name:      "runtime focus input",
+			schema:    disposableSchemaProfile,
+			suite:     featureRuntimeProfile,
+			mode:      fullModeValue,
+			scale:     featureDefaultScale,
+			focus:     featureFocusText,
+			wantError: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			gh := `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "api repos/ydixken/pgcopydb-operator/pulls/1" ]]
+printf 'lookup\n' >> "$GH_CALLED"
+printf '%s\n' '{"state":"open","base":{"ref":"main","repo":{"full_name":"ydixken/pgcopydb-operator"}},
+"head":{"repo":{"full_name":"ydixken/pgcopydb-operator"},"sha":"` + sha + `"}}'
+`
+			if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(gh), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "-c", resolver.Run)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "GH_CALLED="+filepath.Join(dir, "calls"),
+				"GITHUB_OUTPUT="+filepath.Join(dir, "output"), "GITHUB_REPOSITORY=ydixken/pgcopydb-operator", "INPUT_PR=1",
+				"INPUT_MODE="+tt.mode, "INPUT_SCALE="+tt.scale, "INPUT_FOCUS="+tt.focus,
+				"INPUT_SCHEMA_VALIDATION="+tt.schema, "INPUT_SUITE_PROFILE="+tt.suite)
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantError {
+				t.Fatalf("resolver error = %v, want error %v: %s", err, tt.wantError, output)
+			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if tt.wantError {
+				if len(calls) != 0 {
+					t.Fatal("invalid profile contacted GitHub")
+				}
+				return
+			}
+			if string(calls) != "lookup\n" {
+				t.Fatalf("candidate lookup was not exactly once: %q", calls)
+			}
+			schema, suite := tt.schema, tt.suite
+			if schema == "" {
+				schema = identicalSchemaProfile
+			}
+			if suite == "" {
+				suite = featureBaselineProfile
+			}
+			resolved := read(t, filepath.Join(dir, "output"))
+			for _, want := range []string{
+				"sha=" + sha + "\n",
+				"schema_validation=" + schema + "\n",
+				"suite_profile=" + suite + "\n",
+			} {
+				if !strings.Contains(resolved, want) {
+					t.Errorf("resolved outputs lack %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestFeatureE2EPreflightRoute(t *testing.T) {
+	job := parseProtectedWorkflow(t, featureWorkflow).Jobs[featurePreflightJob]
+	check := protectedStepNamed(t, job, "Check candidate compatibility")
+	for _, tt := range []struct {
+		profile, target, failure string
+	}{
+		{profile: identicalSchemaProfile, target: featureSharedTarget},
+		{profile: disposableSchemaProfile, target: featureDisposableJob},
+		{profile: disposableSchemaProfile, failure: "make"},
+		{profile: disposableSchemaProfile, failure: "go"},
+		{profile: disposableSchemaProfile, failure: featureDockerCommand},
+	} {
+		t.Run(tt.profile+tt.failure, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			crd := "candidate CRD bytes\n"
+			for _, root := range []string{"trusted", "candidate"} {
+				writeCompatibilityFixture(t, dir, root+"/images/runner/Dockerfile",
+					"FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:test@sha256:"+strings.Repeat("1", 64)+" AS pgcopydb\n")
+			}
+			writeCompatibilityFixture(t, dir, "candidate/config/crd/bases/pgcopydb-operator.io_migrations.yaml", crd)
+			for _, name := range []string{
+				"make",
+				"go",
+				featureDockerCommand,
+				"git",
+				"helm",
+				"../trusted/hack/sync-chart-crd.sh",
+				"../trusted/hack/sync-chart-rbac.sh",
+			} {
+				path := filepath.Join(dir, "bin", name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				body := `#!/usr/bin/env bash
+set -euo pipefail
+name=${0##*/}
+[[ "$name" != "$FAIL_COMMAND" ]]
+if [[ "$name" == go ]]; then
+  [[ "$FEATURE_E2E_SCHEMA_VALIDATION" == "$EXPECTED_PROFILE" ]]
+  [[ "$PWD" == "$GITHUB_WORKSPACE/trusted" ]]
+  [[ "$*" == "test ./test/buildconfig -run ^TestFeatureE2ECandidateCompatibility$ -count=1" ]]
+fi
+`
+				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("bash", "-c", check.Run)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
+				"GITHUB_WORKSPACE="+dir, "GITHUB_OUTPUT="+filepath.Join(dir, "output"),
+				"FEATURE_E2E_SCHEMA_VALIDATION="+tt.profile, "EXPECTED_PROFILE="+tt.profile, "FAIL_COMMAND="+tt.failure)
+			output, err := cmd.CombinedOutput()
+			if tt.failure != "" {
+				if err == nil {
+					t.Fatal("preflight failure was accepted")
+				}
+				if data, _ := os.ReadFile(filepath.Join(dir, "output")); len(data) != 0 {
+					t.Fatal("failed preflight emitted route evidence")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("preflight: %v: %s", err, output)
+			}
+			want := fmt.Sprintf("validation_target=%s\ncandidate_crd_sha256=%x\n", tt.target, sha256.Sum256([]byte(crd)))
+			if got := read(t, filepath.Join(dir, "output")); got != want {
+				t.Errorf("preflight evidence = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestFeatureE2EDisposableRouting(t *testing.T) {
+	wf := parseProtectedWorkflow(t, featureWorkflow)
+	for jobName, target := range map[string]string{
+		featureClusterJob:    featureSharedTarget,
+		featureDisposableJob: featureDisposableJob,
+	} {
+		job, ok := wf.Jobs[jobName]
+		if !ok {
+			t.Fatalf("missing selected route %s", jobName)
+		}
+		if job.If != "needs.preflight.outputs.validation_target == '"+target+"'" ||
+			!slices.Equal(protectedNeeds(t, job), []string{resolveJob, featurePreflightJob, managerImageJob, runnerImageJob}) {
+			t.Errorf("%s can run without its successful selected preflight", jobName)
+		}
+		for _, stepName := range []string{featureHelpersStep, featureSuiteStep} {
+			_ = protectedStepNamed(t, job, stepName)
+		}
+	}
+	job := wf.Jobs[featureDisposableJob]
+	if job.RunsOn != "github-runner-pgcopydb-operator" || job.Environment != "" || job.Concurrency.Group != "" {
+		t.Fatal("disposable route inherits shared runner protections or credentials")
+	}
+	if !maps.Equal(job.Permissions, map[string]string{
+		permissionContents: permissionRead, permissionPackages: permissionRead,
+	}) {
+		t.Fatal("disposable route has excessive permissions")
+	}
+	encoded, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"secrets.E2E", "vars.E2E", "config current-context", "e2e-cluster", "~/.kube"} {
+		if strings.Contains(string(encoded), banned) {
+			t.Errorf("disposable route contains shared fallback %q", banned)
+		}
+	}
+	steps := []string{
+		"Prepare isolated state",
+		"Create disposable cluster",
+		featureHelpersStep,
+		"Require an empty feature slot",
+		"Attest runner image",
+		featureSuiteStep,
+		"Cleanup feature resources",
+		"Destroy disposable cluster",
+		"Require suite cleanup and teardown success",
+	}
+	previous := -1
+	for _, name := range steps {
+		index := protectedStepIndex(t, job, name)
+		if index <= previous {
+			t.Fatalf("disposable lifecycle order breaks at %s", name)
+		}
+		previous = index
+	}
+	for _, name := range []string{
+		"Cleanup feature resources",
+		"Destroy disposable cluster",
+		"Require suite cleanup and teardown success",
+	} {
+		if protectedStepNamed(t, job, name).If != "always()" {
+			t.Errorf("%s does not run after failure", name)
+		}
+	}
+	suite := protectedStepNamed(t, job, featureSuiteStep)
+	for key, want := range map[string]string{
+		"FEATURE_E2E_SCHEMA_VALIDATION": disposableSchemaProfile, "E2E_SCALE": featureDefaultScale,
+		"E2E_CNPG_INSTANCES": "1", "E2E_STORAGE_CLASS": "standard", "E2E_MANAGE_NAMESPACES": trueValue,
+		"E2E_KEEP_FIXTURES": falseValue, "E2E_STRESS": falseValue, "E2E_FORCE": falseValue,
+		"E2E_PG_SOURCE": "17", "E2E_PG_TARGET": "17", "E2E_PROMETHEUS_URL": "",
+		"E2E_PROMETHEUS_PORT_FORWARD": "monitoring/feature-monitoring-prometheus:9090",
+		"SUITE_PROFILE":               "${{ needs.resolve.outputs.suite_profile }}",
+	} {
+		if got, exists := suite.Env[key]; !exists || got != want {
+			t.Errorf("disposable suite %s = %q (present %v), want %q", key, got, exists, want)
+		}
+	}
+	if got := job.Outputs["schema_verified"]; got != "${{ steps.bootstrap.outputs.schema_verified }}" {
+		t.Errorf("schema verification output = %q", got)
+	}
+	if got := job.Outputs["teardown"]; got != "${{ steps.teardown.outcome }}" {
+		t.Errorf("teardown output = %q", got)
+	}
+}
+
+func TestFeatureE2EWorkflowKindLifecycle(t *testing.T) {
+	job := parseProtectedWorkflow(t, featureWorkflow).Jobs[featureDisposableJob]
+	prepare := protectedStepNamed(t, job, "Prepare isolated state")
+	create := protectedStepNamed(t, job, "Create disposable cluster")
+	destroy := protectedStepNamed(t, job, "Destroy disposable cluster")
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			trusted := filepath.Join(dir, "feature-e2e-trusted/hack")
+			if err := os.MkdirAll(trusted, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fake := `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$2" == "$FEATURE_E2E_KIND_STATE" && "$KUBECONFIG" == "$2/kubeconfig" ]]
+[[ "$2" == "$RUNNER_TEMP"/feature-kind.* ]]
+printf '%s\n' "$1" >> "$CALLS"
+case "$1" in
+  create)
+    [[ "$#" == 4 && "$3" == "$GITHUB_WORKSPACE/config/crd/bases/pgcopydb-operator.io_migrations.yaml" ]]
+    [[ "$4" == "$CANDIDATE_CRD_SHA256" ]]
+    [[ "$CREATE_FAILS" == false ]] ;;
+  destroy) [[ "$#" == 2 ]] ;;
+  *) exit 1 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(trusted, "feature-e2e-kind.sh"), []byte(fake), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			env := append(os.Environ(), "GITHUB_WORKSPACE="+dir, "RUNNER_TEMP="+dir,
+				"GITHUB_ENV="+filepath.Join(dir, "env"), "GITHUB_OUTPUT="+filepath.Join(dir, "output"),
+				"KUBECONFIG=/not-the-run-kubeconfig", "CREATE_FAILS="+fmt.Sprint(failed),
+				"CANDIDATE_CRD_SHA256="+strings.Repeat("a", 64), "CALLS="+filepath.Join(dir, "calls"))
+			run := func(script string) error {
+				t.Helper()
+				cmd := exec.Command("bash", "-c", script)
+				cmd.Env = env
+				output, runErr := cmd.CombinedOutput()
+				if len(output) > 0 {
+					t.Errorf("workflow lifecycle printed unexpected output")
+				}
+				return runErr
+			}
+			if err := run(prepare.Run); err != nil {
+				t.Fatal(err)
+			}
+			exported := strings.Split(strings.TrimSpace(read(t, filepath.Join(dir, "env"))), "\n")
+			if len(exported) != 2 || !strings.HasPrefix(exported[0], "FEATURE_E2E_KIND_STATE="+dir+"/feature-kind.") ||
+				exported[1] != "KUBECONFIG="+strings.TrimPrefix(exported[0], "FEATURE_E2E_KIND_STATE=")+"/kubeconfig" {
+				t.Fatal("workflow did not export one exact private state/kubeconfig binding")
+			}
+			env = append(env, exported...)
+			if err := run(create.Run); (err != nil) != failed {
+				t.Fatalf("create error = %v, want failure %v", err, failed)
+			}
+			output, _ := os.ReadFile(filepath.Join(dir, "output"))
+			if (string(output) == "schema_verified=true\n") == failed {
+				t.Fatal("schema output did not follow successful create-owned verification")
+			}
+			if err := run(destroy.Run); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(t, filepath.Join(dir, "calls")); got != "create\ndestroy\n" {
+				t.Errorf("lifecycle calls = %q", got)
+			}
+		})
+	}
+}
+
+func featureProofSpecs() gingkotypes.SpecReports {
+	metric := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "healthy operator scrape")
+	metric.ContainerHierarchyTexts = []string{featureMetricsText}
+	metric.ContainerHierarchyLabels = [][]string{{"metrics"}}
+	expiry := ginkgoSpecFixture(gingkotypes.SpecStatePassed, featureExpiryLeaf)
+	expiry.ContainerHierarchyTexts = []string{"Worker session bounds"}
+	expiry.ReportEntries = gingkotypes.ReportEntries{{Name: featureExpiryEntry,
+		Value: gingkotypes.WrapEntryValue(map[string]any{
+			"migrationUID": "test-migration", "sourceCohortSize": 2, "targetCohortSize": 3,
+			"sourceExpiredCount": 2, "targetExpiredCount": 3, "expirySeconds": 120,
+			"targetCopyObserved": true, "rollbackRegisteredBeforeFault": true, "faultRuleInstalled": true,
+			"faultRuleRemoved": true, "controlSessionHealthy": true, "longCopyOutlivedProbe": true,
+			"resumeObserved": true, "dataMatched": true, "backendTerminationUsed": false,
+		})}}
+	cleanup := ginkgoSpecFixture(gingkotypes.SpecStatePassed, featureCleanupLeaf)
+	cleanup.ReportEntries = gingkotypes.ReportEntries{{Name: featureCleanupEntry,
+		Value: gingkotypes.WrapEntryValue(map[string]any{
+			"migrationUID": "test-cleanup", "jobTTLObserved": true, "failureMetricObserved": true, "firingAlertObserved": true,
+		})}}
+	return gingkotypes.SpecReports{metric, expiry, cleanup}
+}
+
+func TestFeatureE2ESuiteProfiles(t *testing.T) {
+	suite := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureSuiteStep)
+	for _, tt := range []struct {
+		name, schema, profile, mode, focus, filter string
+		wantError                                  bool
+	}{
+		{name: "default baseline", filter: "!chaos && !flaky && !isolated-runtime-safety"},
+		{
+			name:    "isolated baseline",
+			schema:  disposableSchemaProfile,
+			profile: featureBaselineProfile,
+			filter:  "!chaos && !flaky && !isolated-runtime-safety",
+		},
+		{
+			name:    "runtime",
+			schema:  disposableSchemaProfile,
+			profile: featureRuntimeProfile,
+			filter:  "(!chaos && !flaky && !isolated-runtime-safety) || (isolated-runtime-safety && !flaky)",
+		},
+		{name: "unknown schema", schema: featureInvalidInput, wantError: true},
+		{name: "unknown suite", profile: featureInvalidInput, wantError: true},
+		{name: "shared runtime", profile: featureRuntimeProfile, wantError: true},
+		{
+			name:      "focused runtime",
+			schema:    disposableSchemaProfile,
+			profile:   featureRuntimeProfile,
+			mode:      focusModeValue,
+			focus:     featureFocusText,
+			wantError: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runSuiteFixture(t, suite.Run, suiteFixture{schemaProfile: tt.schema, suiteProfile: tt.profile,
+				runMode: tt.mode, focus: tt.focus, report: ginkgoReportFixture(t, true, 3, 3, featureProofSpecs())})
+			if tt.wantError {
+				if result.err == nil || len(result.args) != 0 || len(result.outputs) != 0 {
+					t.Fatalf("invalid suite profile reached candidate execution: %+v", result)
+				}
+				return
+			}
+			if result.err != nil || !slices.Contains(result.args, "-ginkgo.label-filter="+tt.filter) {
+				t.Fatalf("suite profile: %v; args %q; %s", result.err, result.args, result.output)
+			}
+			if got := result.outputs["runtime_safety_completed"]; (got == trueValue) != (tt.profile == featureRuntimeProfile) {
+				t.Errorf("runtime proof output = %q for %q", got, tt.profile)
+			}
+		})
+	}
+}
+
+func TestFeatureE2EDisposableMetricsEvidence(t *testing.T) {
+	suite := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureSuiteStep)
+	for _, tt := range []struct {
+		name, mode string
+		mutate     func(*gingkotypes.SpecReport)
+		wantError  bool
+	}{
+		{name: "passed inherited label"},
+		{
+			name:      "no metrics",
+			mutate:    func(s *gingkotypes.SpecReport) { s.ContainerHierarchyTexts = nil; s.ContainerHierarchyLabels = nil },
+			wantError: true,
+		},
+		{
+			name:      "missing inherited label",
+			mutate:    func(s *gingkotypes.SpecReport) { s.ContainerHierarchyLabels = nil },
+			wantError: true,
+		},
+		{
+			name:      "label without metrics container",
+			mutate:    func(s *gingkotypes.SpecReport) { s.ContainerHierarchyTexts = nil },
+			wantError: true,
+		},
+		{
+			name:      "skipped metrics",
+			mutate:    func(s *gingkotypes.SpecReport) { s.State = gingkotypes.SpecStateSkipped },
+			wantError: true,
+		},
+		{
+			name:   "focused nonmetrics",
+			mode:   focusModeValue,
+			mutate: func(s *gingkotypes.SpecReport) { s.ContainerHierarchyTexts = nil; s.ContainerHierarchyLabels = nil },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			specs := featureProofSpecs()
+			if tt.mutate != nil {
+				tt.mutate(&specs[0])
+			}
+			result := runSuiteFixture(t, suite.Run, suiteFixture{schemaProfile: disposableSchemaProfile, runMode: tt.mode,
+				focus: "healthy operator scrape", report: ginkgoReportFixture(t, true, 3, 3, specs)})
+			if (result.err != nil) != tt.wantError {
+				t.Fatalf("metrics gate error = %v, want %v: %s", result.err, tt.wantError, result.output)
+			}
+			if tt.wantError && (result.outputs["metrics_completed"] != "" || result.outputs[featureCompleteOutput] != "") {
+				t.Fatal("invalid metrics emitted completion evidence")
+			}
+			if !tt.wantError && tt.mode != focusModeValue && result.outputs["metrics_completed"] != trueValue {
+				t.Fatal("passed metrics did not emit completion evidence")
+			}
+		})
+	}
+}
+
+func TestFeatureE2ERuntimeProofPayloads(t *testing.T) {
+	suite := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureSuiteStep)
+	for _, index := range []int{1, 2} {
+		payload := featureProofSpecs()[index].ReportEntries[0].Value.GetRawValue().(map[string]any)
+		mutations := map[string]func(map[string]any){
+			"missing uid": func(p map[string]any) { delete(p, "migrationUID") },
+			"empty uid":   func(p map[string]any) { p["migrationUID"] = "" },
+			"typed uid":   func(p map[string]any) { p["migrationUID"] = 1 },
+		}
+		for key, value := range payload {
+			if _, ok := value.(bool); ok {
+				mutations[key+" reversed"] = func(p map[string]any) { p[key] = !value.(bool) }
+				mutations[key+" string"] = func(p map[string]any) { p[key] = "true" }
+				mutations[key+" missing"] = func(p map[string]any) { delete(p, key) }
+			}
+		}
+		if index == 1 {
+			for _, key := range []string{"sourceCohortSize", "targetCohortSize", "sourceExpiredCount", "targetExpiredCount"} {
+				for _, value := range []any{0, -1, 1.5, "2", 7, nil} {
+					mutations[fmt.Sprintf("%s %v", key, value)] = func(p map[string]any) { p[key] = value }
+				}
+			}
+			for _, value := range []any{0, -1, 180.1, "120", nil} {
+				mutations[fmt.Sprintf("expiry %v", value)] = func(p map[string]any) { p["expirySeconds"] = value }
+			}
+		}
+		for name, mutate := range mutations {
+			t.Run(fmt.Sprintf("%d/%s", index, name), func(t *testing.T) {
+				specs := featureProofSpecs()
+				changed := maps.Clone(payload)
+				mutate(changed)
+				specs[index].ReportEntries[0].Value = gingkotypes.WrapEntryValue(changed)
+				result := runSuiteFixture(t, suite.Run, suiteFixture{
+					schemaProfile: disposableSchemaProfile, suiteProfile: featureRuntimeProfile,
+					report: ginkgoReportFixture(t, true, 3, 3, specs)})
+				if result.err == nil || result.outputs["runtime_safety_completed"] != "" ||
+					result.outputs[featureCompleteOutput] != "" {
+					t.Fatalf("invalid payload earned completion: %v, %v", result.err, result.outputs)
+				}
+			})
+		}
+	}
+}
+
+func TestFeatureE2ERuntimeProofEntries(t *testing.T) {
+	suite := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureSuiteStep)
+	for _, index := range []int{1, 2} {
+		for name, mutate := range map[string]func(*gingkotypes.SpecReport){
+			featureMissingValue: func(s *gingkotypes.SpecReport) { s.ReportEntries = nil },
+			"duplicate": func(s *gingkotypes.SpecReport) {
+				s.ReportEntries = append(s.ReportEntries, s.ReportEntries[0])
+			},
+			"wrong leaf":   func(s *gingkotypes.SpecReport) { s.LeafNodeText = "unrelated passing scenario" },
+			"wrong node":   func(s *gingkotypes.SpecReport) { s.LeafNodeType = gingkotypes.NodeTypeBeforeAll },
+			"skipped":      func(s *gingkotypes.SpecReport) { s.State = gingkotypes.SpecStateSkipped },
+			"failed":       func(s *gingkotypes.SpecReport) { s.State = gingkotypes.SpecStateFailed },
+			"null payload": func(s *gingkotypes.SpecReport) { s.ReportEntries[0].Value = gingkotypes.WrapEntryValue(nil) },
+			"string payload": func(s *gingkotypes.SpecReport) {
+				s.ReportEntries[0].Value = gingkotypes.WrapEntryValue(`{"migrationUID":"misleading-string"}`)
+			},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", index, name), func(t *testing.T) {
+				specs := featureProofSpecs()
+				mutate(&specs[index])
+				result := runSuiteFixture(t, suite.Run, suiteFixture{
+					schemaProfile: disposableSchemaProfile, suiteProfile: featureRuntimeProfile,
+					report: ginkgoReportFixture(t, true, 3, 3, specs)})
+				if result.err == nil || result.outputs["runtime_safety_completed"] != "" ||
+					result.outputs[featureCompleteOutput] != "" {
+					t.Fatalf("invalid report entry earned completion: %v, %v", result.err, result.outputs)
+				}
+			})
+		}
+	}
+	for _, name := range []string{"wrong container", "malformed JSON", "duplicate on other leaf"} {
+		t.Run(name, func(t *testing.T) {
+			specs := featureProofSpecs()
+			switch name {
+			case "wrong container":
+				specs[1].ContainerHierarchyTexts = []string{"unrelated container"}
+			case "duplicate on other leaf":
+				specs[0].ReportEntries = specs[1].ReportEntries
+			}
+			report := ginkgoReportFixture(t, true, 3, 3, specs)
+			if name == "malformed JSON" {
+				report = mutateGinkgoReport(t, report, func(r map[string]any) {
+					s := r["SpecReports"].([]any)[1].(map[string]any)
+					s["ReportEntries"].([]any)[0].(map[string]any)["Value"].(map[string]any)["AsJSON"] = "{"
+				})
+			}
+			result := runSuiteFixture(t, suite.Run, suiteFixture{
+				schemaProfile: disposableSchemaProfile,
+				suiteProfile:  featureRuntimeProfile,
+				report:        report,
+			})
+			if result.err == nil || result.outputs["runtime_safety_completed"] != "" {
+				t.Fatalf("invalid proof passed: %v, %v", result.err, result.outputs)
+			}
+		})
+	}
+}
+
+func TestFeatureE2EFinalRouteSelection(t *testing.T) {
+	final := protectedStepNamed(t, parseProtectedWorkflow(t, featureWorkflow).Jobs["final-status"], "Publish final status")
+	passed := map[string]string{
+		featureSuiteOutput: successValue, featureCleanupOutput: successValue, "teardown": successValue,
+		featureSuiteRanOutput: trueValue, featureCompleteOutput: trueValue,
+		featureManagerOutput: trueValue, featureRunnerOutput: trueValue,
+		"schema_verified": trueValue, "metrics_completed": trueValue, "runtime_safety_completed": trueValue}
+	for _, tt := range []struct {
+		name, target, shared, disposable, mode, profile, want string
+		mutate                                                func(map[string]string)
+		malformed                                             string
+	}{
+		{
+			name:       "shared success",
+			target:     featureSharedTarget,
+			shared:     successValue,
+			disposable: skippedValue,
+			want:       successValue,
+		},
+		{
+			name:       "disposable success",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			want:       successValue,
+		},
+		{
+			name:       "runtime success",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			profile:    featureRuntimeProfile,
+			want:       successValue,
+		},
+		{
+			name:       "focused nonmetrics",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			mode:       focusModeValue,
+			mutate:     func(p map[string]string) { delete(p, "metrics_completed") },
+			want:       successValue,
+		},
+		{name: "absent target", shared: successValue, disposable: skippedValue, want: errorValue},
+		{
+			name:       "unknown target",
+			target:     featureInvalidInput,
+			shared:     successValue,
+			disposable: skippedValue,
+			want:       errorValue,
+		},
+		{
+			name:       "both run",
+			target:     featureSharedTarget,
+			shared:     successValue,
+			disposable: successValue,
+			want:       errorValue,
+		},
+		{
+			name:       "neither runs",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: skippedValue,
+			want:       errorValue,
+		},
+		{
+			name:       "unselected failure",
+			target:     featureDisposableJob,
+			shared:     failureValue,
+			disposable: successValue,
+			want:       errorValue,
+		},
+		{
+			name:       featureCancelledValue,
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: featureCancelledValue,
+			want:       errorValue,
+		},
+		{
+			name:       "borrowed shared evidence",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			malformed:  "{}",
+			want:       errorValue,
+		},
+		{
+			name:       "malformed evidence",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			malformed:  "{",
+			want:       errorValue,
+		},
+		{
+			name:       "wrong evidence type",
+			target:     featureDisposableJob,
+			shared:     skippedValue,
+			disposable: successValue,
+			malformed:  "[]",
+			want:       errorValue,
+		},
+		{name: "safe assertion failure", target: featureDisposableJob, shared: skippedValue, disposable: failureValue,
+			mutate: func(p map[string]string) {
+				p[featureSuiteOutput] = failureValue
+				delete(p, "metrics_completed")
+				delete(p, "runtime_safety_completed")
+			}, want: failureValue},
+		{name: "missing runtime proof", target: featureDisposableJob,
+			shared: skippedValue, disposable: successValue, profile: featureRuntimeProfile,
+			mutate: func(p map[string]string) { delete(p, "runtime_safety_completed") }, want: errorValue},
+		{
+			name:       "runtime on shared",
+			target:     featureSharedTarget,
+			shared:     successValue,
+			disposable: skippedValue,
+			profile:    featureRuntimeProfile,
+			want:       errorValue,
+		},
+		{
+			name:       featureUnknownProfile,
+			target:     featureSharedTarget,
+			shared:     successValue,
+			disposable: skippedValue,
+			profile:    featureInvalidInput,
+			want:       errorValue,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			outputs := maps.Clone(passed)
+			if tt.mutate != nil {
+				tt.mutate(outputs)
+			}
+			body, err := json.Marshal(outputs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.malformed != "" {
+				body = []byte(tt.malformed)
+			}
+			profile, mode := tt.profile, tt.mode
+			if profile == "" {
+				profile = featureBaselineProfile
+			}
+			if mode == "" {
+				mode = fullModeValue
+			}
+			got := runFinalStatusFixture(t, final.Run, tt.shared, successValue, successValue,
+				trueValue, trueValue, trueValue, trueValue,
+				"VALIDATION_TARGET="+tt.target, "DISPOSABLE_RESULT="+tt.disposable,
+				"DISPOSABLE_OUTPUTS="+string(body), "SUITE_PROFILE="+profile, "RUN_MODE="+mode)
+			if got != tt.want {
+				t.Errorf("selected status = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	for _, key := range []string{
+		featureSuiteOutput,
+		featureCleanupOutput,
+		"teardown",
+		featureSuiteRanOutput,
+		featureCompleteOutput,
+		featureManagerOutput,
+		featureRunnerOutput,
+		"schema_verified",
+		"metrics_completed",
+		"runtime_safety_completed",
+	} {
+		for _, value := range []string{"", falseValue, featureInvalidInput, failureValue, skippedValue} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				outputs := maps.Clone(passed)
+				outputs[key] = value
+				body, err := json.Marshal(outputs)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := runFinalStatusFixture(t, final.Run, skippedValue, successValue, successValue,
+					trueValue, trueValue, trueValue, trueValue,
+					"VALIDATION_TARGET=disposable", "DISPOSABLE_RESULT=success",
+					"DISPOSABLE_OUTPUTS="+string(body), "SUITE_PROFILE=runtime-safety")
+				if got != errorValue {
+					t.Errorf("missing selected evidence status = %q, want error", got)
+				}
+			})
+		}
+	}
+}
+
+func TestFeatureE2EHelmProfiles(t *testing.T) {
+	job := parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob]
+	helpers := protectedStepNamed(t, job, featureHelpersStep).Run
+	for _, tt := range []struct {
+		name, stored, env string
+		args              []string
+		verifierFails     bool
+		wantError         bool
+	}{
+		{name: featureSharedTarget, stored: identicalSchemaProfile},
+		{
+			name:   "shared candidate enable",
+			stored: identicalSchemaProfile,
+			args:   []string{"--set-string", featureRuleEnabled},
+		},
+		{
+			name:      "shared namespace creation",
+			stored:    identicalSchemaProfile,
+			args:      []string{"--create-namespace"},
+			wantError: true,
+		},
+		{
+			name:   "isolated",
+			stored: disposableSchemaProfile,
+			env:    disposableSchemaProfile,
+			args:   []string{"--create-namespace"},
+		},
+		{
+			name:      "isolated invalid namespace flag",
+			stored:    disposableSchemaProfile,
+			env:       disposableSchemaProfile,
+			args:      []string{"--create-namespace=true"},
+			wantError: true,
+		},
+		{
+			name:          "no delivery unproved",
+			stored:        disposableSchemaProfile,
+			env:           disposableSchemaProfile,
+			verifierFails: true,
+			wantError:     true,
+		},
+		{
+			name:      "environment cannot upgrade shared",
+			stored:    identicalSchemaProfile,
+			env:       disposableSchemaProfile,
+			wantError: true,
+		},
+		{
+			name:      "environment cannot downgrade isolated",
+			stored:    disposableSchemaProfile,
+			env:       identicalSchemaProfile,
+			wantError: true,
+		},
+		{name: "missing profile", wantError: true},
+		{
+			name:      featureUnknownProfile,
+			stored:    featureInvalidInput,
+			env:       featureInvalidInput,
+			wantError: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, sub := range []string{"bin", "feature-e2e-trusted/hack", "kind-state"} {
+				if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				"bin/feature-helm":   extractFeatureHelmHeredoc(t, helpers),
+				"bin/helm":           "#!/usr/bin/env bash\nprintf 'helm\\n' >> \"$CALLS\"\nprintf '%s\\n' \"$@\" > \"$ARGS\"\n",
+				"bin/kubectl":        featurePassingShell,
+				"attest-image":       featurePassingShell,
+				"ownership":          "feature_capture_controller() { return 0; }\n",
+				featureCleanupOutput: featurePassingShell,
+				"feature-e2e-trusted/hack/feature-e2e-kind.sh": `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 2 && "$1" == verify-ready && "$2" == "$FEATURE_E2E_KIND_STATE" ]]
+[[ "$KUBECONFIG" == "$FEATURE_E2E_KIND_STATE/kubeconfig" ]]
+printf 'verify\n' >> "$CALLS"
+[[ "$VERIFIER_FAILS" == false ]]
+`,
+			}
+			if tt.stored != "" {
+				files[featureSchemaFile] = tt.stored
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := append([]string{
+				helmInstallCommand,
+				featureControllerName,
+				featureFixtureChart,
+				"-n",
+				featureControllerNS,
+				"--wait",
+			}, tt.args...)
+			cmd := exec.Command(filepath.Join(dir, "bin/feature-helm"), args...)
+			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
+				"REAL_HELM="+filepath.Join(dir, "bin/helm"), "FEATURE_E2E_HELPERS="+dir, "GITHUB_WORKSPACE="+dir,
+				"E2E_OPERATOR_NAMESPACE="+featureControllerNS, "FEATURE_E2E_SCHEMA_VALIDATION="+tt.env,
+				"FEATURE_E2E_KIND_STATE="+filepath.Join(dir, "kind-state"),
+				"KUBECONFIG="+filepath.Join(dir, "kind-state/kubeconfig"),
+				"CALLS="+filepath.Join(dir, "calls"), "ARGS="+filepath.Join(dir, "args"),
+				"VERIFIER_FAILS="+fmt.Sprint(tt.verifierFails))
+			output, err := cmd.CombinedOutput()
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			if (err != nil) != tt.wantError {
+				t.Fatalf("Helm profile error = %v, want %v: %s", err, tt.wantError, output)
+			}
+			if tt.wantError {
+				if strings.Contains(string(calls), "helm") {
+					t.Fatal("unproved profile reached Helm")
+				}
+				return
+			}
+			wantCalls, enabled := "helm\n", falseValue
+			if tt.stored == disposableSchemaProfile {
+				wantCalls, enabled = "verify\nhelm\n", trueValue
+			}
+			if string(calls) != wantCalls {
+				t.Errorf("readiness/install order = %q, want %q", calls, wantCalls)
+			}
+			got := strings.Split(strings.TrimSpace(read(t, filepath.Join(dir, "args"))), "\n")
+			index := slices.Index(got, "metrics.prometheusRule.enabled="+enabled)
+			if index < len(args) || got[index-1] != helmSetFlag {
+				t.Errorf("trusted rule override does not follow candidate arguments: %q", got)
+			}
+		})
+	}
+}
+
+func TestFeatureE2ERenderedRuleProfiles(t *testing.T) {
+	if _, err := exec.LookPath(kubectlCommand); err != nil {
+		t.Skip("kubectl is unavailable")
+	}
+	job := parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob]
+	helpers := protectedStepNamed(t, job, featureHelpersStep).Run
+	binary := buildFeatureRenderSafety(t, extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY"))
+	for _, tt := range []struct {
+		name, profile, namespace string
+		list, duplicate, absent  bool
+		wantError                bool
+	}{
+		{name: "shared no rule", profile: identicalSchemaProfile, absent: true},
+		{name: "shared rule", profile: identicalSchemaProfile, wantError: true},
+		{name: "shared List rule", profile: identicalSchemaProfile, list: true, wantError: true},
+		{name: "isolated omitted namespace", profile: disposableSchemaProfile},
+		{
+			name:      "isolated explicit namespace",
+			profile:   disposableSchemaProfile,
+			namespace: featureControllerNS,
+		},
+		{name: "isolated List omitted namespace", profile: disposableSchemaProfile, list: true},
+		{name: "isolated List explicit namespace", profile: disposableSchemaProfile,
+			namespace: featureControllerNS, list: true},
+		{
+			name:      "isolated wrong namespace",
+			profile:   disposableSchemaProfile,
+			namespace: featureOtherValue,
+			wantError: true,
+		},
+		{
+			name:      "isolated List wrong namespace",
+			profile:   disposableSchemaProfile,
+			namespace: featureOtherValue,
+			list:      true,
+			wantError: true,
+		},
+		{name: "isolated duplicate", profile: disposableSchemaProfile, duplicate: true, wantError: true},
+		{name: "isolated absent rule", profile: disposableSchemaProfile, absent: true, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "bin"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{
+				featureOwnerFile: imageAttestationOwnerValue, featureSchemaFile: tt.profile,
+				"post-renderer": extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER"),
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(binary, filepath.Join(dir, "bin/render-safety")); err != nil {
+				t.Fatal(err)
+			}
+			metadata := map[string]any{
+				nameKey:   featureControllerName,
+				labelsKey: map[string]any{featureInstanceLabel: featureControllerName},
+			}
+			if tt.namespace != "" {
+				metadata[namespaceKey] = tt.namespace
+			}
+			rule := map[string]any{apiVersionKey: "monitoring.coreos.com/v1", kindKey: "PrometheusRule", metadataKey: metadata,
+				specKey: map[string]any{"groups": []any{}}}
+			var object any = rule
+			if tt.list {
+				object = map[string]any{apiVersionKey: "v1", kindKey: listKind, itemsKey: []any{rule}}
+			}
+			if tt.absent {
+				object = map[string]any{
+					apiVersionKey: "v1",
+					kindKey:       "ConfigMap",
+					metadataKey:   map[string]any{nameKey: "fixture"},
+				}
+			}
+			body, err := json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.duplicate {
+				body = append(append(body, []byte("\n---\n")...), body...)
+			}
+			cmd := exec.Command("bash", filepath.Join(dir, "post-renderer"))
+			cmd.Stdin = bytes.NewReader(body)
+			cmd.Env = append(os.Environ(), "FEATURE_E2E_HELPERS="+dir,
+				"FEATURE_E2E_OWNER_FILE="+filepath.Join(dir, featureOwnerFile),
+				"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey, "FEATURE_E2E_SCHEMA_VALIDATION="+tt.profile)
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantError {
+				t.Fatalf("render rule error = %v, want %v", err, tt.wantError)
+			}
+			if !tt.wantError && !tt.absent && !strings.Contains(string(output), "namespace: pgcopydb-e2e") {
+				t.Fatal("isolated rule lacks its explicit namespace")
+			}
+		})
+	}
+}
+
+func TestFeatureE2ERuleOutputIdentity(t *testing.T) {
+	job := parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob]
+	helpers := protectedStepNamed(t, job, featureHelpersStep).Run
+	binary := buildFeatureRenderSafety(t, extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY"))
+	for name, mutate := range map[string]func(map[string]any){
+		"expected rule":     nil,
+		"wrong api":         func(rule map[string]any) { rule[apiVersionKey] = "other/v1" },
+		"wrong name":        func(rule map[string]any) { rule[metadataKey].(map[string]any)[nameKey] = featureOtherValue },
+		"missing namespace": func(rule map[string]any) { delete(rule[metadataKey].(map[string]any), namespaceKey) },
+		"wrong namespace": func(rule map[string]any) {
+			rule[metadataKey].(map[string]any)[namespaceKey] = featureOtherValue
+		},
+		"wrong owner": func(rule map[string]any) {
+			rule[metadataKey].(map[string]any)[labelsKey].(map[string]any)[imageAttestationOwnerKey] = featureOtherValue
+		},
+		"wrong instance": func(rule map[string]any) {
+			rule[metadataKey].(map[string]any)[labelsKey].(map[string]any)[featureInstanceLabel] = featureOtherValue
+		},
+		"duplicate List": func(rule map[string]any) {
+			copy := maps.Clone(rule)
+			clear(rule)
+			rule[apiVersionKey], rule[kindKey], rule[itemsKey] = "v1", listKind, []any{copy, copy}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			rule := map[string]any{apiVersionKey: "monitoring.coreos.com/v1", kindKey: "PrometheusRule",
+				metadataKey: map[string]any{nameKey: featureControllerName, namespaceKey: featureControllerNS,
+					labelsKey: map[string]any{
+						featureInstanceLabel:     featureControllerName,
+						imageAttestationOwnerKey: imageAttestationOwnerValue,
+					}}}
+			if mutate != nil {
+				mutate(rule)
+			}
+			body, err := json.Marshal(rule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for file, value := range map[string]string{
+				featureOwnerFile: imageAttestationOwnerValue, featureSchemaFile: disposableSchemaProfile,
+				"rendered.json": string(body),
+			} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte(value), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(binary, filepath.Join(dir, "rendered.json"))
+			cmd.Env = append(os.Environ(), "FEATURE_E2E_HELPERS="+dir,
+				"FEATURE_E2E_OWNER_FILE="+filepath.Join(dir, featureOwnerFile), "FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
+				"FEATURE_E2E_SCHEMA_VALIDATION="+disposableSchemaProfile)
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != (mutate != nil) || strings.Contains(string(output), imageAttestationOwnerValue) {
+				t.Fatalf("rendered identity gate error = %v, want error %v", err, mutate != nil)
+			}
+		})
+	}
+}
 
 func TestFeatureE2EInstalledCRDCompatibility(t *testing.T) {
 	candidatePath, candidateSet := os.LookupEnv("FEATURE_E2E_CANDIDATE_CRD")
@@ -485,7 +1612,7 @@ esac
 func TestFeatureE2EMonitoringNoDeliveryEntrypoint(t *testing.T) {
 	for _, scenario := range []string{
 		"empty destinations", "destination", "additional config", "loaded destination",
-		"active", "dropped", "missing", featureInvalidInput, "error status",
+		"active", "dropped", featureMissingValue, featureInvalidInput, "error status",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
@@ -503,7 +1630,7 @@ func TestFeatureE2EMonitoringNoDeliveryEntrypoint(t *testing.T) {
 				discovery = `{"status":"success","data":{"activeAlertmanagers":[{}],"droppedAlertmanagers":[]}}`
 			case "dropped":
 				discovery = `{"status":"success","data":{"activeAlertmanagers":[],"droppedAlertmanagers":[{}]}}`
-			case "missing":
+			case featureMissingValue:
 				discovery = `{"status":"success","data":{}}`
 			case featureInvalidInput:
 				loaded = `{"status":"success","data":{"yaml":"PRIVATE_SENTINEL: ["}}`
@@ -1000,7 +2127,7 @@ func TestFeatureE2ESchemaProfileAdmission(t *testing.T) {
 		{"unset identical", "", "", false},
 		{"explicit identical", identicalSchemaProfile, "", false},
 		{"disposable smoke", disposableSchemaProfile, "", false},
-		{"unknown profile", unknownValue, "", true},
+		{featureUnknownProfile, unknownValue, "", true},
 		{"optional boolean strict", identicalSchemaProfile, optionalSchemaMutation, true},
 		{"optional boolean both versions", disposableSchemaProfile, optionalSchemaMutation, false},
 		{"optional status child requirements", disposableSchemaProfile, "status", false},

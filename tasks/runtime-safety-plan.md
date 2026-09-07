@@ -47,6 +47,9 @@ Test workflow configuration and failure paths without a live cluster.
 Prove effective Docker-daemon capacity and storage provenance before enabling this route.
 Keep the shared profile's alert rules disabled.
 Enable the owned isolated operator rule only after proving that Prometheus has no alert-delivery destinations.
+Keep `suite_profile=baseline` independent of future runtime report entries and preserve the cleanup-after-Job-TTL scenario in baseline selection.
+Use `suite_profile=runtime-safety` only with full additive-disposable validation, scale `0.1`, and empty focus.
+Run baseline and the selected non-flaky packet-loss scenario in one suite invocation, requiring both Migration-bound runtime proof entries before success.
 
 ## Task 1: Fix #242 progress sampler resource leaks
 

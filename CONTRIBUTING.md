@@ -39,7 +39,10 @@ Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret. Codeco
 
 Two runner scale sets serve this repository, both backed by Actions Runner Controller on the dev cluster, and between them they run every job. The scale sets, their GitHub App credentials and their Helm values are declared outside this repository (see private ops notes); nothing here configures them beyond the `runs-on:` label.
 
-`github-runner-pgcopydb-operator` runs everything that is not e2e: both release images, the chart push, the release notes, the promotion tag, the docs deploy, the GitLab mirror, the Artifact Hub push, the weekly candidate, and the three CI jobs. Its jobs get no Kubernetes API access, so they cannot reach the cluster they run on. `github-runner-pgcopydb-e2e` is the deliberate exception: the e2e job installs a chart and drives real workloads, so that scale set does reach the API. Its ServiceAccount is scoped to the e2e namespaces, which GitOps owns; it can work inside them but cannot create or delete one, which is why the suite runs there with `E2E_MANAGE_NAMESPACES=false`.
+`github-runner-pgcopydb-operator` runs builds, publication, base CI, and disposable kind feature E2E.
+Its jobs get no Kubernetes API credentials for the cluster they run on; disposable E2E creates its own run-owned kubeconfig.
+`github-runner-pgcopydb-e2e` runs shared-cluster E2E and can reach that Kubernetes API.
+Its ServiceAccount is scoped to the e2e namespaces, which GitOps owns; it can work inside them but cannot create or delete one, which is why the shared suite runs with `E2E_MANAGE_NAMESPACES=false`.
 
 Two rules hold because this repository is public and both scale sets are real machines on a private cluster:
 
@@ -145,11 +148,12 @@ The workflow loads the cluster helpers and suite launcher from a separate truste
 Both image references are immutable digests.
 Before any Migration, exactly one eligible Ready feature controller must run the expected manager digest and configure the expected runner digest, and a runner canary must run that runner digest.
 An image mismatch stops the run before a Migration is created.
-The feature workflow accepts `E2E_SCALE=0.1` (the default) or `E2E_SCALE=1.0`; release candidate E2E remains separate at `E2E_SCALE=0.25`.
+The default `schema_validation=identical` profile requires matching source and rendered CRD schemas, apart from descriptions, and selects the shared cluster.
+That profile accepts `E2E_SCALE=0.1` (the default) or `E2E_SCALE=1.0`; release candidate E2E remains separate at `E2E_SCALE=0.25`.
 The `1.0` choice rebuilds a kept source whose seed marker is for another scale at 50Gi, expands the target to 50Gi in place, and requests a 12Gi work volume for each Migration.
 A later lower-scale run retains the expanded target because a bound PVC cannot shrink.
 Before continuing, the suite waits for the CNPG request, bound PVC request and capacity, and mounted database filesystem to reach the requested size.
-The feature controller uses the existing `pgcopydb-e2e` namespace, and the suite creates or deletes no namespaces.
+On the shared route, the feature controller uses the existing `pgcopydb-e2e` namespace, and the suite creates or deletes no namespaces.
 Run-labelled cleanup handles a partial install so the same Helm release can be installed again, and preserves unrelated customer resources and shared fixtures.
 
 Run the full merge gate after pushing the pull request head:
@@ -176,10 +180,11 @@ Use focused mode only to diagnose one scenario:
 
 A focused run posts only the non-gating `feature-e2e/focus` status and cannot satisfy the full merge gate.
 The workflow posts `failure` only for a test assertion after manager and runner attestations and verified cleanup; every unsafe or incomplete execution posts `error`.
-Both modes serialize with release candidate and published-release E2E, preserve the shared namespaces and fixtures, and fail if cleanup cannot be verified.
+Shared full and focused runs serialize with release candidate and published-release E2E, preserve the shared namespaces and fixtures, and fail if cleanup cannot be verified.
+The shared Helm wrapper disables operator alert rules and rejects any rendered `PrometheusRule`, including rules supplied through values or nested Lists.
 
 > [!important]
-> The protected environment owns the expected context and the non-secret `E2E_EXCLUSIVE_CONTROLLER` attestation.
+> The shared route's protected environment owns the expected context and the non-secret `E2E_EXCLUSIVE_CONTROLLER` attestation.
 > Set the attestation to literal `true` only when private ops notes confirm the exclusive-controller policy; a missing or different value stops the job before cluster access.
 > GitHub stores `E2E_PROMETHEUS_URL` as an Actions secret, so it masks the complete value before step environment logging; the workflow registers it again before shell use.
 > For setup and incident handling, see private ops notes.
@@ -187,6 +192,47 @@ Both modes serialize with release candidate and published-release E2E, preserve 
 
 Feature E2E creates no release candidate, tag, GitHub release, chart publication, `latest` tag, or production deployment.
 It does not reuse `auto-release.yml`, `release.yml`, `promote.yml`, or a published-release E2E path.
+
+### Disposable feature profiles
+
+Select `schema_validation=additive-disposable` for a run-owned kind cluster on the Docker build runner.
+This route accepts only scale `0.1`, uses one CNPG instance and the `standard` StorageClass, and does not receive shared-cluster credentials or context settings.
+It accepts identical schemas or matching optional properties below `spec` and `status` in both served versions.
+Existing fields, schema constraints, API identities, served/storage versions, conversion, RBAC, builder inputs, and rendered object inventory remain protected.
+The only allowed existing-object CEL addition is the guarded split-table rule paired with the new optional default-true boolean.
+
+Run an isolated baseline merge gate:
+
+1. Dispatch the trusted workflow for the open pull request.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f scale=0.1 \
+     -f focus= -f schema_validation=additive-disposable -f suite_profile=baseline
+   ```
+
+The baseline suite excludes `chaos`, `flaky`, and `isolated-runtime-safety` labels.
+The cleanup-after-Job-TTL scenario remains part of the baseline when present.
+Full isolated success requires a nonempty, fully passed `Migration metrics` group with the `metrics` label, verified owned cleanup, and successful cluster destruction.
+Focused isolated runs may omit unrelated metrics scenarios, but publish only `feature-e2e/focus`.
+The isolated Helm wrapper enables exactly the owned operator rule after the trusted readiness verifier proves no alert delivery.
+The renderer permits an omitted rule namespace as Helm's default, rejects an explicitly different namespace, and checks the final rule's API version, name, namespace, instance, and ownership labels.
+
+Select the combined runtime proof only on a candidate that implements both required scenarios:
+
+1. Run the full isolated runtime-safety profile.
+
+   ```sh
+   PR=$(gh pr view --json number --jq .number)
+   gh workflow run feature-e2e.yml --ref main -f pr="$PR" -f mode=full -f scale=0.1 \
+     -f focus= -f schema_validation=additive-disposable -f suite_profile=runtime-safety
+   ```
+
+The runtime profile runs the baseline plus non-flaky `isolated-runtime-safety` scenarios in one suite invocation.
+It requires exactly one passed leaf scenario for each `cleanup-alert-after-job-ttl` and `dead-worker-session-expiry` report entry, with a nonempty Migration UID and the required TTL, alert, expiry, recovery, and data evidence.
+Only the packet-loss scenario uses the isolated runtime label; baseline does not require either report entry.
+Unknown profiles or incompatible mode, scale, and focus inputs fail before the pull request lookup.
+Missing, skipped, malformed, or conflicting selected-route evidence cannot earn a successful status.
 
 ### Disposable bootstrap helper
 

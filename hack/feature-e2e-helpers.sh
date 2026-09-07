@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+schema_profile=${FEATURE_E2E_SCHEMA_VALIDATION:-identical}
+case "$schema_profile" in
+  identical | additive-disposable) ;;
+  *) echo "::error::schema validation profile is invalid"; exit 1 ;;
+esac
 FEATURE_E2E_HELPERS=$RUNNER_TEMP/feature-e2e
 REAL_HELM=$(command -v helm)
 FEATURE_E2E_OWNER_KEY=pgcopydb-operator.io/feature-e2e-run
@@ -7,6 +12,7 @@ FEATURE_E2E_OWNER_FILE=$FEATURE_E2E_HELPERS/owner
 install -d -m 0755 "$FEATURE_E2E_HELPERS/bin" \
   "$FEATURE_E2E_HELPERS/plugins/feature-e2e-postrenderer"
 umask 077
+printf '%s' "$schema_profile" > "$FEATURE_E2E_HELPERS/schema-profile"
 od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$FEATURE_E2E_OWNER_FILE"
 [[ "$(<"$FEATURE_E2E_OWNER_FILE")" =~ ^[0-9a-f]{32}$ ]]
 [ "$(stat -c '%a' "$FEATURE_E2E_OWNER_FILE")" = 600 ]
@@ -315,7 +321,17 @@ import (
 const ownerKey = "pgcopydb-operator.io/feature-e2e-run"
 
 func main() {
-  if len(os.Args) != 2 || os.Getenv("FEATURE_E2E_OWNER_KEY") != ownerKey {
+  namespaceInput := len(os.Args) == 3 && os.Args[2] == "namespace-input"
+  if (len(os.Args) != 2 && !namespaceInput) || os.Getenv("FEATURE_E2E_OWNER_KEY") != ownerKey {
+    fail()
+  }
+  profile, err := os.ReadFile(os.Getenv("FEATURE_E2E_HELPERS") + "/schema-profile")
+  expected := os.Getenv("FEATURE_E2E_SCHEMA_VALIDATION")
+  if expected == "" {
+    expected = "identical"
+  }
+  isolated := string(profile) == "additive-disposable"
+  if err != nil || string(profile) != expected || (!isolated && string(profile) != "identical") || (namespaceInput && !isolated) {
     fail()
   }
   owner, err := os.ReadFile(os.Getenv("FEATURE_E2E_OWNER_FILE"))
@@ -329,6 +345,7 @@ func main() {
   defer input.Close()
   decoder := k8syaml.NewYAMLOrJSONDecoder(input, 4096)
   resources := 0
+  rules := 0
   for {
     var document map[string]any
     err := decoder.Decode(&document)
@@ -338,13 +355,13 @@ func main() {
     if err != nil || len(document) == 0 {
       fail()
     }
-    count, ok := validateObject(document, string(owner))
+    count, ok := validateObject(document, string(owner), isolated, namespaceInput, &rules)
     if !ok {
       fail()
     }
     resources += count
   }
-  if resources == 0 {
+  if resources == 0 || (isolated && rules != 1) || (!isolated && rules != 0) {
     fail()
   }
 }
@@ -366,7 +383,7 @@ func validOwner(value string) bool {
   return true
 }
 
-func validateObject(object map[string]any, owner string) (int, bool) {
+func validateObject(object map[string]any, owner string, isolated, namespaceInput bool, rules *int) (int, bool) {
   apiVersion, apiOK := object["apiVersion"].(string)
   kind, kindOK := object["kind"].(string)
   if !apiOK || apiVersion == "" || !kindOK || kind == "" || kind == "Namespace" {
@@ -386,7 +403,7 @@ func validateObject(object map[string]any, owner string) (int, bool) {
       if !ok {
         return 0, false
       }
-      nested, ok := validateObject(member, owner)
+      nested, ok := validateObject(member, owner, isolated, namespaceInput, rules)
       if !ok {
         return 0, false
       }
@@ -398,8 +415,21 @@ func validateObject(object map[string]any, owner string) (int, bool) {
     return 0, false
   }
   metadata, ok := object["metadata"].(map[string]any)
-  if !ok || !hasLabel(metadata, owner) {
+  if !ok || (!namespaceInput && !hasLabel(metadata, owner)) {
     return 0, false
+  }
+  if kind == "PrometheusRule" {
+    namespace, present := metadata["namespace"]
+    labels, labelled := metadata["labels"].(map[string]any)
+    if !isolated || apiVersion != "monitoring.coreos.com/v1" || metadata["name"] != "pgcopydb-e2e" ||
+      (present && namespace != "pgcopydb-e2e") || (!present && !namespaceInput) ||
+      !labelled || labels["app.kubernetes.io/instance"] != "pgcopydb-e2e" {
+      return 0, false
+    }
+    *rules++
+  }
+  if namespaceInput {
+    return 1, true
   }
   paths, ok := templatePaths(apiVersion, kind, object)
   if !ok {
@@ -486,8 +516,15 @@ cat > "$input"
   echo "::error::feature chart rendered no objects"
   exit 1
 }
+schema_profile=$(<"$FEATURE_E2E_HELPERS/schema-profile")
+if [ "$schema_profile" = additive-disposable ]; then
+  "$FEATURE_E2E_HELPERS/bin/render-safety" "$input" namespace-input || exit 1
+fi
 {
   printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization'
+  if [ "$schema_profile" = additive-disposable ]; then
+    printf '%s\n' 'namespace: pgcopydb-e2e'
+  fi
   printf '%s\n' 'resources:' '- manifest.yaml' 'labels:' '- pairs:'
   printf '    %s: %s\n' "$FEATURE_E2E_OWNER_KEY" "$owner_value"
   printf '%s\n' '  includeSelectors: false' '  includeTemplates: true'
@@ -853,10 +890,30 @@ if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
       echo "::error::feature controller Helm argument is unsupported"
       exit 1
     }
+  [ -s "$FEATURE_E2E_HELPERS/schema-profile" ] || {
+    echo "::error::feature schema profile is missing"
+    exit 1
+  }
+  schema_profile=$(<"$FEATURE_E2E_HELPERS/schema-profile")
+  [ "$schema_profile" = "${FEATURE_E2E_SCHEMA_VALIDATION:-identical}" ] || {
+    echo "::error::feature schema profile changed"
+    exit 1
+  }
+  case "$schema_profile" in
+    identical | additive-disposable) ;;
+    *) echo "::error::feature schema profile is invalid"; exit 1 ;;
+  esac
   candidate_args=("${@:7}")
   while [ "${#candidate_args[@]}" -gt 0 ]; do
     arg=${candidate_args[0]}
     case "$arg" in
+      --create-namespace)
+        [ "$schema_profile" = additive-disposable ] || {
+          echo "::error::feature namespace creation is not permitted"
+          exit 1
+        }
+        candidate_args=("${candidate_args[@]:1}")
+        ;;
       -f|--values|--set|--set-string|--set-json)
         [ "${#candidate_args[@]}" -ge 2 ] || {
           echo "::error::feature controller Helm argument is unsupported"
@@ -898,8 +955,14 @@ if [ "${1:-}" = install ] && [ "${2:-}" = pgcopydb-e2e ]; then
         ;;
     esac
   done
+  rules_enabled=false
+  if [ "$schema_profile" = additive-disposable ]; then
+    bash "$GITHUB_WORKSPACE/feature-e2e-trusted/hack/feature-e2e-kind.sh" verify-ready "$FEATURE_E2E_KIND_STATE"
+    rules_enabled=true
+  fi
   helm_args+=(
     --set-string fullnameOverride=pgcopydb-e2e
+    --set "metrics.prometheusRule.enabled=$rules_enabled"
     --rollback-on-failure
     --timeout=5m
     --post-renderer feature-e2e-postrenderer

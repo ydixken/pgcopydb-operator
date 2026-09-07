@@ -184,9 +184,9 @@ func featureStepScript(t *testing.T, job protectedJob, step protectedStep) strin
 	t.Helper()
 	var path string
 	switch step.Name {
-	case "Write cluster helpers":
+	case featureHelpersStep:
 		path = "hack/feature-e2e-helpers.sh"
-	case "Run non-chaos suite":
+	case featureSuiteStep:
 		path = "hack/feature-e2e-suite.sh"
 	default:
 		return step.Run
@@ -762,20 +762,22 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 		t.Fatalf("feature triggers = %v, want workflow_dispatch only", got)
 	}
 	inputs := wf.On["workflow_dispatch"].Inputs
-	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{"focus", "mode", "pr", "scale"}) {
-		t.Errorf("feature inputs = %v, want focus, mode, pr, scale", got)
+	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{
+		"focus", "mode", "pr", "scale", "schema_validation", "suite_profile",
+	}) {
+		t.Errorf("feature inputs = %v", got)
 	}
 	if in := inputs["pr"]; !in.Required || in.Type != schemaStringType {
 		t.Errorf("pr input = %+v, want required string", in)
 	}
-	if in := inputs["mode"]; !in.Required || in.Type != "choice" || in.Default != "full" ||
+	if in := inputs["mode"]; !in.Required || in.Type != featureChoiceType || in.Default != "full" ||
 		!slices.Equal(in.Options, []string{"full", "focus"}) {
 		t.Errorf("mode input = %+v", in)
 	}
 	if in := inputs["focus"]; in.Required || in.Type != schemaStringType || in.Default != "" {
 		t.Errorf("focus input = %+v", in)
 	}
-	if in := inputs["scale"]; !in.Required || in.Type != "choice" || in.Default != featureDefaultScale ||
+	if in := inputs["scale"]; !in.Required || in.Type != featureChoiceType || in.Default != featureDefaultScale ||
 		!slices.Equal(in.Options, []string{featureDefaultScale, featureFullScale}) {
 		t.Errorf("scale input = %+v", in)
 	}
@@ -786,7 +788,7 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 	if got := protectedNeeds(t, wf.Jobs[pendingStatusJob]); !slices.Equal(got, []string{resolveJob}) {
 		t.Errorf("pending status needs = %v, want resolve", got)
 	}
-	if got := protectedNeeds(t, wf.Jobs["preflight"]); !slices.Equal(got, []string{resolveJob, pendingStatusJob}) {
+	if got := protectedNeeds(t, wf.Jobs[featurePreflightJob]); !slices.Equal(got, []string{resolveJob, pendingStatusJob}) {
 		t.Errorf("preflight needs = %v, want resolve and pending-status", got)
 	}
 	if got := resolve.Outputs["scale"]; got != "${{ steps.resolve.outputs.scale }}" {
@@ -884,13 +886,14 @@ func TestFeatureE2EPermissionsAndStatuses(t *testing.T) {
 		t.Fatalf("top permissions = %v, want explicit empty map", wf.Permissions)
 	}
 	want := map[string]map[string]string{
-		resolveJob:        {permissionContents: permissionRead, "pull-requests": permissionRead},
-		pendingStatusJob:  {"statuses": permissionWrite},
-		"preflight":       {permissionContents: permissionRead, permissionPackages: permissionRead},
-		managerImageJob:   {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		runnerImageJob:    {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		featureClusterJob: {permissionContents: permissionRead, permissionPackages: permissionRead},
-		"final-status":    {"statuses": permissionWrite},
+		resolveJob:           {permissionContents: permissionRead, "pull-requests": permissionRead},
+		pendingStatusJob:     {"statuses": permissionWrite},
+		featurePreflightJob:  {permissionContents: permissionRead, permissionPackages: permissionRead},
+		managerImageJob:      {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		runnerImageJob:       {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		featureClusterJob:    {permissionContents: permissionRead, permissionPackages: permissionRead},
+		featureDisposableJob: {permissionContents: permissionRead, permissionPackages: permissionRead},
+		"final-status":       {"statuses": permissionWrite},
 	}
 	if got := slices.Sorted(maps.Keys(wf.Jobs)); !slices.Equal(got, slices.Sorted(maps.Keys(want))) {
 		t.Fatalf("feature jobs = %v, want %v", got, slices.Sorted(maps.Keys(want)))
@@ -915,13 +918,13 @@ func TestFeatureE2EPermissionsAndStatuses(t *testing.T) {
 
 func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	preflightCheckouts := protectedStepsUsing(wf.Jobs["preflight"], "actions/checkout@v7")
+	preflightCheckouts := protectedStepsUsing(wf.Jobs[featurePreflightJob], "actions/checkout@v7")
 	if len(preflightCheckouts) != 2 {
 		t.Fatalf("preflight checkout count = %d, want 2", len(preflightCheckouts))
 	}
 	wantPreflightRefs := map[string]string{
 		"trusted":   "${{ github.sha }}",
-		"candidate": "${{ needs.resolve.outputs.sha }}",
+		"candidate": featureResolvedSHA,
 	}
 	for _, checkout := range preflightCheckouts {
 		path := protectedWithString(t, checkout, "path")
@@ -930,20 +933,20 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 			t.Errorf("preflight checkout for %q is not pinned safely", path)
 		}
 	}
-	for _, jobName := range []string{managerImageJob, runnerImageJob, featureClusterJob} {
+	for _, jobName := range []string{managerImageJob, runnerImageJob, featureClusterJob, featureDisposableJob} {
 		checkouts := protectedStepsUsing(wf.Jobs[jobName], "actions/checkout@v7")
 		wantCount := 1
-		if jobName == featureClusterJob {
+		if jobName == featureClusterJob || jobName == featureDisposableJob {
 			wantCount = 2
-			_ = protectedStepNamed(t, wf.Jobs[jobName], "Write cluster helpers")
+			_ = protectedStepNamed(t, wf.Jobs[jobName], featureHelpersStep)
 		}
 		if len(checkouts) != wantCount ||
-			protectedWithString(t, checkouts[0], "ref") != "${{ needs.resolve.outputs.sha }}" ||
+			protectedWithString(t, checkouts[0], "ref") != featureResolvedSHA ||
 			protectedWithString(t, checkouts[0], "persist-credentials") != falseValue {
 			t.Errorf("%s does not preserve the resolved candidate checkout", jobName)
 		}
 	}
-	preflight := protectedRuns(wf.Jobs["preflight"])
+	preflight := protectedRuns(wf.Jobs[featurePreflightJob])
 	for _, want := range []string{
 		"make -C candidate -f ../trusted/Makefile manifests",
 		"git status --porcelain -- config/crd/bases config/rbac",
@@ -961,7 +964,7 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 	runner := wf.Jobs[runnerImageJob]
 	for _, jobName := range []string{managerImageJob, runnerImageJob} {
 		job := wf.Jobs[jobName]
-		if got := protectedNeeds(t, job); !slices.Equal(got, []string{resolveJob, "preflight"}) || job.If != "" {
+		if got := protectedNeeds(t, job); !slices.Equal(got, []string{resolveJob, featurePreflightJob}) || job.If != "" {
 			t.Errorf("%s can run without a successful compatibility preflight: needs %v, if %q",
 				jobName, got, job.If)
 		}
@@ -1001,7 +1004,7 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 
 func TestFeatureE2EImageAttestation(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	const (
 		topDigest              = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -1400,7 +1403,7 @@ func TestFeatureE2EImageAttestation(t *testing.T) {
 
 func TestFeatureE2EImageAttestationSuppressesXtrace(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	const (
 		topDigest     = "sha256:6666666666666666666666666666666666666666666666666666666666666666"
@@ -1611,7 +1614,7 @@ func runImageAttestationFixture(
 	if err := os.WriteFile(attestPath, []byte(attest), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ownerFile := filepath.Join(dir, "owner")
+	ownerFile := filepath.Join(dir, featureOwnerFile)
 	if err := os.WriteFile(ownerFile, []byte(imageAttestationOwnerValue), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1691,7 +1694,7 @@ export SHELLOPTS
 
 func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One table owns the trust boundary.
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	helm := extractFeatureHelmHeredoc(t, helpers)
 	ownership := extractFeatureGeneratedFile(t, helpers, "ownership", "OWNERSHIP")
@@ -2096,7 +2099,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		{"kube-context equals flag", []string{"--kube-context=candidate-context"}},
 		{"short values missing value", []string{"-f"}},
 		{"short values empty equals value", []string{"-f="}},
-		{"values missing value", []string{"--values"}},
+		{"values missing value", []string{featureValuesFlag}},
 		{"values empty equals value", []string{"--values="}},
 		{"set missing value", []string{helmSetFlag}},
 		{"set empty equals value", []string{"--set="}},
@@ -2141,7 +2144,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 	}{
 		{"short values separate flag", []string{"-f", valuesPath}, true},
 		{"short values equals flag", []string{"-f=" + valuesPath}, true},
-		{"values separate flag", []string{"--values", valuesPath}, false},
+		{"values separate flag", []string{featureValuesFlag, valuesPath}, false},
 		{"values equals flag", []string{"--values=" + valuesPath}, false},
 		{"set separate flag", []string{helmSetFlag, "leaderElection.enabled=false"}, false},
 		{"set equals flag", []string{"--set=leaderElection.enabled=false"}, false},
@@ -2224,7 +2227,7 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 	}
 
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	plugin := extractFeatureGeneratedFile(t, helpers,
 		"plugins/"+featurePostRendererPlugin+"/plugin.yaml", "HELM_PLUGIN")
 	postRenderer := extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER")
@@ -2256,7 +2259,8 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 		body string
 		mode os.FileMode
 	}{
-		filepath.Join(dir, "owner"):             {imageAttestationOwnerValue, 0o600},
+		filepath.Join(dir, featureOwnerFile):    {imageAttestationOwnerValue, 0o600},
+		filepath.Join(dir, featureSchemaFile):   {identicalSchemaProfile, 0o600},
 		filepath.Join(dir, "post-renderer"):     {postRenderer, 0o700},
 		filepath.Join(pluginDir, "plugin.yaml"): {plugin, 0o600},
 	} {
@@ -2287,7 +2291,7 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 		"HELM_PLUGINS="+pluginRoot,
 		"FEATURE_E2E_HELPERS="+dir,
 		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
-		"FEATURE_E2E_OWNER_FILE="+filepath.Join(dir, "owner"),
+		"FEATURE_E2E_OWNER_FILE="+filepath.Join(dir, featureOwnerFile),
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2319,6 +2323,41 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 	if objects == 0 {
 		t.Fatal("Helm 4 post-renderer plugin rendered no objects")
 	}
+	valuesPath := filepath.Join(dir, "candidate-values.yaml")
+	if err := os.WriteFile(valuesPath, []byte("metrics:\n  prometheusRule:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, profile string
+		flags         []string
+		wantError     bool
+		wantRules     int
+	}{
+		{name: "shared values remain off", profile: identicalSchemaProfile,
+			flags: []string{featureValuesFlag, valuesPath, helmSetFlag, "metrics.prometheusRule.enabled=false"}},
+		{name: "shared string override cannot create a rule", profile: identicalSchemaProfile,
+			flags: []string{helmSetStringFlag, featureRuleEnabled,
+				helmSetFlag, "metrics.prometheusRule.enabled=false"}, wantError: true},
+		{name: "isolated chart rule has explicit namespace", profile: disposableSchemaProfile,
+			flags: []string{helmSetFlag, featureRuleEnabled}, wantRules: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(dir, featureSchemaFile), []byte(tt.profile), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			profileArgs := append(slices.Clone(args), "--api-versions", "monitoring.coreos.com/v1")
+			profileArgs = append(profileArgs, tt.flags...)
+			profileCmd := exec.Command(helmPath, profileArgs...)
+			profileCmd.Env = append(slices.Clone(cmd.Env), "FEATURE_E2E_SCHEMA_VALIDATION="+tt.profile)
+			rendered, renderErr := profileCmd.CombinedOutput()
+			if (renderErr != nil) != tt.wantError {
+				t.Fatalf("native Helm rule boundary: %v, want error %v", renderErr, tt.wantError)
+			}
+			if !tt.wantError && strings.Count(string(rendered), "kind: PrometheusRule") != tt.wantRules {
+				t.Errorf("native rendered rule count differs from %d", tt.wantRules)
+			}
+		})
+	}
 }
 
 func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
@@ -2331,6 +2370,7 @@ func requireFeatureHelmArgs(t *testing.T, got, candidate []string) {
 	want = append(want, candidate...)
 	want = append(want,
 		helmSetStringFlag, "fullnameOverride="+featureControllerName,
+		helmSetFlag, "metrics.prometheusRule.enabled=false",
 		"--rollback-on-failure", "--timeout=5m", helmPostRendererFlag, featurePostRendererPlugin,
 	)
 	if !slices.Equal(got, want) {
@@ -2705,7 +2745,7 @@ func runManagerCorrelationFixture(
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ownerPath := filepath.Join(dir, "owner")
+	ownerPath := filepath.Join(dir, featureOwnerFile)
 	resourcesPath := filepath.Join(dir, "resources.json")
 	attestPath := filepath.Join(dir, "attest-image")
 	helmPath := filepath.Join(dir, "helm")
@@ -2715,12 +2755,13 @@ func runManagerCorrelationFixture(
 		body string
 		mode os.FileMode
 	}{
-		ownerPath:                           {imageAttestationOwnerValue, 0o600},
-		resourcesPath:                       {resources, 0o600},
-		attestPath:                          {attest, 0o700},
-		helmPath:                            {helm, 0o700},
-		filepath.Join(dir, "ownership"):     {ownership, 0o600},
-		filepath.Join(dir, "post-renderer"): {"#!/usr/bin/env bash\ncat\n", 0o700},
+		ownerPath:                             {imageAttestationOwnerValue, 0o600},
+		filepath.Join(dir, featureSchemaFile): {identicalSchemaProfile, 0o600},
+		resourcesPath:                         {resources, 0o600},
+		attestPath:                            {attest, 0o700},
+		helmPath:                              {helm, 0o700},
+		filepath.Join(dir, "ownership"):       {ownership, 0o600},
+		filepath.Join(dir, "post-renderer"):   {"#!/usr/bin/env bash\ncat\n", 0o700},
 	} {
 		if err := os.WriteFile(path, []byte(fixture.body), fixture.mode); err != nil {
 			t.Fatal(err)
@@ -2892,14 +2933,15 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 			t.Errorf("%s maps the feature-only context secret", path)
 		}
 	}
-	run := protectedStepNamed(t, cluster, "Run non-chaos suite")
+	run := protectedStepNamed(t, cluster, featureSuiteStep)
 	if run.Env["E2E_SCALE"] != "${{ needs.resolve.outputs.scale }}" ||
 		run.Env["E2E_MANAGE_NAMESPACES"] != falseValue ||
 		run.Env["E2E_KEEP_FIXTURES"] != trueValue {
 		t.Errorf("feature suite environment = %v", run.Env)
 	}
 	for _, want := range []string{
-		"-ginkgo.label-filter=!chaos && !flaky",
+		"label_filter='!chaos && !flaky && !isolated-runtime-safety'",
+		"-ginkgo.label-filter=$label_filter",
 		"-ginkgo.fail-on-empty",
 		`test_args+=("-ginkgo.focus=$E2E_FOCUS")`,
 	} {
@@ -2907,7 +2949,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 			t.Errorf("suite command is missing %q", want)
 		}
 	}
-	helpers := protectedStepNamed(t, cluster, "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, cluster, featureHelpersStep).Run
 	for _, want := range []string{
 		imageIDKey, "imagetools inspect", "--runner-image=", "FEATURE_E2E_OWNER_KEY",
 		"FEATURE_E2E_OWNER_FILE", "capture_owned", "cleanup_owned", `-l "$owner_selector"`,
@@ -2949,8 +2991,8 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 	}
 	final := protectedStepNamed(t, wf.Jobs["final-status"], "Publish final status")
 	for _, want := range []string{
-		`CLUSTER_RESULT`, `SUITE_OUTCOME`, `CLEANUP_OUTCOME`,
-		`state=success`, `state=failure`, `state=error`,
+		`CLUSTER_RESULT`, `SHARED_OUTPUTS`, `DISPOSABLE_OUTPUTS`,
+		`"success"`, `"failure"`, `state=error`,
 		`context=feature-e2e/focus`, `statuses/$SHA`,
 	} {
 		if !strings.Contains(final.Run, want) && final.Env[want] == "" {
@@ -2962,7 +3004,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
 	cluster := wf.Jobs[featureClusterJob]
-	helpers := protectedStepNamed(t, cluster, "Write cluster helpers")
+	helpers := protectedStepNamed(t, cluster, featureHelpersStep)
 	cleanup := protectedStepNamed(t, cluster, "Cleanup feature resources")
 	if helpers.ID != "helpers" {
 		t.Errorf("cluster helper step ID = %q, want helpers", helpers.ID)
@@ -2973,7 +3015,7 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 	if cleanup.Env["SUITE_OUTCOME"] != "${{ steps.suite.outcome }}" {
 		t.Errorf("cleanup suite outcome = %q", cleanup.Env["SUITE_OUTCOME"])
 	}
-	if protectedStepIndex(t, cluster, "Write cluster helpers") >=
+	if protectedStepIndex(t, cluster, featureHelpersStep) >=
 		protectedStepIndex(t, cluster, "Attest runner image") {
 		t.Error("cluster mutation can start before helper setup succeeds")
 	}
@@ -2989,7 +3031,7 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 		{"suite success is strict", successValue, successValue, "", true, false},
 		{"suite failure recovers", successValue, failureValue, recoveryValue, true, false},
 		{"suite skipped recovers", successValue, skippedValue, recoveryValue, true, false},
-		{"suite cancellation recovers", successValue, "cancelled", recoveryValue, true, false},
+		{"suite cancellation recovers", successValue, featureCancelledValue, recoveryValue, true, false},
 		{"unknown suite outcome fails", successValue, unknownValue, "", false, true},
 		{"skipped helpers are safe", skippedValue, skippedValue, "", false, false},
 		{"failed helpers are safe", failureValue, failureValue, "", false, false},
@@ -2998,7 +3040,7 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			calls := filepath.Join(dir, "calls")
-			if err := os.WriteFile(filepath.Join(dir, "cleanup"),
+			if err := os.WriteFile(filepath.Join(dir, featureCleanupOutput),
 				[]byte("#!/usr/bin/env bash\nprintf '%s' \"$*\" > \"$CALLS\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -3078,7 +3120,7 @@ func TestFeatureE2EProtectsPrometheusURLBeforeRunnerUse(t *testing.T) {
 		nonemptyIndex <= maskIndex {
 		t.Fatal("Prometheus URL is not masked in full with xtrace disabled before validation")
 	}
-	suiteIndex := protectedStepIndex(t, cluster, "Run non-chaos suite")
+	suiteIndex := protectedStepIndex(t, cluster, featureSuiteStep)
 	if suiteIndex <= validateIndex {
 		t.Fatal("feature suite can use the Prometheus URL before masking")
 	}
@@ -3091,7 +3133,7 @@ func TestFeatureE2EProtectsPrometheusURLBeforeRunnerUse(t *testing.T) {
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(featurePassingShell), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sentinel := "https://prometheus.invalid:9090/private/api?token=test-value"
@@ -3187,7 +3229,7 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 			"", "", trueValue, "", errorValue},
 		{"suite did not run", failureValue, failureValue, successValue,
 			falseValue, falseValue, trueValue, trueValue, errorValue},
-		{"cluster cancelled", "cancelled", failureValue, successValue,
+		{"cluster cancelled", featureCancelledValue, failureValue, successValue,
 			trueValue, trueValue, trueValue, trueValue, errorValue},
 		{"cleanup failure", failureValue, successValue, failureValue,
 			trueValue, trueValue, trueValue, trueValue, errorValue},
@@ -3204,10 +3246,10 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 		})
 	}
 	wantOutputs := map[string]string{
-		"suite_ran":        "${{ steps.suite.outputs.suite_ran }}",
-		"suite_completed":  "${{ steps.suite.outputs.suite_completed }}",
-		"manager_attested": "${{ steps.suite.outputs.manager_attested }}",
-		"runner_attested":  "${{ steps.runner-attestation.outputs.runner_attested }}",
+		featureSuiteRanOutput: "${{ steps.suite.outputs.suite_ran }}",
+		featureCompleteOutput: "${{ steps.suite.outputs.suite_completed }}",
+		featureManagerOutput:  "${{ steps.suite.outputs.manager_attested }}",
+		featureRunnerOutput:   "${{ steps.runner-attestation.outputs.runner_attested }}",
 	}
 	for name, want := range wantOutputs {
 		if got := cluster.Outputs[name]; got != want {
@@ -3215,10 +3257,10 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 		}
 	}
 	wantFinalEnv := map[string]string{
-		"SUITE_RAN":        "${{ needs.cluster.outputs.suite_ran }}",
-		"SUITE_COMPLETED":  "${{ needs.cluster.outputs.suite_completed }}",
-		"MANAGER_ATTESTED": "${{ needs.cluster.outputs.manager_attested }}",
-		"RUNNER_ATTESTED":  "${{ needs.cluster.outputs.runner_attested }}",
+		"SHARED_OUTPUTS":     "${{ toJSON(needs.cluster.outputs) }}",
+		"DISPOSABLE_OUTPUTS": "${{ toJSON(needs.disposable.outputs) }}",
+		"VALIDATION_TARGET":  "${{ needs.preflight.outputs.validation_target }}",
+		"SHA":                featureResolvedSHA,
 	}
 	for name, want := range wantFinalEnv {
 		if got := final.Env[name]; got != want {
@@ -3236,11 +3278,11 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 		t.Error("runner success is recorded before runtime attestation")
 	}
 	if protectedStepIndex(t, cluster, "Attest runner image") >=
-		protectedStepIndex(t, cluster, "Run non-chaos suite") {
+		protectedStepIndex(t, cluster, featureSuiteStep) {
 		t.Error("the suite can run before runner attestation")
 	}
 
-	suite := protectedStepNamed(t, cluster, "Run non-chaos suite")
+	suite := protectedStepNamed(t, cluster, featureSuiteStep)
 	reportArg := strings.Index(suite.Run, `-ginkgo.json-report=$suite_report`)
 	goTest := strings.Index(suite.Run, `go test "${test_args[@]}"`)
 	suiteOutput := strings.Index(suite.Run, `printf 'suite_ran=true\n'`)
@@ -3263,7 +3305,7 @@ func TestFeatureE2EUsesApprovedOperatorNamespace(t *testing.T) {
 	if strings.Contains(protectedRuns(cluster), "pgcopydb-e2e-system") {
 		t.Error("protected feature lifecycle still references pgcopydb-e2e-system")
 	}
-	if got := protectedStepNamed(t, cluster, "Run non-chaos suite").Env["E2E_MANAGE_NAMESPACES"]; got != falseValue {
+	if got := protectedStepNamed(t, cluster, featureSuiteStep).Env["E2E_MANAGE_NAMESPACES"]; got != falseValue {
 		t.Errorf("feature E2E_MANAGE_NAMESPACES = %q, want false", got)
 	}
 	for _, path := range []string{publishedE2EWorkflow, releaseWorkflow} {
@@ -3275,6 +3317,7 @@ func TestFeatureE2EUsesApprovedOperatorNamespace(t *testing.T) {
 
 func runFinalStatusFixture(
 	t *testing.T, script, cluster, suite, cleanup, suiteRan, suiteCompleted, manager, runner string,
+	extraEnv ...string,
 ) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -3285,6 +3328,7 @@ func runFinalStatusFixture(
 	statePath := filepath.Join(dir, stateKey)
 	gh := `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$@" > "$STATUS_ARGS"
 for arg in "$@"; do
   case "$arg" in
     state=*) printf '%s\n' "${arg#state=}" > "$STATUS_STATE" ;;
@@ -3296,12 +3340,25 @@ test -s "$STATUS_STATE"
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", "-c", script)
+	sharedOutputs, err := json.Marshal(map[string]string{
+		featureSuiteOutput: suite, featureCleanupOutput: cleanup,
+		featureSuiteRanOutput: suiteRan, featureCompleteOutput: suiteCompleted,
+		featureManagerOutput: manager, featureRunnerOutput: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"GH_TOKEN=test-token",
 		"GITHUB_REPOSITORY=example/repository",
 		"SHA=0123456789abcdef0123456789abcdef01234567",
 		"RUN_MODE=full",
+		"SUITE_PROFILE=baseline",
+		"VALIDATION_TARGET=shared",
+		"DISPOSABLE_RESULT=skipped",
+		"SHARED_OUTPUTS="+string(sharedOutputs),
+		"DISPOSABLE_OUTPUTS={}",
 		"CLUSTER_RESULT="+cluster,
 		"SUITE_OUTCOME="+suite,
 		"CLEANUP_OUTCOME="+cleanup,
@@ -3311,7 +3368,9 @@ test -s "$STATUS_STATE"
 		"RUNNER_ATTESTED="+runner,
 		"RUN_URL=https://example.invalid/run",
 		"STATUS_STATE="+statePath,
+		"STATUS_ARGS="+filepath.Join(dir, "args"),
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run final status: %v\n%s", err, output)
 	}
@@ -3319,12 +3378,23 @@ test -s "$STATUS_STATE"
 	if err != nil {
 		t.Fatal(err)
 	}
+	context := "feature-e2e"
+	if slices.Contains(extraEnv, "RUN_MODE=focus") {
+		context += "/focus"
+	}
+	args := strings.Split(strings.TrimSpace(read(t, filepath.Join(dir, "args"))), "\n")
+	for _, want := range []string{"POST", "repos/example/repository/statuses/0123456789abcdef0123456789abcdef01234567",
+		"context=" + context, "target_url=https://example.invalid/run"} {
+		if !slices.Contains(args, want) {
+			t.Errorf("status request lacks %q: %q", want, args)
+		}
+	}
 	return strings.TrimSpace(string(state))
 }
 
 func TestFeatureE2ESuiteCompletionEvidence(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureSuiteStep)
 	passed := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "selected spec")
 	skipped := ginkgoSpecFixture(gingkotypes.SpecStateSkipped, "filter-excluded spec")
 	failed := ginkgoSpecFixture(gingkotypes.SpecStateFailed, "selected assertion")
@@ -3572,13 +3642,13 @@ func TestFeatureE2ESuiteCompletionEvidence(t *testing.T) {
 			if (result.err == nil) != tt.stepSuccess {
 				t.Errorf("step error = %v, output:\n%s", result.err, result.output)
 			}
-			if got := result.outputs["suite_ran"]; got != trueValue {
+			if got := result.outputs[featureSuiteRanOutput]; got != trueValue {
 				t.Errorf("suite_ran = %q, want true", got)
 			}
-			if got := result.outputs["manager_attested"]; got != trueValue {
+			if got := result.outputs[featureManagerOutput]; got != trueValue {
 				t.Errorf("manager_attested = %q, want true", got)
 			}
-			got, exists := result.outputs["suite_completed"]
+			got, exists := result.outputs[featureCompleteOutput]
 			if tt.completed {
 				if !exists || got != trueValue {
 					t.Errorf("suite_completed = %q, exists %t, want literal true", got, exists)
@@ -3628,19 +3698,19 @@ runtime.goexit
 	}
 
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureSuiteStep)
 	result := runSuiteFixture(t, suite.Run, suiteFixture{report: report, goResult: 1})
 	if result.err == nil {
 		t.Error("assertion failure unexpectedly returned success")
 	}
-	if got := result.outputs["suite_completed"]; got != trueValue {
+	if got := result.outputs[featureCompleteOutput]; got != trueValue {
 		t.Errorf("suite_completed = %q, want true", got)
 	}
 }
 
 func TestFeatureE2ESuiteProcessBoundary(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureSuiteStep)
 	passed := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "selected spec")
 	result := runSuiteFixture(t, suite.Run, suiteFixture{
 		report:            ginkgoReportFixture(t, true, 1, 1, gingkotypes.SpecReports{passed}),
@@ -3655,14 +3725,14 @@ func TestFeatureE2ESuiteProcessBoundary(t *testing.T) {
 	wantArgs := []string{
 		"test", "./test/e2e/...", "-run", "^TestE2E$", "-v", "-timeout", "4h",
 		"-ginkgo.v", "-ginkgo.timeout=4h", "-ginkgo.poll-progress-after=15m",
-		"-ginkgo.label-filter=!chaos && !flaky", "-ginkgo.fail-on-empty",
+		"-ginkgo.label-filter=!chaos && !flaky && !isolated-runtime-safety", "-ginkgo.fail-on-empty",
 		"-ginkgo.json-report=" + result.reportPath,
 	}
 	if !slices.Equal(result.args, wantArgs) {
 		t.Errorf("go test arguments = %q, want %q", result.args, wantArgs)
 	}
 	verifyGoTestProcessBoundary(t, result.args)
-	if got := result.outputs["suite_completed"]; got != trueValue {
+	if got := result.outputs[featureCompleteOutput]; got != trueValue {
 		t.Errorf("suite_completed = %q, want true", got)
 	}
 }
@@ -3733,6 +3803,8 @@ type suiteFixture struct {
 	staleReport       string
 	runMode           string
 	focus             string
+	schemaProfile     string
+	suiteProfile      string
 	simulateLaterTest bool
 }
 
@@ -3754,7 +3826,7 @@ func runSuiteFixture(
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ownerPath := filepath.Join(dir, "owner")
+	ownerPath := filepath.Join(dir, featureOwnerFile)
 	outputPath := filepath.Join(dir, "github-output")
 	reportSource := filepath.Join(dir, "fixture-report.json")
 	suiteReport := filepath.Join(dir, "suite-report.json")
@@ -3816,6 +3888,9 @@ exit "$result"
 		"GITHUB_OUTPUT="+outputPath,
 		"RUN_MODE="+runMode,
 		"E2E_FOCUS="+fixture.focus,
+		"FEATURE_E2E_SCHEMA_VALIDATION="+fixture.schemaProfile,
+		"SUITE_PROFILE="+fixture.suiteProfile,
+		"E2E_SCALE=0.1",
 		"FAKE_GO_RESULT="+fmt.Sprint(fixture.goResult),
 		"FAKE_ARGS_PATH="+argsPath,
 		"FAKE_LATER_TEST_PATH="+laterTestPath,
@@ -3900,7 +3975,7 @@ func TestLaterNative(t *testing.T) {
 
 func TestFeatureE2ECleanupOwnership(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	cleanup := extractCleanupHeredoc(t, helpers)
 	for _, banned := range []string{
 		"--all", "app.kubernetes.io/managed-by=pgcopydb-operator", "kubectl delete namespace", "finalizers-",
@@ -3935,7 +4010,7 @@ func extractCleanupHeredoc(t *testing.T, helpers string) string {
 
 func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // One fake API owns the lifecycle contract.
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], featureHelpersStep).Run
 	scripts := featureOwnershipScripts{
 		postRenderer: extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER"),
 		plugin: extractFeatureGeneratedFile(t, helpers,
@@ -4031,7 +4106,7 @@ func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // O
 
 	t.Run("pre-controller recovery requires a proven empty slot", func(t *testing.T) {
 		fixture := newFeatureOwnershipFixture(t, scripts, "success", "")
-		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err != nil {
+		if result := fixture.run(fixture.path(featureCleanupOutput), "recovery"); result.err != nil {
 			t.Fatalf("proven empty recovery failed: %v\n%s", result.err, result.output)
 		}
 		if strings.Contains(fixture.readLog(), "uninstall\n") {
@@ -4040,13 +4115,13 @@ func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // O
 
 		fixture = newFeatureOwnershipFixture(t, scripts, "success", "")
 		fixture.write("rendered.yaml", "")
-		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err == nil {
+		if result := fixture.run(fixture.path(featureCleanupOutput), "recovery"); result.err == nil {
 			t.Fatal("empty rendered-manifest evidence was accepted")
 		}
 
 		fixture = newFeatureOwnershipFixture(t, scripts, "success", "")
 		fixture.write("release", featureControllerName)
-		if result := fixture.run(fixture.path("cleanup"), "recovery"); result.err == nil {
+		if result := fixture.run(fixture.path(featureCleanupOutput), "recovery"); result.err == nil {
 			t.Fatal("occupied fixed Helm slot was accepted")
 		}
 	})
@@ -4122,7 +4197,7 @@ items:
 		if !strings.Contains(fixture.readLog(), "uninstall\n") {
 			t.Fatal("post-install attestation failure did not run bounded recovery")
 		}
-		fixture.writeMode("attest-image", "#!/usr/bin/env bash\nexit 0\n", 0o700)
+		fixture.writeMode("attest-image", featurePassingShell, 0o700)
 		if retry := fixture.install(); retry.err != nil {
 			t.Fatalf("clean retry after post-install failure failed: %v\n%s", retry.err, retry.output)
 		}
@@ -4382,15 +4457,16 @@ func newFeatureOwnershipFixture(
 	}{
 		"post-renderer": {scripts.postRenderer, 0o700},
 		"plugins/" + featurePostRendererPlugin + "/plugin.yaml": {scripts.plugin, 0o600},
-		"ownership":        {scripts.ownership, 0o600},
-		"bin/feature-helm": {scripts.helm, 0o700},
-		"cleanup":          {scripts.cleanup, 0o700},
-		"owner":            {fixture.owner, 0o600},
-		stateKey:           {initialState, 0o600},
-		"release":          {"", 0o600},
-		"log":              {"", 0o600},
-		"helm-args":        {"", 0o600},
-		"mutation":         {"", 0o600},
+		"ownership":          {scripts.ownership, 0o600},
+		"bin/feature-helm":   {scripts.helm, 0o700},
+		featureCleanupOutput: {scripts.cleanup, 0o700},
+		featureOwnerFile:     {fixture.owner, 0o600},
+		featureSchemaFile:    {identicalSchemaProfile, 0o600},
+		stateKey:             {initialState, 0o600},
+		"release":            {"", 0o600},
+		"log":                {"", 0o600},
+		"helm-args":          {"", 0o600},
+		"mutation":           {"", 0o600},
 		"manifest.yaml": {`apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -4406,7 +4482,7 @@ metadata:
   name: pgcopydb-e2e-metrics
   namespace: pgcopydb-e2e
 `, 0o600},
-		"attest-image": {"#!/usr/bin/env bash\nexit 0\n", 0o700},
+		"attest-image": {featurePassingShell, 0o700},
 		"bin/helm":     {featureOwnershipHelmFixture, 0o700},
 		"bin/kubectl":  {featureOwnershipKubectlFixture, 0o700},
 	}
@@ -4483,7 +4559,7 @@ func (f *featureOwnershipFixture) install() featureOwnershipResult {
 
 func (f *featureOwnershipFixture) cleanup() featureOwnershipResult {
 	f.t.Helper()
-	return f.run(f.path("cleanup"))
+	return f.run(f.path(featureCleanupOutput))
 }
 
 func (f *featureOwnershipFixture) run(command string, args ...string) featureOwnershipResult {
@@ -4495,7 +4571,7 @@ func (f *featureOwnershipFixture) run(command string, args ...string) featureOwn
 		"REAL_HELM="+f.path("bin/helm"),
 		"FEATURE_E2E_HELPERS="+f.dir,
 		"FEATURE_E2E_OWNER_KEY="+imageAttestationOwnerKey,
-		"FEATURE_E2E_OWNER_FILE="+f.path("owner"),
+		"FEATURE_E2E_OWNER_FILE="+f.path(featureOwnerFile),
 		"FAKE_STATE="+f.path(stateKey),
 		"FAKE_RELEASE="+f.path("release"),
 		"FAKE_LOG="+f.path("log"),
