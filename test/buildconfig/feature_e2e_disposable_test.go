@@ -27,7 +27,7 @@ func compareFeatureCRDs(base, head map[string]string, profile string) error {
 		if !found {
 			return fmt.Errorf("CRD identity differs")
 		}
-		var before, after map[string]any
+		var before, after compatibilityDocument
 		if json.Unmarshal([]byte(original), &before) != nil || json.Unmarshal([]byte(candidate), &after) != nil {
 			return fmt.Errorf("CRD is not canonical JSON")
 		}
@@ -301,6 +301,67 @@ func TestFeatureE2ESchemaProfileAdmission(t *testing.T) {
 				t.Fatalf("fixture failed before candidate comparison: %v\n%s", err, output)
 			}
 		})
+	}
+}
+
+func TestFeatureE2ESchemaLargeIntegerDefaults(t *testing.T) {
+	t.Setenv("FEATURE_E2E_HELM", newCompatibilityHelmFixture(t))
+	for _, tt := range []struct {
+		name, profile, sourceDefault, renderedDefault string
+		existing, sourceError, renderedError          bool
+	}{
+		{"equal additions", disposableSchemaProfile, "9007199254740993", "9007199254740993", false, false, false},
+		{"asymmetric source", disposableSchemaProfile, "9007199254740992", "9007199254740993", false, true, false},
+		{"asymmetric render", disposableSchemaProfile, "9007199254740993", "9007199254740992", false, false, true},
+		{"asymmetric both", disposableSchemaProfile, "9007199254740992", "9007199254740992", false, true, true},
+		{"strict existing change", identicalSchemaProfile, "9007199254740993", "9007199254740993", true, true, true},
+		{"additive existing change", disposableSchemaProfile, "9007199254740993", "9007199254740993", true, true, true},
+	} {
+		for _, prefix := range []string{"", "---\n"} {
+			t.Run(fmt.Sprintf("%s/yaml=%t", tt.name, prefix != ""), func(t *testing.T) {
+				t.Setenv("FEATURE_E2E_SCHEMA_VALIDATION", tt.profile)
+				base, head := newCompatibilityChartRoots(t)
+				for _, root := range []string{base, head} {
+					for path, firstDefault := range map[string]string{
+						"config/crd/bases/migration.yaml":             tt.sourceDefault,
+						"charts/pgcopydb-operator/templates/crd.yaml": tt.renderedDefault,
+					} {
+						doc := featureSchemaFixture(t)
+						if root == head || tt.existing {
+							versions := doc[specKey].(map[string]any)["versions"].([]any)
+							for i, item := range versions {
+								value := "9007199254740993"
+								if root == base {
+									value = "9007199254740992"
+								} else if i == 0 {
+									value = firstDefault
+								}
+								version := item.(map[string]any)
+								schema := version["schema"].(map[string]any)["openAPIV3Schema"].(map[string]any)
+								spec := schema[schemaPropertiesKey].(map[string]any)[specKey].(map[string]any)
+								spec[schemaPropertiesKey].(map[string]any)["largeDefault"] = map[string]any{
+									schemaTypeKey: "integer", schemaDefaultKey: json.Number(value),
+								}
+							}
+						}
+						body, err := json.Marshal(doc)
+						if err != nil {
+							t.Fatal(err)
+						}
+						writeCompatibilityFixture(t, root, path, prefix+string(body)+"\n")
+					}
+				}
+				cmd := exec.Command(os.Args[0], "-test.run=^TestFeatureE2ECandidateCompatibility$", "-test.count=1")
+				cmd.Env = compatibilityFixtureEnv(base, head)
+				output, err := cmd.CombinedOutput()
+				if (err != nil) != (tt.sourceError || tt.renderedError) ||
+					strings.Contains(string(output), "candidate changes the CRD") != tt.sourceError ||
+					strings.Contains(string(output), "candidate changes rendered") != tt.renderedError {
+					t.Fatalf("numeric admission error = %v, want source=%t rendered=%t:\n%s",
+						err, tt.sourceError, tt.renderedError, output)
+				}
+			})
+		}
 	}
 }
 
