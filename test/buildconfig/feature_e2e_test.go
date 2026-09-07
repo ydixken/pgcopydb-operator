@@ -172,11 +172,44 @@ func protectedStepNamed(t *testing.T, job protectedJob, name string) protectedSt
 	t.Helper()
 	for _, step := range job.Steps {
 		if step.Name == name {
+			step.Run = featureStepScript(t, job, step)
 			return step
 		}
 	}
 	t.Fatalf("job has no %q step", name)
 	return protectedStep{}
+}
+
+func featureStepScript(t *testing.T, job protectedJob, step protectedStep) string {
+	t.Helper()
+	var path string
+	switch step.Name {
+	case "Write cluster helpers":
+		path = "hack/feature-e2e-helpers.sh"
+	case "Run non-chaos suite":
+		path = "hack/feature-e2e-suite.sh"
+	default:
+		return step.Run
+	}
+	if strings.TrimSpace(step.Run) != "bash feature-e2e-trusted/"+path {
+		t.Fatalf("%s must invoke its trusted script directly", step.Name)
+	}
+	trusted := false
+	for _, candidate := range job.Steps {
+		if candidate.Name == step.Name {
+			break
+		}
+		if candidate.Uses == "actions/checkout@v7" &&
+			candidate.With["path"] == "feature-e2e-trusted" &&
+			candidate.With["ref"] == "${{ github.sha }}" &&
+			candidate.With["persist-credentials"] == false {
+			trusted = true
+		}
+	}
+	if !trusted {
+		t.Fatal("feature script lacks an earlier immutable trusted checkout")
+	}
+	return read(t, "../../"+path)
 }
 
 func protectedStepIndex(t *testing.T, job protectedJob, name string) int {
@@ -302,7 +335,7 @@ func removeSchemaDescriptions(value any) {
 		}
 		removeSchemaDescriptions(child)
 	}
-	for _, key := range []string{"definitions", "dependencies", "patternProperties", "properties"} {
+	for _, key := range []string{"definitions", "dependencies", "patternProperties", schemaPropertiesKey} {
 		children, _ := schema[key].(map[string]any)
 		for _, child := range children {
 			removeSchemaDescriptions(child)
@@ -320,13 +353,13 @@ func TestRemoveDescriptionsOnlyTouchesCRDSchemaNodes(t *testing.T) {
 				"schema": map[string]any{
 					"openAPIV3Schema": map[string]any{
 						schemaDescriptionKey: schemaRemoveValue,
-						"default":            map[string]any{schemaDescriptionKey: schemaKeepValue},
-						"properties": map[string]any{
+						schemaDefaultKey:     map[string]any{schemaDescriptionKey: schemaKeepValue},
+						schemaPropertiesKey: map[string]any{
 							schemaDescriptionKey: map[string]any{
 								schemaDescriptionKey: schemaRemoveValue,
 								schemaTypeKey:        schemaStringType,
 							},
-							"list": map[string]any{
+							schemaListFixture: map[string]any{
 								itemsKey: map[string]any{
 									schemaDescriptionKey: schemaRemoveValue,
 									schemaTypeKey:        schemaStringType,
@@ -351,10 +384,10 @@ func TestRemoveDescriptionsOnlyTouchesCRDSchemaNodes(t *testing.T) {
 	if _, exists := rootSchema[schemaDescriptionKey]; exists {
 		t.Error("root schema description was preserved")
 	}
-	if got := rootSchema["default"].(map[string]any)[schemaDescriptionKey]; got != schemaKeepValue {
+	if got := rootSchema[schemaDefaultKey].(map[string]any)[schemaDescriptionKey]; got != schemaKeepValue {
 		t.Errorf("schema default description = %v, want keep", got)
 	}
-	properties := rootSchema["properties"].(map[string]any)
+	properties := rootSchema[schemaPropertiesKey].(map[string]any)
 	descriptionProperty, exists := properties[schemaDescriptionKey].(map[string]any)
 	if !exists || descriptionProperty[schemaTypeKey] != schemaStringType {
 		t.Fatalf("properties.description = %v, want a string schema", properties[schemaDescriptionKey])
@@ -362,7 +395,7 @@ func TestRemoveDescriptionsOnlyTouchesCRDSchemaNodes(t *testing.T) {
 	if _, exists := descriptionProperty[schemaDescriptionKey]; exists {
 		t.Error("properties.description annotation was preserved")
 	}
-	items := properties["list"].(map[string]any)[itemsKey].(map[string]any)
+	items := properties[schemaListFixture].(map[string]any)[itemsKey].(map[string]any)
 	if _, exists := items[schemaDescriptionKey]; exists {
 		t.Error("nested items schema description was preserved")
 	}
@@ -664,14 +697,17 @@ func TestFeatureE2ECandidateCompatibility(t *testing.T) {
 	}
 	baseSnapshot := loadCompatibilitySnapshot(t, base)
 	headSnapshot := loadCompatibilitySnapshot(t, head)
-	if !maps.Equal(baseSnapshot.CRDs, headSnapshot.CRDs) {
-		t.Error("candidate changes the CRD beyond description fields")
+	profile := os.Getenv("FEATURE_E2E_SCHEMA_VALIDATION")
+	if err := compareFeatureCRDs(baseSnapshot.CRDs, headSnapshot.CRDs, profile); err != nil {
+		t.Errorf("candidate changes the CRD beyond the selected profile: %v", err)
 	}
 	if !maps.Equal(baseSnapshot.RBAC, headSnapshot.RBAC) {
 		t.Error("candidate changes Role, RoleBinding, ClusterRole, or ClusterRoleBinding documents")
 	}
-	if !slices.Equal(baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges) {
-		t.Error("candidate changes rendered CRD, Role, RoleBinding, ClusterRole, or ClusterRoleBinding documents")
+	if err := compareFeatureRenderedPrivileges(
+		baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges, profile,
+	); err != nil {
+		t.Errorf("candidate changes rendered CRD or RBAC beyond the selected profile: %v", err)
 	}
 	if !maps.Equal(baseSnapshot.Builder, headSnapshot.Builder) {
 		t.Error("candidate changes images/pgcopydb-builder")
@@ -720,14 +756,14 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{"focus", "mode", "pr", "scale"}) {
 		t.Errorf("feature inputs = %v, want focus, mode, pr, scale", got)
 	}
-	if in := inputs["pr"]; !in.Required || in.Type != "string" {
+	if in := inputs["pr"]; !in.Required || in.Type != schemaStringType {
 		t.Errorf("pr input = %+v, want required string", in)
 	}
 	if in := inputs["mode"]; !in.Required || in.Type != "choice" || in.Default != "full" ||
 		!slices.Equal(in.Options, []string{"full", "focus"}) {
 		t.Errorf("mode input = %+v", in)
 	}
-	if in := inputs["focus"]; in.Required || in.Type != "string" || in.Default != "" {
+	if in := inputs["focus"]; in.Required || in.Type != schemaStringType || in.Default != "" {
 		t.Errorf("focus input = %+v", in)
 	}
 	if in := inputs["scale"]; !in.Required || in.Type != "choice" || in.Default != featureDefaultScale ||
@@ -839,13 +875,13 @@ func TestFeatureE2EPermissionsAndStatuses(t *testing.T) {
 		t.Fatalf("top permissions = %v, want explicit empty map", wf.Permissions)
 	}
 	want := map[string]map[string]string{
-		resolveJob:       {permissionContents: permissionRead, "pull-requests": permissionRead},
-		pendingStatusJob: {"statuses": permissionWrite},
-		"preflight":      {permissionContents: permissionRead, permissionPackages: permissionRead},
-		managerImageJob:  {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		runnerImageJob:   {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		"cluster":        {permissionContents: permissionRead, permissionPackages: permissionRead},
-		"final-status":   {"statuses": permissionWrite},
+		resolveJob:        {permissionContents: permissionRead, "pull-requests": permissionRead},
+		pendingStatusJob:  {"statuses": permissionWrite},
+		"preflight":       {permissionContents: permissionRead, permissionPackages: permissionRead},
+		managerImageJob:   {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		runnerImageJob:    {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		featureClusterJob: {permissionContents: permissionRead, permissionPackages: permissionRead},
+		"final-status":    {"statuses": permissionWrite},
 	}
 	if got := slices.Sorted(maps.Keys(wf.Jobs)); !slices.Equal(got, slices.Sorted(maps.Keys(want))) {
 		t.Fatalf("feature jobs = %v, want %v", got, slices.Sorted(maps.Keys(want)))
@@ -885,12 +921,17 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 			t.Errorf("preflight checkout for %q is not pinned safely", path)
 		}
 	}
-	for _, jobName := range []string{managerImageJob, runnerImageJob, "cluster"} {
+	for _, jobName := range []string{managerImageJob, runnerImageJob, featureClusterJob} {
 		checkouts := protectedStepsUsing(wf.Jobs[jobName], "actions/checkout@v7")
-		if len(checkouts) != 1 ||
+		wantCount := 1
+		if jobName == featureClusterJob {
+			wantCount = 2
+			_ = protectedStepNamed(t, wf.Jobs[jobName], "Write cluster helpers")
+		}
+		if len(checkouts) != wantCount ||
 			protectedWithString(t, checkouts[0], "ref") != "${{ needs.resolve.outputs.sha }}" ||
 			protectedWithString(t, checkouts[0], "persist-credentials") != falseValue {
-			t.Errorf("%s does not check out only the resolved SHA", jobName)
+			t.Errorf("%s does not preserve the resolved candidate checkout", jobName)
 		}
 	}
 	preflight := protectedRuns(wf.Jobs["preflight"])
@@ -942,7 +983,7 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 		strings.Contains(body, "crds.install=true") {
 		t.Error("feature path does not preserve the cluster CRD")
 	}
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	if !strings.Contains(cluster.Env["MANAGER_REF"], "@${{ needs.manager-image.outputs.digest }}") ||
 		!strings.Contains(cluster.Env["RUNNER_REF"], "@${{ needs.runner-image.outputs.digest }}") {
 		t.Error("cluster image references are not digest-qualified")
@@ -951,7 +992,7 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 
 func TestFeatureE2EImageAttestation(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	const (
 		topDigest              = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -1350,7 +1391,7 @@ func TestFeatureE2EImageAttestation(t *testing.T) {
 
 func TestFeatureE2EImageAttestationSuppressesXtrace(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	const (
 		topDigest     = "sha256:6666666666666666666666666666666666666666666666666666666666666666"
@@ -1641,7 +1682,7 @@ export SHELLOPTS
 
 func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One table owns the trust boundary.
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	attest := extractImageAttestationHeredoc(t, helpers)
 	helm := extractFeatureHelmHeredoc(t, helpers)
 	ownership := extractFeatureGeneratedFile(t, helpers, "ownership", "OWNERSHIP")
@@ -2174,7 +2215,7 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 	}
 
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	plugin := extractFeatureGeneratedFile(t, helpers,
 		"plugins/"+featurePostRendererPlugin+"/plugin.yaml", "HELM_PLUGIN")
 	postRenderer := extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER")
@@ -2786,7 +2827,7 @@ printf '%s' "$FAKE_REGISTRY"
 
 func TestFeatureE2EClusterUsesDaemonlessRegistryInspection(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	if steps := protectedStepsUsing(cluster, "docker/setup-buildx-action@v4"); len(steps) != 0 {
 		t.Fatalf("cluster setup-buildx steps = %d, want 0", len(steps))
 	}
@@ -2810,7 +2851,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 	if strings.Count(body, "${{ secrets.E2E_EXPECT_CONTEXT }}") != 1 {
 		t.Error("expected context secret must be mapped exactly once")
 	}
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	if cluster.Environment != protectedClusterGroup || cluster.Concurrency.Group != protectedClusterGroup ||
 		cluster.Concurrency.CancelInProgress {
 		t.Errorf("cluster protection = environment %q concurrency %+v", cluster.Environment, cluster.Concurrency)
@@ -2911,7 +2952,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 
 func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	helpers := protectedStepNamed(t, cluster, "Write cluster helpers")
 	cleanup := protectedStepNamed(t, cluster, "Cleanup feature resources")
 	if helpers.ID != "helpers" {
@@ -2940,7 +2981,7 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 		{"suite failure recovers", successValue, failureValue, recoveryValue, true, false},
 		{"suite skipped recovers", successValue, skippedValue, recoveryValue, true, false},
 		{"suite cancellation recovers", successValue, "cancelled", recoveryValue, true, false},
-		{"unknown suite outcome fails", successValue, "unknown", "", false, true},
+		{"unknown suite outcome fails", successValue, unknownValue, "", false, true},
 		{"skipped helpers are safe", skippedValue, skippedValue, "", false, false},
 		{"failed helpers are safe", failureValue, failureValue, "", false, false},
 	}
@@ -3002,7 +3043,7 @@ func TestFeatureE2ECleanupIsSafeBeforeHelperSetup(t *testing.T) {
 
 func TestFeatureE2EProtectsPrometheusURLBeforeRunnerUse(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	validateIndex := protectedStepIndex(t, cluster, "Validate immutable inputs")
 	validate := cluster.Steps[validateIndex]
 	const secretSource = "${{ secrets.E2E_PROMETHEUS_URL }}"
@@ -3106,7 +3147,7 @@ func TestFeatureE2EHasNoReleasePath(t *testing.T) {
 
 func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	final := protectedStepNamed(t, wf.Jobs["final-status"], "Publish final status")
 	tests := []struct {
 		name, cluster, suite, cleanup, suiteRan, suiteCompleted, manager, runner, want string
@@ -3206,7 +3247,7 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 
 func TestFeatureE2EUsesApprovedOperatorNamespace(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	cluster := wf.Jobs["cluster"]
+	cluster := wf.Jobs[featureClusterJob]
 	if got := cluster.Env["E2E_OPERATOR_NAMESPACE"]; got != "pgcopydb-e2e" {
 		t.Errorf("feature operator namespace = %q, want pgcopydb-e2e", got)
 	}
@@ -3274,7 +3315,7 @@ test -s "$STATUS_STATE"
 
 func TestFeatureE2ESuiteCompletionEvidence(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs["cluster"], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
 	passed := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "selected spec")
 	skipped := ginkgoSpecFixture(gingkotypes.SpecStateSkipped, "filter-excluded spec")
 	failed := ginkgoSpecFixture(gingkotypes.SpecStateFailed, "selected assertion")
@@ -3578,7 +3619,7 @@ runtime.goexit
 	}
 
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs["cluster"], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
 	result := runSuiteFixture(t, suite.Run, suiteFixture{report: report, goResult: 1})
 	if result.err == nil {
 		t.Error("assertion failure unexpectedly returned success")
@@ -3590,7 +3631,7 @@ runtime.goexit
 
 func TestFeatureE2ESuiteProcessBoundary(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	suite := protectedStepNamed(t, wf.Jobs["cluster"], "Run non-chaos suite")
+	suite := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Run non-chaos suite")
 	passed := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "selected spec")
 	result := runSuiteFixture(t, suite.Run, suiteFixture{
 		report:            ginkgoReportFixture(t, true, 1, 1, gingkotypes.SpecReports{passed}),
@@ -3850,7 +3891,7 @@ func TestLaterNative(t *testing.T) {
 
 func TestFeatureE2ECleanupOwnership(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	cleanup := extractCleanupHeredoc(t, helpers)
 	for _, banned := range []string{
 		"--all", "app.kubernetes.io/managed-by=pgcopydb-operator", "kubectl delete namespace", "finalizers-",
@@ -3885,7 +3926,7 @@ func extractCleanupHeredoc(t *testing.T, helpers string) string {
 
 func TestFeatureE2EChartOwnershipLifecycle(t *testing.T) { //nolint:gocyclo // One fake API owns the lifecycle contract.
 	wf := parseProtectedWorkflow(t, featureWorkflow)
-	helpers := protectedStepNamed(t, wf.Jobs["cluster"], "Write cluster helpers").Run
+	helpers := protectedStepNamed(t, wf.Jobs[featureClusterJob], "Write cluster helpers").Run
 	scripts := featureOwnershipScripts{
 		postRenderer: extractFeatureGeneratedFile(t, helpers, "post-renderer", "POST_RENDERER"),
 		plugin: extractFeatureGeneratedFile(t, helpers,

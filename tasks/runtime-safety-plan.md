@@ -26,6 +26,9 @@ Keep candidate code scoped to the disposable kubeconfig.
 Preserve immutable candidate-SHA checking and existing CI trust restrictions.
 Require full-suite success, metrics assertions, and successful teardown before publishing `feature-e2e` for the candidate SHA.
 Test workflow configuration and failure paths without a live cluster.
+Prove effective Docker-daemon capacity and storage provenance before enabling this route.
+Keep the shared profile's alert rules disabled.
+Enable the owned isolated operator rule only after proving that Prometheus has no alert-delivery destinations.
 
 ## Task 1: Fix #242 progress sampler resource leaks
 
@@ -52,6 +55,8 @@ Publish cleanup status before completion or finalizer release when status is wri
 Before reporting success, verify that the replication slot, target origin, and operator-managed publication are absent.
 Do not remove caller-owned publications.
 Cover cleanup failure and deletion paths, extend condition metrics, and update alerts, dashboards, runbooks, and E2E teardown.
+Publish this task only after the disposable prerequisite is merged and live-validated.
+The full isolated gate must prove that cleanup failure status, metrics, and a firing alert survive cleanup Job TTL expiry.
 
 ## Task 4: Fix #243 orphaned worker connections
 
