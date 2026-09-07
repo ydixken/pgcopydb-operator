@@ -19,9 +19,12 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -36,11 +39,10 @@ import (
 var _ = Describe("Progress sampler bounds", func() {
 	It("releases blocked source and target samplers across repeated polls and recovers", func() {
 		const name = "e2e-progress-bounds"
-		const table = "public.progress_lock_probe"
+		const table = progressProbeTable
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
-		psql(sourceCluster, "CREATE TABLE "+table+" (id integer PRIMARY KEY, payload text); "+
-			"INSERT INTO "+table+" VALUES (0, 'baseline')")
+		psql(sourceCluster, progressProbeSetupSQL(appDB))
 		DeferCleanup(func() {
 			deleteMigration(name)
 			Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
@@ -48,6 +50,8 @@ var _ = Describe("Progress sampler bounds", func() {
 			psql(sourceCluster, "DROP TABLE IF EXISTS "+table)
 			psql(targetCluster, "DROP TABLE IF EXISTS "+table)
 		})
+		Expect(psql(sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
+			table+"'::regclass")).To(Equal(appDB), "the follow fixture must be owned by the migration role")
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 		readMigration := func() *v1beta1.Migration {
@@ -126,6 +130,51 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 	})
 })
+
+const progressProbeTable = "public.progress_lock_probe"
+
+func progressProbeSetupSQL(role string) string {
+	return "SET ROLE " + role + "; CREATE TABLE " + progressProbeTable + " (id integer PRIMARY KEY, payload text); " +
+		"INSERT INTO " + progressProbeTable + " VALUES (0, 'baseline')"
+}
+
+func TestProgressProbePublicationOwnership(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance for the progress fixture regression")
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatal("invalid test PostgreSQL URI")
+	}
+	runSQL := func(databaseURI, sql string) string {
+		t.Helper()
+		commandCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(commandCtx, "psql", databaseURI,
+			"-XqtA", "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-c", sql).Output()
+		if err != nil {
+			if exit, ok := err.(*exec.ExitError); ok {
+				t.Fatalf("progress fixture SQL failed: %s", exit.Stderr)
+			}
+			t.Fatalf("progress fixture SQL failed: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	role := fmt.Sprintf("progress_probe_%d", time.Now().UnixNano())
+	runSQL(uri, "CREATE ROLE "+role+" NOLOGIN NOSUPERUSER")
+	t.Cleanup(func() { runSQL(uri, "DROP ROLE "+role) })
+	runSQL(uri, "CREATE DATABASE "+role+" OWNER "+role)
+	t.Cleanup(func() { runSQL(uri, "DROP DATABASE "+role+" WITH (FORCE)") })
+	u.Path = "/" + role
+	probeURI := u.String()
+	runSQL(probeURI, progressProbeSetupSQL(role))
+	runSQL(probeURI, "SET ROLE "+role+"; CREATE PUBLICATION progress_probe FOR TABLE "+progressProbeTable)
+	if got := runSQL(probeURI, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
+		progressProbeTable+"'::regclass"); got != role {
+		t.Fatal("the progress fixture is not owned by its migration role")
+	}
+}
 
 const progressBlockerCount = "SELECT count(*) FROM pg_stat_activity WHERE application_name='e2e_progress_blocker'"
 
