@@ -9,15 +9,16 @@ This plan excludes the pgcopydb fork, SQLite contention work, builder publicatio
 ## Global constraints
 
 - Use normal feature branches in the primary checkout.
-- Retain per-issue implementation commits, focused tests, and local specification and quality reviews before integrating approved related issues into a batch.
-- Complete an integration review and the focused local checks for every changed issue before pushing a batch.
-- Run `task lint`, `task test`, and strict documentation validation before publishing each batch.
-- Push each locally reviewed batch once, then require full `feature-e2e` on that batch's exact final head.
+- Retain per-issue implementation commits, regression coverage, and independent specification and quality reviews before integrating approved related issues into a batch.
+- Complete an integration review for every changed issue before pushing a batch.
+- Format locally and run `task lint` locally before publishing each batch.
+- CI runs tests and strict documentation validation for the exact batch head.
+- Push each independently reviewed batch once, then require full `feature-e2e` on that batch's exact final head.
 - A later code change or failed check requires a fresh exact-head full E2E result.
 - Preserve public API group, identities, existing RBAC, candidate-SHA validation, generated-artifact checks, and current validation rules except for the approved optional API fields and the guarded split-table CEL rule.
 - Do not log SQL, connection strings, credentials, or private cluster information.
-- Every behavior change needs focused regression coverage, current documentation, `task lint`, `task test`, strict documentation validation, and a full `feature-e2e` result for the exact final head before merge.
-- Do not run local real-cluster E2E without the repository's required context confirmation flow.
+- Every behavior change needs regression coverage, current documentation, local formatting and `task lint`, CI test and documentation results, and a full `feature-e2e` result for the exact final head before merge.
+- Agents do not run local real-cluster E2E.
 - The isolated kind workflow may receive only its disposable cluster kubeconfig.
 - #200 is investigation-first and remains open until a measured slow-pass cause has a discriminating regression and a fix.
 
@@ -25,7 +26,7 @@ This plan excludes the pgcopydb fork, SQLite contention work, builder publicatio
 
 PR 1 delivers the disposable feature-E2E prerequisite.
 It must merge through the existing trusted shared baseline on its exact head.
-After PR 1 reaches trusted main, publish the completed, locally reviewed PR 2.
+After PR 1 reaches trusted main, publish the completed, independently reviewed PR 2.
 PR 2's full additive-disposable runtime-safety run provides the first live disposable validation and its merge gate.
 Require capacity, schema, no-alert-delivery, metrics, runtime proofs, cleanup, and teardown to pass before merging PR 2, then proceed to PR 3.
 PR 2 groups #211, #215, #243, and #223 as runtime-safety work.
@@ -135,9 +136,10 @@ Do not close #200 after instrumentation or scheduling compensation alone.
 
 For each task, start with a regression that fails against existing behavior.
 Do not treat absent fixtures, skipped scenarios, or missing observations as success.
-Run excluded resume coverage explicitly where required and verify cleanup of test-owned locks, processes, privileges, and replication state.
+Require CI to run excluded resume coverage where required and verify cleanup of test-owned locks, processes, privileges, and replication state.
 Run task-level implementation and review loops before batch integration.
-Before pushing each batch, complete an independent whole-batch review and collect focused local command evidence.
+Before pushing each batch, complete an independent whole-batch review, format locally, and run `task lint`.
+CI supplies the test and documentation evidence.
 After push, collect base CI, the built-image canary where applicable, cleanup evidence, and a full exact-head `feature-e2e` result.
 The #215 batch acceptance retains its non-skipped isolated `cleanup-alert-after-job-ttl` report entry.
 The #243 batch acceptance retains explicit isolated packet-loss expiry-proof selection and nonempty execution evidence.
