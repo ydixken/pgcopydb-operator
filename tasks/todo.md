@@ -114,7 +114,8 @@
 - #211 local implementation and independent review accepted source commits `efde537fbc708b7836c4f2b219bc88d79dd83a4f` and `56952f8ba1e989df2305407abc6399c63ec204cc`.
   Its PR 2 integration candidate still requires whole-batch review and full exact-head feature E2E.
 - #215 local review accepted scoped commits `5cbaf39c17d3677a618aa36665eb84118e328de4` and `72c4e7f1577abb25cfb83d3b94346e643899809f`.
-  Include it only after the disposable prerequisite is merged and live-validated.
+  Include it in the locally reviewed PR 2, published after the disposable prerequisite reaches trusted main.
+  PR 2's full additive-disposable runtime-safety run provides the first live disposable validation and its merge gate, without a separate smoke PR or run.
   Acceptance requires full exact-head isolated E2E with a non-skipped cleanup scenario and its `cleanup-alert-after-job-ttl` evidence entry.
 
 ## Runtime safety exclusions

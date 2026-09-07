@@ -1,0 +1,52 @@
+fullnameOverride: feature-monitoring
+grafana:
+  enabled: false
+alertmanager:
+  enabled: false
+defaultRules:
+  create: false
+kubeStateMetrics:
+  enabled: false
+nodeExporter:
+  enabled: false
+kubernetesServiceMonitors:
+  enabled: false
+crds:
+  enabled: true
+prometheusOperator:
+  enabled: true
+  image:
+    tag: v0.93.1
+    sha: e52bb28fd41c98dd407c7a8cba8bdcfe7eabd7447e250afaf1fe7bb816dedbff
+  prometheusConfigReloader:
+    image:
+      tag: v0.93.1
+      sha: 428f088fe6fe07ab138bda92113664b04848a1dc408e4d3680a60ecdb55d1a65
+  admissionWebhooks:
+    enabled: true
+    deployment:
+      enabled: false
+    patch:
+      image:
+        tag: 1.8.8
+        sha: cd85a621724cd9043a5b46a784578fa159437712f920166389fce830554e1c44
+prometheus:
+  enabled: true
+  prometheusSpec:
+    image:
+      tag: v3.14.0-distroless
+      sha: 50c707e96da5ade383cb1707790576480485e93de06aa60ad8802cb5f744bd0a
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: pgcopydb-e2e
+    ruleSelectorNilUsesHelmValues: false
+    ruleSelector:
+      matchLabels:
+        app.kubernetes.io/instance: pgcopydb-e2e
+    ruleNamespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: pgcopydb-e2e
+    retention: 6h
+    storageSpec: {}
