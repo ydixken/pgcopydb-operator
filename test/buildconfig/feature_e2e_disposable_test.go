@@ -1345,6 +1345,8 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 		"ready-installed-missing", "ready-installed-empty", "ready-kubeconfig-missing", "ready-kubeconfig-empty",
 		containerdValid, "containerd-metadata-timeout", "containerd-metadata-drift", "containerd-pid-drift",
 		"containerd-unsupported-driver", "containerd-partial-graphdriver", "containerd-cleanup",
+		"observer-absent", "observer-absent-list-failed", "observer-absent-list-malformed",
+		"observer-absent-id", "observer-absent-id-present",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1399,6 +1401,98 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 					t.Fatal("unrelated cluster removed")
 				}
 			}()
+			if strings.HasPrefix(scenario, "observer-absent") {
+				if err == nil {
+					t.Fatalf("accepted failed observer create: %s", output)
+				}
+				if string(output) != "kind-observer-create-failed status=125 category=unknown\n" {
+					t.Fatalf("observer create failure was not classified: %s", output)
+				}
+				if strings.Contains(string(output), "PRIVATE_SENTINEL") || strings.Contains(string(output), dir) {
+					t.Fatalf("observer create failure leaked diagnostics: %s", output)
+				}
+				body, readErr := os.ReadFile(filepath.Join(state, "state.json"))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				var partial map[string]any
+				if json.Unmarshal(body, &partial) != nil {
+					t.Fatalf("invalid partial state: %s", body)
+				}
+				observer, ok := partial["observer"].(map[string]any)
+				validObserver := ok && observer["id"] == nil &&
+					observer["name"] == "pgcopydb-feature-123-2-capacity" && observer["owner"] == "123-2"
+				if !validObserver {
+					t.Fatalf("observer intent was not persisted: %s", body)
+				}
+				observerID := strings.Repeat("0", 63) + "2"
+				if strings.HasPrefix(scenario, "observer-absent-id") {
+					observer["id"] = observerID
+					body, err = json.Marshal(partial)
+					if err != nil || os.WriteFile(filepath.Join(state, "state.json"), body, 0o600) != nil {
+						t.Fatal("could not persist observer ID fixture")
+					}
+				}
+				output, err = run("destroy")
+				if strings.Contains(string(output), "PRIVATE_SENTINEL") || strings.Contains(string(output), dir) {
+					t.Fatalf("observer recovery leaked diagnostics: %s", output)
+				}
+				calls, readErr := os.ReadFile(filepath.Join(dir, "calls"))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if strings.HasPrefix(scenario, "observer-absent-id") {
+					nameLookups, idLookups := 0, 0
+					for line := range strings.SplitSeq(string(calls), "\n") {
+						if !strings.HasPrefix(line, "docker container ls ") {
+							continue
+						}
+						hasName := strings.Contains(line, "name=^/pgcopydb-feature-123-2-capacity$")
+						hasID := strings.Contains(line, "id="+observerID)
+						if hasName && hasID {
+							t.Fatal("observer absence combined independent selectors")
+						}
+						if hasName {
+							nameLookups++
+						}
+						if hasID {
+							idLookups++
+						}
+					}
+					if nameLookups == 0 || idLookups == 0 {
+						t.Fatalf("observer absence omitted an independent selector: %s", calls)
+					}
+				}
+				if scenario != "observer-absent" && scenario != "observer-absent-id" {
+					if err == nil {
+						t.Fatalf("ambiguous observer absence passed: %s", output)
+					}
+					body, readErr = os.ReadFile(filepath.Join(state, "state.json"))
+					if readErr != nil || json.Unmarshal(body, &partial) != nil || partial["observer"] == nil {
+						t.Fatalf("ambiguous observer absence cleared intent: %v %s", readErr, body)
+					}
+					if strings.Contains(string(calls), "docker rm ") || strings.Contains(string(calls), "docker start ") {
+						t.Fatalf("ambiguous observer was removed or started: %s", calls)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("proved observer absence did not recover: %v %s", err, output)
+				}
+				body, readErr = os.ReadFile(filepath.Join(state, "state.json"))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				finished := json.Unmarshal(body, &partial) == nil && partial["observer"] == nil &&
+					partial["stage"] == "destroyed" && partial["teardown"] == "complete"
+				if !finished {
+					t.Fatalf("observer absence did not finish teardown: %s", body)
+				}
+				if strings.Contains(string(calls), "docker rm ") || strings.Contains(string(calls), "docker start ") {
+					t.Fatalf("absent observer was removed or started: %s", calls)
+				}
+				return
+			}
 			if scenario != successValue && scenario != containerdValid && !postCreate {
 				if err == nil {
 					t.Fatalf("accepted %s: %s", scenario, output)
@@ -1568,22 +1662,29 @@ docker)
       echo '{"OSType":"linux","CgroupVersion":"2","Driver":"overlay2","DockerRootDir":"/var/lib/docker","NCPU":8,"MemTotal":17179869184,"DriverStatus":[]}' |
         jq --arg s "$scenario" 'if $s|startswith("containerd-") then .Driver="overlayfs" | .DriverStatus=[["driver-type","io.containerd.snapshotter.v1"]] |
           if $s=="containerd-unsupported-driver" then .Driver="unknown" else . end else . end' ;;
-    ps)
+    ps|container)
+      [[ "$1" != container || "$2" == ls ]] || exit 101
       if [[ "$*" == *'label=io.x-k8s.kind.cluster=pgcopydb-feature-123-2'* ]]; then
         [[ "$scenario" != absence-failed ]] || exit 1
         [[ ! -f "$root/cluster" ]] || printf '%064d\n' 1
       elif [[ "$*" == *'name=^/pgcopydb-feature-123-2-capacity$'* ]]; then
+        [[ "$scenario" != observer-absent-list-failed ]] || exit 1
+        [[ "$scenario" != observer-absent-list-malformed ]] || { echo not-a-container-id; exit; }
         [[ ! -f "$root/observer" ]] || printf '%064d\n' 2
+      elif [[ "$*" == *"id=$(printf '%064d' 2)"* ]]; then
+        [[ "$scenario" != observer-absent-id-present ]] || printf '%064d\n' 2
       elif [[ "$*" == *"id=$(printf '%064d' 1)"* && "$scenario" == teardown-remains ]]; then
         printf '%064d\n' 1
       fi ;;
     create)
       [[ "$*" == *'--network none --read-only --cap-drop ALL --security-opt no-new-privileges --pid host --cgroupns host'* ]] || exit 94
       [[ "$*" != *'--cap-add'* && "$*" != *'--privileged'* ]] || exit 95
+      [[ "$scenario" != observer-absent* ]] || { echo "PRIVATE_SENTINEL $root" >&2; exit 125; }
       touch "$root/observer"; [[ "$scenario" != observer-partial ]] || exit 1
       printf '%s\n' "${@: -2:1}" > "$root/observer-pid"; printf '%064d\n' 2 ;;
     inspect)
       if [[ "$*" == *"$(printf '%064d' 2)"* || "$*" == *pgcopydb-feature-123-2-capacity* ]]; then
+        [[ -f "$root/observer" ]] || exit 1
         echo '[{"Id":"0000000000000000000000000000000000000000000000000000000000000002",
           "Name":"/pgcopydb-feature-123-2-capacity","Config":{"Labels":{"pgcopydb-operator.io/feature-run":"123-2"},
           "Image":"kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"},
