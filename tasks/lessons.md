@@ -19,3 +19,5 @@
   A focused success is diagnostic evidence and never replaces the required full exact-head merge gate.
 - Preserve mount propagation when an observer must inspect nested read-only storage mounts.
   A readonly root bind alone does not prove that descendants remain visible and read-only.
+- When a disposable E2E prerequisite cannot be proven on the actual runner path, remove it and return to the established shared-cluster gate.
+  Defer isolation-dependent behavior instead of extending the failed approach with more infrastructure or diagnostics.
