@@ -2,6 +2,17 @@
 
 The day-2 lifecycle of a Migration: pausing it, how the operator retries failed attempts, and what deletion cleans up.
 
+## Initial status
+
+`Pending` is the first phase persisted by the controller, not an API-server default at creation.
+When the entire status is empty, the controller writes only `Pending` and the current `observedGeneration` with an optimistic status patch, then ends that pass.
+It does not validate the spec, add a finalizer, or create resources until a later pass, even when `spec.suspend` is already true.
+The next pass can enter `Validating`, record `Failed` for an invalid spec, or enter `Suspended` as requested.
+Deletion and terminal handling take precedence, and the controller never resets recorded status to `Pending`.
+
+`Pending` has no validation condition or durable condition-transition timestamp.
+An API watch can observe it, but a Prometheus scrape may miss the short-lived phase.
+
 ## Suspend
 
 `spec.suspend: true` deletes the worker Job (foreground, so pgcopydb receives SIGTERM and shuts down cleanly) and keeps the work volume; phase becomes `Suspended`. Setting it back to false starts the next attempt, which resumes from the work-dir catalogs.

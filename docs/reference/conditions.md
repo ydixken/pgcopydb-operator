@@ -2,7 +2,9 @@
 
 The condition types and reason strings the controller writes to `status.conditions`. They are API contract: stable identifiers you can consume from automation (`kubectl wait`, GitOps health checks, alerting) without parsing messages. Every condition is a `metav1.Condition` and carries `observedGeneration`, so a stale condition is detectable after a spec change.
 
-`status.phase` is a one-word summary derived from these conditions for the printer column; the conditions are authoritative.
+`status.phase` summarizes conditions and worker progress for the printer column.
+Its initial `Pending` value records the controller's first observation, before conditions exist; API-server creation does not initialize status.
+Conditions remain authoritative for subsequent outcomes.
 
 ```sh
 kubectl wait --for=condition=Complete migration/shop --timeout=1h
@@ -11,12 +13,12 @@ kubectl wait --for=condition=Complete migration/shop --timeout=1h
 ## Phases
 
 `status.phase` is the printer column: one word for what the migration is doing now.
-It is derived from the conditions and from what the worker is observably doing, and the conditions remain authoritative.
+After the initial `Pending` observation, it reflects conditions and what the worker is observably doing.
 Automation should wait on conditions, not on phase strings.
 
 | Phase | The operator is | Next |
 |---|---|---|
-| `Pending` | Accepted the object, not yet acted | `Validating` |
+| `Pending` | Persisted its first observation, before validation or provisioning | `Validating`, `Failed`, or `Suspended` |
 | `Validating` | Materializing the spec and running the preflight Job | `Cloning`, or `Failed` |
 | `Cloning` | Running the worker: schema, then table data | `Finalizing`, `Streaming`, `Completed`, or `Failed` |
 | `Finalizing` | Past the data copy, finishing indexes, constraints and vacuum | `Streaming`, `Completed`, or `Failed` |
@@ -82,7 +84,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly and the preflight passed; refreshed on every reconcile of an active Migration. |
 | `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unbound PVC, unschedulable). |
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
-| `Validated` | `False` | `PreflightFailed` | The preflight found a failed check: connectivity or a target clone privilege on any migration, or a missing follow prerequisite; the message carries the check output with the exact `GRANT` or setting to fix, plus a `superuserSecretRef` hint when that field could apply it. Terminal. |
+| `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability, a target clone privilege, or a follow prerequisite failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |

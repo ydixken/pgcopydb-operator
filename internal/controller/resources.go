@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"slices"
@@ -765,9 +766,64 @@ else
 fi
 exit "$fail"`
 
+const extensionFiltersEnv = "PREFLIGHT_EXTENSION_FILTERS"
+
+const sourceExtensionsQuery = `SELECT COALESCE(
+jsonb_agg(source_extension.extname ORDER BY source_extension.extname), '[]'::jsonb)
+FROM pg_catalog.pg_extension AS source_extension, (SELECT :'list'::jsonb AS filters) AS input
+WHERE (jsonb_array_length(filters->'include') = 0 OR (filters->'include') ? source_extension.extname::text)
+AND NOT ((filters->'exclude') ? source_extension.extname::text);`
+
+const extensionNamesValidQuery = `SELECT CASE WHEN jsonb_typeof(:'list'::jsonb) = 'array' THEN
+CASE WHEN NOT EXISTS (SELECT 1 FROM jsonb_array_elements(:'list'::jsonb) AS item WHERE jsonb_typeof(item) <> 'string')
+THEN jsonb_array_length(:'list'::jsonb) ELSE -1 END ELSE -1 END;`
+
+const targetExtensionsQuery = `SELECT COALESCE(jsonb_agg(selected.name ORDER BY selected.name), '[]'::jsonb)
+FROM jsonb_array_elements_text(:'list'::jsonb) AS selected(name)
+LEFT JOIN pg_catalog.pg_extension AS installed ON installed.extname::text COLLATE "C" = selected.name
+LEFT JOIN pg_catalog.pg_available_extensions AS available ON available.name::text COLLATE "C" = selected.name
+WHERE NOT (@INSTALLED@ OR available.default_version IS NOT NULL);`
+
+func extensionPreflightBlock(drop bool) string {
+	installed := "installed.extname IS NOT NULL"
+	if drop {
+		installed = "false"
+	}
+	return strings.NewReplacer("@SOURCE@", sourceExtensionsQuery, "@VALIDATE@", extensionNamesValidQuery,
+		"@TARGET@", strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", installed)).Replace(`extension_names_valid() {
+  [ -n "$1" ] || return 1
+  extension_shape=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_VALIDATE'
+@VALIDATE@
+PF_EXTENSION_VALIDATE
+)" "$1" 2>/dev/null) || return 1
+  case "$extension_shape" in ''|*[!0-9]*) return 1 ;; esac
+}
+if selected_extensions=$(checkv "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
+@SOURCE@
+PF_EXTENSION_SOURCE
+)" "${PREFLIGHT_EXTENSION_FILTERS:-}" 2>/dev/null) && extension_names_valid "$selected_extensions"; then
+  if unavailable_extensions=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_TARGET'
+@TARGET@
+PF_EXTENSION_TARGET
+)" "$selected_extensions" 2>/dev/null) && extension_names_valid "$unavailable_extensions"; then
+    if [ "$extension_shape" = 0 ]; then
+      echo "ok: selected extensions available"
+    else
+      note "preflight: selected extensions unavailable on target: $unavailable_extensions; install the required target extension package or choose a target that provides it"
+    fi
+  else
+    note "preflight: target extension availability probe failed"
+  fi
+else
+  note "preflight: source extension selection probe failed"
+fi
+[ "$fail" -eq 0 ] || exit 1
+`)
+}
+
 // preflightScriptFor assembles the per-Migration check script: connectivity
-// always and first, superuser verification when configured, the clone-rights
-// tier for every migration, and the follow battery only for follow migrations.
+// first, optional superuser checks, extensions, then grant checks.
+// Follow-only prerequisites remain outside the clone path.
 func preflightScriptFor(m *v1beta1.Migration) string {
 	var b strings.Builder
 	b.WriteString(preflightHeader)
@@ -778,6 +834,9 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	}
 	if superTgt {
 		b.WriteString(superVerifyBlock(conn.Target))
+	}
+	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
+		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists))
 	}
 	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
 	b.WriteString(cloneRightsBlock(superTgt, dbProps))
@@ -828,6 +887,20 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), 1, extras...)
 	if err != nil {
 		return nil, err
+	}
+	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
+		filters := struct {
+			Include []string `json:"include"`
+			Exclude []string `json:"exclude"`
+		}{Include: []string{}, Exclude: []string{}}
+		if f := m.Spec.Clone.Filters; f != nil {
+			filters.Include = append(filters.Include, f.IncludeOnlyExtensions...)
+			filters.Exclude = append(filters.Exclude, f.ExcludeExtensions...)
+		}
+		// This struct contains only string slices, which json.Marshal cannot reject.
+		encoded, _ := json.Marshal(filters)
+		container := &job.Spec.Template.Spec.Containers[0]
+		container.Env = append(container.Env, corev1.EnvVar{Name: extensionFiltersEnv, Value: string(encoded)})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
 	// and autoscaling surface via PreflightRunning long before 30 minutes;

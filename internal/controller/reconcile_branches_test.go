@@ -95,6 +95,7 @@ var _ = Describe("Migration Controller resilience", func() {
 
 		r := newReconciler()
 		r.Sentinel = fake
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -146,6 +147,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -256,6 +258,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -288,6 +291,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r := newReconciler()
 		r.Sentinel = fake
 		r.Logs = cloneDoneLogs()
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -364,6 +368,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		logs := &fakeLogs{}
 		r.Logs = logs
 		rec := r.Recorder.(*events.FakeRecorder)
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1
@@ -417,6 +422,7 @@ var _ = Describe("Migration Controller resilience", func() {
 		r.Logs = &fakeLogs{tsOut: time.Now().Add(-2*zombieGrace).UTC().Format(time.RFC3339Nano) +
 			` {"timestamp":"t","pid":42,"error_severity":"INFO","message":"reported write_lsn 0/5000"}` + "\n"}
 		rec := r.Recorder.(*events.FakeRecorder)
+		reconcileAndGet(ctx, r, name) // Pending
 		reconcileAndGet(ctx, r, name) // preflight
 		finishJob(ctx, name+"-preflight", true)
 		reconcileAndGet(ctx, r, name) // run-1

@@ -10,9 +10,21 @@ With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` is the whole
 The scraping ServiceAccount additionally needs `get` on the `/metrics` nonResourceURL; kube-prometheus-stack already grants that to its Prometheus, and the 401/403/500 rows in [Troubleshooting](../troubleshooting.md) map the failure modes.
 
 The ServiceMonitor sets `honorLabels: true`, so the `namespace` and `name` labels on migration metrics stay the Migration's own instead of being renamed to `exported_namespace` by the scrape.
-The chart scrapes every 10 seconds, matching the operator's reconcile poll: the gauges only move on a poll, so a slower scrape reads the same sample twice and misses the one in between.
+The chart scrapes every 10 seconds, matching the nominal active-worker poll interval.
+Gauges change when the controller observes the worker; slower scrapes can miss intermediate samples.
 Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by whatever you set.
 The other values tune the rest: `metrics.serviceMonitor.additionalLabels` (for a Prometheus that selects monitors by label), `scrapeTimeout`, `relabelings`, and `metricRelabelings`.
+
+## Controller timing
+
+The normal active-worker path requests its next poll 10 seconds from the start of the reconcile pass, without adding another 10 seconds after observation work finishes.
+An overrun requests a positive requeue delay; slow operations and controller queueing can still delay the next observation.
+Other phase and retry paths keep their own requeue behavior.
+
+The controller emits a sanitized duration summary at verbosity `V(1)` for operations reached during the pass.
+The existing manager flag `--zap-log-level=debug` exposes these messages.
+The summary records timing, not credentials, SQL, or raw command output.
+Use it to investigate slow passes; it does not establish the cause of a historical delay or guarantee a wall-clock polling interval.
 
 ## Metric reference
 
@@ -64,7 +76,7 @@ The three sequential size and scope queries have a combined process budget of 21
 A failed side retains its last size gauge while a usable reading updates the other side.
 Relation counts need both sides, so a partial poll preserves the prior progress counters.
 A failed stage probe preserves the established phase; sampling failures do not complete or fail a migration.
-`pgcopydb_migration_phase` is an instantaneous gauge, and the phase itself is a summary derived from the conditions.
+`pgcopydb_migration_phase` is an instantaneous gauge; after the initial `Pending` bootstrap, the phase summarizes the conditions.
 A phase shorter than the scrape interval is therefore never sampled: on a follow migration whose `Streaming` condition turned true one second before `CaughtUp` did, Prometheus ended up holding no `Streaming` sample at all, while every longer phase was captured.
 A transition timestamp cannot be missed that way, because the value keeps standing for as long as the condition holds, so every scrape carries the same instant the operator stamped when it set the condition.
 One case survives: a condition that changes twice inside a scrape interval publishes only the later of the two transitions, since the CR keeps one `lastTransitionTime` per condition and the earlier value is overwritten before anything reads it.
@@ -85,7 +97,8 @@ The chart ships three dashboards, linked to each other through their shared `pgc
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
-All three auto-refresh every 10 seconds, the same cadence as the poll and the scrape, so a change reaches the screen in roughly one to two of those.
+All three auto-refresh every 10 seconds, matching the nominal poll and scrape intervals.
+Slow controller passes, queueing, and scrape timing can delay a change reaching the screen.
 That is a saved default, not a policy: Grafana's own refresh picker overrides it for your session.
 
 ![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)

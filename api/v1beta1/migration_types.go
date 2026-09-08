@@ -535,12 +535,15 @@ type MigrationSpec struct {
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
-// MigrationPhase is a human-facing summary derived from conditions. It exists
-// for the printer column only; conditions are authoritative.
+// MigrationPhase summarizes conditions and worker progress for the printer column.
+// Initial Pending records the controller's first observation, not an API-server default.
+// Conditions are authoritative after this bootstrap observation.
 // +kubebuilder:validation:Enum=Pending;Validating;Cloning;Finalizing;Streaming;CutoverPending;CuttingOver;Verifying;Completed;Failed;Suspended
 type MigrationPhase string
 
 const (
+	// PhasePending is the first phase persisted by the controller for a new Migration.
+	// API-server creation does not initialize status.
 	PhasePending    MigrationPhase = "Pending"
 	PhaseValidating MigrationPhase = "Validating"
 	PhaseCloning    MigrationPhase = "Cloning"
@@ -601,7 +604,8 @@ type MigrationStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// phase is a human-facing summary derived from conditions.
+	// phase summarizes conditions and worker progress after the controller's
+	// initial Pending observation.
 	// +optional
 	Phase MigrationPhase `json:"phase,omitempty"`
 

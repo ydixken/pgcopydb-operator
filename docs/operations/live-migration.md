@@ -22,6 +22,8 @@ Connectivity to both endpoints always comes first, and each connect is retried u
 A permanent connection error (wrong password, unknown role or database) repeated by the next probe ends the retries there, with the server's error line in the condition message, so that verdict lands in seconds.
 It takes two in a row because a pooler with `auth_query` reports an auth failure of its own when its auth backend blips, and a failed preflight is terminal: the Migration has to be recreated.
 Then, per side with a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref), the superuser connection is probed the same way; a role without `rolsuper` only logs a warning and remediation proceeds, since managed-Postgres admin roles hold the grant rights without the attribute.
+Next, selected source extensions must be installed or default-available on the target; with `spec.clone.dropIfExists`, their default versions must be installable.
+Setting `spec.clone.skip` to include `extensions` bypasses this gate.
 Then the clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe ([prerequisites](../reference/prerequisites.md#base-clone-every-migration) has the details).
 Then the follow prerequisites: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
 Every one of these has failed a live run, and two lose data quietly rather than loudly.

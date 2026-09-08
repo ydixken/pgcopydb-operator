@@ -2064,7 +2064,9 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: phase is a human-facing summary derived from conditions.
+                description: |-
+                  phase summarizes conditions and worker progress after the controller's
+                  initial Pending observation.
                 enum:
                 - Pending
                 - Validating
@@ -4218,7 +4220,9 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: phase is a human-facing summary derived from conditions.
+                description: |-
+                  phase summarizes conditions and worker progress after the controller's
+                  initial Pending observation.
                 enum:
                 - Pending
                 - Validating

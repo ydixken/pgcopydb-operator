@@ -99,50 +99,25 @@
 
 ## Runtime safety implementation plan
 
-- [ ] Bootstrap observer storage-bind repair: The private diagnostic confirmed a sanitized Docker root-mount rejection.
-  Keep storage readonly with bind-recursive enabled and `rslave` propagation.
-  Keep the existing cgroup mount readonly, force-recursive, and `rprivate`.
-  Capture observer mountinfo before storage reads, require one storage root and read-only descendants, and fail closed on writable descendants.
-  Reuse that snapshot for both profile validations, then compare fresh mountinfo after capacity checks before success.
-  Preserve the existing unknown, masking, root-identity, and capacity-ceiling checks.
-  - [x] Author regression fixtures for CI execution only.
-  - [x] Correct the helper and affected documentation.
-  - [x] Complete one independent static review, then format and run `task lint`.
-  - [ ] Push the hotfix and require base CI plus a full exact-head shared baseline before merge.
-  - [ ] Rebase PR 252, complete its full runtime gate, then rebase and deliver the final milestone.
-  The private diagnostic ran once, and no further local functional runs are planned.
-- [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
-  Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
-  The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.
-  The progress recovery oracle accepts changed positive physical counters because storage size is not monotonic.
-  CI runs functional validation, while local work is limited to formatting and `task lint`.
-  Full run `34163739305` lacked the lock-state evidence needed for its failed assertion.
-  One focused CI run may diagnose that assertion, but a successful full exact-head run still gates the merge.
-  Collector fix `7a276036300c58242213be67ba2dca1346c6e3f1` has static approval.
-  After this policy commit, require one exact-head CI and full shared baseline before the ordinary PR 251 merge.
-  Runtime implementation may continue unpublished during that CI wait.
-- [ ] PR 2: Integrate independently reviewed runtime-safety work for #211 manual cutover, #215 cleanup outcomes, #243 worker-session keepalives, and #223 extension preflight.
-  Retain #215's non-skipped isolated cleanup-alert report entry and #243's selected packet-loss expiry proof.
-- [ ] PR 3: Integrate independently reviewed configuration and lifecycle work for #221 same-major version gating, #209 split-table disabling, and #210 initial Pending status.
-  Include #200 only after a measured cause, discriminating regression, and concrete fix are confirmed.
-- [ ] For each batch, complete integration review, local formatting, and `task lint`.
-  CI must complete tests, strict documentation validation, and exact-head full `feature-e2e` evidence.
+- [x] Merge #242 progress-sampler cleanup through PR 250 with exact-head shared E2E evidence.
+- [x] Retire the temporary Kind delivery design and preserve its source refs.
+  The route did not prove its prerequisite on the actual runner path; no failure cause is claimed.
+- [x] Replace PR 252 locally with #211, #223, #210, and only the approved #200 scheduling compensation.
+- [x] Defer all #215, #243, #209, and #221 behavior.
+- [x] Keep #88 out of scope.
+- [ ] Complete the shared-cluster delivery gates below.
 
 ## Runtime safety evidence
 
-- PR 1's workflow integration passed SQL-enabled `task test`, `task lint`, and `mkdocs build --strict` locally.
-  Workflow fixtures cover exclusive routing, native Helm rule enforcement, Migration-bound runtime report entries, exact-head status, cleanup, and teardown failures.
-  Independent integration review and the delivery gates above remain required; local checks do not establish live runner capacity or disposable-cluster success.
-  The approved collector correction requires focused actual-script fixtures, independent review, and fresh base CI plus one shared full exact-head E2E result after its final head changes.
 - #242 merged through [PR #250](https://github.com/ydixken/pgcopydb-operator/pull/250).
   [Full feature E2E](https://github.com/ydixken/pgcopydb-operator/actions/runs/34134512551) verified head `21d10c3864973c8e877a8cafa99f5b24f3318fa6`, including the sampler scenario and cleanup.
   Post-merge [CI](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188021), [docs](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188028), and [mirror](https://github.com/ydixken/pgcopydb-operator/actions/runs/34139188030) passed on `9419372db414c96731abda6ebad13ac99ce7e1b8`.
-- #211 local implementation and independent review accepted source commits `efde537fbc708b7836c4f2b219bc88d79dd83a4f` and `56952f8ba1e989df2305407abc6399c63ec204cc`.
-  Its PR 2 integration candidate still requires whole-batch review and full exact-head feature E2E.
-- #215 local review accepted scoped commits `5cbaf39c17d3677a618aa36665eb84118e328de4` and `72c4e7f1577abb25cfb83d3b94346e643899809f`.
-  Include it in the independently reviewed PR 2, published after the disposable prerequisite reaches trusted main.
-  PR 2's full additive-disposable runtime-safety run provides the first live disposable validation and its merge gate, without a separate smoke PR or run.
-  Acceptance requires full exact-head isolated E2E with a non-skipped cleanup scenario and its `cleanup-alert-after-job-ttl` evidence entry.
+- #211 uses coherent source `972781357628526a220db172f157398e2090599c`.
+- The complete deferred #215 and #243 source remains at `a62ef17724108f6d20b796672fa656188deb82f8`.
+  Earlier #215 branch and stash refs remain extra backups.
+- The deferred #209 and #221 source remains at `43f51270455370224cea493cd51d7b3908fea56d`.
+- Local work remains limited to formatting, `git diff --check`, and `task lint`.
+  CI supplies functional, build, documentation, and exact-head shared E2E evidence.
 
 ## Runtime safety exclusions
 
@@ -155,12 +130,13 @@
 - [x] Preserve the original issue branches, integration branches, complete deferred PR source, and protected stash listed in `tasks/shared-e2e-removal-design.md`.
 - [x] Record the approved implementation and delivery gates in `tasks/shared-e2e-removal-plan.md`.
 - [x] Create `integrate/shared-e2e-on-main-1933ce5` from fetched actual `main` at `1933ce5bb7a2322fddf563ffdbf09b012885cbf1`.
-- [ ] Remove the temporary disposable workflow, observer, documentation, and tests without changing the established shared-cluster route.
-- [ ] Integrate #211, #223, #210, and only the approved #200 scheduling compensation with focused CI-run regression coverage and current documentation.
-- [ ] Exclude #215, #243, #209, #221, and #88.
+- [x] Remove the temporary disposable workflow, observer, documentation, and tests without changing the established shared-cluster route.
+- [x] Integrate #211, #223, #210, and only the approved #200 scheduling compensation with focused CI-run regression coverage and current documentation.
+- [x] Exclude #215, #243, #209, #221, and #88.
   Keep #200 open for the historical 35-second symptom.
-- [ ] Complete one independent static review of the combined diff.
-- [ ] Format touched files, run `git diff --check`, and run `task lint` locally.
+- [x] Complete an independent static review of the retained runtime diff.
+- [x] Complete an independent static review of the workflow, helper, and build-configuration removal diff.
+- [x] Format touched files, run `git diff --check`, and run `task lint` locally.
   CI remains responsible for functional tests, builds, and documentation validation.
 - [ ] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
 - [ ] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -42,8 +43,15 @@ import (
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
-	pgoutputPlugin  = "pgoutput"
-	featureRunOwner = "run-owner"
+	pgoutputPlugin         = "pgoutput"
+	featureRunOwner        = "run-owner"
+	extensionFixtureName   = "citext"
+	extensionBuiltin       = "plpgsql"
+	extensionCitextNames   = `["citext"]`
+	extensionAvailableOK   = "ok: selected extensions available"
+	extensionSourceFailure = "source extension selection probe failed"
+	extensionTargetFailure = "target extension availability probe failed"
+	skipExtensions         = "extensions"
 )
 
 // Schema fixtures for the clone-rights filter tests, hoisted for goconst.
@@ -511,9 +519,20 @@ func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
 func TestPreflightScript_ReplicaIdentityAudit(t *testing.T) {
 	dir := t.TempDir()
 	stub := `#!/bin/sh
-q="$6"
-for a in "$@"; do [ "$a" = "-f" ] && q=$(cat); done
+q="$6"; list=''
+for a in "$@"; do
+  case "$a" in -f) q=$(cat) ;; list=*) list=${a#list=} ;; esac
+done
 case "$q" in
+  "$PREFLIGHT_SOURCE_EXTENSION_QUERY")
+    [ "$1" = src ] && [ "$list" = '{"include":[],"exclude":[]}' ] || exit 1
+    printf '[]' ;;
+  "$PREFLIGHT_TARGET_EXTENSION_QUERY")
+    [ "$1" = tgt ] && [ "$list" = '[]' ] || exit 1
+    printf '[]' ;;
+  "$PREFLIGHT_EXTENSION_SHAPE_QUERY")
+    [ "$1" = tgt ] && [ "$list" = '[]' ] || exit 1
+    echo 0 ;;
   *relreplident*) printf '%s' "${PSQL_RI:-}" ;;
   *has_schema_privilege*) echo "" ;;
   *has_database_privilege*) echo 1 ;;
@@ -548,6 +567,11 @@ esac
 			"PGCOPYDB_TARGET_PGURI=tgt",
 			"PSQL_RI="+offenders,
 			"PREFLIGHT_ALLOW_MISSING_RI="+envValue(c.Env, "PREFLIGHT_ALLOW_MISSING_RI"),
+			"PREFLIGHT_EXTENSION_FILTERS="+envValue(c.Env, extensionFiltersEnv),
+			"PREFLIGHT_SOURCE_EXTENSION_QUERY="+sourceExtensionsQuery,
+			"PREFLIGHT_TARGET_EXTENSION_QUERY="+
+				strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", "installed.extname IS NOT NULL"),
+			"PREFLIGHT_EXTENSION_SHAPE_QUERY="+extensionNamesValidQuery,
 		)
 		out, err := cmd.CombinedOutput()
 		var exitErr *exec.ExitError
@@ -833,8 +857,10 @@ func followPreflightHarness(t *testing.T) func(*testing.T, string, string, ...st
 	// builds role-bearing statements server-side, and the stub emulates the
 	// server's identifier escaping so the injection subtest is faithful.
 	stub := `#!/bin/sh
-uri="$1"; q="$6"
-for a in "$@"; do [ "$a" = "-f" ] && q=$(cat); done
+uri="$1"; q="$6"; list=''
+for a in "$@"; do
+  case "$a" in -f) q=$(cat) ;; list=*) list=${a#list=} ;; esac
+done
 role="${ROLE_NAME:-app}"
 qrole=$(printf '%s' "$role" | sed 's/"/""/g')
 apply() {
@@ -845,6 +871,9 @@ apply() {
   exit 0
 }
 case "$q" in
+  *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
+  *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
+  *pg_available_extensions*) printf '%s' "${PSQL_EXTENSION_TARGET-[]}" ;;
   'select 1')
     n=$(cat "$STATE/conn-$uri" 2>/dev/null || echo 0)
     n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
@@ -896,6 +925,7 @@ esac
 			"STATE="+state,
 			"REMEDY_MODE="+mode,
 			"PREFLIGHT_RETRY_SLEEP=0",
+			`PREFLIGHT_EXTENSION_FILTERS={"include":[],"exclude":[]}`,
 		)
 		cmd.Env = append(cmd.Env, extra...)
 		out, err := cmd.CombinedOutput()
@@ -1346,6 +1376,165 @@ func TestBuilders_InvalidConnection(t *testing.T) {
 	}
 }
 
+func TestPreflightExtensionFilters(t *testing.T) {
+	const unusual = "quote'\"; $(touch /not-executed)\nname"
+	m := passwordMigration()
+	m.Spec.Clone.Filters = &v1beta1.Filters{
+		IncludeOnlyExtensions: []string{extensionFixtureName, unusual}, ExcludeExtensions: []string{extensionBuiltin},
+		IncludeOnlyTables: []string{"audit.events"}, ExcludeSchemas: []string{"public"},
+	}
+	job, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	var filters map[string][]string
+	if err := json.Unmarshal([]byte(envValue(c.Env, extensionFiltersEnv)), &filters); err != nil {
+		t.Fatal(err)
+	}
+	if len(filters) != 2 || strings.Join(filters["include"], "|") != "citext|"+unusual ||
+		strings.Join(filters["exclude"], "|") != extensionBuiltin {
+		t.Fatalf("extension filters mixed with relation filters: %#v", filters)
+	}
+	if strings.Contains(c.Args[1], unusual) {
+		t.Fatal("extension name entered executable script text")
+	}
+	for _, skip := range []v1beta1.SkipOption{skipExtensions, "extensionComments"} {
+		m.Spec.Clone.Skip = []v1beta1.SkipOption{skip}
+		script := preflightScriptFor(m)
+		if strings.Contains(script, sourceExtensionsQuery) != (skip != skipExtensions) {
+			t.Fatalf("wrong extension probe for skip %s", skip)
+		}
+	}
+	script := preflightScriptFor(superMigration())
+	mustPrecede(t, script, "ok: connectivity target", sourceExtensionsQuery)
+	mustPrecede(t, script, "ok: superuser target verified", sourceExtensionsQuery)
+	mustPrecede(t, script, sourceExtensionsQuery, okCloneDB)
+}
+
+func TestPreflightExtensionsFailClosed(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, skip := range []v1beta1.SkipOption{skipExtensions, "extensionComments"} {
+		t.Run("skip "+string(skip), func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.Skip = []v1beta1.SkipOption{skip}
+			out, code, _, _ := run(t, m, "PSQL_FAIL_SUBSTR=source_extension")
+			if (code == 0) != (skip == skipExtensions) {
+				t.Fatalf("skip %s: exit %d: %s", skip, code, out)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"available", []string{`PSQL_EXTENSION_SOURCE=["citext"]`}, extensionAvailableOK},
+		{"empty selection", nil, extensionAvailableOK},
+		{"whitespace empty", []string{"PSQL_EXTENSION_TARGET=[ ]"}, extensionAvailableOK},
+		{"unavailable", []string{`PSQL_EXTENSION_TARGET=["citext"]`}, "selected extensions unavailable on target"},
+		{"source failure", []string{"PSQL_FAIL_SUBSTR=source_extension"}, extensionSourceFailure},
+		{"target failure", []string{"PSQL_FAIL_SUBSTR=pg_available_extensions"}, extensionTargetFailure},
+		{"validation failure", []string{"PSQL_FAIL_SUBSTR=jsonb_typeof"}, extensionSourceFailure},
+		{"source missing", []string{"PSQL_EXTENSION_SOURCE="}, extensionSourceFailure},
+		{"target missing", []string{"PSQL_EXTENSION_TARGET="}, extensionTargetFailure},
+		{"source malformed", []string{"PSQL_EXTENSION_SOURCE=["}, extensionSourceFailure},
+		{"target malformed", []string{"PSQL_EXTENSION_TARGET=["}, extensionTargetFailure},
+		{"source object", []string{"PSQL_EXTENSION_SOURCE={}"}, extensionSourceFailure},
+		{"target object", []string{"PSQL_EXTENSION_TARGET={}"}, extensionTargetFailure},
+		{"source number", []string{"PSQL_EXTENSION_SOURCE=[1]"}, extensionSourceFailure},
+		{"target null", []string{"PSQL_EXTENSION_TARGET=[null]"}, extensionTargetFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _, applied := run(t, passwordMigration(), tc.env...)
+			wantSuccess := strings.HasPrefix(tc.want, "ok:")
+			if (code == 0) != wantSuccess || !strings.Contains(out, tc.want) {
+				t.Fatalf("exit %d, want %q: %s", code, tc.want, out)
+			}
+			if !wantSuccess && (strings.Contains(out, okCloneDB) || applied != "") {
+				t.Fatal("extension failure reached grant checks or remediation")
+			}
+		})
+	}
+}
+
+func TestPreflightExtensionQueries(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("CI supplies PGCOPYDB_TEST_PGURI for extension catalog regressions")
+	}
+	psql, err := exec.LookPath("psql")
+	if err != nil {
+		t.Fatal("PGCOPYDB_TEST_PGURI is set but psql is missing")
+	}
+	probe := func(query, input string) string {
+		t.Helper()
+		cmd := exec.Command(psql, uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-v", "list="+input, "-f", "-")
+		cmd.Stdin = strings.NewReader(query)
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("extension SQL probe failed: %v", err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	for _, tc := range []struct{ input, want string }{
+		{`{"include":["plpgsql"],"exclude":[]}`, `["plpgsql"]`},
+		{`{"include":["PLPGSQL"],"exclude":[]}`, `[]`},
+		{`{"include":["plpgsql"],"exclude":["plpgsql"]}`, `[]`},
+		{`{"include":["name'\\\"; SELECT 1; --"],"exclude":[]}`, `[]`},
+	} {
+		if got := probe(sourceExtensionsQuery, tc.input); got != tc.want {
+			t.Fatalf("source selection = %q, want %q", got, tc.want)
+		}
+	}
+	if got := probe(sourceExtensionsQuery, `{"include":[],"exclude":[]}`); !strings.Contains(got, `"plpgsql"`) {
+		t.Fatalf("unfiltered selection omitted installed plpgsql: %s", got)
+	}
+	if got := probe(sourceExtensionsQuery, `{"include":[],"exclude":["plpgsql"]}`); strings.Contains(got, `"plpgsql"`) {
+		t.Fatalf("exclude-only selection retained plpgsql: %s", got)
+	}
+	for _, tc := range []struct{ input, want string }{
+		{`[]`, "0"}, {`[ ]`, "0"}, {`["quote'\"; --"]`, "1"},
+		{`{}`, "-1"}, {`[1]`, "-1"}, {`[null]`, "-1"}, {`true`, "-1"},
+	} {
+		if got := probe(extensionNamesValidQuery, tc.input); got != tc.want {
+			t.Fatalf("shape verdict = %q, want %q", got, tc.want)
+		}
+	}
+	for _, drop := range []bool{false, true} {
+		_, query, found := strings.Cut(extensionPreflightBlock(drop), "<<'PF_EXTENSION_TARGET'\n")
+		if !found {
+			t.Fatal("shipped target query missing")
+		}
+		query, _, found = strings.Cut(query, "\nPF_EXTENSION_TARGET")
+		if !found {
+			t.Fatal("shipped target query terminator missing")
+		}
+		if got := probe(query, `["plpgsql"]`); got != "[]" {
+			t.Fatalf("installed/default plpgsql unavailable: %s", got)
+		}
+		for _, installed := range []bool{false, true} {
+			for _, available := range []bool{false, true} {
+				installedCatalog := fmt.Sprintf(
+					"(SELECT 'citext'::name AS extname, '9.0' AS extversion WHERE %t)", installed)
+				availableCatalog := fmt.Sprintf(
+					"(SELECT 'citext'::name AS name, '1.0'::text AS default_version WHERE %t)", available)
+				matrix := strings.NewReplacer(
+					"pg_catalog.pg_extension", installedCatalog,
+					"pg_catalog.pg_available_extensions", availableCatalog,
+				).Replace(query)
+				want := extensionCitextNames
+				if available || (installed && !drop) {
+					want = "[]"
+				}
+				if got := probe(matrix, extensionCitextNames); got != want {
+					t.Fatalf("installed=%t available=%t drop=%t: %s, want %s", installed, available, drop, got, want)
+				}
+			}
+		}
+	}
+}
+
 // TestPreflightScriptFor_CloneTier pins the clone-rights tier's structure: it
 // runs for every migration shape, sits between superuser verification and the
 // follow battery, honours the dbProperties skip, and drops the hint lines
@@ -1468,15 +1657,19 @@ func clonePreflightHarness(t *testing.T) func(*testing.T, *v1beta1.Migration, ..
 	// byte-for-byte to APPLY_OUT and, unless PSQL_STICKY=0, flips a marker the
 	// probes honor so the re-check sees the grant.
 	stub := `#!/bin/sh
-q="$6"
+q="$6"; list=''
 for a in "$@"; do
   case "$a" in
-    list=*) printf '%s' "${a#list=}" > "${LIST_OUT:-/dev/null}" ;;
+    list=*) list=${a#list=} ;;
     -f) q=$(cat) ;;
   esac
 done
+case "$q" in *has_schema_privilege*) printf '%s' "$list" > "${LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 case "$q" in
+  *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
+  *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
+  *pg_available_extensions*) printf '%s' "${PSQL_EXTENSION_TARGET-[]}" ;;
   'GRANT CREATE ON DATABASE'*)
     printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
     if [ "${PSQL_STICKY:-1}" = 1 ]; then : > "${STATE_DIR:?}/db-applied"; fi ;;
@@ -1519,6 +1712,7 @@ esac
 			"APPLY_OUT="+applyOut,
 			"STATE_DIR="+scratch,
 			"PREFLIGHT_RETRY_SLEEP=0",
+			"PREFLIGHT_EXTENSION_FILTERS="+envValue(c.Env, extensionFiltersEnv),
 			"PREFLIGHT_SCHEMA_INCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_INCLUDE"),
 			"PREFLIGHT_SCHEMA_EXCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_EXCLUDE"),
 		)
