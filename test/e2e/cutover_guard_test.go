@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,6 +77,7 @@ func TestSlotSenderPID(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Keep this ordered scenario and its bounded failure diagnostics together.
 func earlyManualCutover() {
 	const name = "e2e-follow-early"
 	const marker = "early-cutover-"
@@ -140,15 +142,31 @@ func earlyManualCutover() {
 	psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) "+
 		"SELECT (g %% %d) + 1, 1, '%s' || g || repeat(md5(g::text), 32) "+
 		"FROM generate_series(1, 10000) g", scaled(50000), marker))
-	cutoverEvents := func(g Gomega) int32 {
+	var cutoverRetries int32
+	countCutoverEvents := func(eventCtx context.Context) (int32, error) {
 		events := &corev1.EventList{}
-		g.Expect(k8sClient.List(ctx, events, client.InNamespace(nsE2E))).To(Succeed())
+		if err := k8sClient.List(eventCtx, events, client.InNamespace(nsE2E)); err != nil {
+			cutoverRetries = -1
+			return -1, err
+		}
 		var count int32
+		cutoverRetries = 0
 		for _, e := range events.Items {
-			if e.InvolvedObject.UID == mig.UID && e.Type == corev1.EventTypeNormal && e.Reason == "CutoverStarted" {
+			if e.InvolvedObject.UID != mig.UID {
+				continue
+			}
+			if e.Type == corev1.EventTypeNormal && e.Reason == "CutoverStarted" {
 				count += max(e.Count, 1)
 			}
+			if e.Type == corev1.EventTypeWarning && e.Reason == "CutoverRetry" {
+				cutoverRetries += max(e.Count, 1)
+			}
 		}
+		return count, nil
+	}
+	cutoverEvents := func(g Gomega) int32 {
+		count, err := countCutoverEvents(ctx)
+		g.Expect(err).To(Succeed())
 		return count
 	}
 	By("requiring Streaming with measurable backlog and no cutover despite approval")
@@ -169,11 +187,121 @@ func earlyManualCutover() {
 	By("resuming the sender with source writes stopped and observing automatic use of the existing approval")
 	Expect(signalSender("CONT")).To(Succeed())
 	resumed = true
+	diagnosticStart := time.Now()
+	diagnosticDeadline := diagnosticStart.Add(lagConvergeTimeout)
+	const missingValue = "missing"
+	lsnPattern := `(?:[0-9A-F]{1,8}/[0-9A-F]{1,8}|missing)`
+	lsnValid := regexp.MustCompile("^" + lsnPattern + "$")
+	sourceValid := regexp.MustCompile("^" + strings.Repeat(lsnPattern+" ", 4) +
+		`[01] (startup|catchup|streaming|backup|stopping|missing)$`)
+	safeWord := func(value, allowed string) string {
+		if value == "" || strings.ContainsAny(value, "|\n\r") || !strings.Contains("|"+allowed+"|", "|"+value+"|") {
+			return "unknown"
+		}
+		return value
+	}
+	safeLSN := func(value string) string {
+		if !lsnValid.MatchString(value) {
+			return missingValue
+		}
+		return value
+	}
+	sourceSQL := "SELECT concat_ws(' ', pg_current_wal_flush_lsn(), coalesce(r.write_lsn::text,'missing'), " +
+		"coalesce(r.replay_lsn::text,'missing'), coalesce(s.confirmed_flush_lsn::text,'missing'), " +
+		"s.active::int, coalesce(r.state,'missing')) FROM pg_replication_slots s " +
+		"LEFT JOIN pg_stat_replication r ON r.pid=s.active_pid WHERE s.slot_name='" + slot +
+		"' AND s.database=current_database() AND s.slot_type='logical'"
+	lastSnapshot := "snapshot_unavailable"
+	snapshot := func(stage string) {
+		remaining := time.Until(diagnosticDeadline)
+		if remaining <= 0 {
+			return
+		}
+		probeCtx, cancel := context.WithTimeout(context.Background(), min(2*time.Second, remaining))
+		defer cancel()
+		values := []string{"source_probe_unavailable", "target_probe_unavailable"}
+		for side, database := range []string{sourceCluster, targetCluster} {
+			if probeCtx.Err() != nil {
+				break
+			}
+			primaries := &corev1.PodList{}
+			if err := k8sClient.List(probeCtx, primaries, client.InNamespace(nsE2E), client.MatchingLabels{
+				labelCNPGCluster: database, labelCNPGRole: rolePrimary,
+			}); err != nil || len(primaries.Items) != 1 || probeCtx.Err() != nil {
+				continue
+			}
+			sql := sourceSQL
+			if side == 1 {
+				sql = "SELECT count(*) FROM orders WHERE note LIKE '" + marker + "%'"
+			}
+			out, err := commandOutput(probeCtx, exec.CommandContext, "kubectl", "exec", "-n", nsE2E,
+				primaries.Items[0].Name, "-c", "postgres", "--", "psql", "-U", "postgres", appDB,
+				"-XAtq", "-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=1000", "-c", sql)
+			value := strings.TrimSpace(string(out))
+			if err != nil {
+				continue
+			}
+			if side == 0 && sourceValid.MatchString(value) {
+				values[side] = "source_head/write/replay/confirmed/active/state=" + value
+			} else if count, parseErr := strconv.ParseInt(value, 10, 64); side == 1 && parseErr == nil && count >= 0 {
+				values[side] = "target_marker_rows=" + strconv.FormatInt(count, 10)
+			}
+		}
+		lastSnapshot = fmt.Sprintf("at=%s stage=%s %s",
+			time.Now().UTC().Format(time.RFC3339Nano), stage, strings.Join(values, " "))
+		_, _ = fmt.Fprintln(GinkgoWriter, "cutover snapshot", lastSnapshot)
+	}
+	lastObservation, observationCount := "status_unavailable", 0
+	observe := func(started int32) {
+		status, reason, lag, write, replay := missingValue, missingValue, missingValue, missingValue, missingValue
+		if c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp); c != nil {
+			status = safeWord(string(c.Status), "True|False|Unknown")
+			reason = safeWord(c.Reason, "Lagging|ConfirmingCatchUp|LagBelowThreshold")
+		}
+		endpos := false
+		if rep := m.Status.Replication; rep != nil {
+			write, replay, endpos = safeLSN(rep.WriteLSN), safeLSN(rep.ReplayLSN), rep.Endpos != ""
+			if rep.LagBytes != nil {
+				lag = strconv.FormatInt(*rep.LagBytes, 10)
+			}
+		}
+		phase := safeWord(string(m.Status.Phase), "Pending|Validating|Cloning|Finalizing|Streaming|"+
+			"CutoverPending|CuttingOver|Verifying|Completed|Failed|Suspended")
+		events := "available"
+		if started < 0 {
+			events = "events_unavailable"
+		}
+		value := fmt.Sprintf("phase=%s attempts=%d caught_up=%s reason=%s lag=%s "+
+			"write=%s replay=%s endpos=%t started=%d retries=%d events=%s",
+			phase, m.Status.Attempts, status, reason, lag, write, replay, endpos, started, cutoverRetries, events)
+		if value != lastObservation && observationCount < 29 {
+			_, _ = fmt.Fprintf(GinkgoWriter, "cutover observation at=%s %s\n",
+				time.Now().UTC().Format(time.RFC3339Nano), value)
+			observationCount++
+		}
+		lastObservation = value
+	}
+	DeferCleanup(func() {
+		if CurrentSpecReport().Failed() {
+			_, _ = fmt.Fprintf(GinkgoWriter, "cutover failure at=%s %s; last %s\n",
+				time.Now().UTC().Format(time.RFC3339Nano), lastObservation, lastSnapshot)
+		}
+	})
+	snapshots := 0
 	Eventually(func(g Gomega) {
 		readMigration(g)
+		eventCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, time.Until(diagnosticDeadline)))
+		started, _ := countCutoverEvents(eventCtx)
+		cancel()
+		observe(started)
+		if snapshots == 0 || (snapshots == 1 && time.Since(diagnosticStart) >= 30*time.Second) ||
+			(snapshots == 2 && time.Until(diagnosticDeadline) <= 5*time.Second) {
+			snapshot([]string{"resumed", "after_30s", "deadline"}[snapshots])
+			snapshots++
+		}
 		g.Expect(m.Status.Replication).NotTo(BeNil(), "phase=%s: replication status absent", m.Status.Phase)
 		g.Expect(m.Status.Replication.Endpos).NotTo(BeEmpty(), "phase=%s: cutover endpos absent", m.Status.Phase)
-		g.Expect(cutoverEvents(g)).To(Equal(int32(1)), "phase=%s: expected one cutover event", m.Status.Phase)
+		g.Expect(started).To(Equal(int32(1)), "phase=%s: expected one cutover event", m.Status.Phase)
 	}, lagConvergeTimeout, time.Second).Should(Succeed())
 	Eventually(func(g Gomega) {
 		readMigration(g)
