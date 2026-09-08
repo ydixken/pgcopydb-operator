@@ -227,11 +227,8 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 		m.Status.Phase = v1beta1.PhaseCutoverPending
 	}
 
-	// Draining: pgcopydb 0.18 evaluates endpos only against WAL it receives,
-	// so a fully idle source would never conclude the drain (see
-	// docs/research/upstream-issues.md). One tiny logical message per pass
-	// gives the receiver a record to evaluate; idempotent, harmless under
-	// real traffic, best effort like the sentinel reads above.
+	// Some worker versions need new WAL to observe a freshly set endpos.
+	// Emit a harmless logical message while draining; failures retry next pass.
 	if m.Status.Phase == v1beta1.PhaseCuttingOver {
 		if err := r.Sentinel.NudgeEndpos(ctx, m.Namespace, jobName); err != nil {
 			log.V(1).Info("endpos nudge failed", "job", jobName, "error", err)

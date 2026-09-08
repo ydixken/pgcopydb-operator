@@ -69,20 +69,17 @@ func (c *Client) inPodSh(ctx context.Context, namespace, pod, script string) ([]
 // status.replication.
 type State struct {
 	WriteLSN string
-	// ReplayLSN is how far the consumer has got as the SOURCE reports it,
-	// which is a measure of consumption, not of application. The target's
-	// replication origin is the stricter reading and is deliberately not used
-	// here; see readScript for what that cost.
+	// ReplayLSN is the slot's reported replay cursor, with confirmed-flush
+	// fallback when PostgreSQL does not provide replay feedback.
 	ReplayLSN string
 	Endpos    string
-	// SourceHead is pg_current_wal_flush_lsn() on the source, the reference
-	// for lag: replication is caught up when SourceHead - ReplayLSN is small.
+	// SourceHead is source-wide durable WAL, not the publication cursor.
 	SourceHead string
 }
 
-// Lag returns SourceHead minus ReplayLSN in bytes, or -1 when unknown. Both
-// sides come from the source, so this is WAL produced but not yet consumed:
-// it reaches zero on an idle source, which is what CaughtUp waits for.
+// Lag estimates source-wide durable WAL distance from the slot progress sample.
+// Filtered WAL may leave a non-zero idle gap. It returns -1 when either LSN
+// is invalid or the source head precedes replay.
 func (s State) Lag() int64 {
 	head, err1 := ParseLSN(s.SourceHead)
 	replay, err2 := ParseLSN(s.ReplayLSN)
@@ -92,59 +89,9 @@ func (s State) Lag() int64 {
 	return int64(head - replay)
 }
 
-// readScript samples the stream in one exec, from the source alone.
-//
-// Both positions come from the same slot row, and both fall back the same
-// way: the walsender's own number when the reader may see it, the slot's
-// confirmed flush position otherwise, because PostgreSQL blanks every
-// walsender detail column in pg_stat_replication for a role without
-// pg_read_all_stats, its own row included (verified on PostgreSQL 17).
-//
-// That order is a preference, not a workaround, and the coalesce must not be
-// collapsed to the slot alone. The walsender's replay_lsn column carries the
-// applied field of the consumer's feedback packet, which is pgcopydb's
-// sentinel replay cursor on every version that has one, 0.17 included. So
-// wherever the reader may see the column, the value is honest whatever
-// pgcopydb is running, and the slot is the fallback rather than the source.
-//
-// The fallback is honest from 0.18 on: stream_sync_sentinel drives the
-// confirmed flush position from that same sentinel replay cursor whenever it
-// is non-zero, which is why pgcopydb's own feedback reports write, flush and
-// replay at one LSN. That is upstream behaviour, verified identical between
-// upstream v0.18 and the pinned fork commit; the fork pin buys the
-// list-progress and filtered-catalog fixes and nothing here depends on it.
-// Below 0.18, where streamFlush confirms the locally fsynced receive
-// position, the slot tracks receive progress instead and lag under-reports by
-// the whole receive-ahead-of-apply gap, silently. A downgrade past that
-// boundary, or a future upstream change to stream_sync_sentinel, breaks this
-// reading with no error anywhere.
-//
-// The target's replication origin is deliberately NOT read here, though it is
-// the stricter position. The origin only advances inside a committed apply
-// transaction, so it parks at the last applied COMMIT and falls behind by
-// every byte of WAL that is consumed but never applied: filtered tables,
-// catalog churn, keepalives. Measured on PostgreSQL 17, a source writing only to
-// unpublished tables put the origin 122 MB behind while the consumer sat at
-// the WAL head, and once the source went idle the gap only grew, because
-// nothing would ever apply again. Driving lag off that number hung a release
-// candidate at 1.95 GB of reported lag on a migration that was fully caught
-// up: CaughtUp never turned true, so no cutover could fire.
-//
-// The two questions are not the same question. Lag gates catch-up and wants
-// an optimistic reading of progress, which is what the consumer has consumed.
-// Whether the target really applied it all is proven strictly and separately,
-// after the worker exits, by origin progress plus a content compare (see
-// buildVerifyJob, whose own comment records that this gap "grows with idle
-// time" and refuted healthy drains live). Conflating them is what broke.
-//
-// Which is also the limit of what a caught-up stream means, and the reason
-// the compare-data path in that verification must not be dropped on the
-// grounds that this figure is now honest. What advances here is an apply
-// cursor, and it advances when the apply's COMMITs succeed whether or not
-// they changed anything on the target: in the live session_replication_role
-// incident the positions tracked normally while nothing was being applied at
-// all. CaughtUp therefore means the stream has been consumed, never that the
-// two databases hold the same rows. Only content can say that.
+// readScript samples source head and the exact migration slot in one exec.
+// It prefers reported replay; confirmed-flush fallback remains slot-scoped but
+// may measure consumption, so server-wide WAL distance is only an estimate.
 //
 // Best effort, and the script always exits 0: psql reports a SQL error in its
 // exit status, and a failure here must never cost the caller its sample.
@@ -220,14 +167,9 @@ func (c *Client) SetEndposCurrent(ctx context.Context, namespace, jobName string
 	return strings.TrimSpace(string(out)), nil
 }
 
-// NudgeEndpos emits a tiny non-transactional logical message on the source.
-// pgcopydb 0.18 evaluates endpos only against WAL it receives, so on a fully
-// idle source a freshly set endpos is never reached and the drain hangs; one
-// throwaway record gives the receiver something to evaluate (see
-// docs/research/upstream-issues.md). pg_logical_emit_message carries the
-// default PUBLIC execute grant, so the migration user can always call it.
-// Idempotent and harmless under real traffic. Best effort like Read: no
-// running pod is no error, and callers only debug-log failures.
+// NudgeEndpos emits a logical message for compatibility with workers that
+// need new WAL to observe a freshly set endpos. It is best effort: a missing
+// pod is not an error, and callers only debug-log failures.
 func (c *Client) NudgeEndpos(ctx context.Context, namespace, jobName string) error {
 	pod, err := c.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil || pod == "" {
