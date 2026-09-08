@@ -2469,8 +2469,8 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 			if (renderErr != nil) != tt.wantError {
 				t.Fatalf("native Helm rule boundary: %v, want error %v\n%s", renderErr, tt.wantError, rendered)
 			}
-			if tt.wantError && !strings.Contains(string(rendered), "feature chart render is unsafe") {
-				t.Fatalf("native Helm failed before the trusted renderer rejected the rule: %s", rendered)
+			if tt.wantError && !strings.Contains(string(rendered), `post-renderer plugin "`+featurePostRendererPlugin+`"`) {
+				t.Fatalf("native Helm failed outside the trusted renderer: %s", rendered)
 			}
 			if strings.Contains(string(rendered), "kind: PrometheusRule") {
 				t.Error("candidate values produced a PrometheusRule")

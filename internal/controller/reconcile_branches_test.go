@@ -454,7 +454,10 @@ var _ = Describe("Migration Controller resilience", func() {
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pvc) })
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{
+		r := newReconciler()
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhasePending))
+		_, err := r.Reconcile(ctx, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: name, Namespace: testNS},
 		})
 		Expect(err).To(MatchError(ContainSubstring("belongs to another owner")))
