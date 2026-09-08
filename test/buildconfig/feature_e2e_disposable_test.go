@@ -1668,8 +1668,10 @@ docker)
         [[ "$scenario" != absence-failed ]] || exit 1
         [[ ! -f "$root/cluster" ]] || printf '%064d\n' 1
       elif [[ "$*" == *'name=^/pgcopydb-feature-123-2-capacity$'* ]]; then
-        [[ "$scenario" != observer-absent-list-failed ]] || exit 1
-        [[ "$scenario" != observer-absent-list-malformed ]] || { echo not-a-container-id; exit; }
+        if [[ -f "$root/observer-create-attempted" ]]; then
+          [[ "$scenario" != observer-absent-list-failed ]] || exit 1
+          [[ "$scenario" != observer-absent-list-malformed ]] || { echo not-a-container-id; exit; }
+        fi
         [[ ! -f "$root/observer" ]] || printf '%064d\n' 2
       elif [[ "$*" == *"id=$(printf '%064d' 2)"* ]]; then
         [[ "$scenario" != observer-absent-id-present ]] || printf '%064d\n' 2
@@ -1679,7 +1681,7 @@ docker)
     create)
       [[ "$*" == *'--network none --read-only --cap-drop ALL --security-opt no-new-privileges --pid host --cgroupns host'* ]] || exit 94
       [[ "$*" != *'--cap-add'* && "$*" != *'--privileged'* ]] || exit 95
-      [[ "$scenario" != observer-absent* ]] || { echo "PRIVATE_SENTINEL $root" >&2; exit 125; }
+      [[ "$scenario" != observer-absent* ]] || { touch "$root/observer-create-attempted"; echo "PRIVATE_SENTINEL $root" >&2; exit 125; }
       touch "$root/observer"; [[ "$scenario" != observer-partial ]] || exit 1
       printf '%s\n' "${@: -2:1}" > "$root/observer-pid"; printf '%064d\n' 2 ;;
     inspect)

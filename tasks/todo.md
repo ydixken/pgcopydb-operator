@@ -102,6 +102,7 @@
 - [ ] Bootstrap hotfix: Full runtime run `34172878722` failed with `create kind-operation-failed` followed by `teardown kind-observer-cleanup-failed`.
   The missing-observer cleanup failure is a confirmed secondary error, while the primary create failure remains unproven.
   The helper now proves recorded observer absence after failed creation and emits fixed diagnostic categories only.
+  Base CI run `34174453118` reached fixture cases before the intended create boundary, so the fixture records the failed create attempt before checking observer absence.
   Require a shared-baseline full exact-head gate before trusted-main merge, then rebase PR 252 onto that actual main commit.
   Hold PR 3 until PR 252 is rebased and merged.
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
