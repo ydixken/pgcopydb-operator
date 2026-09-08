@@ -81,9 +81,11 @@ func TestSlotSenderPID(t *testing.T) {
 func earlyManualCutover() {
 	const name = "e2e-follow-early"
 	const marker = "early-cutover-"
+	const backlogRows = 20000
 	mig := newFollowMigration(name, v1beta1.CutoverManual)
 	mig.Spec.Cutover.Approved = true
-	threshold := resource.MustParse("1Mi")
+	// The normal allowance accounts for WAL beyond applied rows; the paused burst must still exceed it.
+	threshold := resource.MustParse("16Mi")
 	mig.Spec.Follow.MaxCatchupLag = &threshold
 	DeferCleanup(func() {
 		deleteMigration(name)
@@ -141,7 +143,7 @@ func earlyManualCutover() {
 	By("committing a bounded backlog while only this migration's sender is paused")
 	psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) "+
 		"SELECT (g %% %d) + 1, 1, '%s' || g || repeat(md5(g::text), 32) "+
-		"FROM generate_series(1, 10000) g", scaled(50000), marker))
+		"FROM generate_series(1, %d) g", scaled(50000), marker, backlogRows))
 	var cutoverRetries int32
 	countCutoverEvents := func(eventCtx context.Context) (int32, error) {
 		events := &corev1.EventList{}
@@ -318,7 +320,8 @@ func earlyManualCutover() {
 	expectSingleAttempt(m)
 	expectCleanupSucceeded(name)
 	Expect(cutoverEvents(Default)).To(Equal(int32(1)))
-	Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE '"+marker+"%'")).To(Equal("10000"))
+	Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE '"+marker+"%'")).
+		To(Equal(strconv.Itoa(backlogRows)))
 	Expect(sourceSlotCount()).To(Equal("0"))
 	Expect(targetOriginCount()).To(Equal("0"))
 }
