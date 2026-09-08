@@ -99,6 +99,11 @@
 
 ## Runtime safety implementation plan
 
+- [ ] Bootstrap hotfix: Full runtime run `34172878722` failed with `create kind-operation-failed` followed by `teardown kind-observer-cleanup-failed`.
+  The missing-observer cleanup failure is a confirmed secondary error, while the primary create failure remains unproven.
+  The helper now proves recorded observer absence after failed creation and emits fixed diagnostic categories only.
+  Require a shared-baseline full exact-head gate before trusted-main merge, then rebase PR 252 onto that actual main commit.
+  Hold PR 3 until PR 252 is rebased and merged.
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
   Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
   The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.

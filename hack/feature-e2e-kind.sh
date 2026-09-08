@@ -20,7 +20,7 @@ trap 'fail kind-operation-failed' ERR
 trusted=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 [[ "$(cd -- "$state" && pwd -P)" == "$state" && "$state" == "$(cd -- "$RUNNER_TEMP" && pwd -P)"/* &&
    -O "$state" && "$(stat -c %a "$state")" == 700 ]] || fail kind-state-invalid
-for binary in jq docker curl sha256sum timeout kubectl helm go; do command -v "$binary" >/dev/null || fail kind-tool-missing; done
+for binary in jq docker curl sha256sum timeout tail kubectl helm go; do command -v "$binary" >/dev/null || fail kind-tool-missing; done
 export KIND_EXPERIMENTAL_PROVIDER=docker
 cluster="pgcopydb-feature-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 context="kind-$cluster"
@@ -125,7 +125,30 @@ verify_node() {
 }
 cleanup_observer() {
   local details id
-  details=$(timeout --kill-after=10s 30 docker inspect "$observer") || return 1
+  if ! details=$(timeout --kill-after=10s 30 docker inspect "$observer"); then
+    [[ "$observer" == "$cluster-capacity" || "$observer" =~ ^[a-f0-9]{64}$ ]] || return 1
+    jq -e --arg name "$cluster-capacity" --arg owner "$owner" '
+      .observer.name==$name and .observer.owner==$owner and
+      (.observer.id==null or (.observer.id | type=="string" and test("^[a-f0-9]{64}$")))
+    ' "$state/state.json" >/dev/null || return 1
+    id=$(jq -r '.observer.id // empty' "$state/state.json") || return 1
+    if [[ "$observer" =~ ^[a-f0-9]{64}$ ]]; then
+      [[ -z "$id" || "$id" == "$observer" ]] || return 1
+      id=$observer
+    fi
+    # Separate filters also catch a recorded container that was renamed after creation.
+    timeout --kill-after=10s 30 docker container ls --all --quiet --no-trunc \
+      --filter "name=^/$cluster-capacity$" > "$work/observer-list" || return 1
+    [[ ! -s "$work/observer-list" ]] || return 1
+    if [[ -n "$id" ]]; then
+      timeout --kill-after=10s 30 docker container ls --all --quiet --no-trunc \
+        --filter "id=$id" > "$work/observer-list" || return 1
+      [[ ! -s "$work/observer-list" ]] || return 1
+    fi
+    save '.observer = null' || return 1
+    observer=
+    return 0
+  fi
   jq -e --arg id "$observer" --arg name "/$cluster-capacity" --arg owner "$owner" --arg image "$node_image" '
     length == 1 and (.[0].Id == $id or ("/"+$id)==$name) and .[0].Name == $name and
     (.[0].Id | test("^[a-f0-9]{64}$")) and
@@ -181,11 +204,29 @@ capacity() {
   existing=$(timeout --kill-after=10s 30 docker ps -aq --no-trunc --filter "name=^/$cluster-capacity$") || fail kind-observer-unproved
   [[ -z "$existing" ]] || fail kind-observer-occupied
   save '.observer = {id:null,name:$name,owner:$owner}' --arg name "$cluster-capacity" --arg owner "$owner"
+  local create_status=0 create_error category=unknown
   observer=$(timeout --kill-after=10s 180 docker create --name "$cluster-capacity" --label "pgcopydb-operator.io/feature-run=$owner" \
     --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pid host --cgroupns host \
     --mount "type=bind,src=/sys/fs/cgroup,dst=/capacity/cgroup,readonly,bind-recursive=readonly,bind-propagation=rprivate" \
     --mount "type=bind,src=$root,dst=/capacity/storage,readonly,bind-recursive=readonly,bind-propagation=rprivate" \
-    --entrypoint /bin/bash -i "$node_image" -s -- "$pid" "$start")
+    --entrypoint /bin/bash -i "$node_image" -s -- "$pid" "$start" 2> "$work/observer-create.stderr") || create_status=$?
+  if (( create_status != 0 )); then
+    # Docker errors may contain private paths; only fixed categories leave the private directory.
+    create_error=$(tail -c 65536 "$work/observer-create.stderr")
+    if (( create_status == 124 )); then
+      category=timeout
+    else
+      case "$create_error" in
+        *'invalid mount config for type "bind"'*) category=mount ;;
+        *'bind-recursive=readonly requires API v1.44 or later'*|*"unknown option 'bind-recursive'"*) category=unsupported-option ;;
+        *'pull access denied for '*|*'manifest for '*' not found'*|*'repository '*' not found'*) category=image ;;
+        *'Cannot connect to the Docker daemon'*|*'permission denied while trying to connect to the Docker daemon socket'*) category=daemon ;;
+      esac
+    fi
+    rm -- "$work/observer-create.stderr"
+    fail "kind-observer-create-failed status=$create_status category=$category"
+  fi
+  rm -- "$work/observer-create.stderr"
   [[ "$observer" =~ ^[a-f0-9]{64}$ ]] || fail kind-observer-invalid
   [[ ! -f "$state/state.json" ]] || save '.observer = {id:$id,name:$name,owner:$owner}' \
     --arg id "$observer" --arg name "$cluster-capacity" --arg owner "$owner"
