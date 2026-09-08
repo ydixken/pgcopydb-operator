@@ -310,15 +310,16 @@ func expectLifecycleResourcesAbsent(m *v1beta1.Migration) {
 
 func TestActiveWorkerObservationTiming(t *testing.T) {
 	tests := []struct {
-		name       string
-		follow     bool
-		zombie     bool
-		patchError error
-		wantResult time.Duration
-		wantErr    error
-		want       []string
-		omit       []string
-		outcome    string
+		name        string
+		follow      bool
+		zombie      bool
+		patchError  error
+		deleteError error
+		wantResult  time.Duration
+		wantErr     error
+		want        []string
+		omit        []string
+		outcome     string
 	}{
 		{
 			name: "clone normal return", wantResult: time.Nanosecond, outcome: "normal",
@@ -339,6 +340,11 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 			want: []string{timingCloneStage, timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
 			omit: []string{timingNextDelay},
 		},
+		{
+			name: "zombie reap error", follow: true, zombie: true, deleteError: errBoom, wantErr: errBoom, outcome: "zombie_reap_error",
+			want: []string{timingCloneStage, timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
+			omit: []string{timingNextDelay},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,7 +357,13 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
 			}
 			clock := &stepClock{at: time.Unix(200, 0), step: time.Second}
-			baseReconciler := failingReconciler(t, interceptor.Funcs{}, m)
+			objects := []client.Object{m}
+			if tc.deleteError != nil {
+				objects = append(objects, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: workerPodName, Namespace: m.Namespace, Labels: map[string]string{jobNameLabel: m.Status.JobName},
+				}})
+			}
+			baseReconciler := failingReconciler(t, interceptor.Funcs{}, objects...)
 			baseClient, ok := baseReconciler.Client.(client.WithWatch)
 			if !ok {
 				t.Fatal("fake client does not support watch")
@@ -365,6 +377,12 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 						return tc.patchError
 					}
 					return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					if tc.deleteError != nil {
+						return tc.deleteError
+					}
+					return c.Delete(ctx, obj, opts...)
 				},
 			})
 			core, recorded := observer.New(zapcore.DebugLevel)
