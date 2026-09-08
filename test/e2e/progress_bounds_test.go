@@ -120,23 +120,28 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 			}()
 			psql(sourceCluster, fmt.Sprintf("INSERT INTO %s SELECT i, repeat(md5(i::text), 100) "+
 				"FROM generate_series(%d,%d) i", table, side*1000+1, (side+1)*1000))
+			for _, database := range []string{sourceCluster, targetCluster} {
+				psql(database, fmt.Sprintf("CREATE INDEX progress_lock_recovery_%d ON %s (id)", side, table))
+			}
 			Eventually(func(g Gomega) {
 				m := readMigration()
-				detail := fmt.Sprintf("after %s lock: phase=%s attempts=%d baseline bytesTotal=%d bytesDone=%d",
+				detail := fmt.Sprintf("after %s lock: phase=%s attempts=%d baseline bytesTotal=%d bytesDone=%d "+
+					"indexesTotal=%d indexesDone=%d",
 					[]string{sourceKey, targetKey}[side], m.Status.Phase, m.Status.Attempts,
-					baseline.BytesTotal.Value(), baseline.BytesDone.Value())
+					baseline.BytesTotal.Value(), baseline.BytesDone.Value(), baseline.IndexesTotal, baseline.IndexesDone)
 				g.Expect(m.Status.Progress).NotTo(BeNil(), detail)
 				g.Expect(m.Status.Progress.BytesTotal).NotTo(BeNil(), detail)
 				g.Expect(m.Status.Progress.BytesDone).NotTo(BeNil(), detail)
 				total, done := m.Status.Progress.BytesTotal.Value(), m.Status.Progress.BytesDone.Value()
-				detail += fmt.Sprintf(" current bytesTotal=%d bytesDone=%d", total, done)
+				detail += fmt.Sprintf(" current bytesTotal=%d bytesDone=%d indexesTotal=%d indexesDone=%d",
+					total, done, m.Status.Progress.IndexesTotal, m.Status.Progress.IndexesDone)
 				g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending), detail)
 				g.Expect(m.Status.Attempts).To(Equal(int32(1)), detail)
 				g.Expect(total).To(BeNumerically(">", 0), detail)
 				g.Expect(done).To(BeNumerically(">", 0), detail)
-				// Physical table-size sums can decrease; changed paired counters prove a fresh sample.
-				g.Expect(total).NotTo(Equal(baseline.BytesTotal.Value()), detail)
-				g.Expect(done).NotTo(Equal(baseline.BytesDone.Value()), detail)
+				// Index counts prove both samplers recovered even when physical bytes stay unchanged.
+				g.Expect(m.Status.Progress.IndexesTotal).To(Equal(baseline.IndexesTotal+1), detail)
+				g.Expect(m.Status.Progress.IndexesDone).To(Equal(baseline.IndexesDone+1), detail)
 			}, time.Minute, time.Second).Should(Succeed(),
 				"sampling must recover after unlocking")
 			Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
