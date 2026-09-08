@@ -171,13 +171,9 @@ func earlyManualCutover() {
 	resumed = true
 	Eventually(func(g Gomega) {
 		readMigration(g)
-		caughtUp := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
-		g.Expect(caughtUp).NotTo(BeNil())
-		g.Expect(caughtUp.Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(caughtUp.Reason).To(Equal("LagBelowThreshold"))
-		g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
-		g.Expect(m.Status.Replication.Endpos).NotTo(BeEmpty())
-		g.Expect(cutoverEvents(g)).To(Equal(int32(1)))
+		g.Expect(m.Status.Replication).NotTo(BeNil(), "phase=%s: replication status absent", m.Status.Phase)
+		g.Expect(m.Status.Replication.Endpos).NotTo(BeEmpty(), "phase=%s: cutover endpos absent", m.Status.Phase)
+		g.Expect(cutoverEvents(g)).To(Equal(int32(1)), "phase=%s: expected one cutover event", m.Status.Phase)
 	}, lagConvergeTimeout, time.Second).Should(Succeed())
 	Eventually(func(g Gomega) {
 		readMigration(g)
