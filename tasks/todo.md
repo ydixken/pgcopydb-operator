@@ -99,12 +99,18 @@
 
 ## Runtime safety implementation plan
 
-- [ ] Bootstrap hotfix: Full runtime run `34172878722` failed with `create kind-operation-failed` followed by `teardown kind-observer-cleanup-failed`.
-  The missing-observer cleanup failure is a confirmed secondary error, while the primary create failure remains unproven.
-  The helper now proves recorded observer absence after failed creation and emits fixed diagnostic categories only.
-  Base CI run `34174453118` reached fixture cases before the intended create boundary, so the fixture records the failed create attempt before checking observer absence.
-  Require a shared-baseline full exact-head gate before trusted-main merge, then rebase PR 252 onto that actual main commit.
-  Hold PR 3 until PR 252 is rebased and merged.
+- [ ] Bootstrap observer storage-bind repair: The private diagnostic confirmed a sanitized Docker root-mount rejection.
+  Keep storage readonly with bind-recursive enabled and `rslave` propagation.
+  Keep the existing cgroup mount readonly, force-recursive, and `rprivate`.
+  Capture observer mountinfo before storage reads, require one storage root and read-only descendants, and fail closed on writable descendants.
+  Reuse that snapshot for both profile validations, then compare fresh mountinfo after capacity checks before success.
+  Preserve the existing unknown, masking, root-identity, and capacity-ceiling checks.
+  - [x] Author regression fixtures for CI execution only.
+  - [x] Correct the helper and affected documentation.
+  - [x] Complete one independent static review, then format and run `task lint`.
+  - [ ] Push the hotfix and require base CI plus a full exact-head shared baseline before merge.
+  - [ ] Rebase PR 252, complete its full runtime gate, then rebase and deliver the final milestone.
+  The private diagnostic ran once, and no further local functional runs are planned.
 - [ ] PR 1: Add the disposable kind CRD-validation E2E prerequisite with candidate-SHA, capacity, metrics, and teardown gates.
   Merge through the existing exact-head shared baseline gate, then use PR 2's one full isolated runtime-safety run for the first disposable live validation.
   The approved capacity correction keeps the classic overlay2 collector and adds a bounded containerd-overlayfs path only when exact storage identity and free-space provenance are proven.

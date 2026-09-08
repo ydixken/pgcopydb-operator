@@ -1332,7 +1332,10 @@ func TestFeatureE2EKindArguments(t *testing.T) {
 
 //nolint:gocyclo // Each branch checks a distinct bootstrap or recovery boundary.
 func TestFeatureE2EKindBootstrap(t *testing.T) {
-	const containerdValid = "containerd-valid"
+	const (
+		containerdValid     = "containerd-valid"
+		observerAbsentMount = "observer-absent-mount"
+	)
 	for _, scenario := range []string{
 		successValue, "architecture", featureDockerCommand, "kind-checksum", "cnpg-checksum", "monitoring-checksum",
 		"cpu", "memory", featureStorageKey, "cgroup", "submount", "observer", "observer-cleanup",
@@ -1345,7 +1348,7 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 		"ready-installed-missing", "ready-installed-empty", "ready-kubeconfig-missing", "ready-kubeconfig-empty",
 		containerdValid, "containerd-metadata-timeout", "containerd-metadata-drift", "containerd-pid-drift",
 		"containerd-unsupported-driver", "containerd-partial-graphdriver", "containerd-cleanup",
-		"observer-absent", "observer-absent-list-failed", "observer-absent-list-malformed",
+		"observer-absent", observerAbsentMount, "observer-absent-list-failed", "observer-absent-list-malformed",
 		"observer-absent-id", "observer-absent-id-present",
 	} {
 		t.Run(scenario, func(t *testing.T) {
@@ -1405,7 +1408,11 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 				if err == nil {
 					t.Fatalf("accepted failed observer create: %s", output)
 				}
-				if string(output) != "kind-observer-create-failed status=125 category=unknown\n" {
+				category := "unknown"
+				if scenario == observerAbsentMount {
+					category = "mount"
+				}
+				if string(output) != "kind-observer-create-failed status=125 category="+category+"\n" {
 					t.Fatalf("observer create failure was not classified: %s", output)
 				}
 				if strings.Contains(string(output), "PRIVATE_SENTINEL") || strings.Contains(string(output), dir) {
@@ -1463,7 +1470,8 @@ func TestFeatureE2EKindBootstrap(t *testing.T) {
 						t.Fatalf("observer absence omitted an independent selector: %s", calls)
 					}
 				}
-				if scenario != "observer-absent" && scenario != "observer-absent-id" {
+				if scenario != "observer-absent" && scenario != observerAbsentMount &&
+					scenario != "observer-absent-id" {
 					if err == nil {
 						t.Fatalf("ambiguous observer absence passed: %s", output)
 					}
@@ -1680,7 +1688,19 @@ docker)
       fi ;;
     create)
       [[ "$*" == *'--network none --read-only --cap-drop ALL --security-opt no-new-privileges --pid host --cgroupns host'* ]] || exit 94
+      mount_count=0
+      for argument in "$@"; do [[ "$argument" != --mount ]] || ((mount_count += 1)); done
+      [[ "$mount_count" == 2 ]] || exit 101
+      [[ "$*" == *'--mount type=bind,src=/sys/fs/cgroup,dst=/capacity/cgroup,readonly,bind-recursive=readonly,bind-propagation=rprivate'* ]] || exit 102
+      [[ "$*" == *'--mount type=bind,src=/var/lib/docker,dst=/capacity/storage,readonly,bind-recursive=enabled,bind-propagation=rslave'* ]] || exit 103
+      [[ "$*" != *'dst=/capacity/storage,readonly,bind-recursive=enabled,bind-propagation=rprivate'* &&
+         "$*" != *'dst=/capacity/storage,readonly,bind-recursive=enabled,bind-propagation=rshared'* ]] || exit 104
       [[ "$*" != *'--cap-add'* && "$*" != *'--privileged'* ]] || exit 95
+      [[ "$scenario" != observer-absent-mount ]] || {
+        touch "$root/observer-create-attempted"
+        echo "invalid mount config: must use either propagation mode PRIVATE_SENTINEL $root" >&2
+        exit 125
+      }
       [[ "$scenario" != observer-absent* ]] || { touch "$root/observer-create-attempted"; echo "PRIVATE_SENTINEL $root" >&2; exit 125; }
       touch "$root/observer"; [[ "$scenario" != observer-partial ]] || exit 1
       printf '%s\n' "${@: -2:1}" > "$root/observer-pid"; printf '%064d\n' 2 ;;
@@ -2050,13 +2070,16 @@ func TestFeatureE2EKindCapacityBody(t *testing.T) {
 	for _, scenario := range []string{
 		successValue, featureOwnedMerged, "ancestor cpu", "ancestor memory", "ancestor cpuset", "unknown namespace",
 		"masked cgroup", "storage submount", "storage floor", "cpu floor", "memory floor", "missing limit",
-		"malformed limit", "pid reused", "different backing", "unowned merged",
+		"malformed limit", "pid reused", "different backing", "unowned merged", "writable storage root",
+		"writable storage descendant", "missing storage root", "duplicate storage root", "mountinfo drift",
 		"containerd valid", "containerd rootfs guess", "containerd upper outside", "containerd work outside",
 		"containerd lower outside", "containerd first lower outside", "containerd lower missing",
 		"containerd snapshot mismatch",
 		"containerd separate backing", "containerd hidden mount", "containerd malformed options", "containerd unknown option",
 		"containerd node start", "containerd node namespace", "containerd node root", "containerd node volume",
-		"containerd observer root", "containerd duplicate option",
+		"containerd observer root", "containerd duplicate option", "containerd writable storage root",
+		"containerd writable storage descendant", "containerd missing storage root",
+		"containerd duplicate storage root", "containerd mountinfo drift",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -2145,6 +2168,21 @@ func TestFeatureE2EKindCapacityBody(t *testing.T) {
 			switch scenario {
 			case featureOwnedMerged:
 				mounts += "3 2 0:3 / /capacity/storage/overlay2/layer/merged ro - overlay overlay ro\n"
+			case "writable storage root", "containerd writable storage root":
+				mounts = strings.Replace(mounts, "/capacity/storage ro -", "/capacity/storage rw -", 1)
+			case "writable storage descendant":
+				mounts += "3 2 0:3 / /capacity/storage/overlay2/layer/merged rw - overlay overlay ro\n"
+			case "containerd writable storage descendant":
+				observerRoot := "/runtime/" + strings.Repeat("0", 63) + "2/rootfs"
+				mounts = strings.Replace(mounts, observerRoot+" ro -", observerRoot+" rw -", 1)
+			case "missing storage root":
+				mounts = strings.Replace(mounts,
+					"2 0 0:2 /docker /capacity/storage ro - ext4 /dev/test ro\n", "", 1)
+			case "containerd missing storage root":
+				mounts = strings.Replace(mounts,
+					"2 0 0:2 /docker /capacity/storage ro - ext4 /dev/test rw\n", "", 1)
+			case "duplicate storage root", "containerd duplicate storage root":
+				mounts += "9 0 0:2 /docker /capacity/storage ro - ext4 /dev/test ro\n"
 			case "ancestor cpu":
 				write("capacity/cgroup/parent/cpu.max", "799999 100000\n")
 			case "ancestor memory":
@@ -2187,14 +2225,22 @@ exec bash "$1/probe.sh" 77 "$2" "$3" "$4" "$5" "$6" /docker "$7" "$8" "$9"`, "ca
 			cmd.Env = append(os.Environ(), "PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
 				"FAKE_CAPACITY_SCENARIO="+scenario)
 			output, err := cmd.CombinedOutput()
+			earlyMountFailure := strings.Contains(scenario, "storage root") ||
+				strings.Contains(scenario, "storage descendant")
 			if scenario == successValue || scenario == featureOwnedMerged || scenario == "containerd valid" {
 				if err != nil || !strings.Contains(string(output), `"nodeStartTime":"900"`) {
 					t.Fatalf("capacity: %v %s", err, output)
 				}
 			} else if err == nil {
 				t.Fatalf("accepted %s: %s", scenario, output)
-			} else if strings.HasPrefix(scenario, "containerd ") && string(output) != "kind-storage-unproved\n" {
+			} else if strings.HasPrefix(scenario, "containerd ") && !earlyMountFailure &&
+				string(output) != "kind-storage-unproved\n" {
 				t.Fatalf("did not reach containerd storage rejection: %v %s", err, output)
+			}
+			if earlyMountFailure {
+				if _, statErr := os.Stat(filepath.Join(dir, "storage-accessed")); !os.IsNotExist(statErr) {
+					t.Fatalf("storage evidence was accessed before mountinfo rejection: %v", statErr)
+				}
 			}
 		})
 	}
@@ -2202,8 +2248,18 @@ exec bash "$1/probe.sh" 77 "$2" "$3" "$4" "$5" "$6" /docker "$7" "$8" "$9"`, "ca
 
 const featureKindCapacityFixture = `#!/usr/bin/env bash
 set -eu
+if [[ "$*" == *'/capacity/storage'* ]]; then
+  target=${!#}
+  fixture_root=${target%%/capacity/storage*}
+  : > "$fixture_root/storage-accessed"
+fi
 case "$(basename "$0")" in
 stat)
+  if [[ ( "$FAKE_CAPACITY_SCENARIO" == 'mountinfo drift' ||
+          "$FAKE_CAPACITY_SCENARIO" == 'containerd mountinfo drift' ) &&
+        "$*" == *'%d '*'/capacity/storage' ]]; then
+    printf '99 0 0:99 / /unrelated ro - tmpfs tmpfs ro\n' >> "$fixture_root/proc/self/mountinfo"
+  fi
   case "$*" in
     *'%t '*'/proc/self/ns/cgroup') echo 6e736673 ;;
     *'%i '*'/proc/self/ns/cgroup')
