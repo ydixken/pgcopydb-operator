@@ -27,12 +27,13 @@ Individual checks appear as `ok:` log lines.
 
 1. Partial.
    API filter validation and `clone rights schemas` operate on declared scope, but preflight does not confirm operator intent.
-2. Not checked.
-   Preflight does not query server versions, extensions, collations, encodings, or source-to-target compatibility.
+2. Partial.
+   Preflight checks selected extension availability, but not extension version compatibility, package installation, installation privileges, collations, encodings, or wider source-to-target compatibility.
+   Server-version equality is not checked.
 3. Partial outside preflight.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not validate downtime, RPO, RTO, or acceptance criteria.
 4. Partial.
-   Exact checks include `connectivity source`, `connectivity target`, `clone rights database`, `clone rights schemas`, `clone rights db-properties` when enabled, `superuser source connected` when applicable, `superuser source verified` when applicable, `superuser target connected` when applicable, `superuser target verified` when applicable, and follow-specific `source replication attribute`, `target origin function grants`, and `target session_replication_role`.
+   Exact checks include `connectivity source`, `connectivity target`, `selected extensions available` unless skipped, `clone rights database`, `clone rights schemas`, `clone rights db-properties` when enabled, `superuser source connected` when applicable, `superuser source verified` when applicable, `superuser target connected` when applicable, `superuser target verified` when applicable, and follow-specific `source replication attribute`, `target origin function grants`, and `target session_replication_role`.
    A connected role without `rolsuper` emits the corresponding warning instead of a verified line.
    Preflight does not audit TLS policy or all required ownership and publication rights.
 5. Partial.

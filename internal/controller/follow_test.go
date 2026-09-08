@@ -239,10 +239,10 @@ var _ = Describe("Migration Controller follow mode", func() {
 		return r
 	}
 
-	// passPreflight drives the gate every follow migration now starts with:
-	// the first pass creates only the preflight Job; its success unlocks run-1.
+	// passPreflight drives a fresh follow migration through Pending and its gate.
 	passPreflight := func(r *MigrationReconciler, name string) *v1beta1.Migration {
 		GinkgoHelper()
+		reconcileAndGet(ctx, r, name)
 		m := reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-preflight", true)
 		return m
@@ -257,9 +257,13 @@ var _ = Describe("Migration Controller follow mode", func() {
 		r.Logs = logs
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 
-		// Pass 1 creates the preflight Job, not the worker: the finalizer is
-		// already on (a preflight cannot leak a slot, but the order is fixed).
+		// Pass 1 persists Pending without creating resources or a finalizer.
 		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Finalizers).To(BeEmpty())
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhasePending))
+
+		// Pass 2 creates the preflight Job, not the worker.
+		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Finalizers).To(ContainElement(finalizerName))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
 		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
@@ -461,6 +465,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name) // run-1
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}}
+		fixedNow := time.Unix(100, 0)
+		r.now = func() time.Time { return fixedNow }
 
 		// Base copy running. The mid-copy requeue used to stretch to double
 		// the poll; the size samples are the live view of a copy, so it does
@@ -753,7 +759,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("Migration"))
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
 
-		// Pass 1 must survive the stored []: finalizer on, status written.
+		// Both Pending and validation must preserve the stored [].
+		reconcileAndGet(ctx, r, name)
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Finalizers).To(ContainElement(finalizerName))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseValidating))
@@ -785,6 +792,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		defer removeMigration(ctx, name)
 		r := followReconciler(&fakeSentinel{})
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+		reconcileAndGet(ctx, r, name)
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Finalizers).To(ContainElement(finalizerName))
 		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
@@ -819,6 +827,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 
 		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-preflight", false)
 		m := reconcileAndGet(ctx, r, name)
 
@@ -847,6 +856,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 
 		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-preflight", false)
 		// nil LogReader: envtest's default, and the operator's stance when
 		// the pod is already gone.
@@ -864,8 +874,8 @@ var _ = Describe("Migration Controller follow mode", func() {
 		r := followReconciler(&fakeSentinel{})
 		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
 
-		// Pass 1 creates the preflight Job; nothing runs it in envtest, so
-		// the gate reports a running preflight.
+		// The second pass creates the preflight Job; envtest does not run it.
+		reconcileAndGet(ctx, r, name)
 		m := reconcileAndGet(ctx, r, name)
 		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
 		Expect(validated.Status).To(Equal(metav1.ConditionUnknown))

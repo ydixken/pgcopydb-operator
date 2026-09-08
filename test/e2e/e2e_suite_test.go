@@ -240,8 +240,7 @@ var (
 
 	// Only the literal "false" leaves the fixture namespaces to their owner
 	// (GitOps in CI): the suite then works inside them and creates none.
-	manageNamespaces   = os.Getenv("E2E_MANAGE_NAMESPACES") != "false"
-	isolatedAlertProof bool
+	manageNamespaces = os.Getenv("E2E_MANAGE_NAMESPACES") != "false"
 
 	// pgSource and pgTarget pick the PostgreSQL major for each fixture
 	// cluster's operand image (E2E_PG_SOURCE/E2E_PG_TARGET, default 17).
@@ -872,21 +871,7 @@ func TestE2E(t *testing.T) {
 	RunSpecs(t, "pgcopydb-operator e2e suite")
 }
 
-func loadIsolatedAlertProof() (bool, error) {
-	switch os.Getenv("FEATURE_E2E_SCHEMA_VALIDATION") {
-	case "", "identical":
-		return false, nil
-	case "additive-disposable":
-		return true, nil
-	default:
-		return false, errors.New("FEATURE_E2E_SCHEMA_VALIDATION must be identical or additive-disposable")
-	}
-}
-
 var _ = BeforeSuite(func() {
-	var err error
-	isolatedAlertProof, err = loadIsolatedAlertProof()
-	Expect(err).NotTo(HaveOccurred())
 	ctx = context.Background()
 	Expect(validateFeatureE2ERunValue()).To(Succeed())
 
@@ -2170,6 +2155,7 @@ func psqlDB(cluster, db, sql string) string {
 
 type commandFactory func(context.Context, string, ...string) *exec.Cmd
 
+//nolint:unparam // Callers pass the executable so the injected command factory sees the full command.
 func commandOutput(
 	ctx context.Context,
 	command commandFactory,

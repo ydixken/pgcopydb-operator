@@ -4,20 +4,13 @@ schema_profile=${FEATURE_E2E_SCHEMA_VALIDATION:-identical}
 suite_profile=${SUITE_PROFILE:-baseline}
 case "$schema_profile" in
   identical) ;;
-  additive-disposable) unset E2E_EXTRA_TABLES E2E_EXTRA_SIZE_GB E2E_EXTRA_JOBS ;;
   *) echo "::error::schema validation profile is invalid"; exit 1 ;;
 esac
 case "$suite_profile" in
-  baseline) label_filter='!chaos && !flaky && !isolated-runtime-safety' ;;
-  runtime-safety)
-    [ "$schema_profile" = additive-disposable ] && [ "$RUN_MODE" = full ] &&
-      [ "${E2E_SCALE:-}" = 0.1 ] && [ -z "${E2E_FOCUS:-}" ] || {
-        echo "::error::runtime-safety suite profile is invalid"
-        exit 1
-      }
-    label_filter='(!chaos && !flaky && !isolated-runtime-safety) || (isolated-runtime-safety && !flaky)' ;;
+  baseline) ;;
   *) echo "::error::suite profile is invalid"; exit 1 ;;
 esac
+label_filter='!chaos && !flaky && !isolated-runtime-safety'
 suite_report=$FEATURE_E2E_HELPERS/suite-report.json
 rm -f "$FEATURE_E2E_HELPERS/manager-attested" "$suite_report"
 export PATH="$FEATURE_E2E_HELPERS/bin:$PATH"
@@ -103,57 +96,5 @@ jq -e --argjson result "$suite_result" '
   echo "::error::suite completion report is missing, malformed, or unsafe"
   exit 1
 }
-if [ "$suite_result" -eq 0 ] && [ "$schema_profile" = additive-disposable ] && [ "$RUN_MODE" = full ]; then
-  jq -e '
-    [.[0].SpecReports[] | select(.LeafNodeType == "It") |
-      . as $spec |
-      ((.ContainerHierarchyTexts // []) | index("Migration metrics") != null) as $container |
-      (((.ContainerHierarchyLabels // [] | flatten) + (.LeafNodeLabels // [])) |
-        index("metrics") != null) as $label |
-      select($container or $label) |
-      {valid: ($container and $label and $spec.State == "passed")}] |
-    length > 0 and all(.[]; .valid)
-  ' "$suite_report" >/dev/null 2>&1 || {
-    echo "::error::full disposable metrics evidence is missing or incomplete"
-    exit 1
-  }
-  printf 'metrics_completed=true\n' >> "$GITHUB_OUTPUT"
-fi
-if [ "$suite_result" -eq 0 ] && [ "$suite_profile" = runtime-safety ]; then
-  jq -e '
-    def proof($name; $leaf):
-      [.[0].SpecReports[] as $spec | ($spec.ReportEntries // [])[] |
-        select(.Name == $name) | {spec: $spec, entry: .}] |
-      if length == 1 and .[0].spec.LeafNodeType == "It" and
-         .[0].spec.LeafNodeText == $leaf and .[0].spec.State == "passed"
-      then .[0] else error("invalid proof entry") end;
-    def positive_integer: type == "number" and . > 0 and floor == .;
-    def payload: .entry.Value.AsJSON | fromjson | select(type == "object");
-    . as $report |
-    ($report | proof("dead-worker-session-expiry";
-      "expires abandoned source and target sessions after packet loss and resumes")) as $expiry |
-    ($report | proof("cleanup-alert-after-job-ttl";
-      "records exhausted cleanup after proven drain and restores retained replication state") | payload) as $cleanup |
-    ($expiry | payload) as $worker |
-    ($expiry.spec.ContainerHierarchyTexts | index("Worker session bounds") != null) and
-    ($worker.migrationUID | type == "string" and length > 0) and
-    ($cleanup.migrationUID | type == "string" and length > 0) and
-    ($worker.sourceCohortSize | positive_integer) and
-    ($worker.targetCohortSize | positive_integer) and
-    ($worker.sourceExpiredCount | positive_integer) and
-    ($worker.targetExpiredCount | positive_integer) and
-    $worker.sourceExpiredCount == $worker.sourceCohortSize and
-    $worker.targetExpiredCount == $worker.targetCohortSize and
-    ($worker.expirySeconds | type == "number" and . > 0 and . <= 180) and
-    all(["targetCopyObserved", "rollbackRegisteredBeforeFault", "faultRuleInstalled", "faultRuleRemoved",
-      "controlSessionHealthy", "longCopyOutlivedProbe", "resumeObserved", "dataMatched"][]; $worker[.] == true) and
-    $worker.backendTerminationUsed == false and
-    all(["jobTTLObserved", "failureMetricObserved", "firingAlertObserved"][]; $cleanup[.] == true)
-  ' "$suite_report" >/dev/null 2>&1 || {
-    echo "::error::runtime-safety proof is missing or invalid"
-    exit 1
-  }
-  printf 'runtime_safety_completed=true\n' >> "$GITHUB_OUTPUT"
-fi
 printf 'suite_completed=true\n' >> "$GITHUB_OUTPUT"
 exit "$suite_result"

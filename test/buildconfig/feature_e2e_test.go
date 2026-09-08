@@ -41,8 +41,12 @@ const (
 	protectedClusterGroup        = "e2e-cluster"
 	resolveJob                   = "resolve"
 	pendingStatusJob             = "pending-status"
+	featurePreflightJob          = "preflight"
 	managerImageJob              = "manager-image"
 	runnerImageJob               = "runner-image"
+	featureClusterJob            = "cluster"
+	featureHelpersStep           = "Write cluster helpers"
+	featureSuiteStep             = "Run non-chaos suite"
 	permissionContents           = "contents"
 	permissionPackages           = "packages"
 	permissionRead               = "read"
@@ -54,10 +58,15 @@ const (
 	skippedValue                 = "skipped"
 	errorValue                   = "error"
 	unreadableValue              = "unreadable"
+	unknownValue                 = "unknown"
 	fullModeValue                = "full"
 	focusModeValue               = "focus"
 	featureDefaultScale          = "0.1"
 	featureFullScale             = "1.0"
+	featureChoiceType            = "choice"
+	featureResolvedSHA           = "${{ needs.resolve.outputs.sha }}"
+	featurePassingShell          = "#!/usr/bin/env bash\nexit 0\n"
+	identicalSchemaProfile       = "identical"
 	recoveryValue                = "recovery"
 	roleKind                     = "Role"
 	roleBindingKind              = "RoleBinding"
@@ -66,7 +75,10 @@ const (
 	customResourceDefinitionKind = "CustomResourceDefinition"
 	listKind                     = "List"
 	schemaDescriptionKey         = "description"
+	schemaPropertiesKey          = "properties"
+	schemaDefaultKey             = "default"
 	schemaTypeKey                = "type"
+	schemaListFixture            = "list"
 	schemaKeepValue              = "keep"
 	schemaRemoveValue            = "remove"
 	schemaStringType             = "string"
@@ -82,6 +94,10 @@ const (
 	sidecarName                  = "sidecar"
 	imageIDKey                   = "imageID"
 	kubectlCommand               = "kubectl"
+	featureMakeCommand           = "make"
+	featureDockerCommand         = "docker"
+	featureUnsetValue            = "unset"
+	featureLegacyAdditive        = "additive-disposable"
 	replacementUID               = "44444444-4444-4444-8444-444444444444"
 	conditionTrueValue           = "True"
 	replacementName              = "replacement"
@@ -99,6 +115,16 @@ const (
 	helmSetJSONFlag              = "--set-json"
 	helmPostRendererFlag         = "--post-renderer"
 	featurePostRendererPlugin    = "feature-e2e-postrenderer"
+	featureRuleEnabled           = "metrics.prometheusRule.enabled=true"
+	featureValuesFlag            = "--values"
+	featureOwnerFile             = "owner"
+	featureCleanupOutput         = "cleanup"
+	featureSuiteOutput           = "suite"
+	featureManagerOutput         = "manager_attested"
+	featureRunnerOutput          = "runner_attested"
+	featureSuiteRanOutput        = "suite_ran"
+	featureCompleteOutput        = "suite_completed"
+	featureCancelledValue        = "cancelled"
 	appsV1                       = "apps/v1"
 	namespaceKey                 = "namespace"
 	labelsKey                    = "labels"
@@ -706,17 +732,14 @@ func TestFeatureE2ECandidateCompatibility(t *testing.T) {
 	}
 	baseSnapshot := loadCompatibilitySnapshot(t, base)
 	headSnapshot := loadCompatibilitySnapshot(t, head)
-	profile := os.Getenv("FEATURE_E2E_SCHEMA_VALIDATION")
-	if err := compareFeatureCRDs(baseSnapshot.CRDs, headSnapshot.CRDs, profile); err != nil {
-		t.Errorf("candidate changes the CRD beyond the selected profile: %v", err)
+	if !maps.Equal(baseSnapshot.CRDs, headSnapshot.CRDs) {
+		t.Error("candidate changes CRD schemas apart from descriptions")
 	}
 	if !maps.Equal(baseSnapshot.RBAC, headSnapshot.RBAC) {
 		t.Error("candidate changes Role, RoleBinding, ClusterRole, or ClusterRoleBinding documents")
 	}
-	if err := compareFeatureRenderedPrivileges(
-		baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges, profile,
-	); err != nil {
-		t.Errorf("candidate changes rendered CRD or RBAC beyond the selected profile: %v", err)
+	if !slices.Equal(baseSnapshot.RenderedPrivileges, headSnapshot.RenderedPrivileges) {
+		t.Error("candidate changes rendered CRD or RBAC apart from descriptions")
 	}
 	if !maps.Equal(baseSnapshot.Builder, headSnapshot.Builder) {
 		t.Error("candidate changes images/pgcopydb-builder")
@@ -763,7 +786,7 @@ func TestFeatureE2ETriggerInputsAndResolver(t *testing.T) {
 	}
 	inputs := wf.On["workflow_dispatch"].Inputs
 	if got := slices.Sorted(maps.Keys(inputs)); !slices.Equal(got, []string{
-		"focus", "mode", "pr", "scale", "schema_validation", "suite_profile",
+		"focus", "mode", "pr", "scale",
 	}) {
 		t.Errorf("feature inputs = %v", got)
 	}
@@ -886,14 +909,13 @@ func TestFeatureE2EPermissionsAndStatuses(t *testing.T) {
 		t.Fatalf("top permissions = %v, want explicit empty map", wf.Permissions)
 	}
 	want := map[string]map[string]string{
-		resolveJob:           {permissionContents: permissionRead, "pull-requests": permissionRead},
-		pendingStatusJob:     {"statuses": permissionWrite},
-		featurePreflightJob:  {permissionContents: permissionRead, permissionPackages: permissionRead},
-		managerImageJob:      {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		runnerImageJob:       {permissionContents: permissionRead, permissionPackages: permissionWrite},
-		featureClusterJob:    {permissionContents: permissionRead, permissionPackages: permissionRead},
-		featureDisposableJob: {permissionContents: permissionRead, permissionPackages: permissionRead},
-		"final-status":       {"statuses": permissionWrite},
+		resolveJob:          {permissionContents: permissionRead, "pull-requests": permissionRead},
+		pendingStatusJob:    {"statuses": permissionWrite},
+		featurePreflightJob: {permissionContents: permissionRead, permissionPackages: permissionRead},
+		managerImageJob:     {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		runnerImageJob:      {permissionContents: permissionRead, permissionPackages: permissionWrite},
+		featureClusterJob:   {permissionContents: permissionRead, permissionPackages: permissionRead},
+		"final-status":      {"statuses": permissionWrite},
 	}
 	if got := slices.Sorted(maps.Keys(wf.Jobs)); !slices.Equal(got, slices.Sorted(maps.Keys(want))) {
 		t.Fatalf("feature jobs = %v, want %v", got, slices.Sorted(maps.Keys(want)))
@@ -916,6 +938,7 @@ func TestFeatureE2EPermissionsAndStatuses(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Each branch checks a distinct workflow safety boundary.
 func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 	wf := parseProtectedWorkflow(t, featureWorkflow)
 	preflightCheckouts := protectedStepsUsing(wf.Jobs[featurePreflightJob], "actions/checkout@v7")
@@ -933,10 +956,10 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 			t.Errorf("preflight checkout for %q is not pinned safely", path)
 		}
 	}
-	for _, jobName := range []string{managerImageJob, runnerImageJob, featureClusterJob, featureDisposableJob} {
+	for _, jobName := range []string{managerImageJob, runnerImageJob, featureClusterJob} {
 		checkouts := protectedStepsUsing(wf.Jobs[jobName], "actions/checkout@v7")
 		wantCount := 1
-		if jobName == featureClusterJob || jobName == featureDisposableJob {
+		if jobName == featureClusterJob {
 			wantCount = 2
 			_ = protectedStepNamed(t, wf.Jobs[jobName], featureHelpersStep)
 		}
@@ -996,9 +1019,107 @@ func TestFeatureE2ECompatibilityAndImmutableImages(t *testing.T) {
 		t.Error("feature path does not preserve the cluster CRD")
 	}
 	cluster := wf.Jobs[featureClusterJob]
+	if got := protectedNeeds(t, cluster); !slices.Equal(got,
+		[]string{resolveJob, featurePreflightJob, managerImageJob, runnerImageJob}) ||
+		cluster.If != "" || cluster.RunsOn != "github-runner-pgcopydb-e2e" ||
+		cluster.Environment != protectedClusterGroup ||
+		cluster.Concurrency.Group != protectedClusterGroup || cluster.Concurrency.CancelInProgress {
+		t.Errorf("cluster route = needs %v, if %q, runner %q, environment %q, concurrency %+v",
+			got, cluster.If, cluster.RunsOn, cluster.Environment, cluster.Concurrency)
+	}
 	if !strings.Contains(cluster.Env["MANAGER_REF"], "@${{ needs.manager-image.outputs.digest }}") ||
 		!strings.Contains(cluster.Env["RUNNER_REF"], "@${{ needs.runner-image.outputs.digest }}") {
 		t.Error("cluster image references are not digest-qualified")
+	}
+}
+
+func TestFeatureE2EPreflightFailsClosed(t *testing.T) {
+	check := protectedStepNamed(t,
+		parseProtectedWorkflow(t, featureWorkflow).Jobs[featurePreflightJob],
+		"Check candidate compatibility",
+	)
+	for _, tt := range []struct {
+		name, failure, candidateDigest string
+		wantError                      bool
+	}{
+		{name: "success", candidateDigest: strings.Repeat("1", 64)},
+		{name: "manifest generation", failure: featureMakeCommand,
+			candidateDigest: strings.Repeat("1", 64), wantError: true},
+		{name: "chart CRD synchronization", failure: "sync-chart-crd.sh",
+			candidateDigest: strings.Repeat("1", 64), wantError: true},
+		{name: "chart RBAC synchronization", failure: "sync-chart-rbac.sh",
+			candidateDigest: strings.Repeat("1", 64), wantError: true},
+		{name: "compatibility test", failure: "go", candidateDigest: strings.Repeat("1", 64), wantError: true},
+		{name: "builder comparison", candidateDigest: strings.Repeat("2", 64), wantError: true},
+		{name: "registry inspection", failure: featureDockerCommand,
+			candidateDigest: strings.Repeat("1", 64), wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for root, digest := range map[string]string{
+				"trusted": strings.Repeat("1", 64), "candidate": tt.candidateDigest,
+			} {
+				writeCompatibilityFixture(t, dir, root+"/images/runner/Dockerfile",
+					"FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:test@sha256:"+digest+" AS pgcopydb\n")
+			}
+			for _, name := range []string{
+				featureMakeCommand, "go", featureDockerCommand, "git", "helm",
+				"../trusted/hack/sync-chart-crd.sh", "../trusted/hack/sync-chart-rbac.sh",
+			} {
+				path := filepath.Join(dir, "bin", name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				body := `#!/usr/bin/env bash
+set -euo pipefail
+name=${0##*/}
+printf '%s\n' "$name" >> "$CALLS"
+[[ "$name" != "$FAIL_COMMAND" ]]
+if [[ "$name" == go ]]; then
+  [[ "$PWD" == "$GITHUB_WORKSPACE/trusted" ]]
+  [[ "$FEATURE_E2E_BASE" == "$GITHUB_WORKSPACE/trusted" ]]
+  [[ "$FEATURE_E2E_HEAD" == "$GITHUB_WORKSPACE/candidate" ]]
+  [[ "$*" == "test ./test/buildconfig -run ^TestFeatureE2ECandidateCompatibility$ -count=1" ]]
+fi
+`
+				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outputPath := filepath.Join(dir, "output")
+			callsPath := filepath.Join(dir, "calls")
+			cmd := exec.Command("bash", "-c", check.Run)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"PATH="+filepath.Join(dir, "bin")+":"+os.Getenv("PATH"),
+				"GITHUB_WORKSPACE="+dir,
+				"GITHUB_OUTPUT="+outputPath,
+				"CALLS="+callsPath,
+				"FAIL_COMMAND="+tt.failure,
+			)
+			output, runErr := cmd.CombinedOutput()
+			if (runErr != nil) != tt.wantError {
+				t.Fatalf("preflight error = %v, want error %t: %s", runErr, tt.wantError, output)
+			}
+			if evidence, readErr := os.ReadFile(outputPath); readErr == nil && len(evidence) != 0 {
+				t.Fatalf("preflight emitted unsupported success evidence: %q", evidence)
+			} else if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+			if !tt.wantError {
+				calls := read(t, callsPath)
+				for _, name := range []string{
+					featureMakeCommand, "git", "sync-chart-crd.sh", "sync-chart-rbac.sh", "go", featureDockerCommand,
+				} {
+					if !strings.Contains(calls, name+"\n") {
+						t.Errorf("successful preflight did not execute %s", name)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -2112,6 +2233,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		{"set-json malformed value", []string{helmSetJSONFlag, "watchNamespaces"}},
 		{"safe flag followed by option", []string{helmSetFlag, "--values=fixture-values.yaml"}},
 		{"short values followed by option", []string{"-f", "--values=fixture-values.yaml"}},
+		{"namespace creation", []string{"--create-namespace"}},
 	}
 	for _, tt := range rejectedHelmArgs {
 		t.Run(tt.name+" is rejected before Helm", func(t *testing.T) {
@@ -2152,6 +2274,7 @@ func TestFeatureE2EManagerCorrelation(t *testing.T) { //nolint:gocyclo // One ta
 		{"set-string equals flag", []string{"--set-string=runner.image.tag=fixture"}, false},
 		{"set-json separate flag", []string{helmSetJSONFlag, `watchNamespaces=["pgcopydb-e2e"]`}, false},
 		{"set-json equals flag", []string{`--set-json=watchNamespaces=["pgcopydb-e2e"]`}, false},
+		{"candidate alert rule override", []string{helmSetFlag, featureRuleEnabled}, false},
 	}
 	for _, tt := range safeHelmArgs {
 		t.Run(tt.name+" preserves the trusted name on retries", func(t *testing.T) {
@@ -2260,7 +2383,6 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 		mode os.FileMode
 	}{
 		filepath.Join(dir, featureOwnerFile):    {imageAttestationOwnerValue, 0o600},
-		filepath.Join(dir, featureSchemaFile):   {identicalSchemaProfile, 0o600},
 		filepath.Join(dir, "post-renderer"):     {postRenderer, 0o700},
 		filepath.Join(pluginDir, "plugin.yaml"): {plugin, 0o600},
 	} {
@@ -2328,34 +2450,203 @@ func TestFeatureE2EPostRendererRunsWithHelm4(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct {
-		name, profile string
-		flags         []string
-		wantError     bool
-		wantRules     int
+		name      string
+		flags     []string
+		wantError bool
 	}{
-		{name: "shared values remain off", profile: identicalSchemaProfile,
+		{name: "candidate values cannot create a rule",
 			flags: []string{featureValuesFlag, valuesPath, helmSetFlag, "metrics.prometheusRule.enabled=false"}},
-		{name: "shared string override cannot create a rule", profile: identicalSchemaProfile,
+		{name: "candidate string override cannot create a rule",
 			flags: []string{helmSetStringFlag, featureRuleEnabled,
 				helmSetFlag, "metrics.prometheusRule.enabled=false"}, wantError: true},
-		{name: "isolated chart rule has explicit namespace", profile: disposableSchemaProfile,
-			flags: []string{helmSetFlag, featureRuleEnabled}, wantRules: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := os.WriteFile(filepath.Join(dir, featureSchemaFile), []byte(tt.profile), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			profileArgs := append(slices.Clone(args), "--api-versions", "monitoring.coreos.com/v1")
 			profileArgs = append(profileArgs, tt.flags...)
 			profileCmd := exec.Command(helmPath, profileArgs...)
-			profileCmd.Env = append(slices.Clone(cmd.Env), "FEATURE_E2E_SCHEMA_VALIDATION="+tt.profile)
+			profileCmd.Env = slices.Clone(cmd.Env)
 			rendered, renderErr := profileCmd.CombinedOutput()
 			if (renderErr != nil) != tt.wantError {
-				t.Fatalf("native Helm rule boundary: %v, want error %v", renderErr, tt.wantError)
+				t.Fatalf("native Helm rule boundary: %v, want error %v\n%s", renderErr, tt.wantError, rendered)
 			}
-			if !tt.wantError && strings.Count(string(rendered), "kind: PrometheusRule") != tt.wantRules {
-				t.Errorf("native rendered rule count differs from %d", tt.wantRules)
+			if tt.wantError && !strings.Contains(string(rendered), "feature chart render is unsafe") {
+				t.Fatalf("native Helm failed before the trusted renderer rejected the rule: %s", rendered)
 			}
+			if strings.Contains(string(rendered), "kind: PrometheusRule") {
+				t.Error("candidate values produced a PrometheusRule")
+			}
+		})
+	}
+}
+
+func TestFeatureE2ERenderSafetyRejectsPrometheusRules(t *testing.T) {
+	helpers := protectedStepNamed(t,
+		parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureHelpersStep,
+	).Run
+	renderSafety := buildFeatureRenderSafety(t,
+		extractFeatureGeneratedFile(t, helpers, "render-safety.go", "RENDER_SAFETY"))
+	dir := t.TempDir()
+	ownerPath := filepath.Join(dir, featureOwnerFile)
+	if err := os.WriteFile(ownerPath, []byte(imageAttestationOwnerValue), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, document string
+		wantError      bool
+	}{
+		{name: "owned deployment", document: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgcopydb-e2e
+  labels:
+    pgcopydb-operator.io/feature-e2e-run: 0123456789abcdef0123456789abcdef
+spec:
+  template:
+    metadata:
+      labels:
+        pgcopydb-operator.io/feature-e2e-run: 0123456789abcdef0123456789abcdef
+`},
+		{name: "direct rule", wantError: true, document: `apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pgcopydb-e2e
+  labels:
+    pgcopydb-operator.io/feature-e2e-run: 0123456789abcdef0123456789abcdef
+`},
+		{name: "nested rule", wantError: true, document: `apiVersion: v1
+kind: List
+items:
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PrometheusRule
+    metadata:
+      name: pgcopydb-e2e
+      labels:
+        pgcopydb-operator.io/feature-e2e-run: 0123456789abcdef0123456789abcdef
+`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-")+".yaml")
+			if err := os.WriteFile(manifest, []byte(tt.document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(renderSafety, manifest)
+			cmd.Env = []string{
+				"FEATURE_E2E_OWNER_KEY=" + imageAttestationOwnerKey,
+				"FEATURE_E2E_OWNER_FILE=" + ownerPath,
+			}
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantError {
+				t.Fatalf("render safety error = %v, want error %t: %s", err, tt.wantError, output)
+			}
+		})
+	}
+}
+
+func TestFeatureE2EHelperRejectsLegacyProfilesBeforeSetup(t *testing.T) {
+	helpers := protectedStepNamed(t,
+		parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureHelpersStep,
+	).Run
+	for _, tt := range []struct {
+		name, profile string
+		wantSetup     bool
+	}{
+		{name: featureUnsetValue, wantSetup: true},
+		{name: "identical", profile: identicalSchemaProfile, wantSetup: true},
+		{name: "legacy additive", profile: featureLegacyAdditive},
+		{name: "unknown", profile: "unknown-profile"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(bin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			setupMarker := filepath.Join(dir, "setup")
+			fakeGo := `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == build && "$2" == -o && -n "$3" && -n "$4" ]]
+: > "$3"
+chmod 0700 "$3"
+: > "$SETUP_MARKER"
+`
+			for name, body := range map[string]string{
+				"go": fakeGo, "helm": featurePassingShell,
+			} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("bash", "-c", helpers)
+			cmd.Env = []string{
+				"PATH=" + bin + ":" + os.Getenv("PATH"),
+				"RUNNER_TEMP=" + dir,
+				"GITHUB_ENV=" + filepath.Join(dir, "github-env"),
+				"SETUP_MARKER=" + setupMarker,
+				"FEATURE_E2E_SCHEMA_VALIDATION=" + tt.profile,
+			}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tt.wantSetup {
+				t.Fatalf("helper setup success = %t, want %t: %v\n%s", err == nil, tt.wantSetup, err, output)
+			}
+			_, markerErr := os.Stat(setupMarker)
+			if tt.wantSetup && markerErr != nil {
+				t.Fatal("supported profile did not complete helper setup")
+			}
+			if !tt.wantSetup && !os.IsNotExist(markerErr) {
+				t.Fatal("unsupported profile reached helper generation")
+			}
+		})
+	}
+}
+
+func TestFeatureE2EHelmRejectsLegacySchemaProfiles(t *testing.T) {
+	helpers := protectedStepNamed(t,
+		parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureHelpersStep,
+	).Run
+	wrapper := extractFeatureHelmHeredoc(t, helpers)
+	for _, tt := range []struct {
+		name, profile string
+		wantHelm      bool
+	}{
+		{name: featureUnsetValue, wantHelm: true},
+		{name: "identical", profile: identicalSchemaProfile, wantHelm: true},
+		{name: "legacy additive", profile: featureLegacyAdditive},
+		{name: "unknown", profile: "unknown-profile"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "helm-args")
+			realHelm := filepath.Join(dir, "helm")
+			fakeHelm := "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$HELM_MARKER\"\nexit 23\n"
+			if err := os.WriteFile(realHelm, []byte(fakeHelm), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", "-c", wrapper, "feature-helm",
+				helmInstallCommand, featureControllerName, featureFixtureChart,
+				"-n", featureControllerNS, "--wait")
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"REAL_HELM=" + realHelm,
+				"HELM_MARKER=" + marker,
+				"E2E_OPERATOR_NAMESPACE=" + featureControllerNS,
+				"FEATURE_E2E_HELPERS=" + dir,
+				"FEATURE_E2E_SCHEMA_VALIDATION=" + tt.profile,
+			}
+			output, _ := cmd.CombinedOutput()
+			body, err := os.ReadFile(marker)
+			if !tt.wantHelm {
+				if !os.IsNotExist(err) {
+					t.Fatalf("unsupported profile reached Helm: %q, err %v", body, err)
+				}
+				if !strings.Contains(string(output), "feature schema profile is invalid") {
+					t.Fatalf("unsupported profile failed without safe diagnostic: %s", output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("supported profile did not reach Helm: %v\n%s", err, output)
+			}
+			requireFeatureHelmArgs(t, strings.Split(strings.TrimSpace(string(body)), "\n"), nil)
 		})
 	}
 }
@@ -2755,13 +3046,12 @@ func runManagerCorrelationFixture(
 		body string
 		mode os.FileMode
 	}{
-		ownerPath:                             {imageAttestationOwnerValue, 0o600},
-		filepath.Join(dir, featureSchemaFile): {identicalSchemaProfile, 0o600},
-		resourcesPath:                         {resources, 0o600},
-		attestPath:                            {attest, 0o700},
-		helmPath:                              {helm, 0o700},
-		filepath.Join(dir, "ownership"):       {ownership, 0o600},
-		filepath.Join(dir, "post-renderer"):   {"#!/usr/bin/env bash\ncat\n", 0o700},
+		ownerPath:                           {imageAttestationOwnerValue, 0o600},
+		resourcesPath:                       {resources, 0o600},
+		attestPath:                          {attest, 0o700},
+		helmPath:                            {helm, 0o700},
+		filepath.Join(dir, "ownership"):     {ownership, 0o600},
+		filepath.Join(dir, "post-renderer"): {"#!/usr/bin/env bash\ncat\n", 0o700},
 	} {
 		if err := os.WriteFile(path, []byte(fixture.body), fixture.mode); err != nil {
 			t.Fatal(err)
@@ -2991,7 +3281,7 @@ func TestFeatureE2EClusterSafetyAndCleanup(t *testing.T) { //nolint:gocyclo // O
 	}
 	final := protectedStepNamed(t, wf.Jobs["final-status"], "Publish final status")
 	for _, want := range []string{
-		`CLUSTER_RESULT`, `SHARED_OUTPUTS`, `DISPOSABLE_OUTPUTS`,
+		`CLUSTER_RESULT`, `CLUSTER_OUTPUTS`,
 		`"success"`, `"failure"`, `state=error`,
 		`context=feature-e2e/focus`, `statuses/$SHA`,
 	} {
@@ -3202,48 +3492,61 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 	final := protectedStepNamed(t, wf.Jobs["final-status"], "Publish final status")
 	tests := []struct {
 		name, cluster, suite, cleanup, suiteRan, suiteCompleted, manager, runner, want string
+		extra                                                                          []string
 	}{
 		{"safe success", successValue, successValue, successValue,
-			trueValue, trueValue, trueValue, trueValue, successValue},
+			trueValue, trueValue, trueValue, trueValue, successValue, nil},
 		{"safe assertion failure", failureValue, failureValue, successValue,
-			trueValue, trueValue, trueValue, trueValue, failureValue},
+			trueValue, trueValue, trueValue, trueValue, failureValue, nil},
 		{"suite timeout", failureValue, failureValue, successValue,
-			trueValue, "", trueValue, trueValue, errorValue},
+			trueValue, "", trueValue, trueValue, errorValue, nil},
 		{"suite panic or abort", failureValue, failureValue, successValue,
-			trueValue, falseValue, trueValue, trueValue, errorValue},
+			trueValue, falseValue, trueValue, trueValue, errorValue, nil},
 		{"completion evidence missing", failureValue, failureValue, successValue,
-			trueValue, "", trueValue, trueValue, errorValue},
+			trueValue, "", trueValue, trueValue, errorValue, nil},
 		{"completion evidence malformed", failureValue, failureValue, successValue,
-			trueValue, unreadableValue, trueValue, trueValue, errorValue},
+			trueValue, unreadableValue, trueValue, trueValue, errorValue, nil},
 		{"manager digest mismatch", failureValue, failureValue, successValue,
-			trueValue, trueValue, falseValue, trueValue, errorValue},
+			trueValue, trueValue, falseValue, trueValue, errorValue, nil},
 		{"manager attestation unreadable", failureValue, failureValue, successValue,
-			trueValue, trueValue, unreadableValue, trueValue, errorValue},
+			trueValue, trueValue, unreadableValue, trueValue, errorValue, nil},
 		{"manager attestation missing", failureValue, failureValue, successValue,
-			trueValue, trueValue, "", trueValue, errorValue},
+			trueValue, trueValue, "", trueValue, errorValue, nil},
 		{"runner digest mismatch", failureValue, failureValue, successValue,
-			trueValue, trueValue, trueValue, falseValue, errorValue},
+			trueValue, trueValue, trueValue, falseValue, errorValue, nil},
 		{"runner attestation unreadable", failureValue, failureValue, successValue,
-			trueValue, trueValue, trueValue, unreadableValue, errorValue},
+			trueValue, trueValue, trueValue, unreadableValue, errorValue, nil},
 		{"runner attestation missing", failureValue, "", successValue,
-			"", "", trueValue, "", errorValue},
+			"", "", trueValue, "", errorValue, nil},
 		{"suite did not run", failureValue, failureValue, successValue,
-			falseValue, falseValue, trueValue, trueValue, errorValue},
+			falseValue, falseValue, trueValue, trueValue, errorValue, nil},
 		{"cluster cancelled", featureCancelledValue, failureValue, successValue,
-			trueValue, trueValue, trueValue, trueValue, errorValue},
+			trueValue, trueValue, trueValue, trueValue, errorValue, nil},
+		{"cluster skipped", skippedValue, failureValue, successValue,
+			trueValue, trueValue, trueValue, trueValue, errorValue, nil},
 		{"cleanup failure", failureValue, successValue, failureValue,
-			trueValue, trueValue, trueValue, trueValue, errorValue},
+			trueValue, trueValue, trueValue, trueValue, errorValue, nil},
+		{"missing output JSON", failureValue, failureValue, successValue,
+			trueValue, trueValue, trueValue, trueValue, errorValue, []string{"CLUSTER_OUTPUTS="}},
+		{"malformed output JSON", failureValue, failureValue, successValue,
+			trueValue, trueValue, trueValue, trueValue, errorValue, []string{"CLUSTER_OUTPUTS={"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := runFinalStatusFixture(
 				t, final.Run, tt.cluster, tt.suite, tt.cleanup, tt.suiteRan,
-				tt.suiteCompleted, tt.manager, tt.runner,
+				tt.suiteCompleted, tt.manager, tt.runner, tt.extra...,
 			)
 			if got != tt.want {
 				t.Errorf("emitted state = %q, want %q", got, tt.want)
 			}
 		})
+	}
+	if got := runFinalStatusFixture(
+		t, final.Run, successValue, successValue, successValue,
+		trueValue, trueValue, trueValue, trueValue, "RUN_MODE=focus",
+	); got != successValue {
+		t.Errorf("focused status = %q, want success", got)
 	}
 	wantOutputs := map[string]string{
 		featureSuiteRanOutput: "${{ steps.suite.outputs.suite_ran }}",
@@ -3257,10 +3560,13 @@ func TestFeatureE2EFinalStatusClassification(t *testing.T) {
 		}
 	}
 	wantFinalEnv := map[string]string{
-		"SHARED_OUTPUTS":     "${{ toJSON(needs.cluster.outputs) }}",
-		"DISPOSABLE_OUTPUTS": "${{ toJSON(needs.disposable.outputs) }}",
-		"VALIDATION_TARGET":  "${{ needs.preflight.outputs.validation_target }}",
-		"SHA":                featureResolvedSHA,
+		"CLUSTER_OUTPUTS": "${{ toJSON(needs.cluster.outputs) }}",
+		"SHA":             featureResolvedSHA,
+	}
+	if got := protectedNeeds(t, wf.Jobs["final-status"]); !slices.Equal(got, []string{
+		resolveJob, pendingStatusJob, featurePreflightJob, managerImageJob, runnerImageJob, featureClusterJob,
+	}) {
+		t.Errorf("final-status needs = %v", got)
 	}
 	for name, want := range wantFinalEnv {
 		if got := final.Env[name]; got != want {
@@ -3315,6 +3621,40 @@ func TestFeatureE2EUsesApprovedOperatorNamespace(t *testing.T) {
 	}
 }
 
+func TestFeatureE2ESuiteRejectsLegacyProfilesBeforeGoTest(t *testing.T) {
+	suite := protectedStepNamed(t,
+		parseProtectedWorkflow(t, featureWorkflow).Jobs[featureClusterJob], featureSuiteStep,
+	)
+	passed := ginkgoSpecFixture(gingkotypes.SpecStatePassed, "selected spec")
+	report := ginkgoReportFixture(t, true, 1, 1, gingkotypes.SpecReports{passed})
+	for _, tt := range []struct {
+		name, schema, profile string
+		wantGo                bool
+	}{
+		{name: featureUnsetValue, wantGo: true},
+		{name: "supported shared", schema: identicalSchemaProfile, profile: "baseline", wantGo: true},
+		{name: "legacy schema", schema: featureLegacyAdditive},
+		{name: "legacy suite", profile: "runtime-safety"},
+		{name: "unknown schema", schema: "unknown-schema"},
+		{name: "unknown suite", profile: "unknown-suite"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runSuiteFixture(t, suite.Run, suiteFixture{
+				report: report, schemaProfile: tt.schema, suiteProfile: tt.profile,
+			})
+			if tt.wantGo {
+				if result.err != nil || len(result.args) == 0 {
+					t.Fatalf("supported profiles did not reach go test: %v\n%s", result.err, result.output)
+				}
+				return
+			}
+			if result.err == nil || len(result.args) != 0 {
+				t.Fatalf("unsupported profiles reached go test: error %v, args %q", result.err, result.args)
+			}
+		})
+	}
+}
+
 func runFinalStatusFixture(
 	t *testing.T, script, cluster, suite, cleanup, suiteRan, suiteCompleted, manager, runner string,
 	extraEnv ...string,
@@ -3348,17 +3688,22 @@ test -s "$STATUS_STATE"
 	if err != nil {
 		t.Fatal(err)
 	}
+	clusterOutputs := string(sharedOutputs)
+	filteredExtraEnv := make([]string, 0, len(extraEnv))
+	for _, value := range extraEnv {
+		if override, ok := strings.CutPrefix(value, "CLUSTER_OUTPUTS="); ok {
+			clusterOutputs = override
+			continue
+		}
+		filteredExtraEnv = append(filteredExtraEnv, value)
+	}
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"GH_TOKEN=test-token",
 		"GITHUB_REPOSITORY=example/repository",
 		"SHA=0123456789abcdef0123456789abcdef01234567",
 		"RUN_MODE=full",
-		"SUITE_PROFILE=baseline",
-		"VALIDATION_TARGET=shared",
-		"DISPOSABLE_RESULT=skipped",
-		"SHARED_OUTPUTS="+string(sharedOutputs),
-		"DISPOSABLE_OUTPUTS={}",
+		"CLUSTER_OUTPUTS="+clusterOutputs,
 		"CLUSTER_RESULT="+cluster,
 		"SUITE_OUTCOME="+suite,
 		"CLEANUP_OUTCOME="+cleanup,
@@ -3370,7 +3715,7 @@ test -s "$STATUS_STATE"
 		"STATUS_STATE="+statePath,
 		"STATUS_ARGS="+filepath.Join(dir, "args"),
 	)
-	cmd.Env = append(cmd.Env, extraEnv...)
+	cmd.Env = append(cmd.Env, filteredExtraEnv...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run final status: %v\n%s", err, output)
 	}
@@ -4461,7 +4806,6 @@ func newFeatureOwnershipFixture(
 		"bin/feature-helm":   {scripts.helm, 0o700},
 		featureCleanupOutput: {scripts.cleanup, 0o700},
 		featureOwnerFile:     {fixture.owner, 0o600},
-		featureSchemaFile:    {identicalSchemaProfile, 0o600},
 		stateKey:             {initialState, 0o600},
 		"release":            {"", 0o600},
 		"log":                {"", 0o600},

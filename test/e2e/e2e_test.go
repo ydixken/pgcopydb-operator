@@ -127,9 +127,15 @@ var _ = Describe("Migration", Ordered, func() {
 	})
 
 	It("completes a fresh clone with matching rows and sequences", func() {
+		By("accepting a selected source extension available but not installed on the target")
+		Expect(psql(sourceCluster, "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'citext')")).To(Equal("t"))
+		Expect(psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_available_extensions "+
+			"WHERE name = 'citext' AND default_version IS NOT NULL) AND NOT EXISTS "+
+			"(SELECT FROM pg_extension WHERE extname = 'citext')")).To(Equal("t"))
 		create(newMigration("e2e-fresh", nsE2E, v1beta1.CloneOptions{}))
 		m := waitCompleted("e2e-fresh", nsE2E)
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
+		Expect(psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'citext')")).To(Equal("t"))
 
 		// The only clone in the suite that configures nothing, so it is the
 		// one that exercises whatever the operator decided on the user's

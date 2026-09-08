@@ -68,6 +68,15 @@ func failingReconciler(t *testing.T, fns interceptor.Funcs, objs ...client.Objec
 	return &MigrationReconciler{Client: c, Scheme: s, Recorder: events.NewFakeRecorder(20), RunnerImage: testRunnerImage}
 }
 
+func installFailureHooks(t *testing.T, r *MigrationReconciler, fns interceptor.Funcs) {
+	t.Helper()
+	c, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("test client does not support watch")
+	}
+	r.Client = interceptor.NewClient(c, fns)
+}
+
 // failStatusPatch injects a failure into every status write.
 func failStatusPatch() interceptor.Funcs {
 	return interceptor.Funcs{
@@ -140,6 +149,16 @@ func TestReconcile_InvalidSpecFailsTerminally(t *testing.T) {
 	if _, err := r.reconcile(context.Background(), migrationRequest(m)); err != nil {
 		t.Fatal(err)
 	}
+	pending := &v1beta1.Migration{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status.Phase != v1beta1.PhasePending {
+		t.Fatalf("initial phase = %q, want Pending", pending.Status.Phase)
+	}
+	if _, err := r.reconcile(context.Background(), migrationRequest(m)); err != nil {
+		t.Fatal(err)
+	}
 	got := &v1beta1.Migration{}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: m.Name, Namespace: m.Namespace}, got); err != nil {
 		t.Fatal(err)
@@ -166,11 +185,15 @@ func findCondition(conds []metav1.Condition, name string) *metav1.Condition {
 // the pass, or a follow migration could start without deletion protection.
 func TestReconcile_FinalizerPatchFailure(t *testing.T) {
 	m := followPasswordMigration()
-	r := failingReconciler(t, interceptor.Funcs{
+	r := failingReconciler(t, interceptor.Funcs{}, m)
+	if _, err := r.reconcile(context.Background(), migrationRequest(m)); err != nil {
+		t.Fatalf("Pending setup failed: %v", err)
+	}
+	installFailureHooks(t, r, interceptor.Funcs{
 		Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
 			return errBoom
 		},
-	}, m)
+	})
 	if _, err := r.reconcile(context.Background(), migrationRequest(m)); !errors.Is(err, errBoom) {
 		t.Fatalf("a finalizer patch failure must propagate, got %v", err)
 	}
@@ -180,11 +203,15 @@ func TestReconcile_FinalizerPatchFailure(t *testing.T) {
 // abort the pass before any Job starts.
 func TestReconcile_EnsureOwnedCreateFailure(t *testing.T) {
 	m := passwordMigration()
-	r := failingReconciler(t, interceptor.Funcs{
+	r := failingReconciler(t, interceptor.Funcs{}, m)
+	if _, err := r.reconcile(context.Background(), migrationRequest(m)); err != nil {
+		t.Fatalf("Pending setup failed: %v", err)
+	}
+	installFailureHooks(t, r, interceptor.Funcs{
 		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 			return errBoom
 		},
-	}, m)
+	})
 	if _, err := r.reconcile(context.Background(), migrationRequest(m)); !errors.Is(err, errBoom) {
 		t.Fatalf("a PVC create failure must propagate, got %v", err)
 	}
@@ -224,7 +251,9 @@ func TestObserveRunningJob_LogFetchFailureDegrades(t *testing.T) {
 	m := followPasswordMigration()
 	r := failingReconciler(t, interceptor.Funcs{}, m)
 	r.Logs = &fakeLogs{tsErr: errBoom}
-	res, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob))
+	now := time.Unix(100, 0)
+	r.now = func() time.Time { return now }
+	res, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob), now)
 	if err != nil {
 		t.Fatalf("an unreadable log must not fail the pass, got %v", err)
 	}
@@ -238,7 +267,9 @@ func TestObserveRunningJob_LogFetchFailureDegrades(t *testing.T) {
 func TestObserveRunningJob_StatusPatchFailure(t *testing.T) {
 	m := passwordMigration()
 	r := failingReconciler(t, failStatusPatch(), m)
-	if _, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob)); !errors.Is(err, errBoom) {
+	now := time.Unix(100, 0)
+	r.now = func() time.Time { return now }
+	if _, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob), now); !errors.Is(err, errBoom) {
 		t.Fatalf("a status write failure must propagate, got %v", err)
 	}
 }

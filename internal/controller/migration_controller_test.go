@@ -82,11 +82,11 @@ func reconcileAndGet(ctx context.Context, r *MigrationReconciler, name string) *
 	return m
 }
 
-// passGate drives a fresh Migration through the universal preflight gate:
-// the first pass creates only the preflight Job, its success unlocks the
-// worker. Shared by every suite in this package.
+// passGate drives a fresh Migration through Pending and the universal
+// preflight gate. Shared by every suite in this package.
 func passGate(ctx context.Context, r *MigrationReconciler, name string) {
 	GinkgoHelper()
+	reconcileAndGet(ctx, r, name)
 	reconcileAndGet(ctx, r, name)
 	finishJob(ctx, name+"-preflight", true)
 	reconcileAndGet(ctx, r, name)
@@ -144,10 +144,39 @@ var _ = Describe("Migration Controller", func() {
 		return m
 	}
 
+	It("rejects unavailable extensions before any worker attempt", func() {
+		const name = "mig-extensions-unavailable"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyExtensions: []string{extensionFixtureName}}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: "preflight: selected extensions unavailable on target: [\"citext\"]; " +
+			"install the required target extension package or choose a target that provides it"}
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		Expect(m.Status.Attempts).To(BeZero())
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated).NotTo(BeNil())
+		Expect(validated.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validated.Reason).To(Equal("PreflightFailed"))
+		Expect(validated.Message).To(ContainSubstring(extensionFixtureName))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed).NotTo(BeNil())
+		Expect(failed.Status).To(Equal(metav1.ConditionTrue))
+		Expect(failed.Reason).To(Equal("PreflightFailed"))
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
+	})
+
 	It("creates the work PVC and the first attempt Job", func() {
 		const name = "mig-first-attempt"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		reconcileAndGet(ctx, newReconciler(), name)
 		m := reconcileAndGet(ctx, newReconciler(), name)
 
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -396,8 +425,9 @@ var _ = Describe("Migration Controller", func() {
 		const name = "mig-suspend-gate"
 		defer removeMigration(ctx, name)
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
-		// First pass creates the preflight; it is NOT finished: the Migration
-		// sits mid-gate, where remediation may be writing to the databases.
+		// Move through Pending, then create the unfinished preflight.
+		reconcileAndGet(ctx, newReconciler(), name)
+		// The Migration sits mid-gate, where remediation may be writing to the databases.
 		reconcileAndGet(ctx, newReconciler(), name)
 		Expect(fetchJob(ctx, name+"-preflight")).NotTo(BeNil())
 
@@ -430,6 +460,7 @@ var _ = Describe("Migration Controller", func() {
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 
 		// Clear the universal gate first so pass A starts the worker attempt.
+		reconcileAndGet(ctx, newReconciler(), name)
 		reconcileAndGet(ctx, newReconciler(), name)
 		finishJob(ctx, name+"-preflight", true)
 

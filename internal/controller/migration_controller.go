@@ -24,6 +24,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -151,6 +152,9 @@ type MigrationReconciler struct {
 
 	// Progress samples clone progress and database sizes; nil disables it.
 	Progress ProgressOps
+
+	// now is overridden only by controlled-clock tests.
+	now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=pgcopydb-operator.io,resources=migrations,verbs=get;list;watch;create;update;patch;delete
@@ -179,6 +183,7 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	reconcileStart := r.currentTime()
 	log := logf.FromContext(ctx)
 
 	m := &v1beta1.Migration{}
@@ -208,6 +213,16 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed) {
 		metrics.Record(m)
 		return ctrl.Result{}, nil
+	}
+	if statusIsEmpty(m.Status) {
+		m.Status.Phase = v1beta1.PhasePending
+		m.Status.ObservedGeneration = m.Generation
+		if err := r.Status().Patch(ctx, m,
+			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, err
+		}
+		metrics.Record(m)
+		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 	}
 
 	if m.Spec.Suspend {
@@ -268,7 +283,26 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleFailedJob(ctx, m, base, job)
 	}
 
-	return r.observeRunningJob(ctx, m, base, job)
+	return r.observeRunningJob(ctx, m, base, job, reconcileStart)
+}
+
+func statusIsEmpty(status v1beta1.MigrationStatus) bool {
+	return apiequality.Semantic.DeepEqual(status, v1beta1.MigrationStatus{})
+}
+
+func (r *MigrationReconciler) currentTime() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+func (r *MigrationReconciler) activePollDelay(reconcileStart time.Time) time.Duration {
+	delay := pollInterval - r.currentTime().Sub(reconcileStart)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
 }
 
 // preflightGate probes the databases before any worker runs: a one-shot Job
@@ -424,7 +458,23 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // ends (pgcopydb.CloneDone), so a follow migration needs the log reader
 // cmd/main.go always wires; the single fetched tail also feeds the zombie
 // check.
-func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
+func (r *MigrationReconciler) observeRunningJob(
+	ctx context.Context,
+	m, base *v1beta1.Migration,
+	job *batchv1.Job,
+	reconcileStart time.Time,
+) (res ctrl.Result, err error) {
+	observationStart := r.currentTime()
+	timings := []any{"scope", "active_worker_observation"}
+	outcome := "normal"
+	defer func() {
+		timings = append(timings, "outcome", outcome, "total", r.currentTime().Sub(observationStart))
+		logf.FromContext(ctx).V(1).Info("active worker observation", timings...)
+	}()
+	record := func(name string, started time.Time) {
+		timings = append(timings, name, r.currentTime().Sub(started))
+	}
+
 	// The copy and its tail look nothing alike from the outside: the copy runs
 	// every worker flat out, the tail narrows to index builds and a vacuum on
 	// the largest table, during which the target stops growing and a
@@ -434,6 +484,7 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	// Finalizing needs the copy seen running first: one sample that catches
 	// every copy worker between statements otherwise reports the tail with
 	// gigabytes still to move. A sample with no answer changes nothing.
+	started := r.currentTime()
 	if r.Progress != nil {
 		copying, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name)
 		switch {
@@ -446,6 +497,7 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		case finalizing && copySeen(m):
 			m.Status.Phase = v1beta1.PhaseFinalizing
 		}
+		record("clone_stage", started)
 	}
 	follow := followEnabled(m)
 
@@ -453,6 +505,7 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	// Unreadable logs (pod starting, already gone) degrade to an empty tail:
 	// no marker seen, nothing to reap, the next poll retries.
 	var logTail []byte
+	started = r.currentTime()
 	if follow && r.Logs != nil {
 		raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
 		if err != nil {
@@ -460,6 +513,7 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 		} else {
 			logTail = raw
 		}
+		record("follow_log_fetch", started)
 	}
 
 	cloneDone := meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
@@ -471,20 +525,39 @@ func (r *MigrationReconciler) observeRunningJob(ctx context.Context, m, base *v1
 	if follow {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
 		// trigger the cutover itself; see follow.go.
+		started = r.currentTime()
 		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
+		record("follow_control", started)
 	}
+	started = r.currentTime()
 	r.sampleProgress(ctx, m, job.Name)
+	record("progress_sample", started)
+	started = r.currentTime()
 	if err := r.updateStatus(ctx, m, base); err != nil {
+		record("status_patch", started)
+		outcome = "status_patch_error"
 		return ctrl.Result{}, err
 	}
+	record("status_patch", started)
+	started = r.currentTime()
 	if res, handled, err := r.reapZombieWorker(ctx, m, job, logTail); handled || err != nil {
+		record("zombie_reap", started)
+		switch {
+		case err != nil:
+			outcome = "zombie_reap_error"
+		default:
+			outcome = "zombie_reap_handled"
+		}
 		return res, err
 	}
+	record("zombie_reap", started)
 	// One cadence throughout. The base copy used to poll at half speed for
 	// want of anything time-critical to watch mid-copy; the size sample is now
 	// the only live view of a running copy, and the throughput panel is its
 	// slope, so mid-copy is where a halved rate shows worst.
-	return ctrl.Result{RequeueAfter: pollInterval}, nil
+	delay := r.activePollDelay(reconcileStart)
+	timings = append(timings, "next_delay", delay)
+	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
 // copySeen reports whether the clone-stage probe has caught this attempt's

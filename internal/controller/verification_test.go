@@ -184,8 +184,8 @@ var _ = Describe("Migration Controller verification", func() {
 		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		// Follow migrations start behind the preflight gate: the first pass
-		// creates only that Job, its success unlocks run-1.
+		// Follow migrations publish Pending before starting the preflight gate.
+		reconcileAndGet(ctx, r, name)
 		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-preflight", true)
 

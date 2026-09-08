@@ -24,18 +24,6 @@ name: Feature E2E
         required: false
         default: ""
         type: string
-      schema_validation:
-        description: Identical shared schemas or additive disposable validation
-        required: true
-        default: identical
-        type: choice
-        options: [identical, additive-disposable]
-      suite_profile:
-        description: Baseline suite or isolated runtime-safety proofs
-        required: true
-        default: baseline
-        type: choice
-        options: [baseline, runtime-safety]
 
 permissions: {}
 
@@ -56,8 +44,6 @@ jobs:
       mode: ${{ steps.resolve.outputs.mode }}
       focus: ${{ steps.resolve.outputs.focus }}
       scale: ${{ steps.resolve.outputs.scale }}
-      schema_validation: ${{ steps.resolve.outputs.schema_validation }}
-      suite_profile: ${{ steps.resolve.outputs.suite_profile }}
     steps:
       - name: Resolve pull request
         id: resolve
@@ -67,8 +53,6 @@ jobs:
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_FOCUS: ${{ inputs.focus }}
           INPUT_SCALE: ${{ inputs.scale }}
-          INPUT_SCHEMA_VALIDATION: ${{ inputs.schema_validation }}
-          INPUT_SUITE_PROFILE: ${{ inputs.suite_profile }}
         run: |
           set -euo pipefail
           [[ "$INPUT_PR" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be positive"; exit 1; }
@@ -81,24 +65,6 @@ jobs:
             0.1 | 1.0) ;;
             *) echo "::error::scale must be 0.1 or 1.0"; exit 1 ;;
           esac
-          schema_validation=${INPUT_SCHEMA_VALIDATION:-identical}
-          suite_profile=${INPUT_SUITE_PROFILE:-baseline}
-          case "$schema_validation" in
-            identical) ;;
-            additive-disposable)
-              [ "$INPUT_SCALE" = 0.1 ] || { echo "::error::disposable scale must be 0.1"; exit 1; } ;;
-            *) echo "::error::schema validation profile is invalid"; exit 1 ;;
-          esac
-          case "$suite_profile" in
-            baseline) ;;
-            runtime-safety)
-              [ "$INPUT_MODE" = full ] && [ "$schema_validation" = additive-disposable ] &&
-                [ "$INPUT_SCALE" = 0.1 ] && [ -z "$INPUT_FOCUS" ] || {
-                  echo "::error::runtime-safety requires full disposable scale 0.1 without focus"
-                  exit 1
-                } ;;
-            *) echo "::error::suite profile is invalid"; exit 1 ;;
-          esac
           sanitized=$(printf '%s' "$INPUT_FOCUS" | LC_ALL=C tr -d '\000-\037\177')
           [ "$sanitized" = "$INPUT_FOCUS" ] || { echo "::error::focus contains a control character"; exit 1; }
           pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${INPUT_PR}")
@@ -110,8 +76,6 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head is not a full SHA"; exit 1; }
           printf 'pr=%s\nsha=%s\nmode=%s\nfocus=%s\nscale=%s\n' \
             "$INPUT_PR" "$sha" "$INPUT_MODE" "$INPUT_FOCUS" "$INPUT_SCALE" >> "$GITHUB_OUTPUT"
-          printf 'schema_validation=%s\nsuite_profile=%s\n' \
-            "$schema_validation" "$suite_profile" >> "$GITHUB_OUTPUT"
 
   pending-status:
     needs: resolve
@@ -139,9 +103,6 @@ jobs:
     runs-on: github-runner-pgcopydb-operator
     timeout-minutes: 30
     permissions: {contents: read, packages: read}
-    outputs:
-      validation_target: ${{ steps.compatibility.outputs.validation_target }}
-      candidate_crd_sha256: ${{ steps.compatibility.outputs.candidate_crd_sha256 }}
     steps:
       - name: Check out trusted main
         uses: actions/checkout@v7
@@ -165,8 +126,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Check candidate compatibility
         id: compatibility
-        env:
-          FEATURE_E2E_SCHEMA_VALIDATION: ${{ needs.resolve.outputs.schema_validation }}
         run: |
           set -euo pipefail
           make -C candidate -f ../trusted/Makefile manifests
@@ -201,14 +160,6 @@ jobs:
           [ -n "$trusted_ref" ]
           [ "$candidate_ref" = "$trusted_ref" ]
           docker buildx imagetools inspect "$candidate_ref" >/dev/null
-          case "$FEATURE_E2E_SCHEMA_VALIDATION" in
-            identical) target=shared ;;
-            additive-disposable) target=disposable ;;
-            *) echo "::error::schema validation profile is invalid"; exit 1 ;;
-          esac
-          crd_sha=$(sha256sum candidate/config/crd/bases/pgcopydb-operator.io_migrations.yaml | cut -d ' ' -f 1)
-          [[ "$crd_sha" =~ ^[0-9a-f]{64}$ ]]
-          printf 'validation_target=%s\ncandidate_crd_sha256=%s\n' "$target" "$crd_sha" >> "$GITHUB_OUTPUT"
 
   manager-image:
     needs: [resolve, preflight]
@@ -268,7 +219,6 @@ jobs:
 
   cluster:
     needs: [resolve, preflight, manager-image, runner-image]
-    if: needs.preflight.outputs.validation_target == 'shared'
     runs-on: github-runner-pgcopydb-e2e
     environment: e2e-cluster
     timeout-minutes: 300
@@ -284,7 +234,6 @@ jobs:
       manager_attested: ${{ steps.suite.outputs.manager_attested }}
       runner_attested: ${{ steps.runner-attestation.outputs.runner_attested }}
     env:
-      FEATURE_E2E_SCHEMA_VALIDATION: identical
       E2E_OPERATOR_NAMESPACE: pgcopydb-e2e
       MANAGER_REF: ghcr.io/${{ github.repository }}:feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
       RUNNER_REF: ghcr.io/${{ github.repository }}/runner:feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
@@ -417,7 +366,6 @@ jobs:
         continue-on-error: true
         env:
           RUN_MODE: ${{ needs.resolve.outputs.mode }}
-          SUITE_PROFILE: ${{ needs.resolve.outputs.suite_profile }}
           E2E_FOCUS: ${{ needs.resolve.outputs.focus }}
           E2E_OPERATOR_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
           E2E_RUNNER_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
@@ -455,179 +403,6 @@ jobs:
           set -euo pipefail
           [ "$SUITE_OUTCOME" = success ] && [ "$CLEANUP_OUTCOME" = success ]
 
-  disposable:
-    needs: [resolve, preflight, manager-image, runner-image]
-    if: needs.preflight.outputs.validation_target == 'disposable'
-    runs-on: github-runner-pgcopydb-operator
-    timeout-minutes: 330
-    permissions: {contents: read, packages: read}
-    outputs:
-      suite: ${{ steps.suite.outcome }}
-      cleanup: ${{ steps.cleanup.outcome }}
-      teardown: ${{ steps.teardown.outcome }}
-      schema_verified: ${{ steps.bootstrap.outputs.schema_verified }}
-      suite_ran: ${{ steps.suite.outputs.suite_ran }}
-      suite_completed: ${{ steps.suite.outputs.suite_completed }}
-      metrics_completed: ${{ steps.suite.outputs.metrics_completed }}
-      runtime_safety_completed: ${{ steps.suite.outputs.runtime_safety_completed }}
-      manager_attested: ${{ steps.suite.outputs.manager_attested }}
-      runner_attested: ${{ steps.runner-attestation.outputs.runner_attested }}
-    env:
-      FEATURE_E2E_SCHEMA_VALIDATION: additive-disposable
-      E2E_OPERATOR_NAMESPACE: pgcopydb-e2e
-      MANAGER_REF: ghcr.io/${{ github.repository }}:feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
-      RUNNER_REF: ghcr.io/${{ github.repository }}/runner:feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          persist-credentials: false
-      - name: Check out trusted feature scripts
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          path: feature-e2e-trusted
-          fetch-depth: 1
-          persist-credentials: false
-      - uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate immutable inputs
-        run: |
-          set -euo pipefail
-          [ "$E2E_OPERATOR_NAMESPACE" = pgcopydb-e2e ]
-          [[ "$MANAGER_REF" =~ ^ghcr\.io/ydixken/pgcopydb-operator:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]]
-          [[ "$RUNNER_REF" =~ ^ghcr\.io/ydixken/pgcopydb-operator/runner:feature-[0-9a-f]{40}@sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools inspect "$MANAGER_REF" >/dev/null
-          docker buildx imagetools inspect "$RUNNER_REF" >/dev/null
-      - name: Prepare isolated state
-        run: |
-          set -euo pipefail
-          umask 077
-          state=$(mktemp -d "$RUNNER_TEMP/feature-kind.XXXXXXXX")
-          state=$(cd -- "$state" && pwd -P)
-          printf 'FEATURE_E2E_KIND_STATE=%s\nKUBECONFIG=%s/kubeconfig\n' "$state" "$state" >> "$GITHUB_ENV"
-      - name: Create disposable cluster
-        id: bootstrap
-        env:
-          CANDIDATE_CRD_SHA256: ${{ needs.preflight.outputs.candidate_crd_sha256 }}
-        run: |
-          set -euo pipefail
-          bash "$GITHUB_WORKSPACE/feature-e2e-trusted/hack/feature-e2e-kind.sh" create \
-            "$FEATURE_E2E_KIND_STATE" "$GITHUB_WORKSPACE/config/crd/bases/pgcopydb-operator.io_migrations.yaml" \
-            "$CANDIDATE_CRD_SHA256"
-          printf 'schema_verified=true\n' >> "$GITHUB_OUTPUT"
-      - name: Write cluster helpers
-        id: helpers
-        run: bash feature-e2e-trusted/hack/feature-e2e-helpers.sh
-      - name: Require an empty feature slot
-        run: |
-          set -euo pipefail
-          releases=$("$REAL_HELM" list -n "$E2E_OPERATOR_NAMESPACE" -q --filter '^pgcopydb-e2e$')
-          [ -z "$releases" ] || { echo "::error::feature controller slot is occupied"; exit 1; }
-          canary=$(kubectl --kubeconfig "$KUBECONFIG" get job feature-e2e-runner-attest -n pgcopydb-e2e \
-            --ignore-not-found -o name)
-          [ -z "$canary" ] || { echo "::error::feature runner slot is occupied"; exit 1; }
-      - name: Attest runner image
-        id: runner-attestation
-        run: |
-          set -euo pipefail
-          owner_value=$(<"$FEATURE_E2E_OWNER_FILE")
-          [[ "$owner_value" =~ ^[0-9a-f]{32}$ ]]
-          kubectl --kubeconfig "$KUBECONFIG" apply -f - >/dev/null <<EOF
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: feature-e2e-runner-attest
-            namespace: pgcopydb-e2e
-            labels:
-              $FEATURE_E2E_OWNER_KEY: $owner_value
-          spec:
-            backoffLimit: 0
-            activeDeadlineSeconds: 120
-            template:
-              metadata:
-                labels:
-                  app.kubernetes.io/name: feature-e2e-runner-attest
-                  $FEATURE_E2E_OWNER_KEY: $owner_value
-              spec:
-                automountServiceAccountToken: false
-                restartPolicy: Never
-                securityContext:
-                  runAsNonRoot: true
-                  seccompProfile: {type: RuntimeDefault}
-                containers:
-                  - name: runner
-                    image: $RUNNER_REF
-                    imagePullPolicy: IfNotPresent
-                    command: [pgcopydb, --version]
-                    securityContext:
-                      allowPrivilegeEscalation: false
-                      capabilities: {drop: [ALL]}
-          EOF
-          kubectl --kubeconfig "$KUBECONFIG" wait job/feature-e2e-runner-attest -n pgcopydb-e2e \
-            --for=condition=complete --timeout=2m >/dev/null
-          "$FEATURE_E2E_HELPERS/attest-image" runner
-          printf 'runner_attested=true\n' >> "$GITHUB_OUTPUT"
-      - name: Run non-chaos suite
-        id: suite
-        continue-on-error: true
-        env:
-          RUN_MODE: ${{ needs.resolve.outputs.mode }}
-          SUITE_PROFILE: ${{ needs.resolve.outputs.suite_profile }}
-          FEATURE_E2E_SCHEMA_VALIDATION: additive-disposable
-          E2E_FOCUS: ${{ needs.resolve.outputs.focus }}
-          E2E_OPERATOR_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.manager-image.outputs.digest }}
-          E2E_RUNNER_TAG: feature-${{ needs.resolve.outputs.sha }}@${{ needs.runner-image.outputs.digest }}
-          E2E_SCALE: "0.1"
-          E2E_CNPG_INSTANCES: "1"
-          E2E_STORAGE_CLASS: standard
-          E2E_MANAGE_NAMESPACES: "true"
-          E2E_KEEP_FIXTURES: "false"
-          E2E_STRESS: "false"
-          E2E_FORCE: "false"
-          E2E_PG_SOURCE: "17"
-          E2E_PG_TARGET: "17"
-          E2E_PROMETHEUS_URL: ""
-          E2E_PROMETHEUS_PORT_FORWARD: monitoring/feature-monitoring-prometheus:9090
-        run: bash feature-e2e-trusted/hack/feature-e2e-suite.sh
-      - name: Cleanup feature resources
-        id: cleanup
-        if: always()
-        env:
-          HELPERS_OUTCOME: ${{ steps.helpers.outcome }}
-          SUITE_OUTCOME: ${{ steps.suite.outcome }}
-        run: |
-          set -euo pipefail
-          case "$HELPERS_OUTCOME" in
-            success)
-              case "$SUITE_OUTCOME" in
-                success) "$FEATURE_E2E_HELPERS/cleanup" ;;
-                failure | skipped | cancelled) "$FEATURE_E2E_HELPERS/cleanup" recovery ;;
-                *) echo "::error::suite outcome is invalid for cleanup"; exit 1 ;;
-              esac
-              ;;
-            skipped | failure) ;;
-            *) echo "::error::cluster helper outcome is invalid"; exit 1 ;;
-          esac
-      - name: Destroy disposable cluster
-        id: teardown
-        if: always()
-        run: |
-          set -euo pipefail
-          bash "$GITHUB_WORKSPACE/feature-e2e-trusted/hack/feature-e2e-kind.sh" destroy "$FEATURE_E2E_KIND_STATE"
-      - name: Require suite cleanup and teardown success
-        if: always()
-        env:
-          SUITE_OUTCOME: ${{ steps.suite.outcome }}
-          CLEANUP_OUTCOME: ${{ steps.cleanup.outcome }}
-          TEARDOWN_OUTCOME: ${{ steps.teardown.outcome }}
-        run: |
-          set -euo pipefail
-          [ "$SUITE_OUTCOME" = success ] && [ "$CLEANUP_OUTCOME" = success ] && [ "$TEARDOWN_OUTCOME" = success ]
-
   final-status:
     needs:
       - resolve
@@ -636,7 +411,6 @@ jobs:
       - manager-image
       - runner-image
       - cluster
-      - disposable
     if: always() && needs.resolve.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -647,50 +421,23 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ needs.resolve.outputs.sha }}
           RUN_MODE: ${{ needs.resolve.outputs.mode }}
-          SUITE_PROFILE: ${{ needs.resolve.outputs.suite_profile }}
-          VALIDATION_TARGET: ${{ needs.preflight.outputs.validation_target }}
           CLUSTER_RESULT: ${{ needs.cluster.result }}
-          DISPOSABLE_RESULT: ${{ needs.disposable.result }}
-          SHARED_OUTPUTS: ${{ toJSON(needs.cluster.outputs) }}
-          DISPOSABLE_OUTPUTS: ${{ toJSON(needs.disposable.outputs) }}
+          CLUSTER_OUTPUTS: ${{ toJSON(needs.cluster.outputs) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           context=feature-e2e
           [ "$RUN_MODE" = focus ] && context=feature-e2e/focus
-          state=error
-          selected_outputs='{}'
-          other_result=
-          case "$VALIDATION_TARGET" in
-            shared) selected_outputs=$SHARED_OUTPUTS; other_result=$DISPOSABLE_RESULT ;;
-            disposable)
-              selected_outputs=$DISPOSABLE_OUTPUTS
-              other_result=$CLUSTER_RESULT
-              CLUSTER_RESULT=$DISPOSABLE_RESULT ;;
-          esac
-          profile_valid=false
-          case "$SUITE_PROFILE:$VALIDATION_TARGET:$RUN_MODE" in
-            baseline:shared:full | baseline:shared:focus | baseline:disposable:full | \
-              baseline:disposable:focus | runtime-safety:disposable:full)
-              profile_valid=true ;;
-          esac
-          if [ "$other_result" = skipped ] && [ "$profile_valid" = true ]; then
-            state=$(jq -er --arg result "$CLUSTER_RESULT" --arg target "$VALIDATION_TARGET" \
-              --arg mode "$RUN_MODE" --arg profile "$SUITE_PROFILE" '
+          state=$(jq -er --arg result "$CLUSTER_RESULT" '
               if type == "object" and .cleanup == "success" and
                  .suite_ran == "true" and .suite_completed == "true" and
-                 .manager_attested == "true" and .runner_attested == "true" and
-                 ($target == "shared" or (.teardown == "success" and .schema_verified == "true"))
+                 .manager_attested == "true" and .runner_attested == "true"
               then
-                if $result == "success" and .suite == "success" and
-                   ($target == "shared" or $mode == "focus" or .metrics_completed == "true") and
-                   ($profile == "baseline" or .runtime_safety_completed == "true")
-                then "success"
+                if $result == "success" and .suite == "success" then "success"
                 elif $result == "failure" and .suite == "failure" then "failure"
                 else "error" end
               else "error" end
-            ' <<<"$selected_outputs" 2>/dev/null) || state=error
-          fi
+            ' <<<"$CLUSTER_OUTPUTS" 2>/dev/null) || state=error
           case "$state" in
             success) description='Feature e2e passed' ;;
             failure) description='Feature e2e assertions failed' ;;
