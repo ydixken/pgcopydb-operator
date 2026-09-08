@@ -148,3 +148,23 @@
 
 - [x] Defer #88, including pgcopydb fork, SQLite contention, builder publication, and runner digest work.
 - [x] Exclude source write fencing from the #211 catch-up guard.
+
+## Shared-cluster scope reduction
+
+- [x] Approve one replacement PR 252 that removes the temporary Kind environment and observer while keeping the existing GitHub/ARC runners and shared-cluster E2E route.
+- [x] Preserve the original issue branches, integration branches, complete deferred PR source, and protected stash listed in `tasks/shared-e2e-removal-design.md`.
+- [x] Record the approved implementation and delivery gates in `tasks/shared-e2e-removal-plan.md`.
+- [x] Create `integrate/shared-e2e-on-main-1933ce5` from fetched actual `main` at `1933ce5bb7a2322fddf563ffdbf09b012885cbf1`.
+- [ ] Remove the temporary disposable workflow, observer, documentation, and tests without changing the established shared-cluster route.
+- [ ] Integrate #211, #223, #210, and only the approved #200 scheduling compensation with focused CI-run regression coverage and current documentation.
+- [ ] Exclude #215, #243, #209, #221, and #88.
+  Keep #200 open for the historical 35-second symptom.
+- [ ] Complete one independent static review of the combined diff.
+- [ ] Format touched files, run `git diff --check`, and run `task lint` locally.
+  CI remains responsible for functional tests, builds, and documentation validation.
+- [ ] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
+- [ ] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
+- [ ] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
+  A focused or disposable run does not replace this gate.
+- [ ] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
+  Leave #200, #215, #243, #209, and #221 open.
