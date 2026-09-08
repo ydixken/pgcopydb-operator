@@ -17,3 +17,5 @@
   Require valid changed positive values and preserve the CI-only verification policy.
 - Use focused CI when a failed full suite lacks the evidence for one assertion.
   A focused success is diagnostic evidence and never replaces the required full exact-head merge gate.
+- Preserve mount propagation when an observer must inspect nested read-only storage mounts.
+  A readonly root bind alone does not prove that descendants remain visible and read-only.

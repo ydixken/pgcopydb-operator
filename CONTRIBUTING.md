@@ -243,6 +243,7 @@ The caller MUST run owned suite cleanup before destruction and treat either clea
 
 We support Linux cgroup v2 with provable initial cgroup namespace visibility and either classic Docker `overlay2` or a verified containerd `overlayfs` layout.
 The containerd path requires a fixed, bounded metadata reader in the exact owned node and a restricted read-only observer to agree on the node root, local volume, and every overlay layer's backing filesystem.
+The Docker storage bind uses one-way slave propagation; both storage profiles require a read-only root and every descendant mount before inspecting storage, and unchanged mount evidence before accepting capacity.
 Missing or changed evidence fails the run; the collector does not infer snapshot paths from absent classic graph-driver metadata.
 The observer checks the complete visible cgroup ancestry and requires at least 8 CPU, 16 GiB memory, and 32 GiB available on the verified Docker backing filesystem.
 These checks establish capacity ceilings, not reservations.

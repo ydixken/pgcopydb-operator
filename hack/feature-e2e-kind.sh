@@ -208,7 +208,7 @@ capacity() {
   observer=$(timeout --kill-after=10s 180 docker create --name "$cluster-capacity" --label "pgcopydb-operator.io/feature-run=$owner" \
     --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pid host --cgroupns host \
     --mount "type=bind,src=/sys/fs/cgroup,dst=/capacity/cgroup,readonly,bind-recursive=readonly,bind-propagation=rprivate" \
-    --mount "type=bind,src=$root,dst=/capacity/storage,readonly,bind-recursive=readonly,bind-propagation=rprivate" \
+    --mount "type=bind,src=$root,dst=/capacity/storage,readonly,bind-recursive=enabled,bind-propagation=rslave" \
     --entrypoint /bin/bash -i "$node_image" -s -- "$pid" "$start" 2> "$work/observer-create.stderr") || create_status=$?
   if (( create_status != 0 )); then
     # Docker errors may contain private paths; only fixed categories leave the private directory.
@@ -217,7 +217,7 @@ capacity() {
       category=timeout
     else
       case "$create_error" in
-        *'invalid mount config for type "bind"'*) category=mount ;;
+        *'invalid mount config for type "bind"'*|*'invalid mount config: must use either propagation mode'*) category=mount ;;
         *'bind-recursive=readonly requires API v1.44 or later'*|*"unknown option 'bind-recursive'"*) category=unsupported-option ;;
         *'pull access denied for '*|*'manifest for '*' not found'*|*'repository '*' not found'*) category=image ;;
         *'Cannot connect to the Docker daemon'*|*'permission denied while trying to connect to the Docker daemon socket'*) category=daemon ;;
@@ -267,12 +267,21 @@ set -euo pipefail
 exec 2>/dev/null
 die() { exit 1; }
 for tool in stat awk readlink df getconf; do command -v "$tool" >/dev/null || die; done
+# Slave propagation admits daemon mounts, so prove recursive readonly before inspecting storage.
+capacity_mountinfo=$(</proc/self/mountinfo)
+awk '$5=="/capacity/storage" || index($5,"/capacity/storage/")==1 {
+       if($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+:[0-9]+$/ || $4 !~ /^\// ||
+          $6 !~ /(^|,)ro(,|$)/ || $6 ~ /(^|,)rw(,|$)/) exit 1
+       for(i=7;i<=NF && $i!="-";i++) {}
+       if(NF!=i+3) exit 1
+       if($5=="/capacity/storage") n++
+     } END {if(n!=1) exit 1}' <<< "$capacity_mountinfo" || die
 # Linux's initial cgroup namespace inode is an implementation invariant, not a portable ABI.
 [[ $(stat -f -c %t /proc/self/ns/cgroup) == 6e736673 &&
    $(stat -Lc %i /proc/self/ns/cgroup) == 4026531835 ]] || die
 [[ $(stat -f -c %t /capacity/cgroup) == 63677270 ]] || die
 awk '$5=="/capacity/cgroup" { if ($4!="/" || $6 !~ /(^|,)ro(,|$)/ || $0 !~ / - cgroup2 /) exit 1; n++ }
-     index($5,"/capacity/cgroup/")==1 { exit 1 } END { if(n!=1) exit 1 }' /proc/self/mountinfo || die
+     index($5,"/capacity/cgroup/")==1 { exit 1 } END { if(n!=1) exit 1 }' <<< "$capacity_mountinfo" || die
 start_time() {
   local value
   value=$(<"/proc/$1/stat") || die
@@ -284,7 +293,7 @@ awk -v allowed="$3" 'BEGIN {split(allowed,a,":"); for(i in a) owned[a[i]]=1}
      $5=="/capacity/storage" { n++; if ($6 !~ /(^|,)ro(,|$)/ || $0 ~ / - overlay /) exit 1 }
      index($5,"/capacity/storage/")==1 {
        if(!owned[$5] || $4!="/" || $6 !~ /(^|,)ro(,|$)/ || $0 !~ / - overlay /) exit 1 }
-     END { if(n!=1) exit 1 }' /proc/self/mountinfo || die
+     END { if(n!=1) exit 1 }' <<< "$capacity_mountinfo" || die
 [[ -d /capacity/storage/overlay2 && -d /capacity/storage/volumes &&
    ! -e /capacity/storage/containerd/daemon/io.containerd.snapshotter.v1.overlayfs &&
    $(readlink -f /capacity/storage/overlay2) == /capacity/storage/overlay2 &&
@@ -300,7 +309,7 @@ done
 else
   die() { printf 'kind-storage-unproved\n'; exit 1; }
   storage_host_root=$7
-  mountinfo=$(</proc/self/mountinfo)
+  mountinfo=$capacity_mountinfo
   mount_record() {
     awk -v path="$1" '$5==path {n++; for(i=7;i<=NF;i++) if($i=="-") {
       if(NF!=i+3) exit 1; print $3, $4, $(i+1), $(i+2), $(i+3)}} END {if(n!=1)exit 1}' <<< "$mountinfo"
@@ -423,6 +432,7 @@ walk() {
 self=$(walk "$$" '') || die
 node=0
 [[ "$1" == 0 ]] || node=$(walk "$1" "$2") || die
+[[ "$capacity_mountinfo" == "$(</proc/self/mountinfo)" ]] || die
 printf '{"nodePID":%s,"nodeStartTime":"%s","observerStartTime":"%s"}\n' "$1" "$node" "$self"
 CAPACITY
   } | timeout --kill-after=10s 90 docker start -ai "$observer" > "$work/capacity.json"
