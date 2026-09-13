@@ -99,6 +99,8 @@ jobs:
         run: |
           command -v yamllint >/dev/null || pipx install yamllint
           yamllint --strict .
+      - name: Generated manifests are current
+        run: make manifests && git diff --exit-code config/crd/bases config/rbac
       - name: Chart CRD is current
         # The chart embeds controller-gen output; this fails on drift.
         run: ./hack/sync-chart-crd.sh --check
