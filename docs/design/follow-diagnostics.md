@@ -1,7 +1,7 @@
 # Follow diagnostics
 
 The early-cutover E2E spec samples source replication feedback and the target marker-row count roughly every 30 seconds after resuming its paused sender.
-Sampling stops when cutover starts or the existing convergence deadline expires.
+Sampling stops when cutover starts or the 12-minute backlog drain deadline expires.
 A snapshot shares a two-second probe budget, capped by the remaining deadline, and each SQL statement has a one-second timeout.
 Delayed polls skip missed intervals rather than issuing catch-up probes.
 
@@ -50,9 +50,28 @@ We do not add those sizes as stage diagnostics because they cannot answer the at
 Full three-stage attribution requires an independently observable transformation boundary, such as bounded read-only counts of received and transformed complete transactions, or stage-specific work and wait counters emitted by the worker.
 Neither is implemented here; any worker probe must first have its paths and semantics verified on a live worker without invoking pgcopydb.
 
-## Budget gate
+## Backlog drain budget
 
-The convergence budget remains 300 seconds.
-The 20,000-row burst, 16Mi allowance, and progress-bounds EXTERNAL payload are unchanged.
-The A/B/A CPU-policy result decides whether the suite needs a larger drain budget.
-Any budget-value change belongs in a separate final commit; these diagnostics do not justify one.
+We use `backlogDrainTimeout = 12 * time.Minute` for early-cutover catch-up and progress-bounds recovery after unlocking.
+Each wait and its probes share one deadline.
+The five-minute `lagConvergeTimeout` still distinguishes idle catch-up from a stall; its existing stress-tier override is unchanged.
+The 20,000-row burst, 16Mi allowance, EXTERNAL payload, and recovery batch shape are unchanged.
+
+The A/B/A replay on 2026-09-13 (roughly 20:18 to 20:55 UTC) used the rc.5 paused-walsender scenario, digest-pinned images, fixed placement, and unchanged storage configuration.
+It measured:
+
+| CPU policy | Receive progress | Resume to cutover | 300-second gate |
+| --- | --- | --- | --- |
+| A1 powersave | 84.3 KB/s | 347.2 s | Missed |
+| B performance | 123.5 KB/s | 236.9 s | Met |
+| A2 powersave restored | 85.5 KB/s | 337.3 s | Missed |
+
+Rates are decimal KB/s of source WAL position progress, not network throughput.
+A2 returned within 1.5% of A1, but performance mode did not restore the historical 170 KB/s.
+Both powersave phases exceeded 300 seconds, and CI remains on powersave.
+The measurements establish a need for roughly 350 seconds plus operating headroom, not a measured 12-minute requirement.
+We allow 12 minutes because the throughput floor remains unexplained; the trade-off is slower reporting of a genuine failure.
+
+> [!important]
+> This budget is environmental accommodation, not a resolution of the throughput investigation in [#260](https://github.com/ydixken/pgcopydb-operator/issues/260).
+> The A/B/A experiment did not exercise the progress-bounds spec, so its fresh-seed behavior remains unproven.

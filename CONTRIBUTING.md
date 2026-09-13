@@ -154,8 +154,9 @@ Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`
 The progress-sampler bounds spec waits for follow to start, then gives replication lag five minutes to converge and waits up to another five minutes for `CutoverPending`.
 A missing replication sample or lag above the allowance fails with the convergence helper's diagnostic instead of consuming the clone's 30-minute budget.
 The EXTERNAL payload and recovery batch sizes remain deliberate: they exercise uncompressed storage traffic during recovery.
+Recovery after unlocking has a separate 12-minute backlog drain budget shared by the wait and its target probes.
 
-The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or its convergence budget expires.
+The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
 CI runs the diagnostic helper regressions without starting the cluster suite.
 

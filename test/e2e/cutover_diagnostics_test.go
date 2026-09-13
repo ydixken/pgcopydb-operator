@@ -71,7 +71,7 @@ func cutoverSnapshotDue(now time.Time, next *time.Time, deadline time.Time) bool
 
 func TestCutoverDiagnosticSchedule(t *testing.T) {
 	start := time.Unix(0, 0)
-	for _, budget := range []time.Duration{300 * time.Second, 10 * time.Minute} {
+	for _, budget := range []time.Duration{300 * time.Second, 10 * time.Minute, backlogDrainTimeout} {
 		next := start
 		deadline := start.Add(budget)
 		count := 0
