@@ -54,7 +54,8 @@ var _ = Describe("Progress sampler bounds", func() {
 		Expect(psql(sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
 			table+"'::regclass")).To(Equal(appDB), "the follow fixture must be owned by the migration role")
 		create(newFollowMigration(name, v1beta1.CutoverManual))
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		waitFollowStreaming(name)
+		waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
 		readMigration := func() *v1beta1.Migration {
 			m := &v1beta1.Migration{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
