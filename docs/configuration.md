@@ -19,6 +19,40 @@ The operator defaults table jobs to the worker's CPU request and enables same-ta
 Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
 Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) is the map.
 
+## All databases
+
+Set `spec.clone.allDatabases: true` to clone the whole source instance using superuser credentials on both sides.
+
+Both connections MUST name an existing maintenance database, such as `postgres`.
+pgcopydb substitutes each database name into the connection URIs itself and creates missing target databases.
+It excludes only `template0` and `template1`: the source's `postgres` database is cloned into the target's `postgres` database too.
+See [09-all-databases.yaml](examples/09-all-databases.yaml) for a complete resource.
+
+> [!warning]
+> Target databases MUST NOT already hold the schema being restored; `pg_restore` errors on existing objects.
+> This includes objects in the target's `postgres` database.
+> Admission rejects `clone.dropIfExists`, `follow.enabled`, and `verification.data` with `allDatabases`.
+
+If admission does not enforce these rules, the controller rejects the same combinations with terminal reason `InvalidSpec` before creating any Jobs.
+
+The source superuser covers the role dump's access to `pg_authid` and dumps across every database.
+The target superuser covers database creation, role restore, and ownership changes.
+Managed admin roles without `rolsuper`, such as `rds_superuser`, fail preflight; `superuserSecretRef` does not replace the migration connections' own superuser requirement.
+All-databases preflight ignores `superuserSecretRef` and does not mount its credentials, because this mode cannot remediate missing privileges.
+
+Roles are copied unconditionally, so `clone.roles: true` is allowed but redundant.
+Roles already present on the target are skipped.
+`clone.noRolePasswords` omits role passwords without relaxing the superuser contract.
+Filters, skip options, and other clone options apply to every database, and job counts are global across databases rather than multiplied per database.
+Restart and resume use per-database work directories beneath the existing work directory.
+
+`verification.schema` is supported across all databases.
+Follow is rejected because pgcopydb ignores it in this mode; `dropIfExists` would try to drop the connected maintenance database, and the data compare produces no JSON verdict.
+Progress sampling reports summed database sizes on each side, without per-database relation counts or pgcopydb counters.
+`uriSecretRef` accepts both PostgreSQL URIs and libpq keyword/value DSNs for this mode.
+pgcopydb parses either form with `PQconninfoParse`, replaces the database name, and renders a per-database URI while preserving connection options, including passwords, TLS settings, and `passfile`.
+For inline and `secretRef` connections, the runner writes passfile entries as `host:*:*:user:password`; the wildcard database field lets the same credentials authenticate every per-database connection.
+
 ## Filters
 
 `clone.filters` selects what to copy; the operator renders it to pgcopydb's filters INI in an operator-owned ConfigMap:
@@ -64,7 +98,8 @@ Left unset, `resources` defaults to 4 CPUs and 4Gi, requests only.
 The copy concurrency follows that request, so raising it is usually the only tuning a migration needs; see [Performance tuning](operations/performance.md).
 
 The runner version also gates the in-pod progress poll that fills `status.progress` and the byte-progress metrics.
-The chart value `runner.progressPollVersions` (manager flag `--progress-poll-versions`) lists the exact pgcopydb versions allowed to run it, and it fails closed: an unlisted version, such as a custom stock 0.18 image, never runs the poll and keeps the clone byte metrics dark, while everything else keeps working.
+The chart value `runner.progressPollVersions` (manager flag `--progress-poll-versions`) lists the exact pgcopydb versions allowed to run it, and it fails closed: an unlisted version, such as a custom stock 0.18 image, never runs the catalog poll.
+Single-database clones retain their psql-based estimates; all-databases clones report only summed database sizes regardless of the allowlist.
 The [monitoring guide](operations/monitoring.md) lists which metrics that gate affects.
 
 ## Credentials
@@ -109,4 +144,5 @@ The password stays a projected file feeding the passfile, with the same guarante
 [03-clone-platform-secret.yaml](examples/03-clone-platform-secret.yaml) is the complete example.
 
 Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
-The preflight checks it and applies the grants the regular role is missing, for the base clone (`GRANT CREATE` on the target database and schemas) and for follow alike, logging every statement in one `PreflightRemediated` event; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.
+For single-database migrations, the preflight checks it and applies the grants the regular role is missing, for the base clone (`GRANT CREATE` on the target database and schemas) and for follow alike.
+Each `PreflightRemediated` event lists the statements applied by one tier; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.

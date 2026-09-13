@@ -48,7 +48,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--origin` | operator-managed | Always the same generated per-Migration name as the slot; unique, so fan-in stays safe. |
 | `--endpos` | operator-managed | Cutover sets it at runtime via `stream sentinel set endpos --current`. |
 | `--use-copy-binary` | `spec.clone.useCopyBinary` | On by default. pgcopydb falls back to text per table when a column's binary encoding is unsafe. |
-| `--all-databases` | not exposed (deliberate) | A Migration migrates one database; create one Migration per database. |
+| `--all-databases` | `spec.clone.allDatabases` | Requires superuser on both sides; see [All databases](../configuration.md#all-databases). |
 | `--host` / `--port` | not exposed (deliberate) | The operator drives the sentinel via `pods/exec`; the TCP coordinator stays the documented alternative if exec proves limiting. |
 | `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed (deliberate) | Runner logs are structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level; a verbosity knob can come with demand. |
 
@@ -59,5 +59,8 @@ The standalone `follow` command advertises a subset of the clone options (resear
 `spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
 
 ## `pgcopydb compare`
+
+With `spec.clone.allDatabases: true`, the schema compare also receives `--all-databases`.
+Admission rejects `verification.data` in this mode because pgcopydb produces no JSON report for the strict wrapper to evaluate.
 
 `spec.verification.schema` and `spec.verification.data` run `pgcopydb compare schema` and `pgcopydb compare data` after completion, each in its own Job on the work PVC. Both take source, target, and `--dir` from the same operator-managed values as the rows above. `compare data` adds `--json` and runs inside a wrapper, because the command logs a differing table and still exits 0: its own exit code cannot report a mismatch. The wrapper reads the report back through `psql` (the runner image has no other JSON parser), fails the Job when any table differs on row count or checksum, and fails it too when the compare could not run or the report could not be read. The report is printed either way, so the Job log keeps the per-table detail.

@@ -2,10 +2,14 @@
 
 What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes cluster before the operator can run it. The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
-Scope: the v0.1 surface, base clone (`pgcopydb clone`), live migration (`clone --follow`), cutover, and cleanup. Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/). The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply exactly the grants below.
+Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/e37d2bd4dd10b7ed7b415555ce3318202d9633cf) for all-databases behavior.
+The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operating, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
 ## Summary
+
+Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuser on both sides; see [All databases](#all-databases).
 
 | Requirement                                             | Where  | Needed for       |
 |---------------------------------------------------------|--------|------------------|
@@ -39,12 +43,13 @@ Every Migration is gated by a `<name>-preflight` Job before the first attempt.
 Its first check, always, is connectivity: `select 1` against both endpoints, each result logged in the Job output.
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt burns; a permanent error such as a failed password authentication ends the retry ladder as soon as a second probe repeats it, so a wrong password is a verdict in seconds while a pooler's momentary auth failure still gets the full ladder.
 Selected installed source extensions must be installed on the target or have a non-null default version in `pg_available_extensions`.
-With `clone.dropIfExists: true`, a target default version is required even for an installed extension, because restore may recreate it.
+With `clone.dropIfExists: true` or `clone.allDatabases: true`, a target default version is required even for an installed extension, because restore may recreate it or create it in a new database.
 Extension include and exclude filters match exact names, with exclusion applied last; table and schema filters do not affect extension selection.
 `clone.skip: [extensions]` bypasses this check, while `extensionComments` does not.
 Missing, malformed, or failed probes fail preflight; an explicitly empty selection passes.
 The check does not compare extension versions, install packages, grant installation privileges, or establish extension compatibility.
-Three target-side grant probes follow, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
+For single-database migrations, three target-side grant probes follow, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
+All-databases clones replace these maintenance-database probes with the instance-wide checks below.
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
 Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).
 
@@ -61,8 +66,36 @@ Target role:
 
 Superuser is required only for:
 
+- `clone.allDatabases: true` on both sides, even when role passwords are omitted.
 - `clone.roles: true` without `clone.noRolePasswords: true` (reads passwords from `pg_authid`).
 - Extensions: creating most C extensions on the target, and cloning a database whose superuser-installed extensions have configuration tables (a pg_dump limitation that filters cannot exclude).
+
+## All databases
+
+Both migration connections MUST name an existing maintenance database such as `postgres` and use a role with `rolsuper`.
+The source role dumps every database and copies roles, whose password dump reads `pg_authid`.
+The target role creates missing databases, restores roles, and runs ownership changes across every database.
+Managed admin roles without `rolsuper` are refused, and configuring `superuserSecretRef` does not satisfy this requirement for a non-superuser migration role.
+All-databases preflight ignores those remediation references and does not project their credentials into the pod.
+
+pgcopydb excludes only `template0` and `template1`, so source `postgres` is cloned into target `postgres`.
+Roles are implied; `clone.roles: true` is redundant, and existing target roles are skipped.
+`clone.noRolePasswords` is honoured but does not relax the required privileges.
+
+> [!warning]
+> Target databases MUST NOT already hold the schema being restored, including in `postgres`.
+> Preflight lists existing target databases but does not check them for conflicting objects.
+> `clone.dropIfExists`, `follow.enabled`, and `verification.data` are rejected in this mode; `verification.schema` is supported.
+
+Preflight checks the migration roles' superuser attributes, lists the source databases and which already exist on the target, then checks selected extensions across every source database unless extensions are skipped.
+A failed superuser check stops the script before database enumeration and extension probes.
+Extension probing opens a separate psql session for each source database and runs sequentially, so its work grows linearly with database count within the preflight Job's 30-minute deadline.
+The target extension check requires package availability, not merely installation in the maintenance database, because target databases may not exist yet.
+A failed database query fails preflight rather than reporting success on an empty result.
+
+Filters and skips apply to every database, and job counts are global across databases.
+The operator reports summed database sizes without per-database relation or catalog counters.
+See [All databases configuration](../configuration.md#all-databases) and [the example](../examples/09-all-databases.yaml).
 
 ## Live migration (`spec.follow.enabled: true`)
 
@@ -119,8 +152,8 @@ With a `secretRef` primary, the internal/external choice follows the primary's `
 The preflight probes the superuser connection (with the same retries as the primaries) and checks `rolsuper`; a role without it only logs a warning, because managed-Postgres admin roles (`rds_superuser` and friends) can hold the grant rights without the attribute.
 It then applies the rights the regular role is missing, exactly these statements:
 
-- `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (every migration).
-- `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (every migration).
+- `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (single-database migrations).
+- `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (single-database migrations).
 - `ALTER ROLE <role> REPLICATION` on the source (follow only).
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).
@@ -129,7 +162,8 @@ Every applied statement is re-checked and logged in the preflight output, and on
 One event rather than one per statement, because the events API folds same-reason events into a counter that keeps only the first message.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never alters schema objects or data; it only grants rights.
-It never touches replica identity, `wal_level`, plugin installation, or database ownership (the db-properties probe stays hint-only), and pgcopydb itself never runs as the superuser.
+It never touches replica identity, `wal_level`, plugin installation, or database ownership (the db-properties probe stays hint-only).
+The remediation credentials are confined to preflight; pgcopydb uses the primary migration connections, which MUST themselves be superusers for all-databases clones.
 One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.
 The reuse extends to TLS transport settings, including any client certificate; when the server maps certificate identities to roles, the certificate cannot present the superuser, so use password auth for it.
 

@@ -45,6 +45,9 @@ spec:
       name: payroll-pg-superuser
       keys: {username: username, password: password}  # remap deviating key names
   clone:
+    # Whole instance, including postgres; requires superuser maintenance connections.
+    # Incompatible with this example's follow, dropIfExists, and verification.data.
+    # allDatabases: true
     # Parallelism.
     tableJobs: 8                # concurrent table copies
     indexJobs: 8                # concurrent index builds
@@ -56,7 +59,7 @@ spec:
     # Target preparation and restore shaping.
     dropIfExists: true          # re-runnable onto a populated target
     roles: true                 # copy roles first (pg_dumpall --roles-only)
-    noRolePasswords: true       # with roles: skip pg_authid, no superuser needed
+    noRolePasswords: true       # omits role passwords; allDatabases still needs superuser
     noOwner: true               # skip ALTER OWNER; restore as the connecting role
     noACL: true                 # skip GRANT/REVOKE replay
     noComments: true            # skip COMMENT statements
