@@ -163,7 +163,14 @@ type SkipOption string
 // migration: tableJobs follows the worker's CPU request, and
 // splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
 // which pgcopydb ships disabled. See docs/configuration.md.
+// +kubebuilder:validation:XValidation:rule="!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists) && self.dropIfExists)",message="allDatabases cannot be combined with dropIfExists: the maintenance database cannot be dropped"
 type CloneOptions struct {
+	// allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
+	// Both connections must name a maintenance database and use superuser roles.
+	// Filters and skips apply to every database; job counts are global across databases.
+	// +optional
+	AllDatabases bool `json:"allDatabases,omitempty"`
+
 	// tableJobs is the number of concurrent table COPY workers (pgcopydb
 	// --table-jobs). Unset follows the worker's CPU request, minimum four. Each
 	// job also gets a concurrent VACUUM ANALYZE backend on the target, so N
@@ -224,7 +231,7 @@ type CloneOptions struct {
 	Roles bool `json:"roles,omitempty"`
 
 	// noRolePasswords dumps roles without passwords (--no-role-passwords),
-	// avoiding the superuser requirement of roles.
+	// avoiding the superuser requirement of roles, but not of allDatabases.
 	// +optional
 	NoRolePasswords bool `json:"noRolePasswords,omitempty"`
 
@@ -479,6 +486,8 @@ type ReplicationStatus struct {
 
 // MigrationSpec is the desired state of a Migration. source and target are
 // immutable after creation (a migration is a one-shot job, like batch/v1 Job).
+// +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode"
+// +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
