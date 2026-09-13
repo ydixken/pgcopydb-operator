@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -82,6 +84,9 @@ const (
 	// chartPath is relative to this package: go test runs each test binary
 	// with the package directory as working directory.
 	chartPath = "../../charts/pgcopydb-operator"
+	// The chart's CRD template is synced from this generated source.
+	// task lint fails if the template drifts from it.
+	crdPath = "../../config/crd/bases/pgcopydb-operator.io_migrations.yaml"
 	// fieldOwner identifies this suite's server-side applies.
 	fieldOwner = "pgcopydb-e2e-suite"
 	// labelFeatureE2ERun isolates objects owned by one protected feature run.
@@ -268,6 +273,9 @@ var (
 	// seedTimeout bounds the seed Job; seeding is IO-bound on the source
 	// volume.
 	seedTimeout = 30 * time.Minute
+	// The cluster CRD follows main through GitOps; a candidate tagged just
+	// after a merge can reach BeforeSuite before that sync lands.
+	crdConvergeTimeout = 5 * time.Minute
 	// lagConvergeTimeout bounds how long a follow migration may take to report
 	// a lag at or under its maxCatchupLag once the stream is up. It only has to
 	// separate a catch-up from a stall, and those are not close: replaying what
@@ -354,6 +362,176 @@ func TestMetricsJobFollowsInstalledFullname(t *testing.T) {
 				t.Errorf("metrics job = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func servedVersion(crd map[string]any, name string) map[string]any {
+	versions, _, _ := unstructured.NestedSlice(crd, "spec", "versions")
+	for _, v := range versions {
+		if m, ok := v.(map[string]any); ok && m["name"] == name && m["served"] == true {
+			return m
+		}
+	}
+	return nil
+}
+
+func schemaOf(version map[string]any) map[string]any {
+	openAPI, _, _ := unstructured.NestedMap(version, "schema", "openAPIV3Schema")
+	return openAPI
+}
+
+// Admission prunes unknown fields silently; validation differences fail loudly.
+func missingSchemaPaths(want, have map[string]any, prefix string) []string {
+	wantProperties, _ := want["properties"].(map[string]any)
+	haveProperties, _ := have["properties"].(map[string]any)
+	var missing []string
+	for name, wanted := range wantProperties {
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		actual, exists := haveProperties[name]
+		if !exists {
+			missing = append(missing, path)
+			continue
+		}
+		wantChild, _ := wanted.(map[string]any)
+		haveChild, _ := actual.(map[string]any)
+		missing = append(missing, missingSchemaPaths(wantChild, haveChild, path)...)
+	}
+	if items, ok := want["items"].(map[string]any); ok {
+		haveItems, _ := have["items"].(map[string]any)
+		missing = append(missing, missingSchemaPaths(items, haveItems, prefix+"[]")...)
+	}
+	if additional, ok := want["additionalProperties"].(map[string]any); ok {
+		haveAdditional, _ := have["additionalProperties"].(map[string]any)
+		missing = append(missing, missingSchemaPaths(additional, haveAdditional, prefix+"{}")...)
+	}
+	slices.Sort(missing)
+	return missing
+}
+
+func candidateCRD() map[string]any {
+	GinkgoHelper()
+	data, err := os.ReadFile(crdPath)
+	Expect(err).NotTo(HaveOccurred(), "reading "+crdPath)
+	var crd map[string]any
+	Expect(yaml.Unmarshal(data, &crd)).To(Succeed(), "decoding "+crdPath)
+	return crd
+}
+
+func TestMissingSchemaPaths(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		want    string
+		have    string
+		missing []string
+	}{
+		{
+			name: "identical schemas",
+			want: `{properties: {spec: {properties: {follow: {type: object}}}}}`,
+			have: `{properties: {spec: {properties: {follow: {type: object}}}}}`,
+		},
+		{
+			name: "extra cluster field",
+			want: `{properties: {spec: {properties: {clone: {type: object}}}}}`,
+			have: `{properties: {spec: {properties: {clone: {type: object}, follow: {type: object}}}}}`,
+		},
+		{
+			name:    "missing nested field",
+			want:    `{properties: {spec: {properties: {clone: {properties: {allDatabases: {type: boolean}}}}}}}`,
+			have:    `{properties: {spec: {properties: {clone: {type: object}}}}}`,
+			missing: []string{"spec.clone.allDatabases"},
+		},
+		{
+			name:    "missing parent field",
+			want:    `{properties: {spec: {properties: {follow: {properties: {enabled: {type: boolean}}}}}}}`,
+			have:    `{properties: {spec: {type: object}}}`,
+			missing: []string{"spec.follow"},
+		},
+		{
+			name:    "missing array item field",
+			want:    `{properties: {spec: {properties: {volumes: {items: {properties: {name: {type: string}}}}}}}}`,
+			have:    `{properties: {spec: {properties: {volumes: {items: {type: object}}}}}}`,
+			missing: []string{"spec.volumes[].name"},
+		},
+		{
+			name:    "missing array items",
+			want:    `{properties: {spec: {properties: {volumes: {items: {properties: {name: {type: string}}}}}}}}`,
+			have:    `{properties: {spec: {properties: {volumes: {type: array}}}}}`,
+			missing: []string{"spec.volumes[].name"},
+		},
+		{
+			name:    "missing status field",
+			want:    `{properties: {status: {properties: {phase: {type: string}}}}}`,
+			have:    `{properties: {status: {type: object}}}`,
+			missing: []string{"status.phase"},
+		},
+		{
+			name: "sorted misses",
+			want: `{properties: {
+				status: {properties: {phase: {type: string}}},
+				spec: {properties: {follow: {type: object}, clone: {type: object}}}
+			}}`,
+			have:    `{properties: {status: {type: object}, spec: {type: object}}}`,
+			missing: []string{"spec.clone", "spec.follow", "status.phase"},
+		},
+		{
+			name: "missing map value field",
+			want: `{properties: {spec: {properties: {settings: {
+				additionalProperties: {properties: {enabled: {type: boolean}}}
+			}}}}}`,
+			have: `{properties: {spec: {properties: {settings: {
+				additionalProperties: {type: object}
+			}}}}}`,
+			missing: []string{"spec.settings{}.enabled"},
+		},
+		{
+			name: "missing map value schema",
+			want: `{properties: {spec: {properties: {settings: {
+				additionalProperties: {properties: {enabled: {type: boolean}}}
+			}}}}}`,
+			have:    `{properties: {spec: {properties: {settings: {type: object}}}}}`,
+			missing: []string{"spec.settings{}.enabled"},
+		},
+		{
+			name: "boolean additional properties",
+			want: `{properties: {spec: {additionalProperties: true}}}`,
+			have: `{properties: {spec: {additionalProperties: false}}}`,
+		},
+		{
+			name: "validation differences",
+			want: `{properties: {spec: {properties: {mode: {
+				type: string, enum: [clone, follow], 'x-kubernetes-validations': [{rule: "self != ''"}]
+			}}}}}`,
+			have: `{properties: {spec: {properties: {mode: {type: integer, enum: [1, 2]}}}}}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var want, have map[string]any
+			if err := yaml.Unmarshal([]byte(tt.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tt.have), &have); err != nil {
+				t.Fatal(err)
+			}
+			if got := missingSchemaPaths(want, have, ""); !slices.Equal(got, tt.missing) {
+				t.Errorf("missingSchemaPaths() = %v, want %v", got, tt.missing)
+			}
+		})
+	}
+}
+
+func TestCandidateCRDDeclaresFollow(t *testing.T) {
+	RegisterTestingT(t)
+	crd := candidateCRD()
+	version := servedVersion(crd, v1beta1.SchemeGroupVersion.Version)
+	if version == nil {
+		t.Fatal(crdPath + " declares no served v1beta1")
+	}
+	_, found, err := unstructured.NestedMap(schemaOf(version), "properties", "spec", "properties", "follow")
+	if err != nil || !found {
+		t.Fatalf("%s v1beta1 has no spec.follow: %v", crdPath, err)
 	}
 }
 
@@ -890,32 +1068,30 @@ var _ = BeforeSuite(func() {
 	k8sClient = featureLabelingClient{Client: baseClient}
 
 	By("checking the Migration CRD exists (the suite does not manage it)")
+	const crdName = "migrations.pgcopydb-operator.io"
+	crdGVK := schema.GroupVersionKind{
+		Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}
 	crd := &unstructured.Unstructured{}
-	crd.SetGroupVersionKind(schema.GroupVersionKind{
-		Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"})
-	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "migrations.pgcopydb-operator.io"}, crd)).
+	crd.SetGroupVersionKind(crdGVK)
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: crdName}, crd)).
 		To(Succeed(), "CRD migrations.pgcopydb-operator.io not found or cluster unreachable;"+
 			" install the CRD first (chart with crds.install=true, or config/crd), the suite will not create it")
-	// The suite talks v1beta1, so that exact version must be served; index 0
-	// is not it once several versions coexist, look the entry up by name.
-	versions, _, _ := unstructured.NestedSlice(crd.Object, "spec", "versions")
-	var served map[string]any
-	for _, v := range versions {
-		if m, ok := v.(map[string]any); ok && m["name"] == v1beta1.SchemeGroupVersion.Version {
-			served = m
-			break
-		}
-	}
-	Expect(served).NotTo(BeNil(),
-		"CRD migrations.pgcopydb-operator.io does not serve "+v1beta1.SchemeGroupVersion.Version+
-			": upgrade the CRD (chart >= v0.2.0) before running the suite")
-	// A pre-follow CRD would silently prune spec.follow at admission and the
-	// live scenarios would run as plain clones; fail fast instead.
-	_, hasFollow, _ := unstructured.NestedMap(served, "schema", "openAPIV3Schema",
-		"properties", "spec", "properties", "follow")
-	Expect(hasFollow).To(BeTrue(),
-		"CRD migrations.pgcopydb-operator.io has no spec.follow: the cluster CRD predates the"+
-			" follow controller; upgrade the CRD (chart >= v0.1.0-alpha.6) before running the live scenarios")
+	By("checking the cluster CRD serves every field this checkout declares")
+	candidate := servedVersion(candidateCRD(), v1beta1.SchemeGroupVersion.Version)
+	Expect(candidate).NotTo(BeNil(), crdPath+" declares no v1beta1")
+	Expect(schemaOf(candidate)).NotTo(BeEmpty(), crdPath+" declares no v1beta1 schema")
+	Eventually(func(g Gomega) {
+		crd := &unstructured.Unstructured{}
+		crd.SetGroupVersionKind(crdGVK)
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: crdName}, crd)).To(Succeed())
+		served := servedVersion(crd.Object, v1beta1.SchemeGroupVersion.Version)
+		g.Expect(served).NotTo(BeNil(), "cluster CRD does not serve v1beta1")
+		missing := missingSchemaPaths(schemaOf(candidate), schemaOf(served), "")
+		g.Expect(missing).To(BeEmpty(),
+			"cluster CRD lacks fields this checkout declares: %v. The suite never installs"+
+				" the CRD. On the shared cluster it follows main through GitOps: merge first and"+
+				" let the sync land. Elsewhere apply config/crd from this checkout.", missing)
+	}, crdConvergeTimeout, 15*time.Second).Should(Succeed())
 
 	By("preparing the fixture StorageClass and checking Longhorn capacity")
 	ensureFixtureStorage()
