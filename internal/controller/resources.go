@@ -116,6 +116,17 @@ func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
 // retries are operator-driven so the attempt count and reasons live in the
 // Migration status, and each retry resumes from the work-dir catalogs.
 func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
+	// Older CRDs may lack CEL rules; Reconcile persists builder errors as terminal InvalidSpec.
+	if m.Spec.Clone.AllDatabases {
+		switch {
+		case m.Spec.Clone.DropIfExists:
+			return nil, fmt.Errorf("allDatabases cannot be combined with dropIfExists: the maintenance database cannot be dropped")
+		case followEnabled(m):
+			return nil, fmt.Errorf("allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode")
+		case m.Spec.Verification != nil && m.Spec.Verification.Data:
+			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
+		}
+	}
 	// Attempt 1 restarts (wipes) the work dir: any state found there is
 	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
 	// failed attempt is gone with its process, so --resume needs
@@ -784,12 +795,22 @@ LEFT JOIN pg_catalog.pg_extension AS installed ON installed.extname::text COLLAT
 LEFT JOIN pg_catalog.pg_available_extensions AS available ON available.name::text COLLATE "C" = selected.name
 WHERE NOT (@INSTALLED@ OR available.default_version IS NOT NULL);`
 
-func extensionPreflightBlock(drop bool) string {
+func extensionPreflightBlock(drop, allDatabases bool) string {
 	installed := "installed.extname IS NOT NULL"
 	if drop {
 		installed = "false"
 	}
+	selection := `checkv "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
+` + sourceExtensionsQuery + `
+PF_EXTENSION_SOURCE
+)" "${PREFLIGHT_EXTENSION_FILTERS:-}" 2>/dev/null`
+	collect := ""
+	if allDatabases {
+		collect = strings.ReplaceAll(allDatabaseExtensionsBlock, "@SOURCE@", sourceExtensionsQuery)
+		selection = `[ "$extensions_collected" = 1 ] && checkv "$PGCOPYDB_TARGET_PGURI" "SELECT COALESCE(jsonb_agg(DISTINCT name), '[]'::jsonb) FROM jsonb_array_elements(:'list'::jsonb) AS db(extensions), jsonb_array_elements(db.extensions) AS ext(name)" "[$extension_arrays]" 2>/dev/null`
+	}
 	return strings.NewReplacer("@SOURCE@", sourceExtensionsQuery, "@VALIDATE@", extensionNamesValidQuery,
+		"@COLLECT@", collect, "@SELECT@", selection,
 		"@TARGET@", strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", installed)).Replace(`extension_names_valid() {
   [ -n "$1" ] || return 1
   extension_shape=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_VALIDATE'
@@ -798,10 +819,8 @@ PF_EXTENSION_VALIDATE
 )" "$1" 2>/dev/null) || return 1
   case "$extension_shape" in ''|*[!0-9]*) return 1 ;; esac
 }
-if selected_extensions=$(checkv "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
-@SOURCE@
-PF_EXTENSION_SOURCE
-)" "${PREFLIGHT_EXTENSION_FILTERS:-}" 2>/dev/null) && extension_names_valid "$selected_extensions"; then
+@COLLECT@
+if selected_extensions=$(@SELECT@) && extension_names_valid "$selected_extensions"; then
   if unavailable_extensions=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_TARGET'
 @TARGET@
 PF_EXTENSION_TARGET
@@ -821,12 +840,85 @@ fi
 `)
 }
 
+// JSON rows preserve whitespace and keep database names out of executable input.
+// The conninfo value quotes libpq metacharacters and reuses the original credentials and TLS options.
+const allDatabaseExtensionsBlock = `checkv_db() {
+  { cat <<'PF_CONNECT'
+SELECT 'dbname=' || chr(39) || replace(replace(:'database'::jsonb #>> '{}', chr(92), chr(92)||chr(92)), chr(39), chr(92)||chr(39)) || chr(39) AS dbconn \gset
+\connect -reuse-previous=on :dbconn
+PF_CONNECT
+    printf '%s' "$2"
+  } | psql "$1" -XAtq -v ON_ERROR_STOP=1 -v list="$3" -v database="$4" -f -
+}
+extension_arrays=''
+extensions_collected=0
+if [ -n "$source_databases" ] && database_rows=$(checkv "$PGCOPYDB_SOURCE_PGURI" "SELECT value::text FROM jsonb_array_elements(:'list'::jsonb)" "$source_databases") && [ -n "$database_rows" ]; then
+  extensions_collected=1
+  while IFS= read -r database; do
+    [ -n "$database" ] || continue
+    if db_extensions=$(checkv_db "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
+@SOURCE@
+PF_EXTENSION_SOURCE
+)" "${PREFLIGHT_EXTENSION_FILTERS:-}" "$database" 2>/dev/null) && extension_names_valid "$db_extensions"; then
+      extension_arrays="${extension_arrays}${extension_arrays:+,}$db_extensions"
+    else
+      note "preflight: source extension selection probe failed for database $database"
+      extensions_collected=0
+    fi
+  done <<PF_DATABASES
+$database_rows
+PF_DATABASES
+else
+  note "preflight: listing source databases for extension probes failed"
+fi
+`
+
+func allDatabasesPreflightBlock() string {
+	var b strings.Builder
+	for _, side := range []string{"source", "target"} {
+		reason := "role dump reads pg_authid and every database is dumped"
+		if side == "target" {
+			reason = "CREATE DATABASE, role restore and ALTER OWNER run across every database"
+		}
+		b.WriteString(remSingleBlock(remSingle{
+			probe:   `check "$PGCOPYDB_` + strings.ToUpper(side) + `_PGURI" 'select rolsuper::int from pg_roles where rolname = current_user'`,
+			ok:      "all-databases " + side + " superuser",
+			missing: "preflight: all-databases " + side + " requires a superuser migration role (rolsuper): " + reason,
+			onProbe: "preflight: probing the all-databases " + side + " superuser requirement failed",
+		}))
+	}
+	// Per-database failures must not push the superuser diagnosis out of the condition's log tail.
+	b.WriteString(`[ "$fail" -eq 0 ] || exit 1
+source_databases=''
+if source_databases=$(check "$PGCOPYDB_SOURCE_PGURI" "SELECT jsonb_agg(datname ORDER BY datname) FROM pg_database WHERE datname NOT IN ('template0', 'template1')") && [ -n "$source_databases" ] && [ "$source_databases" != '[]' ]; then
+  echo "ok: all-databases source databases: $source_databases"
+  if existing_databases=$(checkv "$PGCOPYDB_TARGET_PGURI" "SELECT COALESCE(jsonb_agg(datname ORDER BY datname), '[]'::jsonb) FROM pg_database WHERE datname IN (SELECT jsonb_array_elements_text(:'list'::jsonb))" "$source_databases") && [ -n "$existing_databases" ]; then
+    echo "ok: all-databases existing target databases: $existing_databases"
+  else
+    note "preflight: listing existing target databases failed"
+  fi
+else
+  source_databases=''
+  note "preflight: listing source databases failed or found no databases"
+fi
+`)
+	return b.String()
+}
+
 // preflightScriptFor assembles the per-Migration check script: connectivity
 // first, optional superuser checks, extensions, then grant checks.
 // Follow-only prerequisites remain outside the clone path.
 func preflightScriptFor(m *v1beta1.Migration) string {
 	var b strings.Builder
 	b.WriteString(preflightHeader)
+	if m.Spec.Clone.AllDatabases {
+		b.WriteString(allDatabasesPreflightBlock())
+		if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
+			b.WriteString(extensionPreflightBlock(true, true))
+		}
+		b.WriteString(preflightScriptFooter)
+		return b.String()
+	}
 	superSrc := m.Spec.Source.SuperuserSecretRef != nil
 	superTgt := m.Spec.Target.SuperuserSecretRef != nil
 	if superSrc {
@@ -836,7 +928,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(superVerifyBlock(conn.Target))
 	}
 	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
-		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists))
+		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists, false))
 	}
 	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
 	b.WriteString(cloneRightsBlock(superTgt, dbProps))
@@ -880,6 +972,10 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		s conn.Side
 		c *v1beta1.PostgresConnection
 	}{{conn.Source, &m.Spec.Source}, {conn.Target, &m.Spec.Target}} {
+		// The all-databases path is probe-only and never needs remediation credentials.
+		if m.Spec.Clone.AllDatabases {
+			continue
+		}
 		if mat := conn.MaterializeSuperuser(sc.s, sc.c); mat != nil {
 			extras = append(extras, mat)
 		}
