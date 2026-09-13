@@ -8,7 +8,8 @@
 - [x] Sample source byte positions and target row counts every 30 seconds within the existing budget.
 - [x] Add regression coverage and document the diagnostic's limits.
 - [x] Run `task lint` for each implementation commit.
-- [ ] Push a draft PR and inspect CI tests and documentation checks.
+- [x] Push a draft PR and inspect CI tests and documentation checks.
+- [ ] Verify workflow syntax with `actionlint`; neither the local toolchain nor the CI lint steps ran it.
 - [ ] Confirm any proposed worker paths on a live worker before adding a worker probe.
 - [ ] Resolve transform/apply discrimination before claiming three-stage diagnosis.
 - [ ] Wait for the A/B/A result before a separate, final budget-value commit.
@@ -18,6 +19,16 @@ The diagnostic must not classify a stage from those sizes alone.
 The existing 300-second convergence budget, 20,000-row backlog, 16Mi allowance, and EXTERNAL progress payload remain unchanged.
 Local `task lint` passed for the wait change and the diagnostic change with `0 issues.`.
 Workflow lint skipped locally because `actionlint` is unavailable; functional tests and the documentation build run in CI.
+
+### M2 verification
+
+[Draft PR #263](https://github.com/ydixken/pgcopydb-operator/pull/263) contains the unblocked wait and recurring-snapshot changes.
+[CI run 34779816683](https://github.com/ydixken/pgcopydb-operator/actions/runs/34779816683) passed `lint`, `test`, and `docs` for `e61e0ab24655fcf9fc5d168a4f6c76ee09e0f708`.
+The test log records successful unit/envtest suites and `go test ./test/e2e -run '^TestCutoverDiagnostic' -count=1` against disposable PostgreSQL.
+The documentation log records a successful `mkdocs build --strict`.
+The CI lint job does not invoke `actionlint`, so its success does not close the workflow-syntax gate.
+Three-stage attribution remains unresolved, and no worker filesystem probe is included.
+The A/B/A result still gates the separate budget-value commit.
 
 ## Issue 220: all databases
 
