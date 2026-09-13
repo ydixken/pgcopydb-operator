@@ -42,15 +42,16 @@ import (
 // The call counters let specs prove the catalog poll never runs against a
 // live worker, in any phase, while the size sampler keeps running.
 type fakeProgress struct {
-	mu        sync.Mutex
-	cp        *v1beta1.CloneProgress
-	cpErr     error
-	src, tgt  *int64
-	relations *progress.RelationCounts
-	nilSample bool
-	sizesErr  error
-	cpCalls   int
-	sizeCalls int
+	mu           sync.Mutex
+	cp           *v1beta1.CloneProgress
+	cpErr        error
+	src, tgt     *int64
+	relations    *progress.RelationCounts
+	nilSample    bool
+	sizesErr     error
+	cpCalls      int
+	sizeCalls    int
+	allDatabases bool
 
 	copying, finalizing bool
 	stageCalls          int
@@ -91,10 +92,11 @@ func (f *fakeProgress) setRelations(c *progress.RelationCounts) {
 	f.relations = c
 }
 
-func (f *fakeProgress) Sample(context.Context, string, string) (*progress.Sample, error) {
+func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool) (*progress.Sample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sizeCalls++
+	f.allDatabases = allDatabases
 	if f.sizesErr != nil {
 		return nil, f.sizesErr
 	}
@@ -607,6 +609,32 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(4)))
 		cp, _ = fake.counts()
 		Expect(cp).To(Equal(1))
+	})
+
+	It("samples sizes but never list progress for all databases", func() {
+		const name = "mig-progress-all-dbs"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 4}, src: int64p(7000)}
+		r := newReconciler()
+		r.Progress = fake
+		m := validMigration(name)
+		m.Spec.Clone.AllDatabases = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil())
+		fake.mu.Lock()
+		allDatabases := fake.allDatabases
+		fake.mu.Unlock()
+		Expect(allDatabases).To(BeTrue())
+		finishJob(ctx, name+"-run-1", true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(m.Status.Progress).To(BeNil())
+		cp, sizes := fake.counts()
+		Expect(cp).To(BeZero())
+		Expect(sizes).To(Equal(1))
 	})
 
 	It("re-emits a terminal Migration's series after a registry wipe", func() {

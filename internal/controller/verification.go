@@ -158,7 +158,9 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 		// has rows for the count to see. This goes before the catalog read, not
 		// after, so pgcopydb's own accounting still has the last word.
 		settleProgress(m)
-		r.sampleCloneProgress(ctx, m, m.Status.JobName)
+		if !m.Spec.Clone.AllDatabases {
+			r.sampleCloneProgress(ctx, m, m.Status.JobName)
+		}
 	}
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
 

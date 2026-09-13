@@ -190,6 +190,14 @@ fi
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
+// Instance catalogs have no relation counters; zero counts preserve the sample row format without reporting progress.
+const allDatabasesSampleScript = progressSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'
+  from pg_database where datname not in ('template0', 'template1')"
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row") || s=
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row") || t=
+printf 'source=%s\ntarget=%s\n' "$s" "$t"
+`
+
 // SQL cancellation releases server work; timeout also bounds connection hangs
 // after the local exec stream closes. SET overrides conflicting URI options.
 const progressSQL = `progress_sql() {
@@ -218,7 +226,7 @@ type RelationCounts struct {
 
 // Sample reads both databases from the Job's running pod. No pod is no sample
 // rather than an error: the worker exits and this keeps being called.
-func (p *Poller) Sample(ctx context.Context, namespace, jobName string) (*Sample, error) {
+func (p *Poller) Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*Sample, error) {
 	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil {
 		return nil, err
@@ -226,7 +234,11 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string) (*Sample
 	if pod == "" {
 		return nil, nil
 	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + sampleScript})
+	script := sampleScript
+	if allDatabases {
+		script = allDatabasesSampleScript
+	}
+	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + script})
 	if err != nil {
 		// The container can exit after RunningPod selects it and before the
 		// exec upgrade reaches the kubelet. That is the same no-sample state.

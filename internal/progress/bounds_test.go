@@ -45,7 +45,7 @@ func progressCommand(stage bool) []string {
 	if stage {
 		p.CloneStage(context.Background(), "test", "job")
 	} else {
-		_, _ = p.Sample(context.Background(), "test", "job")
+		_, _ = p.Sample(context.Background(), "test", "job", false)
 	}
 	return f.argv
 }
