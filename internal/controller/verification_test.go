@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -27,10 +28,64 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
+
+func TestBuildCompareJob_AllDatabases(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = true
+	job, err := buildCompareJob(m, "img", compareSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " "); got != "compare schema --dir /work/pgcopydb --all-databases" {
+		t.Fatalf("schema argv = %q", got)
+	}
+	job, err = buildCompareJob(m, "img", compareData)
+	if job != nil || err == nil || !strings.Contains(err.Error(), "allDatabases cannot be combined with verification.data") {
+		t.Fatalf("data builder must fail closed without CEL admission: job=%v, err=%v", job, err)
+	}
+}
+
+// This exercises buildJob's terminal validation, not the compare builder's defensive guard.
+func TestReconcile_AllDatabasesDataVerificationAfterClone(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = true
+	m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+	m.Status.Phase = v1beta1.PhaseVerifying
+	m.Status.Attempts = 1
+	m.Status.JobName = workerJob
+	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+		Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionTrue, Reason: "CloneSucceeded",
+	})
+	ctx := context.Background()
+	r := failingReconciler(t, interceptor.Funcs{}, m, completeJob(workerJob))
+	res, err := r.Reconcile(ctx, migrationRequest(m))
+	if err != nil || res != (ctrl.Result{}) {
+		t.Fatalf("invalid verification must not loop after clone: %+v, %v", res, err)
+	}
+	got := &v1beta1.Migration{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(m), got); err != nil {
+		t.Fatal(err)
+	}
+	failed := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionFailed)
+	if got.Status.Phase != v1beta1.PhaseFailed || failed == nil || failed.Reason != testInvalidSpec || failed.Status != metav1.ConditionTrue {
+		t.Fatalf("invalid verification was not persisted as terminal: %+v", got.Status)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+		t.Fatal("terminal spec failure discarded the recorded clone success")
+	}
+	job := &batchv1.Job{}
+	err = r.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: compareJobName(m, compareData)}, job)
+	if !errors.IsNotFound(err) {
+		t.Fatalf("invalid data verification created a compare Job: %v", err)
+	}
+}
 
 var _ = Describe("Migration Controller verification", func() {
 	ctx := context.Background()
