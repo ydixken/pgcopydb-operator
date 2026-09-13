@@ -89,7 +89,9 @@ Roles are implied; `clone.roles: true` is redundant, and existing target roles a
 
 Preflight checks the migration roles' superuser attributes, lists the source databases and which already exist on the target, then checks selected extensions across every source database unless extensions are skipped.
 A failed superuser check stops the script before database enumeration and extension probes.
+A failed source or target database listing stops it before extension probes and prints a closing `preflight failed:` summary, keeping the listing failure in the condition's log tail.
 Extension probing opens a separate psql session for each source database and runs sequentially, so its work grows linearly with database count within the preflight Job's 30-minute deadline.
+Per-database extension failures distinguish source selection from validation on the target and include the database name.
 The target extension check requires package availability, not merely installation in the maintenance database, because target databases may not exist yet.
 A failed database query fails preflight rather than reporting success on an empty result.
 

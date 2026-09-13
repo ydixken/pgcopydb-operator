@@ -777,6 +777,10 @@ else
 fi
 exit "$fail"`
 
+// Stop dependent probes before their failures bury prerequisite diagnoses in the condition's log tail.
+const preflightStopOnFailure = `
+if [ "$fail" -ne 0 ]; then` + preflightScriptFooter + "\nfi\n"
+
 const extensionFiltersEnv = "PREFLIGHT_EXTENSION_FILTERS"
 
 const sourceExtensionsQuery = `SELECT COALESCE(
@@ -805,12 +809,16 @@ func extensionPreflightBlock(drop, allDatabases bool) string {
 PF_EXTENSION_SOURCE
 )" "${PREFLIGHT_EXTENSION_FILTERS:-}" 2>/dev/null`
 	collect := ""
+	selectionSide := string(conn.Source)
+	stopOnFailure := `[ "$fail" -eq 0 ] || exit 1`
 	if allDatabases {
-		collect = strings.ReplaceAll(allDatabaseExtensionsBlock, "@SOURCE@", sourceExtensionsQuery)
+		selectionSide = string(conn.Target)
+		stopOnFailure = preflightStopOnFailure
+		collect = strings.ReplaceAll(allDatabaseExtensionsBlock, "@SOURCE@", sourceExtensionsQuery) + stopOnFailure
 		selection = `[ "$extensions_collected" = 1 ] && checkv "$PGCOPYDB_TARGET_PGURI" "SELECT COALESCE(jsonb_agg(DISTINCT name), '[]'::jsonb) FROM jsonb_array_elements(:'list'::jsonb) AS db(extensions), jsonb_array_elements(db.extensions) AS ext(name)" "[$extension_arrays]" 2>/dev/null`
 	}
 	return strings.NewReplacer("@SOURCE@", sourceExtensionsQuery, "@VALIDATE@", extensionNamesValidQuery,
-		"@COLLECT@", collect, "@SELECT@", selection,
+		"@COLLECT@", collect, "@SELECT@", selection, "@SELECTION_SIDE@", selectionSide, "@STOP_ON_FAILURE@", stopOnFailure,
 		"@TARGET@", strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", installed)).Replace(`extension_names_valid() {
   [ -n "$1" ] || return 1
   extension_shape=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_VALIDATE'
@@ -834,9 +842,9 @@ PF_EXTENSION_TARGET
     note "preflight: target extension availability probe failed"
   fi
 else
-  note "preflight: source extension selection probe failed"
+  note "preflight: @SELECTION_SIDE@ extension selection probe failed"
 fi
-[ "$fail" -eq 0 ] || exit 1
+@STOP_ON_FAILURE@
 `)
 }
 
@@ -856,14 +864,17 @@ if [ -n "$source_databases" ] && database_rows=$(checkv "$PGCOPYDB_SOURCE_PGURI"
   extensions_collected=1
   while IFS= read -r database; do
     [ -n "$database" ] || continue
-    if db_extensions=$(checkv_db "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
+    if ! db_extensions=$(checkv_db "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
 @SOURCE@
 PF_EXTENSION_SOURCE
-)" "${PREFLIGHT_EXTENSION_FILTERS:-}" "$database" 2>/dev/null) && extension_names_valid "$db_extensions"; then
-      extension_arrays="${extension_arrays}${extension_arrays:+,}$db_extensions"
-    else
+)" "${PREFLIGHT_EXTENSION_FILTERS:-}" "$database" 2>/dev/null); then
       note "preflight: source extension selection probe failed for database $database"
       extensions_collected=0
+    elif ! extension_names_valid "$db_extensions"; then
+      note "preflight: validating selected extensions on target failed for database $database"
+      extensions_collected=0
+    else
+      extension_arrays="${extension_arrays}${extension_arrays:+,}$db_extensions"
     fi
   done <<PF_DATABASES
 $database_rows
@@ -887,9 +898,8 @@ func allDatabasesPreflightBlock() string {
 			onProbe: "preflight: probing the all-databases " + side + " superuser requirement failed",
 		}))
 	}
-	// Per-database failures must not push the superuser diagnosis out of the condition's log tail.
-	b.WriteString(`[ "$fail" -eq 0 ] || exit 1
-source_databases=''
+	b.WriteString(preflightStopOnFailure)
+	b.WriteString(`source_databases=''
 if source_databases=$(check "$PGCOPYDB_SOURCE_PGURI" "SELECT jsonb_agg(datname ORDER BY datname) FROM pg_database WHERE datname NOT IN ('template0', 'template1')") && [ -n "$source_databases" ] && [ "$source_databases" != '[]' ]; then
   echo "ok: all-databases source databases: $source_databases"
   if existing_databases=$(checkv "$PGCOPYDB_TARGET_PGURI" "SELECT COALESCE(jsonb_agg(datname ORDER BY datname), '[]'::jsonb) FROM pg_database WHERE datname IN (SELECT jsonb_array_elements_text(:'list'::jsonb))" "$source_databases") && [ -n "$existing_databases" ]; then
@@ -902,6 +912,7 @@ else
   note "preflight: listing source databases failed or found no databases"
 fi
 `)
+	b.WriteString(preflightStopOnFailure)
 	return b.String()
 }
 
