@@ -438,6 +438,14 @@ func TestProtectedE2EWorkflowsQueueWithoutChangingReleaseScale(t *testing.T) {
 	if runs != 1 {
 		t.Errorf("release e2e job contains %d published candidate suite steps, want 1", runs)
 	}
+	for _, path := range []string{e2eWorkflow, releaseWorkflow} {
+		if strings.Contains(read(t, path), "E2E_OPERATOR_NAMESPACE") {
+			t.Errorf("%s overrides the operator namespace its cleanup step hardcodes", path)
+		}
+	}
+	if !strings.Contains(read(t, e2eSuite), `"crds.install=false"`) {
+		t.Error("e2e suite must install the chart with crds.install=false because it does not manage the CRD")
+	}
 }
 
 func TestE2ESuiteDoesNotPrintTheRawKubeContext(t *testing.T) {
