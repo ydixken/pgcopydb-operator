@@ -99,6 +99,14 @@ jobs:
         run: |
           command -v yamllint >/dev/null || pipx install yamllint
           yamllint --strict .
+      - name: actionlint
+        run: |
+          if ! command -v actionlint >/dev/null; then
+            version=$(sed -n 's/^ARG ACTIONLINT_VERSION=//p' images/github-runner/Dockerfile)
+            test -n "$version"
+            GOBIN="$HOME/.local/bin" go install "github.com/rhysd/actionlint/cmd/actionlint@$version"
+          fi
+          actionlint
       - name: Generated manifests are current
         run: >-
           make manifests &&

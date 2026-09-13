@@ -79,7 +79,10 @@ No job runs `actions/setup-go`. The image carries Go, and `GOTOOLCHAIN` is left 
 
 `setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner, and `ubuntu-latest` has neither Helm nor a guaranteed Python.
 
-`task lint` runs [actionlint](https://github.com/rhysd/actionlint), which yamllint cannot replace: a step that lost its `uses:` is still valid YAML. One shipped that way, and because `release.yml` only runs on a tag, nothing would have noticed until a release failed. [`.github/actionlint.yaml`](.github/actionlint.yaml) declares the two self-hosted labels so the real findings are not buried under unknown-label warnings.
+The CI `lint` job runs [actionlint](https://github.com/rhysd/actionlint) on all workflows; yamllint alone cannot detect a step that lost its `uses:`.
+If the runner lacks actionlint, CI installs the version pinned in `images/github-runner/Dockerfile` and fails if installation or linting fails.
+Local `task lint` runs actionlint when installed and prints a skip message otherwise.
+[`.github/actionlint.yaml`](.github/actionlint.yaml) declares the two self-hosted runner labels.
 
 The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set. Nothing goes through GitHub's cache service: the jobs used to spend 109 and 173 seconds shipping 444MB of Go cache to the internet and pulling it back, and buildx would have done the same with the image layers.
 
