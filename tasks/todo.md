@@ -1,5 +1,79 @@
 # Issue 95 maintenance plan
 
+## Issue 220: all databases
+
+- [x] Add the API field, admission rules, generated artifacts, and validation tests.
+- [x] Render clone and schema-compare arguments with golden coverage.
+- [x] Add instance-wide preflight probes and shell tests.
+- [x] Sample instance sizes without per-database progress counters.
+- [x] Wire schema verification and reject data verification in the builder.
+- [x] Update configuration, prerequisites, reference, troubleshooting, and examples.
+- [x] Add the positive E2E spec with fixture cleanup.
+- [x] Resolve the negative E2E attempts assertion and add the zero-attempt/no-worker-Job spec.
+- [x] Fix the four repeated preflight test literals reported by `goconst`.
+- [x] Reproduce the chart-ownership failures on clean baseline `25822ae` with the changes stashed, then restore the changes.
+- [x] Format, run `task lint` on each implementation commit, and compare the reconstructed tree with the reviewed snapshot.
+- [ ] Require CI and the full feature E2E result on the exact PR head before any merge.
+
+### Issue 220 review fixes
+
+- [x] Round 2: stop after failed superuser probes and prove downstream probes do not run (S1).
+- [x] Round 2: fix the prerequisites summary and document sequential extension-probe cost (O3 and O4).
+- [x] Round 2: clarify the compare guard's direct-call coverage and the inadmissible deepcopy fixtures (O1 and O2).
+- [x] Round 2: rerun lint, affected packages, E2E compilation, and tool availability checks.
+
+The S1 harness regression failed without the early exit because database enumeration continued after both superuser failures; it passed with the guard immediately after those probes.
+The compare-builder guard remains as a defensive backstop for direct callers; its builder test covers it, while the post-clone reconcile test exercises `buildJob` validation.
+Both deepcopy fixtures retain populated incompatible options and explicitly prohibit reuse for admission tests.
+Round 2 verification passed all five affected packages with envtest, E2E compilation, and `task lint` (`0 issues.`).
+GNU `timeout`, `actionlint`, and `mkdocs` are still unavailable on PATH: `timeout` reports uutils 0.8.0, and workflow lint still skips.
+The full test and docs-build gates remain outstanding without workarounds.
+
+- [x] Reject all three incompatible all-databases combinations through terminal `InvalidSpec` validation before creating Jobs (findings 1 and 5).
+- [x] Populate the field in both full API fixtures and correct the metric and connection documentation (findings 2 through 4).
+- [x] Omit unused remediation credentials from all-databases preflight and remove the one-item list (findings 6 and 10).
+- [ ] Run regression tests, lint, E2E compilation, and the full gates when their tools are available.
+
+The admission-bypass and credential-omission regressions failed before the review fixes and passed afterward.
+The controller regression checks persisted conditions, a warning event, zero attempts, no Jobs, and an absorbing terminal reconciliation for each invalid combination.
+A post-clone regression checks terminal failure without losing recorded clone success or creating a data-compare Job.
+Existing transient-error propagation tests remain unchanged and pass.
+
+With an absolute envtest assets path, `go test ./api/... ./internal/conn ./internal/controller ./internal/pgcopydb -count=1` passed all five packages after the fixes.
+The first package run could not start envtest because the invocation supplied a relative assets path; the corrected invocation required no code or test changes.
+E2E compilation exited 0, and the final `task lint` exited 0 with `0 issues.`; workflow lint still skipped because `actionlint` was unavailable.
+
+Finding 7 is deferred: the suspected kept-cluster conflict is unverified, and resetting the shared maintenance database or cluster-wide roles needs ownership-scoped fixtures rather than broad deletion.
+Finding 8 is deferred: log-tail truncation can undercount the displayed checks but does not change the Job's preflight verdict.
+For finding 9, commit `578b3e3` isolates the unrelated defaults, binary-COPY comment, and runner-version documentation corrections.
+The database-listing failure path remains a diagnosis limitation: if the target disappears after the superuser probes, subsequent extension failures can displace the target error with source-labelled notes before the footer runs.
+The failure exit code and terminal state remain correct.
+
+The approved plan requires local tests for this task.
+Publication of the feature branch and GitHub PR, followed by CI and the exact-head full feature E2E gate, is authorized.
+Merge and release creation require a separate confirmation after the gate results and RC procedure are reported.
+
+### Issue 220 handoff
+
+The user corrected the planned negative E2E assertion to zero worker attempts after `PreflightFailed`; lifecycle semantics remain unchanged.
+The negative spec uses the fixture's app credentials with maintenance-database connections, requires superuser failure messages for both sides, and asserts zero worker attempts and no worker Job.
+Configuration, prerequisites, option coverage, conditions, troubleshooting, planning, and examples document the all-databases contract.
+The positive E2E spec seeds an extra source database, clones through superuser maintenance connections, checks the target app and extra-database row counts, and cleans up its Migration, database, password, Secret, and target objects.
+After both E2E specs were added, `go test -c ./test/e2e -o /tmp/opencode/issue220-e2e.test` exited 0; no local cluster E2E run was made.
+
+`make manifests generate`, `./hack/sync-chart-crd.sh`, and `task docs` exited successfully.
+`task test` passed the API, controller, argument, and seven other packages, but failed in `internal/progress` because the installed `timeout` is uutils rather than GNU, and in two `TestFeatureE2EChartOwnershipLifecycle` cases with `run-owned Migration UID-preconditioned deletion failed`.
+`go test ./test/buildconfig -run '^TestFeatureE2EChartOwnershipLifecycle$' -count=1` reproduced both chart-ownership failures on clean baseline `25822ae` with the changes stashed.
+Both failures reported `run-owned Migration UID-preconditioned deletion failed`; they predate this change and are out of scope.
+The stash restored without conflicts.
+After the negative E2E spec was added, `task lint` exited 0 with `0 issues.` from Go lint and successful YAML, generated-chart drift, chart, documentation-link, and Prometheus checks.
+Workflow lint still reported `lint: no actionlint, skipping workflow lint`.
+The tool check still resolved `timeout` to uutils and found no `actionlint` on PATH.
+Per the user's instruction, full tests and the docs build await tool provisioning; workflow lint also needs rerunning once `actionlint` is available.
+`git diff --check` passed.
+The first checks used Go 1.27.0, Task, and yamllint installed under `/tmp/opencode`; subsequent lint and E2E compilation used the provisioned tools on PATH.
+No repository dependency versions or host configuration were changed by this work.
+
 ## Design gate
 
 - [x] Create an isolated worktree at `fix/issue-95-maintenance` and record the clean baseline.
