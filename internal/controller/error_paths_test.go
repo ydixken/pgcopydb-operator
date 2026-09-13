@@ -53,6 +53,8 @@ const workerJob = "m-run-1"
 // workerPodName is the pod the Job controller would have made for workerJob.
 const workerPodName = "w-0"
 
+const testInvalidSpec = "InvalidSpec"
+
 // failingReconciler wires a fake client with injected failures into a
 // reconciler; objs seed the fake API state.
 func failingReconciler(t *testing.T, fns interceptor.Funcs, objs ...client.Object) *MigrationReconciler {
@@ -167,8 +169,70 @@ func TestReconcile_InvalidSpecFailsTerminally(t *testing.T) {
 		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
 	}
 	cond := findCondition(got.Status.Conditions, v1beta1.ConditionValidated)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InvalidSpec" {
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != testInvalidSpec {
 		t.Fatalf("Validated condition = %+v, want False/InvalidSpec", cond)
+	}
+}
+
+// The fake API bypasses CEL, as an older CRD would; a builder error alone does not prove terminal failure.
+func TestReconcile_AllDatabasesInvalidSpec(t *testing.T) {
+	for _, field := range []string{"dropIfExists", "follow.enabled", "verification.data"} {
+		t.Run(field, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.AllDatabases = true
+			m.Status.Phase = v1beta1.PhasePending
+			switch field {
+			case "dropIfExists":
+				m.Spec.Clone.DropIfExists = true
+			case "follow.enabled":
+				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+			case "verification.data":
+				m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+			}
+			ctx := context.Background()
+			r := failingReconciler(t, interceptor.Funcs{}, m)
+			res, err := r.Reconcile(ctx, migrationRequest(m))
+			if err != nil || res != (ctrl.Result{}) {
+				t.Fatalf("deterministic spec error must not requeue: %+v, %v", res, err)
+			}
+			got := &v1beta1.Migration{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Status.Phase != v1beta1.PhaseFailed || got.Status.Attempts != 0 {
+				t.Fatalf("want terminal failure before any worker: %+v", got.Status)
+			}
+			want := "allDatabases cannot be combined with " + field
+			for name, status := range map[string]metav1.ConditionStatus{
+				v1beta1.ConditionValidated: metav1.ConditionFalse,
+				v1beta1.ConditionFailed:    metav1.ConditionTrue,
+			} {
+				cond := findCondition(got.Status.Conditions, name)
+				if cond == nil || cond.Status != status || cond.Reason != testInvalidSpec || !strings.Contains(cond.Message, want) {
+					t.Fatalf("%s must persist the incompatibility: %+v", name, cond)
+				}
+			}
+			jobs := &batchv1.JobList{}
+			if err := r.List(ctx, jobs); err != nil || len(jobs.Items) != 0 {
+				t.Fatalf("invalid spec created Jobs: %v, %v", jobs.Items, err)
+			}
+			rec := r.Recorder.(*events.FakeRecorder)
+			emitted := drainEvents(rec)
+			if len(emitted) != 1 || !strings.Contains(emitted[0], "Warning InvalidSpec") || !strings.Contains(emitted[0], want) {
+				t.Fatalf("missing InvalidSpec event: %v", emitted)
+			}
+			version := got.ResourceVersion
+			res, err = r.Reconcile(ctx, migrationRequest(m))
+			if err != nil || res != (ctrl.Result{}) {
+				t.Fatalf("terminal reconciliation must not requeue: %+v, %v", res, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ResourceVersion != version || len(drainEvents(rec)) != 0 {
+				t.Fatal("terminal reconciliation rewrote status or repeated the event")
+			}
+		})
 	}
 }
 

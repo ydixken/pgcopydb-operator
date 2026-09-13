@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,15 +44,20 @@ import (
 
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
-	pgoutputPlugin         = "pgoutput"
-	featureRunOwner        = "run-owner"
-	extensionFixtureName   = "citext"
-	extensionBuiltin       = "plpgsql"
-	extensionCitextNames   = `["citext"]`
-	extensionAvailableOK   = "ok: selected extensions available"
-	extensionSourceFailure = "source extension selection probe failed"
-	extensionTargetFailure = "target extension availability probe failed"
-	skipExtensions         = "extensions"
+	pgoutputPlugin           = "pgoutput"
+	featureRunOwner          = "run-owner"
+	extensionFixtureName     = "citext"
+	extensionBuiltin         = "plpgsql"
+	extensionCitextNames     = `["citext"]`
+	extensionAvailableOK     = "ok: selected extensions available"
+	extensionSourceFailure   = "source extension selection probe failed"
+	extensionTargetFailure   = "target extension availability probe failed"
+	skipExtensions           = "extensions"
+	walLevelProbe            = "wal_level"
+	replicationAttrProbe     = "rolreplication"
+	replicaIdentityProbe     = "relreplident"
+	databaseOwnerProbe       = "datdba"
+	preflightAllChecksPassed = "all checks passed"
 )
 
 // Schema fixtures for the clone-rights filter tests, hoisted for goconst.
@@ -340,6 +346,11 @@ func TestJobScripts_ShellValid(t *testing.T) {
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 	gate := progress.NewFromExec(nil, []string{"0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
+		"all databases": func() (*batchv1.Job, error) {
+			all := passwordMigration()
+			all.Spec.Clone.AllDatabases = true
+			return buildPreflightJob(all, "img")
+		},
 		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
@@ -455,16 +466,16 @@ func TestBuildPreflightJob(t *testing.T) {
 	}
 	script := c.Args[1]
 	for _, want := range []string{
-		"wal_level",
+		walLevelProbe,
 		"max_replication_slots",
-		"rolreplication",
+		replicationAttrProbe,
 		"ALTER ROLE",
 		"has_function_privilege",
 		"pg_replication_origin_xact_setup",
 		"GRANT EXECUTE ON FUNCTION",
 		"set session_replication_role = 'replica'",
 		"GRANT SET ON PARAMETER session_replication_role",
-		"relreplident",
+		replicaIdentityProbe,
 		"REPLICA IDENTITY USING INDEX",
 		"REPLICA IDENTITY FULL",
 		"allowMissingReplicaIdentity",
@@ -588,7 +599,7 @@ esac
 
 	t.Run("no offenders passes", func(t *testing.T) {
 		out, code := run(t, pgoutputPlugin, "", nil)
-		if code != 0 || !strings.Contains(out, "all checks passed") {
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
@@ -596,7 +607,7 @@ esac
 		out, code := run(t, "wal2json", "", nil)
 		if code != 0 ||
 			!strings.Contains(out, `slot creation with: could not access file "wal2json"`) ||
-			!strings.Contains(out, "all checks passed") {
+			!strings.Contains(out, preflightAllChecksPassed) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
@@ -738,12 +749,12 @@ func mustPrecede(t *testing.T, s, a, b string) {
 func TestPreflightScriptFor_Structure(t *testing.T) {
 	t.Run("clone-only gets connectivity and nothing else", func(t *testing.T) {
 		s := preflightScriptFor(passwordMigration())
-		for _, want := range []string{`echo "ok: connectivity source"`, `echo "ok: connectivity target"`, "all checks passed"} {
+		for _, want := range []string{`echo "ok: connectivity source"`, `echo "ok: connectivity target"`, preflightAllChecksPassed} {
 			if !strings.Contains(s, want) {
 				t.Fatalf("missing %q:\n%s", want, s)
 			}
 		}
-		for _, absent := range []string{"wal_level", "rolreplication", "relreplident", "SUPER_PGURI"} {
+		for _, absent := range []string{walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "SUPER_PGURI"} {
 			if strings.Contains(s, absent) {
 				t.Fatalf("clone-only script must not contain %q:\n%s", absent, s)
 			}
@@ -783,7 +794,7 @@ func TestPreflightScriptFor_Structure(t *testing.T) {
 		}
 		mustPrecede(t, s, `echo "ok: connectivity source"`, `echo "ok: superuser source connected"`)
 		mustPrecede(t, s, `echo "ok: superuser source verified"`, `echo "ok: superuser target connected"`)
-		mustPrecede(t, s, `echo "ok: superuser target verified"`, "wal_level")
+		mustPrecede(t, s, `echo "ok: superuser target verified"`, walLevelProbe)
 	})
 	t.Run("super on one side mixes remediation and hint", func(t *testing.T) {
 		m := superMigration()
@@ -799,6 +810,121 @@ func TestPreflightScriptFor_Structure(t *testing.T) {
 			t.Fatalf("only the source may remediate:\n%s", s)
 		}
 	})
+}
+
+func TestPreflightScriptFor_AllDatabases(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = true
+	s := preflightScriptFor(m)
+	for _, want := range []string{
+		"ok: all-databases source superuser", "ok: all-databases target superuser",
+		"pg_authid", "CREATE DATABASE, role restore and ALTER OWNER",
+		"datname NOT IN ('template0', 'template1')", "existing target databases",
+		sourceExtensionsQuery, `\connect -reuse-previous=on :dbconn`,
+		"jsonb_agg(DISTINCT name)", "WHERE NOT (false OR available.default_version IS NOT NULL)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("all-databases script missing %q", want)
+		}
+	}
+	for _, absent := range []string{"has_database_privilege", "has_schema_privilege", databaseOwnerProbe, walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "remediated:", "@SOURCE@"} {
+		if strings.Contains(s, absent) {
+			t.Fatalf("all-databases script contains %q", absent)
+		}
+	}
+	mustPrecede(t, s, "ok: connectivity target", "ok: all-databases source superuser")
+	mustPrecede(t, s, "ok: all-databases target superuser", sourceExtensionsQuery)
+	m.Spec.Clone.Skip = []v1beta1.SkipOption{skipExtensions}
+	if strings.Contains(preflightScriptFor(m), sourceExtensionsQuery) {
+		t.Fatal("skipped extensions still probed")
+	}
+}
+
+func TestBuildPreflightJob_AllDatabasesOmitsRemediationCredentials(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = true
+	want, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "unused-source-admin"}
+	m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "unused-target-admin"}
+	got, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("probe-only preflight must not mount, read or verify remediation credentials")
+	}
+}
+
+func TestBuildJob_AllDatabasesAllowed(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		m := passwordMigration()
+		m.Spec.Clone.AllDatabases = all
+		m.Spec.Clone.Roles = true
+		m.Spec.Clone.DropIfExists = !all
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: !all}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: !all}
+		if _, err := buildJob(m, "img", 1); err != nil {
+			t.Fatalf("allDatabases=%t rejected compatible options: %v", all, err)
+		}
+	}
+}
+
+func TestPreflightScript_AllDatabasesSuperuserFailureStopsProbes(t *testing.T) {
+	run := clonePreflightHarness(t)
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = true
+	out, code, _, _ := run(t, m,
+		"PSQL_SOURCE_SUPER=0", "PSQL_TARGET_SUPER=0", "PSQL_FAIL_SUBSTR=pg_database")
+	if code != 1 {
+		t.Fatalf("superuser failure must exit 1, got %d: %s", code, out)
+	}
+	for _, side := range []string{"source", "target"} {
+		if !strings.Contains(out, "all-databases "+side+" requires a superuser") {
+			t.Fatalf("missing %s superuser diagnosis: %s", side, out)
+		}
+	}
+	// Downstream probes cannot fix missing superuser rights and can bury the diagnosis in the log tail.
+	for _, absent := range []string{"source databases", "target databases", "extension", preflightAllChecksPassed} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("continued past failed superuser probes (%q): %s", absent, out)
+		}
+	}
+}
+
+func TestPreflightScript_AllDatabases(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+		ok   bool
+	}{
+		{"superusers", nil, "ok: all-databases target superuser", true},
+		{"source not superuser", []string{"PSQL_SOURCE_SUPER=0"}, "all-databases source requires a superuser", false},
+		{"target not superuser", []string{"PSQL_TARGET_SUPER=0"}, "all-databases target requires a superuser", false},
+		{"probe failed", []string{"PSQL_FAIL_SUBSTR=rolsuper"}, "probing the all-databases source superuser requirement failed", false},
+		{"list failed", []string{"PSQL_FAIL_SUBSTR=jsonb_agg(datname"}, "listing source databases failed", false},
+		{"list empty", []string{"PSQL_DATABASES="}, "listing source databases failed", false},
+		{"target list failed", []string{"PSQL_FAIL_SUBSTR=jsonb_array_elements_text(:'list'"}, "listing existing target databases failed", false},
+		{"per-database failure", []string{"PSQL_FAIL_DATABASE=\"extra\""}, "source extension selection probe failed for database \"extra\"", false},
+		{"extension missing in extra", []string{"PSQL_EXTRA_EXTENSION=1", "PSQL_UNAVAILABLE_CITEXT=1"}, "selected extensions unavailable on target: [\"citext\"]", false},
+		{"extra extension available", []string{"PSQL_EXTRA_EXTENSION=1"}, extensionAvailableOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.AllDatabases = true
+			out, code, _, applied := run(t, m, tc.env...)
+			if (code == 0) != tc.ok || !strings.Contains(out, tc.want) {
+				t.Fatalf("exit %d, want %q: %s", code, tc.want, out)
+			}
+			if applied != "" || strings.Contains(out, okCloneDB) || (!tc.ok && strings.Contains(out, preflightAllChecksPassed)) {
+				t.Fatalf("unexpected success or remediation: %s", out)
+			}
+		})
+	}
 }
 
 // TestBuildPreflightJob_SuperuserWiring pins that superuser credentials ride
@@ -961,7 +1087,7 @@ func TestPreflightScript_Remediation(t *testing.T) {
 			"ok: source replication attribute",
 			"ok: target origin function grants",
 			"ok: target session_replication_role",
-			"all checks passed",
+			preflightAllChecksPassed,
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q:\n%s", want, out)
@@ -1502,7 +1628,7 @@ func TestPreflightExtensionQueries(t *testing.T) {
 		}
 	}
 	for _, drop := range []bool{false, true} {
-		_, query, found := strings.Cut(extensionPreflightBlock(drop), "<<'PF_EXTENSION_TARGET'\n")
+		_, query, found := strings.Cut(extensionPreflightBlock(drop, false), "<<'PF_EXTENSION_TARGET'\n")
 		if !found {
 			t.Fatal("shipped target query missing")
 		}
@@ -1545,7 +1671,7 @@ func TestPreflightScriptFor_CloneTier(t *testing.T) {
 		for _, want := range []string{
 			"has_database_privilege(current_user, current_database(), 'CREATE')",
 			"has_schema_privilege(current_user, n.oid, 'CREATE')",
-			"datdba",
+			databaseOwnerProbe,
 			"hint: spec.target.superuserSecretRef",
 		} {
 			if !strings.Contains(s, want) {
@@ -1557,13 +1683,13 @@ func TestPreflightScriptFor_CloneTier(t *testing.T) {
 	t.Run("follow runs the tier before its battery", func(t *testing.T) {
 		s := preflightScriptFor(superMigration())
 		mustPrecede(t, s, "ok: superuser target verified", okCloneDB)
-		mustPrecede(t, s, "ok: clone rights db-properties", "wal_level")
+		mustPrecede(t, s, "ok: clone rights db-properties", walLevelProbe)
 	})
 	t.Run("dbProperties skip drops that probe", func(t *testing.T) {
 		m := passwordMigration()
 		m.Spec.Clone.Skip = []v1beta1.SkipOption{"vacuum", "dbProperties"}
 		s := preflightScriptFor(m)
-		if strings.Contains(s, "datdba") {
+		if strings.Contains(s, databaseOwnerProbe) {
 			t.Fatalf("skipped db-properties still probed:\n%s", s)
 		}
 		if !strings.Contains(s, "has_schema_privilege") {
@@ -1657,19 +1783,28 @@ func clonePreflightHarness(t *testing.T) func(*testing.T, *v1beta1.Migration, ..
 	// byte-for-byte to APPLY_OUT and, unless PSQL_STICKY=0, flips a marker the
 	// probes honor so the re-check sees the grant.
 	stub := `#!/bin/sh
-q="$6"; list=''
+uri="$1"; q="$6"; list=''; database=''
 for a in "$@"; do
   case "$a" in
     list=*) list=${a#list=} ;;
+    database=*) database=${a#database=} ;;
     -f) q=$(cat) ;;
   esac
 done
 case "$q" in *has_schema_privilege*) printf '%s' "$list" > "${LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
+[ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
-  *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
-  *pg_available_extensions*) printf '%s' "${PSQL_EXTENSION_TARGET-[]}" ;;
+  *source_extension*)
+    if [ "$database" = '"extra"' ] && [ "${PSQL_EXTRA_EXTENSION:-0}" = 1 ]; then echo '["citext"]'
+    else printf '%s' "${PSQL_EXTENSION_SOURCE-[]}"; fi ;;
+  *jsonb_agg\(DISTINCT\ name*) case "$list" in *'"citext"'*) echo '["citext"]' ;; *) echo '[]' ;; esac ;;
+  *pg_available_extensions*)
+    if [ "$list" = '["citext"]' ] && [ "${PSQL_UNAVAILABLE_CITEXT:-0}" = 1 ]; then echo '["citext"]'
+    else printf '%s' "${PSQL_EXTENSION_TARGET-[]}"; fi ;;
+  *'SELECT value::text'*) printf '%s\n' '"app"' '"extra"' '"postgres"' ;;
+  *jsonb_agg\(datname*) printf '%s' "${PSQL_DATABASES-[\"app\",\"extra\",\"postgres\"]}" ;;
   'GRANT CREATE ON DATABASE'*)
     printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
     if [ "${PSQL_STICKY:-1}" = 1 ]; then : > "${STATE_DIR:?}/db-applied"; fi ;;
@@ -1682,7 +1817,7 @@ case "$q" in
     if [ -f "${STATE_DIR:-/nonexistent}/db-applied" ]; then echo 1; else echo "${PSQL_DB_CREATE:-1}"; fi ;;
   *'GRANT CREATE ON DATABASE'*) echo "GRANT CREATE ON DATABASE \"app\" TO \"limited\"" ;;
   *datdba*) echo "${PSQL_DBPROPS:-1}" ;;
-  *rolsuper*) echo 1 ;;
+  *rolsuper*) case "$uri" in src) echo "${PSQL_SOURCE_SUPER:-1}" ;; tgt) echo "${PSQL_TARGET_SUPER:-1}" ;; *) echo 1 ;; esac ;;
   *pg_namespace*) printf '%s\n' "${PSQL_SCHEMAS:-public}" | tr ',' '\n' ;;
   *current_user*) echo limited ;;
   *) echo 1 ;;
@@ -1757,7 +1892,7 @@ func TestPreflightScript_CloneRights(t *testing.T) {
 	})
 	t.Run("all rights pass", func(t *testing.T) {
 		out, code, _, _ := run(t, passwordMigration())
-		if code != 0 || !strings.Contains(out, "all checks passed") {
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 		for _, want := range []string{okCloneDB, okCloneSchema, "ok: clone rights db-properties"} {
@@ -1825,7 +1960,7 @@ func TestPreflightScript_CloneRemediation(t *testing.T) {
 	t.Run("superuser remediates the missing schema grants", func(t *testing.T) {
 		grants := `GRANT CREATE ON SCHEMA public TO "limited"; GRANT CREATE ON SCHEMA sales TO "limited"`
 		out, code, _, applied := run(t, superM(), "PSQL_SCHEMA_GRANTS="+grants)
-		if code != 0 || !strings.Contains(out, "all checks passed") {
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 		for _, want := range []string{
@@ -1913,7 +2048,7 @@ func TestPreflightScript_CloneFailClosed(t *testing.T) {
 		},
 		{
 			name:       "db-properties probe fails by name",
-			failSubstr: "datdba",
+			failSubstr: databaseOwnerProbe,
 			wantNote:   "probing database ownership for the db-properties step failed",
 			absentOK:   "ok: clone rights db-properties",
 		},

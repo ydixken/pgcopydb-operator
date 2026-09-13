@@ -229,9 +229,8 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		return r.reconcileSuspended(ctx, m, base)
 	}
 
-	// Validation: materializing both connections exercises every spec error
-	// the operator can catch without contacting the databases. Spec errors
-	// are absorbing (source/target are immutable, retrying cannot help).
+	// Validation catches deterministic connection and option errors, even with an older CRD.
+	// InvalidSpec is terminal: retrying the same spec cannot help.
 	if _, err := buildJob(m, r.RunnerImage, 1); err != nil {
 		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "InvalidSpec", err.Error())
 		r.fail(m, "InvalidSpec", "Validate", err.Error())
