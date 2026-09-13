@@ -147,6 +147,11 @@ The merge gate on `main` is the three `ci.yml` jobs, `lint`, `test`, and `docs`.
 A behavior change gets its first cluster run when `auto-release.yml` cuts the next candidate and `release.yml` runs the suite against it at `E2E_SCALE=0.25` (see [Releasing](#releasing)).
 That run is the only cluster coverage before promotion.
 
+The suite installs the chart with `crds.install=false` and never creates, upgrades, or deletes the Migration CRD; the CI identity may only `get` it by name.
+Before installing the operator, it compares the cluster's served schema with this checkout's generated CRD and fails naming every missing field, because admission would otherwise prune those fields silently.
+On the shared cluster the CRD follows `main` through GitOps (see private ops notes), so a field added on `main` is testable at the next candidate.
+The check polls for up to five minutes to cover a candidate tagged straight after a merge.
+
 A behavior pull request MUST ship its E2E specs in the same change, so the candidate exercises them.
 A contributor with a cluster SHOULD run the new specs locally with `task e2e:focus` before merging; that is the only cluster signal available before the candidate.
 
