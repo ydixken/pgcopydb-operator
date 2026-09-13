@@ -21,7 +21,7 @@
 - [x] Fetch and rebase onto actual `origin/main` before publication.
   Repeat the static and local gates if the exact head changes.
 - [x] Update the existing PR branch with an explicit old-head lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
-- [x] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
+- [ ] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
   Do not allocate a separate disposable or focused substitute.
 - [x] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
   Leave #200, #215, #243, #209, and #221 open.

@@ -140,7 +140,7 @@
   CI remains responsible for functional tests, builds, and documentation validation.
 - [x] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
 - [x] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
-- [x] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
+- [ ] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
   A focused or disposable run does not replace this gate.
 - [x] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
   Leave #200, #215, #243, #209, and #221 open.

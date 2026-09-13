@@ -21,3 +21,4 @@
   A readonly root bind alone does not prove that descendants remain visible and read-only.
 - When an E2E prerequisite cannot be proven on the actual runner path, remove it rather than extend it with more infrastructure or diagnostics.
 - Verify CRD ownership and reconciliation on the actual cluster before documenting an upgrade prerequisite.
+- Mark a remote gate complete only with a run URL and the exact verified SHA.
