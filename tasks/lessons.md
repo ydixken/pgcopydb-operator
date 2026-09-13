@@ -4,7 +4,7 @@
   Create follow-test tables under `SET ROLE app` and verify ownership before lifecycle assertions.
   Exercise publication creation under the migration role in the fixture regression; a successful superuser setup does not prove that the migration can publish the table.
 - Batch approved related issues after local formatting and lint to reduce trusted runner consumption.
-  Keep per-issue tests and reviews, whole-batch integration review, and full E2E on each batch's exact final head.
+  Keep per-issue tests and reviews, whole-batch integration review, and full E2E on the release candidate that carries the batch.
 - After design approval, dispatch one focused implementer instead of repeating planning and audit passes.
   Use one independent final-diff review for each coherent batch unless new risk changes the scope.
 - Write regression coverage with each behavior change, but run functional tests only in CI.
@@ -15,9 +15,9 @@
   Keep exact-head CI, review, merge, privilege, and publication gates intact.
 - Treat physical storage counters as nonmonotonic across recovery.
   Require valid changed positive values and preserve the CI-only verification policy.
-- Use focused CI when a failed full suite lacks the evidence for one assertion.
-  A focused success is diagnostic evidence and never replaces the required full exact-head merge gate.
+- Use a focused local run when a failed suite lacks the evidence for one assertion.
+  A focused success is diagnostic evidence and never replaces the full suite on the release candidate.
 - Preserve mount propagation when an observer must inspect nested read-only storage mounts.
   A readonly root bind alone does not prove that descendants remain visible and read-only.
-- When a disposable E2E prerequisite cannot be proven on the actual runner path, remove it and return to the established shared-cluster gate.
-  Defer isolation-dependent behavior instead of extending the failed approach with more infrastructure or diagnostics.
+- When an E2E prerequisite cannot be proven on the actual runner path, remove it rather than extend it with more infrastructure or diagnostics.
+- Verify CRD ownership and reconciliation on the actual cluster before documenting an upgrade prerequisite.

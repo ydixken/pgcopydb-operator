@@ -105,7 +105,7 @@
 - [x] Replace PR 252 locally with #211, #223, #210, and only the approved #200 scheduling compensation.
 - [x] Defer all #215, #243, #209, and #221 behavior.
 - [x] Keep #88 out of scope.
-- [ ] Complete the shared-cluster delivery gates below.
+- [x] Complete the shared-cluster delivery gates below.
 
 ## Runtime safety evidence
 
@@ -116,8 +116,8 @@
 - The complete deferred #215 and #243 source remains at `a62ef17724108f6d20b796672fa656188deb82f8`.
   Earlier #215 branch and stash refs remain extra backups.
 - The deferred #209 and #221 source remains at `43f51270455370224cea493cd51d7b3908fea56d`.
-- Local work remains limited to formatting, `git diff --check`, and `task lint`.
-  CI supplies functional, build, documentation, and exact-head shared E2E evidence.
+- PR 252 used local formatting, `git diff --check`, and `task lint`.
+  CI supplied functional, build, documentation, and exact-head shared E2E evidence.
 
 ## Runtime safety exclusions
 
@@ -138,9 +138,9 @@
 - [x] Complete an independent static review of the workflow, helper, and build-configuration removal diff.
 - [x] Format touched files, run `git diff --check`, and run `task lint` locally.
   CI remains responsible for functional tests, builds, and documentation validation.
-- [ ] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
-- [ ] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
-- [ ] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
+- [x] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
+- [x] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
+- [x] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
   A focused or disposable run does not replace this gate.
-- [ ] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
+- [x] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
   Leave #200, #215, #243, #209, and #221 open.

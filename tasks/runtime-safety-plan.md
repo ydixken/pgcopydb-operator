@@ -1,20 +1,21 @@
 # Runtime safety delivery status
 
-## Current batch
+## Current state
 
-The active implementation plan is [Shared E2E removal](shared-e2e-removal-plan.md).
-One replacement PR 252 removes the temporary Kind environment and observer while retaining the established shared-cluster route.
-The PR includes #211, #223, #210, and only the approved #200 scheduling compensation.
+PR 252 merged the shared E2E removal with #211, #223, #210, and the approved #200 scheduling compensation.
+The feature-branch E2E gate is removed; the merge gate on `main` is `lint`, `test`, and `docs`.
+Release candidate E2E in `release.yml` is the only cluster coverage.
 Keep #200 open because the historical 35-second delay still has no measured cause.
+
+## Unblocked work
+
+- #220 (PR #257), #209, and #221 no longer wait on an identical installed CRD, because no pre-merge gate compares one.
+  Their first cluster run is the release candidate that carries them.
 
 ## Deferred work
 
 - Defer all #215 cleanup-outcome behavior and #243 worker-session behavior until their isolation-dependent acceptance can run.
-- Defer #209 split-table configuration and #221 major-version configuration because the shared route requires an identical installed CRD.
 - Keep #88 out of scope, including the pgcopydb fork, SQLite contention work, builder publication, and runner digest changes.
-
-The retired disposable route did not prove its prerequisite on the actual runner path.
-This plan does not claim a diagnosed cause for that failure.
 
 ## Preserved sources
 
@@ -27,10 +28,6 @@ This plan does not claim a diagnosed cause for that failure.
 ## Delivery gates
 
 - Write focused regressions for every retained behavior and run them in CI.
-- The retained runtime diff has an independent static review.
-- Complete an independent static review of the workflow, helper, and build-configuration removal diff.
 - Format locally, run `git diff --check`, and run `task lint` locally.
-- Fetch and rebase onto actual `origin/main` before publication.
-- Update the existing PR branch only with the approved explicit old-head lease.
-- Require exact-head base CI, coverage, one full shared-cluster E2E result, and successful cleanup before a normal merge.
-- Verify the merged commit on actual `main`, close #211, #223, and #210, and leave #200, #215, #243, #209, and #221 open.
+- Require exact-head `lint`, `test`, and `docs` before a normal merge.
+- Verify the merged commit on actual `main`.

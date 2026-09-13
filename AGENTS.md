@@ -10,7 +10,8 @@ Operating guide for AI agents and humans working in this repository. The keyword
 - **This repository is public.** Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project. E2e-relevant details live in private ops notes outside git. When a doc needs such a fact, it writes "see private ops notes".
 - Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
 - Agents run formatting and `task lint` locally only.
-- CI runs functional, unit, envtest, integration, E2E, and documentation checks.
+- CI runs lint, unit, envtest, integration, and documentation checks on every pull request.
+  E2E runs only in [release.yml](.github/workflows/release.yml), against a release candidate, after a tag is cut.
 - For human-operated local E2E, `task e2e` targets the current `kubectl` context and requires its confirmation prompt.
   Never bypass that prompt with `task --yes`.
   The dev cluster is shared, so keep E2E resources in the `pgcopydb-e2e` namespace and clean up.
@@ -59,13 +60,13 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 - The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
 - kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
 - CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)).
-  Base CI remains lint, tests and the docs build through [ci.yml](.github/workflows/ci.yml).
-  A behavior pull request additionally requires a successful full `feature-e2e` result on its exact current head SHA before merge.
+  The merge gate on `main` is the three [ci.yml](.github/workflows/ci.yml) jobs: `lint`, `test`, and `docs`.
+  There is no pre-merge cluster validation: a pull request never runs the E2E suite.
   [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, [auto-release.yml](.github/workflows/auto-release.yml) cuts the candidate once a week, and [promote.yml](.github/workflows/promote.yml) turns a candidate into the release.
-- Local, trusted-main feature, and release E2E are distinct paths.
+- Cluster E2E has two paths: local and release candidate.
   Local `task e2e` keeps the current-context confirmation rules in Caution.
-  Feature full and focused runs use `E2E_SCALE=0.1`, while release candidate E2E remains at `E2E_SCALE=0.25`.
-  Feature runs publish no release artifact, and only the full `feature-e2e` context can satisfy the merge gate.
+  Release candidate E2E runs after a tag is cut, at `E2E_SCALE=0.25`, and is the only cluster coverage a change gets before promotion.
+  A candidate that fails E2E stays a candidate; fix forward on `main` and the next candidate carries the fix.
 
 ## The solution ladder ("ponytail")
 
@@ -84,7 +85,8 @@ Some things are **never** cut on the way down: validation, error handling, secur
 
 - Format touched files and run `task lint` locally before declaring a change ready for CI.
 - CI MUST run functional tests and documentation checks.
-- A behavior pull request is not ready to merge until its exact current head has a successful full `feature-e2e` result.
+- A behavior pull request is ready to merge when `lint`, `test`, and `docs` are green on its current head.
+  Cluster behavior is verified on the next release candidate, not before merge, so the E2E specs ship in the same change.
 - Don't claim green without the command output to back it. "It should pass" is not a result.
 - Keep commits small and [conventional](CONTRIBUTING.md#commits-and-pull-requests). Every commit MUST be lint-clean on its own.
 
