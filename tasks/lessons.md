@@ -1,5 +1,21 @@
 # Lessons
 
+- When unsigned commits are explicitly authorized, use `--no-gpg-sign` per invocation.
+  Do not persist that exception in global or repository Git configuration.
+
+- Trace early exits when composing preflight blocks; failure summaries are part of the condition-message contract.
+  Stop failed prerequisites before per-database probes can push the root cause out of the log tail.
+
+- A deterministic validation error must reach a persisted terminal condition, not the reconcile retry channel.
+  Test the full reconcile path with admission bypassed, including status, events, and the absence of worker Jobs.
+
+- `status.attempts` counts worker Jobs, not preflight Jobs.
+  Preflight-failure coverage must assert zero worker attempts and no first worker Job.
+
+- Keep environment failures separate from feature defects when the user is provisioning missing tools.
+  Preserve the tests and lint gates unchanged, and rerun them after provisioning.
+  When authorized, reproduce unrelated failures on the clean baseline before expanding the fix.
+
 - The E2E `psql` helper connects as `postgres`, while migration fixtures use `app`.
   Create follow-test tables under `SET ROLE app` and verify ownership before lifecycle assertions.
   Exercise publication creation under the migration role in the fixture regression; a successful superuser setup does not prove that the migration can publish the table.
