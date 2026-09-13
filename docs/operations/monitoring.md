@@ -41,8 +41,8 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time that condition last changed status, straight from its `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
 | `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it; `check` is `schema` or `data` | once the spec is read, minus a requested check with no result yet |
-| `pgcopydb_migration_source_database_size_bytes` | | Source database size | worker running |
-| `pgcopydb_migration_target_database_size_bytes` | | Target database size; `rate()` of it is the copy throughput | worker running |
+| `pgcopydb_migration_source_database_size_bytes` | | Source database size; summed across the instance with `allDatabases` | worker running |
+| `pgcopydb_migration_target_database_size_bytes` | | Target database size; summed across the instance with `allDatabases` | worker running |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | worker running |
 | `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built / planned | worker running |
 | `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | worker running |
@@ -57,7 +57,7 @@ The "Exists" column is the contract for when a series is present:
 
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
-- **worker running** for the counters too, but they have two sources and the second is more exact.
+- **worker running** for single-database counters too, but they have two sources and the second is more exact.
   While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables and bytes that exist on the target against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
   This requires psql and GNU `timeout` in the runner and touches no pgcopydb catalog.
   Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see the [troubleshooting row](../troubleshooting.md)).
@@ -69,10 +69,20 @@ The "Exists" column is the contract for when a series is present:
 
 Read the timeline off the condition transitions, not off the phase.
 
+With `spec.clone.allDatabases: true`, each size gauge sums `pg_database_size(oid)` over its endpoint's databases, excluding only `template0` and `template1`.
+The target sum includes existing databases even when they have no counterpart on the source, not just databases created by this Migration.
+Table, index, and clone-byte counters are absent in this mode; the operator reads neither per-database relation counts nor the instance catalog's empty counters.
+
+> [!note]
+> Size gauges measure physical storage, not bytes transferred by this Migration.
+> Growth on unrelated target databases contributes to the all-databases target gauge, and maintenance or recovery can shrink either gauge.
+> A slope estimates storage growth, not isolated copy throughput; `rate()` assumes a monotonic counter and is not appropriate for these gauges.
+
 Each database observation, including the clone-stage probe, sets a five-second SQL `statement_timeout` explicitly before querying.
 Connection-string options cannot disable that bound.
 GNU `timeout` sends TERM after six seconds and KILL one second later, so a stalled connection also releases its remote processes even if the exec stream closes early.
-The three sequential size and scope queries have a combined process budget of 21 seconds, below the 30-second exec timeout.
+The three sequential single-database size and scope queries have a combined process budget of 21 seconds, below the 30-second exec timeout.
+All-databases sampling runs two size queries with a combined process budget of 14 seconds.
 A failed side retains its last size gauge while a usable reading updates the other side.
 Relation counts need both sides, so a partial poll preserves the prior progress counters.
 A failed stage probe preserves the established phase; sampling failures do not complete or fail a migration.

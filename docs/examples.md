@@ -1,7 +1,7 @@
 # Examples
 
 Every example is a complete resource that applies as-is after you swap in your hosts and Secrets.
-They build on each other in order; `08-reference.yaml` is the annotated map of the whole spec.
+`08-reference.yaml` is the annotated map of the whole spec; `09-all-databases.yaml` shows the clone-only whole-instance configuration.
 
 | Example | Shows | Start here when |
 |---|---|---|
@@ -13,6 +13,7 @@ They build on each other in order; `08-reference.yaml` is the annotated map of t
 | [06-live-superuser](examples/06-live-superuser.yaml) | Preflight applies the missing grants itself | You have superuser credentials but no DBA time |
 | [07-verified](examples/07-verified.yaml) | Post-migration `pgcopydb compare` checks | The result must be proven, not assumed |
 | [08-reference](examples/08-reference.yaml) | Every spec knob, annotated | You are looking for a specific field |
+| [09-all-databases](examples/09-all-databases.yaml) | Whole-instance clone, roles implied | Both endpoints permit superuser access and target schemas are empty |
 
 Alert rules for unattended migrations ship in the Helm chart rather than as an example here: set `metrics.prometheusRule.enabled=true` to install them.
 The [monitoring guide](operations/monitoring.md) documents them alongside the metrics and dashboards.

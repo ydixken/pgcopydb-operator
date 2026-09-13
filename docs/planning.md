@@ -34,7 +34,9 @@ Individual checks appear as `ok:` log lines.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not validate downtime, RPO, RTO, or acceptance criteria.
 4. Partial.
    Exact checks include `connectivity source`, `connectivity target`, `selected extensions available` unless skipped, `clone rights database`, `clone rights schemas`, `clone rights db-properties` when enabled, `superuser source connected` when applicable, `superuser source verified` when applicable, `superuser target connected` when applicable, `superuser target verified` when applicable, and follow-specific `source replication attribute`, `target origin function grants`, and `target session_replication_role`.
-   A connected role without `rolsuper` emits the corresponding warning instead of a verified line.
+   With `clone.allDatabases`, `all-databases source superuser` and `all-databases target superuser` replace the clone-rights probes, and selected extensions are checked across every source database.
+   `all-databases source databases` and `all-databases existing target databases` log the database scope; they do not verify that target schemas are empty.
+   A `superuserSecretRef` role without `rolsuper` emits the corresponding warning instead of a verified line, but an all-databases migration connection without `rolsuper` fails preflight.
    Preflight does not audit TLS policy or all required ownership and publication rights.
 5. Partial.
    Scheduling and PVC binding problems may keep status at `PreflightRunning`, but preflight does not measure data size, free space, throughput, connection headroom, compute, I/O, network, WAL growth, or work-disk capacity.

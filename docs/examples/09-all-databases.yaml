@@ -1,0 +1,27 @@
+# Whole-instance clone: roles are implied and postgres is included.
+# Both connections require superuser; target schemas MUST be empty.
+# See docs/configuration.md#all-databases for the restrictions.
+apiVersion: pgcopydb-operator.io/v1beta1
+kind: Migration
+metadata:
+  name: all-databases
+spec:
+  source:
+    host: source.example.com
+    database: postgres
+    username: postgres
+    passwordSecretRef: {name: source-superuser, key: password}
+    sslMode: require
+  target:
+    host: target.example.com
+    database: postgres
+    username: postgres
+    passwordSecretRef: {name: target-superuser, key: password}
+    sslMode: require
+  clone:
+    allDatabases: true
+    # noRolePasswords: true  # optional; does not relax the superuser requirement
+    # Filters and skips apply to every database; job counts are global.
+  verification:
+    schema: true
+    # data, follow.enabled, and clone.dropIfExists are rejected with allDatabases.

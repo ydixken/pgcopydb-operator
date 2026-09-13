@@ -84,7 +84,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly and the preflight passed; refreshed on every reconcile of an active Migration. |
 | `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unbound PVC, unschedulable). |
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
-| `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability, a target clone privilege, or a follow prerequisite failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. Terminal. |
+| `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability, a target clone privilege, an all-databases superuser or database-listing probe, or a follow prerequisite failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
