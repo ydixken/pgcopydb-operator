@@ -1,5 +1,21 @@
 # Issue 95 maintenance plan
 
+## M2: follow diagnostics
+
+- [x] Branch from `origin/main` and rebase after PR #261 without editing its two E2E files.
+- [x] Check the pinned receive/apply implementation and SQLite WAL semantics.
+- [x] Replace the progress-bounds setup wait with the existing convergence helper.
+- [ ] Sample source byte positions and target row counts every 30 seconds within the existing budget.
+- [ ] Add regression coverage and document the diagnostic's limits.
+- [ ] Run `task lint` for each commit, push a draft PR, and inspect CI tests and documentation checks.
+- [ ] Confirm any proposed worker paths on a live worker before adding a worker probe.
+- [ ] Resolve transform/apply discrimination before claiming three-stage diagnosis.
+- [ ] Wait for the A/B/A result before a separate, final budget-value commit.
+
+File sizes do not supply a reliable transform/apply boundary: SQLite recycles WAL files, and apply runs transformation inline.
+The diagnostic must not classify a stage from those sizes alone.
+The existing 300-second convergence budget, 20,000-row backlog, 16Mi allowance, and EXTERNAL progress payload remain unchanged.
+
 ## Issue 220: all databases
 
 - [x] Add the API field, admission rules, generated artifacts, and validation tests.
