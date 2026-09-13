@@ -42,6 +42,7 @@ const (
 	managerDockerfile = "../../Dockerfile"
 	runnerDockerfile  = "../../images/runner/Dockerfile"
 	releaseWorkflow   = "../../.github/workflows/release.yml"
+	e2eWorkflow       = "../../.github/workflows/e2e.yml"
 	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
 	promoteWorkflow   = "../../.github/workflows/promote.yml"
 	workflowDir       = "../../.github/workflows"
@@ -54,6 +55,8 @@ const (
 	pollerTest        = "../../internal/progress/poller_test.go"
 	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
 	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
+	managerImageJob   = "manager-image"
+	runnerImageJob    = "runner-image"
 )
 
 const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
@@ -251,11 +254,17 @@ func TestRunnerDoesNotCompilePgcopydb(t *testing.T) {
 	}
 }
 
+type workflowConcurrency struct {
+	Group            string `json:"group"`
+	CancelInProgress bool   `json:"cancel-in-progress"`
+}
+
 type workflowStep struct {
-	Name string `json:"name"`
-	Uses string `json:"uses"`
-	If   string `json:"if"`
-	Run  string `json:"run"`
+	Name string            `json:"name"`
+	Uses string            `json:"uses"`
+	If   string            `json:"if"`
+	Run  string            `json:"run"`
+	Env  map[string]string `json:"env"`
 	With struct {
 		AllowLicenses  string `json:"allow-licenses"`
 		Context        string `json:"context"`
@@ -267,14 +276,16 @@ type workflowStep struct {
 }
 
 type workflowJob struct {
-	Needs json.RawMessage `json:"needs"`
-	If    string          `json:"if"`
-	Uses  string          `json:"uses"`
-	Steps []workflowStep  `json:"steps"`
+	Needs       json.RawMessage     `json:"needs"`
+	If          string              `json:"if"`
+	Uses        string              `json:"uses"`
+	Steps       []workflowStep      `json:"steps"`
+	Concurrency workflowConcurrency `json:"concurrency"`
 }
 
 type workflow struct {
-	Jobs map[string]workflowJob `json:"jobs"`
+	Jobs        map[string]workflowJob `json:"jobs"`
+	Concurrency workflowConcurrency    `json:"concurrency"`
 }
 
 // GitHub propagates a skip down `needs`: a job whose dependency was skipped is
@@ -397,6 +408,48 @@ func TestE2EDefaultRelease(t *testing.T) {
 	}
 	if got, want := match[1], "v0.11.3"; got != want {
 		t.Errorf("e2e operatorTag default is %s, want %s", got, want)
+	}
+}
+
+func TestProtectedE2EWorkflowsQueueWithoutChangingReleaseScale(t *testing.T) {
+	published := mustParse(t, e2eWorkflow)
+	if published.Concurrency.Group != "e2e-cluster" || published.Concurrency.CancelInProgress {
+		t.Errorf("published e2e concurrency = %+v, want queued e2e-cluster", published.Concurrency)
+	}
+
+	release := mustParse(t, releaseWorkflow)
+	candidate, ok := release.Jobs["e2e"]
+	if !ok {
+		t.Fatal("release.yml has no e2e job")
+	}
+	if candidate.Concurrency.Group != "e2e-cluster" || candidate.Concurrency.CancelInProgress {
+		t.Errorf("candidate e2e concurrency = %+v, want queued e2e-cluster", candidate.Concurrency)
+	}
+	runs := 0
+	for _, step := range candidate.Steps {
+		if step.Name != "Run the suite against the published candidate" {
+			continue
+		}
+		runs++
+		if got, want := step.Env["E2E_SCALE"], "0.25"; got != want {
+			t.Errorf("release candidate E2E_SCALE = %q, want %q", got, want)
+		}
+	}
+	if runs != 1 {
+		t.Errorf("release e2e job contains %d published candidate suite steps, want 1", runs)
+	}
+}
+
+func TestE2ESuiteDoesNotPrintTheRawKubeContext(t *testing.T) {
+	src := read(t, e2eSuite)
+	for _, banned := range []string{
+		"clientcmd.NewDefaultClientConfigLoadingRules",
+		"raw.CurrentContext",
+		"e2e running against kubectl context",
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("e2e suite still exposes the kube context through %q", banned)
+		}
 	}
 }
 
