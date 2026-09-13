@@ -282,6 +282,9 @@ var (
 	// a quiet source produced during the base copy takes a pass or two, while a
 	// lag reading that cannot converge never moves at all.
 	lagConvergeTimeout = 5 * time.Minute
+	// 12m is headroom over ~350s on powersave, not a measured requirement; A/B/A on 2026-09-13 (#260):
+	// powersave/performance/powersave: 84.3/123.5/85.5 KB/s receive; cutover after resume: 347.2/236.9/337.3s.
+	backlogDrainTimeout = 12 * time.Minute
 	// primaryTimeout bounds the wait for a cluster to carry exactly one
 	// primary. It only has to cover a CNPG promotion, not a bootstrap.
 	primaryTimeout = 2 * time.Minute

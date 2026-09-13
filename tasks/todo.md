@@ -12,23 +12,35 @@
 - [ ] Verify workflow syntax with `actionlint`; neither the local toolchain nor the CI lint steps ran it.
 - [ ] Confirm any proposed worker paths on a live worker before adding a worker probe.
 - [ ] Resolve transform/apply discrimination before claiming three-stage diagnosis.
-- [ ] Wait for the A/B/A result before a separate, final budget-value commit.
+- [x] Receive the A/B/A result before the separate, final budget-value commit.
+
+### M2 finalization
+
+- [x] Fetch and rebase onto `origin/main`: already contains `9b1668f`, with no conflicts or rewritten commits.
+- [x] Add the approved 12-minute backlog drain budget without changing idle convergence or fixture shape.
+- [x] Cover the longer diagnostic schedule and record the A/B/A provenance and attribution limits.
+- [x] Run `task lint` before the unsigned final budget commit: exit 0, `0 issues.`; local `actionlint` unavailable.
+
+Workflow lint belongs to a separate PR; no workflow edits, merge, or release dispatch belong to this finalization.
+Record publication, draft removal, and exact-head `lint`, `test`, and `docs` evidence in PR #263.
 
 File sizes do not supply a reliable transform/apply boundary: SQLite recycles WAL files, and apply runs transformation inline.
 The diagnostic must not classify a stage from those sizes alone.
-The existing 300-second convergence budget, 20,000-row backlog, 16Mi allowance, and EXTERNAL progress payload remain unchanged.
+The diagnostic commits preserved the 300-second convergence budget, 20,000-row backlog, 16Mi allowance, and EXTERNAL progress payload.
 Local `task lint` passed for the wait change and the diagnostic change with `0 issues.`.
 Workflow lint skipped locally because `actionlint` is unavailable; functional tests and the documentation build run in CI.
 
 ### M2 verification
 
-[Draft PR #263](https://github.com/ydixken/pgcopydb-operator/pull/263) contains the unblocked wait and recurring-snapshot changes.
+[PR #263](https://github.com/ydixken/pgcopydb-operator/pull/263) contains the wait and recurring-snapshot changes.
 [CI run 34779816683](https://github.com/ydixken/pgcopydb-operator/actions/runs/34779816683) passed `lint`, `test`, and `docs` for `e61e0ab24655fcf9fc5d168a4f6c76ee09e0f708`.
 The test log records successful unit/envtest suites and `go test ./test/e2e -run '^TestCutoverDiagnostic' -count=1` against disposable PostgreSQL.
 The documentation log records a successful `mkdocs build --strict`.
 The CI lint job does not invoke `actionlint`, so its success does not close the workflow-syntax gate.
 Three-stage attribution remains unresolved, and no worker filesystem probe is included.
-The A/B/A result still gates the separate budget-value commit.
+The 2026-09-13 A/B/A replay measured 84.3/123.5/85.5 KB/s receive progress and 347.2/236.9/337.3 seconds from sender resume to cutover under powersave/performance/powersave.
+The approved 12-minute budget is environmental headroom over roughly 350 seconds on powersave, not a measured requirement or a resolution of [#260](https://github.com/ydixken/pgcopydb-operator/issues/260).
+The experiment did not exercise progress-bounds, whose fresh-seed behavior remains unproven.
 
 ## Issue 220: all databases
 

@@ -124,7 +124,7 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 			for _, database := range []string{sourceCluster, targetCluster} {
 				psql(database, fmt.Sprintf("CREATE INDEX progress_lock_recovery_%d ON %s (id)", side, table))
 			}
-			recoveryDeadline := time.Now().Add(time.Minute)
+			recoveryDeadline := time.Now().Add(backlogDrainTimeout)
 			Eventually(func(g Gomega) {
 				m := readMigration()
 				detail := fmt.Sprintf("after %s lock: phase=%s attempts=%d baseline bytesTotal=%d bytesDone=%d "+
@@ -160,7 +160,7 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 				queryOK = queryErr == nil && parseErr == nil && rows >= 0
 				g.Expect(queryOK).To(BeTrue(), "target probe row count unavailable")
 				g.Expect(rows).To(Equal(int64((side+1)*1000+1)), "target probe batch is not committed")
-			}, time.Minute, time.Second).Should(Succeed(),
+			}, time.Until(recoveryDeadline), time.Second).Should(Succeed(),
 				"sampling must recover after unlocking")
 			Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
 				"sampling recovery must preserve the worker processes")

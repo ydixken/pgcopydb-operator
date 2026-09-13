@@ -190,7 +190,7 @@ func earlyManualCutover() {
 	Expect(signalSender("CONT")).To(Succeed())
 	resumed = true
 	diagnosticStart := time.Now()
-	diagnosticDeadline := diagnosticStart.Add(lagConvergeTimeout)
+	diagnosticDeadline := diagnosticStart.Add(backlogDrainTimeout)
 	const missingValue = "missing"
 	lsnPattern := `(?:[0-9A-F]{1,8}/[0-9A-F]{1,8}|missing)`
 	lsnValid := regexp.MustCompile("^" + lsnPattern + "$")
