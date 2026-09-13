@@ -194,8 +194,6 @@ func earlyManualCutover() {
 	const missingValue = "missing"
 	lsnPattern := `(?:[0-9A-F]{1,8}/[0-9A-F]{1,8}|missing)`
 	lsnValid := regexp.MustCompile("^" + lsnPattern + "$")
-	sourceValid := regexp.MustCompile("^" + strings.Repeat(lsnPattern+" ", 4) +
-		`[01] (startup|catchup|streaming|backup|stopping|missing)$`)
 	safeWord := func(value, allowed string) string {
 		if value == "" || strings.ContainsAny(value, "|\n\r") || !strings.Contains("|"+allowed+"|", "|"+value+"|") {
 			return "unknown"
@@ -208,20 +206,18 @@ func earlyManualCutover() {
 		}
 		return value
 	}
-	sourceSQL := "SELECT concat_ws(' ', pg_current_wal_flush_lsn(), coalesce(r.write_lsn::text,'missing'), " +
-		"coalesce(r.replay_lsn::text,'missing'), coalesce(s.confirmed_flush_lsn::text,'missing'), " +
-		"s.active::int, coalesce(r.state,'missing')) FROM pg_replication_slots s " +
+	sourceSQL := cutoverSourceProjection + " FROM pg_replication_slots s " +
 		"LEFT JOIN pg_stat_replication r ON r.pid=s.active_pid WHERE s.slot_name='" + slot +
 		"' AND s.database=current_database() AND s.slot_type='logical'"
 	lastSnapshot := "snapshot_unavailable"
-	snapshot := func(stage string) {
+	snapshot := func() {
 		remaining := time.Until(diagnosticDeadline)
 		if remaining <= 0 {
 			return
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), min(2*time.Second, remaining))
 		defer cancel()
-		values := []string{"source_probe_unavailable", "target_probe_unavailable"}
+		values := []string{cutoverSourceUnavailable, "target_probe_unavailable"}
 		for side, database := range []string{sourceCluster, targetCluster} {
 			if probeCtx.Err() != nil {
 				break
@@ -237,20 +233,22 @@ func earlyManualCutover() {
 				sql = "SELECT count(*) FROM orders WHERE note LIKE '" + marker + "%'"
 			}
 			out, err := commandOutput(probeCtx, exec.CommandContext, "kubectl", "exec", "-n", nsE2E,
-				primaries.Items[0].Name, "-c", "postgres", "--", "psql", "-U", "postgres", appDB,
+				primaries.Items[0].Name, "-c", "postgres", "--", "sh", "-c", `exec 2>/dev/null; exec "$@"`, "sh",
+				"psql", "-U", "postgres", appDB,
 				"-XAtq", "-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=1000", "-c", sql)
 			value := strings.TrimSpace(string(out))
 			if err != nil {
 				continue
 			}
-			if side == 0 && sourceValid.MatchString(value) {
-				values[side] = "source_head/write/replay/confirmed/active/state=" + value
+			if side == 0 {
+				values[side] = cutoverSourceSnapshot(value)
 			} else if count, parseErr := strconv.ParseInt(value, 10, 64); side == 1 && parseErr == nil && count >= 0 {
 				values[side] = "target_marker_rows=" + strconv.FormatInt(count, 10)
 			}
 		}
-		lastSnapshot = fmt.Sprintf("at=%s stage=%s %s",
-			time.Now().UTC().Format(time.RFC3339Nano), stage, strings.Join(values, " "))
+		lastSnapshot = fmt.Sprintf("at=%s elapsed=%s %s",
+			time.Now().UTC().Format(time.RFC3339Nano), time.Since(diagnosticStart).Truncate(time.Second),
+			strings.Join(values, " "))
 		_, _ = fmt.Fprintln(GinkgoWriter, "cutover snapshot", lastSnapshot)
 	}
 	lastObservation, observationCount := "status_unavailable", 0
@@ -289,22 +287,20 @@ func earlyManualCutover() {
 				time.Now().UTC().Format(time.RFC3339Nano), lastObservation, lastSnapshot)
 		}
 	})
-	snapshots := 0
+	nextSnapshot := diagnosticStart
 	Eventually(func(g Gomega) {
 		readMigration(g)
 		eventCtx, cancel := context.WithTimeout(ctx, min(2*time.Second, time.Until(diagnosticDeadline)))
 		started, _ := countCutoverEvents(eventCtx)
 		cancel()
 		observe(started)
-		if snapshots == 0 || (snapshots == 1 && time.Since(diagnosticStart) >= 30*time.Second) ||
-			(snapshots == 2 && time.Until(diagnosticDeadline) <= 5*time.Second) {
-			snapshot([]string{"resumed", "after_30s", "deadline"}[snapshots])
-			snapshots++
+		if cutoverSnapshotDue(time.Now(), &nextSnapshot, diagnosticDeadline) {
+			snapshot()
 		}
 		g.Expect(m.Status.Replication).NotTo(BeNil(), "phase=%s: replication status absent", m.Status.Phase)
 		g.Expect(m.Status.Replication.Endpos).NotTo(BeEmpty(), "phase=%s: cutover endpos absent", m.Status.Phase)
 		g.Expect(started).To(Equal(int32(1)), "phase=%s: expected one cutover event", m.Status.Phase)
-	}, lagConvergeTimeout, time.Second).Should(Succeed())
+	}, time.Until(diagnosticDeadline), time.Second).Should(Succeed())
 	Eventually(func(g Gomega) {
 		readMigration(g)
 		drain := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)
