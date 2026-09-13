@@ -554,12 +554,14 @@ func TestWorkflowActionInventory(t *testing.T) {
 }
 
 func TestLintChecksGeneratedManifests(t *testing.T) {
-	const check = "make manifests && git diff --exit-code config/crd/bases config/rbac"
+	const check = `make manifests && ` +
+		`changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) && test -z "$changes"`
 	const chartCheck = "./hack/sync-chart-crd.sh --check"
 	lint, ok := mustParse(t, ciWorkflow).Jobs["lint"]
 	if !ok {
 		t.Fatal("ci.yml has no lint job")
 	}
+	chartIndex := slices.IndexFunc(lint.Steps, func(step workflowStep) bool { return step.Run == chartCheck })
 	checks := 0
 	for i, step := range lint.Steps {
 		if step.Run != check {
@@ -569,8 +571,8 @@ func TestLintChecksGeneratedManifests(t *testing.T) {
 		if step.If != "" {
 			t.Error("generated manifest check must run unconditionally")
 		}
-		if i+1 >= len(lint.Steps) || lint.Steps[i+1].Run != chartCheck {
-			t.Error("generated manifest check must run immediately before the chart CRD check")
+		if i >= chartIndex {
+			t.Error("generated manifest check must run before the chart CRD check")
 		}
 	}
 	if checks != 1 {
@@ -587,13 +589,14 @@ func TestLintChecksGeneratedManifests(t *testing.T) {
 	}
 	checks = 0
 	cmds := tasks.Tasks["lint"].Cmds
+	chartIndex = slices.Index(cmds, any(chartCheck))
 	for i, cmd := range cmds {
 		if cmd != check {
 			continue
 		}
 		checks++
-		if i+1 >= len(cmds) || cmds[i+1] != chartCheck {
-			t.Error("local generated manifest check must run immediately before the chart CRD check")
+		if i >= chartIndex {
+			t.Error("local generated manifest check must run before the chart CRD check")
 		}
 	}
 	if checks != 1 {

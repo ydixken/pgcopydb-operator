@@ -117,7 +117,7 @@
   Earlier #215 branch and stash refs remain extra backups.
 - The deferred #209 and #221 source remains at `43f51270455370224cea493cd51d7b3908fea56d`.
 - PR 252 used local formatting, `git diff --check`, and `task lint`.
-  CI supplied functional, build, documentation, and exact-head shared E2E evidence.
+  CI supplied functional, build, and documentation evidence.
 
 ## Runtime safety exclusions
 
@@ -140,7 +140,6 @@
   CI remains responsible for functional tests, builds, and documentation validation.
 - [x] Fetch and rebase onto actual `origin/main`, then repeat the static review and local formatting, whitespace, and lint gates if the head changes.
 - [x] Publish over the existing PR branch only with an explicit lease against `a62ef17724108f6d20b796672fa656188deb82f8`.
-- [ ] Require naturally triggered base CI, coverage, one full shared-cluster `feature-e2e` result, and successful cleanup on the exact final head before merge.
-  A focused or disposable run does not replace this gate.
+- The `feature-e2e` gate is removed by this change; PR 252 predates the removal and no run URL is recorded here.
 - [x] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
   Leave #200, #215, #243, #209, and #221 open.

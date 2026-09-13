@@ -29,8 +29,9 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
 
-The CI `lint` job and local `task lint` run `make manifests` and fail if `config/crd/bases` or `config/rbac` differs from the index.
-Regeneration writes to the working tree; inspect and stage the generated changes with the API or RBAC marker changes before rerunning lint.
+The CI `lint` job and local `task lint` run `make manifests` and fail if any file in `config/crd/bases` or `config/rbac` differs from the index or is untracked.
+Staged changes in those directories also fail the check.
+Regeneration writes to the working tree; inspect the generated changes and include them in the API or RBAC marker commit, then rerun lint to verify the committed tree.
 
 The CI `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
