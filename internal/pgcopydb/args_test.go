@@ -41,6 +41,17 @@ func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
 
 var copyBinary = true
 
+func TestCloneArgs_AllDatabases(t *testing.T) {
+	spec := &v1beta1.MigrationSpec{Clone: v1beta1.CloneOptions{
+		AllDatabases: true,
+		Roles:        true,
+		Filters:      &v1beta1.Filters{ExcludeSchemas: []string{"audit"}},
+	}}
+	assertArgs(t, CloneArgs(spec, true, false, false),
+		"clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8"+
+			" --roles --filters /etc/pgcopydb/conf/filters.ini --all-databases --restart")
+}
+
 func TestCloneArgs_Full(t *testing.T) {
 	split := resource.MustParse("1Gi")
 	spec := &v1beta1.MigrationSpec{

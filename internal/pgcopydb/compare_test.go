@@ -29,7 +29,8 @@ func TestCompareArgs(t *testing.T) {
 		got  []string
 		want string
 	}{
-		{"schema", CompareSchemaArgs(), "compare schema --dir /work/pgcopydb"},
+		{"schema", CompareSchemaArgs(false), "compare schema --dir /work/pgcopydb"},
+		{"all databases schema", CompareSchemaArgs(true), "compare schema --dir /work/pgcopydb --all-databases"},
 		{"data", CompareDataArgs(), "compare data --dir /work/pgcopydb --json"},
 	} {
 		if got := strings.Join(tc.got, " "); got != tc.want {

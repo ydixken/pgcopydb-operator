@@ -136,7 +136,7 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 	if check == compareData {
 		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript, 1)
 	}
-	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(), "", 1)
+	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(m.Spec.Clone.AllDatabases), "", 1)
 	if err != nil {
 		return nil, err
 	}

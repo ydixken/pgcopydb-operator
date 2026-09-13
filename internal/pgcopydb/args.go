@@ -153,6 +153,9 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	if c.Filters != nil && !c.Filters.IsEmpty() {
 		args = append(args, "--filters", FiltersPath)
 	}
+	if c.AllDatabases {
+		args = append(args, "--all-databases")
+	}
 	if restart {
 		args = append(args, "--restart")
 	}

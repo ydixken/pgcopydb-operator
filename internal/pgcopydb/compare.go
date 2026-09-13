@@ -18,8 +18,12 @@ package pgcopydb
 
 // CompareSchemaArgs renders the argv for `pgcopydb compare schema`. The
 // connection URIs travel via the environment, like every other command.
-func CompareSchemaArgs() []string {
-	return []string{"compare", "schema", flagDir, WorkDir}
+func CompareSchemaArgs(allDatabases bool) []string {
+	args := []string{"compare", "schema", flagDir, WorkDir}
+	if allDatabases {
+		args = append(args, "--all-databases")
+	}
+	return args
 }
 
 // CompareDataArgs renders the argv for `pgcopydb compare data`. --json is
