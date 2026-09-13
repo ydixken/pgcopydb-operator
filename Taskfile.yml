@@ -70,8 +70,8 @@ tasks:
   e2e:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
-      This task is local only; trusted feature PR and release candidate CI
-      invoke the same specs directly. Confirms the context before running.
+      This task is local only; release candidate CI invokes the same specs directly.
+      Confirms the context before running.
       E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures and their
       volumes, which are provisioned once per CNPG instance (one per cluster
       by default). Chaos scenarios are excluded; use e2e:chaos for those.

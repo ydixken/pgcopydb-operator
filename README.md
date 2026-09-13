@@ -41,7 +41,7 @@ The [quickstart](docs/quickstart.md) walks through the first clone; [live migrat
 
 ## Structure
 
-```text
+```sh
 api/                       # Migration CRD types, v1beta1 storage + deprecated v1alpha1 (CEL validation, no webhooks)
 charts/pgcopydb-operator/  # Helm chart (published as OCI to ghcr.io)
 cmd/, internal/            # manager and controller (kubebuilder go/v4)
@@ -50,7 +50,7 @@ docs/                      # user docs, rendered to a site by mkdocs (mkdocs.yml
 docs/examples/             # Migration resources with short explanations
 images/pgcopydb-builder/   # publishes the pgcopydb binary the runner image copies in, keyed on its source commit
 images/runner/             # worker image: pgcopydb + PostgreSQL 18 client tools, stripped of what it never runs
-test/e2e/                  # e2e suite: local runs, trusted feature PR runs, and release candidate CI
+test/e2e/                  # e2e suite: local runs and release candidate CI
 .claude/skills/            # vendored skills (ponytail, humanizer, brainstorming), mandatory per AGENTS.md
 .github/workflows/         # CI, weekly candidate and manual promotion, ghcr publish, docs deploy, GitLab mirror, Artifact Hub metadata
 Taskfile.yml               # task help | lint | test | e2e
