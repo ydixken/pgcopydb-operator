@@ -881,6 +881,9 @@ func TestPreflightScript_AllDatabasesSuperuserFailureStopsProbes(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("superuser failure must exit 1, got %d: %s", code, out)
 	}
+	if !strings.Contains(out, "preflight failed:") {
+		t.Fatalf("superuser failure must print the closing summary: %s", out)
+	}
 	for _, side := range []string{"source", "target"} {
 		if !strings.Contains(out, "all-databases "+side+" requires a superuser") {
 			t.Fatalf("missing %s superuser diagnosis: %s", side, out)
@@ -891,6 +894,67 @@ func TestPreflightScript_AllDatabasesSuperuserFailureStopsProbes(t *testing.T) {
 		if strings.Contains(out, absent) {
 			t.Fatalf("continued past failed superuser probes (%q): %s", absent, out)
 		}
+	}
+}
+
+func TestPreflightScript_AllDatabasesListingFailureKeepsRootCause(t *testing.T) {
+	run := clonePreflightHarness(t)
+	databases := make([]string, 70)
+	for i := range databases {
+		databases[i] = fmt.Sprintf(`"db%02d"`, i)
+	}
+	for _, tc := range []struct {
+		name, fault, diagnosis string
+	}{
+		{"target down after superuser", "PSQL_TARGET_DOWN_AFTER_SUPER=1", "listing existing target databases failed"},
+		{"source listing failed", "PSQL_FAIL_SUBSTR=jsonb_agg(datname", "listing source databases failed or found no databases"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.AllDatabases = true
+			out, code, _, _ := run(t, m, tc.fault,
+				"PSQL_DATABASES=["+strings.Join(databases, ",")+"]",
+				"PSQL_DATABASE_ROWS="+strings.Join(databases, "\n"))
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			tail := strings.Join(lines[max(0, len(lines)-preflightLogTail):], "\n")
+			t.Logf("EXIT=%d\ntotal lines: %d\nroot cause in full log: %d\nroot cause in the %d-line tail: %d\n\"preflight failed:\" summary: %d",
+				code, len(lines), strings.Count(out, tc.diagnosis), preflightLogTail,
+				strings.Count(tail, tc.diagnosis), strings.Count(out, "preflight failed:"))
+			if code != 1 || !strings.Contains(tail, tc.diagnosis) || !strings.Contains(tail, "preflight failed:") {
+				t.Errorf("listing failure must exit 1 and retain its summary in the condition tail")
+			}
+			for _, absent := range []string{"extension", preflightAllChecksPassed} {
+				if strings.Contains(out, absent) {
+					t.Errorf("continued past failed database listing (%q)", absent)
+				}
+			}
+		})
+	}
+}
+
+func TestPreflightScript_AllDatabasesExtensionFailureNamesSide(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, tc := range []struct {
+		name, fault, want, absent string
+	}{
+		{"source query", `PSQL_FAIL_DATABASE="extra"`, `source extension selection probe failed for database "extra"`, "validating selected extensions on target failed"},
+		{"target validation", "PSQL_FAIL_SUBSTR=jsonb_typeof", `validating selected extensions on target failed for database "extra"`, extensionSourceFailure},
+		{"target aggregation", "PSQL_FAIL_SUBSTR=jsonb_agg(DISTINCT name)", "target extension selection probe failed", extensionSourceFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.AllDatabases = true
+			out, code, _, _ := run(t, m, tc.fault)
+			t.Logf("EXIT=%d\n%s", code, out)
+			if code != 1 || !strings.Contains(out, tc.want) || !strings.Contains(out, "preflight failed:") {
+				t.Errorf("extension failure must exit 1 and summarize %q", tc.want)
+			}
+			for _, absent := range []string{tc.absent, extensionAvailableOK, preflightAllChecksPassed} {
+				if strings.Contains(out, absent) {
+					t.Errorf("extension failure reported %q", absent)
+				}
+			}
+		})
 	}
 }
 
@@ -1793,6 +1857,7 @@ for a in "$@"; do
 done
 case "$q" in *has_schema_privilege*) printf '%s' "$list" > "${LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
+[ "$uri" = tgt ] && [ -f "${STATE_DIR:?}/target-down" ] && exit 2
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
@@ -1803,7 +1868,9 @@ case "$q" in
   *pg_available_extensions*)
     if [ "$list" = '["citext"]' ] && [ "${PSQL_UNAVAILABLE_CITEXT:-0}" = 1 ]; then echo '["citext"]'
     else printf '%s' "${PSQL_EXTENSION_TARGET-[]}"; fi ;;
-  *'SELECT value::text'*) printf '%s\n' '"app"' '"extra"' '"postgres"' ;;
+  *'SELECT value::text'*)
+    if [ "${PSQL_DATABASE_ROWS+x}" = x ]; then printf '%s\n' "$PSQL_DATABASE_ROWS"
+    else printf '%s\n' '"app"' '"extra"' '"postgres"'; fi ;;
   *jsonb_agg\(datname*) printf '%s' "${PSQL_DATABASES-[\"app\",\"extra\",\"postgres\"]}" ;;
   'GRANT CREATE ON DATABASE'*)
     printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
@@ -1817,7 +1884,14 @@ case "$q" in
     if [ -f "${STATE_DIR:-/nonexistent}/db-applied" ]; then echo 1; else echo "${PSQL_DB_CREATE:-1}"; fi ;;
   *'GRANT CREATE ON DATABASE'*) echo "GRANT CREATE ON DATABASE \"app\" TO \"limited\"" ;;
   *datdba*) echo "${PSQL_DBPROPS:-1}" ;;
-  *rolsuper*) case "$uri" in src) echo "${PSQL_SOURCE_SUPER:-1}" ;; tgt) echo "${PSQL_TARGET_SUPER:-1}" ;; *) echo 1 ;; esac ;;
+  *rolsuper*)
+    case "$uri" in
+      src) echo "${PSQL_SOURCE_SUPER:-1}" ;;
+      tgt)
+        if [ "${PSQL_TARGET_DOWN_AFTER_SUPER:-0}" = 1 ]; then : > "${STATE_DIR:?}/target-down"; fi
+        echo "${PSQL_TARGET_SUPER:-1}" ;;
+      *) echo 1 ;;
+    esac ;;
   *pg_namespace*) printf '%s\n' "${PSQL_SCHEMAS:-public}" | tr ',' '\n' ;;
   *current_user*) echo limited ;;
   *) echo 1 ;;
