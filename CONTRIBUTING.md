@@ -20,7 +20,8 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 1. Make one logical change.
 1. If the change touches `api/v1beta1`, run `make manifests`, `hack/sync-chart-crd.sh`, and `task docs`, then commit the regenerated CRD, chart template, and `docs/reference/api.md` with it.
 1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it. The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
-1. Format touched files and run `task lint` before every commit.
+1. Format touched files before every commit and run `task lint`.
+   For CRD or RBAC changes, inspect and commit the generated files first, then rerun `task lint` before pushing: staged but uncommitted generated files deliberately fail the check.
 1. Commit (see below), push the branch to GitHub, open a PR.
 1. Merge when the CI `lint`, `test`, and `docs` checks are green on the current head.
    No pull request runs the E2E suite; the next release candidate does (see [Releasing](#releasing)).
@@ -30,6 +31,7 @@ The pull request `lint` job runs GitHub Dependency Review and rejects new depend
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
 
 The CI `lint` job and local `task lint` run `make manifests` and fail if any file in `config/crd/bases` or `config/rbac` differs from the index or is untracked.
+The check prints the offending file paths.
 Staged changes in those directories also fail the check.
 Regeneration writes to the working tree; inspect the generated changes and include them in the API or RBAC marker commit, then rerun lint to verify the committed tree.
 

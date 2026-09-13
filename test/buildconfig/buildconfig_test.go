@@ -555,7 +555,8 @@ func TestWorkflowActionInventory(t *testing.T) {
 
 func TestLintChecksGeneratedManifests(t *testing.T) {
 	const check = `make manifests && ` +
-		`changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) && test -z "$changes"`
+		`changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) && ` +
+		`{ test -z "$changes" || { printf '%s\n' "$changes"; exit 1; }; }`
 	const chartCheck = "./hack/sync-chart-crd.sh --check"
 	lint, ok := mustParse(t, ciWorkflow).Jobs["lint"]
 	if !ok {
@@ -601,6 +602,50 @@ func TestLintChecksGeneratedManifests(t *testing.T) {
 	}
 	if checks != 1 {
 		t.Errorf("task lint contains %d generated manifest checks, want 1", checks)
+	}
+
+	for _, tt := range []struct {
+		name       string
+		changes    string
+		makeStatus int
+		gitStatus  int
+		wantStatus int
+	}{
+		{name: "clean"},
+		{name: "modified", changes: " M config/rbac/role.yaml\n", wantStatus: 1},
+		{name: "untracked", changes: "?? config/crd/bases/probe.yaml\n", wantStatus: 1},
+		{name: "staged", changes: "M  config/rbac/role.yaml\n", wantStatus: 1},
+		{name: "multiple files", changes: "?? config/crd/bases/probe.yaml\n M config/rbac/role.yaml\n", wantStatus: 1},
+		{name: "make failure", makeStatus: 2, wantStatus: 2},
+		{name: "silent git failure", gitStatus: 128, wantStatus: 128},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-ec", `
+make() { printf 'make\n' >&2; return "$MAKE_STATUS"; }
+git() { printf 'git\n' >&2; printf '%s' "$CHANGES"; return "$GIT_STATUS"; }
+`+check)
+			cmd.Env = append(os.Environ(), "CHANGES="+tt.changes,
+				fmt.Sprintf("MAKE_STATUS=%d", tt.makeStatus), fmt.Sprintf("GIT_STATUS=%d", tt.gitStatus))
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if cmd.ProcessState == nil {
+				t.Fatalf("run manifest check: %v", err)
+			}
+			if got := cmd.ProcessState.ExitCode(); got != tt.wantStatus {
+				t.Errorf("exit = %d, want %d: %v", got, tt.wantStatus, err)
+			}
+			if string(out) != tt.changes {
+				t.Errorf("output = %q, want %q", out, tt.changes)
+			}
+			wantCalls := "make\ngit\n"
+			if tt.makeStatus != 0 {
+				wantCalls = "make\n"
+			}
+			if stderr.String() != wantCalls {
+				t.Errorf("calls = %q, want %q", stderr.String(), wantCalls)
+			}
+		})
 	}
 }
 
