@@ -49,10 +49,8 @@ func secretRef(name, key string) *corev1.SecretKeySelector {
 	return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
 }
 
-// fullMigration populates every field of the API surface, pointers, slices,
-// and maps included. The deepcopy test below depends on that: a field added
-// to the types but missing from a stale zz_generated.deepcopy.go only fails
-// the equality check when it carries a value here.
+// fullMigration populates every field to catch stale generated deepcopy code.
+// It intentionally combines mutually exclusive options and MUST NOT be used for admission tests.
 func fullMigration() *Migration {
 	split := resource.MustParse("2Gi")
 	lag := resource.MustParse("32Mi")
@@ -81,7 +79,8 @@ func fullMigration() *Migration {
 			},
 			Target: PostgresConnection{URISecretRef: secretRef("dsn", "uri")},
 			Clone: CloneOptions{
-				TableJobs: 4, IndexJobs: 4, RestoreJobs: 2, LargeObjectsJobs: 2,
+				AllDatabases: true,
+				TableJobs:    4, IndexJobs: 4, RestoreJobs: 2, LargeObjectsJobs: 2,
 				SplitTablesLargerThan: &split, SplitMaxParts: 8,
 				EstimateTableSizes: true, DropIfExists: true, Roles: true,
 				NoRolePasswords: true, NoOwner: true, NoACL: true, NoComments: true,

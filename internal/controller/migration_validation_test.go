@@ -178,6 +178,25 @@ var _ = Describe("Migration CRD validation", func() {
 			func(m *v1beta1.Migration) {
 				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "decoderbufs"}
 			}, "supported values"),
+		Entry("all databases with drop", "cel-all-drop", func(m *v1beta1.Migration) {
+			m.Spec.Clone.AllDatabases = true
+			m.Spec.Clone.DropIfExists = true
+		}, "allDatabases cannot be combined with dropIfExists"),
+		Entry("all databases with follow", "cel-all-follow", func(m *v1beta1.Migration) {
+			m.Spec.Clone.AllDatabases = true
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+		}, "allDatabases cannot be combined with follow.enabled"),
+		Entry("all databases with data verification", "cel-all-data", func(m *v1beta1.Migration) {
+			m.Spec.Clone.AllDatabases = true
+			m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+		}, "allDatabases cannot be combined with verification.data"),
+		Entry("all databases alone", "cel-all-alone", func(m *v1beta1.Migration) {
+			m.Spec.Clone.AllDatabases = true
+		}, ""),
+		Entry("all databases with schema verification", "cel-all-schema", func(m *v1beta1.Migration) {
+			m.Spec.Clone.AllDatabases = true
+			m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
+		}, ""),
 	)
 
 	// The CRD defaults are what Materialize relies on for partial keys; a bare

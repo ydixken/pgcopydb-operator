@@ -77,6 +77,12 @@ spec:
               clone:
                 description: clone configures the base copy.
                 properties:
+                  allDatabases:
+                    description: |-
+                      allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
+                      Both connections must name a maintenance database and use superuser roles.
+                      Filters and skips apply to every database; job counts are global across databases.
+                    type: boolean
                   dropIfExists:
                     description: dropIfExists issues pg_restore --clean --if-exists
                       on the target.
@@ -166,7 +172,7 @@ spec:
                   noRolePasswords:
                     description: |-
                       noRolePasswords dumps roles without passwords (--no-role-passwords),
-                      avoiding the superuser requirement of roles.
+                      avoiding the superuser requirement of roles, but not of allDatabases.
                     type: boolean
                   noTablespaces:
                     description: noTablespaces skips tablespace selection (--no-tablespaces).
@@ -252,6 +258,11 @@ spec:
                       omitempty leaves the key absent, which is what the default needs.
                     type: boolean
                 type: object
+                x-kubernetes-validations:
+                - message: 'allDatabases cannot be combined with dropIfExists: the
+                    maintenance database cannot be dropped'
+                  rule: '!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists)
+                    && self.dropIfExists)'
               cutover:
                 description: cutover controls how a live migration ends; ignored without
                   follow.
@@ -1991,6 +2002,15 @@ spec:
             - source
             - target
             type: object
+            x-kubernetes-validations:
+            - message: 'allDatabases cannot be combined with follow.enabled: pgcopydb
+                ignores follow in this mode'
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)'
+            - message: 'allDatabases cannot be combined with verification.data: pgcopydb
+                produces no JSON verdict in this mode'
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.verification) && has(self.verification.data) && self.verification.data)'
           status:
             description: status defines the observed state of Migration
             properties:
@@ -2233,6 +2253,12 @@ spec:
               clone:
                 description: clone configures the base copy.
                 properties:
+                  allDatabases:
+                    description: |-
+                      allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
+                      Both connections must name a maintenance database and use superuser roles.
+                      Filters and skips apply to every database; job counts are global across databases.
+                    type: boolean
                   dropIfExists:
                     description: dropIfExists issues pg_restore --clean --if-exists
                       on the target.
@@ -2322,7 +2348,7 @@ spec:
                   noRolePasswords:
                     description: |-
                       noRolePasswords dumps roles without passwords (--no-role-passwords),
-                      avoiding the superuser requirement of roles.
+                      avoiding the superuser requirement of roles, but not of allDatabases.
                     type: boolean
                   noTablespaces:
                     description: noTablespaces skips tablespace selection (--no-tablespaces).
@@ -2408,6 +2434,11 @@ spec:
                       omitempty leaves the key absent, which is what the default needs.
                     type: boolean
                 type: object
+                x-kubernetes-validations:
+                - message: 'allDatabases cannot be combined with dropIfExists: the
+                    maintenance database cannot be dropped'
+                  rule: '!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists)
+                    && self.dropIfExists)'
               cutover:
                 description: cutover controls how a live migration ends; ignored without
                   follow.
@@ -4147,6 +4178,15 @@ spec:
             - source
             - target
             type: object
+            x-kubernetes-validations:
+            - message: 'allDatabases cannot be combined with follow.enabled: pgcopydb
+                ignores follow in this mode'
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)'
+            - message: 'allDatabases cannot be combined with verification.data: pgcopydb
+                produces no JSON verdict in this mode'
+              rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
+                && has(self.verification) && has(self.verification.data) && self.verification.data)'
           status:
             description: status defines the observed state of Migration
             properties:
