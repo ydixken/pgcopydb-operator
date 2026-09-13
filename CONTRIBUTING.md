@@ -18,7 +18,7 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 1. Branch from `main`.
 1. Make one logical change.
-1. If the change touches `api/v1beta1`, run `task docs` and commit the regenerated `docs/reference/api.md` with it.
+1. If the change touches `api/v1beta1`, run `make manifests`, `hack/sync-chart-crd.sh`, and `task docs`, then commit the regenerated CRD, chart template, and `docs/reference/api.md` with it.
 1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it. The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
 1. Format touched files and run `task lint` before every commit.
 1. Commit (see below), push the branch to GitHub, open a PR.
@@ -28,6 +28,9 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 `.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
 The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
+
+The CI `lint` job and local `task lint` run `make manifests` and fail if `config/crd/bases` or `config/rbac` differs from the index.
+Regeneration writes to the working tree; inspect and stage the generated changes with the API or RBAC marker changes before rerunning lint.
 
 The CI `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.

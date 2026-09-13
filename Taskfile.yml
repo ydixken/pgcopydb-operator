@@ -15,9 +15,10 @@ tasks:
       - task --list-all
 
   lint:
-    desc: Lint everything (yamllint, then kubebuilder's make lint for Go).
+    desc: Lint everything, including generated manifests.
     cmds:
       - yamllint --strict .
+      - make manifests && git diff --exit-code config/crd/bases config/rbac
       # The chart embeds generated artifacts (CRD, RBAC); these fail on drift.
       - ./hack/sync-chart-crd.sh --check
       - ./hack/sync-chart-rbac.sh --check

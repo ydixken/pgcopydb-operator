@@ -545,6 +545,54 @@ func TestWorkflowActionInventory(t *testing.T) {
 	}
 }
 
+func TestLintChecksGeneratedManifests(t *testing.T) {
+	const check = "make manifests && git diff --exit-code config/crd/bases config/rbac"
+	const chartCheck = "./hack/sync-chart-crd.sh --check"
+	lint, ok := mustParse(t, ciWorkflow).Jobs["lint"]
+	if !ok {
+		t.Fatal("ci.yml has no lint job")
+	}
+	checks := 0
+	for i, step := range lint.Steps {
+		if step.Run != check {
+			continue
+		}
+		checks++
+		if step.If != "" {
+			t.Error("generated manifest check must run unconditionally")
+		}
+		if i+1 >= len(lint.Steps) || lint.Steps[i+1].Run != chartCheck {
+			t.Error("generated manifest check must run immediately before the chart CRD check")
+		}
+	}
+	if checks != 1 {
+		t.Errorf("CI lint contains %d generated manifest checks, want 1", checks)
+	}
+
+	var tasks struct {
+		Tasks map[string]struct {
+			Cmds []any `json:"cmds"`
+		} `json:"tasks"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, "../../Taskfile.yml")), &tasks); err != nil {
+		t.Fatalf("parse Taskfile.yml: %v", err)
+	}
+	checks = 0
+	cmds := tasks.Tasks["lint"].Cmds
+	for i, cmd := range cmds {
+		if cmd != check {
+			continue
+		}
+		checks++
+		if i+1 >= len(cmds) || cmds[i+1] != chartCheck {
+			t.Error("local generated manifest check must run immediately before the chart CRD check")
+		}
+	}
+	if checks != 1 {
+		t.Errorf("task lint contains %d generated manifest checks, want 1", checks)
+	}
+}
+
 func TestDependencyReviewPolicy(t *testing.T) {
 	var wf workflow
 	if err := yaml.Unmarshal([]byte(read(t, ciWorkflow)), &wf); err != nil {
