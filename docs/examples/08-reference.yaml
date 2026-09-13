@@ -61,7 +61,7 @@ spec:
     noACL: true                 # skip GRANT/REVOKE replay
     noComments: true            # skip COMMENT statements
     noTablespaces: true         # ignore source tablespace assignments
-    useCopyBinary: true         # COPY BINARY: faster, same-version endpoints only
+    useCopyBinary: true         # COPY BINARY with per-table fallback for unsafe types
     failFast: true              # abort on the first error instead of collecting
     # Sections to skip entirely; also: extensions, collations, dbProperties, ctidSplit.
     skip: [largeObjects, extensionComments, vacuum, analyze]

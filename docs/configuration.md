@@ -15,7 +15,9 @@ spec:
     skip: [largeObjects]         # steps to omit entirely
 ```
 
-The defaults are pgcopydb's own; raise the job counts to the parallelism your source can serve. Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) is the map.
+The operator defaults table jobs to the worker's CPU request and enables same-table splitting; other unset options use pgcopydb's defaults.
+Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
+Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) is the map.
 
 ## Filters
 

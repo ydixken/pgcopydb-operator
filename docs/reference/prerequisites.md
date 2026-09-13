@@ -31,7 +31,7 @@ The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg
 
 pgcopydb 0.18 is also a floor for the replication lag reading, not only for the client tools.
 At pgcopydb 0.18 and above, `status.replication.lagBytes` reflects what the target has applied; below it the same figure reflects what the target has received, so it reads optimistically and a migration can look caught up while the apply is still behind.
-The bundled runner ships pgcopydb 0.18.2, so this only matters for a `spec.runner.image` pinned to something older.
+The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
 ## Base clone (every Migration)
 
