@@ -102,7 +102,8 @@ jobs:
       - name: Generated manifests are current
         run: >-
           make manifests &&
-          changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) && test -z "$changes"
+          changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) &&
+          { test -z "$changes" || { printf '%s\n' "$changes"; exit 1; }; }
       - name: Chart CRD is current
         # The chart embeds controller-gen output; this fails on drift.
         run: ./hack/sync-chart-crd.sh --check

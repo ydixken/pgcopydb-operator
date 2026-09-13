@@ -20,7 +20,8 @@ tasks:
       - yamllint --strict .
       - >-
         make manifests &&
-        changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) && test -z "$changes"
+        changes=$(git status --porcelain --untracked-files=all -- config/crd/bases config/rbac) &&
+        { test -z "$changes" || { printf '%s\n' "$changes"; exit 1; }; }
       # The chart embeds generated artifacts (CRD, RBAC); these fail on drift.
       - ./hack/sync-chart-crd.sh --check
       - ./hack/sync-chart-rbac.sh --check

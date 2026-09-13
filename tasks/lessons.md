@@ -25,3 +25,5 @@
 - Mark a removed historical gate as superseded when its outcome has no recorded evidence, rather than changing its checkbox to assert failure.
 - Generated-file drift checks must reject untracked output as well as tracked changes.
   Assert required check presence and ordering without coupling unrelated step adjacency.
+- Print the offending paths when a generated-file check fails, without swallowing generation or Git failures.
+  Document commit-then-lint sequencing when staged generated files deliberately fail the check.
