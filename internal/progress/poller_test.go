@@ -281,7 +281,7 @@ func TestSample(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeExec{pod: "p", out: []byte(tc.out)}
-			got, err := NewFromExec(f, nil).Sample(ctx, "ns", "job")
+			got, err := NewFromExec(f, nil).Sample(ctx, "ns", "job", false)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -307,7 +307,7 @@ func TestSample(t *testing.T) {
 // with whatever the pod's environment happens to hold.
 func TestSample_RunsWithTheURIPrelude(t *testing.T) {
 	f := &fakeExec{pod: "p", out: []byte("source=\ntarget=\n")}
-	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job"); err != nil {
+	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" {
@@ -323,21 +323,21 @@ func TestSample_RunsWithTheURIPrelude(t *testing.T) {
 
 func TestSample_NoPodOrError(t *testing.T) {
 	ctx := context.Background()
-	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).Sample(ctx, "ns", "job"); got != nil || err != nil {
+	if got, err := NewFromExec(&fakeExec{pod: ""}, nil).Sample(ctx, "ns", "job", false); got != nil || err != nil {
 		t.Fatalf("no pod: got %+v, %v; want nil, nil", got, err)
 	}
-	if _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).Sample(ctx, "ns", "job"); err == nil {
+	if _, err := NewFromExec(&fakeExec{podErr: errors.New("api down")}, nil).Sample(ctx, "ns", "job", false); err == nil {
 		t.Fatal("a pod lookup failure must surface")
 	}
 	execErr := errors.New("refused")
-	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: execErr}, nil).Sample(ctx, "ns", "job"); !errors.Is(err, execErr) {
+	if _, err := NewFromExec(&fakeExec{pod: "p", execErr: execErr}, nil).Sample(ctx, "ns", "job", false); !errors.Is(err, execErr) {
 		t.Fatalf("exec failure = %v, want original error", err)
 	}
 }
 
 func TestSample_ContainerExitDuringExecIsNoSample(t *testing.T) {
 	f := &fakeExec{pod: "p", execErr: errors.New("container gone"), goneOnExec: true}
-	got, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job")
+	got, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", false)
 	if got != nil || err != nil {
 		t.Fatalf("got %+v, %v; want nil, nil", got, err)
 	}
@@ -346,12 +346,32 @@ func TestSample_ContainerExitDuringExecIsNoSample(t *testing.T) {
 func TestSample_PodRecheckFailurePreservesExecError(t *testing.T) {
 	execErr := errors.New("exec refused")
 	f := &fakeExec{pod: "p", execErr: execErr, podErrOnExec: errors.New("API unavailable")}
-	_, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job")
+	_, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", false)
 	if !errors.Is(err, execErr) {
 		t.Fatalf("got %v; want original exec error", err)
 	}
 	if f.calls != 3 {
 		t.Fatalf("calls = %d, want pod lookup, exec, and pod recheck", f.calls)
+	}
+}
+
+func TestSample_AllDatabases(t *testing.T) {
+	f := &fakeExec{pod: "p", out: []byte("source=7000 0 0 0 0\ntarget=6000 0 0 0 0\n")}
+	got, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", true)
+	if err != nil || got == nil || !eq(got.SourceSize, ptr(7000)) || !eq(got.TargetSize, ptr(6000)) || got.Counts != nil {
+		t.Fatalf("sample = %+v, %v; want sizes without counts", got, err)
+	}
+	script := f.argv[2]
+	for _, want := range []string{conn.URIRecover(), progressSQL, "sum(pg_database_size(oid))", "not in ('template0', 'template1')", "PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q", want)
+		}
+	}
+	if strings.Contains(script, "current_database()") || strings.Contains(script, "pg_class") {
+		t.Fatal("all-databases sampler queries only the maintenance database")
+	}
+	if err := exec.Command("sh", "-n", "-c", script).Run(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -120,7 +120,7 @@ type ProgressOps interface {
 	// Sample reads both databases in one exec: their sizes, and the relation
 	// counts. Unlike CloneProgress it is safe on a pass with a live worker,
 	// which is what makes the progress fields move during a copy.
-	Sample(ctx context.Context, namespace, jobName string) (*progress.Sample, error)
+	Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*progress.Sample, error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
 	// carries. The allowlist lives with the poller, so asking it keeps one
@@ -576,7 +576,7 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	if r.Progress == nil {
 		return
 	}
-	s, err := r.Progress.Sample(ctx, m.Namespace, jobName)
+	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("database sample failed", "job", jobName, "error", err)
 		return
