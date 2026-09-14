@@ -31,6 +31,21 @@ import (
 
 const suiteFile = "../e2e/e2e_suite_test.go"
 
+func TestSeedProfileInvalidatesUnvacuumedFixtures(t *testing.T) {
+	body, err := os.ReadFile(suiteFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := regexp.MustCompile(`baseSeedProfile\s*=\s*"v([0-9]+)"`).FindSubmatch(body)
+	if profile == nil {
+		t.Fatal("suite declares no versioned baseSeedProfile")
+	}
+	version, err := strconv.Atoi(string(profile[1]))
+	if err != nil || version < 4 {
+		t.Fatal("baseSeedProfile must invalidate fixtures seeded without vacuum (v3 and earlier)")
+	}
+}
+
 // seedJob is the part of the seed Job the fixtures depend on, read out of the
 // suite's source. Parsed rather than called: package e2e cannot be imported
 // here, because make test excludes it and its only entry point wants a cluster.

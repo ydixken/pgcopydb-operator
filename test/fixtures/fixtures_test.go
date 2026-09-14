@@ -274,6 +274,29 @@ func TestSecondaryIndexesAreDeferred(t *testing.T) {
 	}
 }
 
+func TestFinishVacuumsBeforeStampingTheSeed(t *testing.T) {
+	finish := regexp.MustCompile(`(?m)--.*$`).ReplaceAllString(read(t, "finish.sql"), "")
+	steps := []string{
+		"REFRESH MATERIALIZED VIEW event_daily_counts;",
+		"VACUUM (ANALYZE);",
+		"BEGIN;",
+		"DELETE FROM e2e_seed;",
+		"INSERT INTO e2e_seed",
+		"COMMIT;",
+	}
+	previous := -1
+	for _, step := range steps {
+		at := strings.Index(finish, step)
+		if at < 0 {
+			t.Fatalf("finish.sql does not contain %q", step)
+		}
+		if at <= previous {
+			t.Errorf("finish.sql performs %q before the preceding finish step", step)
+		}
+		previous = at
+	}
+}
+
 // tableBlock returns the body of a table's CREATE TABLE in schema.sql, so a
 // constraint check cannot be satisfied by some other table's column of the
 // same name.

@@ -94,6 +94,7 @@ That script applies `schema.sql`, runs the three base seed stages concurrently, 
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
 The non-unique secondary indexes are built once by `finish.sql` rather than maintained per insert.
 Primary keys and unique constraints stay in `schema.sql` because the loads resolve `ON CONFLICT` against them.
+After refreshing the materialized view, `finish.sql` runs `VACUUM (ANALYZE)` across the source database before writing the success marker, setting hint bits before a migration opens its replication slot.
 Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
 
 Two tiers, and the environment variables a run reads:

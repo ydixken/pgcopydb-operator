@@ -153,9 +153,9 @@ const (
 	// instead, which is what the budget is really sized for.
 	clusterReadyTimeout = 10 * time.Minute
 
-	// seedProfile names the fixture generation; bump it when the schema or
-	// the seeded shapes change so kept clusters get recreated.
-	baseSeedProfile = "v3"
+	// seedProfile names the fixture generation; bump it when the schema,
+	// seeded shapes, or seed preparation changes so kept clusters get recreated.
+	baseSeedProfile = "v4"
 	// seedJobName and seedConfigMap are the seed Job and its mounted SQL.
 	seedJobName   = "e2e-seed"
 	seedConfigMap = "e2e-fixtures"
