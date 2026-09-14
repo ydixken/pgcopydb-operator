@@ -161,7 +161,8 @@ Two that circulate as advice and are not worth taking:
 There is one commit per table, not per row.
 Follow-mode transactions may be small and frequent, but the bundled runner explicitly sets `synchronous_commit=on` for SQLite apply, overriding a server default of `off` to confirm target WAL durability before publishing progress.
 
-`full_page_writes = off` is not safe on a target that becomes production, and is not safe at all on a CloudNativePG cluster, which enables `wal_log_hints` and data checksums.
+`full_page_writes = off` is not safe on a target that becomes production.
+CloudNativePG defaults `wal_log_hints` to `on`, which WAL-logs hint-bit full-page images even without data checksums; enabling checksums independently requires that logging.
 
 ## The VACUUM tail
 

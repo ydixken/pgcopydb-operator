@@ -96,6 +96,7 @@ The non-unique secondary indexes are built once by `finish.sql` rather than main
 Primary keys and unique constraints stay in `schema.sql` because the loads resolve `ON CONFLICT` against them.
 After refreshing the materialized view, `finish.sql` runs `VACUUM (ANALYZE)` across the source database before writing the success marker, setting hint bits before a migration opens its replication slot.
 Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
+The fixture manifest leaves `bootstrap.initdb.dataChecksums` unset; the [CNPG option defaults to `false`](https://cloudnative-pg.io/docs/1.27/bootstrap/#passing-options-to-initdb).
 
 Two tiers, and the environment variables a run reads:
 
