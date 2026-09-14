@@ -1,11 +1,34 @@
 # Performance tuning
 
-A migration's wall clock is governed by three separate bottlenecks, and they respond to different knobs.
+A migration's phases have different bottlenecks and respond to different knobs.
 The base copy is bound by the source read, the network, and the target write.
 Index builds are bound by the target's CPU and memory, and they happen after the data is in.
-In follow mode, the steady state is bound by how fast the target applies changes, not by how fast the source decodes them.
+In follow mode, source decoding, receive-spool writes, inline transformation, and target apply can each limit progress; measure the pipeline rather than assuming the target is the bottleneck.
 
 This page covers what the operator decides for you, what is left to you, and how to tell whether a change helped.
+
+## Follow receive and apply
+
+The bundled pgcopydb `0.18.10.gaadc4bf` batches receive-spool writes in SQLite transactions instead of committing each row and column insert separately, while retaining SQLite `synchronous=FULL`.
+[Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch, crash/resume checks, and receive-process bpftrace measurements for one source transaction containing 20,000 four-column rows.
+The before/after runs used the same configuration, but not identical volume or cache state.
+Before values cover the row-only receive window; after values include the SQLite batch commit:
+
+| Storage | `fsync` calls, before to after | Time inside syncs | Receive window |
+| --- | ---: | ---: | ---: |
+| Longhorn | 100,831 to 3 | 314.08 s to 0.18 s | 324.04 s to 0.98 s |
+| Local NVMe | 100,774 to 3 | 125.90 s to 0.04 s | 133.67 s to 0.82 s |
+
+> [!important]
+> There is no retained commit-inclusive baseline trace.
+> The conservative mixed-window ratios are about 330x on Longhorn and 164x on NVMe: receive-window speedups, not end-to-end migration speedups.
+> These individual bursts do not establish sustained throughput or measure target WAL durability waits.
+
+Apply now confirms each target COMMIT before publishing progress and uses `synchronous_commit=on` for each source transaction.
+That durability wait may raise latency for workloads with many small transactions; its cost is unmeasured.
+The downstream receive defect is recorded in [#265](https://github.com/ydixken/pgcopydb-operator/issues/265); [#260](https://github.com/ydixken/pgcopydb-operator/issues/260) tracks the broader throughput investigation, including what rate is acceptable.
+Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
+A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
 
 ## What the operator decides
 
@@ -136,7 +159,7 @@ Two that circulate as advice and are not worth taking:
 
 `synchronous_commit = off` buys close to nothing during a base copy, because pgcopydb copies a whole table, or one split part, in a single transaction.
 There is one commit per table, not per row.
-It does matter during follow-mode apply, where transactions are small and frequent.
+Follow-mode transactions may be small and frequent, but the bundled runner explicitly sets `synchronous_commit=on` for SQLite apply, overriding a server default of `off` to confirm target WAL durability before publishing progress.
 
 `full_page_writes = off` is not safe on a target that becomes production, and is not safe at all on a CloudNativePG cluster, which enables `wal_log_hints` and data checksums.
 
@@ -213,4 +236,5 @@ Subtracting them gives the duration, which is the number to compare.
 
 For per-table detail, run `pgcopydb list progress --summary --json` against a finished Migration's work PVC (`<name>-work`) from a short-lived pod that mounts it, never with `kubectl exec` into a running worker: every pgcopydb invocation writes to the catalog, and one landing while a worker is mid-cursor kills that worker.
 It reports per-step and per-table timings, which is the only way to answer which table was slow.
-Skip it when the Migration used filters: `list progress` overwrites a filtered work dir's stored filtering, poisoning the directory for any later resume (both hazards in the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
+On stock 0.18, skip it when the Migration used filters: `list progress` overwrites the stored filtering and poisons later resume (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
+The bundled runner fixes that filter corruption, but the restriction against concurrent catalog access still applies.

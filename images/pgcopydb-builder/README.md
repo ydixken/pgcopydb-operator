@@ -6,7 +6,7 @@ The [runner image](../runner/README.md) `COPY --from`s the result instead of rec
 ## Why a separate image
 
 The compile takes about 20 minutes under QEMU for the arm64 half, and its only real input is `PGCOPYDB_SHA`.
-Across 55 releases, that pin has changed once.
+The source pin changes less often than the runner's release tag.
 The runner image's apt layers float on purpose and must keep rebuilding every release, so a registry build cache is the wrong tool: it cannot tell the two halves apart and would freeze both.
 Publishing the compile as its own image, tagged by the commit it builds, reuses the half that almost never changes and rebuilds only the half that must.
 

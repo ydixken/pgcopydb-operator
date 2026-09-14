@@ -81,7 +81,9 @@ Status: draft, not filed.
 
 - pgcopydb 0.18-1.pgdg12+1 (upstream container image)
 - `clone --follow` under Kubernetes; a supervising operator ran `pgcopydb stream sentinel get --json` and `pgcopydb list progress` in the worker pod repeatedly, for as long as a worker was running
-- Line numbers point at upstream [v0.18](https://github.com/dimitri/pgcopydb/tree/v0.18). `sequences.c` and `indexes.c` are byte-identical between v0.18 and the fork our runner builds ([ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) at `ea87951`), so both fault sites below are stock upstream code and every line number for those two files lands on v0.18 as written. `catalog.c` does differ, so its references are given as "fork N / upstream M".
+- Line numbers point at upstream [v0.18](https://github.com/dimitri/pgcopydb/tree/v0.18).
+  `sequences.c` and `indexes.c` are byte-identical between v0.18 and the fork examined here ([ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) at `ea87951`), so both fault sites below are stock upstream code and every line number for those two files lands on v0.18 as written.
+  `catalog.c` does differ, so its references are given as "fork N / upstream M".
 
 ### What happened
 

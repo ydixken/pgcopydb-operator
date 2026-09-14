@@ -21,8 +21,9 @@ The snapshot does not run pgcopydb, open the worker's catalogs, inspect SQL or r
 
 ## What the snapshot can distinguish
 
-The [pinned feedback implementation](https://github.com/ydixken/pgcopydb/blob/e37d2bd4dd10b7ed7b415555ce3318202d9633cf/src/bin/pgcopydb/ld_stream.c#L1495-L1551) reports receive progress as `write_lsn` and target replay progress as `replay_lsn`.
+The [pinned feedback implementation](https://github.com/ydixken/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/ld_stream.c#L1523-L1578) reports receive progress as `write_lsn` and target replay progress as `replay_lsn`.
 It also uses replay progress for the slot's confirmed-flush feedback, so confirmed flush is not an independent transformation boundary.
+The [apply path confirms target COMMIT results before advancing replay progress](https://github.com/ydixken/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/ld_apply.c#L1013-L1034).
 
 A slowly advancing write position below the quiet source's head demonstrates slow receive-side progress.
 A write position that has caught up while replay and target rows remain behind localizes the remaining work downstream of receive.
@@ -37,8 +38,8 @@ The burst commits as one transaction: target rows can remain zero during healthy
 ## Why SQLite file sizes are not the replacement
 
 The pinned pipeline writes received changes to output SQLite databases and transformed statements to replay SQLite databases.
-The [apply loop invokes transformation inline](https://github.com/ydixken/pgcopydb/blob/e37d2bd4dd10b7ed7b415555ce3318202d9633cf/src/bin/pgcopydb/ld_apply.c#L314-L353), and both stages share one process and an in-memory progress record.
-That record is [persisted every 64 driver iterations](https://github.com/ydixken/pgcopydb/blob/e37d2bd4dd10b7ed7b415555ce3318202d9633cf/src/bin/pgcopydb/ld_apply.c#L234-L240), not at a fixed wall-clock interval.
+The [apply loop invokes transformation inline](https://github.com/ydixken/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/ld_apply.c#L314-L353), and both stages share one process and an in-memory progress record.
+That record is [persisted every 64 driver iterations](https://github.com/ydixken/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/ld_apply.c#L233-L240), not at a fixed wall-clock interval.
 Per-process CPU and I/O counts therefore do not separate the two stages, and the persisted record need not describe a long-running operation.
 
 [SQLite WAL mode](https://www.sqlite.org/wal.html#avoiding_excessively_large_wal_files) normally recycles a checkpointed WAL file without truncating it.
@@ -69,8 +70,9 @@ It measured:
 Rates are decimal KB/s of source WAL position progress, not network throughput.
 A2 returned within 1.5% of A1, but performance mode did not restore the historical 170 KB/s.
 Both powersave phases exceeded 300 seconds, and CI remains on powersave.
-The measurements establish a need for roughly 350 seconds plus operating headroom, not a measured 12-minute requirement.
-We allow 12 minutes because the throughput floor remains unexplained; the trade-off is slower reporting of a genuine failure.
+Those rc.5 measurements established a need for roughly 350 seconds plus operating headroom, not a measured 12-minute requirement.
+The [receive batching fix](../operations/performance.md#follow-receive-and-apply) addresses the per-insert sync cost behind that ceiling.
+We retain the 12-minute budget pending candidate E2E measurements with the new runner; the trade-off is slower reporting of a genuine failure.
 
 > [!important]
 > This budget is environmental accommodation, not a resolution of the throughput investigation in [#260](https://github.com/ydixken/pgcopydb-operator/issues/260).
