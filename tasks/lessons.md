@@ -43,3 +43,5 @@
   Assert required check presence and ordering without coupling unrelated step adjacency.
 - Print the offending paths when a generated-file check fails, without swallowing generation or Git failures.
   Document commit-then-lint sequencing when staged generated files deliberately fail the check.
+- Distinguish independent sufficient causes from jointly required premises.
+  Either `wal_log_hints` or data checksums can require hint-bit WAL; use the measured before/after behaviour to test the proposed fix.
