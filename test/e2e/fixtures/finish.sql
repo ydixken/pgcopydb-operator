@@ -26,6 +26,10 @@ SELECT setval(pg_get_serial_sequence('audit.events', 'id'), (SELECT max(id) FROM
 \echo refreshing event_daily_counts
 REFRESH MATERIALIZED VIEW event_daily_counts;
 
+-- Set hint bits before a replication slot exists, so the base copy does not
+-- generate hint-bit full-page-image WAL onto an open slot.
+VACUUM (ANALYZE);
+
 -- Success marker, written last. Old rows go away so a marker always states
 -- exactly what the cluster contains.
 BEGIN;
