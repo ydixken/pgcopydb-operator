@@ -218,9 +218,8 @@ jobs:
           # hack/stamp-chart.sh reads the tag history to build the changelog.
           fetch-depth: 0
       - name: Push chart as OCI
-        # Chart version and appVersion both track the git tag (without the
-        # leading v, Helm requires SemVer). stamp-chart.sh fills in the
-        # Artifact Hub annotations that only make sense per release.
+        # Chart version strips the leading v; appVersion keeps the image tag.
+        # stamp-chart.sh fills in the per-release Artifact Hub annotations.
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           helm lint charts/pgcopydb-operator
@@ -228,6 +227,13 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
           helm package charts/pgcopydb-operator --version "$VERSION" --app-version "$GITHUB_REF_NAME"
           helm push "pgcopydb-operator-$VERSION.tgz" "oci://$IMAGE/charts"
+      - name: Tag stable chart as latest
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *) oras tag --registry-config "$(helm env HELM_REGISTRY_CONFIG)" \
+                 "$IMAGE/charts/pgcopydb-operator:${GITHUB_REF_NAME#v}" latest ;;
+          esac
 
   release-notes:
     # Last, so a release only appears once its artifacts are actually published.
