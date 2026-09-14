@@ -188,12 +188,15 @@ Fail, and the candidate's artifacts stay where they are, `latest` still points a
 Pass, and nothing happens on its own. Promotion is [promote.yml](.github/workflows/promote.yml), dispatched by hand with the candidate tag. That is what lets several candidates stand between two releases: a candidate that is never promoted just stays a candidate, and rc.2 can supersede rc.1 without rc.1 having already become the release.
 
 Promoting pushes the stable tag `vX.Y.Z`, which starts `release.yml` once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease.
+After `helm push`, the chart job uses the runner's existing ORAS tool and Helm login config to tag the published manifest as `latest`, preserving its digest.
+Chart version tags omit the leading `v`; image tags and chart `appVersion` retain it.
+`test/buildconfig` exercises the chart alias and image tag scripts for stable and prerelease tags, including chart retagging failures, without contacting a registry.
 
 The gate used to be `needs: [e2e, release-notes]`, which GitHub enforced. A manual promotion has to earn that back, so `promote.yml` reads the candidate's own release run and refuses unless its `e2e` job concluded `success`. Skipped, cancelled and never-ran are all refusals, not passes.
 
 > [!important]
 > A release candidate publishes under its own tag and never moves `latest`.
-> A `helm install` without an explicit version therefore never lands on a build e2e has not signed off.
+> Helm without an explicit version selects the highest stable SemVer chart tag, independently of the OCI `latest` alias.
 
 The chart job waits on both image jobs, so a published chart never points at an image that failed to build. A tag containing a hyphen is a SemVer prerelease and is marked as one on GitHub and Artifact Hub, so the candidate round stays out of the way of anyone browsing the releases page for a version to install.
 

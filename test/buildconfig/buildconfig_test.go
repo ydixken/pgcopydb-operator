@@ -14,12 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package buildconfig guards the image builds against silent slowdowns.
+// Package buildconfig guards image builds and release workflows.
 //
-// Every assertion here stands for a change that costs minutes per release and
-// reports no error when it is lost. kubebuilder owns Dockerfile and Makefile
-// and AGENTS.md tells agents to regenerate rather than hand-edit them, so a
-// scaffold refresh is a live way to lose these.
+// A scaffold refresh can silently lose build optimizations; release workflow
+// regressions otherwise go unnoticed until a version tag runs them.
 package buildconfig
 
 import (
@@ -57,6 +55,7 @@ const (
 	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
 	managerImageJob   = "manager-image"
 	runnerImageJob    = "runner-image"
+	stableReleaseTag  = "v0.13.1"
 )
 
 const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
@@ -260,6 +259,7 @@ type workflowConcurrency struct {
 }
 
 type workflowStep struct {
+	ID   string            `json:"id"`
 	Name string            `json:"name"`
 	Uses string            `json:"uses"`
 	If   string            `json:"if"`
@@ -272,6 +272,7 @@ type workflowStep struct {
 		FailOnSeverity string `json:"fail-on-severity"`
 		Platforms      string `json:"platforms"`
 		Outputs        string `json:"outputs"`
+		Tags           string `json:"tags"`
 	} `json:"with"`
 }
 
@@ -398,6 +399,117 @@ func mustParse(t *testing.T, path string) workflow {
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return wf
+}
+
+func TestReleaseChartLatestOnlyMovesForStableTags(t *testing.T) {
+	chart, ok := mustParse(t, releaseWorkflow).Jobs["chart"]
+	if !ok {
+		t.Fatal("release.yml has no chart job")
+	}
+	pushIndex := slices.IndexFunc(chart.Steps, func(step workflowStep) bool {
+		return strings.Contains(step.Run, "helm push ")
+	})
+	tags := 0
+	for i, step := range chart.Steps {
+		if step.Name != "Tag stable chart as latest" {
+			continue
+		}
+		tags++
+		if pushIndex < 0 || i <= pushIndex || step.If != "" {
+			t.Fatal("chart retagging must run after a successful helm push, with the default success condition")
+		}
+		for _, tt := range []struct {
+			name       string
+			ref        string
+			orasStatus int
+			wantStatus int
+			wantTag    bool
+		}{
+			{name: "stable", ref: stableReleaseTag, wantTag: true},
+			{name: "candidate", ref: "v0.13.2-rc.1"},
+			{name: "alpha", ref: "v0.14.0-alpha.1"},
+			{name: "beta", ref: "v0.14.0-beta.1"},
+			{name: "registry failure", ref: stableReleaseTag, orasStatus: 42, wantStatus: 42, wantTag: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				cmd := exec.Command("bash", "-eo", "pipefail", "-c", `
+helm() { test "$*" = 'env HELM_REGISTRY_CONFIG' || return 1; printf '/helm config.json\n'; }
+oras() { printf '%s\n' "$@"; return "$ORAS_STATUS"; }
+`+step.Run)
+				cmd.Env = append(os.Environ(), "GITHUB_REF_NAME="+tt.ref, "IMAGE=registry.example/operator",
+					fmt.Sprintf("ORAS_STATUS=%d", tt.orasStatus))
+				out, err := cmd.CombinedOutput()
+				if cmd.ProcessState == nil {
+					t.Fatalf("run chart retagging: %v", err)
+				}
+				if got := cmd.ProcessState.ExitCode(); got != tt.wantStatus {
+					t.Errorf("exit = %d, want %d: %v\n%s", got, tt.wantStatus, err, out)
+				}
+				want := ""
+				if tt.wantTag {
+					want = "tag\n--registry-config\n/helm config.json\nregistry.example/operator/charts/pgcopydb-operator:" +
+						strings.TrimPrefix(tt.ref, "v") + "\nlatest\n"
+				}
+				if string(out) != want {
+					t.Errorf("oras arguments = %q, want %q", out, want)
+				}
+			})
+		}
+	}
+	if tags != 1 {
+		t.Errorf("chart job contains %d latest tagging steps, want 1", tags)
+	}
+}
+
+func TestReleaseImageLatestOnlyMovesForStableTags(t *testing.T) {
+	wf := mustParse(t, releaseWorkflow)
+	for _, name := range []string{managerImageJob, runnerImageJob} {
+		t.Run(name, func(t *testing.T) {
+			job, ok := wf.Jobs[name]
+			if !ok {
+				t.Fatalf("release.yml has no %s job", name)
+			}
+			tagIndex := slices.IndexFunc(job.Steps, func(step workflowStep) bool { return step.ID == "tags" })
+			if tagIndex < 0 || job.Steps[tagIndex].If != "" {
+				t.Fatal("image job must calculate tags unconditionally")
+			}
+			builds := 0
+			for i, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "docker/build-push-action@") {
+					builds++
+					if i <= tagIndex || step.With.Tags != "${{ steps.tags.outputs.list }}" {
+						t.Error("image build must use the calculated tags")
+					}
+				}
+			}
+			if builds != 1 {
+				t.Fatalf("image job contains %d build steps, want 1", builds)
+			}
+			image := "registry.example/operator"
+			if name == runnerImageJob {
+				image += "/runner"
+			}
+			for _, ref := range []string{stableReleaseTag, "v0.13.2-rc.1", "v0.14.0-alpha.1", "v0.14.0-beta.1"} {
+				t.Run(ref, func(t *testing.T) {
+					output := filepath.Join(t.TempDir(), "output")
+					cmd := exec.Command("bash", "-eo", "pipefail", "-c", job.Steps[tagIndex].Run)
+					cmd.Env = append(os.Environ(), "GITHUB_REF_NAME="+ref,
+						"IMAGE=registry.example/operator", "GITHUB_OUTPUT="+output)
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("calculate image tags: %v\n%s", err, out)
+					}
+					want := "list<<EOF\n" + image + ":" + ref + "\n"
+					if ref == stableReleaseTag {
+						want += image + ":latest\n"
+					}
+					want += "EOF\n"
+					if got := read(t, output); got != want {
+						t.Errorf("image tags = %q, want %q", got, want)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestE2EDefaultRelease(t *testing.T) {
