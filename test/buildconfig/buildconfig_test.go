@@ -846,6 +846,16 @@ func requireMultiArch(t *testing.T, path, platforms string) {
 func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 	want := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
 	q := regexp.QuoteMeta(want)
+	var values struct {
+		Runner struct {
+			ProgressPollVersions []string `json:"progressPollVersions"`
+		} `json:"runner"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, chartValues)), &values); err != nil {
+		t.Fatalf("parse chart values: %v", err)
+	}
+	versions := values.Runner.ProgressPollVersions
+	qList := regexp.QuoteMeta(strings.Join(versions, ","))
 
 	for _, c := range []struct {
 		path string
@@ -858,9 +868,9 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 			"the build canary that fails the image build on drift"},
 		{releaseWorkflow, regexp.MustCompile(`pgcopydb --version \| grep -F '` + q + `'`),
 			"the release smoke test that runs the pushed image"},
-		{mainGo, regexp.MustCompile(`"progress-poll-versions", "` + q + `"`),
+		{mainGo, regexp.MustCompile(`"progress-poll-versions", "` + qList + `"`),
 			"the --progress-poll-versions default"},
-		{mainTest, regexp.MustCompile(`defaultPollVersions = "` + q + `"`),
+		{mainTest, regexp.MustCompile(`defaultPollVersions = "` + qList + `"`),
 			"the flag-default assertion"},
 		{pollerTest, regexp.MustCompile(`const patchedVersion = "` + q + `"`),
 			"the gate-script assertion's fixture constant"},
@@ -884,19 +894,12 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 		}
 	}
 
-	// The chart value is what actually ships, so assert the parsed list rather
-	// than a substring: a commented-out line would satisfy Contains.
-	var values struct {
-		Runner struct {
-			ProgressPollVersions []string `json:"progressPollVersions"`
-		} `json:"runner"`
-	}
-	if err := yaml.Unmarshal([]byte(read(t, chartValues)), &values); err != nil {
-		t.Fatalf("parse chart values: %v", err)
-	}
-	if !slices.Contains(values.Runner.ProgressPollVersions, want) {
-		t.Errorf("runner.progressPollVersions is %v, which does not allow the pinned %s; "+
-			"the in-pod progress poll would fail closed and status.progress would go dark",
-			values.Runner.ProgressPollVersions, want)
+	// Upgrading the manager must retain counters for workers on the previous pin.
+	for _, version := range []string{want, "0.18.5.ge37d2bd"} {
+		if !slices.Contains(versions, version) {
+			t.Errorf("runner.progressPollVersions is %v, which does not allow %s; "+
+				"the in-pod progress poll would fail closed and status.progress would go dark",
+				versions, version)
+		}
 	}
 }

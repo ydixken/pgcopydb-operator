@@ -2,13 +2,9 @@
 # PostgreSQL 18 client tools: pg_dump/pg_restore MUST be >= the newest server
 # major on either side, and 18 is the current release major.
 #
-# pgcopydb is compiled from ydixken/pgcopydb branch v0.18-fixes rather than
-# installed from PGDG: on stock 0.18, `pgcopydb list progress` always fails
-# (dimitri/pgcopydb#1036) and corrupts a filtered catalog's stored filtering
-# (#1038), and the operator needs it for progress reporting. The fork is
-# v0.18 plus the two fixes; upstream has them open as PRs #1041 and #1042.
-# Once an upstream release ships both, restore the single-stage PGDG
-# install this replaced.
+# The fork supplies progress, comparison, receive batching, and apply
+# correctness fixes missing from stock 0.18. See images/runner/README.md
+# for the pinned patch list and the conditions for returning to PGDG.
 #
 # Built from debian:trixie-slim with the PGDG apt repo instead of the
 # upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16
@@ -41,7 +37,7 @@
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
 # renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:e37d2bd4dd10b7ed7b415555ce3318202d9633cf@sha256:0b3a2afef9d6cc156aa59713bbb8ab7bd97597b978b7938c0e804ba26c044a59 AS pgcopydb
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad@sha256:4d9d62e05953926e487f1efc9c600c27cf8c6f40370a8ab303e6fe85384380b9 AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
@@ -101,7 +97,7 @@ ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 # Run the worker, credential escaping, and sampler timeout after purging so
 # a missing runtime capability fails the image build.
 RUN set -eux; \
-    pgcopydb --version | grep -qF '0.18.5.ge37d2bd'; \
+    pgcopydb --version | grep -qF '0.18.10.gaadc4bf'; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \
