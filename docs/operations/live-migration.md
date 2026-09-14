@@ -60,7 +60,12 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 }
 ```
 
-`writeLSN` is the slot's write position on the source, read from the walsender and falling back to the slot's `confirmed_flush_lsn`. `replayLSN` is how far the target has consumed the stream as the source reports it: the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender. It measures consumption, not application; the drain verification after cutover is what proves the target applied everything. `lagBytes` is the distance from the source's current WAL head. The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+`writeLSN` reports receive progress from the walsender, falling back to the slot's `confirmed_flush_lsn`.
+`replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
+With pgcopydb `0.18.10.gaadc4bf`, replay feedback advances only after the target COMMIT succeeds with `synchronous_commit=on`; older or custom runners may report weaker progress.
+The drain verification after cutover still proves that the target applied everything through the frozen endpos.
+`lagBytes` is the distance from the source's current WAL head.
+The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
 
 Granting the migration's source role `pg_read_all_stats` is optional, and sharpens both LSN readings. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so `writeLSN` and `replayLSN` both fall back to the slot's confirmed flush position: one confirmation behind, and identical to each other, which is why the apply backlog derived from them reads zero without the grant. Lag and `CaughtUp` follow `replayLSN`, so they inherit whichever reading is available.
 
@@ -86,7 +91,8 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 5. The operator does not trust the worker's exit code: a verify Job (`<name>-verify`) proves the drain on the target.
    The fast path passes only when the target's replication origin sits exactly on the cutover LSN, because the origin advances inside the apply's own commits and equality is the one reading that proves nothing is outstanding.
    Any remaining distance is decided by content, never by its size: from outside, unapplied commits and the publication-filtered WAL an idle source leaves behind (autovacuum, catalog churn, which pgcopydb never applies) are the same bytes.
-   The Job then runs `pgcopydb compare data` and takes the verdict from the report `--json` prints, because the command logs a differing table and exits 0 regardless.
+   The Job then runs `pgcopydb compare data` and validates the report `--json` prints, rather than relying on exit status alone.
+   The bundled runner exits nonzero on single-database data differences, but stock 0.18 can log them and exit 0.
    It passes only when the report accounts for every migrated table and each one matches on row count and checksum; a compare that could not run, and a report the Job cannot read, refuse rather than pass.
    Nearly every cutover takes that path, and not only an idle one: the cutover LSN is the source's WAL head when approval and confirmed catch-up both hold, the origin holds the last commit the target applied, and anything in between (an autovacuum tick, a checkpoint, another database on the same cluster) leaves the two apart.
    So size the write-downtime window for a `compare data` over the whole database, and treat the exact-LSN pass as the exception it is.

@@ -49,7 +49,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
-| `pgcopydb_migration_replay_lsn_bytes` | | How far the target has consumed the stream, as an absolute byte position, as reported to the source | follow, streaming |
+| `pgcopydb_migration_replay_lsn_bytes` | | Target replay progress reported to the source, as an absolute WAL byte position | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
 
@@ -96,6 +96,8 @@ Receive lag reads high by one confirmation wherever `write` fell back to the slo
 A pass whose source row carried no confirmed position leaves the previous replay and lag standing, so those two read stale for a pass rather than wrong.
 Apply backlog reads both operands from the same walsender row, so the ordering that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
+With pgcopydb `0.18.10.gaadc4bf`, replay feedback follows confirmed target commits with `synchronous_commit=on`; older or custom runners may report weaker progress.
+Receive batching does not make these LSN slopes end-to-end throughput measurements or remove the [drain-verification gate](live-migration.md#manual-cutover-runbook).
 
 ## Dashboards
 
