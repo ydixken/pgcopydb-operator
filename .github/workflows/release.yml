@@ -83,8 +83,8 @@ jobs:
             VERSION=${{ github.ref_name }}
 
   # Split out so the build below can be a reusable workflow call, which a step
-  # cannot be. Its only input, PGCOPYDB_SHA, changed once across 55 tags, so the
-  # answer is almost always "published, reuse it".
+  # cannot be. The source pin changes less often than release tags, so the
+  # answer is usually "published, reuse it".
   builder-check:
     runs-on: github-runner-pgcopydb-operator
     outputs:
@@ -197,7 +197,7 @@ jobs:
         # pgcopydb (see images/runner/Dockerfile). Native amd64 pull on the
         # amd64 runner; the arm64 half was validated by spike S6 (podman).
         run: |
-          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.5.ge37d2bd'
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.10.gaadc4bf'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
 
   chart:

@@ -1,7 +1,7 @@
 # Compiles pgcopydb from the pinned fork commit and ships nothing but the
-# binary. Its only input, PGCOPYDB_SHA, has changed once across 55
-# releases, unlike the runner image's apt layers, which float on purpose
-# and rebuild every release; a registry cache cannot tell the two apart.
+# binary. The source pin changes less often than the runner image's apt
+# layers, which float and rebuild every release; a registry cache cannot
+# tell the two apart.
 # A debian digest bump here still rebuilds and republishes this tag, so
 # it tracks the pinned pgcopydb commit but not the base it compiled against.
 
@@ -10,10 +10,10 @@
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-5-ge37d2bd, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-10-gaadc4bf, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=e37d2bd4dd10b7ed7b415555ce3318202d9633cf
-ARG PGCOPYDB_VERSION=0.18.5.ge37d2bd
+ARG PGCOPYDB_SHA=aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad
+ARG PGCOPYDB_VERSION=0.18.10.gaadc4bf
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.

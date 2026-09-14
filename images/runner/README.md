@@ -5,9 +5,36 @@ Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18, pat
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit `ea87951753f06361550c0a1357da7b42c3c55034`: upstream v0.18 plus the two fixes, sent upstream as [#1041](https://github.com/dimitri/pgcopydb/pull/1041) and [#1042](https://github.com/dimitri/pgcopydb/pull/1042).
-The version string is `0.18.5.ge37d2bd`, what `git describe` prints for that commit with dashes as dots, and the build canary and the release smoke test both assert it exactly.
-Once an upstream release ships both fixes, revert here: swap `libgc1` for the `pgcopydb` package in the install line, drop the `COPY --from=pgcopydb` line, and point the version greps in this Dockerfile and the release workflow back at the release.
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit `aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad`.
+The version string is `0.18.10.gaadc4bf`, derived from `git describe` by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+This is upstream v0.18 plus ten commits, not an upstream release named v0.18.10.
+
+The five patches inherited from `e37d2bd` are:
+
+1. [`82aa566`](https://github.com/ydixken/pgcopydb/commit/82aa566): count table bytes from `s_table_size` in `list progress` (upstream [#1041](https://github.com/dimitri/pgcopydb/pull/1041)).
+2. [`ea87951`](https://github.com/ydixken/pgcopydb/commit/ea87951): keep adopted filters in memory without overwriting the stored filtering (upstream [#1042](https://github.com/dimitri/pgcopydb/pull/1042)).
+3. [`ed62eec`](https://github.com/ydixken/pgcopydb/commit/ed62eec): make single-database `compare data` exit nonzero when data differs.
+4. [`1393b60`](https://github.com/ydixken/pgcopydb/commit/1393b60): stop overwriting `replay_lsn` with cutover endpos.
+5. [`e37d2bd`](https://github.com/ydixken/pgcopydb/commit/e37d2bd): keep keepalives off the apply cursor and drain committed spool work before completion or rotation.
+
+[Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) adds five commits, closing fork issue #5 and addressing fork issue #6:
+
+1. [`01bfe16`](https://github.com/ydixken/pgcopydb/commit/01bfe16): batch receive writes in SQLite transactions, committed at source COMMIT, flush, and close/rotation, with `synchronous=FULL` unchanged.
+2. [`92e9209`](https://github.com/ydixken/pgcopydb/commit/92e9209): pin the Pagila test fixture to its pre-v4 commit.
+3. [`58abca7`](https://github.com/ydixken/pgcopydb/commit/58abca7): confirm target COMMIT results before publishing apply progress.
+4. [`6277199`](https://github.com/ydixken/pgcopydb/commit/6277199): add receive SIGKILL/resume and flush-order regressions.
+5. [`aadc4bf`](https://github.com/ydixken/pgcopydb/commit/aadc4bf): stop follow cleanly after confirmed apply, use `synchronous_commit=on` for SQLite-apply transactions, and cover shutdown and pre-COMMIT apply termination/resume.
+
+> [!warning]
+> Each source transaction now waits for target WAL durability before apply progress advances.
+> This may raise latency for workloads with many small transactions; that cost is unmeasured.
+> A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
+
+The manager and chart allow both `0.18.10.gaadc4bf` and the previous `0.18.5.ge37d2bd` to run the catalog progress poll.
+We retain the previous version so upgrading the operator does not suppress counters for workers still running rc.5 or rc.6.
+This allowlist does not select or upgrade worker images.
+
+Once an upstream release includes the required runtime fixes above, return to PGDG: swap `libgc1` for the `pgcopydb` package in the install line, drop the `COPY --from=pgcopydb` line, and update the version assertions and progress allowlists together.
 `images/pgcopydb-builder` can then go away entirely.
 
 The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
