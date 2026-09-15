@@ -1776,6 +1776,10 @@ func TestPreflightExtensionOwnershipSelection(t *testing.T) {
 }
 
 func TestPreflightExtensionOwnershipQueries(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Fatal("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance for extension ownership SQL regressions")
+	}
 	const (
 		sourceMarker = "SOURCE"
 		targetMarker = "TARGET"
@@ -1807,10 +1811,6 @@ func TestPreflightExtensionOwnershipQueries(t *testing.T) {
 			query, _, found := strings.Cut(script[start+len(marker):], "\nPF_EXTENSION_"+tc.marker)
 			if !found || (!strings.Contains(query, "extowner") && !strings.Contains(query, "source_extension.oid")) {
 				t.Fatal("shipped ownership query missing")
-			}
-			uri := os.Getenv("PGCOPYDB_TEST_PGURI")
-			if uri == "" {
-				t.Skip("CI supplies PGCOPYDB_TEST_PGURI for extension catalog regressions")
 			}
 			catalog := `(SELECT 13559::oid AS oid, 'plpgsql'::name AS extname
 UNION ALL SELECT 16384, 'citext' UNION ALL SELECT 20000, 'hstore')`

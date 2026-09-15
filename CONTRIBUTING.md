@@ -36,6 +36,7 @@ Staged changes in those directories also fail the check.
 Regeneration writes to the working tree; inspect the generated changes and include them in the API or RBAC marker commit, then rerun lint to verify the committed tree.
 
 The CI `test` job runs beside a throwaway Postgres service container and points `PGCOPYDB_TEST_PGURI` at it.
+`TestPreflightExtensionOwnershipQueries` requires that variable and a working `psql`; `task test` fails without them rather than leaving the ownership SQL untested.
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 
