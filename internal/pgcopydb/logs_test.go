@@ -215,6 +215,11 @@ func TestPermissionDeniedLine(t *testing.T) {
 		},
 		{name: "unrelated error", raw: `{"error_severity":"ERROR","message":"deadlock detected"}`, want: ""},
 		{
+			name: "relation ownership error does not classify",
+			raw:  `{"error_severity":"ERROR","message":"must be owner of relation orders"}`,
+			want: "",
+		},
+		{
 			// pg_restore relays tolerated per-object errors this way while
 			// continuing; classifying them would kill retryable attempts.
 			name: "warning quoting ERROR text does not classify",
