@@ -255,3 +255,67 @@ func TestPermissionDeniedLine(t *testing.T) {
 		})
 	}
 }
+
+func TestPermissionDeniedLineExtensionOwnership(t *testing.T) {
+	// Terminal tails from the named container-reproduction captures, starting at the ownership error.
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "aadc4bf-affected-jobs1.clone.log",
+			raw: `{"timestamp":"2026-09-15 15:19:43.280","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"pg_restore: error: could not execute query: ERROR:  must be owner of extension unaccent"}
+{"timestamp":"2026-09-15 15:19:43.280","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"Command was: DROP EXTENSION IF EXISTS unaccent;"}
+{"timestamp":"2026-09-15 15:19:43.280","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"pgcmd.c","file_line_num":1044,"message":"Failed to run pg_restore: exit code 1"}
+{"timestamp":"2026-09-15 15:19:43.280","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1034,"message":"Failed to prepare schema on the target database, see above for details"}
+{"timestamp":"2026-09-15 15:19:43.281","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":942,"message":"Failed to clone source database, see above for details"}
+{"timestamp":"2026-09-15 15:19:43.344","pid":56,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"clone process 63 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  must be owner of extension unaccent",
+		},
+		{
+			name: "aadc4bf-no-drop-affected-jobs1.clone.log",
+			raw: `{"timestamp":"2026-09-15 15:20:23.332","pid":809,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"pg_restore: error: could not execute query: ERROR:  must be owner of extension citext"}
+{"timestamp":"2026-09-15 15:20:23.333","pid":809,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"Command was: COMMENT ON EXTENSION citext IS 'data type for case-insensitive character strings';"}
+{"timestamp":"2026-09-15 15:20:23.334","pid":809,"error_level":7,"error_severity":"ERROR","file_name":"pgcmd.c","file_line_num":1044,"message":"Failed to run pg_restore: exit code 1"}
+{"timestamp":"2026-09-15 15:20:23.334","pid":809,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1034,"message":"Failed to prepare schema on the target database, see above for details"}
+{"timestamp":"2026-09-15 15:20:23.334","pid":809,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":942,"message":"Failed to clone source database, see above for details"}
+{"timestamp":"2026-09-15 15:20:23.380","pid":802,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"clone process 809 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  must be owner of extension citext",
+		},
+		{
+			name: "e37d2bd-affected-jobs1.clone.log",
+			raw: `{"timestamp":"2026-09-15 15:18:21.868","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"pg_restore: error: could not execute query: ERROR:  must be owner of extension unaccent"}
+{"timestamp":"2026-09-15 15:18:21.868","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"Command was: DROP EXTENSION IF EXISTS unaccent;"}
+{"timestamp":"2026-09-15 15:18:21.868","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"pgcmd.c","file_line_num":1044,"message":"Failed to run pg_restore: exit code 1"}
+{"timestamp":"2026-09-15 15:18:21.868","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1034,"message":"Failed to prepare schema on the target database, see above for details"}
+{"timestamp":"2026-09-15 15:18:21.868","pid":63,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":942,"message":"Failed to clone source database, see above for details"}
+{"timestamp":"2026-09-15 15:18:21.929","pid":56,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"clone process 63 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  must be owner of extension unaccent",
+		},
+		{
+			name: "e37d2bd-no-drop-affected-jobs1.clone.log",
+			raw: `{"timestamp":"2026-09-15 15:19:00.609","pid":810,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"pg_restore: error: could not execute query: ERROR:  must be owner of extension citext"}
+{"timestamp":"2026-09-15 15:19:00.609","pid":810,"error_level":7,"error_severity":"ERROR","file_name":"string_utils.c","file_line_num":500,"message":"Command was: COMMENT ON EXTENSION citext IS 'data type for case-insensitive character strings';"}
+{"timestamp":"2026-09-15 15:19:00.609","pid":810,"error_level":7,"error_severity":"ERROR","file_name":"pgcmd.c","file_line_num":1044,"message":"Failed to run pg_restore: exit code 1"}
+{"timestamp":"2026-09-15 15:19:00.609","pid":810,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1034,"message":"Failed to prepare schema on the target database, see above for details"}
+{"timestamp":"2026-09-15 15:19:00.609","pid":810,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":942,"message":"Failed to clone source database, see above for details"}
+{"timestamp":"2026-09-15 15:19:00.713","pid":803,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"clone process 810 has terminated [6]"}`,
+			want: "pg_restore: error: could not execute query: ERROR:  must be owner of extension citext",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PermissionDeniedLine([]byte(tc.raw)); got != tc.want {
+				t.Errorf("PermissionDeniedLine() = %q, want %q", got, tc.want)
+			}
+			_, following, ok := strings.Cut(tc.raw, "\n")
+			if !ok || following == "" {
+				t.Fatal("fixture must include the command and follow-on errors")
+			}
+			if got := PermissionDeniedLine([]byte(following)); got != "" {
+				t.Errorf("command and follow-on errors classified as permission denied: %q", got)
+			}
+		})
+	}
+}

@@ -79,8 +79,8 @@ const permissionWindow = 40
 
 // PermissionDeniedLine returns a log line showing a PostgreSQL permission
 // error as the attempt's terminal cause, or "". The class is deliberately
-// tiny and severity-gated: an error-severity entry carrying "permission
-// denied" or an explicit "SQLSTATE 42501", within the last permissionWindow
+// tiny and severity-gated: an error-severity entry carrying "permission denied",
+// "must be owner of extension", or "SQLSTATE 42501", within the last permissionWindow
 // lines. JSON-wrapped lines count as severe on real severity or a quoted
 // libpq "FATAL:" passthrough; a quoted "ERROR:" alone does not, because that
 // is how pg_restore relays tolerated per-object errors while continuing.
@@ -111,7 +111,8 @@ func PermissionDeniedLine(raw []byte) string {
 		if !severe {
 			continue
 		}
-		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") {
+		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") ||
+			strings.Contains(msg, "must be owner of extension") {
 			return msg
 		}
 	}
