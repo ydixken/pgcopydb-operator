@@ -52,6 +52,10 @@ const (
 	extensionAvailableOK     = "ok: selected extensions available"
 	extensionSourceFailure   = "source extension selection probe failed"
 	extensionTargetFailure   = "target extension availability probe failed"
+	extensionOwnershipOK     = "ok: selected extension ownership"
+	extensionOwnershipProbe  = "pg_has_role(current_user, installed.extowner, 'USAGE')"
+	extensionOwnershipDetail = `["extension citext (owner postgres, migration role limited)"]`
+	extensionOwnershipFailed = "target extension ownership probe failed"
 	skipExtensions           = "extensions"
 	walLevelProbe            = "wal_level"
 	replicationAttrProbe     = "rolreplication"
@@ -346,6 +350,16 @@ func TestJobScripts_ShellValid(t *testing.T) {
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 	gate := progress.NewFromExec(nil, []string{"0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
+		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
+			drop := passwordMigration()
+			drop.Spec.Clone.DropIfExists = true
+			drop.Spec.Clone.NoComments = true
+			job, err := buildPreflightJob(drop, "img")
+			if err == nil && !strings.Contains(job.Spec.Template.Spec.Containers[0].Args[1], extensionOwnershipProbe) {
+				t.Error("drop preflight omitted extension ownership SQL")
+			}
+			return job, err
+		},
 		"all databases": func() (*batchv1.Job, error) {
 			all := passwordMigration()
 			all.Spec.Clone.AllDatabases = true
@@ -544,6 +558,7 @@ case "$q" in
   "$PREFLIGHT_EXTENSION_SHAPE_QUERY")
     [ "$1" = tgt ] && [ "$list" = '[]' ] || exit 1
     echo 0 ;;
+  *source_extension.oid*|*installed.extowner*) printf '[]' ;;
   *relreplident*) printf '%s' "${PSQL_RI:-}" ;;
   *has_schema_privilege*) echo "" ;;
   *has_database_privilege*) echo 1 ;;
@@ -1064,6 +1079,7 @@ case "$q" in
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
   *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
   *pg_available_extensions*) printf '%s' "${PSQL_EXTENSION_TARGET-[]}" ;;
+  *installed.extowner*) printf '[]' ;;
   'select 1')
     n=$(cat "$STATE/conn-$uri" 2>/dev/null || echo 0)
     n=$((n+1)); printf '%s' "$n" > "$STATE/conn-$uri"
@@ -1648,6 +1664,179 @@ func TestPreflightExtensionsFailClosed(t *testing.T) {
 	}
 }
 
+func TestPreflightExtensionOwnershipTrigger(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, drop := range []bool{false, true} {
+		for _, noComments := range []bool{false, true} {
+			for _, skipComments := range []bool{false, true} {
+				for _, skip := range []bool{false, true} {
+					name := fmt.Sprintf("drop=%t/noComments=%t/skipComments=%t/skipExtensions=%t", drop, noComments, skipComments, skip)
+					t.Run(name, func(t *testing.T) {
+						m := passwordMigration()
+						m.Spec.Clone.DropIfExists = drop
+						m.Spec.Clone.NoComments = noComments
+						if skipComments {
+							m.Spec.Clone.Skip = append(m.Spec.Clone.Skip, "extensionComments")
+						}
+						if skip {
+							m.Spec.Clone.Skip = append(m.Spec.Clone.Skip, skipExtensions)
+						}
+						wantGate := !skip && (drop || (!noComments && !skipComments))
+						wantCode := 0
+						if wantGate {
+							wantCode = 1
+						}
+						out, code, _, _ := run(t, m, "PSQL_EXTENSION_SOURCE="+extensionCitextNames,
+							"PSQL_EXTENSION_OWNERSHIP="+extensionOwnershipDetail)
+						t.Logf("EXIT=%d ownershipGate=%t\n%s", code, wantGate, out)
+						if code != wantCode || strings.Contains(out, extensionAvailableOK) == skip {
+							t.Fatalf("ownership or availability gate disagrees with spec")
+						}
+						if !wantGate {
+							// Pair each bypass with the affected default, so an absent gate cannot pass.
+							_, control, _, _ := run(t, passwordMigration(), "PSQL_EXTENSION_SOURCE="+extensionCitextNames,
+								"PSQL_EXTENSION_OWNERSHIP="+extensionOwnershipDetail)
+							t.Logf("default control EXIT=%d", control)
+							if control != 1 {
+								t.Fatal("default clone did not reject administrator-owned extension")
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestPreflightExtensionOwnershipVerdicts(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, tc := range []struct {
+		name, fault, want string
+		drop              bool
+	}{
+		{"comment failure", "PSQL_EXTENSION_OWNERSHIP=" + extensionOwnershipDetail, "clone.skip: [extensionComments]", false},
+		{"drop failure", "PSQL_EXTENSION_OWNERSHIP=" + extensionOwnershipDetail, "clone.skip: [extensions]", true},
+		{"inherited owner privileges", "PSQL_EXTENSION_MEMBER=1", extensionOwnershipOK, false},
+		{"query failure", "PSQL_FAIL_SUBSTR=installed.extowner", extensionOwnershipFailed, false},
+		{"missing verdict", "PSQL_EXTENSION_OWNERSHIP=", extensionOwnershipFailed, false},
+		{"malformed verdict", "PSQL_EXTENSION_OWNERSHIP=[", extensionOwnershipFailed, false},
+		{"source query failure", "PSQL_FAIL_SUBSTR=source_extension.oid", "source extension ownership selection probe failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.DropIfExists = tc.drop
+			out, code, _, applied := run(t, m, "PSQL_EXTENSION_SOURCE="+extensionCitextNames, tc.fault)
+			t.Logf("EXIT=%d\n%s", code, out)
+			if (code == 0) != (tc.want == extensionOwnershipOK) || !strings.Contains(out, tc.want) || applied != "" {
+				t.Fatalf("wrong ownership verdict, want %q without remediation", tc.want)
+			}
+			if code == 0 {
+				return
+			}
+			_, footer, found := strings.Cut(out, "preflight failed:\n")
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			tail := strings.Join(lines[max(0, len(lines)-preflightLogTail):], "\n")
+			if !found || !strings.Contains(footer, tc.want) || !strings.Contains(tail, tc.want) {
+				t.Fatal("ownership failure lost its footer or condition-tail diagnosis")
+			}
+			if strings.Contains(out, extensionOwnershipOK) || strings.Contains(out, okCloneDB) {
+				t.Fatal("failed ownership probe reported success or reached grant checks")
+			}
+			if strings.Contains(tc.fault, extensionOwnershipDetail) && !strings.Contains(footer, extensionOwnershipDetail) {
+				t.Fatal("footer lost extension, owner, or migration role")
+			}
+		})
+	}
+}
+
+func TestPreflightExtensionOwnershipSelection(t *testing.T) {
+	run := clonePreflightHarness(t)
+	for _, tc := range []struct {
+		name    string
+		filters *v1beta1.Filters
+		want    string
+	}{
+		{"exclude selected extension", &v1beta1.Filters{ExcludeExtensions: []string{extensionFixtureName}}, "[]"},
+		{"include only another extension", &v1beta1.Filters{IncludeOnlyExtensions: []string{"hstore"}}, "[]"},
+		{"built-in absent from restore selection", nil, extensionCitextNames},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Clone.Filters = tc.filters
+			listPath := filepath.Join(t.TempDir(), "extensions")
+			out, code, _, _ := run(t, m, "PSQL_EXTENSION_SOURCE="+extensionCitextNames,
+				"PSQL_EXTENSION_LIST_OUT="+listPath)
+			list, err := os.ReadFile(listPath)
+			t.Logf("EXIT=%d ownership selection=%s\n%s", code, list, out)
+			if err != nil || string(list) != tc.want || code != 0 || !strings.Contains(out, extensionOwnershipOK) {
+				t.Fatalf("ownership selection = %q, want %q (read: %v)", list, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestPreflightExtensionOwnershipQueries(t *testing.T) {
+	const (
+		sourceMarker = "SOURCE"
+		targetMarker = "TARGET"
+		otherRole    = "SET ROLE extension_other_test;"
+	)
+	for _, tc := range []struct {
+		name, marker, setup, input, want string
+	}{
+		{"source built-in omitted", sourceMarker, "", `{"include":[],"exclude":[]}`, `["citext", "hstore"]`},
+		{"source exclusion", sourceMarker, "", `{"include":["citext","hstore"],"exclude":["citext"]}`, `["hstore"]`},
+		{"source inclusion", sourceMarker, "", `{"include":["citext"],"exclude":[]}`, extensionCitextNames},
+		{"target nonmember", targetMarker, otherRole, extensionCitextNames,
+			`["extension citext (owner extension_owner_test, migration role extension_other_test)"]`},
+		{"target owner", targetMarker, "SET ROLE extension_owner_test;", extensionCitextNames, "[]"},
+		{"target inherited member", targetMarker, "SET ROLE extension_member_test;", extensionCitextNames, "[]"},
+		{"target noninherited member", targetMarker, "SET ROLE extension_noinherit_test;", extensionCitextNames,
+			`["extension citext (owner extension_owner_test, migration role extension_noinherit_test)"]`},
+		{"target superuser", targetMarker, "", extensionCitextNames, "[]"},
+		{"target not selected", targetMarker, otherRole, "[]", "[]"},
+		{"target not installed", targetMarker, otherRole, `["hstore"]`, "[]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := preflightScriptFor(passwordMigration())
+			marker := "<<'PF_EXTENSION_" + tc.marker + "'\n"
+			start := strings.LastIndex(script, marker)
+			if start < 0 {
+				t.Fatal("shipped extension query missing")
+			}
+			query, _, found := strings.Cut(script[start+len(marker):], "\nPF_EXTENSION_"+tc.marker)
+			if !found || (!strings.Contains(query, "extowner") && !strings.Contains(query, "source_extension.oid")) {
+				t.Fatal("shipped ownership query missing")
+			}
+			uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+			if uri == "" {
+				t.Skip("CI supplies PGCOPYDB_TEST_PGURI for extension catalog regressions")
+			}
+			catalog := `(SELECT 13559::oid AS oid, 'plpgsql'::name AS extname
+UNION ALL SELECT 16384, 'citext' UNION ALL SELECT 20000, 'hstore')`
+			setup := ""
+			if tc.marker == targetMarker {
+				catalog = `(SELECT extname::name, oid AS extowner FROM pg_roles
+CROSS JOIN (VALUES ('citext'), ('plpgsql')) AS extensions(extname) WHERE rolname = 'extension_owner_test')`
+				setup = `CREATE ROLE extension_owner_test;
+CREATE ROLE extension_other_test;
+CREATE ROLE extension_member_test INHERIT;
+CREATE ROLE extension_noinherit_test NOINHERIT;
+GRANT extension_owner_test TO extension_member_test, extension_noinherit_test;
+`
+			}
+			query = strings.ReplaceAll(query, "pg_catalog.pg_extension", catalog)
+			cmd := exec.Command("psql", uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-v", "list="+tc.input, "-f", "-")
+			cmd.Stdin = strings.NewReader("BEGIN;\n" + setup + tc.setup + "\n" + query + "\nRESET ROLE; ROLLBACK;")
+			output, err := cmd.CombinedOutput()
+			t.Logf("query result: %s", output)
+			if err != nil || strings.TrimSpace(string(output)) != tc.want {
+				t.Fatalf("ownership query: %v, got %q, want %q", err, output, tc.want)
+			}
+		})
+	}
+}
+
 func TestPreflightExtensionQueries(t *testing.T) {
 	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
 	if uri == "" {
@@ -1692,7 +1881,7 @@ func TestPreflightExtensionQueries(t *testing.T) {
 		}
 	}
 	for _, drop := range []bool{false, true} {
-		_, query, found := strings.Cut(extensionPreflightBlock(drop, false), "<<'PF_EXTENSION_TARGET'\n")
+		_, query, found := strings.Cut(extensionPreflightBlock(drop, false, false), "<<'PF_EXTENSION_TARGET'\n")
 		if !found {
 			t.Fatal("shipped target query missing")
 		}
@@ -1856,14 +2045,23 @@ for a in "$@"; do
   esac
 done
 case "$q" in *has_schema_privilege*) printf '%s' "$list" > "${LIST_OUT:-/dev/null}" ;; esac
+case "$q" in *installed.extowner*) printf '%s' "$list" > "${PSQL_EXTENSION_LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ "$uri" = tgt ] && [ -f "${STATE_DIR:?}/target-down" ] && exit 2
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
-  *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
+  *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;
   *source_extension*)
-    if [ "$database" = '"extra"' ] && [ "${PSQL_EXTRA_EXTENSION:-0}" = 1 ]; then echo '["citext"]'
-    else printf '%s' "${PSQL_EXTENSION_SOURCE-[]}"; fi ;;
+    case "$list" in
+      *'"exclude":["citext"]'*|*'"include":["hstore"]'*) echo '[]' ;;
+      *)
+        if [ "$database" = '"extra"' ] && [ "${PSQL_EXTRA_EXTENSION:-0}" = 1 ]; then echo '["citext"]'
+        else printf '%s' "${PSQL_EXTENSION_SOURCE-[]}"; fi ;;
+    esac ;;
+  *installed.extowner*)
+    if [ "${PSQL_EXTENSION_MEMBER:-0}" = 1 ]; then
+      case "$q" in *"pg_has_role(current_user, installed.extowner, 'USAGE')"*) echo '[]' ;; *) exit 2 ;; esac
+    else printf '%s' "${PSQL_EXTENSION_OWNERSHIP-[]}"; fi ;;
   *jsonb_agg\(DISTINCT\ name*) case "$list" in *'"citext"'*) echo '["citext"]' ;; *) echo '[]' ;; esac ;;
   *pg_available_extensions*)
     if [ "$list" = '["citext"]' ] && [ "${PSQL_UNAVAILABLE_CITEXT:-0}" = 1 ]; then echo '["citext"]'

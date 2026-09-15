@@ -19,6 +19,16 @@ The operator defaults table jobs to the worker's CPU request and enables same-ta
 Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
 Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) is the map.
 
+### Extension comments and skips
+
+`clone.skip: [extensionComments]` suppresses only extension comments; table and other object comments are still restored.
+`clone.noComments: true` suppresses all restored comments.
+Both avoid the extension-comment ownership requirement when `dropIfExists` is false, including for an otherwise empty `spec.clone: {}`.
+Neither avoids the ownership requirement for `DROP EXTENSION` with `dropIfExists: true`.
+`clone.skip: [extensions]` skips extension restoration, including extension comments, and bypasses both the availability and ownership preflight gates.
+When skipping extensions, provide the extensions required by the application on the target yourself.
+See [Prerequisites](reference/prerequisites.md#base-clone-every-migration) for the ownership rules and remedies.
+
 ## All databases
 
 Set `spec.clone.allDatabases: true` to clone the whole source instance using superuser credentials on both sides.
