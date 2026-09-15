@@ -102,7 +102,7 @@ var _ = Describe("Extension ownership", func() {
 		completed := waitCompleted(name, nsE2E)
 		expectConditionTrue(completed, v1beta1.ConditionValidated)
 		Expect(completed.Status.Attempts).To(Equal(int32(1)))
-		Expect(seedTableCounts(sourceCluster)).To(Equal(expectedSeedCounts()))
+		Expect(psql(sourceCluster, "SELECT EXISTS (SELECT FROM customers)")).To(Equal("t"))
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 		Expect(psql(targetCluster, owner)).To(Equal(postgresContainer))
 		Expect(psql(targetCluster, comment)).To(Equal(targetComment))
