@@ -51,6 +51,7 @@ The check does not compare extension versions, install packages, grant installat
 The separate `selected extension ownership` check covers target-installed extensions selected from the source when `dropIfExists` is true or extension comments are restored (the default).
 It honours extension include/exclude filters and omits source extensions with initdb-reserved OIDs, such as built-in `plpgsql`, whose DDL and comments `pg_dump` does not emit.
 The migration role MUST be a superuser or have the owning role's privileges, directly or through inherited membership (`pg_has_role(..., 'USAGE')`); owning the database alone does not suffice.
+Not covered: extension ownership preflight on PostgreSQL 11 and older sources, which are outside the documented [E2E version matrix](https://github.com/ydixken/pgcopydb-operator/blob/main/CONTRIBUTING.md#e2e-tests).
 
 > [!warning]
 > The minimal failing spec is `spec.clone: {}` when the target already holds selected administrator-owned extensions.
