@@ -29,9 +29,20 @@ target:
 
 The Migration MUST live in the same namespace as that Secret.
 
-## 3. Grant the target prerequisites (live migrations only)
+## 3. Check ownership and grant the target prerequisites
 
-A plain clone connecting as `app` needs nothing more: the role owns the `app` database and everything restored into it, which covers the ownership rules in the [prerequisites](../reference/prerequisites.md). A live migration (`spec.follow.enabled: true`) needs two more grants on the target that only a superuser can give. Run them once through the instance pod (peer auth, no superuser password needed):
+Owning the `app` database does not give `app` ownership of extensions already installed by `postgres`.
+CNPG's [`postInitApplicationSQL`](https://cloudnative-pg.io/docs/1.30/bootstrap#executing-queries-after-initialization) runs as `postgres` against the application database, so extensions created there belong to `postgres`, not `app`.
+Even a plain clone with `spec.clone: {}` can fail when restoring comments on those extensions.
+
+> [!warning]
+> Without `dropIfExists`, set `clone.skip: [extensionComments]` to retain administrator-owned target extensions and keep application comments.
+> `clone.noComments: true` also avoids this failure but suppresses all comments.
+> With `dropIfExists: true`, comment suppression does not prevent ownership failures on `DROP EXTENSION`: use `clone.skip: [extensions]` or a migration role with the owner's privileges.
+> `superuserSecretRef` does not remediate extension ownership; see [Prerequisites](../reference/prerequisites.md#base-clone-every-migration).
+
+A live migration (`spec.follow.enabled: true`) needs two more grants on the target that only a superuser can give.
+Run them once through the instance pod (peer auth, no superuser password needed):
 
 ```sh
 kubectl exec -it -n shop shop-pg-1 -c postgres -- psql -U postgres app

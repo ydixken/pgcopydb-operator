@@ -48,6 +48,16 @@ Extension include and exclude filters match exact names, with exclusion applied 
 `clone.skip: [extensions]` bypasses this check, while `extensionComments` does not.
 Missing, malformed, or failed probes fail preflight; an explicitly empty selection passes.
 The check does not compare extension versions, install packages, grant installation privileges, or establish extension compatibility.
+The separate `selected extension ownership` check covers target-installed extensions selected from the source when `dropIfExists` is true or extension comments are restored (the default).
+It honours extension include/exclude filters and omits source extensions with initdb-reserved OIDs, such as built-in `plpgsql`, whose DDL and comments `pg_dump` does not emit.
+The migration role MUST be a superuser or have the owning role's privileges, directly or through inherited membership (`pg_has_role(..., 'USAGE')`); owning the database alone does not suffice.
+
+> [!warning]
+> The minimal failing spec is `spec.clone: {}` when the target already holds selected administrator-owned extensions.
+> Without `dropIfExists`, `CREATE EXTENSION IF NOT EXISTS` is a no-op but the subsequent `COMMENT ON EXTENSION` fails ownership checks.
+> Use `clone.skip: [extensionComments]` to keep other comments, or `clone.noComments: true` to suppress all comments.
+> With `dropIfExists: true`, neither comment option prevents `DROP EXTENSION` failures: use an authorised migration role or `clone.skip: [extensions]` and provide the required extensions on the target yourself.
+
 For single-database migrations, three target-side grant probes follow, all read-only: CREATE on the target database, CREATE on each source schema that already exists on the target (honouring the schema filters in `clone.filters`, and with `includeOnlyTables` narrowing the probes to those tables' schemas; schemas the restore must create fall under the database-level probe), and, unless `dbProperties` is in `clone.skip`, whether `ALTER DATABASE ... SET` can run (database ownership via `pg_has_role`, or superuser).
 All-databases clones replace these maintenance-database probes with the instance-wide checks below.
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
@@ -93,6 +103,8 @@ A failed source or target database listing stops it before extension probes and 
 Extension probing opens a separate psql session for each source database and runs sequentially, so its work grows linearly with database count within the preflight Job's 30-minute deadline.
 Per-database extension failures distinguish source selection from validation on the target and include the database name.
 The target extension check requires package availability, not merely installation in the maintenance database, because target databases may not exist yet.
+Extension comments are restored per database, but the required target migration superuser already bypasses extension ownership checks.
+pgcopydb changes only the database name in each connection URI and retains that role, so this mode needs no separate per-database ownership probe.
 A failed database query fails preflight rather than reporting success on an empty result.
 
 Filters and skips apply to every database, and job counts are global across databases.
@@ -164,7 +176,7 @@ Every applied statement is re-checked and logged in the preflight output, and on
 One event rather than one per statement, because the events API folds same-reason events into a counter that keeps only the first message.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never alters schema objects or data; it only grants rights.
-It never touches replica identity, `wal_level`, plugin installation, or database ownership (the db-properties probe stays hint-only).
+It never touches replica identity, `wal_level`, plugin installation, database ownership, or extension ownership (the ownership probes only report remedies).
 The remediation credentials are confined to preflight; pgcopydb uses the primary migration connections, which MUST themselves be superusers for all-databases clones.
 One restriction: the superuser connection reuses the primary connection's URI, so a `uriSecretRef` primary holding a conninfo-style `key=value` DSN cannot host it and is rejected by name; use the URI form.
 The reuse extends to TLS transport settings, including any client certificate; when the server maps certificate identities to roles, the certificate cannot present the superuser, so use password auth for it.

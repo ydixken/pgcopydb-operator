@@ -799,27 +799,57 @@ LEFT JOIN pg_catalog.pg_extension AS installed ON installed.extname::text COLLAT
 LEFT JOIN pg_catalog.pg_available_extensions AS available ON available.name::text COLLATE "C" = selected.name
 WHERE NOT (@INSTALLED@ OR available.default_version IS NOT NULL);`
 
-func extensionPreflightBlock(drop, allDatabases bool) string {
+// USAGE tests inherited owner privileges, as PostgreSQL's object_ownercheck does.
+const targetExtensionOwnershipQuery = `SELECT COALESCE(jsonb_agg(
+format('extension %I (owner %I, migration role %I)', installed.extname,
+pg_get_userbyid(installed.extowner), current_user) ORDER BY selected.name), '[]'::jsonb)
+FROM jsonb_array_elements_text(:'list'::jsonb) AS selected(name)
+JOIN pg_catalog.pg_extension AS installed ON installed.extname::text COLLATE "C" = selected.name
+WHERE NOT (pg_has_role(current_user, installed.extowner, 'USAGE')
+OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user));`
+
+func extensionPreflightBlock(drop, allDatabases, ownership bool) string {
 	installed := "installed.extname IS NOT NULL"
 	if drop {
 		installed = "false"
 	}
+	sourceQuery := sourceExtensionsQuery
+	targetQuery := strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", installed)
+	ok := "selected extensions available"
+	missing := "selected extensions unavailable on target: $extension_issues; install the required target extension package or choose a target that provides it"
+	selectionCheck := "extension selection"
+	targetCheck := "extension availability"
+	stopOnFailure := `[ "$fail" -eq 0 ] || exit 1`
+	if ownership {
+		// pg_dump's selectDumpableExtension omits initdb OIDs below FirstNormalObjectId from DDL and comments.
+		sourceQuery = strings.TrimSuffix(sourceQuery, ";") + "\nAND source_extension.oid >= 16384;"
+		targetQuery = targetExtensionOwnershipQuery
+		ok = "selected extension ownership"
+		selectionCheck = "extension ownership selection"
+		targetCheck = "extension ownership"
+		route, skip := "COMMENT ON EXTENSION (dropIfExists: false)", "extensionComments"
+		if drop {
+			route, skip = "DROP EXTENSION (dropIfExists: true)", "extensions"
+		}
+		missing = "target extension ownership required for " + route + ": $extension_issues; use a migration role with the owner's privileges, or set clone.skip: [" + skip + "]"
+		stopOnFailure = preflightStopOnFailure
+	}
 	selection := `checkv "$PGCOPYDB_SOURCE_PGURI" "$(cat <<'PF_EXTENSION_SOURCE'
-` + sourceExtensionsQuery + `
+` + sourceQuery + `
 PF_EXTENSION_SOURCE
 )" "${PREFLIGHT_EXTENSION_FILTERS:-}" 2>/dev/null`
 	collect := ""
 	selectionSide := string(conn.Source)
-	stopOnFailure := `[ "$fail" -eq 0 ] || exit 1`
 	if allDatabases {
 		selectionSide = string(conn.Target)
 		stopOnFailure = preflightStopOnFailure
 		collect = strings.ReplaceAll(allDatabaseExtensionsBlock, "@SOURCE@", sourceExtensionsQuery) + stopOnFailure
 		selection = `[ "$extensions_collected" = 1 ] && checkv "$PGCOPYDB_TARGET_PGURI" "SELECT COALESCE(jsonb_agg(DISTINCT name), '[]'::jsonb) FROM jsonb_array_elements(:'list'::jsonb) AS db(extensions), jsonb_array_elements(db.extensions) AS ext(name)" "[$extension_arrays]" 2>/dev/null`
 	}
-	return strings.NewReplacer("@SOURCE@", sourceExtensionsQuery, "@VALIDATE@", extensionNamesValidQuery,
+	return strings.NewReplacer("@SOURCE@", sourceQuery, "@VALIDATE@", extensionNamesValidQuery,
 		"@COLLECT@", collect, "@SELECT@", selection, "@SELECTION_SIDE@", selectionSide, "@STOP_ON_FAILURE@", stopOnFailure,
-		"@TARGET@", strings.ReplaceAll(targetExtensionsQuery, "@INSTALLED@", installed)).Replace(`extension_names_valid() {
+		"@OK@", ok, "@MISSING@", missing, "@SELECTION_CHECK@", selectionCheck, "@TARGET_CHECK@", targetCheck,
+		"@TARGET@", targetQuery).Replace(`extension_names_valid() {
   [ -n "$1" ] || return 1
   extension_shape=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_VALIDATE'
 @VALIDATE@
@@ -829,20 +859,20 @@ PF_EXTENSION_VALIDATE
 }
 @COLLECT@
 if selected_extensions=$(@SELECT@) && extension_names_valid "$selected_extensions"; then
-  if unavailable_extensions=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_TARGET'
+  if extension_issues=$(checkv "$PGCOPYDB_TARGET_PGURI" "$(cat <<'PF_EXTENSION_TARGET'
 @TARGET@
 PF_EXTENSION_TARGET
-)" "$selected_extensions" 2>/dev/null) && extension_names_valid "$unavailable_extensions"; then
+)" "$selected_extensions" 2>/dev/null) && extension_names_valid "$extension_issues"; then
     if [ "$extension_shape" = 0 ]; then
-      echo "ok: selected extensions available"
+      echo "ok: @OK@"
     else
-      note "preflight: selected extensions unavailable on target: $unavailable_extensions; install the required target extension package or choose a target that provides it"
+      note "preflight: @MISSING@"
     fi
   else
-    note "preflight: target extension availability probe failed"
+    note "preflight: target @TARGET_CHECK@ probe failed"
   fi
 else
-  note "preflight: @SELECTION_SIDE@ extension selection probe failed"
+  note "preflight: @SELECTION_SIDE@ @SELECTION_CHECK@ probe failed"
 fi
 @STOP_ON_FAILURE@
 `)
@@ -925,7 +955,8 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	if m.Spec.Clone.AllDatabases {
 		b.WriteString(allDatabasesPreflightBlock())
 		if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
-			b.WriteString(extensionPreflightBlock(true, true))
+			// The migration role's required rolsuper already covers ownership in every database.
+			b.WriteString(extensionPreflightBlock(true, true, false))
 		}
 		b.WriteString(preflightScriptFooter)
 		return b.String()
@@ -939,7 +970,10 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(superVerifyBlock(conn.Target))
 	}
 	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
-		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists, false))
+		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists, false, false))
+		if m.Spec.Clone.DropIfExists || (!m.Spec.Clone.NoComments && !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensionComments"))) {
+			b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists, false, true))
+		}
 	}
 	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
 	b.WriteString(cloneRightsBlock(superTgt, dbProps))
