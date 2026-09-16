@@ -75,6 +75,14 @@ func TestLastErrorLine(t *testing.T) {
 			want: `pg_restore: error: could not execute query: ERROR:  relation "public.second_idx" does not exist`,
 		},
 		{
+			name: "later actionable connection error wins over earlier restore cause",
+			raw: missingRelationError + "\n" +
+				`{"error_severity":"ERROR","message":"connection to target database lost"}` + "\n" +
+				`{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}` + "\n" +
+				`{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: "connection to target database lost",
+		},
+		{
 			name: "generic supervisor error is the fallback",
 			raw: `{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}
 {"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
