@@ -461,19 +461,17 @@ type CutoverSpec struct {
 	Approved bool `json:"approved,omitempty"`
 }
 
-// ReplicationStatus mirrors the pgcopydb sentinel while streaming.
+// ReplicationStatus records source-visible feedback and the operator's cutover LSN.
 type ReplicationStatus struct {
 	// +optional
 	SlotName string `json:"slotName,omitempty"`
-	// writeLSN is the last LSN received from the source.
+	// writeLSN is the walsender's write position, with slot confirmed-flush fallback
+	// when the migration role cannot read it.
 	// +optional
 	WriteLSN string `json:"writeLSN,omitempty"`
-	// replayLSN is how far the target has consumed the stream, as the source
-	// reports it: the walsender's replay position, or the slot's confirmed
-	// flush position where the migration role may not read the walsender.
-	// It measures consumption, not application. Whether the target really
-	// applied every change is settled after cutover by the drain
-	// verification, which reads the target's own replication origin.
+	// replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.
+	// It may include certified idle WAL beyond the last applied data transaction.
+	// Post-cutover drain verification, not this position, proves target application.
 	// +optional
 	ReplayLSN string `json:"replayLSN,omitempty"`
 	// endpos is the cutover LSN once set.

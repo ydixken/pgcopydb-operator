@@ -49,7 +49,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
-| `pgcopydb_migration_replay_lsn_bytes` | | Target replay progress reported to the source, as an absolute WAL byte position | follow, streaming |
+| `pgcopydb_migration_replay_lsn_bytes` | | Source-visible replay feedback, including certified idle progress, as an absolute WAL byte position | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
 
@@ -96,7 +96,12 @@ Receive lag reads high by one confirmation wherever `write` fell back to the slo
 A pass whose source row carried no confirmed position leaves the previous replay and lag standing, so those two read stale for a pass rather than wrong.
 Apply backlog reads both operands from the same walsender row, so the ordering that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
-With pgcopydb `0.18.10.gaadc4bf`, replay feedback follows confirmed target commits with `synchronous_commit=on`; older or custom runners may report weaker progress.
+The bundled runner, pgcopydb `0.18.13.g4873c18`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
+It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/4873c1810b73086473903110d9057a1bde37195a/src/bin/pgcopydb/ld_stream.c#L1521-L1546) from the current connection once initialized durable apply covers all stored, non-skipped COMMITs, including retained spool, no receive transaction is open, and endpos is unset.
+That network feedback can advance across filtered WAL without moving the target replication origin or the sentinel's data replay cursor.
+An advancing replay gauge on an idle publication therefore does not imply new target rows or measure applied-data throughput.
+The progress poll still supports `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd`, but neither provides certified idle feedback.
+Older or custom runners may also report weaker progress.
 Receive batching does not make these LSN slopes end-to-end throughput measurements or remove the [drain-verification gate](live-migration.md#manual-cutover-runbook).
 
 ## Dashboards
@@ -192,7 +197,8 @@ Reading it:
   A check `spec.verification` does not request reads Deactivated, which both checks do by default.
   A result outranks the spec, so switching a check off after it reported a mismatch still reads FAIL.
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
-  It reads No Endpos until a cutover sets one, and 0 B once the target has caught up, which is what the screenshot shows.
+  It reads No Endpos until a cutover sets one, and 0 B once source-visible replay feedback reaches it, which is what the screenshot shows.
+  Only `CutoverCompleted`, after target-origin or content verification, proves the drain.
 
 Every tile here is scoped to one Migration, so an empty result means that Migration is not in the dashboard's range and the tile reads N/A.
 Tiles that report a fact about the run rather than its current state (Attempts, Elapsed, Completed At, the two verification tiles, Cutover Drain) read over the range, so a Migration that has since been deleted keeps what it last reported instead of falling back to N/A.

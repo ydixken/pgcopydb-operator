@@ -46,6 +46,20 @@ func slotSenderPID(output string) (int64, error) {
 	return pid, nil
 }
 
+func signalSlotSender(pod, database, query string, pid int64, signal string) error {
+	signalCtx, cancel := context.WithTimeout(context.Background(), e2eCommandTimeout)
+	defer cancel()
+	// Recheck slot ownership on the captured pod before either signal, including cleanup.
+	_, err := commandOutput(signalCtx, exec.CommandContext, "kubectl",
+		"exec", "-n", nsE2E, pod, "-c", "postgres", "--", "sh", "-ceu",
+		`actual=$(psql -U postgres "$1" -tAc "$2"); test "$actual" = "$3"; kill -"$4" "$3"`,
+		"sh", database, query, strconv.FormatInt(pid, 10), signal)
+	if err != nil {
+		return fmt.Errorf("could not %s the test-owned walsender", signal)
+	}
+	return nil
+}
+
 func TestSlotSenderPID(t *testing.T) {
 	for _, tc := range []struct {
 		name, output string
@@ -120,14 +134,7 @@ func earlyManualCutover() {
 	}, migrationTimeout, 200*time.Millisecond).Should(Succeed())
 	pod := primaryPod(sourceCluster)
 	signalSender := func(signal string) error {
-		signalCtx, cancel := context.WithTimeout(context.Background(), e2eCommandTimeout)
-		defer cancel()
-		// Recheck ownership on the captured pod before either signal, including cleanup.
-		_, err := commandOutput(signalCtx, exec.CommandContext, "kubectl",
-			"exec", "-n", nsE2E, pod, "-c", "postgres", "--", "sh", "-ceu",
-			`actual=$(psql -U postgres "$1" -tAc "$2"); test "$actual" = "$3"; kill -"$4" "$3"`,
-			"sh", appDB, query, strconv.FormatInt(pid, 10), signal)
-		return err
+		return signalSlotSender(pod, appDB, query, pid, signal)
 	}
 	resumed := false
 	DeferCleanup(func() {

@@ -62,10 +62,18 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports receive progress from the walsender, falling back to the slot's `confirmed_flush_lsn`.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-With pgcopydb `0.18.10.gaadc4bf`, replay feedback advances only after the target COMMIT succeeds with `synchronous_commit=on`; older or custom runners may report weaker progress.
+The bundled runner, pgcopydb `0.18.13.g4873c18`, confirms target COMMITs with `synchronous_commit=on` before reporting their replay progress.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/4873c1810b73086473903110d9057a1bde37195a/src/bin/pgcopydb/ld_stream.c#L1521-L1546) across WAL outside the publication.
+Certification requires an initialized durable apply position covering every stored, non-skipped COMMIT, including retained spool, with no receive transaction open and no endpos set.
+Synthetic keepalives and WAL data headers cannot establish that boundary.
+This advances the source-visible feedback, not the target replication origin or the sentinel's data replay cursor; `replayLSN` is therefore not necessarily the last applied data transaction's LSN.
+The progress poll still supports `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd`, but neither provides certified idle feedback.
+Older or custom runners may also report weaker durability guarantees.
 The drain verification after cutover still proves that the target applied everything through the frozen endpos.
 `lagBytes` is the distance from the source's current WAL head.
 The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+With the bundled runner, an idle publication needs neither heartbeat INSERTs nor a higher `maxCatchupLag` to cross filtered WAL.
+Catch-up does not replace endpos drain verification or prove that source writers have stopped.
 
 Granting the migration's source role `pg_read_all_stats` is optional, and sharpens both LSN readings. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so `writeLSN` and `replayLSN` both fall back to the slot's confirmed flush position: one confirmation behind, and identical to each other, which is why the apply backlog derived from them reads zero without the grant. Lag and `CaughtUp` follow `replayLSN`, so they inherit whichever reading is available.
 
@@ -101,7 +109,10 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin. Then `Complete` goes True, phase `Completed`.
 7. Point the application at the target.
 
-An idle source needs no extra care from you. pgcopydb 0.18 only checks the cutover LSN against WAL it receives, and a source with zero writes sends none, which would leave the drain waiting forever. So while the phase is `CuttingOver` the operator emits a tiny logical message on the source (`pg_logical_emit_message`) on every pass: one WAL record for the stream to deliver, letting the worker reach the LSN promptly. The message carries no data, needs no special privilege, and changes nothing user-visible.
+During `CuttingOver`, the operator emits a tiny logical message on the source (`pg_logical_emit_message`) on every pass because some worker versions need new WAL to observe a freshly set endpos.
+The message carries no table data, needs no special privilege, and changes nothing user-visible.
+This endpos nudge runs only after cutover starts.
+It cannot unblock a Migration waiting for `CaughtUp`; certified keepalive feedback handles idle catch-up before endpos is set.
 
 The e2e suite exercises this runbook under load: a client commits one row per transaction to the source, from before the base copy, through the whole streaming phase, stopping only at the approval.
 It requires the target to end with the same count of that client's rows as the source, no gap in the run the client committed, and a passing `pgcopydb compare data` over the whole database.

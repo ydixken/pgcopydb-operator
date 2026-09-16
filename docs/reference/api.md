@@ -334,7 +334,7 @@ _Appears in:_
 
 
 
-ReplicationStatus mirrors the pgcopydb sentinel while streaming.
+ReplicationStatus records source-visible feedback and the operator's cutover LSN.
 
 
 
@@ -344,8 +344,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `slotName` _string_ |  |  | Optional: \{\} <br /> |
-| `writeLSN` _string_ | writeLSN is the last LSN received from the source. |  | Optional: \{\} <br /> |
-| `replayLSN` _string_ | replayLSN is how far the target has consumed the stream, as the source<br />reports it: the walsender's replay position, or the slot's confirmed<br />flush position where the migration role may not read the walsender.<br />It measures consumption, not application. Whether the target really<br />applied every change is settled after cutover by the drain<br />verification, which reads the target's own replication origin. |  | Optional: \{\} <br /> |
+| `writeLSN` _string_ | writeLSN is the walsender's write position, with slot confirmed-flush fallback<br />when the migration role cannot read it. |  | Optional: \{\} <br /> |
+| `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application. |  | Optional: \{\} <br /> |
 | `endpos` _string_ | endpos is the cutover LSN once set. |  | Optional: \{\} <br /> |
 | `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
 
