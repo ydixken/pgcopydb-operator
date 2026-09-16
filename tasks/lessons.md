@@ -53,3 +53,7 @@
   Do not expand the scope without approval.
 - When the user replaces a merge restriction, record the new authorization and preserve the review gate for the current task.
   Later release success requires its own exact-SHA evidence.
+- The user requires the next RC run to use `E2E_SCALE=0.1`.
+  Set that value in the tag-triggered `release.yml` suite and its contract test; it has no scale input.
+  Do not infer a new default for local scripts or the independently configured stable-release workflow.
+  Keep fixed WAL-noise fixtures unscaled so they still exceed the default `16Mi` lag allowance.

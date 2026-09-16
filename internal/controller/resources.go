@@ -148,6 +148,12 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	return job, nil
 }
 
+// publicationRetryDollarTag is a named PostgreSQL dollar-quote tag rather than
+// bare $$: kubelet's Container.Command/Args expansion reduces "$$" to a
+// literal "$" (see the Command godoc), which corrupts an anonymous DO $$
+// block before the shell ever sees it.
+const publicationRetryDollarTag = "$publication_retry$"
+
 // pgcopydb creates the publication before the slot, but skips creation when
 // resuming saved slot state. Only an orphan without a source slot is safe to drop;
 // an existing slot without its publication must not start a silent no-op stream.
@@ -161,7 +167,7 @@ func publicationDropGuard(m *v1beta1.Migration, attempt int32) string {
 	// Generated and CRD-validated slot names contain only [a-z0-9_].
 	slot := effectiveSlotName(m)
 	return `psql "$PGCOPYDB_SOURCE_PGURI" -Xq -v ON_ERROR_STOP=1 <<'PUBLICATION_RETRY'
-DO $$
+DO ` + publicationRetryDollarTag + `
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = '` + slot + `') THEN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = '` + slot + `') THEN
@@ -171,7 +177,7 @@ BEGIN
     DROP PUBLICATION IF EXISTS "` + slot + `";
   END IF;
 END;
-$$;
+` + publicationRetryDollarTag + `;
 PUBLICATION_RETRY`
 }
 

@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -335,12 +336,33 @@ func createProgressPoolRunner() *batchv1.Job {
 		podLabels := map[string]string{"cnpg.io/poolerName": pooler.GetName()}
 		cleanupProgressPoolObject(pooler, podLabels)
 		Eventually(func(g Gomega) {
+			deployment := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), deployment)).To(Succeed())
+			g.Expect(deployment.UID).NotTo(BeEmpty())
+			g.Expect(metav1.IsControlledBy(deployment, pooler)).To(BeTrue(), "Pooler must own its Deployment")
+			g.Expect(deployment.DeletionTimestamp).To(BeNil())
+			g.Expect(deployment.Spec.Selector).NotTo(BeNil())
+			g.Expect(deployment.Spec.Selector.MatchLabels).To(HaveKeyWithValue("cnpg.io/poolerName", pooler.GetName()))
+			replicaSets := &appsv1.ReplicaSetList{}
+			g.Expect(k8sClient.List(ctx, replicaSets, client.InNamespace(nsE2E),
+				client.MatchingLabels(podLabels))).To(Succeed())
+			g.Expect(replicaSets.Items).NotTo(BeEmpty(), "Pooler selector must identify its ReplicaSets")
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
 				client.MatchingLabels(podLabels))).To(Succeed())
 			found := len(pods.Items)
 			g.Expect(found).To(Equal(1), "%s Pooler selector must identify one pod", clusterName)
 			poolPod := &pods.Items[0]
+			podOwned := false
+			for j := range replicaSets.Items {
+				replicaSet := &replicaSets.Items[j]
+				g.Expect(replicaSet.UID).NotTo(BeEmpty())
+				g.Expect(metav1.IsControlledBy(replicaSet, deployment)).To(BeTrue(), "Deployment must own its ReplicaSets")
+				if metav1.IsControlledBy(poolPod, replicaSet) {
+					podOwned = true
+				}
+			}
+			g.Expect(podOwned).To(BeTrue(), "Pooler pod must belong to a matching ReplicaSet")
 			g.Expect(poolPod.DeletionTimestamp).To(BeNil())
 			g.Expect(poolPod.Status.Phase).To(Equal(corev1.PodRunning))
 			ready := false
@@ -382,15 +404,31 @@ func cleanupProgressPoolObject(obj client.Object, podLabels map[string]string) {
 	GinkgoHelper()
 	uid := obj.GetUID()
 	Expect(uid).NotTo(BeEmpty())
+	isPooler := obj.GetObjectKind().GroupVersionKind() == cnpgGVK.GroupVersion().WithKind("Pooler")
+	policy := metav1.DeletePropagationForeground
+	if isPooler {
+		// Background deletion prevents CNPG from repeatedly recreating a terminating Pooler's dependents.
+		// https://github.com/cloudnative-pg/cloudnative-pg/issues/11360
+		policy = metav1.DeletePropagationBackground
+	}
 	DeferCleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		err := k8sClient.Delete(cleanupCtx, obj, client.Preconditions{UID: &uid},
-			client.PropagationPolicy(metav1.DeletePropagationForeground))
+			client.PropagationPolicy(policy))
 		Expect(client.IgnoreNotFound(err)).To(Succeed())
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(cleanupCtx, client.ObjectKeyFromObject(obj), obj)
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "pooled fixture still exists")
+			if isPooler {
+				deployment := &appsv1.Deployment{}
+				err := k8sClient.Get(cleanupCtx, client.ObjectKeyFromObject(obj), deployment)
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Pooler Deployment still exists")
+				replicaSets := &appsv1.ReplicaSetList{}
+				g.Expect(k8sClient.List(cleanupCtx, replicaSets, client.InNamespace(nsE2E),
+					client.MatchingLabels(podLabels))).To(Succeed())
+				g.Expect(replicaSets.Items).To(BeEmpty(), "Pooler ReplicaSets still exist")
+			}
 			pods := &corev1.PodList{}
 			g.Expect(k8sClient.List(cleanupCtx, pods, client.InNamespace(nsE2E),
 				client.MatchingLabels(podLabels))).To(Succeed())

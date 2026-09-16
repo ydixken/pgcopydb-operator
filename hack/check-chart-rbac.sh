@@ -106,6 +106,14 @@ expect_match '^    name: rel-pgcopydb-operator$'
 expect_absent --set leaderElection.enabled=false
 expect_absent --set rbac.create=false
 
+# CNPG fixtures belong to the E2E runner, not the manager.
+tpl=templates/clusterrole.yaml
+expect_match '^kind: ClusterRole$'
+if printf '%s\n' "$out" | grep -q 'postgresql[.]cnpg[.]io'; then
+  echo "FAIL: manager ClusterRole grants access to the CNPG fixture API" >&2
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "chart RBAC check failed" >&2
   exit 1

@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	defaultPollVersions = "0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd"
+	defaultPollVersions = "0.18.15.gea2dc96,0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd"
 	testCertDir         = "/certs"
 	testCertName        = "m.crt"
 	testCertKey         = "m.key"
@@ -58,7 +58,7 @@ func TestSplitList(t *testing.T) {
 	}{
 		{"", nil},
 		{" , ,", nil},
-		{defaultPollVersions, []string{"0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}},
+		{defaultPollVersions, []string{"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}},
 		{"a, b ,c", []string{"a", "b", "c"}},
 	} {
 		if got := splitList(tc.in); !slices.Equal(got, tc.want) {

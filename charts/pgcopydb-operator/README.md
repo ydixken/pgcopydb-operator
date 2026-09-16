@@ -23,13 +23,13 @@ Migration CRs) in place.
 | `image.pullPolicy` | `IfNotPresent` | Manager pull policy. |
 | `runner.image.repository` | `ghcr.io/ydixken/pgcopydb-operator/runner` | Worker Job image, passed as `--runner-image`. |
 | `runner.image.tag` | `""` | Runner tag; empty uses the chart appVersion. |
-| `runner.progressPollVersions` | `["0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"]` | Exact pgcopydb versions allowed to run the in-pod progress poll; fail closed, `[]` disables it. |
+| `runner.progressPollVersions` | `["0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"]` | Exact pgcopydb versions allowed to run the in-pod progress poll; fail closed, `[]` disables it. |
 | `imagePullSecrets` | `[]` | Pull secrets for the manager pod. |
 | `nameOverride` | `""` | Overrides the chart name in resource names. |
 | `fullnameOverride` | `""` | Overrides the full resource name. |
 | `serviceAccount.create` | `true` | Create the manager ServiceAccount. |
-| `serviceAccount.name` | `""` | ServiceAccount name; empty derives from the fullname. |
-| `rbac.create` | `true` | Create ClusterRole, bindings, and the leader-election Role. |
+| `serviceAccount.name` | `""` | Manager ServiceAccount name; empty uses the fullname if created, otherwise `default`. |
+| `rbac.create` | `true` | Create the manager's ClusterRoles, bindings, and leader-election Role. |
 | `watchNamespaces` | `[]` | Namespaces the manager watches and reconciles (passed as `--watch-namespaces`); empty is cluster-wide. RBAC stays cluster-scoped either way, only the informer cache narrows. |
 | `replicaCount` | `1` | Manager replicas; extras are leader-election standbys. |
 | `leaderElection.enabled` | `true` | Pass `--leader-elect` and create the election Role. |
@@ -52,6 +52,14 @@ Migration CRs) in place.
 | `grafana.dashboards.additionalAnnotations` | `{}` | Extra annotations on the dashboard ConfigMaps. |
 | `networkPolicy.enabled` | `false` | Placeholder; renders nothing yet. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
+
+## RBAC and ServiceAccounts
+
+`rbac.create` and `serviceAccount.*` configure the controller manager, not the external CI runner that installs the chart and creates E2E fixtures.
+With `rbac.create=false`, supply the manager's permissions and bindings outside Helm.
+With `serviceAccount.create=false`, set `serviceAccount.name` to an existing manager ServiceAccount in the release namespace, or leave it empty to use `default`.
+The manager does not use CNPG Poolers, so its ClusterRole grants no CNPG fixture permissions.
+E2E runner permissions belong in the runner's own RBAC; see the [E2E guide](https://github.com/ydixken/pgcopydb-operator/blob/main/CONTRIBUTING.md#e2e-tests).
 
 ## Metrics
 

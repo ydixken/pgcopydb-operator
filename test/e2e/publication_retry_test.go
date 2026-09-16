@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -28,6 +29,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -48,7 +51,7 @@ var _ = Describe("Automatic publication retries", func() {
 		waitFollowStreaming(mig.Name)
 		first := waitPhase(mig.Name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
 		expectSingleAttempt(first)
-		expectPublicationRetrySlotActive(slot)
+		expectPublicationRetrySlotActive(mig, slot, 1)
 		publication := psql(sourceCluster, publicationRetryStateSQL(slot))
 		Expect(publication).To(MatchRegexp(publicationRetryOwnerPattern + regexp.QuoteMeta(table) + `$`))
 
@@ -92,7 +95,7 @@ var _ = Describe("Automatic publication retries", func() {
 		setSuspend(mig.Name, false)
 		retry := expectPublicationRetryAttempt(mig.Name)
 		Expect(retry.Spec.Template.Spec.Containers[0].Image).To(Equal(image))
-		expectPublicationRetrySlotActive(slot)
+		expectPublicationRetrySlotActive(mig, slot, 2)
 		Expect(psql(sourceCluster, publicationRetryStateSQL(slot))).To(Equal(publication),
 			"the retry must preserve the publication OID, owner, and table membership")
 		psql(sourceCluster, publicationRetryInsert+table+" VALUES (3, '"+marker+"-resumed')")
@@ -139,7 +142,7 @@ var _ = Describe("Automatic publication retries", func() {
 
 		By("requiring the retry to recreate membership without touching another publication")
 		expectPublicationRetryAttempt(mig.Name)
-		expectPublicationRetrySlotActive(slot)
+		expectPublicationRetrySlotActive(mig, slot, 2)
 		repaired := psql(sourceCluster, publicationRetryStateSQL(slot))
 		Expect(repaired).To(MatchRegexp(publicationRetryOwnerPattern + regexp.QuoteMeta(table) + `$`))
 		Expect(strings.Split(repaired, "|")[0]).NotTo(Equal(strings.Split(orphan, "|")[0]),
@@ -177,8 +180,14 @@ func publicationRetryFixture(name string) (*v1beta1.Migration, string, string) {
 		}
 	})
 	DeferCleanup(func() {
+		// Per-spec cleanup removes the worker evidence before workflow reporting.
+		if CurrentSpecReport().Failed() {
+			AddReportEntry("publication retry before cleanup",
+				publicationRetryDiagnostics(k8sClient, exec.CommandContext, mig, table, slot),
+				ReportEntryVisibilityFailureOrVerbose)
+		}
 		if mig.UID != "" {
-			deleteMigration(mig.Name)
+			deletePublicationRetryMigration(mig)
 		}
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
@@ -210,13 +219,72 @@ func publicationRetryRowsSQL(table string) string {
 	return "SELECT id, marker FROM " + table + " ORDER BY id"
 }
 
-func expectPublicationRetrySlotActive(slot string) {
+func expectPublicationRetrySlotActive(mig *v1beta1.Migration, slot string, attempt int32) {
 	GinkgoHelper()
 	Eventually(func() (string, error) {
-		return psqlDBErr(sourceCluster, appDB, publicationRetrySlotCount+slot+
+		if err := publicationRetryWorkerState(ctx, k8sClient, mig, attempt); err != nil {
+			return "", err
+		}
+		out, err := psqlDBErr(sourceCluster, appDB, publicationRetrySlotCount+slot+
 			"' AND database=current_database() AND slot_type='logical' AND plugin='pgoutput' "+
 			"AND active AND confirmed_flush_lsn IS NOT NULL")
+		return out, publicationRetryProbeError(err)
 	}, lagConvergeTimeout, time.Second).Should(Equal("1"))
+}
+
+func publicationRetryWorkerState(
+	parent context.Context, c client.Client, mig *v1beta1.Migration, attempt int32,
+) error {
+	probeCtx, cancel := context.WithTimeout(parent, e2eCommandTimeout)
+	defer cancel()
+	m := &v1beta1.Migration{}
+	if err := c.Get(probeCtx, client.ObjectKeyFromObject(mig), m); err != nil {
+		return publicationRetryProbeError(err)
+	}
+	if mig.UID == "" || m.UID != mig.UID {
+		return StopTrying("active-slot wait: Migration ownership changed")
+	}
+	if m.Status.Phase == v1beta1.PhaseFailed || m.Status.Phase == v1beta1.PhaseCompleted {
+		reason := publicationRetryUnavailable
+		if condition := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed); condition != nil {
+			reason = publicationRetryToken(condition.Reason)
+		}
+		return StopTrying(fmt.Sprintf("active-slot wait: attempt=%d phase=%s reason=%s; see pre-cleanup diagnostics",
+			attempt, m.Status.Phase, reason))
+	}
+	job := &batchv1.Job{}
+	key := client.ObjectKey{Namespace: mig.Namespace, Name: fmt.Sprintf("%s-run-%d", mig.Name, attempt)}
+	if err := c.Get(probeCtx, key, job); err != nil {
+		return publicationRetryProbeError(err)
+	}
+	if !metav1.IsControlledBy(job, mig) {
+		return StopTrying("active-slot wait: worker Job ownership changed")
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue &&
+			(condition.Type == batchv1.JobFailed || condition.Type == batchv1.JobFailureTarget ||
+				condition.Type == batchv1.JobComplete) {
+			return StopTrying(fmt.Sprintf("active-slot wait: attempt=%d Job=%s reason=%s; see pre-cleanup diagnostics",
+				attempt, condition.Type, publicationRetryToken(condition.Reason)))
+		}
+	}
+	return nil
+}
+
+func deletePublicationRetryMigration(mig *v1beta1.Migration) {
+	GinkgoHelper()
+	Expect(mig.UID).NotTo(BeEmpty(), "refusing to delete a publication retry Migration without its fixture UID")
+	// deleteMigration cannot take the fixture UID, so use a native deletion precondition.
+	err := k8sClient.Delete(ctx, mig, client.Preconditions{UID: &mig.UID})
+	Expect(publicationRetryProbeError(client.IgnoreNotFound(err))).To(Succeed())
+	Eventually(func() (bool, error) {
+		m := &v1beta1.Migration{}
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(mig), m)
+		if err == nil && m.UID != mig.UID {
+			return false, StopTrying("refusing to clean up a replacement publication retry Migration")
+		}
+		return apierrors.IsNotFound(err), publicationRetryProbeError(client.IgnoreNotFound(err))
+	}, 5*time.Minute, 2*time.Second).Should(BeTrue())
 }
 
 func expectPublicationRetryAttempt(name string) *batchv1.Job {
