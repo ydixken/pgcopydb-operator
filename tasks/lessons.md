@@ -49,3 +49,7 @@
   Track upstream submission separately rather than deleting the branch during merge cleanup.
 - A completed Migration can retain a replay sample from before endpos, and catch-up allows nonzero lag.
   Prove feedback directly before cutover; use final endpos, drain verification, and data checks for completion.
+- When the user asks for operator-only remediation, keep fork-level resume and eviction recovery separate.
+  Do not expand the scope without approval.
+- When the user replaces a merge restriction, record the new authorization and preserve the review gate for the current task.
+  Later release success requires its own exact-SHA evidence.

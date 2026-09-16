@@ -23,22 +23,50 @@ import (
 	"time"
 )
 
-// LastErrorLine extracts the message of the last ERROR-or-worse entry from a
-// PGCOPYDB_LOG_JSON=on log stream (one JSON object per line, fields
-// error_severity and message). Runners emit these on stderr; the operator
-// feeds in the tail of a failed pod's logs to surface the terminal cause in
-// conditions and events. Lines that do not parse as log entries (psql
-// output, partial writes) are skipped, so mixed or truncated input degrades
-// to "" and the caller falls back to the Job's own failure message.
+// LastErrorLine returns the last structured severe error, except that a recent
+// pg_restore database error survives later generic teardown summaries.
+// Raw and lower-severity pg_restore errors qualify only in the recent window.
 func LastErrorLine(raw []byte) string {
 	var last string
 	for line := range strings.Lines(string(raw)) {
 		e, ok := parseLogLine(line)
-		if ok && isErrorSeverity(e.Severity) && e.Message != "" {
+		if ok && e.Message != "" && isErrorSeverity(e.Severity) && !strings.HasPrefix(e.Message, "Command was:") {
 			last = e.Message
 		}
 	}
+
+	var actionable string
+	for _, line := range recentLogLines(raw) {
+		msg := line
+		e, structured := parseLogLine(line)
+		if structured {
+			msg = e.Message
+		}
+		if pgRestoreErrorLine(msg) {
+			actionable = msg
+			continue
+		}
+		if actionable != "" && structured && msg != "" && isErrorSeverity(e.Severity) &&
+			!strings.HasPrefix(msg, "Command was:") && !genericFailureSummary(msg) {
+			actionable = msg
+		}
+	}
+	if actionable != "" {
+		return actionable
+	}
 	return last
+}
+
+func pgRestoreErrorLine(line string) bool {
+	const prefix = "pg_restore: error:"
+	return strings.HasPrefix(line, prefix) && strings.Contains(line[len(prefix):], "ERROR:")
+}
+
+func genericFailureSummary(line string) bool {
+	return supervisorDeathLine(line) ||
+		strings.HasPrefix(line, "Failed to run pg_restore: exit code ") ||
+		strings.HasPrefix(line, "pg_restore: warning: errors ignored on restore:") ||
+		strings.HasSuffix(line, ", see above for details")
 }
 
 // logEntry is one PGCOPYDB_LOG_JSON=on line's relevant fields.
@@ -77,6 +105,21 @@ func isErrorSeverity(s string) bool {
 // termination) is a handful of lines.
 const permissionWindow = 40
 
+func recentLogLines(raw []byte) []string {
+	var window []string
+	for line := range strings.Lines(string(raw)) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		window = append(window, line)
+		if len(window) > permissionWindow {
+			window = window[1:]
+		}
+	}
+	return window
+}
+
 // PermissionDeniedLine returns a log line showing a PostgreSQL permission
 // error as the attempt's terminal cause, or "". The class is deliberately
 // tiny and severity-gated: an error-severity entry carrying "permission denied",
@@ -88,18 +131,7 @@ const permissionWindow = 40
 // the caller keeps its normal retry behavior; extend the class only with
 // evidence that it is always deterministic and terminal.
 func PermissionDeniedLine(raw []byte) string {
-	var window []string
-	for line := range strings.Lines(string(raw)) {
-		msg := strings.TrimSpace(line)
-		if msg == "" {
-			continue
-		}
-		window = append(window, msg)
-		if len(window) > permissionWindow {
-			window = window[1:]
-		}
-	}
-	for _, msg := range window {
+	for _, msg := range recentLogLines(raw) {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
 		if e, ok := parseLogLine(msg); ok {
 			if e.Message == "" {

@@ -260,6 +260,25 @@ No repository dependency versions or host configuration were changed by this wor
 - [x] Merge normally, verify the merged commit on actual `main`, and close #211, #223, and #210.
   Leave #200, #215, #243, #209, and #221 open.
 
+## Issues 274 and 275: RC1 verification and rebase checkpoint
+
+The user authorized the next delivery sequence: "Afterwards rebase pr 276, merge it and cut another rc. then e2e test."
+This supersedes the earlier no-merge-276 restriction in the historical phase records below.
+The current task permits local rebase, diff review, formatting checks, and `task lint`; publication and merge await the review handoff.
+Keep the fork's `fix/keepalive-feedback` branch for upstream submission.
+
+- [x] Verify `v0.13.3-rc.1` [release run 35117259154](https://github.com/ydixken/pgcopydb-operator/actions/runs/35117259154) succeeded on `2045910b60406a250cdeb2f9060595a91e79e060`, including [E2E job 104866789797](https://github.com/ydixken/pgcopydb-operator/actions/runs/35117259154/job/104866789797) and its cleanup step.
+  The RC1 handoff records 40 passing specs out of 47, with seven excluded, including both Manual and Automatic keepalive cases.
+- [x] Verify a clean tracked tree, local and remote PR #276 head `7a86003a6e937b48671bdd6d0a1010a11db284e1`, and fetched `origin/main` at the RC1 SHA; record both user-owned release-assessment file hashes without reading their contents.
+- [ ] Replay all three PR #276 commits with per-invocation `--no-gpg-sign`, preserving their messages, both issue plans, and both fixes.
+- [ ] Review `git range-diff`, verify formatting and whitespace, run `task lint`, and record final HEAD and file-hash proof in the delivery handoff before publishing.
+- [ ] After review, publish with a strict lease against `7a86003a6e937b48671bdd6d0a1010a11db284e1`, verify exact-head CI, and merge PR #276.
+- [ ] Cut the next release candidate and verify its E2E suite and cleanup on the exact merged SHA.
+- [ ] Update the existing [issue 274 resolution comment](https://github.com/ydixken/pgcopydb-operator/issues/274#issuecomment-5701335993) and [issue 275 resolution comment](https://github.com/ydixken/pgcopydb-operator/issues/275#issuecomment-5701345951) with the final RC2 proof after it exists.
+
+This checkpoint precedes the commit replay; the sections below preserve each earlier phase's evidence and authorization boundaries.
+RC1 verifies the keepalive fix on main, not PR #276 or RC2.
+
 ## Issue 275: approved keepalive feedback
 
 The receiver owns genuine primary keepalive position `K`, required stored COMMIT position `C`, and the certified network replay floor.
@@ -594,3 +613,118 @@ Operator CI, runner smoke, and release-candidate E2E remain pending; the earlier
 
 Operator PR #276 is a separate, open change and contributes no commits to this branch.
 The publication scope excludes a merge, release, cluster operation, fork-branch deletion, and changes to other worktrees or pull requests.
+
+## Issue 274: operator-only remediation
+
+### Agreed design
+
+We keep the fix in the operator: conservatively guard publication retries, run all shared progress SQL with `psql --single-transaction` and `SET LOCAL`, and preserve useful database failure lines.
+Release E2Es MUST cover retries with an established publication, early orphan recovery, and pooled SQL isolation with COPY and index operations lasting longer than five seconds.
+The approved scope excludes pgcopydb fork, catalog, and image-pin changes, and eviction recovery implementation.
+
+### Plan
+
+- [x] Approve the operator-only scope and complete research, as recorded in the approved handoff.
+- [x] Author the publication retry guard with regression coverage and active release E2Es for established-publication retry and early orphan recovery.
+- [x] Author transaction-local shared progress SQL settings with regression coverage and active release pooling E2Es, including COPY and index operations lasting longer than five seconds.
+- [x] Author database failure-line preservation and focused tests.
+- [x] Update affected behavior and troubleshooting documentation.
+- [x] Complete independent review and resolve findings.
+- [x] Inspect formatting of all ten touched Go files and check diff whitespace without modifying code.
+- [x] Resolve the local lint findings below and rerun `task lint` successfully.
+- [ ] Verify exact-head CI `lint`, `test`, and `docs` on the corrected PR head.
+- [ ] Verify the active E2Es on the release candidate carrying the fix.
+
+### Local verification evidence
+
+The checked authoring steps record code, test, and documentation presence, not functional success or review approval.
+The three new test files are `internal/controller/publication_retry_test.go`, `test/e2e/publication_retry_test.go`, and `test/e2e/progress_pooling_test.go`.
+Both release E2E files register active specs without build tags or excluded labels.
+The lifecycle, monitoring, prerequisites, and troubleshooting pages describe the authored behavior.
+
+`git diff --check` passed with no output.
+`gofmt -l` passed with no output for all seven modified Go files and the three new test files.
+The initial `task lint` run failed with 18 Go lint findings: four `ginkgolinter`, thirteen `goconst`, and one `prealloc`.
+Its final output was `make: *** [Makefile:102: lint] Error 1` followed by `task: Failed to run task "lint": exit status 2`.
+YAML, generated-manifest drift, chart synchronization, Helm/chart checks, documentation-link checks, and Prometheus rule checks passed before Go lint failed.
+The task also ran its built-in `promtool test rules` step, which reported `SUCCESS`.
+Workflow lint reported `lint: no actionlint, skipping workflow lint`.
+
+The initial findings, resolved by the successful rerun below, were:
+
+- `test/e2e/progress_pooling_test.go:81:4`, `:125:4`, `:145:3`, and `:186:5`: `ginkgolinter` rejects boolean error assertions and recommends `Expect(error).ToNot(HaveOccurred(), ...)`.
+- `internal/pgcopydb/logs_test.go:46:10`: `goconst` reports three occurrences of `pg_restore: error: could not execute query: ERROR:  relation "public.events_2026_01_idx" does not exist`.
+- `test/e2e/e2e_suite_test.go:1351:3`, `:1352:3`, `:1353:32`, and `:1354:3`: `goconst` reports `apiVersion`, `kind`, `name`, and `spec`.
+- `test/e2e/metrics_test.go:431:49` and `test/e2e/progress_bounds_test.go:70:26`: `goconst` reports `name` and `job-name`, respectively.
+- `test/e2e/progress_pooling_test.go:277:4`, `:278:31`, `:279:4`, `:280:31`, and `:322:51`: `goconst` reports `apiVersion`, `namespace`, `spec`, `name`, and `job-name`.
+- `test/e2e/publication_retry_test.go:62:27`: `goconst` reports `job-name`.
+- `test/e2e/progress_pooling_test.go:268:6`: `prealloc` recommends capacity two for `passfiles`.
+
+`task lint` invokes `make lint`, which runs `golangci-lint run` across `./...`; `run --help` confirms test analysis defaults to enabled.
+The configuration does not exclude `test/e2e`, and the initial diagnostics included both new E2E files.
+Go lint therefore covers E2E syntax and type loading.
+No Go unit, envtest, integration, or E2E tests, test-binary builds, documentation builds, cluster commands, or workflow dispatches ran during this verification.
+
+### Verification rerun
+
+After the review and lint fixes, `gofmt -l` on all ten touched Go files and `git diff --check` passed with no output.
+The approved `task lint` rerun exited 0 and reported `0 issues.` from Go lint, resolving all 18 initial findings.
+YAML, generated-manifest drift, chart synchronization, Helm/chart checks, documentation-link checks, and Prometheus checks passed.
+The task's built-in `promtool test rules` step reported `SUCCESS`.
+The only skip was `lint: no actionlint, skipping workflow lint`.
+The static analysis includes both new E2E files; it does not execute their specs.
+The first exact-head CI result is recorded below; the corrected head still needs passing `lint`, `test`, and `docs` checks.
+The release candidate E2E gate remains pending and unexecuted.
+
+### Independent review
+
+The independent reviewer approved targeted closure with no blockers.
+At pinned pgcopydb commit `aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad`, [snapshot.c:401-489](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/snapshot.c#L401-L489) returns early with a saved LSN and snapshot; otherwise it creates the publication at line 450, creates the slot at line 463, and persists state at line 489.
+Comparison respects the fetched, filtered source catalog through [cli_compare.c:366-400](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/cli_compare.c#L366-L400), [catalog.c:1363-1400](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/catalog.c#L1363-L1400), [copydb_schema.c:318-329](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/copydb_schema.c#L318-L329) and [48-51](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/copydb_schema.c#L48-L51), and [compare.c:141-149](https://github.com/dimitri/pgcopydb/blob/aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad/src/bin/pgcopydb/compare.c#L141-L149).
+
+### Publication authorization and plan
+
+The user authorized publication with "create a pr, but dont merge yet".
+Merge and auto-merge MUST NOT be enabled without further authorization.
+The PR MUST use "Related to #274" because fork-level index and eviction recovery remain outside this operator-only patch.
+
+- [x] Inspect the full tracked diff and all three new test files against the intended 16-path scope.
+- [x] Fetch `origin/main` and confirm the base is `515cca8e39a665358b9f58b58a83deaa556a0639`, with no extra local commits.
+- [x] Prepare `fix/issue-274-operator-retries` and rerun `task lint`.
+- [x] Commit only the intended paths as `c4e46db10b90dc001b945fd413d6e726c72bcab7`.
+- [x] Push the feature branch, open [PR #276](https://github.com/ydixken/pgcopydb-operator/pull/276), and record its first exact-head CI result below.
+
+The publication-preparation `task lint` run exited 0 with `0 issues.` from Go lint and `SUCCESS` from the built-in Prometheus rule tests.
+YAML, manifest drift, chart synchronization, chart rendering, and documentation-link checks passed.
+Workflow lint reported `lint: no actionlint, skipping workflow lint`.
+`gofmt -l` on all ten touched Go files and `git diff --check` produced no output.
+Functional tests and documentation builds remain CI-only; the new cluster specs await the release candidate.
+
+The first commit attempt failed with `gpg: signing failed: No secret key` and `fatal: failed to write commit object`.
+The user explicitly authorized one unsigned commit with `git commit --no-gpg-sign`, followed by push and PR creation while leaving the PR unmerged.
+This one-off authorization resolves the signing blocker for this commit; Git configuration and signing defaults MUST remain unchanged, and hooks MUST NOT be bypassed.
+
+The untracked `docs/release-assessment.de.md` and `docs/release-assessment.en.md` belong to the user and MUST remain outside the commit.
+The publication handoff pushed the implementation commit and opened PR #276.
+
+### PR 276 CI correction
+
+[CI run 35080095962](https://github.com/ydixken/pgcopydb-operator/actions/runs/35080095962) completed on `c4e46db10b90dc001b945fd413d6e726c72bcab7` with `lint` and `docs` successful and `test` failed.
+The two failing cases were `TestProgressSQLTransactionOutcome/SQL_error_rolls_back` and `TestProgressSQLTransactionOutcome/cancellation_rolls_back`.
+The expectation was wrong: psql's `ACT_SINGLE_QUERY` (`-c`) path returns `EXIT_FAILURE` (1) for a failed query; the test expected the script-mode `ON_ERROR_STOP` exit code 3.
+The independent reviewer verified this distinction against psql source and approved the correction.
+The assertion now requires exit code 1, still rejects connection failure 2 and process timeouts 124/137, and includes the actual error in its failure message.
+The persisted-row commit and rollback assertions remain intact.
+
+- [x] Record the failed exact-head CI run and correct the exit-code expectation.
+- [x] Format the touched test and independently run `task lint` on the final correction.
+- [ ] Verify the next CI run's `lint`, `test`, and `docs` on the corrected head; no new functional pass is claimed.
+
+`gofmt -w internal/progress/sql_bounds_test.go` and `git diff --check` completed without output.
+The final correction's independent `task lint` run exited 0 with `0 issues.` from Go lint.
+YAML, manifest drift, chart synchronization, chart rendering, documentation-link checks, and Prometheus checks passed; the built-in rule tests reported `SUCCESS`.
+Workflow lint reported `lint: no actionlint, skipping workflow lint`.
+
+The user authorized a new `fix(test)` commit with per-invocation `--no-gpg-sign` and publication on `fix/issue-274-operator-retries` only.
+PR #276 MUST remain open and unmerged, with auto-merge disabled.
+Functional tests, SQL reproductions, builds, documentation builds, and cluster runs remain outside local verification for this correction.

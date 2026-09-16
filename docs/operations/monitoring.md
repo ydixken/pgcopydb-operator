@@ -78,8 +78,11 @@ Table, index, and clone-byte counters are absent in this mode; the operator read
 > Growth on unrelated target databases contributes to the all-databases target gauge, and maintenance or recovery can shrink either gauge.
 > A slope estimates storage growth, not isolated copy throughput; `rate()` assumes a monotonic counter and is not appropriate for these gauges.
 
-Each database observation, including the clone-stage probe, sets a five-second SQL `statement_timeout` explicitly before querying.
+Each size, relation-count, and clone-stage observation runs `SET LOCAL statement_timeout = 5000` and its query in one `psql --single-transaction` invocation with `ON_ERROR_STOP`.
 Connection-string options cannot disable that bound.
+The transaction keeps the setting and query on the same backend through a transaction pooler, and restores the backend's prior timeout on commit or rollback, including SQL errors and statement cancellation.
+The sampler therefore leaves no five-second session timeout for a later COPY or index build to inherit.
+This guarantee covers the operator's progress SQL, not pgcopydb's compatibility with transaction pooling for an entire migration.
 GNU `timeout` sends TERM after six seconds and KILL one second later, so a stalled connection also releases its remote processes even if the exec stream closes early.
 The three sequential single-database size and scope queries have a combined process budget of 21 seconds, below the 30-second exec timeout.
 All-databases sampling runs two size queries with a combined process budget of 14 seconds.
@@ -227,6 +230,9 @@ Monitor `pg_replication_slots` on the source itself (`active` and `safe_wal_size
 
 Every change runs the static gates: the dashboards must parse with unique uids, every PromQL token in a panel or alert must name a registered metric (and every metric must be consumed somewhere), and promtool checks the rules plus a unit test per alert.
 Each release candidate then runs a live gate: the e2e suite drives a real follow migration, checks the exported series against a running Prometheus mid-stream and after cutover, replays every dashboard panel query and fails on an empty answer unless the panel is legitimately empty for a completed migration, and finally verifies deletion removes the series.
+The active pooling E2E runs the real progress sampler from a candidate runner Job through single-slot source and target PgBouncer transaction pools.
+It checks backend identity and timeout restoration across successful and lock-cancelled samples, recovery after unlocking, and subsequent COPY and index operations that each take more than five seconds on the server.
+Pooler resets and query timeouts do not mask the sampler's behavior.
 
 ## Caveats
 
