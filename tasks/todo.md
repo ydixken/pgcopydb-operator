@@ -632,7 +632,7 @@ The approved scope excludes pgcopydb fork, catalog, and image-pin changes, and e
 - [x] Complete independent review and resolve findings.
 - [x] Inspect formatting of all ten touched Go files and check diff whitespace without modifying code.
 - [x] Resolve the local lint findings below and rerun `task lint` successfully.
-- [ ] Verify exact-head CI `lint`, `test`, and `docs` on the implementation head.
+- [ ] Verify exact-head CI `lint`, `test`, and `docs` on the corrected PR head.
 - [ ] Verify the active E2Es on the release candidate carrying the fix.
 
 ### Local verification evidence
@@ -673,7 +673,8 @@ YAML, generated-manifest drift, chart synchronization, Helm/chart checks, docume
 The task's built-in `promtool test rules` step reported `SUCCESS`.
 The only skip was `lint: no actionlint, skipping workflow lint`.
 The static analysis includes both new E2E files; it does not execute their specs.
-Exact-head CI `lint`/`test`/`docs` and the release candidate E2E gate remain pending and unexecuted.
+The first exact-head CI result is recorded below; the corrected head still needs passing `lint`, `test`, and `docs` checks.
+The release candidate E2E gate remains pending and unexecuted.
 
 ### Independent review
 
@@ -690,8 +691,8 @@ The PR MUST use "Related to #274" because fork-level index and eviction recovery
 - [x] Inspect the full tracked diff and all three new test files against the intended 16-path scope.
 - [x] Fetch `origin/main` and confirm the base is `515cca8e39a665358b9f58b58a83deaa556a0639`, with no extra local commits.
 - [x] Prepare `fix/issue-274-operator-retries` and rerun `task lint`.
-- [ ] Commit only the intended paths.
-- [ ] Push the feature branch, open the PR, and record its URL and exact-head CI results.
+- [x] Commit only the intended paths as `c4e46db10b90dc001b945fd413d6e726c72bcab7`.
+- [x] Push the feature branch, open [PR #276](https://github.com/ydixken/pgcopydb-operator/pull/276), and record its first exact-head CI result below.
 
 The publication-preparation `task lint` run exited 0 with `0 issues.` from Go lint and `SUCCESS` from the built-in Prometheus rule tests.
 YAML, manifest drift, chart synchronization, chart rendering, and documentation-link checks passed.
@@ -704,4 +705,26 @@ The user explicitly authorized one unsigned commit with `git commit --no-gpg-sig
 This one-off authorization resolves the signing blocker for this commit; Git configuration and signing defaults MUST remain unchanged, and hooks MUST NOT be bypassed.
 
 The untracked `docs/release-assessment.de.md` and `docs/release-assessment.en.md` belong to the user and MUST remain outside the commit.
-Publication preparation ends with the local commit; the publication handoff owns the push and PR creation.
+The publication handoff pushed the implementation commit and opened PR #276.
+
+### PR 276 CI correction
+
+[CI run 35080095962](https://github.com/ydixken/pgcopydb-operator/actions/runs/35080095962) completed on `c4e46db10b90dc001b945fd413d6e726c72bcab7` with `lint` and `docs` successful and `test` failed.
+The two failing cases were `TestProgressSQLTransactionOutcome/SQL_error_rolls_back` and `TestProgressSQLTransactionOutcome/cancellation_rolls_back`.
+The expectation was wrong: psql's `ACT_SINGLE_QUERY` (`-c`) path returns `EXIT_FAILURE` (1) for a failed query; the test expected the script-mode `ON_ERROR_STOP` exit code 3.
+The independent reviewer verified this distinction against psql source and approved the correction.
+The assertion now requires exit code 1, still rejects connection failure 2 and process timeouts 124/137, and includes the actual error in its failure message.
+The persisted-row commit and rollback assertions remain intact.
+
+- [x] Record the failed exact-head CI run and correct the exit-code expectation.
+- [x] Format the touched test and independently run `task lint` on the final correction.
+- [ ] Verify the next CI run's `lint`, `test`, and `docs` on the corrected head; no new functional pass is claimed.
+
+`gofmt -w internal/progress/sql_bounds_test.go` and `git diff --check` completed without output.
+The final correction's independent `task lint` run exited 0 with `0 issues.` from Go lint.
+YAML, manifest drift, chart synchronization, chart rendering, documentation-link checks, and Prometheus checks passed; the built-in rule tests reported `SUCCESS`.
+Workflow lint reported `lint: no actionlint, skipping workflow lint`.
+
+The user authorized a new `fix(test)` commit with per-invocation `--no-gpg-sign` and publication on `fix/issue-274-operator-retries` only.
+PR #276 MUST remain open and unmerged, with auto-merge disabled.
+Functional tests, SQL reproductions, builds, documentation builds, and cluster runs remain outside local verification for this correction.

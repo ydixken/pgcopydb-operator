@@ -126,8 +126,10 @@ func TestProgressSQLTransactionOutcome(t *testing.T) {
 				t.Fatalf("unexpected transaction outcome: failed=%t", err != nil)
 			}
 			if tc.fail {
-				if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
-					t.Fatal("expected ON_ERROR_STOP SQL failure, not a connection or process timeout")
+				// psql's exit code 3 (ON_ERROR_STOP) applies to -f/stdin scripts;
+				// -c commands report the same failure as plain exit code 1.
+				if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+					t.Fatalf("expected ON_ERROR_STOP SQL failure, not a connection or process timeout: %v", err)
 				}
 			}
 			if got := sqlOutput(t, uri, "SELECT count(*) FROM "+table); got != tc.rows {
