@@ -9,14 +9,14 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#9 certifies keepalive feedback without moving data cursors.
-# Retains aadc4bf's confirmed COMMIT and synchronous_commit=on apply fixes.
+# ydixken/pgcopydb#11 bootstraps a missing sentinel only for a freshly created slot.
+# Retains #9's certified keepalive feedback and aadc4bf's durable apply fixes.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-13-g4873c18, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-15-gea2dc96, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=4873c1810b73086473903110d9057a1bde37195a
-ARG PGCOPYDB_VERSION=0.18.13.g4873c18
+ARG PGCOPYDB_SHA=ea2dc96a47c2f7676d71a4967d044a1e469e4110
+ARG PGCOPYDB_VERSION=0.18.15.gea2dc96
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.

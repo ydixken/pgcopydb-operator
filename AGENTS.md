@@ -11,7 +11,7 @@ Operating guide for AI agents and humans working in this repository. The keyword
 - Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
 - Agents run formatting and `task lint` locally only.
 - CI runs lint, unit, envtest, integration, and documentation checks on every pull request.
-  E2E runs only in [release.yml](.github/workflows/release.yml), against a release candidate, after a tag is cut.
+  Release-candidate E2E runs in [release.yml](.github/workflows/release.yml) after a tag is cut.
 - For human-operated local E2E, `task e2e` targets the current `kubectl` context and requires its confirmation prompt.
   Never bypass that prompt with `task --yes`.
   The dev cluster is shared, so keep E2E resources in the `pgcopydb-e2e` namespace and clean up.
@@ -63,10 +63,11 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
   The merge gate on `main` is the three [ci.yml](.github/workflows/ci.yml) jobs: `lint`, `test`, and `docs`.
   There is no pre-merge cluster validation: a pull request never runs the E2E suite.
   [release.yml](.github/workflows/release.yml) owns everything a `v*` tag produces, [auto-release.yml](.github/workflows/auto-release.yml) cuts the candidate once a week, and [promote.yml](.github/workflows/promote.yml) turns a candidate into the release.
-- Cluster E2E has two paths: local and release candidate.
+- Cluster E2E before promotion has two paths: local and release candidate.
   Local `task e2e` keeps the current-context confirmation rules in Caution.
-  Release candidate E2E runs after a tag is cut, at `E2E_SCALE=0.25`, and is the only cluster coverage a change gets before promotion.
+  Release candidate E2E runs after a tag is cut, at `E2E_SCALE=0.1`, and is the only CI cluster coverage a change gets before promotion.
   A candidate that fails E2E stays a candidate; fix forward on `main` and the next candidate carries the fix.
+  Published-release E2E in [e2e.yml](.github/workflows/e2e.yml) defines its scale independently.
 
 ## The solution ladder ("ponytail")
 

@@ -296,8 +296,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{"0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -348,7 +348,7 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{"0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()

@@ -523,7 +523,7 @@ func TestE2EDefaultRelease(t *testing.T) {
 	}
 }
 
-func TestProtectedE2EWorkflowsQueueWithoutChangingReleaseScale(t *testing.T) {
+func TestProtectedE2EWorkflowsQueueWithExpectedCandidateScale(t *testing.T) {
 	published := mustParse(t, e2eWorkflow)
 	if published.Concurrency.Group != "e2e-cluster" || published.Concurrency.CancelInProgress {
 		t.Errorf("published e2e concurrency = %+v, want queued e2e-cluster", published.Concurrency)
@@ -543,7 +543,7 @@ func TestProtectedE2EWorkflowsQueueWithoutChangingReleaseScale(t *testing.T) {
 			continue
 		}
 		runs++
-		if got, want := step.Env["E2E_SCALE"], "0.25"; got != want {
+		if got, want := step.Env["E2E_SCALE"], "0.1"; got != want {
 			t.Errorf("release candidate E2E_SCALE = %q, want %q", got, want)
 		}
 	}
@@ -805,6 +805,80 @@ func TestDependencyReviewPolicy(t *testing.T) {
 	}
 }
 
+// A selector matching only one test of a family passed that family's presence
+// check while leaving its other tests unrun, so this instead requires the
+// selector to agree with every declared helper's own family, test by test.
+func TestCIDiagnosticStepSelectsBothFamiliesWithoutACluster(t *testing.T) {
+	test, ok := mustParse(t, ciWorkflow).Jobs["test"]
+	if !ok {
+		t.Fatal("ci.yml has no test job")
+	}
+
+	const namePrefix = "go test ./test/e2e -run '"
+	var selector string
+	steps := 0
+	for _, step := range test.Steps {
+		start := strings.Index(step.Run, namePrefix)
+		if start < 0 {
+			continue
+		}
+		steps++
+		rest := step.Run[start+len(namePrefix):]
+		end := strings.IndexByte(rest, '\'')
+		if end < 0 {
+			t.Fatalf("diagnostic step run has no closing quote after the selector: %q", step.Run)
+		}
+		selector = rest[:end]
+	}
+	if steps != 1 {
+		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e -run` steps, want 1", steps)
+	}
+
+	re, err := regexp.Compile(selector)
+	if err != nil {
+		t.Fatalf("diagnostic step selector %q does not compile: %v", selector, err)
+	}
+
+	entries, err := os.ReadDir("../e2e")
+	if err != nil {
+		t.Fatalf("read test/e2e: %v", err)
+	}
+	funcRe := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
+	families := []string{"TestCutoverDiagnostic", "TestPublicationRetry"}
+	found := make(map[string]bool, len(families))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		for _, m := range funcRe.FindAllStringSubmatch(read(t, filepath.Join("../e2e", entry.Name())), -1) {
+			name := m[1]
+			family := ""
+			for _, prefix := range families {
+				if strings.HasPrefix(name, prefix) {
+					family = prefix
+					break
+				}
+			}
+			selected := re.MatchString(name)
+			switch {
+			case family == "" && selected:
+				t.Errorf("diagnostic step selector %q matches %s, outside the cutover and "+
+					"publication-retry diagnostic families", selector, name)
+			case family != "" && !selected:
+				t.Errorf("diagnostic step selector %q does not match %s; it would ship "+
+					"untested by any pull request", selector, name)
+			case family != "":
+				found[family] = true
+			}
+		}
+	}
+	for _, prefix := range families {
+		if !found[prefix] {
+			t.Errorf("no declared %s* test found to require selection", prefix)
+		}
+	}
+}
+
 func usesQEMU(steps []workflowStep) bool {
 	for _, s := range steps {
 		if strings.HasPrefix(s.Uses, "docker/setup-qemu-action") {
@@ -1006,8 +1080,8 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 		}
 	}
 
-	// Upgrading the manager must retain counters for workers on both previous pins.
-	for _, version := range []string{want, "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"} {
+	// Upgrading the manager must retain counters for workers on all previous pins.
+	for _, version := range []string{want, "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"} {
 		if !slices.Contains(versions, version) {
 			t.Errorf("runner.progressPollVersions is %v, which does not allow %s; "+
 				"the in-pod progress poll would fail closed and status.progress would go dark",

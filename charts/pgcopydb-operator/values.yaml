@@ -14,7 +14,7 @@ runner:
     tag: ""
   # Exact pgcopydb versions allowed to run the in-pod progress poll. Fail
   # closed: any other runner version never runs it, an empty list disables it.
-  progressPollVersions: ["0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"]
+  progressPollVersions: ["0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"]
 
 imagePullSecrets: []
 

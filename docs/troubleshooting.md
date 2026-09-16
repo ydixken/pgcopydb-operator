@@ -46,6 +46,15 @@ For `pgoutput` with an automatic publication, retries preserve the publication w
 Only an orphan with no source slot is dropped before pgcopydb retries incomplete setup.
 Explicit `spec.follow.publication` values and non-`pgoutput` plugins, including `wal2json` and `test_decoding`, bypass this guard.
 
+The bundled pgcopydb `0.18.15.gea2dc96` also repairs interrupted initial setup when the retry creates a fresh slot but the work catalog has no sentinel row ([fork PR #11](https://github.com/ydixken/pgcopydb/pull/11)).
+Together with the operator's slotless-orphan guard, this lets automatic retries recreate the publication and initialize the sentinel at the new slot's start LSN.
+Setup preserves existing sentinel fields; a retained slot with missing or unreadable sentinel state fails closed rather than rebuilding established progress.
+Version `0.18.13.g4873c18` has certified keepalive feedback but lacks this bootstrap recovery.
+
+The operator fixes in [#274](https://github.com/ydixken/pgcopydb-operator/issues/274) remain separate: progress SQL restores pooled settings on commit or rollback, and the publication guard uses a named dollar-quote tag because kubelet reduces `$$` to `$` in container commands and arguments.
+The fork fix addresses the missing-sentinel failure after that guard can run, not the `DO $` syntax error.
+The default plugin remains `pgoutput`, and `wal2jsonNumericAsString` remains an opt-in for `wal2json`; bootstrap recovery does not change numeric decoding.
+
 `publication retry refused: source slot "..." exists but auto publication "..." is missing` means the source state is inconsistent.
 The attempt fails before pgcopydb starts; a catalog-query or publication-drop error also stops the attempt.
 Read the worker log and inspect `pg_replication_slots` and `pg_publication` on the source.

@@ -99,11 +99,16 @@ After refreshing the materialized view, `finish.sql` runs `VACUUM (ANALYZE)` acr
 Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
 The fixture manifest leaves `bootstrap.initdb.dataChecksums` unset; the [CNPG option defaults to `false`](https://cloudnative-pg.io/docs/1.27/bootstrap/#passing-options-to-initdb).
 
+The pooling fixture requires the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster and pod permissions, including `pods/exec`.
+Grant those three Pooler verbs through a dedicated Role and RoleBinding in `pgcopydb-e2e` only.
+The runner's ServiceAccount and GitOps RBAC live outside this repository (see private ops notes).
+The [chart's RBAC and ServiceAccount values](charts/pgcopydb-operator/README.md#rbac-and-serviceaccounts) configure the manager, which does not manage CNPG fixtures; changing them cannot repair a runner authorization failure.
+
 Two tiers, and the environment variables a run reads:
 
 | Variable                      | Default | Effect                                                                                                                                                     |
 |-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `E2E_SCALE`                   | `1`     | Fixture and volume multiplier: 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.25, roughly 3GB on 13Gi.                                  |
+| `E2E_SCALE`                   | `1`     | Fixture and volume multiplier: 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.                                  |
 | `E2E_CNPG_INSTANCES`          | `1`     | Instances per fixture CNPG cluster. One keeps setup and teardown short, and the migration still crosses the network because source, target and worker are separate pods. Raise it to 3 for the chaos scenarios, one of which kills a primary. |
 | `E2E_EXTRA_TABLES`            | unset   | Adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`. The base fixture is deliberately lopsided (one table holds 73% of the bytes); this gives it a production shape. Must be set with `E2E_EXTRA_SIZE_GB`. |
 | `E2E_EXTRA_SIZE_GB`           | unset   | Total size of the extra tables. Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL. Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape. |
@@ -120,10 +125,11 @@ Two tiers, and the environment variables a run reads:
 | `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                                                             |
 | `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.                                                |
 
-Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: a 0.1 run gets 7/7/2Gi and the 0.25 release candidate tier gets 13/13/3Gi.
+Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: the 0.1 release candidate tier gets 7/7/2Gi.
 `max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright.
 The floor is there because WAL, indexes and the change spool need headroom that the row counts alone do not size.
 Source and target sizes are per instance, so raising `E2E_CNPG_INSTANCES` multiplies those volumes; the work volume is one per migration and does not multiply.
+Fixed WAL-noise fixtures remain unscaled because they must exceed the default `16Mi` lag allowance.
 
 The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion. They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target. Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl. With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red. They assert metrics of the installed operator, so point `E2E_OPERATOR_TAG` at a build that exports them when the pinned default predates the metrics work.
 
@@ -150,7 +156,11 @@ Two specs cover this. One reads what was rendered onto the pods, an anti-affinit
 
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
-`release.yml` runs this suite too, against a release candidate rather than a branch: `E2E_SCALE=0.25`, chaos excluded, `E2E_OPERATOR_TAG` set to the candidate so it installs the images that run was built from, and `E2E_MANAGE_NAMESPACES=false` because there the namespaces belong to GitOps and the CI identity may not create one. It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden. `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
+`release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
+`E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
+It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
+`E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
+The published-release workflow `e2e.yml` defines its scale independently, defaulting to `0.25`.
 
 ### Cluster coverage
 
@@ -161,12 +171,12 @@ Recovery after unlocking has a separate 12-minute backlog drain budget shared by
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
-CI runs the diagnostic helper regressions without starting the cluster suite.
+CI runs both the cutover and publication-retry diagnostic helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`) without starting the cluster suite.
 
 No pull request runs the E2E suite, and there is no pre-merge cluster validation.
 The merge gate on `main` is the three `ci.yml` jobs, `lint`, `test`, and `docs`.
-A behavior change gets its first cluster run when `auto-release.yml` cuts the next candidate and `release.yml` runs the suite against it at `E2E_SCALE=0.25` (see [Releasing](#releasing)).
-That run is the only cluster coverage before promotion.
+A behavior change gets its first CI cluster run when `auto-release.yml` cuts the next candidate and `release.yml` runs the suite against it at `E2E_SCALE=0.1` (see [Releasing](#releasing)).
+That run is the only CI cluster coverage before promotion.
 
 The suite installs the chart with `crds.install=false` and never creates, upgrades, or deletes the Migration CRD; the CI identity may only `get` it by name.
 Before installing the operator, it compares the cluster's served schema with this checkout's generated CRD and fails naming every missing field, because admission would otherwise prune those fields silently.

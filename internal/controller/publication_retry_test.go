@@ -71,6 +71,68 @@ func TestPublicationRetryShellFailure(t *testing.T) {
 	}
 }
 
+// simulateKubeletDollarExpansion reproduces the one documented rule of
+// kubelet's Container.Command/Args expansion our generated scripts can hit:
+// "Double $$ are reduced to a single $" (see corev1.Container.Command
+// godoc). It is not a full re-implementation of kubelet's $(VAR) expander.
+func simulateKubeletDollarExpansion(s string) string {
+	return strings.ReplaceAll(s, "$$", "$")
+}
+
+// TestPublicationRetryKubeletDollarExpansion guards against reintroducing an
+// anonymous DO $$ block. exec.Command runs the guard's raw Command/Args
+// directly, so it never exercises kubelet's expansion; this test applies it
+// before running the script, then proves both directions against a real
+// server: the named dollar-quote tag survives untouched and executes the
+// guard's SQL, while the old $$ form is corrupted into a syntax error.
+func TestPublicationRetryKubeletDollarExpansion(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("CI supplies PGCOPYDB_TEST_PGURI for publication retry SQL regressions")
+	}
+	psql, err := exec.LookPath("psql")
+	if err != nil {
+		t.Fatal("PGCOPYDB_TEST_PGURI is set but psql is missing")
+	}
+	query := func(t *testing.T, sql string) {
+		t.Helper()
+		queryCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(queryCtx, psql, uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql).CombinedOutput(); err != nil {
+			t.Fatalf("publication fixture SQL failed: %v\n%s", err, out)
+		}
+	}
+	name := fmt.Sprintf("publication_retry_kubelet_%d", time.Now().UnixNano())
+	table := name + "_table"
+	t.Cleanup(func() {
+		query(t, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name='"+name+"'")
+		query(t, `DROP PUBLICATION IF EXISTS "`+name+`"; DROP TABLE IF EXISTS `+table)
+	})
+	query(t, "CREATE TABLE "+table+" (id integer PRIMARY KEY)")
+	query(t, `CREATE PUBLICATION "`+name+`" FOR TABLE `+table)
+	query(t, "SELECT slot_name FROM pg_create_physical_replication_slot('"+name+"')")
+
+	cmd, _ := publicationRetryWorker(t, name, uri)
+	if got := simulateKubeletDollarExpansion(cmd.Args[2]); got != cmd.Args[2] {
+		t.Fatalf("named dollar-quote tag must survive kubelet's $$ expansion unchanged:\n%s", got)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), publicationWorkerStarted) {
+		t.Fatalf("named dollar-quote guard did not execute after kubelet expansion: err=%v, output=%s", err, out)
+	}
+
+	regressed, _ := publicationRetryWorker(t, name, uri)
+	regressed.Args[2] = simulateKubeletDollarExpansion(
+		strings.ReplaceAll(regressed.Args[2], publicationRetryDollarTag, "$$"))
+	out, err = regressed.CombinedOutput()
+	if err == nil || strings.Contains(string(out), publicationWorkerStarted) {
+		t.Fatalf("anonymous DO $$ must fail once kubelet reduces it to DO $: err=%v, output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "syntax error") {
+		t.Fatalf("expected a SQL syntax error from the corrupted DO block, got: %s", out)
+	}
+}
+
 func TestPublicationRetrySQL(t *testing.T) {
 	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
 	if uri == "" {

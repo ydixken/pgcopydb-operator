@@ -728,3 +728,223 @@ Workflow lint reported `lint: no actionlint, skipping workflow lint`.
 The user authorized a new `fix(test)` commit with per-invocation `--no-gpg-sign` and publication on `fix/issue-274-operator-retries` only.
 PR #276 MUST remain open and unmerged, with auto-merge disabled.
 Functional tests, SQL reproductions, builds, documentation builds, and cluster runs remain outside local verification for this correction.
+
+## RC2 results and RC3 follow-up
+
+PR #276 merged as `9413a3ca6820ca47b6f22091d23d4656dc78904f` under the user's later authorization, superseding the historical no-merge restrictions above.
+The RC3 worktree starts from that freshly fetched `origin/main` commit on `fix/rc3-e2e-regressions`.
+Keep the fork's `fix/keepalive-feedback` branch, existing worktrees, and user-owned release assessments untouched.
+RC2 used pgcopydb `0.18.13.g4873c18`, with builder index `sha256:73cd1dbdaa6493f7b0a59a8ebab5742fedccdc0e2ce9f4605c533ed1148978e3`.
+The RC3 builder and pin integration below supersedes that pin.
+
+[RC2 release run 35128223015](https://github.com/ydixken/pgcopydb-operator/actions/runs/35128223015) failed on that SHA.
+The handoff records [E2E job 104903548865](https://github.com/ydixken/pgcopydb-operator/actions/runs/35128223015/job/104903548865) with 40 passing, three failing, and seven skipped specs.
+Both keepalive cases passed; both publication-retry cases failed, and the pooling case failed with HTTP 403 on Pooler creation.
+GitHub's job metadata confirms the E2E failure and successful `Empty the e2e namespaces` cleanup step.
+
+- [x] Create the isolated public worktree from fresh `origin/main` without altering existing worktrees.
+- [x] Set the candidate suite in `release.yml` to `E2E_SCALE=0.1`, update its existing contract test, and correct release-coverage documentation.
+  Preserve `!chaos && !flaky`, timeouts, context checks, and confirmation prompts; leave `e2e.yml` and unscaled WAL-noise fixtures unchanged.
+- [x] Document that chart RBAC and ServiceAccount values configure the manager, not the external E2E runner; keep generated RBAC and chart values unchanged.
+  Extend the existing chart RBAC lint check to reject the CNPG fixture API group in the manager ClusterRole.
+- [x] Have the private GitOps worker grant the E2E runner only `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io` through a dedicated Role and RoleBinding in `pgcopydb-e2e`, then verify allowed and denied operations.
+  Keep private configuration and identity details in private ops notes; do not expand manager privileges.
+  The integration handoff records the external E2E RBAC verification with all 15 checks passing; see private ops notes.
+- [x] Reproduce the publication-retry defects and supply the reviewed named-dollar-quote and fork bootstrap fixes with regression coverage.
+  Full candidate verification remains a separate gate below.
+- [x] Review the public config/docs changes, format touched Go files, and run `task lint` locally.
+  Functional tests and documentation builds remain CI-owned.
+- [ ] After integration and review, publish the follow-up PR, require exact-head `lint`, `test`, and `docs`, and merge.
+- [ ] Cut RC3 and require the full candidate suite at `E2E_SCALE=0.1` plus cleanup to pass on the exact merged SHA.
+
+The config/docs phase created no commit, push, PR, merge, release, or cluster change.
+
+### Config/docs verification
+
+Scoped review used base `9413a3ca6820ca47b6f22091d23d4656dc78904f` and the eight uncommitted task paths only.
+`gofmt -w test/buildconfig/buildconfig_test.go` and `git diff --check` exited 0.
+`task lint` exited 0 on its first run, with `0 issues.` from Go lint.
+YAML, generated-manifest drift, chart synchronization, chart RBAC/monitoring, and documentation-link checks passed; the built-in Prometheus rule tests reported `SUCCESS`.
+Workflow lint reported `lint: no actionlint, skipping workflow lint`.
+The scale contract test is updated but not executed locally; Go tests, the documentation build, and RC3 E2E remain CI gates.
+The later integration handoff confirms the external Pooler grant and supplies the named-dollar-quote and fork bootstrap fixes described below.
+
+## Missing-sentinel fork delivery
+
+The approved fork change starts at `4873c1810b73086473903110d9057a1bde37195a` on `fix/resume-sentinel-bootstrap`.
+It initializes a missing sentinel only when this invocation's `exportedCreateSlotSnapshot` proves fresh slot creation, preserves existing sentinel fields, and fails on missing retained-slot state or SQL errors.
+The RC2 cluster first encountered the operator's `DO $` guard defect; the missing-sentinel failure was reproduced locally through the same clone entrypoint after guard repair.
+Track that distinction under [operator issue #274](https://github.com/ydixken/pgcopydb-operator/issues/274) and [RC2 failure #279](https://github.com/ydixken/pgcopydb-operator/issues/279).
+
+- [x] Inspect status, complete intended source/test/docs diff, recent history, remote refs, workflow matrices, and the approved local review evidence.
+  The final paired fixture logs show a baseline zero-row sentinel failure and five fixed bootstrap PASS lines across all three plugins.
+  The earlier full six-case keepalive, unit, and pagila runs passed; final style and explicit Sphinx `-W` logs passed.
+- [x] Confirm preflight fork base `4873c1810b73086473903110d9057a1bde37195a`, retained branch `b20522547688021b65d176b97677415d2ae89076`, and `delete_branch_on_merge=false`.
+- [x] Commit only the 14 approved source/test/docs paths with `--no-gpg-sign`, push the new branch without force, and publish the five-section fork issue and PR against `v0.18-fixes`.
+  Keep untracked fork `tasks/lessons.md` and ignored environment/log artifacts out of the commit.
+- [x] Dispatch both `run-tests.yml` and `nightly.yml` on the exact published feature head and require all 40 and 86 jobs to complete successfully.
+  Any failure blocks delivery without reruns or gate exceptions.
+- [x] Reconfirm the reviewed tree, ancestry, exact PR head, and disabled automatic branch deletion, then merge with `gh pr merge --match-head-commit --merge` and retain every feature branch.
+- [x] Verify the actual merge tree equals the tested feature tree, derive its version with `git describe` from `v0.18`, and record both retained feature refs and public run URLs.
+- [x] Complete builder publication and consistent operator-pin integration in a separate task, then obtain independent review before the final integration commit.
+
+That fork delivery did not publish a builder; the RC3 integration below records its publication separately.
+Index failures, eviction recovery, established-stream CDC-file loss, and general corrupt-metadata repair are outside this fix.
+
+### Missing-sentinel publication evidence
+
+[Fork commit `5d10b14`](https://github.com/ydixken/pgcopydb/commit/5d10b14de662540a9b2a27030fe264a4e8e7116d) is unsigned (`N`) and has the sole parent `4873c1810b73086473903110d9057a1bde37195a`.
+Its 14 paths match the inspected staged tree `e8dfb7af0afdad2844e01a96541bfc425c5cbd0e`; production `src` is `ec71e1fb0a08eef74b92ff705b50ade66a11c56b`.
+`git describe --match v0.18` returns `v0.18-14-g5d10b14`, deriving source version `0.18.14.g5d10b14` before merge.
+The default push helper referenced an unavailable executable; the successful non-force push used the installed `gh auth git-credential` through command-scoped helper options without changing stored Git configuration.
+Remote refs confirm `fix/resume-sentinel-bootstrap` at `5d10b14de662540a9b2a27030fe264a4e8e7116d` and `fix/keepalive-feedback` unchanged at `b20522547688021b65d176b97677415d2ae89076`.
+
+[Fork issue #10](https://github.com/ydixken/pgcopydb/issues/10) and [PR #11](https://github.com/ydixken/pgcopydb/pull/11) publish the executed test entrypoint, actual paired output excerpts, cause, fix, and limits.
+PR #11 targeted `v0.18-fixes` with only the reviewed commit and no auto-merge request.
+Both manual runs report that exact head, `workflow_dispatch`, and attempt 1:
+
+- [Run Tests `35150666775`](https://github.com/ydixken/pgcopydb/actions/runs/35150666775), created `2026-09-16T21:08:18Z`: all 40 jobs completed successfully.
+- [Nightly Tests `35150664335`](https://github.com/ydixken/pgcopydb/actions/runs/35150664335), created `2026-09-16T21:08:16Z`: all 86 jobs completed successfully.
+
+At `2026-09-16T21:21:10Z`, both workflows had completed successfully on attempt 1 at the exact published head.
+The paginated jobs API returned exactly 40 and 86 distinct jobs, all successful, and successful execution of all 35 and 82 matrix `Run a test` steps.
+No skipped, cancelled, neutral, missing, or failed job counted as a pass.
+The final PR body records these results and the reviewed source and complete-tree identities.
+
+### Missing-sentinel merge evidence
+
+The immediate pre-merge check at `2026-09-16T21:22:40Z` reconfirmed all 126 successful jobs and all 117 successful matrix test steps on attempt 1.
+GitHub's comparison showed exactly one reviewed commit ahead of base `4873c1810b73086473903110d9057a1bde37195a`, zero behind, and the same 14 paths.
+The PR head, local head, full tree, and production source tree matched the published review identities above.
+GitHub returned `mergeable=true`, `mergeable_state=clean`, `allow_merge_commit=true`, and `delete_branch_on_merge=false`.
+
+The authorized merge used `gh pr merge 11 --repo ydixken/pgcopydb --match-head-commit 5d10b14de662540a9b2a27030fe264a4e8e7116d --merge`, without branch deletion or an administrative override.
+[PR #11](https://github.com/ydixken/pgcopydb/pull/11) merged at `2026-09-16T21:22:51Z` as [`ea2dc96a47c2f7676d71a4967d044a1e469e4110`](https://github.com/ydixken/pgcopydb/commit/ea2dc96a47c2f7676d71a4967d044a1e469e4110).
+Its parents are the verified base and tested feature head, in that order.
+Fetched `origin/v0.18-fixes` resolves to that merge; `git diff --exit-code HEAD origin/v0.18-fixes` passed.
+The entire merged tree equals CI-tested tree `e8dfb7af0afdad2844e01a96541bfc425c5cbd0e`, including production `src` tree `ec71e1fb0a08eef74b92ff705b50ade66a11c56b`.
+
+Tag `v0.18` peels to `95ebd553790fa45de67c92b934917d777131bdd3`.
+`git describe --match v0.18 ea2dc96a47c2f7676d71a4967d044a1e469e4110` returns `v0.18-15-gea2dc96`, deriving merged source version `0.18.15.gea2dc96`.
+This is source provenance, not a rebuilt or published builder image.
+
+Post-merge remote-ref checks prove both feature branches remain:
+
+```text
+b20522547688021b65d176b97677415d2ae89076 refs/heads/fix/keepalive-feedback
+5d10b14de662540a9b2a27030fe264a4e8e7116d refs/heads/fix/resume-sentinel-bootstrap
+```
+
+All nine preexisting non-base remote branches retain their preflight SHAs, including every prior feature branch; `delete_branch_on_merge` remains `false`.
+Fork issue #10 remains open for upstream tracking, and the fork worktree has no tracked changes.
+Untracked fork `tasks/lessons.md` and ignored environment/log artifacts remain outside the commit.
+The fork-delivery phase changed only this task file in the public operator worktree and left it uncommitted.
+The following integration uses the actual merged SHA and version above.
+
+## RC3 builder and pin integration
+
+Base: `9413a3ca6820ca47b6f22091d23d4656dc78904f`; branch: `fix/rc3-e2e-regressions`.
+The user authorized one unsigned builder-preparation commit and feature-branch push, followed by builder publication and an uncommitted final integration for independent review.
+No PR, operator merge, or candidate release is authorized in this step.
+Keep the next candidate's `E2E_SCALE=0.1`, the existing RC3 changes, both fork feature branches, and user-owned release assessments intact.
+
+- [x] Refresh `origin/main` and confirm the base, existing diff, recent history, fork PR #11 merge tree, and retained fork refs.
+- [x] Change only the builder Dockerfile's source SHA, version, and provenance; run scoped cleanup and `task lint` before the unsigned commit and non-force push.
+- [x] Dispatch `pgcopydb-builder.yml --ref fix/rc3-e2e-regressions` and require both architecture builds and the index merge to pass on the exact commit.
+- [x] Verify anonymous public registry access, the raw index hash, exactly two runnable platforms, and each child manifest and architecture config.
+- [x] Pin the runner to the published index, update the runner and release assertions, and retain all four versions in CLI/chart defaults and regression fixtures.
+- [x] Update bundled-source links and bootstrap recovery documentation without relabeling historical measurements or changing API fields, dependencies, or generated artifacts.
+- [x] Format touched Go files, review only the integration hunks, and run final `task lint`.
+- [x] Obtain independent review before the final integration commit and PR, including acceptance of the corrected CI diagnostic selector contract.
+- [ ] Require exact-head CI `lint`, `test`, and `docs` before any later merge.
+- [ ] Require the full next-candidate E2E suite at `E2E_SCALE=0.1` and cleanup on its exact merged SHA before claiming RC3 success.
+
+### Builder evidence
+
+Unsigned commit [`7ad579fcb7dde2da37d648e0f6e8ea4f02167e74`](https://github.com/ydixken/pgcopydb-operator/commit/7ad579fcb7dde2da37d648e0f6e8ea4f02167e74), `chore: prepare bootstrap recovery pgcopydb builder`, changes only `images/pgcopydb-builder/Dockerfile`.
+Source is fork merge `ea2dc96a47c2f7676d71a4967d044a1e469e4110`, version `0.18.15.gea2dc96` (`v0.18-15-gea2dc96`).
+[Builder run `35152785053`](https://github.com/ydixken/pgcopydb-operator/actions/runs/35152785053) completed successfully on that exact operator commit, with `workflow_dispatch`, attempt 1.
+The `pin`, `amd64`, `arm64`, and `merge` jobs all passed, including the existing build-time version checks and merged-platform assertion.
+
+Verified public builder reference:
+
+```text
+ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:ea2dc96a47c2f7676d71a4967d044a1e469e4110@sha256:1145d382fc74bb35c1b8a19a42ed9469639b66d405b560ad9777a7111c9d3b33
+```
+
+Anonymous registry reads matched SHA-256 of the raw index bytes to the registry digest header and the pin above.
+The only runnable platforms are `linux/amd64` and `linux/arm64`; each child manifest's raw hash, declared size, and config platform matched its descriptor:
+
+- `linux/amd64`: `sha256:82d1cd44335dea8ec0c27daba962627d31be4e2ed1fb4c61da0a49808fd83eed`.
+- `linux/arm64`: `sha256:c9dbf94158e56c417aeb621a5905a06442db86dd085ee5c908fc5063c92a45e6`.
+
+The two remaining entries are verified `unknown/unknown` attestation manifests linked to those children, not additional runnable platforms:
+
+- amd64 attestation: `sha256:caae4a4377ed138eaacf3a90e147c51e72c699ad5fc966378cd89fceccd33b36`.
+- arm64 attestation: `sha256:5356b8916ebbbe5c5132918ded375d1dee71bdaf4d24e9c94803723397c6d933`.
+
+### Scope and verification boundaries
+
+The operator-side [#274](https://github.com/ydixken/pgcopydb-operator/issues/274) fixes preserve publications, restore pooled SQL settings on rollback, and use named dollar quoting to survive kubelet expansion.
+Fork [PR #11](https://github.com/ydixken/pgcopydb/pull/11) separately repairs missing-sentinel bootstrap after fresh slot creation, preserves existing sentinel fields, and refuses missing retained-slot recovery state.
+Neither fix claims recovery from interrupted index builds, eviction damage, or established-stream CDC-file loss.
+The default plugin and opt-in `wal2jsonNumericAsString` behavior are unchanged.
+
+The integration handoff records a focused pooling PASS at scale `0.1`: one of 50 specs selected, with deferred background Pooler cleanup completing.
+This is focused diagnostic evidence, not a full RC3 pass and not a cluster test of the new runner.
+External E2E RBAC was verified separately; see private ops notes.
+No private repository URL, cluster identity, context, or topology belongs in the public evidence.
+
+The pre-commit `task lint` passed with `0 issues.` and no generated CRD/RBAC or chart drift.
+It reported `lint: no actionlint, skipping workflow lint`.
+Go functional tests, runner builds, documentation builds, and the E2E diagnostic helper regressions remain CI-owned; none ran locally in this integration.
+
+Final integration lint passed after wrapping the longer CLI default to satisfy the 120-character limit; no lint configuration or dependency changed.
+YAML, generated-manifest drift, chart synchronization, chart RBAC/monitoring, documentation-link checks, and Prometheus rule checks/tests passed; Go lint reported `0 issues.`.
+Actionlint was unavailable and skipped by the existing local target.
+Formatting and `git diff --check` passed; API types, generated CRD/RBAC/chart artifacts, and dependency manifests are unchanged.
+The integration phase handed off the runner pin and remaining RC3 files for independent review after pushing only the builder-preparation commit.
+
+## RC3 publication gates
+
+The user approved the reviewed batch for an unsigned commit, feature-branch push, and PR to `main`.
+This authorization supersedes the builder-only publication restriction above.
+Merge and RC3 creation wait for the next verifier's full gate review; stable promotion is outside this handoff.
+Record remote publication and exact-head results in a maintained PR comment rather than follow-up bookkeeping commits.
+
+- [x] Inspect status, the complete tracked and untracked diff, the last ten commits, remote tracking, and all branch commits against freshly fetched `origin/main`.
+  The base remains `9413a3ca6820ca47b6f22091d23d4656dc78904f`; the only existing branch commit is builder preparation `7ad579fcb7dde2da37d648e0f6e8ea4f02167e74`.
+- [x] Confirm the approved CI selector includes all six `TestPublicationRetry*` helpers and all three `TestCutoverDiagnostic*` helpers, with per-declaration contract coverage and rejection of other test families.
+- [x] Review the public diff for private infrastructure details and keep the external runner's Pooler permissions separate from manager RBAC; see private ops notes.
+- [x] Complete final formatting, whitespace, and local `task lint` checks.
+- [ ] Commit only the 27 intended pending public paths with `--no-gpg-sign`, then push `fix/rc3-e2e-regressions` without force and create the five-section PR.
+- [ ] Dispatch `runner-smoke.yml` on the final feature head for `linux/amd64,linux/arm64` with the workflow's `push: false` setting.
+- [ ] Hand the exact head, PR, CI `lint`/`test`/`docs` and Codecov observations, and smoke URL to the next verifier.
+- [ ] Require the verifier's full gate approval before merging or cutting RC3.
+- [ ] Require the full RC3 suite at `E2E_SCALE=0.1` and successful cleanup before claiming candidate verification or closing the original issues.
+
+The RC2 job log records:
+
+```text
+Ran 43 of 50 Specs in 4597.834 seconds
+FAIL! -- 40 Passed | 3 Failed | 0 Pending | 7 Skipped
+```
+
+The recorded focused Pooler run at scale `0.1` used candidate RC2 runtime images with the revised test code and completed deferred cleanup:
+
+```text
+Ran 1 of 50 Specs in 246.168 seconds
+SUCCESS! -- 1 Passed | 0 Failed | 0 Pending | 49 Skipped
+PASS
+```
+
+This proves the focused pooling fixture, including same-backend restoration and long SQL assertions, rather than the new runner or the full RC3 suite.
+The fork's paired bootstrap failure and success are published in [fork issue #10](https://github.com/ydixken/pgcopydb/issues/10).
+
+### Publication preflight review
+
+Final `gofmt -l` returned no paths, `git diff --check` exited 0, and `task lint` exited 0 with `0 issues.`.
+YAML, generated-manifest drift, chart synchronization, RBAC/monitoring, documentation-link, and Prometheus checks passed.
+The target reported `lint: no actionlint, skipping workflow lint`; CI owns that check.
+No local Go tests, image builds, documentation builds, or cluster operations ran in this publication phase.
+Functional tests, documentation validation, the final-head runner smoke build, and full RC3 E2E remain remote gates.

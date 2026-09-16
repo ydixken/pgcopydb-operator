@@ -29,7 +29,9 @@ import (
 )
 
 // patchedVersion is the allowlisted fixture version across these tests.
-const patchedVersion = "0.18.13.g4873c18"
+const patchedVersion = "0.18.15.gea2dc96"
+
+const keepalivePatchedVersion = "0.18.13.g4873c18"
 
 const previousPatchedVersion = "0.18.10.gaadc4bf"
 
@@ -87,7 +89,7 @@ func TestNewFromExec_DropsInvalidVersions(t *testing.T) {
 }
 
 func TestGateScript(t *testing.T) {
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	s := p.GateScript()
 	for _, want := range []string{
 		// The pattern list opens with "(", and that is asserted on the text
@@ -98,7 +100,7 @@ func TestGateScript(t *testing.T) {
 		// the bug, which is the one thing this test exists to prevent. The
 		// verify Job embeds this script inside $( ), where the bare form is
 		// ambiguous, so the leading "(" is the property, not the parse.
-		"\n(0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
+		"\n(0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {
@@ -154,14 +156,17 @@ func TestGateScript_UnderSh(t *testing.T) {
 	if err != nil {
 		t.Skipf("no sh available: %v", err)
 	}
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	for version, want := range map[string]string{
 		patchedVersion:           `{"tables":{"total":2,"done":1}}` + "\n",
+		keepalivePatchedVersion:  `{"tables":{"total":2,"done":1}}` + "\n",
 		previousPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
 		oldestPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
 		"0.18":                   "",
+		"0.18.15.gea2dc96-extra": "",
 		"0.18.13.g4873c18-extra": "",
 		"0.18.10.gaadc4bf-extra": "",
+		"0.18.5.ge37d2bd-extra":  "",
 	} {
 		cmd := exec.Command(sh, "-c", p.GateScript())
 		cmd.Env = append(os.Environ(), "PATH="+stubPgcopydb(t, version)+":"+os.Getenv("PATH"))
@@ -175,7 +180,7 @@ func TestGateScript_UnderSh(t *testing.T) {
 	}
 	// The disabled gate has to parse too: it is pasted into the verify Job's
 	// script, where a syntax error would be the whole file's problem.
-	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
+	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
 		script := NewFromExec(&fakeExec{}, versions).GateScript()
 		if err := exec.Command(sh, "-n", "-c", script).Run(); err != nil {
 			t.Errorf("allowlist %v renders a script sh rejects: %v\n%s", versions, err, script)
