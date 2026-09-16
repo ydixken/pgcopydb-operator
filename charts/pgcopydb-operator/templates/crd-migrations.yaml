@@ -2150,17 +2150,16 @@ spec:
                     type: integer
                   replayLSN:
                     description: |-
-                      replayLSN is how far the target has consumed the stream, as the source
-                      reports it: the walsender's replay position, or the slot's confirmed
-                      flush position where the migration role may not read the walsender.
-                      It measures consumption, not application. Whether the target really
-                      applied every change is settled after cutover by the drain
-                      verification, which reads the target's own replication origin.
+                      replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.
+                      It may include certified idle WAL beyond the last applied data transaction.
+                      Post-cutover drain verification, not this position, proves target application.
                     type: string
                   slotName:
                     type: string
                   writeLSN:
-                    description: writeLSN is the last LSN received from the source.
+                    description: |-
+                      writeLSN is the walsender's write position, with slot confirmed-flush fallback
+                      when the migration role cannot read it.
                     type: string
                 type: object
               startedAt:
@@ -4326,17 +4325,16 @@ spec:
                     type: integer
                   replayLSN:
                     description: |-
-                      replayLSN is how far the target has consumed the stream, as the source
-                      reports it: the walsender's replay position, or the slot's confirmed
-                      flush position where the migration role may not read the walsender.
-                      It measures consumption, not application. Whether the target really
-                      applied every change is settled after cutover by the drain
-                      verification, which reads the target's own replication origin.
+                      replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.
+                      It may include certified idle WAL beyond the last applied data transaction.
+                      Post-cutover drain verification, not this position, proves target application.
                     type: string
                   slotName:
                     type: string
                   writeLSN:
-                    description: writeLSN is the last LSN received from the source.
+                    description: |-
+                      writeLSN is the walsender's write position, with slot confirmed-flush fallback
+                      when the migration role cannot read it.
                     type: string
                 type: object
               startedAt:

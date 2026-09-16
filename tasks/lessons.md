@@ -45,3 +45,7 @@
   Document commit-then-lint sequencing when staged generated files deliberately fail the check.
 - Distinguish independent sufficient causes from jointly required premises.
   Either `wal_log_hints` or data checksums can require hint-bit WAL; use the measured before/after behaviour to test the proposed fix.
+- Retain a fork feature branch after downstream merge when the fix will be proposed upstream.
+  Track upstream submission separately rather than deleting the branch during merge cleanup.
+- A completed Migration can retain a replay sample from before endpos, and catch-up allows nonzero lag.
+  Prove feedback directly before cutover; use final endpos, drain verification, and data checks for completion.

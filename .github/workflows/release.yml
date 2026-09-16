@@ -197,7 +197,7 @@ jobs:
         # pgcopydb (see images/runner/Dockerfile). Native amd64 pull on the
         # amd64 runner; the arm64 half was validated by spike S6 (podman).
         run: |
-          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.10.gaadc4bf'
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.13.g4873c18'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
 
   chart:

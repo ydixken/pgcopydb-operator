@@ -5,9 +5,10 @@ Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18, pat
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit `aadc4bf7a60f3030c569a10c5da2eeb4e531e6ad`.
-The version string is `0.18.10.gaadc4bf`, derived from `git describe` by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-This is upstream v0.18 plus ten commits, not an upstream release named v0.18.10.
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`4873c1810b73086473903110d9057a1bde37195a`](https://github.com/ydixken/pgcopydb/commit/4873c1810b73086473903110d9057a1bde37195a).
+The version string is `0.18.13.g4873c18`, derived from `git describe` (`v0.18-13-g4873c18`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is thirteen commits, including the merge commit, not an upstream release named v0.18.13.
+The runner pins the builder's multi-platform index `sha256:73cd1dbdaa6493f7b0a59a8ebab5742fedccdc0e2ce9f4605c533ed1148978e3`, published by [builder run `35111549279`](https://github.com/ydixken/pgcopydb-operator/actions/runs/35111549279).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -25,13 +26,19 @@ The five patches inherited from `e37d2bd` are:
 4. [`6277199`](https://github.com/ydixken/pgcopydb/commit/6277199): add receive SIGKILL/resume and flush-order regressions.
 5. [`aadc4bf`](https://github.com/ydixken/pgcopydb/commit/aadc4bf): stop follow cleanly after confirmed apply, use `synchronous_commit=on` for SQLite-apply transactions, and cover shutdown and pre-COMMIT apply termination/resume.
 
+[Fork PR #9](https://github.com/ydixken/pgcopydb/pull/9), merged as `4873c18`, adds certified keepalive feedback and CDC regression fixes.
+The receiver can advance network replay and flush feedback to a genuine primary keepalive only after initialized durable apply covers every stored, non-skipped COMMIT, including retained spool, with no receive transaction open and endpos unset.
+The certified feedback floor is monotonic and leaves the data apply cursor, target replication origin, and sentinel replay position unchanged.
+This retains the confirmed-COMMIT and `synchronous_commit=on` guarantees from `aadc4bf`; it does not replace post-cutover drain verification.
+
 > [!warning]
-> Each source transaction now waits for target WAL durability before apply progress advances.
+> Each source transaction waits for target WAL durability before apply progress advances.
 > This may raise latency for workloads with many small transactions; that cost is unmeasured.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow both `0.18.10.gaadc4bf` and the previous `0.18.5.ge37d2bd` to run the catalog progress poll.
-We retain the previous version so upgrading the operator does not suppress counters for workers still running rc.5 or rc.6.
+The manager and chart allow `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We retain both older versions so upgrading the operator does not suppress counters for existing workers.
+Neither older version provides certified idle keepalive feedback.
 This allowlist does not select or upgrade worker images.
 
 Once an upstream release includes the required runtime fixes above, return to PGDG: swap `libgc1` for the `pgcopydb` package in the install line, drop the `COPY --from=pgcopydb` line, and update the version assertions and progress allowlists together.

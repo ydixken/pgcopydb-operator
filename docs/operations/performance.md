@@ -9,8 +9,9 @@ This page covers what the operator decides for you, what is left to you, and how
 
 ## Follow receive and apply
 
-The bundled pgcopydb `0.18.10.gaadc4bf` batches receive-spool writes in SQLite transactions instead of committing each row and column insert separately, while retaining SQLite `synchronous=FULL`.
+The bundled pgcopydb `0.18.13.g4873c18` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
 [Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch, crash/resume checks, and receive-process bpftrace measurements for one source transaction containing 20,000 four-column rows.
+These measurements predate the [certified keepalive feedback](live-migration.md#watching-the-stream) in `0.18.13.g4873c18`; they are not measurements of that version.
 The before/after runs used the same configuration, but not identical volume or cache state.
 Before values cover the row-only receive window; after values include the SQLite batch commit:
 
@@ -24,7 +25,7 @@ Before values cover the row-only receive window; after values include the SQLite
 > The conservative mixed-window ratios are about 330x on Longhorn and 164x on NVMe: receive-window speedups, not end-to-end migration speedups.
 > These individual bursts do not establish sustained throughput or measure target WAL durability waits.
 
-Apply now confirms each target COMMIT before publishing progress and uses `synchronous_commit=on` for each source transaction.
+Apply confirms each target COMMIT before publishing data progress and uses `synchronous_commit=on` for each source transaction.
 That durability wait may raise latency for workloads with many small transactions; its cost is unmeasured.
 The downstream receive defect is recorded in [#265](https://github.com/ydixken/pgcopydb-operator/issues/265); [#260](https://github.com/ydixken/pgcopydb-operator/issues/260) tracks the broader throughput investigation, including what rate is acceptable.
 Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
