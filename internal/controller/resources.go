@@ -148,21 +148,31 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	return job, nil
 }
 
-// publicationDropGuard returns the retry prelude that drops pgcopydb's own
-// leftover publication, or "" when the guard does not apply. Background: when
-// an attempt dies between CREATE PUBLICATION and the catalog write recording
-// it, pgcopydb --resume re-runs the CREATE non-idempotently and fails on its
-// own leftover ("already exists", found live). Only the auto-managed
-// publication (named after the slot) is ever dropped; a user-provided
-// spec.follow.publication is pgcopydb's to leave alone and ours too.
+// pgcopydb creates the publication before the slot, but skips creation when
+// resuming saved slot state. Only an orphan without a source slot is safe to drop;
+// an existing slot without its publication must not start a silent no-op stream.
 func publicationDropGuard(m *v1beta1.Migration, attempt int32) string {
 	if attempt <= 1 || !followEnabled(m) || m.Spec.Follow.Publication != "" {
 		return ""
 	}
-	// effectiveSlotName is safe to interpolate: generated names are
-	// [a-z0-9_], and spec.follow.slotName is pattern-restricted to the same
-	// charset by the CRD.
-	return `psql "$PGCOPYDB_SOURCE_PGURI" -Xqc 'DROP PUBLICATION IF EXISTS "` + effectiveSlotName(m) + `"'`
+	if plugin := m.Spec.Follow.Plugin; plugin != "" && plugin != "pgoutput" {
+		return ""
+	}
+	// Generated and CRD-validated slot names contain only [a-z0-9_].
+	slot := effectiveSlotName(m)
+	return `psql "$PGCOPYDB_SOURCE_PGURI" -Xq -v ON_ERROR_STOP=1 <<'PUBLICATION_RETRY'
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = '` + slot + `') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = '` + slot + `') THEN
+      RAISE EXCEPTION 'publication retry refused: source slot "` + slot + `" exists but auto publication "` + slot + `" is missing';
+    END IF;
+  ELSE
+    DROP PUBLICATION IF EXISTS "` + slot + `";
+  END IF;
+END;
+$$;
+PUBLICATION_RETRY`
 }
 
 // buildCleanupJob tears down source/target replication state after a live

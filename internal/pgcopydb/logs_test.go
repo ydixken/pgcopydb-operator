@@ -23,13 +23,17 @@ import (
 )
 
 func TestLastErrorLine(t *testing.T) {
+	const (
+		missingRelationError = `pg_restore: error: could not execute query: ERROR:  relation "public.events_2026_01_idx" does not exist`
+		groupTermination     = "Terminating all processes in our process group"
+	)
 	cases := []struct {
 		name string
 		raw  string
 		want string
 	}{
 		{
-			name: "last error wins over earlier ones",
+			name: "last actionable error wins over earlier ones",
 			raw: `{"timestamp":"t","pid":1,"error_severity":"INFO","message":"STEP 1: starting"}
 {"timestamp":"t","pid":1,"error_severity":"ERROR","message":"permission denied for function pg_replication_origin_drop"}
 {"timestamp":"t","pid":1,"error_severity":"ERROR","message":"pgcopydb clone failed"}
@@ -42,15 +46,69 @@ func TestLastErrorLine(t *testing.T) {
 			want: "connection to source lost",
 		},
 		{
-			name: "non-JSON and partial lines are skipped",
+			name: "raw pg_restore database error is actionable",
+			raw:  missingRelationError,
+			want: missingRelationError,
+		},
+		{
+			name: "JSON wrapped pg_restore error ignores outer warning severity",
+			raw: `{"error_severity":"WARNING","message":"` +
+				strings.ReplaceAll(missingRelationError, `"`, `\"`) + `"}`,
+			want: missingRelationError,
+		},
+		{
+			name: "real restore chain keeps the database cause",
+			raw: `{"error_severity":"WARNING","message":"pg_restore: error: could not execute query: ERROR:  relation \"public.events_2026_01_customer_id_occurred_at_idx\" does not exist"}
+{"error_severity":"ERROR","message":"Command was: ALTER INDEX public.events_customer_time_idx ATTACH PARTITION public.events_2026_01_customer_id_occurred_at_idx;"}
+{"error_severity":"ERROR","message":"Failed to run pg_restore: exit code 1"}
+{"error_severity":"ERROR","message":"Failed to prepare schema on the target database, see above for details"}
+{"error_severity":"WARNING","message":"pg_restore: warning: errors ignored on restore: 1"}
+{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}
+{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: `pg_restore: error: could not execute query: ERROR:  relation "public.events_2026_01_customer_id_occurred_at_idx" does not exist`,
+		},
+		{
+			name: "last actionable database error wins",
+			raw: `{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  relation \"public.first_idx\" does not exist"}
+{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  relation \"public.second_idx\" does not exist"}
+{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: `pg_restore: error: could not execute query: ERROR:  relation "public.second_idx" does not exist`,
+		},
+		{
+			name: "generic supervisor error is the fallback",
+			raw: `{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}
+{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: groupTermination,
+		},
+		{
+			name: "old tolerated restore error does not override terminal fallback",
+			raw: `{"error_severity":"INFO","message":"` +
+				strings.ReplaceAll(missingRelationError, `"`, `\"`) + `"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}` + "\n" +
+				`{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: groupTermination,
+		},
+		{
+			name: "restore error at recent window boundary wins",
+			raw: missingRelationError + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow-3) +
+				`{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}` + "\n" +
+				`{"error_severity":"FATAL","message":"Terminating all processes in our process group"}`,
+			want: missingRelationError,
+		},
+		{
+			name: "invalid truncated and unrelated lines are skipped",
 			raw: `DROP PUBLICATION
-{"error_severity":"ERROR","message":"boom"}
+row value contains ERROR: but is not a subprocess failure
+{"error_severity":"INFO","message":"normal data contains ERROR: text"}
+{"error_severity":"ERROR","message":"Command was: SELECT secret FROM private_table;"}
 {"error_severity":"ERROR","mess`,
-			want: "boom",
+			want: "",
 		},
 		{name: "no error lines", raw: `{"error_severity":"INFO","message":"done"}`, want: ""},
 		{name: "empty input", raw: "", want: ""},
-		{name: "plain text only", raw: "panic: not json\nERROR: still not json\n", want: ""},
+		{name: "unrelated plain text only", raw: "panic: not json\nERROR: still not json\n", want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,6 +282,11 @@ func TestPermissionDeniedLine(t *testing.T) {
 			// continuing; classifying them would kill retryable attempts.
 			name: "warning quoting ERROR text does not classify",
 			raw:  `{"error_severity":"WARNING","message":"subprocess said: ERROR:  permission denied for schema public"}`,
+			want: "",
+		},
+		{
+			name: "warning pg_restore error remains retryable",
+			raw:  `{"error_severity":"WARNING","message":"pg_restore: error: could not execute query: ERROR:  permission denied for schema public"}`,
 			want: "",
 		},
 		{

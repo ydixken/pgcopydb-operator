@@ -403,13 +403,10 @@ func envValue(env []corev1.EnvVar, name string) string {
 	return ""
 }
 
-// TestPublicationDropGuard covers the retry-after-setup-crash guard: only a
-// retry attempt of a follow migration with an auto-managed publication drops
-// the leftover, and only ever pgcopydb's own (slot-named) publication.
 func TestPublicationDropGuard(t *testing.T) {
-	follow := func(pub, slot string) *v1beta1.Migration {
+	follow := func(pub, slot, plugin string, enabled bool) *v1beta1.Migration {
 		m := passwordMigration()
-		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: pub, SlotName: slot}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: enabled, Publication: pub, SlotName: slot, Plugin: plugin}
 		return m
 	}
 	generated := pgcopydb.SlotName("ns", "m")
@@ -418,25 +415,34 @@ func TestPublicationDropGuard(t *testing.T) {
 		name    string
 		m       *v1beta1.Migration
 		attempt int32
-		want    string // "" = no guard
+		slot    string // "" = no guard
 	}{
-		{"first attempt has no guard", follow("", ""), 1, ""},
-		{"retry drops the auto-managed publication", follow("", ""), 2, `DROP PUBLICATION IF EXISTS "` + generated + `"`},
-		{"retry honors an explicit slot name", follow("", "my_slot"), 2, `DROP PUBLICATION IF EXISTS "my_slot"`},
-		{"user-provided publication is never touched", follow("userpub", ""), 2, ""},
+		{"first attempt has no guard", follow("", "", "", true), 1, ""},
+		{"retry guards the default plugin", follow("", "", "", true), 2, generated},
+		{"later pgoutput retry is guarded", follow("", "", pgoutputPlugin, true), 3, generated},
+		{"retry honors an explicit slot name", follow("", "my_slot", "", true), 2, "my_slot"},
+		{"user-provided publication is never touched", follow("userpub", "", "", true), 2, ""},
+		{"wal2json has no publication guard", follow("", "", v1beta1.PluginWal2json, true), 2, ""},
+		{"test_decoding has no publication guard", follow("", "", "test_decoding", true), 2, ""},
+		{"disabled follow has no guard", follow("", "", "", false), 2, ""},
 		{"non-follow migration has no guard", passwordMigration(), 2, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			guard := publicationDropGuard(tc.m, tc.attempt)
-			if tc.want == "" {
+			if tc.slot == "" {
 				if guard != "" {
 					t.Fatalf("unexpected guard: %q", guard)
 				}
-				return
-			}
-			if !strings.Contains(guard, tc.want) || !strings.Contains(guard, "PGCOPYDB_SOURCE_PGURI") {
-				t.Fatalf("guard %q does not drop %q on the source", guard, tc.want)
+			} else {
+				for _, want := range []string{"PGCOPYDB_SOURCE_PGURI", "ON_ERROR_STOP=1",
+					"pg_catalog.pg_replication_slots WHERE slot_name = '" + tc.slot + "'",
+					"pg_catalog.pg_publication WHERE pubname = '" + tc.slot + "'",
+					`DROP PUBLICATION IF EXISTS "` + tc.slot + `"`, "RAISE EXCEPTION"} {
+					if !strings.Contains(guard, want) {
+						t.Fatalf("guard missing %q:\n%s", want, guard)
+					}
+				}
 			}
 			// The guard must reach the Job's prelude, after the passfile
 			// export and before the exec that hands over to pgcopydb.
@@ -445,6 +451,12 @@ func TestPublicationDropGuard(t *testing.T) {
 				t.Fatal(err)
 			}
 			prelude := job.Spec.Template.Spec.Containers[0].Command[2]
+			if tc.slot == "" {
+				if strings.Contains(prelude, "PUBLICATION") || strings.Contains(prelude, "pg_replication_slots") {
+					t.Fatalf("unguarded job queries publication state:\n%s", prelude)
+				}
+				return
+			}
 			guardAt := strings.Index(prelude, guard)
 			execAt := strings.Index(prelude, `exec "$0" "$@"`)
 			exportAt := strings.Index(prelude, "export PGPASSFILE=")

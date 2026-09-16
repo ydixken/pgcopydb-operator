@@ -290,19 +290,20 @@ var _ = Describe("Migration Controller", func() {
 			types.NamespacedName{Name: name + "-run-3", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
 	})
 
-	It("surfaces the worker's terminal error from structured logs", func() {
+	It("keeps a database error ahead of later termination summaries", func() {
 		const name = "mig-error-surface"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
 		m.Spec.BackoffLimit = 1 // 1 retry, so 2 attempts total
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
-		// Neutral text: a permission-denied fixture would now trip the
-		// fast-fail classifier and never reach the retry this spec pins.
-		const lastError = "deadlock detected while restoring indexes"
+		const lastError = `pg_restore: error: could not execute query: ERROR:  relation "public.events_2026_01_customer_id_occurred_at_idx" does not exist`
 		r := newReconciler()
 		r.Logs = &fakeLogs{out: `{"error_severity":"INFO","message":"STEP 1: setup"}` + "\n" +
-			`{"error_severity":"ERROR","message":"` + lastError + `"}` + "\n"}
+			`{"error_severity":"WARNING","message":"pg_restore: error: could not execute query: ERROR:  relation \"public.events_2026_01_customer_id_occurred_at_idx\" does not exist"}` + "\n" +
+			`{"error_severity":"ERROR","message":"Failed to prepare schema on the target database, see above for details"}` + "\n" +
+			`{"error_severity":"ERROR","message":"clone process 809 has terminated [6]"}` + "\n" +
+			`{"error_severity":"FATAL","message":"Terminating all processes in our process group"}` + "\n"}
 		rec := r.Recorder.(*events.FakeRecorder)
 
 		passGate(ctx, r, name) // run-1
@@ -319,6 +320,7 @@ var _ = Describe("Migration Controller", func() {
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
 		Expect(failed.Message).To(ContainSubstring(lastError))
+		Expect(failed.Message).NotTo(ContainSubstring("Terminating all processes"))
 	})
 
 	It("fails fast when the worker hits a permission error", func() {

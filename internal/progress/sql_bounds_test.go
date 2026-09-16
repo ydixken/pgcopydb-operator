@@ -76,8 +76,10 @@ func TestProgressSQLBounds(t *testing.T) {
 		fail, timeout              bool
 	}{
 		{"URI cannot disable timeout", "show statement_timeout", progressSQL, "5s\n", false, false},
+		{"commit restores timeout", "show statement_timeout; COMMIT; show statement_timeout", progressSQL, "5s\n0\n", false, false},
+		{"rollback restores timeout", "show statement_timeout; ROLLBACK; show statement_timeout", progressSQL, "5s\n0\n", false, false},
 		{"query error", "select 1/0", progressSQL, "", true, false},
-		{"setup error stops query", "select 42", strings.Replace(progressSQL, "SET statement_timeout = 5000", "SET nonexistent_progress_setting = 5000", 1), "", true, false},
+		{"setup error stops query", "select 42", strings.Replace(progressSQL, "SET LOCAL statement_timeout = 5000", "SET LOCAL nonexistent_progress_setting = 5000", 1), "", true, false},
 		{"SQL cancels before process deadline", "select pg_sleep(30)", progressSQL, "", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +97,41 @@ func TestProgressSQLBounds(t *testing.T) {
 			}
 			if got := sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name='progress_sql_test' and pid <> pg_backend_pid()"); got != "0" {
 				t.Fatal("sampler backend survived its command")
+			}
+		})
+	}
+}
+
+func TestProgressSQLTransactionOutcome(t *testing.T) {
+	uri := namedURI(t, testPGURI(t), "", "progress_transaction_test")
+	table := fmt.Sprintf("progress_transaction_%d", time.Now().UnixNano())
+	sqlOutput(t, uri, "CREATE TABLE "+table+" (id integer)")
+	t.Cleanup(func() { sqlOutput(t, uri, "DROP TABLE "+table) })
+	// A write between the helper's -c commands witnesses psql's automatic commit or rollback.
+	wrapper := strings.Replace(progressSQL, `-c "$2"`, `-c 'INSERT INTO `+table+` VALUES (1)' -c "$2"`, 1)
+	for _, tc := range []struct {
+		name, query, rows string
+		fail              bool
+	}{
+		{"success commits", "select 42", "1", false},
+		{"SQL error rolls back", "select 1/0", "0", true},
+		{"cancellation rolls back", "select pg_sleep(30)", "0", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlOutput(t, uri, "TRUNCATE "+table)
+			cmd := exec.Command("sh", "-c", wrapper+`progress_sql "$TEST_URI" "$TEST_QUERY"`)
+			cmd.Env = append(os.Environ(), "TEST_URI="+uri, "TEST_QUERY="+tc.query)
+			err := cmd.Run()
+			if (err != nil) != tc.fail {
+				t.Fatalf("unexpected transaction outcome: failed=%t", err != nil)
+			}
+			if tc.fail {
+				if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
+					t.Fatal("expected ON_ERROR_STOP SQL failure, not a connection or process timeout")
+				}
+			}
+			if got := sqlOutput(t, uri, "SELECT count(*) FROM "+table); got != tc.rows {
+				t.Fatalf("transaction left %s rows, want %s", got, tc.rows)
 			}
 		})
 	}

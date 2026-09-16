@@ -198,11 +198,12 @@ t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row") || t=
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
+// One transaction pins pooled queries to the backend with the local timeout.
 // SQL cancellation releases server work; timeout also bounds connection hangs
-// after the local exec stream closes. SET overrides conflicting URI options.
+// after the local exec stream closes.
 const progressSQL = `progress_sql() {
-  timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA -v ON_ERROR_STOP=1 \
-    -c 'SET statement_timeout = 5000' -c "$2"
+  timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA --single-transaction -v ON_ERROR_STOP=1 \
+    -c 'SET LOCAL statement_timeout = 5000' -c "$2"
 }
 `
 
