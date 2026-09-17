@@ -169,6 +169,7 @@ func publicationRetryFixture(name string) (*v1beta1.Migration, string, string) {
 	mig.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyTables: []string{table}}
 	Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 	Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+	resetTargetObjects()
 	for _, cluster := range []string{sourceCluster, targetCluster} {
 		Expect(psql(cluster, "SELECT to_regclass('"+table+"') IS NULL")).To(Equal("t"))
 	}

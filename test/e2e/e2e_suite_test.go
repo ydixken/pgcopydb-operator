@@ -128,7 +128,7 @@ const (
 	fixtureSharedBuffers = "1GB"
 	fixtureCacheSize     = "3GB"
 
-	// defaultCNPGInstances is the instance count of both fixture clusters.
+	// defaultCNPGInstances is the instance count of both shared fixture clusters.
 	// One: the migration's SQL legs still cross the real network, because the
 	// source, the target and the worker are separate pods, and provisioning
 	// two volumes instead of six takes minutes off every setup and teardown.
@@ -1226,8 +1226,8 @@ var _ = AfterSuite(func() {
 })
 
 // deleteFixtures empties the fixture namespaces instead of deleting them, for
-// runs that do not own them. Migrations are gone by here; a deleted CNPG
-// Cluster leaves its instance volumes behind, so those go explicitly.
+// runs that do not own them. Migrations are gone by here; explicit PVC cleanup
+// also handles retained or orphaned fixture volumes after cluster deletion.
 func deleteFixtures(timeout time.Duration) {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
@@ -1308,12 +1308,8 @@ func ensureNamespace(name string) {
 	}
 }
 
-// cnpgCluster builds a minimal CNPG Cluster: one instance, tier-sized
-// storage, the requested PostgreSQL major, app database owned by app. Seeding
-// happens in a separate Job (see ensureSeededSource), not at initdb time: a
-// Job survives pod restarts, its log is inspectable, and re-runs are cheap on
-// kept clusters. Built as unstructured on purpose: importing the CNPG API
-// just for two fixtures is not worth a dependency.
+// Seeding runs in a separate Job so it survives pod restarts and can reuse kept fixtures.
+// Unstructured avoids importing the CNPG API just for test fixtures.
 func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	storage := map[string]any{"size": size}
 	if fixtureStorageClass != "" {
@@ -1507,19 +1503,20 @@ func applyCluster(obj *unstructured.Unstructured) {
 		To(Succeed(), "failed to apply CNPG cluster %s", obj.GetName())
 }
 
-// waitClusterReady waits until every instance is ready, not just the primary.
-// One ready instance would let the suite start while the replicas are still
-// cloning, which is exactly when the fixtures are not yet spread across nodes
-// and a chaos failover has nowhere to promote to.
+// Wait for all declared instances: a ready primary alone cannot support a chaos failover.
 func waitClusterReady(name string) {
 	GinkgoHelper()
 	Eventually(func(g Gomega) {
 		c := &unstructured.Unstructured{}
 		c.SetGroupVersionKind(cnpgGVK)
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, c)).To(Succeed())
+		desired, found, err := unstructured.NestedInt64(c.Object, "spec", "instances")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(found).To(BeTrue(), "CNPG cluster %s declares no instance count", name)
+		g.Expect(desired).To(BeNumerically(">", 0))
 		ready, _, _ := unstructured.NestedInt64(c.Object, "status", "readyInstances")
-		g.Expect(ready).To(BeNumerically(">=", int64(cnpgInstances)),
-			"CNPG cluster %s has %d of %d instances ready", name, ready, cnpgInstances)
+		g.Expect(ready).To(BeNumerically(">=", desired),
+			"CNPG cluster %s has %d of %d instances ready", name, ready, desired)
 	}, clusterReadyTimeout, 5*time.Second).Should(Succeed())
 }
 
@@ -1669,13 +1666,9 @@ func readMountedFilesystemCapacity(instance string) (int64, error) {
 	return capacity, nil
 }
 
-// resetTargetObjects wipes the fixture objects from the target. Needed
-// because pg_restore --clean only drops objects present in the incoming dump,
-// so a populated target from an earlier run would break the no-dropIfExists
-// clone. Dropping the schemas wholesale (plus the citext extension and the
-// large objects, which live outside any schema) beats keeping a per-object
-// drop list in sync with the fixture set. public is recreated with its stock
-// owner; app is the database owner, so it needs no extra grants.
+// A prior full clone leaves objects excluded from the next filtered restore;
+// their dependencies can block routine/type cleanup because pg_restore --clean
+// only drops objects in the incoming dump. Resetting also permits fresh clones.
 func resetTargetObjects() {
 	GinkgoHelper()
 	psql(targetCluster, "DROP EXTENSION IF EXISTS citext CASCADE")
@@ -1728,8 +1721,7 @@ func waitSourceVolumesDeleted() {
 	}, storageReadyTimeout, storageReadyPollInterval).Should(Succeed())
 }
 
-// deleteCluster deletes a CNPG cluster (volumes included) and waits until it
-// is gone.
+// Cluster deletion can precede dependent garbage collection; callers wait for PVCs separately.
 func deleteCluster(name string) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
@@ -1747,14 +1739,9 @@ func deleteCluster(name string) {
 	}, 10*time.Minute, 5*time.Second).Should(Succeed())
 }
 
-// ensureClusterShape deletes a kept cluster that this run cannot adopt in
-// place, so the subsequent apply creates it fresh. Three things force that: a
-// different PostgreSQL major (CNPG cannot change majors in place, so applying
-// another major's imageName would wedge the cluster rather than upgrade it), a
-// different instance count, and a different storage class, which is immutable
-// once a PVC is bound. The two shape checks read the spec and run before the
-// readiness wait on purpose: a kept single-instance cluster can never reach
-// cnpgInstances ready, so waiting first would time out instead of recreating.
+// Check the requested shape before waiting on the live spec: readiness alone
+// cannot prove its instance count or StorageClass matches this run. A different
+// PostgreSQL major also requires recreation; CNPG cannot change it in place.
 func ensureClusterShape(name string, major int) {
 	GinkgoHelper()
 	c := &unstructured.Unstructured{}
@@ -2092,6 +2079,8 @@ func checkLonghornCapacity() {
 	}
 	work := resource.MustParse(workVolumeSize)
 	required += work.Value()
+	pool := resource.MustParse(progressPoolStorageSize)
+	required += 2 * pool.Value()
 	// numberOfReplicas is 1 on the ephemeral StorageClass, so requested
 	// bytes map 1:1 to consumed bytes; 1.2 leaves headroom for WAL churn
 	// and everything else living on the shared disks.
@@ -2100,7 +2089,8 @@ func checkLonghornCapacity() {
 	if available < need {
 		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
 			" (%dGi requested x %d replica x 1.2 headroom, source and target sized for"+
-			" %d CNPG instances each) but only %dGi are free; free up space or lower E2E_SCALE",
+			" %d CNPG instances each, plus the dedicated pooling pair) but only %dGi are free;"+
+			" free up space or lower E2E_SCALE",
 			need>>30, required>>30, replicas, cnpgInstances, available>>30))
 	}
 }

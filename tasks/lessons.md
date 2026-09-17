@@ -57,3 +57,5 @@
   Set that value in the tag-triggered `release.yml` suite and its contract test; it has no scale input.
   Do not infer a new default for local scripts or the independently configured stable-release workflow.
   Keep fixed WAL-noise fixtures unscaled so they still exceed the default `16Mi` lag allowance.
+- Distinguish objects left by a prior full clone from objects selected by the next filtered restore.
+  Keep baseline failures, preventive fixture changes, focused passes, and pending full-suite gates separate in evidence summaries.
