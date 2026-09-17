@@ -26,8 +26,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -57,8 +59,10 @@ const (
 	liveWriterModeQueryThree         = "query-3"
 	liveWriterModeQueryError         = "query-error"
 	liveWriterModeQueryHang          = "query-hang"
+	liveWriterModeStderrFlood        = "stderr-flood"
 	liveWriterTestMarker             = "unit-live"
 	liveWriterTestPod                = "source-1"
+	liveWriterTestCredential         = "credential"
 )
 
 type helperCall struct {
@@ -406,7 +410,7 @@ func requireLifecycleCalls(
 
 func TestLiveWriterHelper(t *testing.T) {
 	if os.Getenv(liveWriterHelperEnv) != "1" {
-		return
+		t.Skip("subprocess entry point")
 	}
 
 	switch os.Getenv(liveWriterHelperModeEnv) {
@@ -425,23 +429,44 @@ func TestLiveWriterHelper(t *testing.T) {
 	case "stream-wait-error":
 		helperStream(t, 17)
 	case liveWriterModeStreamExit:
+		if _, err := io.WriteString(os.Stderr, "ERROR: relation orders does not exist\n"+
+			"postgresql://app:credential@db.invalid/app\n"); err != nil {
+			t.Fatal(err)
+		}
 		writeHelperSignal(t, liveWriterReadyEnv, liveWriterReadySignal)
 		os.Exit(18)
+	case liveWriterModeStderrFlood:
+		if _, err := io.WriteString(os.Stderr, "ERROR: stream prelude\n"+
+			strings.Repeat("INFO: draining stderr\n", liveWriterStderrLimit)); err != nil {
+			t.Fatal(err)
+		}
+		helperStream(t, 0)
 	case liveWriterModeQueryThree:
 		if _, err := fmt.Fprintln(os.Stdout, "3"); err != nil {
 			t.Fatalf("write query result: %v", err)
 		}
 		os.Exit(0)
+	case "query-zero":
+		if _, err := fmt.Fprintln(os.Stdout, "0"); err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(0)
 	case liveWriterModeQueryError:
+		if _, err := io.WriteString(os.Stderr, "ERROR: final query rejected\npassword=credential\n"); err != nil {
+			t.Fatal(err)
+		}
 		os.Exit(19)
 	case liveWriterModeQueryHang:
+		if _, err := io.WriteString(os.Stderr, "ERROR: final query stalled\npassword=credential\n"); err != nil {
+			t.Fatal(err)
+		}
 		time.Sleep(time.Hour)
 	case "query-bad":
 		if _, err := fmt.Fprintln(os.Stdout, "not-an-int"); err != nil {
 			t.Fatalf("write bad query result: %v", err)
 		}
 	case "query-empty":
-		return
+		os.Exit(0)
 	default:
 		t.Fatalf("unknown helper mode %q", os.Getenv(liveWriterHelperModeEnv))
 	}
@@ -534,6 +559,112 @@ func TestLiveWriterMarkerHelpers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLiveWriterDiagnosticStderr(t *testing.T) {
+	const metadata = `{"error_severity":"ERROR","message":"statement rejected","node":"private-node.invalid"}`
+	const redacted = "[LOG] [redacted connection/environment line]\n"
+	const retained = "[LOG] ERROR: retained\n"
+	for _, tc := range []struct {
+		name      string
+		chunks    []string
+		want      string
+		truncated bool
+	}{
+		{"URI split across writes", []string{"postgre", "sql://app:credential@db.invalid/app\n"}, redacted, false},
+		{"password split across writes", []string{"pass", "word=credential\n"}, redacted, false},
+		{"TCP lookup split across writes", []string{"dial t", "cp: lookup safe.invalid: no such host\n"}, redacted, false},
+		{"UDP6 split across writes", []string{"dial u", "dp6 safe.invalid: connection refused\n"}, redacted, false},
+		{"DNS lookup split across writes", []string{"lookup safe.invalid: no such", " host\n"}, redacted, false},
+		{"libpq hostname split across writes", []string{"could not translate host ", "name safe.invalid to address\n"},
+			redacted, false},
+		{"structured metadata", []string{metadata[:40], metadata[40:] + "\n"}, "[ERROR] statement rejected\n", false},
+		{"untrusted severity", []string{`{"error_severity":"password=credential","message":"statement rejected"}`},
+			"[LOG] statement rejected\n", false},
+		{"known primary", []string{"exec failed on " + liveWriterTestPod + "\n"},
+			"[LOG] exec failed on [fixture-location]\n", false},
+		{"environment", []string{"KUBECONFIG=/private/credential\n"}, redacted, false},
+		{"truncated URI", []string{"ERROR: retained\n" + strings.Repeat("x", liveWriterStderrLimit-20) +
+			"postgresql://app:credential@db.invalid/app\n"}, retained, true},
+		{"truncated password", []string{"ERROR: retained\n" + strings.Repeat("x", liveWriterStderrLimit-20) +
+			"password=credential\n"}, retained, true},
+		{"truncated DNS suffix", []string{"ERROR: retained\nlookup safe.invalid: " +
+			strings.Repeat(" ", liveWriterStderrLimit), "no such host\n"}, retained, true},
+		{"no complete line", []string{strings.Repeat("credential", liveWriterStderrLimit)}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr liveWriterStderr
+			total := 0
+			for _, chunk := range tc.chunks {
+				n, err := stderr.Write([]byte(chunk))
+				if err != nil || n != len(chunk) {
+					t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(chunk))
+				}
+				total += len(chunk)
+			}
+			if stderr.total != total || len(stderr.prefix) > liveWriterStderrLimit ||
+				(stderr.total > len(stderr.prefix)) != tc.truncated {
+				t.Fatalf("incorrect stderr bound: total=%d prefix=%d", stderr.total, len(stderr.prefix))
+			}
+			text := stderr.text(liveWriterTestPod)
+			if text != tc.want {
+				t.Fatalf("sanitized stderr = %q, want %q", text, tc.want)
+			}
+		})
+	}
+}
+
+func TestLiveWriterStderrFlood(t *testing.T) {
+	paths := newHelperPaths(t)
+	command, state := helperCommand(t, []string{liveWriterModeStderrFlood, "query-zero"}, paths.env())
+	primary, _ := countingPrimary()
+	w := liveWriterForTest(t, primary, command, state)
+	waitForFile(t, paths.first, liveWriterFirstSignal)
+	if active := w.diagnostics(); active.stderr != "" || active.queryResult != liveWriterQueryNotRun {
+		t.Fatalf("snapshot read stderr before the child was reaped: %s", active)
+	}
+	last, err := stopLiveWriterWithWatchdog(t, w, state)
+	if err != nil || last != 0 {
+		t.Fatalf("stop = %d, %v; want a valid zero marker", last, err)
+	}
+	diag := w.diagnostics()
+	if !diag.finalMarkerValid || diag.finalMarker != 0 || diag.queryResult != liveWriterQueryValid ||
+		!strings.Contains(diag.String(), "marker=0") || strings.Contains(diag.String(), "marker=unavailable") {
+		t.Fatalf("zero marker was not distinguished from unavailable: %s", diag)
+	}
+	if !diag.stderrTruncated || diag.stderrBytes <= liveWriterStderrLimit ||
+		!strings.Contains(diag.stderr, "ERROR: stream prelude") || len(diag.stderr) > 2*liveWriterStderrLimit {
+		t.Fatalf("stderr flood was lost or unbounded: %s", diag)
+	}
+	waitForFile(t, paths.eof, liveWriterEOFSignal)
+	requireLifecycleCalls(t, state, 2)
+	for _, cmd := range state.commandsSnapshot() {
+		requireReaped(t, cmd)
+	}
+}
+
+func TestLiveWriterActiveBeyondShutdownTimeout(t *testing.T) {
+	paths := newHelperPaths(t)
+	command, state := helperCommand(t, []string{liveWriterModeStream, liveWriterModeQueryThree}, paths.env())
+	primary, _ := countingPrimary()
+	w := liveWriterForTest(t, primary, command, state)
+	waitForFile(t, paths.first, liveWriterFirstSignal)
+	before := w.diagnostics()
+	select {
+	case <-w.done:
+		t.Fatal("writer stopped without an explicit stop")
+	case <-time.After(2 * liveWriterTestTimeout):
+	}
+	after := w.diagnostics()
+	if after.submittedMarker <= before.submittedMarker || after.submittedBytes <= before.submittedBytes ||
+		!after.stopAt.IsZero() || !after.firstErrorAt.IsZero() || w.ctx.Err() != nil {
+		t.Fatalf("writer did not stay active beyond its shutdown timeout: %s", after)
+	}
+	if _, err := stopLiveWriterWithWatchdog(t, w, state); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, paths.eof, liveWriterEOFSignal)
+	requireLifecycleCalls(t, state, 2)
 }
 
 func TestLiveWriterStartupBoundary(t *testing.T) {
@@ -654,12 +785,38 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		w := liveWriterForTest(t, primary, command, state)
 
 		waitForFile(t, paths.first, liveWriterFirstSignal)
+		completedQuery := make(chan liveWriterDiagnostic, 1)
+		go func() {
+			for {
+				diag := w.diagnostics()
+				if !diag.queryFinishedAt.IsZero() {
+					completedQuery <- diag
+					return
+				}
+				select {
+				case <-w.done:
+					completedQuery <- w.diagnostics()
+					return
+				default:
+					runtime.Gosched()
+				}
+			}
+		}()
 		last, err := stopLiveWriterWithWatchdog(t, w, state)
 		if err != nil {
 			t.Fatalf("stop: %v", err)
 		}
 		if last != 3 {
 			t.Fatalf("last = %d, want 3", last)
+		}
+		observed := <-completedQuery
+		if observed.queryResult != liveWriterQueryValid || !observed.finalMarkerValid || observed.finalMarker != last {
+			t.Fatalf("completed query snapshot published a transient result: %s", observed)
+		}
+		diag := w.diagnostics()
+		if !diag.finalMarkerValid || diag.finalMarker != last || diag.queryResult != liveWriterQueryValid ||
+			diag.childExit != "exit status 0" || diag.firstError != nil {
+			t.Fatalf("unexpected successful diagnostics: %s", diag)
 		}
 		waitForFile(t, paths.eof, liveWriterEOFSignal)
 
@@ -672,6 +829,9 @@ func TestLiveWriterLifecycle(t *testing.T) {
 			t.Fatalf("capture = %q, want one or more newline-terminated statements", text)
 		}
 		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		if diag.submittedBytes != len(captured) || diag.submittedMarker != len(lines) {
+			t.Fatalf("submitted counters do not match the consumed stream: %s", diag)
+		}
 		for i, line := range lines {
 			want := fmt.Sprintf(
 				"INSERT INTO orders (customer_id, amount, note) VALUES (1, 1.00, '%s-%d');",
@@ -705,6 +865,9 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		waitForDone(t, w)
 		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "open persistent psql stdin")
+		if diag := w.diagnostics(); diag.firstErrorStage != "stdin-open" || diag.queryResult != liveWriterQueryNotRun {
+			t.Fatalf("unexpected stdin-open diagnostics: %s", diag)
+		}
 		requireLifecycleCalls(t, state, 1)
 		commands := state.commandsSnapshot()
 		if commands[0].Process != nil {
@@ -730,6 +893,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		waitForDone(t, w)
 		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "start persistent psql")
+		if diag := w.diagnostics(); diag.firstErrorStage != "start" || diag.childExit != liveWriterNotStarted ||
+			strings.Contains(diag.String(), missing) {
+			t.Fatalf("unexpected startup diagnostics: %s", diag)
+		}
 		requireLifecycleCalls(t, state, 1)
 		if got := primaryCalls(); got != 1 {
 			t.Fatalf("primary calls = %d, want 1", got)
@@ -785,6 +952,10 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		waitForFile(t, paths.first, liveWriterFirstSignal)
 		_, err := stopLiveWriterWithWatchdog(t, w, state)
 		requireError(t, err, "read final marker")
+		if diag := w.diagnostics(); diag.finalMarkerValid || diag.queryResult != liveWriterQueryFailed ||
+			!strings.Contains(diag.String(), "marker=unavailable") {
+			t.Fatalf("query failure looks like a known marker: %s", diag)
+		}
 		requireLifecycleCalls(t, state, 2)
 		if got := primaryCalls(); got != 1 {
 			t.Fatalf("primary calls = %d, want 1", got)
@@ -792,11 +963,12 @@ func TestLiveWriterLifecycle(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name string
-		mode string
+		name   string
+		mode   string
+		result string
 	}{
-		{name: "invalid final marker", mode: "query-bad"},
-		{name: "empty final marker", mode: "query-empty"},
+		{name: "invalid final marker", mode: "query-bad", result: liveWriterQueryInvalid},
+		{name: "empty final marker", mode: "query-empty", result: liveWriterQueryEmpty},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			paths := newHelperPaths(t)
@@ -807,6 +979,11 @@ func TestLiveWriterLifecycle(t *testing.T) {
 			waitForFile(t, paths.first, liveWriterFirstSignal)
 			_, err := stopLiveWriterWithWatchdog(t, w, state)
 			requireError(t, err, "parse final marker")
+			diag := w.diagnostics()
+			if diag.queryResult != tc.result || diag.finalMarkerValid || diag.firstErrorStage != "final-parse" ||
+				!strings.Contains(diag.String(), "marker=unavailable") || strings.Contains(diag.String(), "not-an-int") {
+				t.Fatalf("invalid marker diagnostics: %s", diag)
+			}
 			requireLifecycleCalls(t, state, 2)
 			if got := primaryCalls(); got != 1 {
 				t.Fatalf("primary calls = %d, want 1", got)
@@ -826,6 +1003,28 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		requireError(t, err, "write live marker")
 		if strings.Contains(err.Error(), "read final marker") {
 			t.Fatalf("stop returned later final-query error: %v", err)
+		}
+		diag := w.diagnostics()
+		if !errors.Is(err, syscall.EPIPE) || !diag.brokenPipe || diag.firstErrorStage != "stdin-write" ||
+			diag.failedMarker != diag.submittedMarker+1 || diag.writeError == nil ||
+			diag.firstErrorAt.IsZero() || diag.writeFailedAt.IsZero() ||
+			!diag.writeFailedAt.Before(diag.stopAt) || !diag.reapedAt.Before(diag.queryStartedAt) {
+			t.Fatalf("lost write failure or failure timing: %s; primary error: %v", diag, err)
+		}
+		if diag.finalMarkerValid || diag.queryResult != liveWriterQueryFailed || diag.childExit != "exit status 18" ||
+			diag.waitError == nil || diag.queryError == nil {
+			t.Fatalf("lost secondary failure: %s", diag)
+		}
+		for _, want := range []string{"ERROR: relation orders does not exist", "ERROR: final query rejected",
+			"command exit=18", "command exit=19", "marker=unavailable"} {
+			if !strings.Contains(diag.String(), want) {
+				t.Fatalf("missing %q from diagnostics: %s", want, diag)
+			}
+		}
+		for _, forbidden := range []string{liveWriterTestCredential, "db.invalid", liveWriterTestPod, "postgresql://"} {
+			if strings.Contains(diag.String(), forbidden) {
+				t.Fatalf("diagnostics leaked %q", forbidden)
+			}
 		}
 		requireLifecycleCalls(t, state, 2)
 		if got := primaryCalls(); got != 1 {
@@ -855,6 +1054,11 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		}
 		if last != 3 {
 			t.Fatalf("last = %d, want marker 3 after forced cancellation", last)
+		}
+		diag := w.diagnostics()
+		if diag.firstErrorStage != "stop-timeout" || diag.writerContext != context.Canceled.Error() ||
+			!strings.Contains(diag.childExit, "signal:") || !diag.finalMarkerValid {
+			t.Fatalf("lost forced cancellation diagnostics: %s", diag)
 		}
 		waitForFile(t, paths.eof, liveWriterEOFSignal)
 		requireLifecycleCalls(t, state, 2)
@@ -918,6 +1122,15 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		} {
 			requireError(t, err, want)
 		}
+		diag := w.diagnostics()
+		if diag.finalMarkerValid || diag.queryResult != liveWriterQueryFailed ||
+			diag.queryContext != context.DeadlineExceeded.Error() ||
+			!strings.Contains(diag.String(), "timeout or cancellation") ||
+			!strings.Contains(diag.String(), "marker=unavailable") ||
+			!strings.Contains(diag.queryStderr, "ERROR: final query stalled") ||
+			strings.Contains(diag.String(), liveWriterTestCredential) {
+			t.Fatalf("lost query timeout diagnostics: %s", diag)
+		}
 		for _, cmd := range state.commandsSnapshot() {
 			requireReaped(t, cmd)
 		}
@@ -961,10 +1174,12 @@ func TestLiveWriterLifecycle(t *testing.T) {
 
 		start := make(chan struct{})
 		results := make(chan liveWriterStopResult, 2)
+		diagnostics := make(chan liveWriterDiagnostic, 2)
 		for range 2 {
 			go func() {
 				<-start
 				last, err := w.stop()
+				diagnostics <- w.diagnostics()
 				results <- liveWriterStopResult{last: last, err: err}
 			}()
 		}
@@ -987,6 +1202,11 @@ func TestLiveWriterLifecycle(t *testing.T) {
 		}
 		if !errors.Is(first.err, context.DeadlineExceeded) {
 			t.Fatalf("stop error = %v, want context.DeadlineExceeded", first.err)
+		}
+		firstDiag, secondDiag := <-diagnostics, <-diagnostics
+		if !reflect.DeepEqual(firstDiag, secondDiag) || firstDiag.firstErrorStage != "stop-timeout" ||
+			firstDiag.finalMarker != first.last || !firstDiag.finalMarkerValid {
+			t.Fatalf("inconsistent concurrent diagnostics:\n%s\n%s", firstDiag, secondDiag)
 		}
 		requireLifecycleCalls(t, state, 2)
 		for _, cmd := range state.commandsSnapshot() {

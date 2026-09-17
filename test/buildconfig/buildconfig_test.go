@@ -808,7 +808,7 @@ func TestDependencyReviewPolicy(t *testing.T) {
 // A selector matching only one test of a family passed that family's presence
 // check while leaving its other tests unrun, so this instead requires the
 // selector to agree with every declared helper's own family, test by test.
-func TestCIDiagnosticStepSelectsBothFamiliesWithoutACluster(t *testing.T) {
+func TestCIDiagnosticStepSelectsHelperFamiliesWithoutACluster(t *testing.T) {
 	test, ok := mustParse(t, ciWorkflow).Jobs["test"]
 	if !ok {
 		t.Fatal("ci.yml has no test job")
@@ -829,6 +829,12 @@ func TestCIDiagnosticStepSelectsBothFamiliesWithoutACluster(t *testing.T) {
 			t.Fatalf("diagnostic step run has no closing quote after the selector: %q", step.Run)
 		}
 		selector = rest[:end]
+		flags := strings.Fields(rest[end+1:])
+		for _, flag := range []string{"-race", "-v"} {
+			if !slices.Contains(flags, flag) {
+				t.Errorf("diagnostic step must include %s: %q", flag, step.Run)
+			}
+		}
 	}
 	if steps != 1 {
 		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e -run` steps, want 1", steps)
@@ -844,7 +850,7 @@ func TestCIDiagnosticStepSelectsBothFamiliesWithoutACluster(t *testing.T) {
 		t.Fatalf("read test/e2e: %v", err)
 	}
 	funcRe := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
-	families := []string{"TestCutoverDiagnostic", "TestPublicationRetry"}
+	families := []string{"TestCutoverDiagnostic", "TestPublicationRetry", "TestLiveWriter"}
 	found := make(map[string]bool, len(families))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
@@ -862,8 +868,7 @@ func TestCIDiagnosticStepSelectsBothFamiliesWithoutACluster(t *testing.T) {
 			selected := re.MatchString(name)
 			switch {
 			case family == "" && selected:
-				t.Errorf("diagnostic step selector %q matches %s, outside the cutover and "+
-					"publication-retry diagnostic families", selector, name)
+				t.Errorf("diagnostic step selector %q matches %s, outside the helper families %v", selector, name, families)
 			case family != "" && !selected:
 				t.Errorf("diagnostic step selector %q does not match %s; it would ship "+
 					"untested by any pull request", selector, name)

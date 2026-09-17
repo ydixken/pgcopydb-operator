@@ -39,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2438,6 +2439,80 @@ type liveWriter struct {
 	pod  string
 	last int
 	err  error
+	diag liveWriterDiagnostic
+}
+
+const (
+	liveWriterStderrLimit  = 8 << 10
+	liveWriterNotStarted   = "not-started"
+	liveWriterQueryNotRun  = "not-run"
+	liveWriterQueryFailed  = "exec-error"
+	liveWriterQueryValid   = "valid"
+	liveWriterQueryInvalid = "parse-invalid"
+	liveWriterQueryEmpty   = "parse-empty"
+)
+
+type liveWriterStderr struct {
+	prefix []byte
+	total  int
+}
+
+func (b *liveWriterStderr) Write(p []byte) (int, error) {
+	b.total += len(p)
+	b.prefix = append(b.prefix, p[:min(len(p), liveWriterStderrLimit-len(b.prefix))]...)
+	return len(p), nil // Keep draining after the retained prefix is full.
+}
+
+func (b *liveWriterStderr) text(pod string) string {
+	raw := string(b.prefix)
+	if b.total > len(b.prefix) {
+		// A cut URI or credential may no longer match the redactor.
+		raw = raw[:strings.LastIndexByte(raw, '\n')+1]
+	}
+	return publicationRetryLogText(raw, pod, sourceCluster, nsE2E)
+}
+
+type liveWriterDiagnostic struct {
+	startedAt, childStartedAt, firstErrorAt, writeFailedAt         time.Time
+	stopAt, reapedAt, queryStartedAt, queryFinishedAt              time.Time
+	firstErrorStage                                                string
+	firstError, writeError, waitError, queryError                  error
+	submittedMarker, submittedBytes, failedMarker                  int
+	brokenPipe                                                     bool
+	childExit, queryExit, writerContext, queryContext, queryResult string
+	stderr, queryStderr                                            string
+	stderrBytes                                                    int
+	stderrTruncated, queryStderrTruncated                          bool
+	finalMarker                                                    int
+	finalMarkerValid                                               bool
+}
+
+func (d liveWriterDiagnostic) String() string {
+	marker := "unavailable"
+	if d.finalMarkerValid {
+		marker = strconv.Itoa(d.finalMarker)
+	}
+	return fmt.Sprintf("source=captured-primary container=postgres started=%s childStarted=%s\n"+
+		"firstError stage=%s at=%s error=%v\n"+
+		"stdin submittedMarker=%d submittedBytes=%d failedMarker=%d failedAt=%s EPIPE=%t error=%v\n"+
+		"stopRequested=%s reaped=%s child=%s waitError=%v writerContext=%s stderrBytes=%d stderrTruncated=%t\n"+
+		"stderr:\n%s"+
+		"finalQuery started=%s finished=%s child=%s result=%s marker=%s error=%v context=%s stderrTruncated=%t\n"+
+		"finalQuery stderr:\n%s",
+		d.startedAt.Format(time.RFC3339Nano), d.childStartedAt.Format(time.RFC3339Nano),
+		d.firstErrorStage, d.firstErrorAt.Format(time.RFC3339Nano), d.firstError,
+		d.submittedMarker, d.submittedBytes, d.failedMarker, d.writeFailedAt.Format(time.RFC3339Nano),
+		d.brokenPipe, d.writeError,
+		d.stopAt.Format(time.RFC3339Nano), d.reapedAt.Format(time.RFC3339Nano), d.childExit,
+		d.waitError, d.writerContext, d.stderrBytes, d.stderrTruncated, d.stderr,
+		d.queryStartedAt.Format(time.RFC3339Nano), d.queryFinishedAt.Format(time.RFC3339Nano),
+		d.queryExit, d.queryResult, marker, d.queryError, d.queryContext, d.queryStderrTruncated, d.queryStderr)
+}
+
+func (w *liveWriter) diagnostics() liveWriterDiagnostic {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.diag
 }
 
 // startLiveWriter resolves the source primary before it returns the writer.
@@ -2470,12 +2545,16 @@ func startLiveWriterWith(
 		interval: interval,
 		timeout:  timeout,
 		pod:      pod,
+		diag: liveWriterDiagnostic{
+			startedAt: time.Now(), childExit: liveWriterNotStarted,
+			queryExit: liveWriterNotStarted, queryResult: liveWriterQueryNotRun,
+		},
 	}
 	go w.run(marker)
 	return w
 }
 
-func (w *liveWriter) recordErr(err error) {
+func (w *liveWriter) recordErr(stage string, err error) {
 	if err == nil {
 		return
 	}
@@ -2483,39 +2562,79 @@ func (w *liveWriter) recordErr(err error) {
 	defer w.mu.Unlock()
 	if w.err == nil {
 		w.err = err
+		w.diag.firstErrorStage = stage
+		w.diag.firstErrorAt = time.Now()
+		w.diag.firstError = publicationRetryProbeError(err)
 	}
 }
 
 func (w *liveWriter) readFinalMarker(marker, pod string) {
 	query := liveMarkerQuery(marker)
 	queryCtx, cancel := context.WithTimeout(context.Background(), w.timeout)
-	out, err := commandOutput(
+	w.mu.Lock()
+	w.diag.queryStartedAt = time.Now()
+	w.mu.Unlock()
+	cmd := w.command(
 		queryCtx,
-		w.command,
 		"kubectl",
 		"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-tAc", query,
 	)
+	cmd.WaitDelay = min(w.timeout, time.Second)
+	out, err := cmd.Output()
+	finishedAt := time.Now()
+	ctxErr := queryCtx.Err()
 	cancel()
+	var stderr liveWriterStderr
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		_, _ = stderr.Write(exit.Stderr)
+	}
+	if ctxErr != nil {
+		err = ctxErr
+	}
+	result := liveWriterQueryFailed
+	var last int
+	var parseErr error
+	if err == nil {
+		last, parseErr = parseLiveMarker(out)
+		result = liveWriterQueryValid
+		if parseErr != nil {
+			result = liveWriterQueryInvalid
+			if strings.TrimSpace(string(out)) == "" {
+				result = liveWriterQueryEmpty
+			}
+		}
+	}
+	w.mu.Lock()
+	w.diag.queryFinishedAt = finishedAt
+	if cmd.ProcessState != nil {
+		w.diag.queryExit = cmd.ProcessState.String()
+	}
+	w.diag.queryContext = fmt.Sprint(ctxErr)
+	w.diag.queryError = publicationRetryProbeError(err)
+	w.diag.queryStderr = stderr.text(pod)
+	w.diag.queryStderrTruncated = stderr.total > len(stderr.prefix)
+	w.diag.queryResult = result
+	if result == liveWriterQueryValid {
+		w.last = last
+		w.diag.finalMarker = last
+		w.diag.finalMarkerValid = true
+	}
+	w.mu.Unlock()
 	if errors.Is(err, context.DeadlineExceeded) {
-		w.recordErr(fmt.Errorf(
+		w.recordErr("final-query", fmt.Errorf(
 			"read final marker for cluster %s on pod %s with SQL %q timed out after %s: %w",
 			sourceCluster, pod, query, w.timeout, err,
 		))
 		return
 	}
 	if err != nil {
-		w.recordErr(fmt.Errorf("read final marker: %w", err))
+		w.recordErr("final-query", fmt.Errorf("read final marker: %w", err))
 		return
 	}
-	last, err := parseLiveMarker(out)
-	if err != nil {
-		w.recordErr(fmt.Errorf("parse final marker: %w", err))
-		return
+	if parseErr != nil {
+		w.recordErr("final-parse", fmt.Errorf("parse final marker: %w", parseErr))
 	}
-	w.mu.Lock()
-	w.last = last
-	w.mu.Unlock()
 }
 
 func liveMarkerQuery(marker string) string {
@@ -2548,6 +2667,10 @@ func (w *liveWriter) run(marker string) {
 	pod := w.pod
 	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
 		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	var stderr liveWriterStderr
+	cmd.Stderr = &stderr
+	// Bound inherited stderr descriptors after exit or explicit cancellation, not active writing.
+	cmd.WaitDelay = min(w.timeout, time.Second)
 	select {
 	case <-w.stopCh:
 		close(w.reaped)
@@ -2556,26 +2679,39 @@ func (w *liveWriter) run(marker string) {
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		w.recordErr(fmt.Errorf("open persistent psql stdin: %w", err))
+		w.recordErr("stdin-open", fmt.Errorf("open persistent psql stdin: %w", err))
 		close(w.reaped)
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		w.recordErr(fmt.Errorf("start persistent psql: %w", err))
+		w.recordErr("start", fmt.Errorf("start persistent psql: %w", err))
 		if closeErr := stdin.Close(); closeErr != nil {
-			w.recordErr(fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
+			w.recordErr("stdin-close", fmt.Errorf("close persistent psql stdin after start failure: %w", closeErr))
 		}
 		close(w.reaped)
 		return
 	}
+	w.mu.Lock()
+	w.diag.childStartedAt = time.Now()
+	w.mu.Unlock()
 
 	defer func() {
 		if err := stdin.Close(); err != nil {
-			w.recordErr(fmt.Errorf("close persistent psql stdin: %w", err))
+			w.recordErr("stdin-close", fmt.Errorf("close persistent psql stdin: %w", err))
 		}
-		if err := cmd.Wait(); err != nil {
-			w.recordErr(fmt.Errorf("wait for persistent psql: %w", err))
+		err := cmd.Wait()
+		if err != nil {
+			w.recordErr("wait", fmt.Errorf("wait for persistent psql: %w", err))
 		}
+		w.mu.Lock()
+		w.diag.reapedAt = time.Now()
+		w.diag.childExit = cmd.ProcessState.String()
+		w.diag.waitError = publicationRetryProbeError(err)
+		w.diag.writerContext = fmt.Sprint(w.ctx.Err())
+		w.diag.stderr = stderr.text(pod)
+		w.diag.stderrBytes = stderr.total
+		w.diag.stderrTruncated = stderr.total > len(stderr.prefix)
+		w.mu.Unlock()
 		close(w.reaped)
 		w.readFinalMarker(marker, pod)
 	}()
@@ -2594,11 +2730,24 @@ func (w *liveWriter) run(marker string) {
 			marker, n,
 		)
 		written, err := io.WriteString(stdin, statement)
+		writtenAt := time.Now()
+		w.mu.Lock()
+		w.diag.submittedBytes += written
+		if err == nil && written == len(statement) {
+			w.diag.submittedMarker = n
+		}
+		w.mu.Unlock()
 		if err != nil || written != len(statement) {
 			if err == nil {
 				err = io.ErrShortWrite
 			}
-			w.recordErr(fmt.Errorf("write live marker %d: %w", n, err))
+			w.mu.Lock()
+			w.diag.writeFailedAt = writtenAt
+			w.diag.failedMarker = n
+			w.diag.writeError = publicationRetryProbeError(err)
+			w.diag.brokenPipe = errors.Is(err, syscall.EPIPE)
+			w.mu.Unlock()
+			w.recordErr("stdin-write", fmt.Errorf("write live marker %d: %w", n, err))
 			return
 		}
 	}
@@ -2608,6 +2757,9 @@ func (w *liveWriter) run(marker string) {
 // Repeated calls share the first call's completed lifecycle and first error.
 func (w *liveWriter) stop() (int, error) {
 	w.stopOnce.Do(func() {
+		w.mu.Lock()
+		w.diag.stopAt = time.Now()
+		w.mu.Unlock()
 		close(w.stopCh)
 		timer := time.NewTimer(w.timeout)
 		defer timer.Stop()
@@ -2615,7 +2767,7 @@ func (w *liveWriter) stop() (int, error) {
 		case <-w.reaped:
 		case <-w.done:
 		case <-timer.C:
-			w.recordErr(fmt.Errorf(
+			w.recordErr("stop-timeout", fmt.Errorf(
 				"stop persistent psql for cluster %s on pod %s timed out after %s: %w",
 				sourceCluster, w.pod, w.timeout, context.DeadlineExceeded,
 			))
