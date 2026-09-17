@@ -90,7 +90,7 @@ The Go build cache, the module cache, golangci-lint's analysis cache and the bui
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
-The suite installs a throwaway operator, creates two single-instance CNPG clusters by default, and seeds the source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
+The suite installs a throwaway operator, creates a shared source/target CNPG pair with one instance each by default, and seeds the source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
 The non-unique secondary indexes are built once by `finish.sql` rather than maintained per insert.
@@ -99,7 +99,19 @@ After refreshing the materialized view, `finish.sql` runs `VACUUM (ANALYZE)` acr
 Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
 The fixture manifest leaves `bootstrap.initdb.dataChecksums` unset; the [CNPG option defaults to `false`](https://cloudnative-pg.io/docs/1.27/bootstrap/#passing-options-to-initdb).
 
-The pooling fixture requires the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster and pod permissions, including `pods/exec`.
+The pooling spec creates its own ephemeral CNPG pair because [managed Pooler authentication](https://cloudnative-pg.io/docs/1.27/connection_pooling/#authentication) installs objects in `postgres`, even when clients use `app`.
+Those objects can persist after Pooler deletion, so a separate application database does not isolate the shared maintenance catalogs used by all-databases clones.
+The dedicated pair follows `E2E_PG_SOURCE`/`E2E_PG_TARGET` and the fixture StorageClass, but always uses one instance and a 1Gi PVC per cluster, independent of scale, stress, and `E2E_CNPG_INSTANCES`.
+It requests 100m CPU and 256Mi memory per instance, uses PostgreSQL's default caches, and sizes `max_wal_size` at a fifth of its volume.
+Cleanup registers after each successful create and removes the runner and Poolers before the clusters, checks deletion UIDs, and waits for cluster-labelled pods and UID-owned PVCs to disappear, even with `E2E_KEEP_FIXTURES=true`.
+The spec requires dedicated-cluster Pooler ownership and unchanged schema/function signatures and owners in both shared `postgres` databases while pooling and after cleanup; it reads no authentication function bodies or secret values.
+
+> [!important]
+> Recreate kept shared fixtures whose maintenance databases contain Pooler authentication objects before running all-databases tests.
+> `E2E_KEEP_FIXTURES=false` controls teardown after a run; it does not clean those databases before the run.
+
+The pooling fixture requires the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster, pod, and PVC permissions, including `pods/exec`.
+Dedicated-cluster readiness and cleanup require `get`, `list`, and `delete` on PVCs in `pgcopydb-e2e`.
 Grant those three Pooler verbs through a dedicated Role and RoleBinding in `pgcopydb-e2e` only.
 The runner's ServiceAccount and GitOps RBAC live outside this repository (see private ops notes).
 The [chart's RBAC and ServiceAccount values](charts/pgcopydb-operator/README.md#rbac-and-serviceaccounts) configure the manager, which does not manage CNPG fixtures; changing them cannot repair a runner authorization failure.
@@ -109,12 +121,12 @@ Two tiers, and the environment variables a run reads:
 | Variable                      | Default | Effect                                                                                                                                                     |
 |-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `E2E_SCALE`                   | `1`     | Fixture and volume multiplier: 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.                                  |
-| `E2E_CNPG_INSTANCES`          | `1`     | Instances per fixture CNPG cluster. One keeps setup and teardown short, and the migration still crosses the network because source, target and worker are separate pods. Raise it to 3 for the chaos scenarios, one of which kills a primary. |
+| `E2E_CNPG_INSTANCES`          | `1`     | Instances per shared source/target CNPG cluster. Raise it to 3 for chaos failover coverage. The pooling pair stays at one instance each. |
 | `E2E_EXTRA_TABLES`            | unset   | Adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`. The base fixture is deliberately lopsided (one table holds 73% of the bytes); this gives it a production shape. Must be set with `E2E_EXTRA_SIZE_GB`. |
 | `E2E_EXTRA_SIZE_GB`           | unset   | Total size of the extra tables. Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL. Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape. |
 | `E2E_EXTRA_JOBS`              | `4`     | Concurrent psql sessions that seed the extra tables. Each session derives the same deterministic layout and builds its assigned tables. |
 | `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets. Use `task e2e:stress`.                               |
-| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and clusters for iteration; the next run reuses them and skips a matching seed.                                        |
+| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and shared clusters for iteration; the next run reuses them and skips a matching seed. The pooling pair is always removed. |
 | `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                                                              |
 | `E2E_PG_SOURCE`               | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                                                                   |
 | `E2E_PG_TARGET`               | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).                                                   |
@@ -140,17 +152,20 @@ A kept cluster the run cannot adopt in place is deleted and recreated before the
 When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
 One Longhorn replica is deliberate: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
+Its requested-storage budget includes the shared pair, work volume, and two additional 1Gi pooling volumes before applying 20% headroom.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
 
-The fixtures are placed, not left to the scheduler.
-Each CNPG cluster has one instance by default and uses preferred pod anti-affinity over `kubernetes.io/hostname` when `E2E_CNPG_INSTANCES` adds replicas.
+The shared fixtures are placed, not left to the scheduler.
+Each shared CNPG cluster has one instance by default and uses preferred pod anti-affinity over `kubernetes.io/hostname` when `E2E_CNPG_INSTANCES` adds replicas.
 The runner Jobs carry anti-affinity against the two primaries so a migration's SQL legs cross the network instead of looping back inside one node.
 The target additionally repels the source's first instance, because CNPG's own anti-affinity only separates instances of the same cluster and the two primaries would otherwise share whichever node scores highest.
 Every suite-created pod also declares CPU and memory requests.
 A pod that requests nothing scores identically on every node, so the least-allocated node wins every scheduling decision and never gets any less attractive, and an entire run piles onto one node.
 All placement rules are preferred, so a smaller cluster can co-locate the pods and still pass.
 
-Fixture servers get 2 CPUs and 4Gi, and the seed Job and runner Jobs the same. Requests only, so nothing is throttled. The caches are set by hand alongside them (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
+Shared fixture servers get 2 CPUs and 4Gi, and the seed Job and migration runner Jobs the same.
+Requests only, so nothing is throttled.
+The caches are set by hand alongside them (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
 
 Two specs cover this. One reads what was rendered onto the pods, an anti-affinity term and non-zero requests, which is namespaced and so runs anywhere; the other counts the nodes the instances actually occupy, which needs to read nodes and skips where that is not permitted. The first is the one that binds: CloudNativePG defaults to a preferred hostname anti-affinity on its own, so the fixtures would still spread, and the node count alone would still pass, with the suite's own configuration deleted.
 

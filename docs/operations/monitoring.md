@@ -232,6 +232,8 @@ Monitor `pg_replication_slots` on the source itself (`active` and `safe_wal_size
 Every change runs the static gates: the dashboards must parse with unique uids, every PromQL token in a panel or alert must name a registered metric (and every metric must be consumed somewhere), and promtool checks the rules plus a unit test per alert.
 Each release candidate then runs a live gate: the e2e suite drives a real follow migration, checks the exported series against a running Prometheus mid-stream and after cutover, replays every dashboard panel query and fails on an empty answer unless the panel is legitimately empty for a completed migration, and finally verifies deletion removes the series.
 The active pooling E2E runs the real progress sampler from a candidate runner Job through single-slot source and target PgBouncer transaction pools.
+The pools use a dedicated ephemeral CNPG pair because managed authentication can leave objects in `postgres` after Pooler deletion.
+The spec checks that both shared maintenance catalogs retain their schema/function signatures and owners during pooling and after fixture cleanup.
 It checks backend identity and timeout restoration across successful and lock-cancelled samples, recovery after unlocking, and subsequent COPY and index operations that each take more than five seconds on the server.
 Pooler resets and query timeouts do not mask the sampler's behavior.
 

@@ -71,6 +71,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	}
 	Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 	Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+	resetTargetObjects()
 	DeferCleanup(func() {
 		deleteMigration(name)
 		Eventually(func() string { return query(Default, sourceCluster, slotCountSQL) },

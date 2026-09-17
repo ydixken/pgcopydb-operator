@@ -948,3 +948,161 @@ YAML, generated-manifest drift, chart synchronization, RBAC/monitoring, document
 The target reported `lint: no actionlint, skipping workflow lint`; CI owns that check.
 No local Go tests, image builds, documentation builds, or cluster operations ran in this publication phase.
 Functional tests, documentation validation, the final-head runner smoke build, and full RC3 E2E remain remote gates.
+
+## Stable v0.13.3: allDatabases E2E follow-up
+
+- [x] Create isolated branch `fix/all-databases-e2e-failure` from freshly fetched `origin/main`.
+  Local `main`, `origin/main`, and stable tag `v0.13.3` resolve to `d6a32c4e665dbdd5408caf585204ba97495642c8`.
+- [x] Record the user-verified release handoff: stable `v0.13.3` is published and its artifacts are verified.
+  Publication and artifact checks were not repeated during workspace preparation.
+- [x] Record the user-reported stable `allDatabases` E2E failure in [run 35165037653](https://github.com/ydixken/pgcopydb-operator/actions/runs/35165037653), [job 105024114133](https://github.com/ydixken/pgcopydb-operator/actions/runs/35165037653/job/105024114133): timestamp `00:35:06Z`, attempt `4`, with `lastError` reporting a cleanup queue `Invalid argument` error.
+
+> [!important]
+> The focused stable-image diagnostic confirms that Pooler cleanup leaves `public.user_search(text)` in both shared `postgres` databases, causing AllDatabases to fail during pre-data restore.
+> The cleanup queue error follows the duplicate-function failure.
+> A separate baseline diagnostic confirms both keepalive failures after a full clone leaves target dependencies excluded from the next filtered restore.
+> Manual passed in the first ordered diagnostic, which did not exercise that preceding full-clone setup.
+
+- [x] Collect the actual AllDatabases worker errors preceding cleanup, including earlier attempts, and identify the first causal failure.
+  Keep private infrastructure details in private ops notes; include only sanitized evidence in public records.
+- [x] Reproduce the failure on the published baseline, confirm the root cause, then fix it with paired baseline-fail and focused fixed-pass evidence.
+- [ ] Add regression coverage and affected documentation, obtain independent review, run local `task lint`, and require exact-head CI `lint`, `test`, and `docs` success.
+- [ ] Verify the affected scenario and the full suite through the appropriate new release-candidate or authorized harness proof route, recording exact source and artifact identities, run evidence, and cleanup results.
+  Focused harness success MUST NOT substitute for the full release-candidate suite; published tag `v0.13.3` MUST NOT be rewritten.
+
+### Ordered stable-image diagnostic
+
+- [x] Verify the stable source and original suite seed without changing cluster resources.
+  Run `35165037653` used seed `1789603652` and ran Keepalive Manual before Pooling, then AllDatabases.
+  Native dry-runs preserve that relative order when the suite is filtered.
+  With the same seed, `randomize-all` puts Pooling before Manual before AllDatabases.
+  Sequential seed-only dry-runs found `1789603663` gives Pooling, positive AllDatabases, then Keepalive Manual.
+- [x] Validate the approved context privately and record fixture inventories plus namespace and preexisting Secret metadata UIDs.
+  Test resources were absent before the diagnostic, and all three namespace UIDs plus twelve preexisting Secret UIDs were recorded privately.
+- [x] Run one guarded focus with stable manager and runner `v0.13.3`, scale `0.25`, `KEEP=false`, and `MANAGE_NS=false`.
+  Temporary diagnostic hooks may read function identity and owner in `postgres` and `app`, and bounded sanitized worker logs before cleanup.
+  They MUST NOT read function bodies, credentials, or live SQLite files, or remove the managed auth function.
+- [x] Verify cleanup and preservation, save the diagnostic-only patch privately, and restore only the temporary hunks.
+- [x] Record the first worker errors and limits of the evidence without claiming a production fix or a release gate result.
+
+#### Diagnostic result
+
+The run selected three of fifty specs and finished with two passed, one failed, and forty-seven skipped.
+Pooling passed, AllDatabases failed, and Keepalive Manual passed in that order.
+The runner identified itself as `0.18.15.gea2dc96`.
+The manager image ID was `sha256:06096c6ec3572a83e0bbfcc108a3af6acd7fecedc966031c22b14f56df66ef0a`.
+The runner image ID was `sha256:51a94c4cdd6454ceeba3b4b050e28d623a565fdf5efe6bbc9de76e10ce31b4f4`.
+
+Before Pooling, `public.user_search(text)` was absent from `postgres` and `app` on both clusters.
+While Poolers existed and after both were deleted, the function existed in both `postgres` databases with owner `postgres`.
+It remained absent from both `app` databases throughout the diagnostic.
+
+Every AllDatabases attempt first reported `pg_restore: error: could not execute query: ERROR: function "user_search" already exists with same argument types`.
+Each then reported failure to restore pre-data for database `postgres`, worker exit `12`, and Job failure with `BackoffLimitExceeded`.
+The message-queue `Invalid argument` error followed those failures.
+All four complete worker streams were below the prefix limit and were captured before fixture cleanup, with a separate bounded tail.
+
+Keepalive Manual reached `Completed` in one attempt and its worker exited `0`.
+Its complete captured worker stream contained no ERROR lines.
+The original stable seed ran Manual and Automatic before Pooling, so this Pooling case cannot explain those earlier failures within that run.
+
+Cleanup left zero Migrations, CNPG Clusters, Poolers, Jobs, pods, PVCs, Deployments, ReplicaSets, or Services in the three fixture namespaces.
+The Helm release was absent, and all three namespace UIDs, twelve preexisting Secret metadata UIDs, and three baseline ConfigMap metadata UIDs were preserved exactly.
+Private evidence and the restored diagnostic patch are in private ops notes outside git.
+The diagnostic handoff changed only this task note.
+Local `task lint` exited successfully with zero Go issues; its actionlint check reported that the tool was unavailable and skipped workflow lint.
+
+### Pooling fixture isolation
+
+- [x] Trace the pooling spec, CNPG constructor, readiness and PVC helpers, and existing capacity budget from stable source `d6a32c4e665dbdd5408caf585204ba97495642c8`.
+- [x] Move both Poolers and every pooling probe onto a dedicated ephemeral CNPG pair, preserving the PostgreSQL version matrix and functional assertions.
+- [x] Register each cluster's cleanup immediately after creation, delete only UID-owned resources, and wait for its pods and PVCs to disappear after dependent cleanup.
+- [x] Assert that Poolers reference the new cluster UIDs and that shared maintenance schema/function metadata stays unchanged during pooling and after cleanup.
+- [x] Account for two fixed 1Gi auxiliary PVCs in the existing capacity budget and update affected test documentation.
+- [x] Review the scoped diff, format touched Go files, and run local `task lint`.
+- [x] Obtain focused fixed-pass proof, including isolation and cleanup, after the separate keepalive baseline run.
+- [ ] Complete final independent review, exact-head CI, and full E2E verification after review corrections.
+
+Keep production behavior, chart sources, runner pins, and published release tags unchanged.
+Do not remove CNPG-managed authentication objects from shared databases.
+The initial scope withheld keepalive/publication changes pending diagnosis; the separate baseline evidence below supports their one-time target resets.
+The earlier stable failures remain the baseline proof; focused fixed-pass evidence does not close the full-suite gate.
+Regression assertions live in the existing `Progress sampler transaction pooling` Ginkgo spec; no standalone Go test family or CI selector is added.
+The existing non-cluster CI selector remains limited to `TestCutoverDiagnostic*` and `TestPublicationRetry*`.
+The focused verifier passed the new assertions, small-volume startup, and cleanup paths; full E2E and release-candidate coverage remain separate gates.
+
+#### Static review
+
+`gofmt -l` returned no paths and `git diff --check` exited 0.
+`task lint` exited 0 with `0 issues.` from Go lint; YAML, generated manifests, chart synchronization and rendering, documentation links, and Prometheus checks passed.
+It reported `lint: no actionlint, skipping workflow lint`.
+The diff against stable source is empty for `api`, `cmd`, `internal`, `charts`, `config`, `images`, `.github`, `go.mod`, `go.sum`, `Dockerfile`, and `Makefile`.
+This implementation phase ran no local Go tests, builds, or cluster operations and made no commits or remote changes.
+The seven fixture-fix files are the pooling, keepalive, and publication-retry specs, the suite helper file, `CONTRIBUTING.md`, `docs/operations/monitoring.md`, and this task record.
+The review lesson is recorded separately in `tasks/lessons.md`.
+
+### Separate keepalive baseline
+
+The separate diagnostic used stable source `d6a32c4e665dbdd5408caf585204ba97495642c8`, published manager and runner `v0.13.3`, seed `1789603652`, and scale `0.25`, with pooling excluded.
+Progress sampler bounds passed first; Keepalive Manual and Automatic then failed during their initial clones, before reaching feedback assertions.
+Each keepalive case exhausted four worker attempts.
+All eight workers first reported that `public.e2e_touch_updated_at()` could not be dropped because trigger `app_users_touch_updated` on `public.app_users` depended on it; PostgreSQL recorded SQLSTATE `2BP01`.
+The prior full clone left that table on the target, but the keepalive filter excluded it from restore cleanup.
+Other excluded-table dependencies blocked type and extension cleanup; duplicate-definition errors followed, and the stable log's `END $$;` suffix did not identify the first cause.
+
+```text
+Ran 3 of 50 Specs in 612.141 seconds
+FAIL! -- 1 Passed | 2 Failed | 0 Pending | 47 Skipped
+```
+
+Each keepalive/publication fixture now calls `resetTargetObjects()` once after the zero-slot and zero-origin checks, before its filtered clone starts.
+There is no reset between publication attempts or suspend/resume phases.
+The publication reset was preventive because its setup has the same filtered-clone precondition; those cases were not part of this baseline diagnostic.
+Both publication cases subsequently passed the fixed functional verification below.
+
+### Fixed focused verification
+
+Both groups ran sequentially at scale `0.25` with the same published manager and runner `v0.13.3` and runtime digests recorded above.
+Group A used seed `1789603663`: Pooling, AllDatabases, then Keepalive Manual all passed.
+
+```text
+Ran 3 of 50 Specs in 678.141 seconds
+SUCCESS! -- 3 Passed | 0 Failed | 0 Pending | 47 Skipped
+```
+
+Group B used seed `1789603652`: Progress sampler bounds, Keepalive Manual, Keepalive Automatic, established-publication suspend/resume, then orphan-publication repair all passed.
+
+```text
+Ran 5 of 50 Specs in 1016.847 seconds
+SUCCESS! -- 5 Passed | 0 Failed | 0 Pending | 45 Skipped
+```
+
+The eight successful spec executions include Manual in both groups.
+Both auxiliary CNPG clusters became ready with one instance and one Bound 1Gi PVC each; pods and PVCs had the expected cluster controller UIDs.
+Pooler ownership chains, same-backend restoration, cancellation, six-second COPY/index operations, unchanged shared maintenance catalogs, and deferred cleanup all passed.
+AllDatabases, bounds, and keepalive passed their single-worker-attempt assertions.
+Both publication cases passed their attempt-2 and resume-argument assertions, including retained publication/work-PVC identity and marker rows for suspend/resume, plus the deliberate duplicate-publication failure and repair for the orphan case.
+Independent inventories found all main and auxiliary test resources absent after each run, with namespace and preexisting Secret/ConfigMap metadata UIDs preserved.
+Detailed evidence is in private ops notes outside git.
+
+Review closure narrows only the pooling readiness pod selector to CNPG instances and gives its cleanup context one minute beyond the unchanged ten-minute wait budget.
+Cleanup still checks all cluster-labelled pods and retains its UID-checked PVC deletion fallback.
+After these review edits, `gofmt -l` returned no paths, `git diff --check` passed, and `task lint` exited 0 with `0 issues.`; actionlint was unavailable and skipped.
+The focused runs preceded these review edits; exact-head CI and full manual E2E remain pending, with no additional focused run in this closure pass.
+The focused results do not establish a full stable-suite pass or authorize changing published tags.
+
+### Test-only publication and published-image verification
+
+The user approved independent review closure and authorized unsigned publication, gated merge, and one full `e2e.yml` dispatch from merged `main` with `tag=v0.13.3` and `scale=0.25`.
+This uses the reviewed test harness with the existing release artifacts; no new release, retag, or image build is authorized.
+Record remote gate and dispatch results in the PR rather than follow-up bookkeeping commits.
+
+- [x] Inspect the eight intended paths, all branch commits, recent history, remote tracking, and fresh `origin/main`; the base is `d6a32c4e665dbdd5408caf585204ba97495642c8`.
+- [x] Confirm review closure, paired baseline/fixed proof, unchanged production sources, and preserved fork feature refs.
+- [x] Complete final local formatting, whitespace, and `task lint` checks with `0 issues.`; the existing target reports unavailable actionlint and leaves workflow validation to CI.
+- [x] Verify the published tag object `4df87d225b1f03f454025f6aef9b821b4b07f415`, both recorded image digests, and chart OCI digest `sha256:d1b17eb243b45887a47e7db6eaa1ae92b1cd6d58f87d34fc4ba7e5d0fea9d893` before publication.
+- [ ] Commit only the eight intended files unsigned, push the feature branch normally, and open the test-only PR.
+- [ ] Require exact-head `lint`, `test`, `docs`, and any Codecov checks; recheck the reviewed diff and base before merging with the matched head.
+- [ ] Verify merge-tree equality, post-merge CI, documentation deployment, mirror success, and unchanged release source and artifact identities.
+- [ ] Dispatch `e2e.yml` once from merged `main` against published `v0.13.3` at scale `0.25`, then verify checkout, image availability, prerequisites, and suite startup.
+- [ ] Follow the full E2E result and cleanup separately; startup alone does not close the stable-suite gate.
