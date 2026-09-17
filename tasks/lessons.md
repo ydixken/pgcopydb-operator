@@ -59,3 +59,6 @@
   Keep fixed WAL-noise fixtures unscaled so they still exceed the default `16Mi` lag allowance.
 - Distinguish objects left by a prior full clone from objects selected by the next filtered restore.
   Keep baseline failures, preventive fixture changes, focused passes, and pending full-suite gates separate in evidence summaries.
+- Reviewer recommendations do not override the CI-only functional-test rule; unknown race-instrumented timing belongs to exact-head CI, not a new local gate.
+- Publish a diagnostic result and its validity together; an interim failure label can mislead concurrent readers even when every field is locked.
+- Redact known DNS/transport error phrases as whole lines: private hostnames can appear without a URI or IP address.

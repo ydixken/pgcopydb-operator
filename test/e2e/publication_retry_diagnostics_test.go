@@ -54,6 +54,7 @@ var (
 	publicationRetryTokenPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,79}$`)
 	publicationRetryImageDigest  = regexp.MustCompile(`sha256:[a-f0-9]{64}$`)
 	publicationRetrySensitive    = regexp.MustCompile(`(?i)://|password|passwd|passfile|pgpass|secret|token|` +
+		`\bdial\s+(?:tcp|udp)[46]?\b|\blookup\b.*\bno such host\b|\bcould not translate host name\b|` +
 		`\b(?:host\w*|user|dbname|port|ssl\w*|service|node|pod)\s*[=:]|` +
 		`\b(?:host|hostname|server|node|pod)\s+["']|\b(?:\d{1,3}\.){3}\d{1,3}\b|` +
 		`\[[0-9a-f:]+\]|\b[0-9a-f]*::[0-9a-f:]+(?:\s|$)|(?:[0-9a-f]{1,4}:){4}|\b[A-Z_][A-Z0-9_]*=`)
@@ -378,6 +379,8 @@ func TestPublicationRetryLogRedaction(t *testing.T) {
 		"host='db.invalid' user=app password='credential with spaces'\n" +
 		"PGCOPYDB_SOURCE_PGURI=credential\npassword: credential\nTOKEN=credential\n" +
 		"dial tcp 192.0.2.1:443\ndial tcp [2001:db8::1]:443\n" +
+		"dial tcp: lookup safe.invalid: no such host\ndial udp safe.invalid: connection refused\n" +
+		"lookup safe.invalid: no such host\ncould not translate host name safe.invalid to address\n" +
 		`{"error_severity":"ERROR","message":"incomplete private-node.invalid` + "\n"
 	out := publicationRetryLogText(raw, publicationRetryTestPod, "private-node.invalid")
 	for _, want := range []string{"[INFO] opening catalog", `[ERROR] relation "pgcopydb.sentinel" does not exist`,

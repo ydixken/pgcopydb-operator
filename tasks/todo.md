@@ -1106,3 +1106,77 @@ Record remote gate and dispatch results in the PR rather than follow-up bookkeep
 - [ ] Verify merge-tree equality, post-merge CI, documentation deployment, mirror success, and unchanged release source and artifact identities.
 - [ ] Dispatch `e2e.yml` once from merged `main` against published `v0.13.3` at scale `0.25`, then verify checkout, image availability, prerequisites, and suite startup.
 - [ ] Follow the full E2E result and cleanup separately; startup alone does not close the stable-suite gate.
+
+## Stable v0.13.3: continuous-writer failure follow-up
+
+### Baseline and latest full-run evidence
+
+[PR #281](https://github.com/ydixken/pgcopydb-operator/pull/281) merged the fixture fixes as `b12c254fc5b03bc0c4de3e2c9dd4d3831bb2e64c`.
+The isolated follow-up branch is `fix/e2e-live-writer-failure`, based on that freshly fetched `origin/main` commit.
+[Full E2E run 35180589925](https://github.com/ydixken/pgcopydb-operator/actions/runs/35180589925) completed with conclusion `failure` using the `main` harness at `b12c254fc5b03bc0c4de3e2c9dd4d3831bb2e64c` against published `v0.13.3` artifacts at scale `0.25`.
+The release source remains `d6a32c4e665dbdd5408caf585204ba97495642c8`; its annotated tag object is `4df87d225b1f03f454025f6aef9b821b4b07f415`.
+Keep the harness revision separate from the immutable release source and artifact identities.
+
+The run handoff records `FAILED`: 32 passed, 1 failed, and 17 skipped, including 10 ordered-dependent skips.
+All previously fixed fixture scenarios passed.
+The log records writer start at `04:57:34` and stop/failure at `04:59:12`, with `EPIPE` at attempted marker `199` and last reported marker `0`.
+The attempted marker describes submitted SQL, not committed rows; the zero result is ambiguous because final-query validity was not recorded.
+Source forensics recorded zero pod restarts and zero sampled OOM/cgroup OOM counters in the inspected window, with no source Kubernetes events.
+Server logs covering the failure were not retained, and the writer discarded child stderr, so the evidence cannot distinguish SQL/session failure from exec transport failure.
+The traced writer uses `WithCancel` without an active-writing deadline; its 30-second timeout bounds shutdown and the final query only.
+The cause remains **UNCONFIRMED**.
+These results supersede the pending full-run outcome in the preceding publication checklist and do not establish a full-suite pass.
+
+### Follow-up checklist
+
+- [x] Verify the destination parent and absent target path/branch, then create the isolated worktree from freshly fetched `origin/main` at the expected merge commit.
+- [x] Read `AGENTS.md`, `tasks/lessons.md`, and ponytail at full intensity; record the latest completed full run and separate harness/release provenance.
+- [x] Review the failed run's existing evidence and source forensics, and trace the writer lifecycle and helper callers.
+  The evidence is insufficient to identify the cause; `EPIPE` remains a symptom.
+- [x] Implement bounded, sanitized failure-only diagnostics and regression coverage while preserving the first error, one child, captured primary, SQL, pace, and shutdown/query order.
+  Record failure-time timestamps, submitted counters, child exit/signal, stderr, and independent final-query validity without private identities or raw command errors.
+- [x] Configure all three helper families in the no-cluster CI step with `-race -v` and extend the per-source-test selector contract.
+- [x] Update the diagnostic documentation, format touched files, and run initial local `task lint`: exit 0, `0 issues.`.
+  Workflow lint skipped because actionlint was unavailable; CI retains that gate.
+- [x] Apply review follow-ups for atomic final-query snapshots, exact CI flags, and known DNS/transport redaction with synthetic regressions.
+- [x] Format the four touched Go files and run `task lint` after the review follow-ups: exit 0, `0 issues.`.
+  YAML, generated-manifest/chart drift, Helm, documentation-link, Prometheus, and Go lint checks passed; workflow lint again skipped because actionlint was unavailable.
+- [ ] Verify exact-head functional/race tests, selector/flag contracts, and documentation checks in PR CI before merge or use of public runtime diagnostics.
+  Publish a draft or normal PR only in the separately authorized delivery phase; record run URLs, actual test selection, and results.
+  The runner image's GCC/cgo prerequisites were verified, and helper children already use `GORACE=atexit_sleep_ms=0`.
+  Remaining race-instrumented runtime and timing cost is a CI gate, not a reason to add a local functional gate.
+- [ ] Run the capture-removal mutation in disposable CI, require a behavioral failure rather than a compile failure, restore capture, and require the same regressions to pass.
+  See [Live-writer diagnostic verification](live-writer-diagnostics.md) for the procedure.
+- [ ] Identify the writer's failure cause from retained evidence before choosing a root fix.
+- [ ] Establish a meaningful reproduction that fails on the affected baseline, then implement the smallest root-cause fix with regression coverage that passes on the fixed revision.
+  Preserve writer-error propagation and all data-loss, marker, cutover, and cleanup assertions; MUST NOT hide the failure with retries, skips, or weakened assertions.
+- [ ] After separate authorization and exact-head CI, use focused E2E if full-run evidence still cannot resolve the assertion.
+  Preserve context confirmation, bounded execution, and owned-resource cleanup; see private ops notes for environment details.
+  A focused pass is diagnostic evidence and MUST NOT replace the full suite.
+- [ ] After the follow-up is delivered under separate authorization, run the full native `e2e.yml` workflow from `main` with `tag=v0.13.3` and `scale=0.25`.
+  Keep the native suite selection and assertions, record the exact harness SHA, and verify the existing release tag and image/chart digests remain unchanged.
+  Do not rebuild, retag, or replace the published artifacts.
+- [ ] Record the full suite result, ordered-dependent outcomes, cleanup result, run URL, and immutable artifact identities before closing the follow-up.
+
+### Implementation and review scope
+
+The implementation phase covered the scoped test-harness diagnostics, regression sources, CI contract, and documentation updates.
+The publication phase below supersedes its commit and push restriction.
+Local verification is limited to formatting and `task lint`; functional and race evidence comes from exact-head PR CI.
+Preserve the root worktree's user task note and untracked release assessments unread, and retain all existing worktrees and fork branches.
+Secret values MUST NOT be read, printed, or changed; private contexts and GitOps paths MUST NOT enter public notes.
+
+### Diagnostics-only publication
+
+The user authorized one unsigned commit, a normal branch push, a PR against `main`, and exact-head CI verification.
+Merge, cluster access, focused or full E2E, release creation, and stable-tag mutation require a separate delivery-leader check.
+Record the PR URL, commit SHA, CI URLs, test selection, and timings in the PR rather than a follow-up bookkeeping commit.
+
+- [x] Inspect status, all ten intended files including the new verification note, recent history, upstream tracking, and the complete base diff.
+  Fetched `origin/main` and the branch both resolve to `b12c254fc5b03bc0c4de3e2c9dd4d3831bb2e64c`, with no earlier branch commits to publish.
+- [x] Verify all five touched Go files are gofmt-stable, `git diff --check` passes, and final local `task lint` exits 0 with `0 issues.` in 10.454 seconds.
+  Local actionlint is unavailable; CI owns workflow syntax verification.
+- [ ] Stage only the ten reviewed paths, commit with `--no-gpg-sign`, push without force, and open the five-section diagnostics-only PR.
+- [ ] Verify `lint`, `test`, and `docs` on the exact published head, plus Codecov when present.
+  Record helper-step build/startup time, every meaningful `TestLiveWriter` parent result, stderr flood, atomic-query and concurrency coverage, and the parent-only subprocess-helper skip.
+  Stop on any failure with its exact head and logs; report a bounded checkpoint if CI exceeds 20 minutes.

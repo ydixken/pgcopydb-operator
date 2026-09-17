@@ -186,7 +186,21 @@ Recovery after unlocking has a separate 12-minute backlog drain budget shared by
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
-CI runs both the cutover and publication-retry diagnostic helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`) without starting the cluster suite.
+CI runs the cutover, publication-retry, and live-writer helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`) with `-race -v` without starting the cluster suite.
+Verbose output makes actual test selection and the expected parent-only subprocess-helper skip visible; it does not waive any meaningful regression.
+The `TestLiveWriterHelper` subprocess entry point skips in the parent process; the lifecycle tests invoke it as a child.
+
+The live-load spec emits a writer report only on failure, after stopping the writer.
+It records failure-time timestamps, submitted marker and byte counts, the child exit or signal, and final-query execution, parsing, and marker availability separately from the first returned error.
+Submitted bytes and markers are not committed-row counts; a valid zero marker differs from an unavailable query result.
+The writer still uses one persistent child and the primary captured at startup, followed by one fresh bounded final query after stdin closes and the child is reaped.
+There is no active-writing deadline; the command timeout bounds shutdown and the final query.
+`Cmd.WaitDelay` bounds inherited output descriptors to at most one additional second per command after exit or cancellation.
+The report retains an 8KiB stderr prefix while draining excess output, discards a truncated partial line, and applies the publication-retry redactors after joining chunks.
+Known DNS and TCP/UDP error phrases suppress the whole line, including bare hostnames without a URI or IP address.
+Final-query stderr comes from `exec.ExitError` when available, with the same prefix limit and redaction.
+The report uses a source-role label rather than a pod name, emits no raw command error or query output, and makes no additional Kubernetes requests.
+These diagnostics do not establish whether a broken pipe originated in SQL, the session, or the exec transport.
 
 No pull request runs the E2E suite, and there is no pre-merge cluster validation.
 The merge gate on `main` is the three `ci.yml` jobs, `lint`, `test`, and `docs`.

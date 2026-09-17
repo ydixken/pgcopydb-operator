@@ -511,7 +511,12 @@ var _ = Describe("Migration", Ordered, func() {
 		w := startLiveWriter(marker)
 		// The fixture is shared and these specs are Ordered, so a writer that
 		// outlives this spec corrupts every spec after it.
-		DeferCleanup(func() { _, _ = w.stop() })
+		DeferCleanup(func() {
+			_, _ = w.stop()
+			if CurrentSpecReport().Failed() {
+				AddReportEntry("live writer after stop", w.diagnostics().String(), ReportEntryVisibilityFailureOrVerbose)
+			}
+		})
 		create(mig)
 
 		By("waiting for streaming with the source still moving")
@@ -522,7 +527,8 @@ var _ = Describe("Migration", Ordered, func() {
 		// after it.
 		By("stopping the writer, so the source is quiescent from the freeze onward")
 		last, err := w.stop()
-		Expect(err).NotTo(HaveOccurred(), "the live writer failed after %d rows", last)
+		Expect(publicationRetryProbeError(err)).NotTo(HaveOccurred(),
+			"the live writer failed; see the live writer diagnostic report for final marker availability")
 		Expect(last).To(BeNumerically(">", 100),
 			"the writer committed only %d rows, too few to exercise a migration under load", last)
 		sourceLast := psql(sourceCluster, liveMarkerQuery(marker))

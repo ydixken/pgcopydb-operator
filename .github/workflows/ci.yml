@@ -219,10 +219,10 @@ jobs:
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: make test
-      - name: Cutover and publication-retry diagnostic helper regressions (no cluster)
+      - name: Cutover, publication-retry, and live-writer helper regressions (no cluster)
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
-        run: go test ./test/e2e -run '^(TestCutoverDiagnostic|TestPublicationRetry)' -count=1
+        run: go test ./test/e2e -run '^(TestCutoverDiagnostic|TestPublicationRetry|TestLiveWriter)' -count=1 -race -v
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
       # Codecov requires a token even for a public repo: a tokenless upload is
