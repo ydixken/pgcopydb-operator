@@ -1,6 +1,7 @@
 # Configuration
 
-The knobs you reach for after the first clone works. Every field, with defaults and validation, is in the [CRD reference](reference/api.md); complete commented resources live in the [examples index](examples.md).
+The knobs you reach for after the first clone works.
+Every field, with defaults and validation, is in the [CRD reference](reference/api.md); complete commented resources live in the [examples index](examples.md).
 
 ## Clone tuning
 
@@ -107,11 +108,13 @@ spec:
       excludeTableData: ["public.event_log"]  # schema yes, rows no
 ```
 
-Table names follow PostgreSQL quoting and `~/regex/` patterns work. All eight pgcopydb filter sections are exposed; the [CRD reference](reference/api.md) lists them.
+Table names follow PostgreSQL quoting and `~/regex/` patterns work.
+All eight pgcopydb filter sections are exposed; the [CRD reference](reference/api.md) lists them.
 
 ## Work volume
 
-`spec.workVolume` sizes the PVC that holds pgcopydb's dumps and catalogs. It is the unit of resumability: retries resume from it.
+`spec.workVolume` sizes the PVC that holds pgcopydb's dumps and catalogs.
+It is the unit of resumability: retries resume from it.
 
 ```yaml
 spec:
@@ -124,7 +127,8 @@ For live migrations the volume also buffers the change stream, so budget the clo
 
 ## Runner image
 
-The worker Jobs run the operator-wide runner image (chart value `runner.image`, pgcopydb 0.18 with PostgreSQL 18 client tools). `spec.runner` overrides it per Migration, along with pod placement and resources:
+The worker Jobs run the operator-wide runner image (chart value `runner.image`, pgcopydb 0.18 with PostgreSQL 18 client tools).
+`spec.runner` overrides it per Migration, along with pod placement and resources:
 
 ```yaml
 spec:
@@ -146,7 +150,8 @@ The [monitoring guide](operations/monitoring.md) lists which metrics that gate a
 
 ## Credentials
 
-Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile. Three forms, mutually exclusive per endpoint:
+Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile.
+Three forms, mutually exclusive per endpoint:
 
 ```yaml
 spec:
