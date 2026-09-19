@@ -1,8 +1,11 @@
 # Migration planning checklist
 
-A PostgreSQL migration is a change project, not only a `Migration` resource. Use this checklist to agree the scope, compatibility, operating plan, capacity, replication contract, cutover, recovery, and rehearsal before creating the resource.
+A PostgreSQL migration is a change project, not only a `Migration` resource.
+Use this checklist to agree the scope, compatibility, operating plan, capacity, replication contract, cutover, recovery, and rehearsal before creating the resource.
 
-The operator's preflight checks only the items listed in the coverage notes below. A `Partial` or `Not checked` item remains an operator decision. Start with the [operator prerequisites](reference/prerequisites.md), read the [live migration runbook](operations/live-migration.md) when follow mode is enabled, and use the [troubleshooting guide](troubleshooting.md) when a preflight check fails.
+The operator's preflight checks only the items listed in the coverage notes below.
+A `Partial` or `Not checked` item remains an operator decision.
+Start with the [operator prerequisites](reference/prerequisites.md), read the [live migration runbook](operations/live-migration.md) when follow mode is enabled, and use the [troubleshooting guide](troubleshooting.md) when a preflight check fails.
 
 pgcopydb is a migration tool, not a backup system.
 
@@ -46,9 +49,9 @@ Individual checks appear as `ok:` log lines.
    Exact checks are `source wal_level logical`, `replication slot headroom`, and `source replication attribute`.
    Preflight does not check WAL sender headroom, plugin installation, WAL retention budget, or slot behavior after failover.
 8. Partial outside preflight.
-    The API has cutover mode and approval fields, but preflight does not identify an owner, verify source writes stopped, or validate a maintenance window.
+   The API has cutover mode and approval fields, but preflight does not identify an owner, verify source writes stopped, or validate a maintenance window.
 9. Not checked by preflight.
-    Runtime may drain replay, run optional comparisons, and clean replication resources, but preflight does not validate acceptance tests, rollback criteria, or cleanup timing.
+   Runtime may drain replay, run optional comparisons, and clean replication resources, but preflight does not validate acceptance tests, rollback criteria, or cleanup timing.
 10. Not checked.
     Clone-right checks are not backup or restore-readiness checks, and the operator does not inspect backup recency, PITR, or restore drills.
 11. Not checked.
