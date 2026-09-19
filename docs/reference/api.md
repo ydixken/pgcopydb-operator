@@ -17,12 +17,10 @@ Package v1beta1 contains API Schema definitions for the  v1beta1 API group.
 
 
 
-CloneOptions maps the pgcopydb clone surface. All fields are optional. A
-zero value means the operator decides, which for most fields is pgcopydb's
-own default. Three it overrides, because pgcopydb's defaults are wrong for a
-migration: tableJobs follows the worker's CPU request, and
-splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
-which pgcopydb ships disabled. See docs/configuration.md.
+CloneOptions maps the pgcopydb clone surface. All fields are optional; a zero
+value means the operator decides, which for most fields is pgcopydb's own default.
+It overrides three: tableJobs follows the worker's CPU request, and
+splitTablesLargerThan and splitMaxParts turn on same-table concurrency. See docs/configuration.md.
 
 
 
@@ -36,18 +34,18 @@ _Appears in:_
 | `indexJobs` _integer_ | indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).<br />Unset leaves pgcopydb's default of four. Size it against the TARGET, not<br />the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,<br />overriding the server's own setting, so four jobs authorise 4GB there. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `restoreJobs` _integer_ | restoreJobs is pg_restore --jobs (--restore-jobs); 0 follows indexJobs. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `largeObjectsJobs` _integer_ | largeObjectsJobs is the number of concurrent large-object workers. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `splitTablesLargerThan` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | splitTablesLargerThan enables same-table concurrency for tables at or<br />above this size (--split-tables-larger-than), rendered to bytes. Unset<br />defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one<br />large table to a single worker however many table jobs are running.<br />Splitting needs a single-column integer key, or it falls back to ctid<br />ranges, and pgcopydb disables it silently when the source is a standby. |  | Optional: \{\} <br /> |
+| `splitTablesLargerThan` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | splitTablesLargerThan enables same-table concurrency for tables at or<br />above this size (--split-tables-larger-than), rendered to bytes. Unset<br />defaults to 512Mi. Splitting needs a single-column integer key, or it<br />falls back to ctid ranges. See docs/operations/performance.md. |  | Optional: \{\} <br /> |
 | `splitMaxParts` _integer_ | splitMaxParts caps the number of parts per table (--split-max-parts).<br />Unset defaults to 8, so a very large table cannot fan out into hundreds<br />of parts and catalog rows. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `estimateTableSizes` _boolean_ | estimateTableSizes bases split decisions on pg_class page-count<br />estimates instead of exact size queries (--estimate-table-sizes). To<br />refresh those estimates pgcopydb first runs vacuumdb --analyze-only<br />(with tableJobs workers) on the SOURCE; add "analyze" to skip to leave<br />the source untouched and trust its existing statistics. |  | Optional: \{\} <br /> |
+| `estimateTableSizes` _boolean_ | estimateTableSizes bases split decisions on pg_class page-count estimates<br />instead of exact size queries (--estimate-table-sizes). To refresh those,<br />pgcopydb first runs vacuumdb --analyze-only (with tableJobs workers) on<br />the SOURCE; add "analyze" to skip to leave the source untouched. |  | Optional: \{\} <br /> |
 | `dropIfExists` _boolean_ | dropIfExists issues pg_restore --clean --if-exists on the target. |  | Optional: \{\} <br /> |
 | `roles` _boolean_ | roles copies roles before the clone (--roles). Needs superuser on the<br />source unless noRolePasswords is also set. |  | Optional: \{\} <br /> |
 | `noRolePasswords` _boolean_ | noRolePasswords dumps roles without passwords (--no-role-passwords),<br />avoiding the superuser requirement of roles, but not of allDatabases. |  | Optional: \{\} <br /> |
 | `noOwner` _boolean_ | noOwner skips ALTER OWNER on restore (--no-owner). |  | Optional: \{\} <br /> |
-| `ownerAfterRestore` _string_ | ownerAfterRestore hands the restored objects to this role once the<br />worker has finished. The operator reassigns every schema, relation,<br />routine and type in the target database that the migration role owns,<br />skipping extension members so the platform's own extensions keep their<br />owner. It covers objects the migration role owned before this restore<br />too, because the catalog does not record which objects a restore<br />created. Needs noOwner: true, or pg_restore assigns the source owners<br />and the handover covers only part of the schema. Immutable: the<br />preflight probes the role before the first attempt.<br />See docs/reference/prerequisites.md. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z_][A-Za-z0-9_$]*$` <br />Optional: \{\} <br /> |
+| `ownerAfterRestore` _string_ | ownerAfterRestore hands the restored objects to this role once the worker<br />has finished. Needs noOwner: true, or pg_restore assigns the source owners<br />and the handover covers only part of the schema. Immutable.<br />See docs/reference/prerequisites.md. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z_][A-Za-z0-9_$]*$` <br />Optional: \{\} <br /> |
 | `noACL` _boolean_ | noACL skips GRANT/REVOKE on restore (--no-acl). |  | Optional: \{\} <br /> |
 | `noComments` _boolean_ | noComments skips COMMENT statements (--no-comments). |  | Optional: \{\} <br /> |
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |
-| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which<br />is on by default. Text COPY encodes bytea as hex, two wire bytes per<br />data byte, and the worker relays every row between source and target, so<br />the cost lands on both legs. pgcopydb checks each table against the<br />source catalog and falls back to text for any table with a column whose<br />binary encoding is not safe, so this is per table rather than all or<br />nothing. Set it false to force text everywhere.<br />A pointer, and defaulted by the API server rather than by the operator,<br />because this is the only shape where all three states are expressible.<br />A plain bool cannot carry them: false is its zero value, so a Go client<br />that never touches the field still marshals "useCopyBinary": false, the<br />API server sees a value present and skips its default, and the setting<br />silently stays off for everyone not writing YAML by hand. nil with<br />omitempty leaves the key absent, which is what the default needs. | true | Optional: \{\} <br /> |
+| `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), on by<br />default. pgcopydb falls back to text for any table with a column whose<br />binary encoding is not safe, so the choice is per table. Set it false to<br />force text everywhere. See docs/operations/performance.md. | true | Optional: \{\} <br /> |
 | `failFast` _boolean_ | failFast stops the whole run on the first failed child (--fail-fast). |  | Optional: \{\} <br /> |
 | `skip` _[SkipOption](#skipoption) array_ | skip lists base-copy sections to skip. |  | Enum: [largeObjects extensions extensionComments collations vacuum analyze dbProperties ctidSplit] <br />Optional: \{\} <br /> |
 | `filters` _[Filters](#filters)_ | filters is rendered to the pgcopydb --filters INI file. |  | Optional: \{\} <br /> |
@@ -194,11 +192,11 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | enabled turns the migration into a live one. |  | Optional: \{\} <br /> |
 | `plugin` _string_ | plugin is the logical decoding plugin (--plugin). | pgoutput | Enum: [pgoutput wal2json test_decoding] <br />Optional: \{\} <br /> |
-| `slotName` _string_ | slotName overrides the replication slot name (--slot-name). Empty means<br />a generated name unique to this Migration; set it only when fanning<br />several migrations out of one source instance deliberately. The pattern<br />is PostgreSQL's own slot-name charset; the operator relies on it when<br />interpolating the name into SQL (origin verification, retry cleanup). |  | MaxLength: 63 <br />Pattern: `^[a-z0-9_]+$` <br />Optional: \{\} <br /> |
+| `slotName` _string_ | slotName overrides the replication slot name (--slot-name). Empty means a<br />generated name unique to this Migration; set it only when deliberately<br />fanning several migrations out of one source. The pattern is PostgreSQL's<br />own slot-name charset, which the operator relies on when it interpolates it into SQL. |  | MaxLength: 63 <br />Pattern: `^[a-z0-9_]+$` <br />Optional: \{\} <br /> |
 | `publication` _string_ | publication names a pre-created publication (--publication); empty lets<br />pgcopydb create and drop its own. |  | Optional: \{\} <br /> |
 | `wal2jsonNumericAsString` _boolean_ | wal2jsonNumericAsString makes wal2json emit numeric values as JSON<br />strings (--wal2json-numeric-as-string), preserving precision a JSON<br />number would lose. Only meaningful with plugin wal2json; admission<br />rejects it under any other plugin. |  | Optional: \{\} <br /> |
 | `replayNoOpUpdates` _boolean_ | replayNoOpUpdates replays UPDATEs that change no columns<br />(--replay-no-op-updates), needed when target triggers must fire. |  | Optional: \{\} <br /> |
-| `allowMissingReplicaIdentity` _string array_ | allowMissingReplicaIdentity acknowledges tables that the preflight<br />replica-identity audit would otherwise fail on. Entries are<br />schema-qualified table names exactly as the preflight prints them<br />(schema.table, unquoted); the single entry "*" acknowledges every<br />offender. Acknowledged tables are reported as a warning instead of<br />failing the Migration. The risk stays: UPDATE or DELETE on such a<br />table during the migration window fails on the source at write time,<br />so acknowledge only tables that are read-only or insert-only while<br />the migration runs. Immutable with the rest of follow. |  | Optional: \{\} <br /> |
+| `allowMissingReplicaIdentity` _string array_ | allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit<br />would otherwise fail on, as schema-qualified names exactly as the preflight prints them<br />("*" covers every offender). UPDATE or DELETE on an acknowledged table still fails on the<br />source at write time, so acknowledge only read-only or insert-only ones. Immutable with follow. |  | Optional: \{\} <br /> |
 | `maxCatchupLag` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | maxCatchupLag is the replication lag under which the migration counts<br />as caught up (the CaughtUp condition and Automatic cutover trigger). | 16Mi | Optional: \{\} <br /> |
 
 
@@ -206,7 +204,8 @@ _Appears in:_
 
 
 
-Migration is the Schema for the migrations API.
+Migration copies PostgreSQL data from a source endpoint to a target,
+optionally following changes until cutover.
 
 
 
@@ -217,8 +216,8 @@ Migration is the Schema for the migrations API.
 | `apiVersion` _string_ | `pgcopydb-operator.io/v1beta1` | | |
 | `kind` _string_ | `Migration` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
-| `spec` _[MigrationSpec](#migrationspec)_ | spec defines the desired state of Migration |  | Required: \{\} <br /> |
-| `status` _[MigrationStatus](#migrationstatus)_ | status defines the observed state of Migration |  | Optional: \{\} <br /> |
+| `spec` _[MigrationSpec](#migrationspec)_ | spec is the migration to run; source and target are immutable. |  | Required: \{\} <br /> |
+| `status` _[MigrationStatus](#migrationstatus)_ | status reports progress. Conditions are authoritative; phase summarizes them. |  | Optional: \{\} <br /> |
 
 
 #### MigrationPhase
@@ -240,7 +239,7 @@ _Appears in:_
 | `Pending` | PhasePending is the first phase persisted by the controller for a new Migration.<br />API-server creation does not initialize status.<br /> |
 | `Validating` |  |
 | `Cloning` |  |
-| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a third of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished. On a clone-only<br />migration it also covers the ownership handover to ownerAfterRestore,<br />which runs after the worker has exited.<br /> |
+| `Finalizing` | PhaseFinalizing is the tail of a base copy: data across, worker building<br />indexes, applying constraints and vacuuming, and on a clone-only migration<br />the ownerAfterRestore handover. The target stops growing, so size-based<br />estimates read as finished. See docs/operations/performance.md#the-vacuum-tail.<br /> |
 | `Streaming` |  |
 | `CutoverPending` |  |
 | `CuttingOver` |  |
@@ -306,11 +305,10 @@ _Appears in:_
 
 
 
-PostgresConnection describes how to reach one PostgreSQL endpoint. It is a
-self-contained type so a reusable connection kind can reference it later.
-Provide exactly one form: the inline fields (host/database/username plus a
-password secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one
-Secret holding the parts as individual keys).
+PostgresConnection describes how to reach one PostgreSQL endpoint. Provide
+exactly one form: the inline fields (host/database/username plus a password
+secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one Secret
+holding the parts as individual keys).
 
 
 
@@ -410,12 +408,10 @@ _Appears in:_
 
 
 
-VerificationOptions selects post-migration pgcopydb compare checks. Both
-default to off: even the schema compare costs a catalog fetch on both sides,
-and the data compare reads every table row twice. Results are information,
-not a gate: a mismatch sets the Verified condition to False and emits a
-warning event, but the Migration still completes (the data has arrived; what
-to do about a difference is the operator's call). Mutable until completion.
+VerificationOptions selects post-migration pgcopydb compare checks, both off
+by default because both are expensive. Results are information, not a gate: a
+mismatch sets Verified to False and emits a warning event, but the Migration
+still completes. Mutable until completion. See docs/operations/verification.md.
 
 
 
