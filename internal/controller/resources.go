@@ -659,6 +659,70 @@ fi
 	return b
 }
 
+// reownPreflightOwnerEnv carries clone.ownerAfterRestore into the preflight,
+// like reownOwnerEnv does for the handover: the role reaches SQL as a psql
+// variable only, never as shell or SQL text.
+const reownPreflightOwnerEnv = "PREFLIGHT_OWNER_AFTER_RESTORE"
+
+const reownRoleExistsSQL = `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'list')::int`
+
+const reownRoleProbe = `checkv "$PGCOPYDB_TARGET_PGURI" "` + reownRoleExistsSQL + `" "$reown_owner"`
+
+// reownSetRoleSQL interpolates :"list" (an identifier), not :'list' (a quoted
+// literal), so the role name reaches SET ROLE already quoted. psql
+// interpolates either one in file input only, which is what checkv feeds.
+const reownSetRoleSQL = `BEGIN; SET ROLE :"list"; ROLLBACK;`
+
+const reownSetRoleProbe = `checkv "$PGCOPYDB_TARGET_PGURI" '` + reownSetRoleSQL + `' "$reown_owner"`
+
+// A plain GRANT carries SET on every supported version (14 to 18), which is
+// the part the handover needs; the re-check after the apply proves it.
+const reownGrantSQL = `SELECT format('GRANT %I TO %I', :'list', current_user)`
+
+const reownGrantStmt = `checkv "$PGCOPYDB_TARGET_PGURI" "` + reownGrantSQL + `" "$reown_owner"`
+
+// ownerAfterRestoreBlock probes what the handover needs on the target before
+// any worker runs: the role must exist, and the migration role must be able
+// to SET ROLE to it, which is what ALTER ... OWNER TO requires.
+// The probe is that SET ROLE and not a pg_has_role(..., 'USAGE') test, which
+// answers a different question: whether the role's privileges are inherited
+// without SET ROLE. A NOINHERIT member has SET ROLE without USAGE on every
+// supported version, and PostgreSQL 16 added the reverse in WITH SET FALSE,
+// so a USAGE probe would reject handovers that work and admit ones that fail
+// (TestPreflightOwnerAfterRestoreQueries runs both live).
+// The third requirement, CREATE for the new owner on the database and on the
+// schemas it does not receive, waits for the handover Job: the restore has
+// not created those schemas yet (see reown.go).
+func ownerAfterRestoreBlock(super bool) string {
+	superURI := ""
+	hint := tgtSuperHint
+	if super {
+		superURI = conn.SuperURIEnv(conn.Target)
+		hint = ""
+	}
+	// The stop between the probes keeps the diagnosis readable: a missing
+	// role fails the SET ROLE probe for that reason alone, and the note that
+	// names it must not scroll out of the condition's log tail.
+	return `reown_owner="${` + reownPreflightOwnerEnv + `:-}"
+` + remSingleBlock(remSingle{
+		probe:   reownRoleProbe,
+		ok:      "ownerAfterRestore role",
+		missing: `preflight: clone.ownerAfterRestore role \"$reown_owner\" does not exist on the target: create it there, or name a role that exists`,
+		onProbe: `preflight: probing the target for the clone.ownerAfterRestore role failed`,
+	}) + preflightStopOnFailure + remSingleBlock(remSingle{
+		cmdProbe: reownSetRoleProbe,
+		compose:  reownGrantStmt,
+		superURI: superURI,
+		prefix:   remPrefixClone,
+		ok:       "ownerAfterRestore SET ROLE",
+		missing:  `preflight: the migration role cannot SET ROLE to \"$reown_owner\", which the ownership handover needs: $stmt`,
+		apply:    `preflight: the migration role cannot SET ROLE to \"$reown_owner\" and applying $stmt via superuserSecretRef failed`,
+		still:    `preflight: the migration role still cannot SET ROLE to \"$reown_owner\" after remediation ($stmt)`,
+		onComp:   `preflight: composing the role GRANT failed`,
+		hint:     hint,
+	})
+}
+
 const walLevelBlock = `wal_level=$(check "$PGCOPYDB_SOURCE_PGURI" 'show wal_level')
 if [ "$wal_level" != logical ]; then
   note "preflight: source wal_level is '$wal_level', follow needs 'logical': set wal_level = logical on the source and restart it"
@@ -1008,6 +1072,9 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		}
 	}
 	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
+	if reownRequested(m) {
+		b.WriteString(ownerAfterRestoreBlock(superTgt))
+	}
 	b.WriteString(cloneRightsBlock(superTgt, dbProps))
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
@@ -1074,6 +1141,10 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		encoded, _ := json.Marshal(filters)
 		container := &job.Spec.Template.Spec.Containers[0]
 		container.Env = append(container.Env, corev1.EnvVar{Name: extensionFiltersEnv, Value: string(encoded)})
+	}
+	if reownRequested(m) {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
 	// and autoscaling surface via PreflightRunning long before 30 minutes;

@@ -64,6 +64,10 @@ All-databases clones replace these maintenance-database probes with the instance
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
 Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).
 
+With `clone.ownerAfterRestore` set, two probes run ahead of those three: the named role MUST exist on the target, and the migration role MUST be able to `SET ROLE` to it, which is what `ALTER ... OWNER TO` requires.
+A missing role stops the script there, so its diagnosis stays in the condition's log tail; a refused `SET ROLE` names the exact `GRANT <owner> TO <migration role>`, which `superuserSecretRef` applies for you.
+The new owner's `CREATE` on the database and on the schemas it does not receive is not probed here, because the restore has not created those schemas yet: the `<name>-reown` Job checks it before it alters anything.
+
 Source role:
 
 - SELECT on every table and sequence being copied and USAGE on their schemas. Owning the objects covers all of it.
@@ -175,6 +179,7 @@ It then applies the rights the regular role is missing, exactly these statements
 
 - `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (single-database migrations).
 - `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (single-database migrations).
+- `GRANT <owner> TO <role>` on the target, when the migration role cannot `SET ROLE` to `clone.ownerAfterRestore` (single-database migrations). The membership carries `SET` on every supported version, which is the part the handover needs.
 - `ALTER ROLE <role> REPLICATION` on the source (follow only).
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).
