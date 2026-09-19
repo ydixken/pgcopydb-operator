@@ -411,8 +411,7 @@ func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
 // percent-encoding are rejected by name (they would compose a wrong URI or a
 // passfile line libpq never matches); uriSecretRef is the escape hatch, and
 // the DB URI must be password-free (the PW key carries the password).
-// ponytail: host parsing assumes host or host:port; bracketed IPv6 literals
-// are out of scope until someone needs them.
+// Host parsing assumes host or host:port; bracketed IPv6 literals are out of scope.
 func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 db=$@DB@
