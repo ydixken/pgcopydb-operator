@@ -1,9 +1,10 @@
 # Argo CD health checks
 
-Argo CD does not know what a healthy `Migration` looks like; without help it reports every custom resource as `Healthy` the moment it applies.
-This Lua health check maps the [conditions](../reference/conditions.md) to Argo CD's health states, so a failed migration shows up as `Degraded` in the UI and in notifications instead of sitting green.
+Without a custom health check, Argo CD reports every `Migration` as `Healthy` as soon as it applies.
+This Lua health check maps the [conditions](../reference/conditions.md) to Argo CD's health states.
+A failed migration then shows as `Degraded` in the UI and in notifications.
 
-Add it to the `argocd-cm` ConfigMap (or the equivalent `resource.customizations` block of your Argo CD Helm values):
+Add it to the `argocd-cm` ConfigMap, or to the equivalent `resource.customizations` block in your Argo CD Helm values:
 
 ```yaml
 apiVersion: v1
@@ -44,12 +45,20 @@ data:
     return hs
 ```
 
-The mapping: `Failed=True` is `Degraded`, `Complete=True` is `Healthy`, phase `Suspended` is `Suspended`, and everything else is `Progressing` with the current phase in the message.
-Both terminal conditions are absorbing, so the health state settles once and stays.
+The mapping:
 
-This is a starting point, not a policy.
-A live migration parked at `CutoverPending` counts as `Progressing` here indefinitely, which is correct (it is waiting for your approval) but may deserve its own mapping if you alert on stuck progress.
-Extend the Lua with the [condition reasons](../reference/conditions.md) as needed.
+- `Failed=True` is `Degraded`.
+- `Complete=True` is `Healthy`.
+- Phase `Suspended` is `Suspended`.
+- Everything else is `Progressing`, with the current phase in the message.
+
+Both terminal conditions are absorbing, so the health state settles once.
+A verification mismatch does not set `Failed`, so a migration with `Verified=False` still reports `Healthy`.
+Alert on `Verified` separately.
+
+A live migration at `CutoverPending` stays `Progressing` here until you approve the cutover.
+If you alert on stuck progress, give that phase its own mapping.
+Extend the Lua with the [condition reasons](../reference/conditions.md).
 
 One caveat for GitOps-managed migrations: `spec.cutover.approved: true` is a timed action, and writes to the source must already be stopped when it lands.
 Flipping it through a Git commit works, but mind your sync latency; `kubectl patch` at the moment of cutover gives you exact timing.
