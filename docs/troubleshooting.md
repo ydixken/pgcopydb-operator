@@ -243,12 +243,11 @@ On operator versions without that recovery, delete the worker pod by hand.
 
 The Migration sits in `Finalizing` for a long time, the target database size is flat, and the worker pod is still running.
 This is not a stall.
-pgcopydb runs `VACUUM ANALYZE` per table alongside the copy, but a table's vacuum cannot start until its own copy finishes, and the largest table finishes last, so the end of a clone narrows to one vacuum running alone.
-On a fixture where a single table held 73% of the bytes this tail was roughly a fifth of the wall clock.
+The end of a clone narrows to a single `VACUUM ANALYZE` on the largest table: on a fixture where one table held 73% of the bytes, that tail was roughly a third of the wall clock.
 
 There is nothing to fix.
 `skip: [vacuum]` gives the time back at the cost of leaving the target without statistics, so run `ANALYZE` yourself before sending traffic.
-See [Performance tuning](operations/performance.md) and the [phase table](reference/conditions.md#phases).
+See [The VACUUM tail](operations/performance.md#the-vacuum-tail) and the [phase table](reference/conditions.md#phases).
 
 ### `Streaming` and `CaughtUp` stay unset during the clone
 

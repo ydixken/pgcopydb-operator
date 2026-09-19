@@ -35,8 +35,7 @@ The Migration MUST live in the same namespace as that Secret.
 
 ## 3. Check ownership and grant the target prerequisites
 
-Owning the `app` database does not give `app` ownership of extensions already installed by `postgres`.
-CNPG's [`postInitApplicationSQL`](https://cloudnative-pg.io/docs/1.30/bootstrap#executing-queries-after-initialization) runs as `postgres` against the application database, so extensions created there belong to `postgres`, not `app`.
+CNPG's [`postInitApplicationSQL`](https://cloudnative-pg.io/docs/1.30/bootstrap#executing-queries-after-initialization) runs as `postgres` against the application database, so extensions created there belong to `postgres`, not to the `app` role that owns the database.
 Even a plain clone with `spec.clone: {}` can fail when restoring comments on those extensions.
 
 > [!warning]
@@ -93,8 +92,8 @@ spec:
 
 - `managed.roles` with `replication: true` gives the role the `REPLICATION` attribute declaratively.
   CNPG does not manage its bootstrap owner role by default, so listing it here starts managing it; alternatively run `ALTER ROLE app REPLICATION` once by hand.
-- `wal_sender_timeout` at CNPG's 5s default terminates pgcopydb's logical-decoding walsender whenever a status update arrives a few seconds late, burning attempts during catchup and drain.
-  Raise it to the PostgreSQL default (60s) or more for the migration window; see [troubleshooting](../troubleshooting.md).
+- `wal_sender_timeout` at CNPG's 5s default kills pgcopydb's logical-decoding walsender.
+  Raise it to the PostgreSQL default (60s) or more for the migration window; the [source instance prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) explain why 5s is too short.
 
 ## 5. The Migration
 

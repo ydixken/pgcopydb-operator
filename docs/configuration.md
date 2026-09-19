@@ -24,8 +24,7 @@ Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [o
 
 `clone.skip: [extensionComments]` suppresses only extension comments; table and other object comments are still restored.
 `clone.noComments: true` suppresses all restored comments.
-Both avoid the extension-comment ownership requirement when `dropIfExists` is false, including for an otherwise empty `spec.clone: {}`.
-Neither avoids the ownership requirement for `DROP EXTENSION` with `dropIfExists: true`.
+Both avoid the extension-comment ownership requirement that an otherwise empty `spec.clone: {}` can hit; neither avoids the one `dropIfExists: true` adds for `DROP EXTENSION`.
 `clone.skip: [extensions]` skips extension restoration, including extension comments, and bypasses both the availability and ownership preflight gates.
 When skipping extensions, provide the extensions required by the application on the target yourself.
 See [Prerequisites](reference/prerequisites.md#base-clone-every-migration) for the ownership rules and remedies.
@@ -56,11 +55,7 @@ Re-running is safe.
 The Job derives its statement list from current ownership each time, so a rerun selects only what is left, and each `ALTER` commits on its own rather than in one transaction that many partitions could push past `max_locks_per_transaction`.
 The field is immutable once the Migration exists, because preflight probes the role before the first attempt and the Job is built once.
 
-The handover transfers schemas, relations (tables, partitions, sequences, views, materialized views, foreign tables), routines (functions, procedures, aggregates), and types including domains.
-Extension members keep their owner, and the classes outside those four, large objects and publications among them, are left alone.
-A sequence attached to a column by `serial` or `IDENTITY` changes owner with its table, so it needs no statement of its own.
-
-See [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore) for the privileges it needs and [Ownership handover failures](troubleshooting.md#ownership-handover-failures) for recovering one that failed.
+See [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore) for the object classes it covers and the privileges it needs, and [Ownership handover failures](troubleshooting.md#ownership-handover-failures) for recovering one that failed.
 
 ## All databases
 
@@ -68,7 +63,7 @@ Set `spec.clone.allDatabases: true` to clone the whole source instance using sup
 
 Both connections MUST name an existing maintenance database, such as `postgres`.
 pgcopydb substitutes each database name into the connection URIs itself and creates missing target databases.
-It excludes only `template0` and `template1`: the source's `postgres` database is cloned into the target's `postgres` database too.
+[The all-databases contract](reference/prerequisites.md#all-databases) has the superuser requirement on each side and what preflight checks.
 See [09-all-databases.yaml](examples/09-all-databases.yaml) for a complete resource.
 
 > [!warning]
@@ -78,14 +73,7 @@ See [09-all-databases.yaml](examples/09-all-databases.yaml) for a complete resou
 
 If admission does not enforce these rules, the controller rejects the same combinations with terminal reason `InvalidSpec` before creating any Jobs.
 
-The source superuser covers the role dump's access to `pg_authid` and dumps across every database.
-The target superuser covers database creation, role restore, and ownership changes.
-Managed admin roles without `rolsuper`, such as `rds_superuser`, fail preflight; `superuserSecretRef` does not replace the migration connections' own superuser requirement.
-All-databases preflight ignores `superuserSecretRef` and does not mount its credentials, because this mode cannot remediate missing privileges.
-
-Roles are copied unconditionally, so `clone.roles: true` is allowed but redundant.
-Roles already present on the target are skipped.
-`clone.noRolePasswords` omits role passwords without relaxing the superuser contract.
+Roles are copied unconditionally, so `clone.roles: true` is allowed but redundant, and `clone.noRolePasswords` omits their passwords without relaxing the superuser contract.
 Filters, skip options, and other clone options apply to every database, and job counts are global across databases rather than multiplied per database.
 Restart and resume use per-database work directories beneath the existing work directory.
 

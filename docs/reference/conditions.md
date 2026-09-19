@@ -47,7 +47,7 @@ So a single phase would cover the whole run and tell you nothing, which is why t
 
 The tail is the one that surprises people.
 A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last, so a clone routinely ends as a single `VACUUM ANALYZE` running alone while every other worker sits idle.
-On a fixture where one table held 73% of the bytes, that tail was roughly a fifth of the wall clock.
+[The VACUUM tail](../operations/performance.md#the-vacuum-tail) has the measurement.
 
 > [!important]
 > During `Finalizing` the target database stops growing, so anything derived from its size reads as finished while real work continues.
