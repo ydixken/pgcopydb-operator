@@ -38,17 +38,15 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
-// finalizerName guards replication-slot cleanup: a live migration that ever
-// started holds a slot on the source, and a leaked slot retains WAL there
-// without bound.
+// finalizerName guards replication-slot cleanup: a leaked slot retains WAL on
+// the source without bound.
 const finalizerName = "pgcopydb-operator.io/cleanup"
 
 // defaultMaxCatchupLag applies when spec.follow.maxCatchupLag is unset.
 const defaultMaxCatchupLag = int64(16 << 20)
 
 // The CaughtUp reasons. ConfirmingCatchUp is the latch: one sample below the
-// threshold parks here, and only a second consecutive one turns the condition
-// true (see lagSeenBelow).
+// threshold parks here, and only a second consecutive one turns it true.
 const (
 	reasonLagBelowThreshold = "LagBelowThreshold"
 	reasonConfirmingCatchUp = "ConfirmingCatchUp"
@@ -57,8 +55,7 @@ const (
 
 // lagSeenBelow reports whether an earlier pass already measured the lag below
 // the threshold. Like copySeen, the latch lives in the condition reason, so it
-// needs no API field and survives an operator restart; a sample above the
-// threshold writes Lagging and clears it.
+// needs no API field and survives an operator restart.
 func lagSeenBelow(m *v1beta1.Migration) bool {
 	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCaughtUp)
 	if c == nil {
@@ -107,9 +104,8 @@ func cutoverWanted(m *v1beta1.Migration, caughtUp bool) bool {
 
 // ensureFinalizer adds the cleanup finalizer to follow migrations before any
 // worker runs, so a deletion at any later point routes through cleanup.
-// Metadata-only patch, never Update: a full Update round-trips the spec
-// through omitempty, stripping stored zero values (an explicit [] or ""),
-// and the spec's immutability CEL rules reject that as a spec change.
+// Metadata-only patch, never Update: an Update strips stored zero values from
+// the spec through omitempty, which the immutability CEL rules then reject.
 func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Migration) error {
 	if !followEnabled(m) || controllerutil.ContainsFinalizer(m, finalizerName) {
 		return nil
@@ -121,10 +117,8 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Mi
 
 // reconcileFollowRunning handles the streaming and cutover phases while the
 // worker Job runs. The sample is best effort: no sample keeps the previous
-// status, exactly like progress polling. cloneDone is the caller's reading of
-// the base copy (the worker's own log marker, confirmed by the pass's sample;
-// see confirmBaseCopy); until it is true the stream is only reported, never
-// acted on.
+// status. Until cloneDone (see confirmBaseCopy) the stream is only reported,
+// never acted on.
 func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone bool) {
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
@@ -141,13 +135,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	}
 	rs := st.ToStatus(slot)
 	if prev := m.Status.Replication; prev != nil {
-		// What one pass did not learn, it must not erase. The sample is per
-		// side: the source answering while the target does not (revoked
-		// grants, a restarting target) yields a write_lsn with no replay
-		// position, and publishing that alone would empty the lag out of the
-		// CR and flip CaughtUp on a healthy stream. Endpos is carried for a
-		// different reason: nothing reads it back from the worker any more,
-		// so this status is the only place it lives.
+		// The sample is per side, and a target that does not answer (revoked
+		// grants, a restart) yields a write_lsn with no replay position:
+		// publishing that alone would empty the lag out of the CR and flip
+		// CaughtUp on a healthy stream. Endpos is carried because nothing
+		// reads it back from the worker, so this status is its only copy.
 		if rs.Endpos == "" {
 			rs.Endpos = prev.Endpos
 		}
@@ -176,21 +168,12 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	// must carry the previous verdict with it.
 	below := rs.LagBytes != nil && *rs.LagBytes <= maxCatchupLagBytes(m)
 
-	// Two consecutive samples, because one can be measured inside a window
-	// where the figure is not yet meaningful. pgcopydb's sentinel replay_lsn
-	// starts at 0/0 and the override that ties the confirmed flush position to
-	// the apply cursor is guarded on it being non-zero, so until the apply
-	// loop's first sync the worker confirms its raw receive position instead.
-	// Lag then reads near zero whatever the apply backlog is, and the fallback
-	// in readScript cannot help: the walsender's replay column is NULL in that
-	// same window, so it falls through to the very value that is polluted. The
-	// window opens at every worker start and every worker pod restart and
-	// closes within seconds, so a second sample clears it. All of it upstream
-	// v0.18 code, zero guard included, so a rebase off the fork keeps it.
-	// cloneDone already covers the fresh start, which leaves about one sample
-	// at clone-end and after a restart. The cost is one poll interval of
-	// cutover latency on a stream that really is caught up, against an endpos
-	// frozen at a position the target has not actually applied to.
+	// Two consecutive samples, because a sentinel replay_lsn still at 0/0
+	// carries the raw receive position, so one sample taken before the apply
+	// loop's first sync reads near-zero lag whatever the backlog is (see
+	// docs/design/follow-diagnostics.md). The window opens at every worker
+	// start and pod restart and closes within seconds, so the second sample
+	// costs one poll interval of cutover latency at most.
 	caughtUp := below && lagSeenBelow(m)
 	switch {
 	case caughtUp:
@@ -237,17 +220,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 	}
 }
 
-// finishFollow runs after the worker Job exited 0. Exit 0 alone is NOT
-// trusted: after a crash inside the drain window, pgcopydb --resume exits 0
-// without replaying pending WAL ("endpos previously reached" tracks the
-// receive side). A verify Job proves the drain on the target: only origin
-// progress exactly at the recorded endpos passes on the LSN, and every other
-// reading, which is nearly every cutover, is decided by pgcopydb compare data
-// (see buildVerifyJob); only proof, and the ownership handover when one is
-// requested, gate CutoverCompleted and the cleanup. On refuted drain or a
-// failed handover the Migration fails loudly with the slot intact, so the
-// data stays recoverable (at the documented cost of WAL retention on the
-// source).
+// finishFollow runs after the worker Job exited 0, which alone is NOT trusted:
+// after a crash inside the drain window pgcopydb --resume exits 0 without
+// replaying pending WAL, so a verify Job proves the drain on the target
+// instead (see buildVerifyJob). A refuted drain or a failed handover fails the
+// Migration with the slot intact, at the cost of WAL retention on the source.
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	// A refused marker stays refused (see confirmBaseCopy): the worker exiting
 	// 0 is the same word the marker was, and the verify Job decides by content.
@@ -274,10 +251,8 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
-	// The handover precedes CutoverCompleted, while verification and cleanup
-	// follow it (see below): that condition is the signal to point
-	// applications at the target, so ownership must already be right when it
-	// turns True. A failure here keeps the slot, as a refuted drain does.
+	// CutoverCompleted is the signal to point applications at the target, so
+	// ownership must already be right when it turns True.
 	if res, handled, err := r.reownGate(ctx, m, base, v1beta1.PhaseCuttingOver,
 		"; the replication slot is kept, so the migration stays recoverable. "+
 			"Deleting the Migration runs the cleanup Job and releases the slot"); handled || err != nil {
@@ -298,13 +273,10 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
 	}
 
-	// Verification runs after the drain is proven and after cleanup: a data
-	// compare against a target still applying WAL would mismatch by design,
-	// so it must wait for the drain; and cleanup goes first because the slot
-	// retains WAL on the source for as long as it exists, while the compare
-	// needs no replication state at all (a mismatch never reopens the
-	// stream). CutoverCompleted is already surfaced above: holding it back
-	// for a long data compare would stretch the write-downtime window.
+	// Verification runs last: a compare against a target still applying WAL
+	// would mismatch by design, cleanup before it releases the slot retaining
+	// WAL on the source, and CutoverCompleted is already set above so a long
+	// compare does not stretch the write-downtime window.
 	vdone, err := r.ensureVerification(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -324,13 +296,10 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
 
-// ensureCleanup creates and observes the cleanup Job. It reports done=true
-// once replication state is dropped, or when cleanup cannot run at all: after
-// exhausted retries, and when the namespace is terminating (no Job can ever
-// be created there again, so retrying would only deadlock namespace deletion
-// against the finalizer). Both give-ups carry a loud CleanupFailed warning:
-// the slot may leak on the source, and that needs an operator's attention,
-// not an endlessly blocked Migration.
+// ensureCleanup creates and observes the cleanup Job. done=true once the
+// replication state is dropped, and when it cannot run at all: retries
+// exhausted, or a terminating namespace, where retrying would only deadlock
+// namespace deletion against the finalizer. Both give-ups emit CleanupFailed.
 func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migration) (bool, error) {
 	job, created, err := r.ensureJob(ctx, m, cleanupJobName(m), func() (*batchv1.Job, error) {
 		return buildCleanupJob(m, r.RunnerImage)
@@ -365,10 +334,8 @@ func (r *MigrationReconciler) ensureCleanup(ctx context.Context, m *v1beta1.Migr
 
 // ensurePreflight creates and observes the preflight Job every Migration's
 // first attempt gates on. Returns (passed, failureMessage, err); passed=false
-// with an empty failureMessage means the check is still running. The failure
-// message carries the pod's own check output (one line per failed
-// prerequisite, with the exact GRANT or setting to fix it) so nobody has to
-// chase pod logs of a finished Job.
+// with an empty failureMessage means the check is still running. The message
+// repeats the pod's check output, so the Job's logs are not the only copy.
 func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Migration) (bool, string, error) {
 	job, created, err := r.ensureJob(ctx, m, preflightJobName(m), func() (*batchv1.Job, error) {
 		return buildPreflightJob(m, r.RunnerImage)
@@ -429,22 +396,11 @@ func (r *MigrationReconciler) progressGate() string {
 }
 
 // recordCloneProgress takes the copy counters out of a finished verify Job's
-// log. This is where a follow migration's status.progress ends up: the worker
-// owns its catalog until it exits, and then its pod is gone, so the verify Job
-// (own pod, same work dir, worker dead) is the one place left that can count.
-// The line overwrites the copy-time estimate on every pass it is readable,
-// with nothing latched on the field: a pass that lost its status patch, or a
-// worker restarted after the verify Job existed, once left the estimate
-// standing as the final figure, 81 of 81 indexes over a catalog that counted
-// 75 (issue #277, docs/research/measurements.md#clone-completion-issue-277).
-// The Job is finished, so the line cannot change. Best
-// effort otherwise: an unreadable log (pod not yet collected, or already
-// gone) or an unparsable line leaves the field as it is, and nothing here can
-// move the drain verdict.
-// The bool return says whether a line was read and parsed: ensureCatalogCheck
-// needs to know, since a plain clone's completion gate must not be lifted by
-// an unreadable log, while ensureVerify's caller does not care, the counters
-// there being cosmetic (see recordCloneProgress's own doc).
+// log, reporting whether a line parsed; ensureCatalogCheck gates on that. The
+// worker's pod is gone by then, so that Job is the one place left that can
+// count, and nothing latches the field, so a lost status patch cannot leave
+// the copy-time estimate standing as the final figure
+// (see docs/research/measurements.md#a-stale-estimate-outlived-the-catalog-that-produced-it).
 func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) bool {
 	if r.Logs == nil {
 		return false
