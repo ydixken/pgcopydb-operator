@@ -35,11 +35,8 @@ import (
 	"k8s.io/streaming/pkg/httpstream"
 )
 
-// callTimeout bounds every API call this package makes. Reconcile contexts
-// carry no deadline, and a pod exec or log stream that hangs on a wedged
-// API-server connection would otherwise freeze that Migration's reconcile
-// forever, its phase pinned wherever it stood (observed live: Migrations
-// stuck in Cloning and CuttingOver with a healthy worker underneath).
+// callTimeout bounds every API call this package makes: reconcile contexts
+// carry no deadline, so a wedged call would pin that Migration's phase forever.
 const callTimeout = 30 * time.Second
 
 // containerName is the worker container every call targets.
@@ -143,11 +140,9 @@ func (e *Exec) InPod(ctx context.Context, namespace, pod string, argv []string) 
 			Stdout:    true,
 			Stderr:    true,
 		}, scheme.ParameterCodec)
-	// WebSocket first: its handshake honors the context, while the SPDY
-	// round tripper reads the upgrade response with no deadline at all (a
-	// wedged API-server connection froze reconciles mid-phase, proven by
-	// the bounded-timeout test). SPDY stays as the fallback for API
-	// servers that refuse the websocket upgrade.
+	// WebSocket first: its handshake honors the context, while the SPDY round
+	// tripper reads the upgrade response with no deadline at all. SPDY stays the
+	// fallback for API servers that refuse the websocket upgrade.
 	ws, err := remotecommand.NewWebSocketExecutor(e.config, "GET", req.URL().String())
 	if err != nil {
 		return nil, err
