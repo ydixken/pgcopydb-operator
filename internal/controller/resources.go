@@ -70,6 +70,7 @@ func jobName(m *v1beta1.Migration, attempt int32) string {
 }
 func cleanupJobName(m *v1beta1.Migration) string   { return m.Name + "-cleanup" }
 func verifyJobName(m *v1beta1.Migration) string    { return m.Name + "-verify" }
+func reownJobName(m *v1beta1.Migration) string     { return m.Name + "-reown" }
 func preflightJobName(m *v1beta1.Migration) string { return m.Name + "-preflight" }
 func catalogJobName(m *v1beta1.Migration) string   { return m.Name + "-catalog" }
 
