@@ -172,6 +172,22 @@ spec:
                   noTablespaces:
                     description: noTablespaces skips tablespace selection (--no-tablespaces).
                     type: boolean
+                  ownerAfterRestore:
+                    description: |-
+                      ownerAfterRestore hands the restored objects to this role once the
+                      worker has finished. The operator reassigns every schema, relation,
+                      routine and type in the target database that the migration role owns,
+                      skipping extension members so the platform's own extensions keep their
+                      owner. It covers objects the migration role owned before this restore
+                      too, because the catalog does not record which objects a restore
+                      created. Needs noOwner: true, or pg_restore assigns the source owners
+                      and the handover covers only part of the schema. Immutable: the
+                      preflight probes the role before the first attempt.
+                      See docs/reference/prerequisites.md.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z_][A-Za-z0-9_$]*$
+                    type: string
                   restoreJobs:
                     description: restoreJobs is pg_restore --jobs (--restore-jobs);
                       0 follows indexJobs.
@@ -258,6 +274,20 @@ spec:
                     maintenance database cannot be dropped'
                   rule: '!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists)
                     && self.dropIfExists)'
+                - message: 'ownerAfterRestore requires noOwner: true, or pg_restore
+                    assigns the source owners and the handover covers only part of
+                    the schema'
+                  rule: '!(has(self.ownerAfterRestore) && !(has(self.noOwner) && self.noOwner))'
+                - message: 'ownerAfterRestore cannot be combined with allDatabases:
+                    the handover runs in the target connection''s database only'
+                  rule: '!(has(self.ownerAfterRestore) && has(self.allDatabases) &&
+                    self.allDatabases)'
+                - message: 'ownerAfterRestore is immutable: the preflight probes the
+                    target role before the first attempt, and the handover Job is
+                    built once'
+                  rule: has(self.ownerAfterRestore) == has(oldSelf.ownerAfterRestore)
+                    && (!has(self.ownerAfterRestore) || self.ownerAfterRestore ==
+                    oldSelf.ownerAfterRestore)
               cutover:
                 description: cutover controls how a live migration ends; ignored without
                   follow.
@@ -2347,6 +2377,22 @@ spec:
                   noTablespaces:
                     description: noTablespaces skips tablespace selection (--no-tablespaces).
                     type: boolean
+                  ownerAfterRestore:
+                    description: |-
+                      ownerAfterRestore hands the restored objects to this role once the
+                      worker has finished. The operator reassigns every schema, relation,
+                      routine and type in the target database that the migration role owns,
+                      skipping extension members so the platform's own extensions keep their
+                      owner. It covers objects the migration role owned before this restore
+                      too, because the catalog does not record which objects a restore
+                      created. Needs noOwner: true, or pg_restore assigns the source owners
+                      and the handover covers only part of the schema. Immutable: the
+                      preflight probes the role before the first attempt.
+                      See docs/reference/prerequisites.md.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[A-Za-z_][A-Za-z0-9_$]*$
+                    type: string
                   restoreJobs:
                     description: restoreJobs is pg_restore --jobs (--restore-jobs);
                       0 follows indexJobs.
@@ -2433,6 +2479,20 @@ spec:
                     maintenance database cannot be dropped'
                   rule: '!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists)
                     && self.dropIfExists)'
+                - message: 'ownerAfterRestore requires noOwner: true, or pg_restore
+                    assigns the source owners and the handover covers only part of
+                    the schema'
+                  rule: '!(has(self.ownerAfterRestore) && !(has(self.noOwner) && self.noOwner))'
+                - message: 'ownerAfterRestore cannot be combined with allDatabases:
+                    the handover runs in the target connection''s database only'
+                  rule: '!(has(self.ownerAfterRestore) && has(self.allDatabases) &&
+                    self.allDatabases)'
+                - message: 'ownerAfterRestore is immutable: the preflight probes the
+                    target role before the first attempt, and the handover Job is
+                    built once'
+                  rule: has(self.ownerAfterRestore) == has(oldSelf.ownerAfterRestore)
+                    && (!has(self.ownerAfterRestore) || self.ownerAfterRestore ==
+                    oldSelf.ownerAfterRestore)
               cutover:
                 description: cutover controls how a live migration ends; ignored without
                   follow.

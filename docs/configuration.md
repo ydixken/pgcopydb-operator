@@ -29,6 +29,38 @@ Neither avoids the ownership requirement for `DROP EXTENSION` with `dropIfExists
 When skipping extensions, provide the extensions required by the application on the target yourself.
 See [Prerequisites](reference/prerequisites.md#base-clone-every-migration) for the ownership rules and remedies.
 
+### Ownership after restore
+
+`clone.ownerAfterRestore` names the role that owns the restored objects once the migration finishes:
+
+```yaml
+spec:
+  clone:
+    dropIfExists: true
+    noOwner: true
+    ownerAfterRestore: app_role   # the application's owning role on the target
+```
+
+Reach for it when the migration cannot connect as the role the objects have to end up under.
+That is the usual shape on managed PostgreSQL, where the admin role the provider hands out is not the application's owning role and creating one that owns both sides is not an option.
+`noOwner: true` is required alongside it, and the CRD rejects the pair without it: `pg_restore` would otherwise assign the source owners, and the handover would cover only the part of the schema that happened to land on the migration role.
+`clone.allDatabases` is rejected too, because the handover runs in the target connection's database only.
+
+The handover runs as a `<name>-reown` Job after the worker has exited.
+On a plain clone it runs in `Finalizing`, before the verification compares, so nothing reads the target while ownership is still moving.
+On a live migration it is in `CuttingOver`, after the drain is proven and before `CutoverCompleted` turns True.
+That condition is the signal to point applications at the target, so the handover sits inside the cutover window and its duration is part of that window.
+
+Re-running is safe.
+The Job derives its statement list from current ownership each time, so a rerun selects only what is left, and each `ALTER` commits on its own rather than in one transaction that many partitions could push past `max_locks_per_transaction`.
+The field is immutable once the Migration exists, because preflight probes the role before the first attempt and the Job is built once.
+
+The handover transfers schemas, relations (tables, partitions, sequences, views, materialized views, foreign tables), routines (functions, procedures, aggregates), and types including domains.
+Extension members keep their owner, and the classes outside those four, large objects and publications among them, are left alone.
+A sequence attached to a column by `serial` or `IDENTITY` changes owner with its table, so it needs no statement of its own.
+
+See [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore) for the privileges it needs and [Ownership handover failures](troubleshooting.md#ownership-handover-failures) for recovering one that failed.
+
 ## All databases
 
 Set `spec.clone.allDatabases: true` to clone the whole source instance using superuser credentials on both sides.

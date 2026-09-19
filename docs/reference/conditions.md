@@ -21,7 +21,7 @@ Automation should wait on conditions, not on phase strings.
 | `Pending` | Persisted its first observation, before validation or provisioning | `Validating`, `Failed`, or `Suspended` |
 | `Validating` | Materializing the spec and running the preflight Job | `Cloning`, or `Failed` |
 | `Cloning` | Running the worker: schema, then table data | `Finalizing`, `Streaming`, `Completed`, or `Failed` |
-| `Finalizing` | Past the data copy, finishing indexes, constraints and vacuum | `Streaming`, `Completed`, or `Failed` |
+| `Finalizing` | Past the data copy, finishing indexes, constraints and vacuum; on a clone with `clone.ownerAfterRestore`, also handing the restored objects over once the worker has exited | `Streaming`, `Verifying`, `Completed`, or `Failed` |
 | `Streaming` | Applying changes from the replication slot (live migrations) | `CutoverPending`, or `Failed` |
 | `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
 | `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
@@ -62,7 +62,7 @@ Zero on both counts is the unknown answer rather than the tail, and the phase st
 
 ## Condition types
 
-Each type is named for what `True` means. Seven are normal-true (True is the desired state); `Failed` is abnormal-true (True means the migration ended in failure).
+Each type is named for what `True` means. Eight are normal-true (True is the desired state); `Failed` is abnormal-true (True means the migration ended in failure).
 
 | Type | Polarity | True means |
 |---|---|---|
@@ -70,7 +70,8 @@ Each type is named for what `True` means. Seven are normal-true (True is the des
 | `CloneCompleted` | normal-true | The base copy finished. |
 | `Streaming` | normal-true | Logical replication is applying changes (live migrations only). |
 | `CaughtUp` | normal-true | Replication lag has been at or below `spec.follow.maxCatchupLag` on two consecutive samples. |
-| `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN on the rare cutover where the two coincide. |
+| `CutoverCompleted` | normal-true | The drain is proven: a clean data compare, or origin progress exactly at the cutover LSN on the rare cutover where the two coincide. With `clone.ownerAfterRestore` set, the handover has finished first. |
+| `OwnershipApplied` | normal-true | The restored objects belong to `clone.ownerAfterRestore`. Only present when that field is set. |
 | `Verified` | normal-true | The requested `pgcopydb compare` checks found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
 | `Failed` | abnormal-true | The migration failed for good. Terminal and absorbing. |
@@ -98,6 +99,10 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator wants a second consecutive one before turning `CaughtUp` True: a single sample can land while the worker is still confirming its raw receive position, where the lag reads near zero whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging` and the count starts over. |
 | `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. Any other reading, in either direction, is decided by content, which is the path nearly every cutover takes, because publication-filtered WAL and unapplied commits measure alike. Changes applied, sequences synced. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change (`pgcopydb compare data` either found a difference or produced no verdict); the replication slot is kept so the data stays recoverable. The Migration fails with the same reason. |
+| `OwnershipApplied` | `Unknown` | `OwnershipRunning` | The `<name>-reown` Job is running: after the worker exited on a clone, after the drain is proven on a live migration. No worker restarts while it exists. |
+| `OwnershipApplied` | `Unknown` | `OwnershipSuspended` | `spec.suspend` deleted a running handover Job. It re-runs on resume and picks up the statements that are left; each `ALTER` commits on its own. |
+| `OwnershipApplied` | `True` | `OwnershipApplied` | Every schema, relation, routine and type the migration role owned in the target database now belongs to `clone.ownerAfterRestore`. |
+| `OwnershipApplied` | `False` | `OwnershipFailed` | The handover Job failed after its retries; the data is on the target and the message carries the Job's last lines (the missing role, or the exact `GRANT`). The Migration fails with the same reason. |
 | `Verified` | `Unknown` | `VerificationRunning` | A `pgcopydb compare` Job is running. |
 | `Verified` | `True` | `ComparePassed` | Every requested compare found source and target matching. |
 | `Verified` | `False` | `SchemaMismatch` | `pgcopydb compare schema` reported differences. |
@@ -109,6 +114,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
+| `Failed` | `True` | `OwnershipFailed` | The ownership handover failed. The data is on the target; finish the handover by hand with the statements in the Job log, see [Ownership handover failures](../troubleshooting.md#ownership-handover-failures). On a live migration the slot is kept until the Migration is deleted. |
 
 A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call. `Complete` is set either way; see [Verification](../operations/verification.md).
 
@@ -129,7 +135,9 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |
 | `CleanupFailed` | Warning | Cleanup exhausted its retries; the named slot may keep retaining WAL on the source and needs manual removal. |
-| `Suspended` | Normal | `spec.suspend` deleted the worker; the work volume is kept. |
+| `OwnershipStarted` | Normal | The `<name>-reown` handover Job was created. |
+| `OwnershipApplied` | Normal | The handover finished; the restored objects belong to `clone.ownerAfterRestore`. |
+| `Suspended` | Normal | `spec.suspend` deleted the worker, and a running handover Job with it; the work volume is kept. |
 | `SlotRetained` | Warning | A suspended live migration keeps its replication slot, which retains WAL on the source. |
 | `VerificationStarted` | Normal | A compare Job was created. |
 | `Verified` | Normal | Compare found source and target matching. |

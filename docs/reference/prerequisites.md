@@ -64,6 +64,10 @@ All-databases clones replace these maintenance-database probes with the instance
 A failed grant probe puts the exact `GRANT CREATE ...` statement in the condition message, with the `superuserSecretRef` hint when [that field](#superuser-remediation-superusersecretref) could apply it; the db-properties probe instead names its two outs, membership in the owning role or `clone.skip: [dbProperties]`.
 Ownership alignment (`clone.noOwner`) and the source-side SELECT/USAGE privileges are not probed; a permission error they cause fails fast on the first attempt with reason `PermissionDenied` instead of burning the retry budget, when it is the attempt's terminal cause in the log tail (a best-effort scan, so a miss falls back to normal retries).
 
+With `clone.ownerAfterRestore` set, two probes run ahead of those three: the named role MUST exist on the target, and the migration role MUST be able to `SET ROLE` to it, which is what `ALTER ... OWNER TO` requires.
+A missing role stops the script there, so its diagnosis stays in the condition's log tail; a refused `SET ROLE` names the exact `GRANT <owner> TO <migration role>`, which `superuserSecretRef` applies for you.
+The new owner's `CREATE` on the database and on the schemas it does not receive is not probed here, because the restore has not created those schemas yet: the `<name>-reown` Job checks it before it alters anything.
+
 Source role:
 
 - SELECT on every table and sequence being copied and USAGE on their schemas. Owning the objects covers all of it.
@@ -72,7 +76,7 @@ Source role:
 Target role:
 
 - CREATE on the target database.
-- Ownership alignment: without `clone.noOwner`, `pg_restore` emits `ALTER OWNER`, which only works as superuser or as the owning role. The simplest non-superuser setup is the pattern the e2e fixtures use: the migration connects as the role that owns every migrated object on both sides. Otherwise set `clone.noOwner: true`.
+- Ownership alignment: without `clone.noOwner`, `pg_restore` emits `ALTER OWNER`, which only works as superuser or as the owning role. The simplest non-superuser setup is the pattern the e2e fixtures use: the migration connects as the role that owns every migrated object on both sides. Otherwise set `clone.noOwner: true`, and add [`clone.ownerAfterRestore`](#ownership-after-restore-cloneownerafterrestore) when the objects have to end up under a role the migration cannot connect as.
 - `ALTER DATABASE ... SET` (the db-properties step) requires database ownership or superuser. If the target role has neither, add `dbProperties` to `clone.skip`.
 
 Superuser is required only for:
@@ -80,6 +84,40 @@ Superuser is required only for:
 - `clone.allDatabases: true` on both sides, even when role passwords are omitted.
 - `clone.roles: true` without `clone.noRolePasswords: true` (reads passwords from `pg_authid`).
 - Extensions: creating most C extensions on the target, and cloning a database whose superuser-installed extensions have configuration tables (a pg_dump limitation that filters cannot exclude).
+
+### Ownership after restore (`clone.ownerAfterRestore`)
+
+`clone.noOwner: true` leaves every restored object owned by the migration role.
+`clone.ownerAfterRestore` names the role that MUST own them instead: the restore still runs as the migration role, and a `<name>-reown` Job hands the objects over once the worker has exited.
+The field requires `noOwner: true`, cannot be combined with `clone.allDatabases`, and is immutable, all three enforced by the CRD.
+See [Ownership after restore](../configuration.md#ownership-after-restore) for when to reach for it.
+
+Preflight covers two of the requirements, ahead of the clone grant probes above: the role MUST exist on the target, and the migration role MUST be able to `SET ROLE` to it.
+`SET ROLE` is what `ALTER ... OWNER TO` needs, and membership that only inherits the role's privileges does not supply it: PostgreSQL 16 added `GRANT ... WITH SET FALSE`, which inherits the privileges without the `SET ROLE`.
+The probe is therefore a real `SET ROLE` inside a rolled-back transaction rather than a `pg_has_role(..., 'USAGE')` test.
+`superuserSecretRef` remediates a refused `SET ROLE` with the `GRANT <owner> TO <migration role>` the preflight composes on the server.
+
+Two more requirements wait for the handover Job, because the restore has not created the schemas yet when preflight runs.
+The Job checks both before it alters anything, prints the exact `GRANT` when one is missing, and skips both when the migration role is a superuser (a third check, on inherited privileges, follows the same rule; see the callout below):
+
+- The **migration role** needs `CREATE` on the target database, and only when the handover transfers at least one schema. This is the migration role rather than the new owner because `ALTER SCHEMA ... OWNER TO` checks the current user's right to create schemas, the same check `CREATE SCHEMA` makes.
+- The **new owner** needs `CREATE` on every schema that holds objects it receives and that it does not receive itself. A schema in the transfer set supplies the privilege through its own `ALTER`, which runs first, so only the schemas that stay behind need a standing grant. `public` is the usual one: from PostgreSQL 15 it belongs to `pg_database_owner` and no longer grants `CREATE` to `PUBLIC`.
+
+> [!important]
+> The migration role also needs `USAGE` on every schema it hands over: after the `ALTER SCHEMA`, it still has to name the objects left inside that schema.
+> Membership in the new owner supplies this when the membership carries inheritance, which is the default for `GRANT <owner> TO <migration role>` and therefore for the preflight's remediation too.
+> It does not when the migration role has the `NOINHERIT` attribute, or when the membership was granted `WITH INHERIT FALSE` (PostgreSQL 16 and later).
+> Both pass the `SET ROLE` probe, so the Job checks inherited privileges as a third pre-check, only when the handover transfers at least one schema, and prints the exact remediation for the target's version before altering anything: `GRANT <owner> TO <migration role> WITH INHERIT TRUE` from PostgreSQL 16, where inheritance is a property of the membership, or `ALTER ROLE <migration role> INHERIT` before that, where it is a role attribute instead.
+> `GRANT USAGE ON SCHEMA <schema> TO <migration role>` is not a working alternative: granting `USAGE` to a role that owns the schema collapses into that role's own ACL entry, and the `ALTER SCHEMA ... OWNER TO` the handover runs next rewrites that entry to the new owner, wiping the grant out. Fix the inheritance instead.
+
+The handover covers four object classes in the target database: schemas, relations (tables, partitions, sequences, views, materialized views, foreign tables), routines (functions, procedures, aggregates), and types including domains.
+It leaves extension members alone, so the platform's own extensions keep their owner, and it does not touch large objects, publications, subscriptions, event triggers, foreign-data wrappers, operators, collations, text search objects, or statistics objects.
+A sequence attached to a column by `serial` or `IDENTITY` gets no statement of its own because PostgreSQL refuses to change its owner directly; it follows its table, as array types, row types and multirange types follow the type they belong to.
+
+> [!warning]
+> The handover covers every schema, relation, routine and type in the target database that the migration role owns, not only the ones this restore created.
+> Nothing in the catalog records which objects a restore created.
+> Use a migration role dedicated to the migration when the target database also holds objects that role owns.
 
 ## All databases
 
@@ -175,6 +213,7 @@ It then applies the rights the regular role is missing, exactly these statements
 
 - `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (single-database migrations).
 - `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (single-database migrations).
+- `GRANT <owner> TO <role>` on the target, when the migration role cannot `SET ROLE` to `clone.ownerAfterRestore` (single-database migrations). The membership carries `SET` on every supported version, which is the part the handover needs.
 - `ALTER ROLE <role> REPLICATION` on the source (follow only).
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).

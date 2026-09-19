@@ -243,8 +243,9 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // receive side). A verify Job proves the drain on the target: only origin
 // progress exactly at the recorded endpos passes on the LSN, and every other
 // reading, which is nearly every cutover, is decided by pgcopydb compare data
-// (see buildVerifyJob); only proof gates CutoverCompleted and the cleanup.
-// On refuted drain the Migration fails loudly with the slot intact, so the
+// (see buildVerifyJob); only proof, and the ownership handover when one is
+// requested, gate CutoverCompleted and the cleanup. On refuted drain or a
+// failed handover the Migration fails loudly with the slot intact, so the
 // data stays recoverable (at the documented cost of WAL retention on the
 // source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
@@ -271,6 +272,16 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+
+	// The handover precedes CutoverCompleted, while verification and cleanup
+	// follow it (see below): that condition is the signal to point
+	// applications at the target, so ownership must already be right when it
+	// turns True. A failure here keeps the slot, as a refuted drain does.
+	if res, handled, err := r.reownGate(ctx, m, base, v1beta1.PhaseCuttingOver,
+		"; the replication slot is kept, so the migration stays recoverable. "+
+			"Deleting the Migration runs the cleanup Job and releases the slot"); handled || err != nil {
+		return res, err
 	}
 
 	r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionTrue, "DrainVerified",

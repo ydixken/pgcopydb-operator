@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,6 +72,18 @@ const (
 	okCloneSchema = "ok: clone rights schemas"
 	testSchemaInc = "sales"
 	testSchemaExc = "scratch"
+)
+
+// testSuperSecret is the target superuserSecretRef the remediating variants
+// of the clone tier are built with.
+const testSuperSecret = "adm"
+
+// The ownerAfterRestore tier's log lines, and the grant the stub psql
+// composes for its remediation (the assertions match that byte for byte).
+const (
+	okOwnerRole    = "ok: ownerAfterRestore role"
+	okOwnerSetRole = "ok: ownerAfterRestore SET ROLE"
+	ownerRoleGrant = `GRANT "app_owner_role" TO "limited"`
 )
 
 // passwordMigration is the canned inline-credentials spec the builder tests
@@ -400,6 +413,9 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			all := passwordMigration()
 			all.Spec.Clone.AllDatabases = true
 			return buildPreflightJob(all, "img")
+		},
+		"owner after restore": func() (*batchv1.Job, error) {
+			return buildPreflightJob(reownMigration(), "img")
 		},
 		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
@@ -2000,7 +2016,7 @@ func TestPreflightScriptFor_CloneTier(t *testing.T) {
 	})
 	t.Run("target superuser drops the clone hints", func(t *testing.T) {
 		m := passwordMigration()
-		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "adm"}
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
 		s := preflightScriptFor(m)
 		if strings.Contains(s, "hint: spec.target.superuserSecretRef") {
 			t.Fatalf("clone hints must vanish with a target superuser:\n%s", s)
@@ -2125,6 +2141,11 @@ case "$q" in
   'GRANT CREATE ON SCHEMA'*)
     printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
     if [ "${PSQL_STICKY:-1}" = 1 ]; then : > "${STATE_DIR:?}/schemas-applied"; fi ;;
+  'GRANT "'*)
+    printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
+    if [ "${PSQL_STICKY:-1}" = 1 ]; then : > "${STATE_DIR:?}/role-granted"; fi ;;
+  *'SET ROLE'*) [ "${PSQL_SET_ROLE:-1}" = 1 ] || [ -f "${STATE_DIR:?}/role-granted" ] || exit 2 ;;
+  *'GRANT %I TO %I'*) echo 'GRANT "app_owner_role" TO "limited"' ;;
   *has_schema_privilege*)
     if [ -f "${STATE_DIR:-/nonexistent}/schemas-applied" ]; then :; else printf '%s' "${PSQL_SCHEMA_GRANTS:-}"; fi ;;
   *has_database_privilege*)
@@ -2139,6 +2160,7 @@ case "$q" in
         echo "${PSQL_TARGET_SUPER:-1}" ;;
       *) echo 1 ;;
     esac ;;
+  *pg_roles*) echo "${PSQL_OWNER_EXISTS:-1}" ;;
   *pg_namespace*) printf '%s\n' "${PSQL_SCHEMAS:-public}" | tr ',' '\n' ;;
   *current_user*) echo limited ;;
   *) echo 1 ;;
@@ -2171,6 +2193,7 @@ esac
 			"PREFLIGHT_EXTENSION_FILTERS="+envValue(c.Env, extensionFiltersEnv),
 			"PREFLIGHT_SCHEMA_INCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_INCLUDE"),
 			"PREFLIGHT_SCHEMA_EXCLUDE="+envValue(c.Env, "PREFLIGHT_SCHEMA_EXCLUDE"),
+			reownPreflightOwnerEnv+"="+envValue(c.Env, reownPreflightOwnerEnv),
 		)
 		cmd.Env = append(cmd.Env, extra...)
 		out, err := cmd.CombinedOutput()
@@ -2275,7 +2298,7 @@ func TestPreflightScript_CloneRemediation(t *testing.T) {
 	run := clonePreflightHarness(t)
 	superM := func() *v1beta1.Migration {
 		m := passwordMigration()
-		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "adm"}
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
 		return m
 	}
 	t.Run("superuser remediates the missing schema grants", func(t *testing.T) {
@@ -2396,4 +2419,291 @@ func TestPreflightScript_CloneFailClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPreflightScriptFor_OwnerAfterRestore pins the ownerAfterRestore tier:
+// it ships only for a Migration that sets the field, it runs before the
+// clone-rights tier, the role travels as an env var, and the role probe stops
+// the script before a SET ROLE probe that could only fail for a role that
+// does not exist.
+func TestPreflightScriptFor_OwnerAfterRestore(t *testing.T) {
+	t.Run("absent without the field", func(t *testing.T) {
+		s := preflightScriptFor(passwordMigration())
+		for _, absent := range []string{okOwnerRole, okOwnerSetRole, "SET ROLE", reownPreflightOwnerEnv} {
+			if strings.Contains(s, absent) {
+				t.Fatalf("a script without ownerAfterRestore must not contain %q:\n%s", absent, s)
+			}
+		}
+		job, err := buildPreflightJob(passwordMigration(), "img")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := envValue(job.Spec.Template.Spec.Containers[0].Env, reownPreflightOwnerEnv); got != "" {
+			t.Fatalf("%s = %q, want unset", reownPreflightOwnerEnv, got)
+		}
+	})
+	t.Run("both probes run before the clone-rights tier", func(t *testing.T) {
+		s := preflightScriptFor(reownMigration())
+		mustPrecede(t, s, `echo "ok: connectivity target"`, okOwnerRole)
+		mustPrecede(t, s, okOwnerRole, okOwnerSetRole)
+		mustPrecede(t, s, okOwnerSetRole, okCloneDB)
+	})
+	t.Run("the role probe stops the script before the SET ROLE probe", func(t *testing.T) {
+		s := preflightScriptFor(reownMigration())
+		role := strings.Index(s, okOwnerRole)
+		setRole := strings.Index(s, reownSetRoleProbe)
+		if role < 0 || setRole < 0 {
+			t.Fatalf("the tier is missing from the script (role=%d setRole=%d):\n%s", role, setRole, s)
+		}
+		stop := strings.Index(s[role:], preflightStopOnFailure)
+		if stop < 0 || role+stop > setRole {
+			t.Fatalf("want a stop-on-failure between the probes (role=%d stop=%d setRole=%d):\n%s",
+				role, stop, setRole, s)
+		}
+	})
+	t.Run("SET ROLE takes the role as an identifier through stdin", func(t *testing.T) {
+		s := preflightScriptFor(reownMigration())
+		// checkv, never check: psql interpolates a variable in file input
+		// only, and :"list" is the identifier form ALTER ... OWNER TO needs.
+		if !strings.Contains(s, `checkv "$PGCOPYDB_TARGET_PGURI" 'BEGIN; SET ROLE :"list"; ROLLBACK;'`) {
+			t.Fatalf("the SET ROLE probe must run %q through checkv:\n%s", reownSetRoleSQL, s)
+		}
+		if strings.Contains(s, `SET ROLE :'list'`) {
+			t.Fatal("a quoted literal would reach SET ROLE as a string, not an identifier")
+		}
+		if !strings.Contains(s, reownRoleProbe) || !strings.Contains(s, reownGrantStmt) {
+			t.Fatalf("the shipped role and compose probes drifted:\n%s", s)
+		}
+	})
+	t.Run("the role name rides as env only", func(t *testing.T) {
+		job, err := buildPreflightJob(reownMigration(), "img")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		if got := envValue(c.Env, reownPreflightOwnerEnv); got != reownTestOwner {
+			t.Fatalf("%s = %q, want %q", reownPreflightOwnerEnv, got, reownTestOwner)
+		}
+		for _, s := range slices.Concat(c.Command, c.Args) {
+			if strings.Contains(s, reownTestOwner) {
+				t.Fatalf("the role name must ride as env only, found in command text:\n%s", s)
+			}
+		}
+	})
+	t.Run("target superuser remediates, otherwise hints", func(t *testing.T) {
+		m := reownMigration()
+		s := preflightScriptFor(m)
+		if !strings.Contains(s, ownerAfterRestoreBlock(false)) {
+			t.Fatalf("want the no-super variant:\n%s", s)
+		}
+		if !strings.Contains(ownerAfterRestoreBlock(false), `hint "`+tgtSuperHint) ||
+			strings.Contains(ownerAfterRestoreBlock(false), "SUPER_PGURI") {
+			t.Fatal("without a target superuser the SET ROLE probe hints instead of remediating")
+		}
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
+		if !strings.Contains(preflightScriptFor(m), ownerAfterRestoreBlock(true)) {
+			t.Fatal("a target superuser must select the remediating variant")
+		}
+		if !strings.Contains(ownerAfterRestoreBlock(true), `check "$PGM_TARGET_SUPER_PGURI" "$stmt"`) ||
+			strings.Contains(ownerAfterRestoreBlock(true), "hint: spec.") {
+			t.Fatal("the remediating variant applies the GRANT and drops the hint")
+		}
+	})
+}
+
+// TestPreflightScript_OwnerAfterRestore runs the generated script under
+// /bin/sh with the stub psql: the missing-role diagnosis must not be buried
+// under the probes that follow it, and the SET ROLE denial must name the
+// exact GRANT or apply it.
+func TestPreflightScript_OwnerAfterRestore(t *testing.T) {
+	run := clonePreflightHarness(t)
+	superM := func() *v1beta1.Migration {
+		m := reownMigration()
+		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
+		return m
+	}
+	t.Run("both probes pass", func(t *testing.T) {
+		out, code, _, _ := run(t, reownMigration())
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{okOwnerRole, okOwnerSetRole, okCloneDB} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+	})
+	t.Run("a missing role stops the script there", func(t *testing.T) {
+		out, code, _, _ := run(t, reownMigration(), "PSQL_OWNER_EXISTS=0")
+		if code != 1 || !strings.Contains(out, `role "app_owner_role" does not exist on the target`) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, absent := range []string{okOwnerSetRole, okCloneDB} {
+			if strings.Contains(out, absent) {
+				t.Fatalf("a missing role must stop the script before %q:\n%s", absent, out)
+			}
+		}
+	})
+	t.Run("a denied SET ROLE names the grant and hints", func(t *testing.T) {
+		out, code, _, applied := run(t, reownMigration(), "PSQL_SET_ROLE=0")
+		if code != 1 || !strings.Contains(out, okOwnerRole) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "cannot SET ROLE to") || !strings.Contains(out, ownerRoleGrant) ||
+			!strings.Contains(out, tgtSuperHint) {
+			t.Fatalf("missing the GRANT or the hint:\n%s", out)
+		}
+		if strings.TrimSpace(applied) != "" {
+			t.Fatalf("nothing may be applied without a superuser: %q", applied)
+		}
+	})
+	t.Run("target superuser applies the grant", func(t *testing.T) {
+		out, code, _, applied := run(t, superM(), "PSQL_SET_ROLE=0")
+		if code != 0 || !strings.Contains(out, remPrefixClone+ownerRoleGrant) ||
+			!strings.Contains(out, okOwnerSetRole) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.TrimSpace(applied) != ownerRoleGrant {
+			t.Fatalf("applied = %q, want %q byte-for-byte", applied, ownerRoleGrant)
+		}
+	})
+	t.Run("non-sticking remediation fails by name", func(t *testing.T) {
+		out, code, _, _ := run(t, superM(), "PSQL_SET_ROLE=0", "PSQL_STICKY=0")
+		if code != 1 || !strings.Contains(out, "still cannot SET ROLE to") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("a failed role probe is its own named failure", func(t *testing.T) {
+		out, code, _, _ := run(t, reownMigration(), "PSQL_FAIL_SUBSTR=SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles")
+		if code != 1 || !strings.Contains(out, "probing the target for the clone.ownerAfterRestore role failed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.Contains(out, okOwnerRole) {
+			t.Fatalf("a psql failure must not read as a present role:\n%s", out)
+		}
+	})
+	t.Run("a failed compose is its own named failure", func(t *testing.T) {
+		out, code, _, _ := run(t, reownMigration(), "PSQL_SET_ROLE=0",
+			"PSQL_FAIL_SUBSTR=GRANT %I TO %I")
+		if code != 1 || !strings.Contains(out, "composing the role GRANT failed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+}
+
+// preflightOwnerFixture builds the membership shapes the SET ROLE probe must
+// tell apart. The roles persist for the length of the test because SET ROLE
+// reads the session user, not current_user, so each case needs its own psql
+// session with SET SESSION AUTHORIZATION; that, and the SUPERUSER role, need
+// the test connection to be a superuser.
+const preflightOwnerFixture = `CREATE ROLE pf_owner_test;
+CREATE ROLE pf_member_test;
+CREATE ROLE pf_noinherit_test NOINHERIT;
+CREATE ROLE pf_other_test;
+CREATE ROLE pf_super_test SUPERUSER;
+GRANT pf_owner_test TO pf_member_test, pf_noinherit_test;
+`
+
+// The members go before the role they are granted, and IF EXISTS also clears
+// what a crashed run left behind.
+const preflightOwnerCleanup = `DROP ROLE IF EXISTS pf_member_test, pf_noinherit_test,
+pf_other_test, pf_super_test, pf_noset_test, pf_owner_test;`
+
+const (
+	pfOwnerRole     = "pf_owner_test"
+	pfNoInheritRole = "pf_noinherit_test"
+	pfOtherRole     = "pf_other_test"
+)
+
+// TestPreflightOwnerAfterRestoreQueries runs the shipped ownerAfterRestore
+// probes against a live server: the SET ROLE probe must answer exactly what
+// ALTER ... OWNER TO will do. The NOINHERIT case is why the probe is a SET
+// ROLE and not a pg_has_role(..., 'USAGE') test, and the WITH SET FALSE case
+// is the other half of that divergence on PostgreSQL 16 and later.
+func TestPreflightOwnerAfterRestoreQueries(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Fatal("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance for ownerAfterRestore SQL regressions")
+	}
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Fatal("PGCOPYDB_TEST_PGURI is set but psql is missing")
+	}
+	// The role is bound the way checkv binds it, as a psql variable.
+	psql := func(t *testing.T, sql, list string) (string, error) {
+		t.Helper()
+		cmd := exec.Command("psql", uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-v", "list="+list, "-f", "-")
+		cmd.Stdin = strings.NewReader(sql)
+		out, err := cmd.CombinedOutput()
+		t.Logf("list=%q %s -> %v\n%s", list, sql, err, out)
+		return strings.TrimSpace(string(out)), err
+	}
+	must := func(t *testing.T, sql, list string) string {
+		t.Helper()
+		out, err := psql(t, sql, list)
+		if err != nil {
+			t.Fatalf("psql: %v", err)
+		}
+		return out
+	}
+	setRoleAs := func(role string) string {
+		return "SET SESSION AUTHORIZATION " + role + ";\n" + reownSetRoleSQL
+	}
+	must(t, preflightOwnerCleanup, "")
+	must(t, preflightOwnerFixture, "")
+	t.Cleanup(func() { must(t, preflightOwnerCleanup, "") })
+	version := must(t, "SHOW server_version_num;", "")
+
+	t.Run("the role probe answers for a present and a missing role", func(t *testing.T) {
+		if got := must(t, reownRoleExistsSQL, pfOwnerRole); got != "1" {
+			t.Fatalf("existing role probe = %q, want 1", got)
+		}
+		if got := must(t, reownRoleExistsSQL, "pf_absent_test"); got != "0" {
+			t.Fatalf("missing role probe = %q, want 0", got)
+		}
+		if _, err := psql(t, setRoleAs(pfOtherRole), "pf_absent_test"); err == nil {
+			t.Fatal("SET ROLE to a role that does not exist must fail")
+		}
+	})
+	for _, tc := range []struct {
+		name, role string
+		want       bool
+	}{
+		{"a non-member cannot set role", pfOtherRole, false},
+		{"a plain member can", "pf_member_test", true},
+		{"a NOINHERIT member can", pfNoInheritRole, true},
+		{"a superuser can without any grant", "pf_super_test", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := psql(t, setRoleAs(tc.role), pfOwnerRole)
+			if (err == nil) != tc.want {
+				t.Fatalf("SET ROLE as %s: err = %v, want success = %t", tc.role, err, tc.want)
+			}
+		})
+	}
+	t.Run("USAGE disagrees with SET ROLE for a NOINHERIT member", func(t *testing.T) {
+		got := must(t, `SELECT pg_has_role('`+pfNoInheritRole+`', '`+pfOwnerRole+`', 'USAGE')::int`, "")
+		if got != "0" {
+			t.Fatalf("pg_has_role USAGE = %q, want 0: the case above proves SET ROLE works anyway, which is why the probe is the SET ROLE", got)
+		}
+	})
+	t.Run("a member granted WITH SET FALSE cannot set role", func(t *testing.T) {
+		if version < "160000" {
+			t.Skipf("GRANT ... WITH SET FALSE needs PostgreSQL 16, server is %s", version)
+		}
+		must(t, "CREATE ROLE pf_noset_test;\nGRANT pf_owner_test TO pf_noset_test WITH SET FALSE;", "")
+		if _, err := psql(t, setRoleAs("pf_noset_test"), pfOwnerRole); err == nil {
+			t.Fatal("a membership without SET must not read as a handover the server will allow")
+		}
+	})
+	t.Run("the composed GRANT is what enables the SET ROLE", func(t *testing.T) {
+		stmt := must(t, "SET SESSION AUTHORIZATION "+pfOtherRole+";\n"+reownGrantSQL, pfOwnerRole)
+		if stmt != "GRANT "+pfOwnerRole+" TO "+pfOtherRole {
+			t.Fatalf("composed statement = %q", stmt)
+		}
+		must(t, stmt, "")
+		t.Cleanup(func() { must(t, "REVOKE "+pfOwnerRole+" FROM "+pfOtherRole+";", "") })
+		if _, err := psql(t, setRoleAs(pfOtherRole), pfOwnerRole); err != nil {
+			t.Fatalf("the composed GRANT must grant SET too, on every supported version: %v", err)
+		}
+	})
 }

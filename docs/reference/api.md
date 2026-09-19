@@ -43,6 +43,7 @@ _Appears in:_
 | `roles` _boolean_ | roles copies roles before the clone (--roles). Needs superuser on the<br />source unless noRolePasswords is also set. |  | Optional: \{\} <br /> |
 | `noRolePasswords` _boolean_ | noRolePasswords dumps roles without passwords (--no-role-passwords),<br />avoiding the superuser requirement of roles, but not of allDatabases. |  | Optional: \{\} <br /> |
 | `noOwner` _boolean_ | noOwner skips ALTER OWNER on restore (--no-owner). |  | Optional: \{\} <br /> |
+| `ownerAfterRestore` _string_ | ownerAfterRestore hands the restored objects to this role once the<br />worker has finished. The operator reassigns every schema, relation,<br />routine and type in the target database that the migration role owns,<br />skipping extension members so the platform's own extensions keep their<br />owner. It covers objects the migration role owned before this restore<br />too, because the catalog does not record which objects a restore<br />created. Needs noOwner: true, or pg_restore assigns the source owners<br />and the handover covers only part of the schema. Immutable: the<br />preflight probes the role before the first attempt.<br />See docs/reference/prerequisites.md. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z_][A-Za-z0-9_$]*$` <br />Optional: \{\} <br /> |
 | `noACL` _boolean_ | noACL skips GRANT/REVOKE on restore (--no-acl). |  | Optional: \{\} <br /> |
 | `noComments` _boolean_ | noComments skips COMMENT statements (--no-comments). |  | Optional: \{\} <br /> |
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |
@@ -239,7 +240,7 @@ _Appears in:_
 | `Pending` | PhasePending is the first phase persisted by the controller for a new Migration.<br />API-server creation does not initialize status.<br /> |
 | `Validating` |  |
 | `Cloning` |  |
-| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a fifth of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished.<br /> |
+| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a fifth of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished. On a clone-only<br />migration it also covers the ownership handover to ownerAfterRestore,<br />which runs after the worker has exited.<br /> |
 | `Streaming` |  |
 | `CutoverPending` |  |
 | `CuttingOver` |  |

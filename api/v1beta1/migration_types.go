@@ -164,6 +164,9 @@ type SkipOption string
 // splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
 // which pgcopydb ships disabled. See docs/configuration.md.
 // +kubebuilder:validation:XValidation:rule="!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists) && self.dropIfExists)",message="allDatabases cannot be combined with dropIfExists: the maintenance database cannot be dropped"
+// +kubebuilder:validation:XValidation:rule="!(has(self.ownerAfterRestore) && !(has(self.noOwner) && self.noOwner))",message="ownerAfterRestore requires noOwner: true, or pg_restore assigns the source owners and the handover covers only part of the schema"
+// +kubebuilder:validation:XValidation:rule="!(has(self.ownerAfterRestore) && has(self.allDatabases) && self.allDatabases)",message="ownerAfterRestore cannot be combined with allDatabases: the handover runs in the target connection's database only"
+// +kubebuilder:validation:XValidation:rule="has(self.ownerAfterRestore) == has(oldSelf.ownerAfterRestore) && (!has(self.ownerAfterRestore) || self.ownerAfterRestore == oldSelf.ownerAfterRestore)",message="ownerAfterRestore is immutable: the preflight probes the target role before the first attempt, and the handover Job is built once"
 type CloneOptions struct {
 	// allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
 	// Both connections must name a maintenance database and use superuser roles.
@@ -238,6 +241,22 @@ type CloneOptions struct {
 	// noOwner skips ALTER OWNER on restore (--no-owner).
 	// +optional
 	NoOwner bool `json:"noOwner,omitempty"`
+
+	// ownerAfterRestore hands the restored objects to this role once the
+	// worker has finished. The operator reassigns every schema, relation,
+	// routine and type in the target database that the migration role owns,
+	// skipping extension members so the platform's own extensions keep their
+	// owner. It covers objects the migration role owned before this restore
+	// too, because the catalog does not record which objects a restore
+	// created. Needs noOwner: true, or pg_restore assigns the source owners
+	// and the handover covers only part of the schema. Immutable: the
+	// preflight probes the role before the first attempt.
+	// See docs/reference/prerequisites.md.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_$]*$`
+	// +optional
+	OwnerAfterRestore string `json:"ownerAfterRestore,omitempty"`
 
 	// noACL skips GRANT/REVOKE on restore (--no-acl).
 	// +optional
@@ -561,7 +580,9 @@ const (
 	// the largest table, because a table's vacuum cannot start until its own
 	// copy finishes and the largest one finishes last. That tail measured
 	// roughly a fifth of a clone's wall clock, during which the target stops
-	// growing and every size-based estimate reads as finished.
+	// growing and every size-based estimate reads as finished. On a clone-only
+	// migration it also covers the ownership handover to ownerAfterRestore,
+	// which runs after the worker has exited.
 	PhaseFinalizing     MigrationPhase = "Finalizing"
 	PhaseStreaming      MigrationPhase = "Streaming"
 	PhaseCutoverPending MigrationPhase = "CutoverPending"
@@ -574,14 +595,15 @@ const (
 
 // Condition type constants (positive polarity, per Kubernetes API conventions).
 const (
-	ConditionValidated       = "Validated"
-	ConditionCloneCompleted  = "CloneCompleted"
-	ConditionStreaming       = "Streaming"
-	ConditionCaughtUp        = "CaughtUp"
-	ConditionCutoverComplete = "CutoverCompleted"
-	ConditionVerified        = "Verified"
-	ConditionComplete        = "Complete"
-	ConditionFailed          = "Failed"
+	ConditionValidated        = "Validated"
+	ConditionCloneCompleted   = "CloneCompleted"
+	ConditionStreaming        = "Streaming"
+	ConditionCaughtUp         = "CaughtUp"
+	ConditionCutoverComplete  = "CutoverCompleted"
+	ConditionOwnershipApplied = "OwnershipApplied"
+	ConditionVerified         = "Verified"
+	ConditionComplete         = "Complete"
+	ConditionFailed           = "Failed"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs

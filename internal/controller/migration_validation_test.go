@@ -30,6 +30,9 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
 
+// testOwnerRole is the role the ownerAfterRestore rules are exercised with.
+const testOwnerRole = "app_owner"
+
 // Exercises the CRD CEL rules through the envtest apiserver: the schema in
 // config/crd/bases is what real clusters enforce, so this is where a broken
 // rule would surface.
@@ -64,6 +67,12 @@ var _ = Describe("Migration CRD validation", func() {
 	}
 	filters := func(f *v1beta1.Filters) func(*v1beta1.Migration) {
 		return func(m *v1beta1.Migration) { m.Spec.Clone.Filters = f }
+	}
+	owner := func(name string) func(*v1beta1.Migration) {
+		return func(m *v1beta1.Migration) {
+			m.Spec.Clone.NoOwner = true
+			m.Spec.Clone.OwnerAfterRestore = name
+		}
 	}
 	DescribeTable("create-time rules",
 		func(name string, mutate func(*v1beta1.Migration), wantErr string) {
@@ -197,6 +206,20 @@ var _ = Describe("Migration CRD validation", func() {
 			m.Spec.Clone.AllDatabases = true
 			m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true}
 		}, ""),
+		Entry("owner handover with noOwner", "cel-owner-ok", owner(testOwnerRole), ""),
+		Entry("owner handover without noOwner", "cel-owner-keeps-owners",
+			func(m *v1beta1.Migration) { m.Spec.Clone.OwnerAfterRestore = testOwnerRole },
+			"ownerAfterRestore requires noOwner"),
+		Entry("owner handover with all databases", "cel-owner-all", func(m *v1beta1.Migration) {
+			m.Spec.Clone.NoOwner = true
+			m.Spec.Clone.OwnerAfterRestore = testOwnerRole
+			m.Spec.Clone.AllDatabases = true
+		}, "cannot be combined with allDatabases"),
+		// omitempty drops the key, so an empty value is an absent field.
+		Entry("owner handover left empty", "cel-owner-empty", owner(""), ""),
+		// The role name reaches SQL as an identifier; the charset pattern is
+		// the barrier, as it is for slot names.
+		Entry("owner name with a space", "cel-owner-space", owner("app owner"), "should match"),
 	)
 
 	// The CRD defaults are what Materialize relies on for partial keys; a bare
@@ -272,5 +295,47 @@ var _ = Describe("Migration CRD validation", func() {
 		changed.Spec.Clone.TableJobs = 8
 		changed.Spec.Cutover.Approved = true
 		Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+	})
+
+	It("pins ownerAfterRestore once the Migration exists", func() {
+		const name = "cel-owner-immutable"
+		m := validMigration(name)
+		m.Spec.Clone.NoOwner = true
+		m.Spec.Clone.OwnerAfterRestore = testOwnerRole
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		fresh := func() *v1beta1.Migration {
+			got := &v1beta1.Migration{}
+			ExpectWithOffset(1, k8sClient.Get(ctx,
+				types.NamespacedName{Name: name, Namespace: testNS}, got)).To(Succeed())
+			return got
+		}
+
+		changed := fresh()
+		changed.Spec.Clone.OwnerAfterRestore = "other_owner"
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("ownerAfterRestore is immutable")))
+
+		changed = fresh()
+		changed.Spec.Clone.OwnerAfterRestore = ""
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("ownerAfterRestore is immutable")))
+
+		// Control: the rule pins one field, not the whole clone block.
+		changed = fresh()
+		changed.Spec.Clone.DropIfExists = true
+		Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+	})
+
+	It("rejects an ownerAfterRestore added after creation", func() {
+		const name = "cel-owner-late"
+		m := validMigration(name)
+		m.Spec.Clone.NoOwner = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, got)).To(Succeed())
+		got.Spec.Clone.OwnerAfterRestore = testOwnerRole
+		Expect(k8sClient.Update(ctx, got)).To(MatchError(ContainSubstring("ownerAfterRestore is immutable")))
 	})
 })

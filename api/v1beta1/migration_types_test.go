@@ -96,6 +96,7 @@ func fullMigration() *Migration {
 					IncludeOnlyExtensions: []string{"citext"},
 					ExcludeExtensions:     []string{"postgis"},
 				},
+				OwnerAfterRestore: "app_owner",
 			},
 			Follow: &FollowOptions{
 				Enabled: true, Plugin: "wal2json", SlotName: "slot_1",

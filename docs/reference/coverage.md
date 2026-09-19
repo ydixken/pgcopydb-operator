@@ -19,7 +19,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--drop-if-exists` | `spec.clone.dropIfExists` | |
 | `--roles` | `spec.clone.roles` | |
 | `--no-role-passwords` | `spec.clone.noRolePasswords` | |
-| `--no-owner` | `spec.clone.noOwner` | |
+| `--no-owner` | `spec.clone.noOwner` | `spec.clone.ownerAfterRestore` builds on it: operator-level behavior, not a pgcopydb option. It hands the restored objects to a named role after the worker exits; see [Ownership after restore](prerequisites.md#ownership-after-restore-cloneownerafterrestore). |
 | `--no-acl` | `spec.clone.noACL` | |
 | `--no-comments` | `spec.clone.noComments` | |
 | `--no-tablespaces` | `spec.clone.noTablespaces` | |
