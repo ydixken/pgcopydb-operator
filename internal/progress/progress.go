@@ -15,10 +15,9 @@ limitations under the License.
 */
 
 // Package progress samples a running worker pod's database sizes and relation
-// counts via psql, and renders the version-gated shell that runs pgcopydb's
-// own JSON progress reporting (`pgcopydb list progress --json`) inside a
-// caller's own script, because on stock pgcopydb 0.18 that command corrupts
-// filtered catalogs and never returns data (see
+// counts via psql, and renders the version-gated shell that runs `pgcopydb
+// list progress --json` inside a caller's script: on stock pgcopydb 0.18 that
+// command corrupts filtered catalogs and never returns data (see
 // docs/research/upstream-issues.md). Every failure mode yields no sample,
 // never an aborted reconcile.
 package progress
@@ -76,33 +75,18 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 	return p
 }
 
-// GateScript reads the pod's pgcopydb version and runs `list progress` only
-// inside the case arm the allowlist rendered: any other version matches
-// nothing, prints nothing, and the poll stays shut. Exported because two
-// Jobs ask for the counters this same way, each from its own pod once the
-// worker is gone: a follow migration's drain verification (see
-// buildVerifyJob) and a plain clone's completion check (see
-// buildCatalogJob). One allowlist, one renderer, so the gate cannot drift
-// between callers.
-//
-// An empty allowlist renders nothing at all, which is the same "do not even
-// ask" the poll itself takes. Rendering the case statement with no pattern at
-// all is a syntax error in dash, which is what the runner image links /bin/sh
-// to (measured on the shipped image), so a caller embedding this in a larger
-// script would have had the shell refuse the whole thing.
+// GateScript runs `list progress` only inside the case arm the allowlist
+// rendered, so any other version matches nothing and the poll stays shut. An
+// empty allowlist renders nothing at all: callers embed this in a larger
+// script, and dash (the runner image's /bin/sh) refuses a patternless case.
 func (p *Poller) GateScript() string {
 	if len(p.allowed) == 0 {
 		return ""
 	}
-	// The pattern list opens with "(", the unambiguous POSIX form, because
-	// the verify Job embeds this script inside $( ), where a shell may read
-	// the pattern's own ")" as the end of the substitution. Shells disagree
-	// about whether they do: bash 3.2 refuses the bare form, bash 4.0 and
-	// later accept it, dash accepts it (measured across 3.2, 4.0, 4.4, 5.1,
-	// 5.3 and the shipped runner image). Nothing we ship runs a shell that
-	// refuses it, so this is portability rather than a live bug, and the
-	// reason to write it this way is that the form which needs no such
-	// survey is free.
+	// The pattern list opens with "(", the POSIX form that needs no portability
+	// survey: the verify Job embeds this inside $( ), where a shell may read a
+	// bare pattern's own ")" as the end of the substitution
+	// (see docs/research/measurements.md#shells-disagree-about-a-bare-case-pattern-inside-a-command-substitution).
 	return `v=$(pgcopydb --version | head -n 1)
 v=${v#` + versionPrefix + `}
 case "$v" in
@@ -111,49 +95,16 @@ esac
 `
 }
 
-// sampleScript asks each database for everything one poll needs, in one row:
-// its size, then its tables, the tables holding rows, the indexes, and the
-// table bytes; the source row ends with a sixth figure, the tables it holds
-// rows in that the target holds none in. Sizes and counts used to be two
-// execs against the same two connections, which is five psql invocations
-// every ten seconds against a database already under a bulk copy.
-//
-// The source has to be asked about the target's tables rather than its own.
-// pgcopydb restores only the in-scope schema, so the target's table list is
-// the filters already applied; counting the source unscoped reports indexes
-// and bytes for tables this migration was told to leave behind, and a
-// denominator it can never reach. The target's counts row carries that list
-// as a second column, one name and one row count per table, and the source
-// joins it; a target that did not answer (a held lock on one table blocks the
-// row) leaves the source joining nothing, so its size still lands and its
-// counts, which need the target's anyway, are discarded by the parser.
-//
-// Each table's exact row count is read with a one-row select
-// (query_to_xml being the one read-only dynamic SQL stock PostgreSQL has), and
-// a table owes the copy while the target's count is short of the source's.
-// Storage cannot tell: a table's TOAST relation occupies a page from the
-// moment the schema is restored, so a pg_table_size test counted an 848MB
-// table with no rows on the target as copied (issue #277), and an earlier
-// version of this same query counted a table done the instant it held any row
-// at all, so a table interrupted mid-copy with some but not all of its rows
-// landed also read as done. Counting exactly is a full scan of every in-scope
-// table on both sides, every poll; the tables here are assumed small enough,
-// and the copy busy enough already, that one more sequential scan alongside
-// it is noise, but a migration of a few enormous tables is the case to watch
-// if this ever shows up in the load it causes rather than the load it copies.
-//
-// pg_table_size for the bytes: the table with its TOAST, without its indexes.
-// The other two are both wrong here, and each was measured against a real
-// pair before this settled. pg_total_relation_size adds the indexes, so an
-// empty table carrying a primary key counted as copied and a target holding
-// one populated table of three reported two. pg_relation_size counts only the
-// main fork, so a table of documents reported 256kB where pg_table_size
-// reported 66MB: on an e2e clone that read as 512MiB to copy while the target
-// grew past 3GB. The readings are in docs/research/measurements.md#progress-sampling.
-//
-// A failed side prints empty and parses to no sample, never to zero. psql
-// touches no SQLite catalog, so unlike `list progress` this is safe while the
-// clone runs, which is why these numbers can be live at all.
+// sampleScript asks each database for one row of sizes and counts, the source
+// row ending in a sixth figure: the tables the target is still short rows on.
+// The source is asked about the target's tables rather than its own, because
+// the target holds the in-scope schema and an unscoped source counts toward a
+// denominator the copy can never reach. Counts are read exactly, table by
+// table, because storage cannot tell an empty table from a copied one and an
+// any-row test calls a table interrupted mid-copy done. Bytes come from
+// pg_table_size, whose neighbours add the indexes or drop the TOAST
+// (see docs/research/measurements.md#progress-sampling). A failed side prints
+// empty and parses to no sample, never to zero.
 const sampleScript = progressSQL + `rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
@@ -186,9 +137,8 @@ t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row") || t=
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
-// One transaction pins pooled queries to the backend with the local timeout.
-// SQL cancellation releases server work; timeout also bounds connection hangs
-// after the local exec stream closes.
+// One transaction pins the pooled queries to the backend that SET LOCAL bounds,
+// and the outer timeout catches a connection hang after the exec stream closes.
 const progressSQL = `progress_sql() {
   timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA --single-transaction -v ON_ERROR_STOP=1 \
     -c 'SET LOCAL statement_timeout = 5000' -c "$2"
@@ -204,9 +154,8 @@ type Sample struct {
 }
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
-// TablesDone counts the in-scope tables the copy owes nothing on: their exact
-// row count on the target is at least the source's, which a table empty on
-// both sides also satisfies.
+// TablesDone counts tables whose target row count reached the source's, which
+// an empty table on both sides also satisfies.
 type RelationCounts struct {
 	TablesTotal  int64
 	TablesDone   int64
@@ -265,11 +214,9 @@ func parseSample(out []byte) *Sample {
 	// 0 of 0 is an absent sample, not progress.
 	if len(src) == 6 && len(tgt) == 5 && tgt[1] > 0 {
 		sample.Counts = &RelationCounts{
-			// Every total is the source's, every done is the target's, so a
-			// dashboard can name the side it came from. The source is asked only
-			// about the tables the target has, so this counts the same set either
-			// way; taking it from the source is what makes the label true. The
-			// tables done are the total less what the source counted as owed.
+			// Every total is the source's and every done the target's, so a
+			// dashboard can name the side each figure came from. Tables done is
+			// the total less what the source counted as still owed.
 			TablesTotal:  src[1],
 			TablesDone:   src[1] - src[5],
 			IndexesTotal: src[3],
@@ -295,28 +242,12 @@ func parseFields(s string) []int64 {
 	return out
 }
 
-// finalizingScript asks the target what pgcopydb is doing there, counting its
-// own backends by the work they are on. pgcopydb names its connections after
-// that work, "pgcopydb[54] copy worker" against "pgcopydb[32] VACUUM ANALYZE
-// public.documents", so the name is the primary signal and the statement text
-// only a fallback. Both tests are case insensitive on purpose: pgcopydb emits
-// the copy statement lowercase, which is easy to match wrongly and gives a
-// confident zero when four copies are running.
-//
-// Copy workers count by connection, the tail only while active. Sampled
-// across a whole base copy on a live worker 2026-08-30: four copy workers
-// connected in every sample, zero the instant it ended, while the active
-// count dipped to zero mid-copy and read as the tail.
-//
-// Scoped to this worker's own connections by client_addr. Every worker of one
-// migration runs in one pod and so shares a source address, while a target can
-// be shared: the e2e suite points every migration at one, and without the
-// scope a compare worker from another migration's verification counts as this
-// clone's tail and reports the wrong phase. psql's own backend is excluded by
-// the application_name test.
-//
-// psql against the target touches no SQLite catalog, so it is safe while the
-// clone runs. Reading `list progress` is not, which is why this exists.
+// finalizingScript counts pgcopydb's own backends on the target. Both tests
+// are case insensitive because pgcopydb emits the copy statement lowercase,
+// and copy workers count by connection while the tail counts only active ones
+// (see docs/research/measurements.md#a-copy-workers-connection-outlives-the-statement-it-is-running).
+// client_addr scopes the count to this worker's pod, so another migration's
+// compare worker on a shared target cannot read as this clone's tail.
 const finalizingScript = progressSQL + `progress_sql "$PGCOPYDB_TARGET_PGURI" "select
   count(*) filter (where application_name ilike '%copy worker%'
                       or (state = 'active' and query ilike 'copy %')) || ' ' ||
@@ -328,9 +259,9 @@ where application_name like 'pgcopydb%' and client_addr = inet_client_addr()" ||
 `
 
 // CloneStage reports whether the worker is still copying data or has moved on
-// to the tail: index builds, constraints and vacuum. Unknown (both false) when
-// there is no pod, the query failed, or pgcopydb holds no backend the query
-// counts, since an empty answer must not be read as either state.
+// to the tail: index builds, constraints and vacuum. Both false is unknown,
+// since no pod, a failed query and no matching backend must not read as either
+// state.
 func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool) {
 	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
 	if err != nil || pod == "" {
@@ -344,8 +275,6 @@ func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (cop
 	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &nCopy, &nOther); err != nil {
 		return false, false
 	}
-	// The counts behind the phase the operator goes on to report, so the next
-	// surprise arrives with evidence rather than a guess.
 	logf.FromContext(ctx).V(1).Info("clone stage sample",
 		"job", jobName, "copyBackends", nCopy, "otherBackends", nOther)
 	// Only once no copy worker is left is the data across. A single remaining
@@ -354,10 +283,8 @@ func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (cop
 }
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
-// (bytes object per upstream progress.c). Unknown fields are ignored so
-// schema drift degrades to missing
-// numbers, never to a failure. Bytes is a pointer so an output without the
-// object (older pgcopydb) yields no byte counters instead of fake zeros.
+// (bytes object per upstream progress.c). Bytes is a pointer so an output from
+// an older pgcopydb without the object yields no byte counters, not fake zeros.
 type listProgress struct {
 	Tables  counts  `json:"tables"`
 	Indexes counts  `json:"indexes"`
