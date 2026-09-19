@@ -122,8 +122,9 @@ func (r *MigrationReconciler) ensureFinalizer(ctx context.Context, m *v1beta1.Mi
 // reconcileFollowRunning handles the streaming and cutover phases while the
 // worker Job runs. The sample is best effort: no sample keeps the previous
 // status, exactly like progress polling. cloneDone is the caller's reading of
-// the base copy (the worker's own log markers); until it is true the stream
-// is only reported, never acted on.
+// the base copy (the worker's own log marker, confirmed by the pass's sample;
+// see confirmBaseCopy); until it is true the stream is only reported, never
+// acted on.
 func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1beta1.Migration, jobName string, cloneDone bool) {
 	log := logf.FromContext(ctx)
 	if r.Sentinel == nil {
@@ -247,7 +248,11 @@ func (r *MigrationReconciler) reconcileFollowRunning(ctx context.Context, m *v1b
 // data stays recoverable (at the documented cost of WAL retention on the
 // source).
 func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
-	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
+	// A refused marker stays refused (see confirmBaseCopy): the worker exiting
+	// 0 is the same word the marker was, and the verify Job decides by content.
+	if !tablesEmptySeen(m) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone", "base copy finished")
+	}
 	m.Status.Phase = v1beta1.PhaseCuttingOver
 
 	verified, failedVerify, err := r.ensureVerify(ctx, m)
@@ -386,25 +391,9 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
-	job, created, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
+	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
 		return buildVerifyJob(m, r.RunnerImage, r.progressGate())
 	})
-	if created {
-		// Drop what sampleProgress estimated from the databases during the copy.
-		// The worker Job is finished, so no further estimate can arrive, and this
-		// Job's catalog line is the real count: recordCloneProgress waits on an
-		// empty field to know it may still write one. This runs before the nil
-		// check below because ensureJob reports no Job on the pass it creates
-		// one, and it runs on that pass only, so a landed count is never cleared.
-		//
-		// The estimate's last word goes to the gauges first, squared off: the base
-		// copy succeeded, and a tile left one table short for good is the confusing
-		// end state. Record leaves those gauges alone while the field is empty, so
-		// they hold that reading until the catalog line overwrites them.
-		settleProgress(m)
-		metrics.Record(m)
-		m.Status.Progress = nil
-	}
 	if err != nil || job == nil {
 		return false, false, err
 	}
@@ -429,19 +418,24 @@ func (r *MigrationReconciler) progressGate() string {
 }
 
 // recordCloneProgress takes the copy counters out of a finished verify Job's
-// log. This is where a follow migration's status.progress comes from: the
-// worker owns its catalog until it exits, and then its pod is gone, so the
-// verify Job (own pod, same work dir, worker dead) is the one place left that
-// can count. Best effort in both directions: an absent or unparsable line
-// leaves the field empty, and nothing here can move the drain verdict.
-//
-// An empty status.progress is the latch, so an unreadable log (the Job is
-// finished, its pod not yet collected) is retried next pass and a landed
-// count is never rewritten. finishFollow drops the copy-time estimate for
-// exactly that reason: it would otherwise read as landed.
-func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
-	if m.Status.Progress != nil || r.Logs == nil {
-		return
+// log. This is where a follow migration's status.progress ends up: the worker
+// owns its catalog until it exits, and then its pod is gone, so the verify Job
+// (own pod, same work dir, worker dead) is the one place left that can count.
+// The line overwrites the copy-time estimate on every pass it is readable,
+// with nothing latched on the field: a pass that lost its status patch, or a
+// worker restarted after the verify Job existed, once left the estimate
+// standing as the final figure, 81 of 81 indexes over a catalog that counted
+// 75 (issue #277). The Job is finished, so the line cannot change. Best
+// effort otherwise: an unreadable log (pod not yet collected, or already
+// gone) or an unparsable line leaves the field as it is, and nothing here can
+// move the drain verdict.
+// The bool return says whether a line was read and parsed: ensureCatalogCheck
+// needs to know, since a plain clone's completion gate must not be lifted by
+// an unreadable log, while ensureVerify's caller does not care, the counters
+// there being cosmetic (see recordCloneProgress's own doc).
+func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) bool {
+	if r.Logs == nil {
+		return false
 	}
 	tail := r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
@@ -452,11 +446,12 @@ func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta
 		cp, err := progress.ParseListProgress([]byte(raw))
 		if err != nil {
 			logf.FromContext(ctx).V(1).Info("verify Job progress line did not parse", "job", jobName, "error", err)
-			return
+			return false
 		}
 		m.Status.Progress = cp
-		return
+		return true
 	}
+	return false
 }
 
 // reconcileDeletion routes deletion through cleanup for live migrations. The

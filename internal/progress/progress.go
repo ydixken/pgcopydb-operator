@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package progress samples a running worker pod: database sizes on both
-// sides via psql, and pgcopydb's own JSON progress reporting (`pgcopydb
-// list progress --json`) behind an exact version allowlist, because on
-// stock pgcopydb 0.18 that command corrupts filtered catalogs and never
-// returns data (see docs/research/upstream-issues.md). Every failure mode
-// yields no sample, never an aborted reconcile.
+// Package progress samples a running worker pod's database sizes and relation
+// counts via psql, and renders the version-gated shell that runs pgcopydb's
+// own JSON progress reporting (`pgcopydb list progress --json`) inside a
+// caller's own script, because on stock pgcopydb 0.18 that command corrupts
+// filtered catalogs and never returns data (see
+// docs/research/upstream-issues.md). Every failure mode yields no sample,
+// never an aborted reconcile.
 package progress
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -78,10 +78,12 @@ func NewFromExec(exec execer, allowedVersions []string) *Poller {
 
 // GateScript reads the pod's pgcopydb version and runs `list progress` only
 // inside the case arm the allowlist rendered: any other version matches
-// nothing, prints nothing, and the poll stays shut. Exported because the
-// drain-verification Job asks for the counters the same way, from its own pod
-// once the worker is gone (see buildVerifyJob): one allowlist, one renderer,
-// so the gate cannot drift between the two callers.
+// nothing, prints nothing, and the poll stays shut. Exported because two
+// Jobs ask for the counters this same way, each from its own pod once the
+// worker is gone: a follow migration's drain verification (see
+// buildVerifyJob) and a plain clone's completion check (see
+// buildCatalogJob). One allowlist, one renderer, so the gate cannot drift
+// between callers.
 //
 // An empty allowlist renders nothing at all, which is the same "do not even
 // ask" the poll itself takes. Rendering the case statement with no pattern at
@@ -109,91 +111,77 @@ esac
 `
 }
 
-// CloneProgress returns the current copy progress of the Job's running pod,
-// or (nil, nil) when there is nothing safe to report: gate shut, no running
-// pod, exec failure, or non-JSON output. A missing sample is not an error,
-// the previous status value simply stands.
-func (p *Poller) CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error) {
-	if len(p.allowed) == 0 {
-		return nil, nil
-	}
-	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
-	if err != nil {
-		return nil, err
-	}
-	if pod == "" {
-		return nil, nil
-	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", p.GateScript()})
-	if err != nil {
-		// Catalogs still initializing, or the exec transport hiccuped.
-		return nil, nil
-	}
-	raw := bytes.TrimSpace(out)
-	if len(raw) == 0 {
-		// The gate did not open: the pod runs a version off the allowlist.
-		return nil, nil
-	}
-	cp, err := ParseListProgress(raw)
-	if err != nil {
-		return nil, nil
-	}
-	return cp, nil
-}
-
 // sampleScript asks each database for everything one poll needs, in one row:
-// its size, then its tables, the tables holding data, the indexes, and the
-// table bytes. Sizes and counts used to be two execs against the same two
-// connections, which is five psql invocations every ten seconds against a
-// database already under a bulk copy.
+// its size, then its tables, the tables holding rows, the indexes, and the
+// table bytes; the source row ends with a sixth figure, the tables it holds
+// rows in that the target holds none in. Sizes and counts used to be two
+// execs against the same two connections, which is five psql invocations
+// every ten seconds against a database already under a bulk copy.
 //
-// Three round trips, not two, because the source has to be asked about the
-// target's tables rather than its own. pgcopydb restores only the in-scope
-// schema, so the target's table list is the filters already applied; counting
-// the source unscoped reports indexes and bytes for tables this migration was
-// told to leave behind, and a denominator it can never reach.
+// The source has to be asked about the target's tables rather than its own.
+// pgcopydb restores only the in-scope schema, so the target's table list is
+// the filters already applied; counting the source unscoped reports indexes
+// and bytes for tables this migration was told to leave behind, and a
+// denominator it can never reach. The target's counts row carries that list
+// as a second column, one name and one row count per table, and the source
+// joins it; a target that did not answer (a held lock on one table blocks the
+// row) leaves the source joining nothing, so its size still lands and its
+// counts, which need the target's anyway, are discarded by the parser.
 //
-// pg_table_size: the table with its TOAST, without its indexes. The other two
-// are both wrong here, and each was measured against a real pair before this
-// settled. pg_total_relation_size adds the indexes, so an empty table carrying
-// a primary key counted as copied and a target holding one populated table of
-// three reported two. pg_relation_size counts only the main fork, so a table
-// of documents reported 256kB where pg_table_size reported 66MB: on an e2e
-// clone that read as 512MiB to copy while the target grew past 3GB.
+// Each table's exact row count is read with a one-row select
+// (query_to_xml being the one read-only dynamic SQL stock PostgreSQL has), and
+// a table owes the copy while the target's count is short of the source's.
+// Storage cannot tell: a table's TOAST relation occupies a page from the
+// moment the schema is restored, so a pg_table_size test counted an 848MB
+// table with no rows on the target as copied (issue #277), and an earlier
+// version of this same query counted a table done the instant it held any row
+// at all, so a table interrupted mid-copy with some but not all of its rows
+// landed also read as done. Counting exactly is a full scan of every in-scope
+// table on both sides, every poll; the tables here are assumed small enough,
+// and the copy busy enough already, that one more sequential scan alongside
+// it is noise, but a migration of a few enormous tables is the case to watch
+// if this ever shows up in the load it causes rather than the load it copies.
+//
+// pg_table_size for the bytes: the table with its TOAST, without its indexes.
+// The other two are both wrong here, and each was measured against a real
+// pair before this settled. pg_total_relation_size adds the indexes, so an
+// empty table carrying a primary key counted as copied and a target holding
+// one populated table of three reported two. pg_relation_size counts only the
+// main fork, so a table of documents reported 256kB where pg_table_size
+// reported 66MB: on an e2e clone that read as 512MiB to copy while the target
+// grew past 3GB.
 //
 // A failed side prints empty and parses to no sample, never to zero. psql
 // touches no SQLite catalog, so unlike `list progress` this is safe while the
 // clone runs, which is why these numbers can be live at all.
-const sampleScript = progressSQL + `scope=
-tables="select c.oid, n.nspname, c.relname from pg_class c
-  join pg_namespace n on n.oid = c.relnamespace
-  where c.relkind = 'r'
+const sampleScript = progressSQL + `rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"
+tables="from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace"
+user_tables="where c.relkind = 'r'
     and n.nspname not in ('pg_catalog', 'information_schema')
     and n.nspname not like 'pg_toast%'"
-row="select pg_database_size(current_database()) || ' ' ||
+row="pg_database_size(current_database()) || ' ' ||
   (select count(*) from t) || ' ' ||
-  (select count(*) from t where pg_table_size(t.oid) > 0) || ' ' ||
+  (select count(*) from t where $rowcount > 0) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
   (select coalesce(sum(pg_table_size(t.oid)), 0) from t)"
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with t as ($tables) $row") || t=
-scope=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "select coalesce(string_agg(quote_literal(n.nspname || '.' || c.relname), ','), '')
-  from pg_class c join pg_namespace n on n.oid = c.relnamespace
-  where c.relkind = 'r'
-    and n.nspname not in ('pg_catalog', 'information_schema')
-    and n.nspname not like 'pg_toast%'") || scope=
-if [ -n "$scope" ]; then
-  s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as ($tables
-    and (n.nspname || '.' || c.relname) in ($scope)) $row") || s=
-else
-  s=
-fi
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with t as (select c.oid, n.nspname, c.relname $tables $user_tables)
+  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($rowcount)::text || ')', ','), '') from t)") || t=
+case $t in
+  *\|?*) landed="values ${t#*|}" ;;
+  *) landed="select null::text, 0::bigint where false" ;;
+esac
+t=${t%%|*}
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.rowcount as target_rowcount $tables
+    join ($landed) as landed(name, rowcount) on landed.name = n.nspname || '.' || c.relname $user_tables)
+  select $row || ' ' || (select count(*) from t where t.target_rowcount < $rowcount)") || s=
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
 // Instance catalogs have no relation counters; zero counts preserve the sample row format without reporting progress.
 const allDatabasesSampleScript = progressSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'
   from pg_database where datname not in ('template0', 'template1')"
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row") || s=
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0'") || s=
 t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row") || t=
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
@@ -216,6 +204,9 @@ type Sample struct {
 }
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
+// TablesDone counts the in-scope tables the copy owes nothing on: their exact
+// row count on the target is at least the source's, which a table empty on
+// both sides also satisfies.
 type RelationCounts struct {
 	TablesTotal  int64
 	TablesDone   int64
@@ -251,8 +242,9 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string, allDatab
 	return parseSample(out), nil
 }
 
-// parseSample reads the source= and target= lines, five integers each. A side
-// that is missing, short or not numeric contributes nothing rather than zero.
+// parseSample reads the source= and target= lines, six integers for the source
+// and five for the target. A side that is missing, short or not numeric
+// contributes nothing rather than zero.
 func parseSample(out []byte) *Sample {
 	var src, tgt []int64
 	for line := range strings.SplitSeq(string(out), "\n") {
@@ -263,7 +255,7 @@ func parseSample(out []byte) *Sample {
 		}
 	}
 	sample := &Sample{}
-	if len(src) == 5 {
+	if len(src) == 6 {
 		sample.SourceSize = &src[0]
 	}
 	if len(tgt) == 5 {
@@ -271,14 +263,15 @@ func parseSample(out []byte) *Sample {
 	}
 	// Counts need both sides, and a target with no tables has no schema yet:
 	// 0 of 0 is an absent sample, not progress.
-	if len(src) == 5 && len(tgt) == 5 && tgt[1] > 0 {
+	if len(src) == 6 && len(tgt) == 5 && tgt[1] > 0 {
 		sample.Counts = &RelationCounts{
 			// Every total is the source's, every done is the target's, so a
 			// dashboard can name the side it came from. The source is asked only
 			// about the tables the target has, so this counts the same set either
-			// way; taking it from the source is what makes the label true.
+			// way; taking it from the source is what makes the label true. The
+			// tables done are the total less what the source counted as owed.
 			TablesTotal:  src[1],
-			TablesDone:   tgt[2],
+			TablesDone:   src[1] - src[5],
 			IndexesTotal: src[3],
 			IndexesDone:  tgt[3],
 			BytesTotal:   src[4],

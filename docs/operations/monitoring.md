@@ -58,10 +58,11 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **worker running**: the sizes are live samples from the worker pod, so they appear during attempts and fade out with the pod.
 - **worker running** for single-database counters too, but they have two sources and the second is more exact.
-  While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables and bytes that exist on the target against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
+  While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables holding rows on the target and its table bytes, against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
+  A table holding no rows on the source owes nothing and counts as done; one holding rows on the source and none on the target does not, whatever storage its restored schema already occupies.
   This requires psql and GNU `timeout` in the runner and touches no pgcopydb catalog.
   Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see the [troubleshooting row](../troubleshooting.md)).
-  The estimate leads that accounting slightly, because a table counts as copied once it holds any data.
+  The estimate leads that accounting slightly, because a table counts once it holds a row, so a table copied in parts counts before its last part lands.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 - **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
   A flip retires the old `{type,status}` pair and stamps a new one, so the endpoint never carries more than one series per condition type.
@@ -84,7 +85,7 @@ The transaction keeps the setting and query on the same backend through a transa
 The sampler therefore leaves no five-second session timeout for a later COPY or index build to inherit.
 This guarantee covers the operator's progress SQL, not pgcopydb's compatibility with transaction pooling for an entire migration.
 GNU `timeout` sends TERM after six seconds and KILL one second later, so a stalled connection also releases its remote processes even if the exec stream closes early.
-The three sequential single-database size and scope queries have a combined process budget of 21 seconds, below the 30-second exec timeout.
+The single-database sample runs two sequential queries, the target's counts and then the source's, with a combined process budget of 14 seconds, below the 30-second exec timeout.
 All-databases sampling runs two size queries with a combined process budget of 14 seconds.
 A failed side retains its last size gauge while a usable reading updates the other side.
 Relation counts need both sides, so a partial poll preserves the prior progress counters.
@@ -245,9 +246,10 @@ Pooler resets and query timeouts do not mask the sampler's behavior.
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
 - The tables, indexes and clone byte series move during the base copy, from the psql sample described above, and jump once when pgcopydb's own count replaces it (at clone completion, or at drain verification for a live migration).
-  A small step at that moment is expected rather than a fault: the estimate counts a table as copied once it holds any data, so it leads a count of finished tables.
-  A copy that exits 0 squares the table and index counts off to their totals, because an in-scope table that is legitimately empty is invisible to a count that reads data on disk and would otherwise leave the tile one short for good.
-  The byte figures settle with them, because the two sides end a little apart through fillfactor, bloat and alignment, and a finished migration reporting 480 of 512 invites the question of where the rest went.
+  A small step at that moment is expected rather than a fault: the estimate counts a table once it holds a row, so a table copied in parts counts before its last part lands.
+  Nothing rounds the estimate up when the worker exits 0.
+  A table that is empty on the source owes nothing and counts as done on its own, so a finished copy that still reads one table short is a finding: that table holds rows on the source and none on the target, which is how a `--resume` after killed attempts once called an 848MB table done ([#277](https://github.com/ydixken/pgcopydb-operator/issues/277)).
+  The byte figures are not rounded up either: the two sides end a little apart through fillfactor, bloat and alignment, so read a shortfall there against the table count beside it.
   A failed copy keeps its partial figures, which are the ones worth reading there.
 - The `by size` percent-done series can read above 100 during `Finalizing`: index builds and pre-vacuum bloat put the target ahead of the source in bytes before space is reclaimed.
   The query clamps it at 100, because a progress bar past 100 is a display bug, not a finding.

@@ -188,53 +188,6 @@ func TestGateScript_UnderSh(t *testing.T) {
 	}
 }
 
-func TestCloneProgress_FailClosed(t *testing.T) {
-	ctx := context.Background()
-	for name, f := range map[string]*fakeExec{
-		"no running pod": {pod: ""},
-		"exec error":     {pod: "p", execErr: errors.New("exec refused")},
-		"empty output":   {pod: "p", out: []byte("  \n")},
-		"non-JSON":       {pod: "p", out: []byte("pgcopydb: fatal")},
-	} {
-		p := NewFromExec(f, []string{patchedVersion})
-		cp, err := p.CloneProgress(ctx, "ns", "job")
-		if cp != nil || err != nil {
-			t.Errorf("%s: = (%v, %v), want (nil, nil)", name, cp, err)
-		}
-	}
-}
-
-func TestCloneProgress_DisabledAndPodErr(t *testing.T) {
-	ctx := context.Background()
-
-	// Empty allowlist: shut for good, no exec traffic at all.
-	f := &fakeExec{pod: "p", out: []byte("{}")}
-	if cp, err := NewFromExec(f, nil).CloneProgress(ctx, "ns", "job"); cp != nil || err != nil || f.calls != 0 {
-		t.Fatalf("disabled poller: = (%v, %v) after %d calls, want (nil, nil) and none", cp, err, f.calls)
-	}
-
-	// A pod lookup failure is an API error, not a shut gate.
-	f = &fakeExec{podErr: errors.New("api down")}
-	if _, err := NewFromExec(f, []string{patchedVersion}).CloneProgress(ctx, "ns", "job"); err == nil {
-		t.Fatal("pod lookup error: want it surfaced")
-	}
-}
-
-func TestCloneProgress_Sample(t *testing.T) {
-	f := &fakeExec{pod: "p", out: []byte(`{"tables":{"total":5,"done":2},"bytes":{"total":100,"done":40}}`)}
-	p := NewFromExec(f, []string{patchedVersion})
-	cp, err := p.CloneProgress(context.Background(), "ns", "job")
-	if err != nil || cp == nil {
-		t.Fatalf("= (%v, %v), want a sample", cp, err)
-	}
-	if cp.TablesTotal != 5 || cp.TablesDone != 2 || cp.BytesTotal.Value() != 100 || cp.BytesDone.Value() != 40 {
-		t.Fatalf("bad sample: %+v", cp)
-	}
-	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.GateScript() {
-		t.Fatalf("exec argv = %v, want the gate script under sh -c", f.argv)
-	}
-}
-
 func ptr(n int64) *int64 { return &n }
 
 func eq(a, b *int64) bool {
@@ -246,15 +199,16 @@ func eq(a, b *int64) bool {
 
 func TestSample(t *testing.T) {
 	ctx := context.Background()
-	// Five fields a side: database size, tables, tables holding data, indexes,
-	// table bytes.
+	// Five fields a side: database size, tables, tables holding rows, indexes,
+	// table bytes; the source adds a sixth, the tables it holds rows in that
+	// the target holds none in.
 	for name, tc := range map[string]struct {
 		out        string
 		src, tgt   *int64
 		wantCounts *RelationCounts
 	}{
 		"mid copy": {
-			out: "source=1073741824 60 60 85 48000000000\ntarget=536870912 60 23 0 12000000000\n",
+			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\n",
 			src: ptr(1073741824), tgt: ptr(536870912),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 23,
@@ -263,7 +217,7 @@ func TestSample(t *testing.T) {
 			},
 		},
 		"index build under way": {
-			out: "source=1073741824 60 60 85 48000000000\ntarget=1000000000 60 60 41 47000000000\n",
+			out: "source=1073741824 60 60 85 48000000000 0\ntarget=1000000000 60 60 41 47000000000\n",
 			src: ptr(1073741824), tgt: ptr(1000000000),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 60,
@@ -271,10 +225,34 @@ func TestSample(t *testing.T) {
 				BytesTotal: 48000000000, BytesDone: 47000000000,
 			},
 		},
+		// The shape of issue #277: pgcopydb called every table done while
+		// one, populated on the source, held no rows on the target. Storage
+		// read 57 of 57 for it, since a TOAST relation occupies a page from
+		// the schema restore on; the owed count reads 56.
+		"table empty on the target": {
+			out: "source=10134634496 57 57 81 10134634496 1\ntarget=9247000000 57 56 81 9247000000\n",
+			src: ptr(10134634496), tgt: ptr(9247000000),
+			wantCounts: &RelationCounts{
+				TablesTotal: 57, TablesDone: 56,
+				IndexesTotal: 81, IndexesDone: 81,
+				BytesTotal: 10134634496, BytesDone: 9247000000,
+			},
+		},
+		// A table empty on both sides owes nothing and counts done, so a
+		// finished copy reads whole without anything rounding it up.
+		"table empty on both sides": {
+			out: "source=1000 3 2 4 500 0\ntarget=900 3 2 4 480\n",
+			src: ptr(1000), tgt: ptr(900),
+			wantCounts: &RelationCounts{
+				TablesTotal: 3, TablesDone: 3,
+				IndexesTotal: 4, IndexesDone: 4,
+				BytesTotal: 500, BytesDone: 480,
+			},
+		},
 		// The schema restore has not run yet, so there is a size but nothing
 		// to count. 0 of 0 is an absent sample, not progress.
 		"target has no schema": {
-			out: "source=1073741824 60 60 85 48000000000\ntarget=8388608 0 0 0 0\n",
+			out: "source=1073741824 60 60 85 48000000000 0\ntarget=8388608 0 0 0 0\n",
 			src: ptr(1073741824), tgt: ptr(8388608),
 		},
 		// One side unreadable: its size goes too, and counts need both.
@@ -283,13 +261,13 @@ func TestSample(t *testing.T) {
 			tgt: ptr(536870912),
 		},
 		"target failed": {
-			out: "source=1073741824 60 60 85 48000000000\ntarget=\n",
+			out: "source=1073741824 60 60 85 48000000000 0\ntarget=\n",
 			src: ptr(1073741824),
 		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
-		"short source row":    {out: "source=1 60 60 85\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
-		"source not a number": {out: "source=1 60 60 85 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
+		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
 		"no output":           {out: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -369,13 +347,14 @@ func TestSample_PodRecheckFailurePreservesExecError(t *testing.T) {
 }
 
 func TestSample_AllDatabases(t *testing.T) {
-	f := &fakeExec{pod: "p", out: []byte("source=7000 0 0 0 0\ntarget=6000 0 0 0 0\n")}
+	f := &fakeExec{pod: "p", out: []byte("source=7000 0 0 0 0 0\ntarget=6000 0 0 0 0\n")}
 	got, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", true)
 	if err != nil || got == nil || !eq(got.SourceSize, ptr(7000)) || !eq(got.TargetSize, ptr(6000)) || got.Counts != nil {
 		t.Fatalf("sample = %+v, %v; want sizes without counts", got, err)
 	}
 	script := f.argv[2]
-	for _, want := range []string{conn.URIRecover(), progressSQL, "sum(pg_database_size(oid))", "not in ('template0', 'template1')", "PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI"} {
+	// The source row keeps the single-database shape, owed count included.
+	for _, want := range []string{conn.URIRecover(), progressSQL, "sum(pg_database_size(oid))", "not in ('template0', 'template1')", "PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI", `"$row || ' 0'"`} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q", want)
 		}
@@ -419,25 +398,60 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 	}
 }
 
-// The source must be asked about the target's tables, not its own. pgcopydb
-// restores only the in-scope schema, so an unscoped source count reports
-// indexes and bytes for tables this migration was told to leave behind, and a
-// filtered migration then shows a denominator it can never reach.
-func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
+// A table is done once its exact row count on the target is at least the
+// source's, and only a read of the table can say so: its TOAST relation
+// occupies a page from the schema restore on, so a storage test called an
+// 848MB table with no rows on the target copied (issue #277), and a
+// has-any-row test called a table interrupted mid-copy done the instant it
+// held one row of many. The count travels in the target's scope list, which
+// lets the source count exactly the tables whose target count falls short of
+// its own; a table empty on both sides owes nothing.
+func TestRelationCountsScript_CountsRowsNotStorage(t *testing.T) {
 	for _, want := range []string{
-		"string_agg(quote_literal(", // the list is built, and quoted
-		"in ($scope)",               // and the source query uses it
-		`if [ -n "$scope" ]`,        // an empty list would be a syntax error
+		`rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"`,
+		"(select count(*) from t where $rowcount > 0)",
+		"|| ',' || ($rowcount)::text || ')'",                   // the target's row carries the count per table
+		"join ($landed) as landed(name, rowcount)",             // and the source joins it
+		"where t.target_rowcount < $rowcount)",                 // owed: target short of source
+		`*\|?*) landed="values ${t#*|}"`,                       // the list rides the row as a second column
+		`*) landed="select null::text, 0::bigint where false"`, // and a target that did not answer joins nothing
 	} {
 		if !strings.Contains(sampleScript, want) {
 			t.Errorf("sampleScript is missing %q", want)
 		}
 	}
-	// The scope is read off the target; asking the source would defeat it.
-	scope := sampleScript[strings.Index(sampleScript, "scope=$("):]
-	scope = scope[:strings.Index(scope, "\nif ")]
-	if !strings.Contains(scope, "PGCOPYDB_TARGET_PGURI") || strings.Contains(scope, "SOURCE") {
-		t.Errorf("the table list must come from the target:\n%s", scope)
+	if strings.Contains(sampleScript, "pg_table_size(t.oid) > 0") {
+		t.Error("sampleScript calls a table done off its storage, which a TOAST relation occupies before any row lands")
+	}
+}
+
+// The source must be asked about the target's tables, not its own. pgcopydb
+// restores only the in-scope schema, so an unscoped source count reports
+// indexes and bytes for tables this migration was told to leave behind, and a
+// filtered migration then shows a denominator it can never reach.
+func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
+	// query returns the SQL one side is sent: from its progress_sql call to
+	// the `") || ` that ends every such call in the script.
+	query := func(side string) string {
+		t.Helper()
+		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI"`)
+		if start < 0 {
+			t.Fatalf("sampleScript never asks the %s", side)
+		}
+		rest := sampleScript[start:]
+		return rest[:strings.Index(rest, `") || `)]
+	}
+	// The list is built on the target, quoted, and the source joins it in
+	// place of reading its own catalog unscoped.
+	if target := query("TARGET"); !strings.Contains(target, "string_agg('(' || quote_literal(") {
+		t.Errorf("the target's row does not carry the table list:\n%s", target)
+	}
+	source := query("SOURCE")
+	if !strings.Contains(source, "join ($landed) as landed(name, rowcount) on landed.name = n.nspname || '.' || c.relname") {
+		t.Errorf("the source is not scoped to the target's tables:\n%s", source)
+	}
+	if strings.Contains(source, "string_agg") {
+		t.Errorf("the source builds a table list of its own:\n%s", source)
 	}
 }
 

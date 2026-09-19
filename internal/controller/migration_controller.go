@@ -95,11 +95,17 @@ const (
 )
 
 // The CloneCompleted=False reasons of a running attempt. Promotion to the
-// second is the latch that lets the phase reach Finalizing (see copySeen).
+// second is the latch that lets the phase reach Finalizing (see copySeen); the
+// third latches a refused clone-done marker (see confirmBaseCopy).
 const (
-	reasonCloneRunning = "CloneRunning"
-	reasonCopyingData  = "CopyingData"
+	reasonCloneRunning        = "CloneRunning"
+	reasonCopyingData         = "CopyingData"
+	reasonTablesEmptyOnTarget = "TablesEmptyOnTarget"
 )
+
+// reasonCloneIncomplete fails a plain clone whose worker exited 0 while
+// pgcopydb's own catalog still counts tables not done (see finishClone).
+const reasonCloneIncomplete = "CloneIncomplete"
 
 // LogReader fetches worker pod logs so terminal errors can be surfaced in
 // status; nil degrades to the Job's own condition message (envtest has no
@@ -116,10 +122,9 @@ type LogReader interface {
 // injects a fake). Both are best effort: a nil sample keeps the previous
 // value and an error never fails the pass.
 type ProgressOps interface {
-	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
 	// Sample reads both databases in one exec: their sizes, and the relation
-	// counts. Unlike CloneProgress it is safe on a pass with a live worker,
-	// which is what makes the progress fields move during a copy.
+	// counts. It is safe on a pass with a live worker, which is what makes
+	// the progress fields move during a copy.
 	Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*progress.Sample, error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
@@ -442,9 +447,10 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // three of them: the follow watch queries the two databases (see
 // internal/sentinel), the clone-stage probe counts pgcopydb's own backends on
 // the target, and the size sample reads pg_database_size (both in
-// internal/progress). The copy counters are read from a pod with no worker in
-// it, the verify Job for a follow migration and the exited worker's own pod
-// for a plain clone. The one remaining exec into a live worker is `sentinel
+// internal/progress). The copy counters are read from a Job of their own,
+// its own pod, with no worker in it: the verify Job for a follow migration
+// and the catalog check Job for a plain clone (see buildVerifyJob,
+// buildCatalogJob). The one remaining exec into a live worker is `sentinel
 // set endpos`, which is how a cutover is asked for and has no other route.
 //
 // The claim is about exec, not about the work dir, and deliberately: deleting
@@ -454,9 +460,9 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // predates this rule and is not reworked here.
 //
 // The copy's end is read from the markers pgcopydb prints when the copy phase
-// ends (pgcopydb.CloneDone), so a follow migration needs the log reader
-// cmd/main.go always wires; the single fetched tail also feeds the zombie
-// check.
+// ends (pgcopydb.CloneDone) and confirmed against this pass's own sample
+// (confirmBaseCopy), so a follow migration needs the log reader cmd/main.go
+// always wires; the single fetched tail also feeds the zombie check.
 func (r *MigrationReconciler) observeRunningJob(
 	ctx context.Context,
 	m, base *v1beta1.Migration,
@@ -489,7 +495,9 @@ func (r *MigrationReconciler) observeRunningJob(
 		switch {
 		case copying:
 			m.Status.Phase = v1beta1.PhaseCloning
-			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
+			// A refused marker outranks the probe: its latch is the only
+			// memory of the marker once that scrolls out of the log tail.
+			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
 				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
 					"base copy running, copy workers connected to the target")
 			}
@@ -515,11 +523,16 @@ func (r *MigrationReconciler) observeRunningJob(
 		record("follow_log_fetch", started)
 	}
 
+	// The sample goes before the marker is read: it is the evidence the marker
+	// is checked against, and one taken after the log fetch has seen every
+	// copy transaction the marker follows commit.
+	started = r.currentTime()
+	counts := r.sampleProgress(ctx, m, job.Name)
+	record("progress_sample", started)
+
 	cloneDone := meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
-	if follow && !cloneDone && pgcopydb.CloneDone(logTail) {
-		cloneDone = true
-		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
-			"base copy finished (worker logged clone completion), replaying changes")
+	if follow && !cloneDone && (pgcopydb.CloneDone(logTail) || tablesEmptySeen(m)) {
+		cloneDone = r.confirmBaseCopy(m, counts)
 	}
 	if follow {
 		// May advance the phase to Streaming/CutoverPending/CuttingOver and
@@ -528,9 +541,6 @@ func (r *MigrationReconciler) observeRunningJob(
 		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
 		record("follow_control", started)
 	}
-	started = r.currentTime()
-	r.sampleProgress(ctx, m, job.Name)
-	record("progress_sample", started)
 	started = r.currentTime()
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		record("status_patch", started)
@@ -567,28 +577,66 @@ func copySeen(m *v1beta1.Migration) bool {
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonCopyingData
 }
 
-// sampleProgress best-effort feeds the size gauges while the worker runs. It
-// is psql and nothing else, per the invariant on observeRunningJob; the
-// counters that would need a pgcopydb command wait for the Job to exit (see
-// sampleCloneProgress). Errors V(1)-log and never flip a condition or fail
-// the pass.
-func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+// tablesEmptySeen reports whether a refused clone-done marker still stands.
+// Like copySeen, the latch lives in the condition reason, so it survives an
+// operator restart and needs no API field.
+func tablesEmptySeen(m *v1beta1.Migration) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonTablesEmptyOnTarget
+}
+
+// confirmBaseCopy decides whether the worker's clone-done marker turns
+// CloneCompleted true, and reports the outcome. The marker is pgcopydb's own
+// bookkeeping, and --resume has called a table done that no rows ever reached
+// (issue #277: 848MB on the source, empty on the target, 57 of 57 reported),
+// so the pass's own sample has the last word: one that finds a table holding
+// rows on the source and none on the target refuses. The refusal is latched
+// in the reason because the marker scrolls out of the bounded log tail, and
+// only a sample that owes nothing clears it; a pass without a sample changes
+// nothing either way, so a sampler hiccup neither causes nor lifts one.
+func (r *MigrationReconciler) confirmBaseCopy(m *v1beta1.Migration, counts *progress.RelationCounts) bool {
+	switch {
+	case counts != nil && counts.TablesDone < counts.TablesTotal:
+		msg := fmt.Sprintf("pgcopydb logged the base copy finished, but %d of %d in-scope tables hold rows on the source and none on the target; the copy is not reported complete until a sample finds them populated",
+			counts.TablesTotal-counts.TablesDone, counts.TablesTotal)
+		if !tablesEmptySeen(m) {
+			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonTablesEmptyOnTarget, "Clone", "%s", msg)
+		}
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonTablesEmptyOnTarget, msg)
+		return false
+	case counts == nil && tablesEmptySeen(m):
+		return false
+	}
+	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
+		"base copy finished (worker logged clone completion), replaying changes")
+	return true
+}
+
+// sampleProgress best-effort feeds the size gauges and the progress counters
+// while the worker runs, and returns the counts this pass read, nil when it
+// read none. It is psql and nothing else, per the invariant on
+// observeRunningJob; the counters that would need a pgcopydb command wait for
+// the worker to exit and are read from a Job of their own (see
+// ensureCatalogCheck, ensureVerify). Errors V(1)-log and never flip a
+// condition or fail the pass.
+func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) *progress.RelationCounts {
 	if r.Progress == nil {
-		return
+		return nil
 	}
 	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
 	if err != nil {
 		logf.FromContext(ctx).V(1).Info("database sample failed", "job", jobName, "error", err)
-		return
+		return nil
 	}
 	if s == nil {
-		return
+		return nil
 	}
 	// Metrics only, by design: sizes are observability, not state.
 	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
 	if s.Counts != nil {
 		applyCounts(m, s.Counts)
 	}
+	return s.Counts
 }
 
 // applyCounts writes the database estimate over whatever is there. Every
@@ -599,9 +647,9 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 //
 // Precedence over pgcopydb's own accounting is not settled here. A plain
 // clone reads the catalog once the worker has exited, after the last sample;
-// a follow migration's estimate is dropped when the verify Job is created,
-// also after the last sample. Neither can be overwritten by a later estimate,
-// because no sample runs once the worker Job is gone.
+// a follow migration takes it out of the verify Job's log, and that line
+// overwrites whatever is in the field on every pass it can be read (see
+// recordCloneProgress), so no estimate outlives the catalog.
 func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	if m.Status.Progress == nil {
 		m.Status.Progress = &v1beta1.CloneProgress{}
@@ -611,54 +659,6 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
 	p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
 	p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
-}
-
-// settleProgress squares the counters off after a copy that succeeded. The
-// database count calls a table copied once it holds data, so an in-scope
-// table that is legitimately empty is never counted and the tile would sit
-// one short for good. A successful copy copied all of them. Only on success:
-// a failed run's partial count is the number worth reading.
-//
-// Bytes settle for a related reason: the two sides end a little apart through
-// fillfactor, bloat and alignment, and a finished migration reporting 480 of
-// 512 invites the question of where the rest went.
-func settleProgress(m *v1beta1.Migration) {
-	p := m.Status.Progress
-	if p == nil {
-		return
-	}
-	p.TablesDone, p.IndexesDone = p.TablesTotal, p.IndexesTotal
-	if p.BytesTotal != nil {
-		done := p.BytesTotal.DeepCopy()
-		p.BytesDone = &done
-	}
-}
-
-// sampleCloneProgress best-effort fills status.progress from `list progress`,
-// once, by exec-ing into the pod. Its one caller is finishClone, never a pass
-// with a live worker: this is a pgcopydb command and it writes to the catalog.
-// It overwrites what sampleProgress estimated from the databases, and that is
-// the point: the catalog is pgcopydb's own accounting, and the estimate leads
-// it. The caller runs this behind CloneCompleted, so it reads the pod once.
-// A failed try leaves whatever the estimate put there.
-func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
-	if r.Progress == nil {
-		return
-	}
-	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)
-	switch {
-	case err != nil:
-		logf.FromContext(ctx).V(1).Info("progress sample failed", "job", jobName, "error", err)
-	case cp != nil:
-		// The catalog owns the object counts, which it counts exactly. It does
-		// not own the bytes: pgcopydb tallies what crossed the wire, while both
-		// figures on this tile are table bytes on disk, and mixing them puts a
-		// wire tally under an on-disk total. Keep ours wherever we have it.
-		if p := m.Status.Progress; p != nil && p.BytesTotal != nil {
-			cp.BytesTotal, cp.BytesDone = p.BytesTotal, p.BytesDone
-		}
-		m.Status.Progress = cp
-	}
 }
 
 // reapZombieWorker handles pgcopydb 0.18's zombie failure mode, proven live:

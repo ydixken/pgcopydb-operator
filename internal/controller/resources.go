@@ -71,6 +71,7 @@ func jobName(m *v1beta1.Migration, attempt int32) string {
 func cleanupJobName(m *v1beta1.Migration) string   { return m.Name + "-cleanup" }
 func verifyJobName(m *v1beta1.Migration) string    { return m.Name + "-verify" }
 func preflightJobName(m *v1beta1.Migration) string { return m.Name + "-preflight" }
+func catalogJobName(m *v1beta1.Migration) string   { return m.Name + "-catalog" }
 
 // buildWorkPVC returns the work-directory claim. It holds pgcopydb's catalogs
 // and is the unit of resumability: it survives Job restarts and is only
@@ -292,7 +293,21 @@ exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely
 	// refuted every password-based drain (found live).
-	return scriptJob(m, runnerImage, verifyJobName(m), script, 1)
+	return scriptJob(m, runnerImage, verifyJobName(m), script)
+}
+
+// buildCatalogJob reads pgcopydb's own catalog once a plain clone's worker
+// has exited, which exec cannot do: a Kubernetes exec targets a running
+// container, and the worker's pod has already left Running by the time its
+// Job is observed finished (issue #277's plain-clone gap: the fix that
+// gated a follow migration's clone-done marker on the catalog left the
+// plain-clone path exec-ing into a pod that was already gone, so the check
+// never ran). This Job mounts the same work dir with the worker dead, the
+// same way buildVerifyJob does for a follow migration's drain, and does
+// nothing but print the counters line; finishClone reads its own exit code
+// nowhere, only its log.
+func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
+	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate))
 }
 
 // The preflight script is assembled per Migration by preflightScriptFor.
@@ -1041,7 +1056,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 			extras = append(extras, mat)
 		}
 	}
-	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), 1, extras...)
+	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -1141,9 +1156,12 @@ func probeSchemasFromTables(tables []string) ([]string, bool) {
 
 // scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to
 // run a shell script instead of a pgcopydb argv: the prelude execs $0, which
-// here is /bin/sh -c <script> instead of pgcopydb.
-func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, backoff int32, extras ...*conn.Materialized) (*batchv1.Job, error) {
-	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", backoff, extras...)
+// here is /bin/sh -c <script> instead of pgcopydb. Backoff 1 absorbs one
+// infra flake (pod eviction) without masking a real script failure as
+// several; every caller runs a bounded, idempotent script, so this is fixed
+// rather than a parameter every call site would just set to 1.
+func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, extras ...*conn.Materialized) (*batchv1.Job, error) {
+	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, extras...)
 	if err != nil {
 		return nil, err
 	}

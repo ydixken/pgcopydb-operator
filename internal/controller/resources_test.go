@@ -45,6 +45,7 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
+	patchedVersionForTest    = "0.18.15.gea2dc96"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -296,7 +297,7 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	if !strings.Contains(gate, "\n(0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
@@ -331,6 +332,41 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	}
 }
 
+// A plain clone's completion gate cannot exec into the worker pod: by the
+// time the Job is observed finished, the pod has already left Running (issue
+// #277's plain-clone gap). buildCatalogJob's Job must ask for the counters
+// itself, the same way buildVerifyJob does, rather than depend on anything
+// reaching into a live pod.
+func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest}).GateScript()
+	job, err := buildCatalogJob(passwordMigration(), "img", gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := job.Spec.Template.Spec.Containers[0]
+	script := c.Args[1]
+	if !strings.Contains(script, gate) {
+		t.Fatalf("catalog script must carry the poller's own gate:\n%s", script)
+	}
+	if !strings.Contains(script, verifyProgressPrefix) {
+		t.Fatalf("catalog script must print the counters line finishClone reads:\n%s", script)
+	}
+	// It mounts the same work dir the worker used, with the worker gone: no
+	// exec, no dependence on a pod that is still Running.
+	found := false
+	for _, mnt := range c.VolumeMounts {
+		if mnt.Name == "workdir" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("catalog Job does not mount the work dir")
+	}
+	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatalf("catalog Job restart policy = %v, want Never (it runs once, its own pod, after the worker)", job.Spec.Template.Spec.RestartPolicy)
+	}
+}
+
 // TestJobScripts_ShellValid is a smoke check, and only that: every script the
 // operator ships into a Job parses under whatever shells this machine has. It
 // earns its place because a script that does not parse does not half-run (the
@@ -348,7 +384,7 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -368,6 +404,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
 	}
 	shells := []string{}
 	for _, name := range []string{"sh", "dash", "bash"} {
