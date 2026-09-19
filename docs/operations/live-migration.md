@@ -70,12 +70,8 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
 The bundled runner, pgcopydb `0.18.15.gea2dc96`, confirms target COMMITs with `synchronous_commit=on` before reporting their replay progress.
 When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/ea2dc96a47c2f7676d71a4967d044a1e469e4110/src/bin/pgcopydb/ld_stream.c#L1521-L1546) across WAL outside the publication.
-Certification requires an initialized durable apply position covering every stored, non-skipped COMMIT, including retained spool, with no receive transaction open and no endpos set.
-Synthetic keepalives and WAL data headers cannot establish that boundary.
-This advances the source-visible feedback, not the target replication origin or the sentinel's data replay cursor; `replayLSN` is therefore not necessarily the last applied data transaction's LSN.
-The progress poll still supports `0.18.13.g4873c18`, which provides certified idle feedback but lacks [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures).
-It also supports `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd`, but neither provides certified idle feedback.
-Older or custom runners may also report weaker durability guarantees.
+That feedback does not move the target replication origin or the sentinel's data replay cursor, so `replayLSN` is not necessarily the last applied data transaction's LSN; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
+Other supported runner versions differ; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
 The drain verification after cutover still proves that the target applied everything through the frozen endpos.
 `lagBytes` is the distance from the source's current WAL head.
 The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is expected.

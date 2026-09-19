@@ -102,12 +102,10 @@ A pass whose source row carried no confirmed position leaves the previous replay
 Apply backlog reads both operands from the same walsender row, so the ordering that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 The bundled runner, pgcopydb `0.18.15.gea2dc96`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
-It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/ea2dc96a47c2f7676d71a4967d044a1e469e4110/src/bin/pgcopydb/ld_stream.c#L1521-L1546) from the current connection once initialized durable apply covers all stored, non-skipped COMMITs, including retained spool, no receive transaction is open, and endpos is unset.
-That network feedback can advance across filtered WAL without moving the target replication origin or the sentinel's data replay cursor.
+It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/ea2dc96a47c2f7676d71a4967d044a1e469e4110/src/bin/pgcopydb/ld_stream.c#L1521-L1546) from the current connection, advancing network feedback across filtered WAL.
+That feedback does not move the target replication origin or the sentinel's data replay cursor; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 An advancing replay gauge on an idle publication therefore does not imply new target rows or measure applied-data throughput.
-The progress poll still supports `0.18.13.g4873c18`, which provides certified idle feedback but lacks [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures).
-It also supports `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd`, but neither provides certified idle feedback.
-Older or custom runners may also report weaker progress.
+Other supported runner versions differ; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
 Receive batching does not make these LSN slopes end-to-end throughput measurements or remove the [drain-verification gate](live-migration.md#manual-cutover-runbook).
 
 ## Dashboards
