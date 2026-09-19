@@ -208,7 +208,9 @@ SQL
   [ -z "$grants" ] || die "reown: role \"$REOWN_OWNER\" lacks CREATE on schemas it would own objects in, which ALTER OWNER needs; run on the target: $grants"
   inherit=$(reown <<SQL
 $REOWN_CANDIDATES_CTE
-SELECT format('GRANT %I TO %I WITH INHERIT TRUE', :'owner', current_user)
+SELECT CASE WHEN current_setting('server_version_num')::int >= 160000
+            THEN format('GRANT %I TO %I WITH INHERIT TRUE', :'owner', current_user)
+            ELSE format('ALTER ROLE %I INHERIT', current_user) END
  WHERE EXISTS (SELECT 1 FROM candidates c WHERE c.sort = 1)
    AND NOT pg_catalog.pg_has_role(current_user, :'owner', 'USAGE');
 SQL
@@ -224,7 +226,7 @@ reown <<SQL || die "reown: listing the objects to hand over failed"
 $REOWN_CANDIDATES_CTE
 SELECT stmt FROM candidates ORDER BY sort, stmt LIMIT 200;
 SQL
-reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun picks up the rest after a transient failure, but not after a permission error like this one"
+reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun re-applies the rest"
 $REOWN_CANDIDATES_CTE
 SELECT stmt FROM candidates ORDER BY sort, stmt \gexec
 SQL

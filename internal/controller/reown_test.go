@@ -577,16 +577,28 @@ $reown_inh_cleanup$;
 		t.Logf("EXIT=%d\n%s", code, out)
 		return string(out), code
 	}
-	wantGrant := "GRANT " + to + " TO " + from + " WITH INHERIT TRUE"
+	// The remediation the pre-check prints changed shape in PostgreSQL 16:
+	// GRANT ... WITH INHERIT TRUE only parses from 16 on, below that
+	// inheritance is a role attribute and ALTER ROLE ... INHERIT is what
+	// actually fixes the handover (both confirmed live).
+	wantRemediation := "GRANT " + to + " TO " + from + " WITH INHERIT TRUE"
+	if reownPsql(t, uri, "SHOW server_version_num;") < "160000" {
+		wantRemediation = "ALTER ROLE " + from + " INHERIT"
+	}
 
 	t.Run("NOINHERIT membership with a transferred schema fires the pre-check", func(t *testing.T) {
 		setup(t, true, true)
 		out, code := run(t)
-		if code != 1 || !strings.Contains(out, wantGrant) {
-			t.Fatalf("want exit 1 naming %q, got exit %d:\n%s", wantGrant, code, out)
+		if code != 1 || !strings.Contains(out, wantRemediation) {
+			t.Fatalf("want exit 1 naming %q, got exit %d:\n%s", wantRemediation, code, out)
 		}
 		if got := reownPsql(t, uri, "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'reown_inh_s';"); got != from {
 			t.Fatalf("a failed pre-check must not hand anything over, reown_inh_s owned by %s", got)
+		}
+		reownPsql(t, uri, wantRemediation+";")
+		out, code = run(t)
+		if code != 0 || !strings.Contains(out, reownHandedOK) {
+			t.Fatalf("applying the printed remediation must let the handover succeed, got exit %d:\n%s", code, out)
 		}
 	})
 	t.Run("inheriting membership with a transferred schema stays silent", func(t *testing.T) {
