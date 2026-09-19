@@ -187,6 +187,49 @@ WHERE c.relkind = 'r' AND n.nspname = 'public' AND pg_table_size(c.oid) > 0`); g
 	}
 }
 
+// A table interrupted mid-copy with some but not all of its rows landed used
+// to read as done the instant it held any row at all. The sampler now counts
+// exactly, so a target short of the source's row count owes the difference,
+// whatever that count is.
+func TestProgressSampleCountsPartialRowsAsOwed(t *testing.T) {
+	admin := testPGURI(t)
+	uris := make([]string, 0, 2)
+	for _, side := range []string{"source", "target"} {
+		db := fmt.Sprintf("progress_partial_%s_%d", side, time.Now().UnixNano())
+		sqlOutput(t, admin, "CREATE DATABASE "+db)
+		t.Cleanup(func() { sqlOutput(t, admin, "DROP DATABASE "+db+" WITH (FORCE)") })
+		uri := namedURI(t, admin, db, "progress_partial_"+side)
+		sqlOutput(t, uri, "CREATE TABLE orders (id integer PRIMARY KEY, note text)")
+		uris = append(uris, uri)
+	}
+	sqlOutput(t, uris[0], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 35000) i")
+	sample := func() *RelationCounts {
+		t.Helper()
+		argv := progressCommand(false)
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("sample failed: %v", err)
+		}
+		s := parseSample(out)
+		if s.Counts == nil {
+			t.Fatalf("no counts in %q", out)
+		}
+		return s.Counts
+	}
+	// The COPY that landed 12000 of 35000 rows was interrupted, not the whole
+	// table missing: a has-any-row check would have called this done.
+	sqlOutput(t, uris[1], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 12000) i")
+	if c := sample(); c.TablesTotal != 1 || c.TablesDone != 0 {
+		t.Fatalf("tables = %d of %d, want 0 of 1 with orders holding 12000 of 35000 rows on the target", c.TablesDone, c.TablesTotal)
+	}
+	sqlOutput(t, uris[1], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(12001, 35000) i")
+	if c := sample(); c.TablesTotal != 1 || c.TablesDone != 1 {
+		t.Fatalf("tables = %d of %d after the remaining rows landed, want 1 of 1", c.TablesDone, c.TablesTotal)
+	}
+}
+
 // A held relation lock must cancel the sampled side without losing its peer.
 func TestProgressRelationLocks(t *testing.T) {
 	admin := testPGURI(t)

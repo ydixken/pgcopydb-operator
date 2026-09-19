@@ -138,7 +138,7 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 		if m.Spec.Clone.AllDatabases {
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
-		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript, 1)
+		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript)
 	}
 	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(m.Spec.Clone.AllDatabases), "", 1)
 	if err != nil {
@@ -153,21 +153,30 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 // reads succeeded, so it must stay idempotent.
 func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
-		// The one progress sample a plain clone gets: no pgcopydb command may
-		// run against a live worker (see observeRunningJob), and only now,
-		// with it exited, is its catalog nobody's. Best effort: the pod
-		// usually leaves Running along with the Job, and then there is nothing
-		// to sample, which is acceptable for a finished clone.
-		//
 		// Exit 0 is pgcopydb's word that every in-scope table was copied, and
 		// --resume has given that word for a table no rows reached (issue
-		// #277). Its catalog is the one check left with the worker gone, so
-		// where it can be read it decides: a count short of the total fails
-		// the migration. The copy-time estimate is no check here, since its
-		// last sample may predate the final commit, so it stands as observed
-		// and is never rounded up to its totals.
-		if !m.Spec.Clone.AllDatabases && r.sampleCloneProgress(ctx, m, m.Status.JobName) {
-			if p := m.Status.Progress; p.TablesDone < p.TablesTotal {
+		// #277). Its catalog is the one check left with the worker gone, and
+		// the worker's own pod is gone too by the time a Job reads finished
+		// (exec targets a running container, and this pod already left
+		// Running), so reading the catalog takes a Job of its own, the same
+		// way a follow migration's drain does (see buildCatalogJob). Where it
+		// answers, it decides: a count short of the total fails the
+		// migration. The copy-time estimate is no check here, since its last
+		// sample may predate the final commit, so it stands as observed and
+		// is never rounded up to its totals.
+		if gate := r.progressGate(); !m.Spec.Clone.AllDatabases && gate != "" {
+			owed, checked, err := r.ensureCatalogCheck(ctx, m, gate)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !checked {
+				if err := r.updateStatus(ctx, m, base); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: pollInterval}, nil
+			}
+			if owed > 0 {
+				p := m.Status.Progress
 				msg := fmt.Sprintf("pgcopydb exited 0 but its catalog counts %d of %d tables done; do not use the target as a complete copy",
 					p.TablesDone, p.TablesTotal)
 				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneIncomplete, msg)
@@ -195,6 +204,33 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 	r.setCondition(m, v1beta1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "migration finished")
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Completed", "Complete", "pgcopydb clone finished")
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
+}
+
+// ensureCatalogCheck creates and observes the post-exit catalog Job a plain
+// clone's completion gate reads (see buildCatalogJob and finishClone), and
+// reports (owed, checked, err): checked is false while the Job still runs,
+// meaning the caller should wait for the next pass; owed is the in-scope
+// tables pgcopydb's catalog counts short of the total, valid only once
+// checked is true. m.Status.Progress is updated from the Job's log either
+// way it can be read, the same as a follow migration's verify Job: a sampler
+// hiccup here reads as no evidence, not as a pass, so owed is 0 and the
+// estimate already in the field stands.
+func (r *MigrationReconciler) ensureCatalogCheck(ctx context.Context, m *v1beta1.Migration, gate string) (owed int64, checked bool, err error) {
+	job, _, err := r.ensureJob(ctx, m, catalogJobName(m), func() (*batchv1.Job, error) {
+		return buildCatalogJob(m, r.RunnerImage, gate)
+	})
+	if err != nil || job == nil {
+		return 0, false, err
+	}
+	finished, _ := jobFinished(job)
+	if !finished {
+		return 0, false, nil
+	}
+	if !r.recordCloneProgress(ctx, m, job.Name) {
+		return 0, true, nil
+	}
+	p := m.Status.Progress
+	return p.TablesTotal - p.TablesDone, true, nil
 }
 
 // ensureVerification drives the enabled compare Jobs one at a time (schema,

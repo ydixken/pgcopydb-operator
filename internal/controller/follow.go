@@ -429,9 +429,13 @@ func (r *MigrationReconciler) progressGate() string {
 // effort otherwise: an unreadable log (pod not yet collected, or already
 // gone) or an unparsable line leaves the field as it is, and nothing here can
 // move the drain verdict.
-func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) {
+// The bool return says whether a line was read and parsed: ensureCatalogCheck
+// needs to know, since a plain clone's completion gate must not be lifted by
+// an unreadable log, while ensureVerify's caller does not care, the counters
+// there being cosmetic (see recordCloneProgress's own doc).
+func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) bool {
 	if r.Logs == nil {
-		return
+		return false
 	}
 	tail := r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
@@ -442,11 +446,12 @@ func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta
 		cp, err := progress.ParseListProgress([]byte(raw))
 		if err != nil {
 			logf.FromContext(ctx).V(1).Info("verify Job progress line did not parse", "job", jobName, "error", err)
-			return
+			return false
 		}
 		m.Status.Progress = cp
-		return
+		return true
 	}
+	return false
 }
 
 // reconcileDeletion routes deletion through cleanup for live migrations. The

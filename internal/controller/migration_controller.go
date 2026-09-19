@@ -122,10 +122,9 @@ type LogReader interface {
 // injects a fake). Both are best effort: a nil sample keeps the previous
 // value and an error never fails the pass.
 type ProgressOps interface {
-	CloneProgress(ctx context.Context, namespace, jobName string) (*v1beta1.CloneProgress, error)
 	// Sample reads both databases in one exec: their sizes, and the relation
-	// counts. Unlike CloneProgress it is safe on a pass with a live worker,
-	// which is what makes the progress fields move during a copy.
+	// counts. It is safe on a pass with a live worker, which is what makes
+	// the progress fields move during a copy.
 	Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*progress.Sample, error)
 	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
@@ -448,9 +447,10 @@ func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace
 // three of them: the follow watch queries the two databases (see
 // internal/sentinel), the clone-stage probe counts pgcopydb's own backends on
 // the target, and the size sample reads pg_database_size (both in
-// internal/progress). The copy counters are read from a pod with no worker in
-// it, the verify Job for a follow migration and the exited worker's own pod
-// for a plain clone. The one remaining exec into a live worker is `sentinel
+// internal/progress). The copy counters are read from a Job of their own,
+// its own pod, with no worker in it: the verify Job for a follow migration
+// and the catalog check Job for a plain clone (see buildVerifyJob,
+// buildCatalogJob). The one remaining exec into a live worker is `sentinel
 // set endpos`, which is how a cutover is asked for and has no other route.
 //
 // The claim is about exec, not about the work dir, and deliberately: deleting
@@ -616,7 +616,8 @@ func (r *MigrationReconciler) confirmBaseCopy(m *v1beta1.Migration, counts *prog
 // while the worker runs, and returns the counts this pass read, nil when it
 // read none. It is psql and nothing else, per the invariant on
 // observeRunningJob; the counters that would need a pgcopydb command wait for
-// the Job to exit (see sampleCloneProgress). Errors V(1)-log and never flip a
+// the worker to exit and are read from a Job of their own (see
+// ensureCatalogCheck, ensureVerify). Errors V(1)-log and never flip a
 // condition or fail the pass.
 func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) *progress.RelationCounts {
 	if r.Progress == nil {
@@ -658,37 +659,6 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
 	p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
 	p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
-}
-
-// sampleCloneProgress best-effort fills status.progress from `list progress`,
-// once, by exec-ing into the pod, and reports whether the catalog answered.
-// Its one caller is finishClone, never a pass with a live worker: this is a
-// pgcopydb command and it writes to the catalog. It overwrites what
-// sampleProgress estimated from the databases, and that is the point: the
-// catalog is pgcopydb's own accounting. The caller runs this behind
-// CloneCompleted, so it reads the pod once. A failed try leaves whatever the
-// estimate put there.
-func (r *MigrationReconciler) sampleCloneProgress(ctx context.Context, m *v1beta1.Migration, jobName string) bool {
-	if r.Progress == nil {
-		return false
-	}
-	cp, err := r.Progress.CloneProgress(ctx, m.Namespace, jobName)
-	switch {
-	case err != nil:
-		logf.FromContext(ctx).V(1).Info("progress sample failed", "job", jobName, "error", err)
-		return false
-	case cp == nil:
-		return false
-	}
-	// The catalog owns the object counts, which it counts exactly. It does
-	// not own the bytes: pgcopydb tallies what crossed the wire, while both
-	// figures on this tile are table bytes on disk, and mixing them puts a
-	// wire tally under an on-disk total. Keep ours wherever we have it.
-	if p := m.Status.Progress; p != nil && p.BytesTotal != nil {
-		cp.BytesTotal, cp.BytesDone = p.BytesTotal, p.BytesDone
-	}
-	m.Status.Progress = cp
-	return true
 }
 
 // reapZombieWorker handles pgcopydb 0.18's zombie failure mode, proven live:

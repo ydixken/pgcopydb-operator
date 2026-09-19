@@ -188,53 +188,6 @@ func TestGateScript_UnderSh(t *testing.T) {
 	}
 }
 
-func TestCloneProgress_FailClosed(t *testing.T) {
-	ctx := context.Background()
-	for name, f := range map[string]*fakeExec{
-		"no running pod": {pod: ""},
-		"exec error":     {pod: "p", execErr: errors.New("exec refused")},
-		"empty output":   {pod: "p", out: []byte("  \n")},
-		"non-JSON":       {pod: "p", out: []byte("pgcopydb: fatal")},
-	} {
-		p := NewFromExec(f, []string{patchedVersion})
-		cp, err := p.CloneProgress(ctx, "ns", "job")
-		if cp != nil || err != nil {
-			t.Errorf("%s: = (%v, %v), want (nil, nil)", name, cp, err)
-		}
-	}
-}
-
-func TestCloneProgress_DisabledAndPodErr(t *testing.T) {
-	ctx := context.Background()
-
-	// Empty allowlist: shut for good, no exec traffic at all.
-	f := &fakeExec{pod: "p", out: []byte("{}")}
-	if cp, err := NewFromExec(f, nil).CloneProgress(ctx, "ns", "job"); cp != nil || err != nil || f.calls != 0 {
-		t.Fatalf("disabled poller: = (%v, %v) after %d calls, want (nil, nil) and none", cp, err, f.calls)
-	}
-
-	// A pod lookup failure is an API error, not a shut gate.
-	f = &fakeExec{podErr: errors.New("api down")}
-	if _, err := NewFromExec(f, []string{patchedVersion}).CloneProgress(ctx, "ns", "job"); err == nil {
-		t.Fatal("pod lookup error: want it surfaced")
-	}
-}
-
-func TestCloneProgress_Sample(t *testing.T) {
-	f := &fakeExec{pod: "p", out: []byte(`{"tables":{"total":5,"done":2},"bytes":{"total":100,"done":40}}`)}
-	p := NewFromExec(f, []string{patchedVersion})
-	cp, err := p.CloneProgress(context.Background(), "ns", "job")
-	if err != nil || cp == nil {
-		t.Fatalf("= (%v, %v), want a sample", cp, err)
-	}
-	if cp.TablesTotal != 5 || cp.TablesDone != 2 || cp.BytesTotal.Value() != 100 || cp.BytesDone.Value() != 40 {
-		t.Fatalf("bad sample: %+v", cp)
-	}
-	if len(f.argv) != 3 || f.argv[0] != "sh" || f.argv[1] != "-c" || f.argv[2] != p.GateScript() {
-		t.Fatalf("exec argv = %v, want the gate script under sh -c", f.argv)
-	}
-}
-
 func ptr(n int64) *int64 { return &n }
 
 func eq(a, b *int64) bool {
@@ -445,21 +398,23 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 	}
 }
 
-// A table is done once it holds a row, and only a read of the table can say
-// so: its TOAST relation occupies a page from the schema restore on, so a
-// storage test called an 848MB table with no rows on the target copied (issue
-// #277). The flag travels in the target's scope list, which lets the source
-// count exactly the tables it holds rows in that the target holds none in; a
-// table empty on both sides owes nothing.
+// A table is done once its exact row count on the target is at least the
+// source's, and only a read of the table can say so: its TOAST relation
+// occupies a page from the schema restore on, so a storage test called an
+// 848MB table with no rows on the target copied (issue #277), and a
+// has-any-row test called a table interrupted mid-copy done the instant it
+// held one row of many. The count travels in the target's scope list, which
+// lets the source count exactly the tables whose target count falls short of
+// its own; a table empty on both sides owes nothing.
 func TestRelationCountsScript_CountsRowsNotStorage(t *testing.T) {
 	for _, want := range []string{
-		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
-		"(select count(*) from t where $populated)",
-		"|| ',' || ($populated)::text || ')'",              // the target's row carries the flag per table
-		"join ($landed) as landed(name, populated)",        // and the source joins it
-		"where not t.populated and $populated)",            // owed: rows here, none there
-		`*\|?*) landed="values ${t#*|}"`,                   // the list rides the row as a second column
-		`*) landed="select null::text, false where false"`, // and a target that did not answer joins nothing
+		`rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"`,
+		"(select count(*) from t where $rowcount > 0)",
+		"|| ',' || ($rowcount)::text || ')'",                   // the target's row carries the count per table
+		"join ($landed) as landed(name, rowcount)",             // and the source joins it
+		"where t.target_rowcount < $rowcount)",                 // owed: target short of source
+		`*\|?*) landed="values ${t#*|}"`,                       // the list rides the row as a second column
+		`*) landed="select null::text, 0::bigint where false"`, // and a target that did not answer joins nothing
 	} {
 		if !strings.Contains(sampleScript, want) {
 			t.Errorf("sampleScript is missing %q", want)
@@ -492,7 +447,7 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 		t.Errorf("the target's row does not carry the table list:\n%s", target)
 	}
 	source := query("SOURCE")
-	if !strings.Contains(source, "join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname") {
+	if !strings.Contains(source, "join ($landed) as landed(name, rowcount) on landed.name = n.nspname || '.' || c.relname") {
 		t.Errorf("the source is not scoped to the target's tables:\n%s", source)
 	}
 	if strings.Contains(source, "string_agg") {

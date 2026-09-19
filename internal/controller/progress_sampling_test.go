@@ -24,7 +24,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -40,17 +39,16 @@ import (
 
 // fakeProgress scripts the sampler the way fakeSentinel scripts the
 // sentinel: tests choose the samples (or errors), the reconciler reads them.
-// The call counters let specs prove the catalog poll never runs against a
-// live worker, in any phase, while the size sampler keeps running.
+// The call counter lets specs prove the size sampler keeps running in every
+// phase; the catalog counters (a plain clone's completion gate, a follow
+// migration's drain gate) are both read out of a finished Job's log instead
+// of exec, so specs drive them with finishJob and a wired fakeLogs.
 type fakeProgress struct {
 	mu           sync.Mutex
-	cp           *v1beta1.CloneProgress
-	cpErr        error
 	src, tgt     *int64
 	relations    *progress.RelationCounts
 	nilSample    bool
 	sizesErr     error
-	cpCalls      int
 	sizeCalls    int
 	allDatabases bool
 
@@ -69,20 +67,6 @@ func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) 
 	defer f.mu.Unlock()
 	f.stageCalls++
 	return f.copying, f.finalizing
-}
-
-func (f *fakeProgress) CloneProgress(context.Context, string, string) (*v1beta1.CloneProgress, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cpCalls++
-	if f.cpErr != nil {
-		return nil, f.cpErr
-	}
-	if f.cp == nil {
-		return nil, nil
-	}
-	c := *f.cp
-	return &c, nil
 }
 
 // setRelations changes what the next Sample answers, so a spec can prove a
@@ -107,11 +91,11 @@ func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool)
 	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
 }
 
-// counts returns (catalog polls, size samples) seen so far.
-func (f *fakeProgress) counts() (cp, sizes int) {
+// counts returns the size samples seen so far.
+func (f *fakeProgress) counts() (sizes int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.cpCalls, f.sizeCalls
+	return f.sizeCalls
 }
 
 // gaugeValue reads one series from the controller-runtime registry, the same
@@ -164,23 +148,29 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		`    "indexes": {        "total": 3,        "done": 3    },` +
 		`    "bytes": {        "total": 12165120,        "done": 10347680    }}`
 
+	// landCatalog drives a plain clone's post-exit catalog check (see
+	// buildCatalogJob, ensureCatalogCheck) to completion: one pass creates the
+	// Job, then its log carries the counters line the same way a follow
+	// migration's verify Job does, and a second pass reads it.
+	landCatalog := func(r *MigrationReconciler, logs *fakeLogs, name, json string) *v1beta1.Migration {
+		GinkgoHelper()
+		reconcileAndGet(ctx, r, name)
+		logs.out = verifyProgressPrefix + json + "\n"
+		finishJob(ctx, name+"-catalog", true)
+		return reconcileAndGet(ctx, r, name)
+	}
+
 	It("persists a sample to status.progress and the gauges", func() {
 		const name = "mig-progress-sample"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{
-			cp: &v1beta1.CloneProgress{
-				TablesTotal: 12, TablesDone: 12,
-				BytesTotal: resource.NewQuantity(1000, resource.BinarySI),
-				BytesDone:  resource.NewQuantity(400, resource.BinarySI),
-			},
-			src: int64p(5000), tgt: int64p(400),
-		}
+		fake := &fakeProgress{src: int64p(5000), tgt: int64p(400)}
+		logs := &fakeLogs{}
 		r := newReconciler()
-		r.Progress = fake
-		// A plain clone, whose counters are read by exec-ing into its own pod
-		// once pgcopydb has exited (a follow migration takes the same numbers
-		// out of the verify Job instead; see the specs below).
+		r.Progress, r.Logs = fake, logs
+		// A plain clone, whose counters are read out of a Job's log once
+		// pgcopydb has exited (a follow migration takes the same numbers out
+		// of the verify Job instead; see the specs below).
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
@@ -190,6 +180,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress).To(BeNil())
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Progress).To(BeNil(), "the catalog check Job has not answered yet")
+
+		m = landCatalog(r, logs, name, `{"tables":{"total":12,"done":12},"bytes":{"total":1000,"done":400}}`)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(12)))
 		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(400)))
@@ -311,6 +304,10 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(59)))
 
 		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, r, name) // creates the catalog check Job
+		// Its log is not wired: the catalog answers nothing, and the estimate
+		// already in the field is what stands, not a gate rounding it up.
+		finishJob(ctx, name+"-catalog", true)
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue(),
 			"the estimate's last sample may predate the final commit, so it is reported, not a gate")
@@ -381,22 +378,22 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
 		// The worker exited 0 and the database estimate reads whole, but
-		// pgcopydb's own catalog, read from the exited pod, counts one table
-		// short. It is the one check left, and it outranks the exit code and
-		// the estimate both.
+		// pgcopydb's own catalog, read from a Job mounting the same work
+		// dir, counts one table short. It is the one check left, and it
+		// outranks the exit code and the estimate both.
 		fake := &fakeProgress{
-			cp:        &v1beta1.CloneProgress{TablesTotal: 57, TablesDone: 56, IndexesTotal: 81, IndexesDone: 75},
 			src:       int64p(7000),
 			relations: &progress.RelationCounts{TablesTotal: 57, TablesDone: 57, IndexesTotal: 81, IndexesDone: 81},
 		}
+		logs := &fakeLogs{}
 		r := newReconciler()
-		r.Progress = fake
+		r.Progress, r.Logs = fake, logs
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 		Expect(reconcileAndGet(ctx, r, name).Status.Progress.TablesDone).To(Equal(int64(57)))
 
 		finishJob(ctx, name+"-run-1", true)
-		m := reconcileAndGet(ctx, r, name)
+		m := landCatalog(r, logs, name, `{"tables":{"total":57,"done":56},"indexes":{"total":81,"done":75}}`)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
@@ -542,11 +539,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-progress-err"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{cpErr: errors.New("exec wedged"), sizesErr: errors.New("psql refused")}
+		fake := &fakeProgress{sizesErr: errors.New("psql refused")}
 		r := newReconciler()
 		r.Progress = fake
-		// A plain clone, so both samplers that exec into a pod are exercised:
-		// the sizes while the worker runs, the counters once it has exited.
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
@@ -556,8 +551,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		_, found := gaugeValue("pgcopydb_migration_source_database_size_bytes", migLabels(name))
 		Expect(found).To(BeFalse())
 
-		// The poll's own error, on the finish path where it runs, is just as
-		// absorbing: no sample, no condition, no failed pass.
+		// The catalog check Job's log is not wired: on the finish path where
+		// it runs, that is just as absorbing as a sampler error: no sample,
+		// no condition, no failed pass.
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
@@ -611,10 +607,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-progress-quiesce"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{
-			cp:  &v1beta1.CloneProgress{TablesTotal: 5, TablesDone: 5},
-			src: int64p(9000), tgt: int64p(100),
-		}
+		fake := &fakeProgress{src: int64p(9000), tgt: int64p(100)}
 		r := newReconciler()
 		r.Progress = fake
 		logs := copyingLogs()
@@ -626,9 +619,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		// (psql, no catalog), the poll does not.
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
-		cp, sizes := fake.counts()
-		Expect(cp).To(BeZero())
-		Expect(sizes).To(Equal(1))
+		Expect(fake.counts()).To(Equal(1))
 
 		// The worker logs the clone-done marker. The copy is over, but the
 		// worker is not: it streams changes now, and its catalog stays off
@@ -637,17 +628,14 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
 		Expect(m.Status.Progress).To(BeNil())
-		cp, sizes = fake.counts()
-		Expect(cp).To(BeZero(), "the copy being done does not make the worker's catalog safe to open")
-		Expect(sizes).To(Equal(2))
+		Expect(fake.counts()).To(Equal(2))
 
 		// The worker exits, and still nothing execs into it: this migration's
 		// counters are read from the verify Job's log instead.
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
-		cp, _ = fake.counts()
-		Expect(cp).To(BeZero())
+		Expect(fake.counts()).To(Equal(2))
 	})
 
 	It("takes a follow migration's counters from the verify Job", func() {
@@ -687,10 +675,6 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Progress.BytesDone.Value()).To(Equal(int64(10347680)))
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeTrue())
 
-		// The poller itself was never asked to exec into anything: this
-		// migration's counters came out of a Job log.
-		cp, _ := fake.counts()
-		Expect(cp).To(BeZero())
 	})
 
 	It("verifies the drain whatever the counters line does", func() {
@@ -726,35 +710,32 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-progress-finish"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 4, TablesDone: 4}, src: int64p(7000)}
+		fake := &fakeProgress{src: int64p(7000)}
+		logs := &fakeLogs{}
 		r := newReconciler()
-		r.Progress = fake
+		r.Progress, r.Logs = fake, logs
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		// Mid-run pass: a plain clone never opens the catalogs, only psql.
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress).To(BeNil())
-		cp, sizes := fake.counts()
-		Expect(cp).To(BeZero())
-		Expect(sizes).To(Equal(1))
+		Expect(fake.counts()).To(Equal(1))
 
-		// Worker succeeded: pgcopydb exited, the catalogs are quiet, and the
-		// finish path takes the final sample.
+		// Worker succeeded: pgcopydb exited, and the catalog check Job (its
+		// own pod, the worker gone) takes the final sample.
 		finishJob(ctx, name+"-run-1", true)
-		m = reconcileAndGet(ctx, r, name)
+		m = landCatalog(r, logs, name, `{"tables":{"total":4,"done":4}}`)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(4)))
-		cp, _ = fake.counts()
-		Expect(cp).To(Equal(1))
 	})
 
-	It("samples sizes but never list progress for all databases", func() {
+	It("samples sizes but never runs the catalog check for all databases", func() {
 		const name = "mig-progress-all-dbs"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{cp: &v1beta1.CloneProgress{TablesTotal: 4}, src: int64p(7000)}
+		fake := &fakeProgress{src: int64p(7000)}
 		r := newReconciler()
 		r.Progress = fake
 		m := validMigration(name)
@@ -769,11 +750,10 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(allDatabases).To(BeTrue())
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
-		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted),
+			"AllDatabases skips the catalog check Job entirely and completes on the same pass")
 		Expect(m.Status.Progress).To(BeNil())
-		cp, sizes := fake.counts()
-		Expect(cp).To(BeZero())
-		Expect(sizes).To(Equal(1))
+		Expect(fake.counts()).To(Equal(1))
 	})
 
 	It("re-emits a terminal Migration's series after a registry wipe", func() {
@@ -854,14 +834,14 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-catalog-wins"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		// The counts lead the catalog, because a table counts as copied once
-		// it holds any data, so the catalog wins where it answered.
+		// The catalog wins where it answered, over the estimate already in
+		// the field.
 		r := newReconciler()
-		r.Progress = &fakeProgress{
-			cp:        &v1beta1.CloneProgress{TablesTotal: 7, TablesDone: 7},
+		logs := &fakeLogs{}
+		r.Progress, r.Logs = &fakeProgress{
 			src:       int64p(5000),
 			relations: &progress.RelationCounts{TablesTotal: 60, TablesDone: 23},
-		}
+		}, logs
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
@@ -872,7 +852,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(60)))
 
 		finishJob(ctx, name+"-run-1", true)
-		m = reconcileAndGet(ctx, r, name)
+		m = landCatalog(r, logs, name, `{"tables":{"total":7,"done":7}}`)
 		Expect(m.Status.Progress).NotTo(BeNil())
 		Expect(m.Status.Progress.TablesTotal).To(Equal(int64(7)))
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(7)))

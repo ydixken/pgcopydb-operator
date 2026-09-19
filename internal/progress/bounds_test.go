@@ -116,7 +116,7 @@ if [ "$n" = "$HANG" ]; then
 fi
 for arg do query=$arg; done
 case "$query" in
-  *string_agg*) echo "100 2 2 3 80|('public.items',true)" ;;
+  *string_agg*) echo "100 2 2 3 80|('public.items',1)" ;;
   *pg_stat_activity*) echo '4 0' ;;
   *) echo '100 2 2 3 80' ;;
 esac
