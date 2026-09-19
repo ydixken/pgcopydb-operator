@@ -172,7 +172,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 7. Point the application at the target.
 
 During `CuttingOver`, the operator emits a logical message on the source with `pg_logical_emit_message` on every pass.
-Some worker versions need new WAL to see a freshly set endpos.
+Some runner versions need new WAL to see a freshly set endpos.
 The message carries no table data, needs no special privilege, and changes nothing user-visible.
 This endpos nudge runs only after cutover starts, so it cannot unblock a Migration that waits for `CaughtUp`.
 Certified keepalive feedback handles idle catch-up before endpos is set.
