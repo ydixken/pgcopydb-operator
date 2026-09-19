@@ -56,5 +56,4 @@ nav:
       - Conditions and reasons: reference/conditions.md
       - pgcopydb option coverage: reference/coverage.md
   - Design:
-      - Competitive comparison: design/comparison.md
       - Follow diagnostics: design/follow-diagnostics.md

@@ -125,6 +125,6 @@ spec:
 From here the [live-migration runbook](live-migration.md) applies unchanged: watch `CaughtUp`, stop writes, approve the cutover, and point the application at `shop-pg-rw.shop.svc` once `CutoverCompleted` is True.
 
 CNPG's own `initdb.import` also moves data into a new cluster and is the simpler tool for a small, offline CNPG-to-CNPG copy.
-This operator is the better choice when the source is elsewhere, the database is large (parallel copy), or the application cannot stop for the duration: see the [comparison](../design/comparison.md).
+This operator is the better choice when the source is elsewhere, the database is large (parallel copy), or the application cannot stop for the duration.
 
 The e2e suite runs this exact shape on every release: CNPG source and target clusters, the `app` role and Secret, the grants above, and `wal_sender_timeout: 60s` on the source.
