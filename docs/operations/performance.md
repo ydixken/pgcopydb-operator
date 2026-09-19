@@ -170,14 +170,14 @@ CloudNativePG defaults `wal_log_hints` to `on`, which WAL-logs hint-bit full-pag
 ## The VACUUM tail
 
 pgcopydb runs `VACUUM ANALYZE` per table alongside the copy, with a worker pool sized from `tableJobs`.
-The catch is ordering: a table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
+A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
 So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
 
 On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a third of the clone's wall clock: 19404ms with it against 13253ms without, in a clean pair with a fresh target database per arm.
 The operator reports it as the `Finalizing` phase because the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
 [Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
 
-You can have that time back:
+Skipping the vacuum recovers that time:
 
 ```yaml
 spec:

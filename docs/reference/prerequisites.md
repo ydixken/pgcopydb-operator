@@ -228,7 +228,7 @@ BEGIN
 END $$;
 ```
 
-  Missing grants surface in a confusing place: the very first runner attempt dies in pgcopydb's setup cleanup with "permission denied for function pg_replication_origin_drop", before any data moves.
+  Missing grants surface on the very first runner attempt, which dies in pgcopydb's setup cleanup with "permission denied for function pg_replication_origin_drop", before any data moves.
 
 Schema and workload contract:
 

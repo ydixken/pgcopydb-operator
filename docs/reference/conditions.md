@@ -45,7 +45,6 @@ So a single phase would cover the whole run and tell you nothing, which is why t
 | The tail | `Finalizing` | Index builds, constraints, and vacuum on the tables that finished last | **The target stops growing** while work continues |
 | Post-data | `Finalizing` | Post-data `pg_restore`: foreign keys and the rest | Seconds |
 
-The tail is the one that surprises people.
 A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last, so a clone routinely ends as a single `VACUUM ANALYZE` running alone while every other worker sits idle.
 [The VACUUM tail](../operations/performance.md#the-vacuum-tail) has the measurement.
 
