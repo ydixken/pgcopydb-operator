@@ -447,6 +447,51 @@ func TestReconcileSuspended_WorkerJobErrors(t *testing.T) {
 	}
 }
 
+// TestReconcileSuspended_ReownJobErrors: Suspended promises no further
+// database writes, so a handover left running breaks the promise. Both ways
+// of failing to stop it must abort the pass instead of parking the Migration.
+// Attempts sits past the gate so the preflight leg stays out of the way.
+func TestReconcileSuspended_ReownJobErrors(t *testing.T) {
+	m := reownMigration()
+	m.Status.Attempts = 1
+	r := failingReconciler(t, interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return errBoom
+		},
+	}, m, namedJob(reownJobName(m)))
+	if _, err := r.reconcileSuspended(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
+		t.Fatalf("a handover Delete failure must propagate, got %v", err)
+	}
+	if got := m.Status.Phase; got == v1beta1.PhaseSuspended {
+		t.Fatal("a handover that could not be stopped must not read as suspended")
+	}
+
+	m = reownMigration()
+	m.Status.Attempts = 1
+	r = failingReconciler(t, failGetOf(reownJobName(m)), m)
+	if _, err := r.reconcileSuspended(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
+		t.Fatalf("a non-NotFound handover Get failure must propagate, got %v", err)
+	}
+}
+
+// TestNextAttempt_ReownJobGetFailure: the handover Job's existence is what
+// tells the single-writer guard the worker already exited 0. Unreadable, it
+// must abort the pass; reading it as absent would start pgcopydb beside a
+// handover still altering ownership.
+func TestNextAttempt_ReownJobGetFailure(t *testing.T) {
+	m := reownMigration()
+	m.Status.Attempts = 1
+	m.Status.JobName = workerJob
+	r := failingReconciler(t, failGetOf(reownJobName(m)), m)
+	if _, err := r.nextAttempt(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
+		t.Fatalf("an unreadable handover Job must propagate, got %v", err)
+	}
+	jobs := &batchv1.JobList{}
+	if err := r.List(context.Background(), jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("the guard started a worker it could not rule out: %v, %v", jobs.Items, err)
+	}
+}
+
 // TestStartAttempt_Errors covers the four ways starting a worker can fail:
 // the Job cannot build, cannot be owned, cannot be created, or the status
 // write recording the attempt fails.
@@ -641,6 +686,26 @@ func TestFinishClone_ErrorLegs(t *testing.T) {
 	r = failingReconciler(t, failStatusPatch(), m)
 	if _, err := r.finishClone(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
 		t.Fatalf("verification-pending status leg: %v", err)
+	}
+}
+
+// TestReownGate_Errors covers the handover gate's own error legs: the Job
+// cannot be built, and the running-state status write fails. Both end the
+// pass handled, so the finish path does not publish the migration as done
+// over a handover that never ran.
+func TestReownGate_Errors(t *testing.T) {
+	broken := reownMigration()
+	broken.Spec.Source.Host = ""
+	broken.Spec.Source.Username = ""
+	r := failingReconciler(t, interceptor.Funcs{}, broken)
+	if _, handled, err := r.reownGate(context.Background(), broken, broken.DeepCopy(), v1beta1.PhaseFinalizing, ""); !handled || err == nil {
+		t.Fatalf("an unbuildable handover Job must propagate, got (handled=%v, %v)", handled, err)
+	}
+
+	m := reownMigration()
+	r = failingReconciler(t, failStatusPatch(), m, namedJob(reownJobName(m)))
+	if _, handled, err := r.reownGate(context.Background(), m, m.DeepCopy(), v1beta1.PhaseFinalizing, ""); !handled || !errors.Is(err, errBoom) {
+		t.Fatalf("a running-handover status write failure must propagate, got (handled=%v, %v)", handled, err)
 	}
 }
 
