@@ -50,7 +50,7 @@ Migration CRs) in place.
 | `grafana.dashboards.folder` | `"pgcopydb"` | Grafana folder via the `grafana_folder` annotation; empty skips it. |
 | `grafana.dashboards.additionalLabels` | `{}` | Extra labels on the dashboard ConfigMaps. |
 | `grafana.dashboards.additionalAnnotations` | `{}` | Extra annotations on the dashboard ConfigMaps. |
-| `networkPolicy.enabled` | `false` | Placeholder; renders nothing yet. |
+| `networkPolicy.enabled` | `false` | Reserved for a manager NetworkPolicy; no policy template ships, and the exec-based control plane opens no inbound port. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
 
 ## RBAC and ServiceAccounts

@@ -1,3 +1,5 @@
+# The shortest correct Migration: a one-shot clone of everything.
+# Worked examples of every other mode live in docs/examples/.
 apiVersion: pgcopydb-operator.io/v1beta1
 kind: Migration
 metadata:
@@ -6,4 +8,14 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: migration-sample
 spec:
-  # TODO(user): Add fields here
+  source:
+    host: shop.example.com
+    database: shop
+    username: migrator
+    passwordSecretRef: {name: shop-source, key: password}
+    sslMode: require
+  target:
+    host: shop-pg-rw.shop.svc
+    database: shop
+    username: app
+    passwordSecretRef: {name: shop-pg-app, key: password}

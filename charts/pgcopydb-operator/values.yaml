@@ -100,8 +100,9 @@ grafana:
     additionalAnnotations: {}
 
 networkPolicy:
-  # Placeholder; renders nothing yet. The exec-based sentinel control plane
-  # opens no port, so there is nothing to restrict so far.
+  # Reserved for a NetworkPolicy around the manager. The chart ships no policy
+  # template, so enabling this renders nothing: the exec-based sentinel control
+  # plane opens no inbound port, leaving nothing to restrict.
   enabled: false
 
 nodeSelector: {}

@@ -1,8 +1,7 @@
-# Task runner for the pgcopydb-operator harness. Deliberately a Taskfile, not a
-# Makefile: kubebuilder owns the Makefile it generates at scaffold time, and
-# keeping it pristine keeps upstream diffs clean. Once the scaffold lands,
-# `test` delegates to `make test` (envtest setup lives there); this file stays
-# the human/agent entrypoint.
+# Task runner for the pgcopydb-operator harness, and the human/agent entrypoint.
+# Deliberately a Taskfile, not a Makefile: kubebuilder owns the Makefile it
+# generates, and keeping that pristine keeps upstream diffs clean. The Go
+# targets delegate to it, because envtest setup lives there.
 version: "3"
 
 set: [pipefail]
@@ -40,11 +39,9 @@ tasks:
       # The measurement anchors live in Go comments as plain text, and
       # docs/research/ is excluded from the site, so mkdocs never sees either end.
       - ./hack/check-measurement-anchors.sh
-      # yamllint proves a workflow is YAML, not that it is a workflow. A step
-      # that lost its `uses:` is still valid YAML, and release.yml only runs on
-      # a tag, so one shipped broken and nothing noticed until the next release
-      # would have failed. actionlint reads the schema and the expressions, and
-      # runs shellcheck over every run: block.
+      # yamllint proves a workflow is YAML, not that it is a workflow: a step
+      # that lost its `uses:` stays valid YAML. actionlint reads the schema and
+      # the expressions, and runs shellcheck over every run: block.
       - cmd: |-
           if command -v actionlint >/dev/null; then
             actionlint
