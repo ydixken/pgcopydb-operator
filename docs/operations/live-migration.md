@@ -1,18 +1,20 @@
 # Live migration
 
-`spec.follow.enabled: true` turns the clone into a live migration: the base copy runs under a replication slot, then logical replication streams and applies every change until you cut over. Start from [05-live-migration.yaml](../examples/05-live-migration.yaml). The [follow-specific prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) (wal_level, REPLICATION attribute, target grants, replica identities) are strict, and two of them fail silently when missed, so the operator checks the ones it can reach before any data moves (see [preflight](#preflight) below).
+`spec.follow.enabled: true` turns the clone into a live migration: the base copy runs under a replication slot, then logical replication streams and applies every change until you cut over.
+Start from [05-live-migration.yaml](../examples/05-live-migration.yaml).
+The [follow-specific prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) (wal_level, REPLICATION attribute, target grants, replica identities) are strict, and two of them fail silently when missed, so the operator checks the ones it can reach before any data moves (see [preflight](#preflight) below).
 Use the [Planning checklist](../planning.md) to agree the operating plan, cutover ownership, recovery criteria, and rehearsal before enabling follow mode.
 
 The phases of a live migration:
 
 | Phase            | Meaning                                                                                        |
 |------------------|------------------------------------------------------------------------------------------------|
-| `Validating`     | Preflight Job probing connectivity, the clone privileges, and the replication prerequisites; no worker has started yet. |
-| `Cloning`        | Base copy running; changes are already being received into the work volume.                     |
-| `Streaming`      | Base copy done; changes are replayed onto the target continuously.                              |
-| `CutoverPending` | Caught up (`CaughtUp` condition True) and waiting for approval (Manual mode).                   |
-| `CuttingOver`    | Cutover LSN frozen; draining remaining changes, verifying the drain, cleaning up replication.   |
-| `Completed`      | Drain proven complete, sequences synced, slot dropped. Safe to switch applications.             |
+| `Validating`     | Preflight Job probing connectivity, clone privileges, and follow prerequisites; no worker yet. |
+| `Cloning`        | Base copy running; changes are already being received into the work volume.                    |
+| `Streaming`      | Base copy done; changes are replayed onto the target continuously.                             |
+| `CutoverPending` | Caught up (`CaughtUp` condition True) and waiting for approval (Manual mode).                  |
+| `CuttingOver`    | Cutover LSN frozen; draining remaining changes, verifying the drain, cleaning up replication.  |
+| `Completed`      | Drain proven complete, sequences synced, slot dropped; safe to switch applications.            |
 
 ## Preflight
 
@@ -26,7 +28,7 @@ Next, selected source extensions must be installed or default-available on the t
 Setting `spec.clone.skip` to include `extensions` bypasses this gate.
 Then the clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe ([prerequisites](../reference/prerequisites.md#base-clone-every-migration) has the details).
 Then the follow prerequisites: `wal_level`, free replication-slot headroom, the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
-Every one of these has failed a live run, and two lose data quietly rather than loudly.
+Every one of these has failed a live run, and two of them lose data without raising an error.
 
 A failed rights check names the exact `GRANT` or setting that fixes it, in the `Validated` and `Failed` condition messages, and adds a hint naming `superuserSecretRef` when that field could have applied it:
 
@@ -41,11 +43,15 @@ Setting `spec.suspend` while the gate runs deletes the preflight Job, stopping r
 While the gate runs, the `Validated` condition is `Unknown` with reason `PreflightRunning`; if the preflight pod cannot start (a misnamed Secret, an unbound work PVC, an unschedulable node), the kubelet's reason lands verbatim in the condition message.
 The Job is bounded: connections time out after 10 seconds (`PGCONNECT_TIMEOUT`, set on every operator control Job but never on the pgcopydb worker, whose data path must not race a connect cap) and the whole preflight after 30 minutes, so a black-holed endpoint fails instead of waiting forever.
 
-Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them. Fix the endpoint, then create a new Migration. The workload contract (no DDL during the migration, no large-object changes, wal2json presence) is not preflighted and stays your responsibility.
+Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them.
+Fix the endpoint, then create a new Migration.
+The workload contract (no DDL during the migration, no large-object changes, wal2json presence) is not preflighted and stays your responsibility.
 
 ## Watching the stream
 
-`status.replication` is sampled from the source rather than from the worker: one row joining the replication slot to `pg_stat_replication`. It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True. Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
+`status.replication` is sampled from the source rather than from the worker: one row joining the replication slot to `pg_stat_replication`.
+It fills in as soon as the slot answers, which is during the base copy, and the operator only acts on it (catchup, cutover) once `CloneCompleted` is True.
+Nothing in that path opens pgcopydb's own catalogs, because reading those while the copy writes them kills workers (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
@@ -72,11 +78,13 @@ It also supports `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd`, but neither provides 
 Older or custom runners may also report weaker durability guarantees.
 The drain verification after cutover still proves that the target applied everything through the frozen endpos.
 `lagBytes` is the distance from the source's current WAL head.
-The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is fine.
+The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag` (16Mi by default); with ongoing writes it may flap, which is expected.
 With the bundled runner, an idle publication needs neither heartbeat INSERTs nor a higher `maxCatchupLag` to cross filtered WAL.
 Catch-up does not replace endpos drain verification or prove that source writers have stopped.
 
-Granting the migration's source role `pg_read_all_stats` is optional, and sharpens both LSN readings. PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so `writeLSN` and `replayLSN` both fall back to the slot's confirmed flush position: one confirmation behind, and identical to each other, which is why the apply backlog derived from them reads zero without the grant. Lag and `CaughtUp` follow `replayLSN`, so they inherit whichever reading is available.
+Granting the migration's source role `pg_read_all_stats` is optional, and sharpens both LSN readings.
+PostgreSQL blanks the walsender columns in `pg_stat_replication` for a role without it, that role's own row included, so `writeLSN` and `replayLSN` both fall back to the slot's confirmed flush position: one confirmation behind, and identical to each other, which is why the apply backlog derived from them reads zero without the grant.
+Lag and `CaughtUp` follow `replayLSN`, so they inherit whichever reading is available.
 
 ## Manual cutover runbook
 
@@ -93,10 +101,12 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 > Operators MUST stop source writes before cutover freezes the stream, in both Manual and Automatic modes.
 > The operator does not fence source writes or terminate source sessions.
 
-1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`). It returns up to one poll interval (about 10 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
+1. Wait for `CaughtUp` to be True (`kubectl wait pgm/billing --for=condition=CaughtUp`).
+   It returns up to one poll interval (about 10 seconds) after the lag itself drops, because the condition waits for a second confirming sample.
 2. Stop writes to the source (stop the application, revoke access, whatever your setup calls quiescing).
 3. Approve: `kubectl patch pgm billing --type=merge -p '{"spec":{"cutover":{"approved":true}}}'`.
-4. Once approval and confirmed catch-up both hold, the operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits. Phase: `CuttingOver`.
+4. Once approval and confirmed catch-up both hold, the operator sets the cutover LSN (pgcopydb `sentinel set endpos --current`); the worker drains the remaining changes, syncs sequences, and exits.
+   The phase is `CuttingOver`.
 5. The operator does not trust the worker's exit code: a verify Job (`<name>-verify`) proves the drain on the target.
    The fast path passes only when the target's replication origin sits exactly on the cutover LSN, because the origin advances inside the apply's own commits and equality is the one reading that proves nothing is outstanding.
    Any remaining distance is decided by content, never by its size: from outside, unapplied commits and the publication-filtered WAL an idle source leaves behind (autovacuum, catalog churn, which pgcopydb never applies) are the same bytes.
@@ -104,10 +114,11 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
    The bundled runner exits nonzero on single-database data differences, but stock 0.18 can log them and exit 0.
    It passes only when the report accounts for every migrated table and each one matches on row count and checksum; a compare that could not run, and a report the Job cannot read, refuse rather than pass.
    Nearly every cutover takes that path, and not only an idle one: the cutover LSN is the source's WAL head when approval and confirmed catch-up both hold, the origin holds the last commit the target applied, and anything in between (an autovacuum tick, a checkpoint, another database on the same cluster) leaves the two apart.
-   So size the write-downtime window for a `compare data` over the whole database, and treat the exact-LSN pass as the exception it is.
+   So size the write-downtime window for a `compare data` over the whole database, and treat the exact-LSN pass as the exception.
    Only that proof sets `CutoverCompleted`.
    A refuted drain fails the Migration instead (see `DrainIncomplete` in [troubleshooting](../troubleshooting.md)).
-6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin. Then `Complete` goes True, phase `Completed`.
+6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin.
+   Then `Complete` goes True and the phase is `Completed`.
 7. Point the application at the target.
 
 During `CuttingOver`, the operator emits a tiny logical message on the source (`pg_logical_emit_message`) on every pass because some worker versions need new WAL to observe a freshly set endpos.
@@ -119,7 +130,7 @@ The e2e suite exercises this runbook under load: a client commits one row per tr
 It requires the target to end with the same count of that client's rows as the source, no gap in the run the client committed, and a passing `pgcopydb compare data` over the whole database.
 Leaving the application running through the copy and the stream loses no committed transaction.
 What that leaves untested is the other side of the freeze: the source is silent from step 2 onward, so there are no writes past the cutover LSN to lose.
-Keeping that set empty is what step 2 is for, and [Automatic mode](#automatic-mode) below is the same warning for the mode that skips it.
+Step 2 is what keeps that set empty, and [Automatic mode](#automatic-mode) below carries the same warning for the mode that skips approval.
 
 ## Automatic mode
 
