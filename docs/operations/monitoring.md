@@ -7,7 +7,7 @@ All three are opt-in values; this page is the reference for the metrics and for 
 
 The manager serves metrics over HTTPS on :8443 and authenticates every scrape; `metrics.enabled` (default `true`) controls the endpoint and its Service.
 With the Prometheus Operator, `metrics.serviceMonitor.enabled=true` is the whole scrape setup; the ServiceMonitor sends Prometheus' own ServiceAccount token.
-The scraping ServiceAccount additionally needs `get` on the `/metrics` nonResourceURL; kube-prometheus-stack already grants that to its Prometheus, and the 401/403/500 rows in [Troubleshooting](../troubleshooting.md) map the failure modes.
+The scraping ServiceAccount additionally needs `get` on the `/metrics` nonResourceURL; kube-prometheus-stack already grants that to its Prometheus, and the 401/403/500 sections in [Troubleshooting](../troubleshooting.md) map the failure modes.
 
 The ServiceMonitor sets `honorLabels: true`, so the `namespace` and `name` labels on migration metrics stay the Migration's own instead of being renamed to `exported_namespace` by the scrape.
 The chart scrapes every 10 seconds, matching the nominal active-worker poll interval.
@@ -40,15 +40,15 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_completion_time_seconds` | | Unix time the migration completed | once completed |
 | `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time that condition last changed status, straight from its `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
-| `pgcopydb_migration_verification_check` | `check` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it; `check` is `schema` or `data` | once the spec is read, minus a requested check with no result yet |
+| `pgcopydb_migration_verification_check` | `check`: `schema` or `data` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it | once the spec is read, minus a requested check with no result yet |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size; summed across the instance with `allDatabases` | worker running |
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size; summed across the instance with `allDatabases` | worker running |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied / planned | worker running |
 | `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built / planned | worker running |
-| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned. The ratio tops out a few percent short of 100 and that is correct: planned is the relation size on disk, moved is bytes on the wire, and a relation carries page headers, tuple headers, alignment padding and free space that a COPY stream does not. Use the table and index counters to tell completion. | worker running |
+| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved / planned | worker running |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source WAL head as an absolute byte position | follow, streaming |
-| `pgcopydb_migration_write_lsn_bytes` | | The slot's write position on the source: the walsender's `write_lsn`, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
+| `pgcopydb_migration_write_lsn_bytes` | | The walsender's `write_lsn` on the source, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
 | `pgcopydb_migration_replay_lsn_bytes` | | Source-visible replay feedback, including certified idle progress, as an absolute WAL byte position | follow, streaming |
 | `pgcopydb_migration_endpos_lsn_bytes` | | Cutover endpos as an absolute byte position | after cutover set it |
 | `pgcopydb_operator_build_info` | `version` | Always 1; operator-wide, no migration labels | always |
@@ -61,7 +61,7 @@ The "Exists" column is the contract for when a series is present:
   While the copy runs, the same psql sample that reads the sizes counts relations on both databases: tables holding rows on the target and its table bytes, against the tables the target was given and their size on the source, and indexes the target has built against the ones the source has.
   A table holding no rows on the source owes nothing and counts as done; one holding rows on the source and none on the target does not, whatever storage its restored schema already occupies.
   This requires psql and GNU `timeout` in the runner and touches no pgcopydb catalog.
-  Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see the [troubleshooting row](../troubleshooting.md)).
+  Then pgcopydb's own accounting replaces it wherever it can be read: at clone completion for a plain clone, and out of the verify Job's log after cutover for a follow migration, both only on allowlisted runner versions (see [Troubleshooting](../troubleshooting.md)).
   The estimate leads that accounting slightly, because a table counts once it holds a row, so a table copied in parts counts before its last part lands.
 - **follow, streaming**: plain clones never produce these; in follow mode they appear as soon as the replication slot answers, which is during the base copy, before streaming starts.
 - **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
@@ -69,6 +69,7 @@ The "Exists" column is the contract for when a series is present:
   The retired pair keeps its samples in Prometheus, so query the timeline as `last_over_time(...[$__range])` rather than at the range end: that is what puts both sides of a flip back on the panel, and it is the only way to read a Migration that has since been deleted.
 
 Read the timeline off the condition transitions, not off the phase.
+Read completion off the table and index counters: the clone-byte ratio tops out a few percent short of 100, for the reason in the [caveats](#caveats) below.
 
 With `spec.clone.allDatabases: true`, each size gauge sums `pg_database_size(oid)` over its endpoint's databases, excluding only `template0` and `template1`.
 The target sum includes existing databases even when they have no counterpart on the source, not just databases created by this Migration.
@@ -220,11 +221,15 @@ Thresholds and windows are starting points; the promtool unit tests under `test/
 | `PgcopydbMigrationFailed` | critical | The phase is `Failed` for 5m |
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
-| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h. Matches `Cloning` alone on purpose: the index and vacuum tail normally reads as `Finalizing` and leaves the target flat without being stalled. |
-| `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending`. The phase matcher is deliberate: the lag gauge exists during the base copy too, where a large lag is expected and nothing can act on it |
+| `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
+| `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
 | `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
 
-Slot retention is deliberately not covered.
+Both warnings match a narrow set of phases on purpose.
+`PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail normally reads as `Finalizing` and leaves the target flat without being stalled.
+`PgcopydbMigrationReplicationLagHigh` skips the base copy, where the lag gauge already exists, a large lag is expected, and nothing can act on it.
+
+No alert covers slot retention.
 While a follow migration is suspended, failed, or streaming, its replication slot retains WAL on the **source**, and the operator's metrics cannot see the source's disk.
 Monitor `pg_replication_slots` on the source itself (`active` and `safe_wal_size`; postgres_exporter exposes both) and alert on inactive slots or a shrinking `safe_wal_size`.
 
@@ -246,7 +251,8 @@ Pooler resets and query timeouts do not mask the sampler's behavior.
   For a finished migration there is no pod to sample, so those two series do not return after a restart even though the migration's other series do.
 - `rate()` and `delta()` over the size gauges misread a shrinking database as a counter reset; the throughput panels note it and the stalled-clone alert uses `delta()` for that reason.
 - The tables, indexes and clone byte series move during the base copy, from the psql sample described above, and jump once when pgcopydb's own count replaces it (at clone completion, or at drain verification for a live migration).
-  A small step at that moment is expected rather than a fault: the estimate counts a table once it holds a row, so a table copied in parts counts before its last part lands.
+  The estimate counts a table once it holds a row, so a table copied in parts counts before its last part lands and the estimate runs slightly ahead.
+  The small step at the handover is that correction landing.
   Nothing rounds the estimate up when the worker exits 0.
   A table that is empty on the source owes nothing and counts as done on its own, so a finished copy that still reads one table short is a finding: that table holds rows on the source and none on the target, which is how a `--resume` after killed attempts once called an 848MB table done ([#277](https://github.com/ydixken/pgcopydb-operator/issues/277)).
   The byte figures are not rounded up either: the two sides end a little apart through fillfactor, bloat and alignment, so read a shortfall there against the table count beside it.
