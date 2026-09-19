@@ -35,7 +35,7 @@ A backlog above the catch-up threshold cannot drain while source changes keep ar
 
 `spec.clone` fields are optional, and a zero value means the operator decides.
 For most fields that means pgcopydb's own default.
-Three it overrides, because pgcopydb's defaults are wrong for a migration rather than for a copy.
+These five are the exceptions, because a default that suits an ad-hoc copy does not suit a migration.
 
 | Field | Unset behaviour | Why |
 |-------|-----------------|-----|
@@ -82,7 +82,7 @@ pgcopydb hardcodes that and applies it per worker, **overriding whatever the tar
 So the real cost of this number is roughly `indexJobs` GB of target memory, and pgcopydb's default of four asks for 4GB.
 
 Size it against the target: its core count, minus what the COPY workers are already using there, and no more than its memory can carry at 1GB each.
-On a small target, four is already too many, and lowering it to 2 is a speed-up rather than a sacrifice.
+On a small target, four is already too many, and lowering it to 2 makes the index phase faster.
 
 `clone.restoreJobs` follows `indexJobs` unless you set it.
 Set it separately when they differ: `pg_restore` is a separate process and never receives that GUC, so it is not bound by the same memory ceiling.
@@ -126,8 +126,10 @@ Ask the source which case you are in:
 SELECT count(*), pg_size_pretty(sum(pg_column_size(data))) FROM pg_largeobject;
 ```
 
-- **No rows.** Use `skip: [largeObjects]`. The pool is then not created at all, which is better than setting the job count to 1, because it also skips the metadata pass.
-- **A handful, or a few MB.** Set `largeObjectsJobs: 1`. The copy is short either way and the connections are better spent elsewhere.
+- **No rows.** Use `skip: [largeObjects]`.
+  The pool is then not created at all, which beats setting the job count to 1 because it also skips the metadata pass.
+- **A handful, or a few MB.** Set `largeObjectsJobs: 1`.
+  The copy is short either way and the connections are better spent elsewhere.
 - **Many, or a large total.** Leave the default, and raise it if the large-object phase is visibly the tail of your migration.
 
 > [!note]
@@ -138,7 +140,7 @@ SELECT count(*), pg_size_pretty(sum(pg_column_size(data))) FROM pg_largeobject;
 ### `restoreJobs`
 
 Follows `indexJobs` unless you set it, which is pgcopydb's behaviour and not the operator's.
-That coupling is worth knowing about: lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
+The coupling matters: lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
 Whether that is a problem depends on whether the target is short of memory or short of cores, which again is not something the operator can see.
 Set both explicitly when they should differ.
 
@@ -172,7 +174,7 @@ The catch is ordering: a table's vacuum cannot start until that table's own copy
 So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
 
 On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a third of the clone's wall clock: 19404ms with it against 13253ms without, in a clean pair with a fresh target database per arm.
-The operator reports it as the `Finalizing` phase precisely because it looks like a stall and is not: the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
+The operator reports it as the `Finalizing` phase because the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
 [Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
 
 You can have that time back:
@@ -186,7 +188,7 @@ spec:
 > [!important]
 > The target is then left without fresh statistics.
 > The planner will use whatever it had, which on a freshly restored database is nothing, so the first real queries after cutover can choose badly.
-> Run `ANALYZE` on the target yourself before pointing traffic at it, and the trade is a good one: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
+> Run `ANALYZE` on the target yourself before pointing traffic at it: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
 
 The operator does not skip it by default, because a migration target that silently lacks statistics is a worse failure than a slow one: it is invisible until a query plan goes wrong in production.
 
@@ -205,7 +207,8 @@ A **production-shaped** database, 15 tables totalling 1010MB with the largest at
 
 Throughput scales to four jobs and then flattens, which is where the default sits.
 
-The **one-dominant-table** shape, 2909MB with a single TOASTed table holding 73% of it, is the harder case and runs at roughly half the rate. There `tableJobs` cannot help, because a table is one COPY stream unless pgcopydb splits it, and splitting further makes it worse rather than better:
+The **one-dominant-table** shape, 2909MB with a single TOASTed table holding 73% of it, is the harder case and runs at roughly half the rate.
+There `tableJobs` cannot help, because a table is one COPY stream unless pgcopydb splits it, and splitting further slows it down:
 
 | split threshold | max parts | rate |
 |---|---|---|
@@ -213,9 +216,13 @@ The **one-dominant-table** shape, 2909MB with a single TOASTed table holding 73%
 | 256MB | 16 | 80.7 MiB/s |
 | 128MB | 32 | 57.2 MiB/s |
 
-More parts means more writers contending on one relation, and that costs more than the added parallelism returns. Leave both at their defaults.
+More parts means more writers contending on one relation, and that costs more than the added parallelism returns.
+Leave both at their defaults.
 
-Why the ceiling is where it is: a copy worker traced mid-COPY sits at 7-12% CPU and moves roughly 14kB per socket round trip, one round trip at a time. Each stream is bound by round-trip latency rather than by CPU, disk or network, so throughput is the number of streams multiplied by what one stream sustains. That is why adding streams helps until the servers saturate, and why adding jobs with no streams to fill does nothing.
+The ceiling sits where it does because of round-trip latency.
+A copy worker traced mid-COPY sits at 7-12% CPU and moves roughly 14kB per socket round trip, one round trip at a time.
+Each stream is bound by that latency, not by CPU, disk or network, so throughput is the number of streams multiplied by what one stream sustains.
+Adding streams therefore helps until the servers saturate, and adding jobs with no streams to fill does nothing.
 
 ## Measuring
 
@@ -229,7 +236,7 @@ Give every arm a freshly provisioned target volume, run at least three, and repo
 Watch the divisor too.
 Dividing the source database size by wall clock overstates throughput by roughly 16%, because a relation's size counts its indexes, page and tuple headers, alignment padding and free space, and a COPY stream carries none of them.
 One run moved 5078 MB against a 5886 MiB source.
-pgcopydb's own summary, printed at the end of every clone, is the honest source: its `COPY (cumulative)` row gives both the bytes and the time.
+pgcopydb's own summary, printed at the end of every clone, is the accurate source: its `COPY (cumulative)` row gives both the bytes and the time.
 
 The operator exports `pgcopydb_migration_start_time_seconds` and `pgcopydb_migration_completion_time_seconds`.
 Subtracting them gives the duration, which is the number to compare.
