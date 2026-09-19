@@ -62,7 +62,7 @@ Taskfile.yml               # task help | lint | test | e2e
 
 ```sh
 task help   # list tasks
-task lint   # the pre-commit gate (yamllint + make lint)
+task lint   # the pre-commit gate (YAML, generated manifests, chart, docs links, alert rules, Go)
 task test   # unit and envtest suites
 task e2e    # e2e against your CURRENT kubectl context (local only; prompts first)
             # E2E_SCALE sizes the seeded fixtures (default 1 = ~12GB); task e2e:stress runs the ~120GB tier

@@ -65,11 +65,11 @@ GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing els
 
 ## Common commands
 
-| Command     | Does                                                                                   |
-|-------------|----------------------------------------------------------------------------------------|
-| `task help` | List all tasks.                                                                        |
-| `task lint` | yamllint always; golangci-lint once `go.mod` exists (skips with a message before that). |
-| `task test` | Unit tests via kubebuilder's `make test` once scaffolded. CI runs this target.          |
+| Command     | Does                                                                                    |
+|-------------|-----------------------------------------------------------------------------------------|
+| `task help` | List all tasks.                                                                         |
+| `task lint` | Lint everything: YAML, generated manifests, the chart, docs links, alert rules, and Go. |
+| `task test` | Unit and envtest suites via kubebuilder's `make test`. CI runs the same target.         |
 | `task e2e`  | Human-operated E2E against the current kubectl context. See Caution.                    |
 
 ## Architecture key points

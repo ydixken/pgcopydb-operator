@@ -207,7 +207,7 @@ On a cluster without Longhorn the fixtures fall back to the default StorageClass
 The shared fixtures are placed, not left to the scheduler.
 Each shared CNPG cluster has one instance by default and uses preferred pod anti-affinity over `kubernetes.io/hostname` when `E2E_CNPG_INSTANCES` adds replicas.
 The runner Jobs carry anti-affinity against the two primaries so a migration's SQL legs cross the network instead of looping back inside one node.
-The target additionally repels the source's first instance, because CNPG's own anti-affinity only separates instances of the same cluster and the two primaries would otherwise share whichever node scores highest.
+The target also repels the source's first instance, because CNPG's own anti-affinity only separates instances of the same cluster and the two primaries would otherwise share whichever node scores highest.
 Every suite-created pod also declares CPU and memory requests.
 A pod that requests nothing counts the same on every node, so the least-allocated node wins every scheduling decision, its allocation never rises, and an entire run piles onto one node.
 All placement rules are preferred, so a smaller cluster can co-locate the pods and still pass.
@@ -250,7 +250,7 @@ Submitted bytes and markers are not committed-row counts; a valid zero marker di
 The writer still uses one persistent child and the primary captured at startup, followed by one fresh bounded final query after stdin closes and the child is reaped.
 There is no active-writing deadline; the command timeout bounds shutdown and the final query.
 `Cmd.WaitDelay` bounds inherited output descriptors to at most one additional second per command after exit or cancellation.
-The report retains an 8KiB stderr prefix while draining excess output, discards a truncated partial line, and applies the publication-retry redactors after joining chunks.
+The report keeps an 8KiB stderr prefix while draining excess output, discards a truncated partial line, and applies the publication-retry redactors after joining chunks.
 Known DNS and TCP/UDP error phrases suppress the whole line, including bare hostnames without a URI or IP address.
 Final-query stderr comes from `exec.ExitError` when available, with the same prefix limit and redaction.
 The report uses a source-role label rather than a pod name, emits no raw command error or query output, and makes no additional Kubernetes requests.
@@ -285,7 +285,7 @@ That is what lets several candidates stand between two releases: a candidate tha
 
 Promoting pushes the stable tag `vX.Y.Z`, which starts `release.yml` once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease.
 After `helm push`, the chart job uses the runner's existing ORAS tool and Helm login config to tag the published manifest as `latest`, preserving its digest.
-Chart version tags omit the leading `v`; image tags and chart `appVersion` retain it.
+Chart version tags omit the leading `v`; image tags and chart `appVersion` keep it.
 `test/buildconfig` exercises the chart alias and image tag scripts for stable and prerelease tags, including chart retagging failures, without contacting a registry.
 
 The gate used to be `needs: [e2e, release-notes]`, which GitHub enforced.
