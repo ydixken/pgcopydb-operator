@@ -96,16 +96,18 @@ esac
 }
 
 // sampleScript asks each database for one row of sizes and counts, the source
-// row ending in a sixth figure: the tables the target is still short rows on.
-// The source is asked about the target's tables rather than its own, because
-// the target holds the in-scope schema and an unscoped source counts toward a
-// denominator the copy can never reach. Counts are read exactly, table by
-// table, because storage cannot tell an empty table from a copied one and an
-// any-row test calls a table interrupted mid-copy done. Bytes come from
-// pg_table_size, whose neighbours add the indexes or drop the TOAST
-// (see docs/research/measurements.md#progress-sampling). A failed side prints
-// empty and parses to no sample, never to zero.
-const sampleScript = progressSQL + `rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"
+// row ending in a sixth figure: the tables that hold rows on the source and
+// none on the target. Their names follow on an owed= line. The source is asked
+// about the target's tables rather than its own, because the target holds the
+// in-scope schema and an unscoped source counts toward a denominator the copy
+// can never reach. Presence is tested, not a row count, because storage cannot
+// tell an empty table from a copied one and a live source runs ahead of the
+// copy's snapshot, so a count compared against it never settles in follow mode
+// (see docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
+// Bytes come from pg_table_size, whose neighbours add the indexes or drop the
+// TOAST (see docs/research/measurements.md#progress-sampling). A failed side
+// prints empty and parses to no sample, never to zero.
+const sampleScript = progressSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
 user_tables="where c.relkind = 'r'
@@ -113,20 +115,21 @@ user_tables="where c.relkind = 'r'
     and n.nspname not like 'pg_toast%'"
 row="pg_database_size(current_database()) || ' ' ||
   (select count(*) from t) || ' ' ||
-  (select count(*) from t where $rowcount > 0) || ' ' ||
+  (select count(*) from t where $populated) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
   (select coalesce(sum(pg_table_size(t.oid)), 0) from t)"
 t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with t as (select c.oid, n.nspname, c.relname $tables $user_tables)
-  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($rowcount)::text || ')', ','), '') from t)") || t=
+  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($populated)::text || ')', ','), '') from t)") || t=
 case $t in
   *\|?*) landed="values ${t#*|}" ;;
-  *) landed="select null::text, 0::bigint where false" ;;
+  *) landed="select null::text, false where false" ;;
 esac
 t=${t%%|*}
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.rowcount as target_rowcount $tables
-    join ($landed) as landed(name, rowcount) on landed.name = n.nspname || '.' || c.relname $user_tables)
-  select $row || ' ' || (select count(*) from t where t.target_rowcount < $rowcount)") || s=
-printf 'source=%s\ntarget=%s\n' "$s" "$t"
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated $tables
+    join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
+  select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
+    from t where not t.populated and $populated)") || s=
+printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
 `
 
 // Instance catalogs have no relation counters; zero counts preserve the sample row format without reporting progress.
@@ -154,15 +157,16 @@ type Sample struct {
 }
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
-// TablesDone counts tables whose target row count reached the source's, which
-// an empty table on both sides also satisfies.
+// TablesDone counts tables that hold a row on the target or none on the
+// source; EmptyOnTarget names the rest, for the condition message.
 type RelationCounts struct {
-	TablesTotal  int64
-	TablesDone   int64
-	IndexesTotal int64
-	IndexesDone  int64
-	BytesTotal   int64
-	BytesDone    int64
+	TablesTotal   int64
+	TablesDone    int64
+	IndexesTotal  int64
+	IndexesDone   int64
+	BytesTotal    int64
+	BytesDone     int64
+	EmptyOnTarget string
 }
 
 // Sample reads both databases from the Job's running pod. No pod is no sample
@@ -192,15 +196,19 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string, allDatab
 }
 
 // parseSample reads the source= and target= lines, six integers for the source
-// and five for the target. A side that is missing, short or not numeric
-// contributes nothing rather than zero.
+// and five for the target, and the owed= line naming the tables the sixth
+// figure counted. A side that is missing, short or not numeric contributes
+// nothing rather than zero.
 func parseSample(out []byte) *Sample {
 	var src, tgt []int64
+	var owed string
 	for line := range strings.SplitSeq(string(out), "\n") {
 		if v, ok := strings.CutPrefix(line, "source="); ok {
 			src = parseFields(v)
 		} else if v, ok := strings.CutPrefix(line, "target="); ok {
 			tgt = parseFields(v)
+		} else if v, ok := strings.CutPrefix(line, "owed="); ok {
+			owed = strings.TrimSpace(v)
 		}
 	}
 	sample := &Sample{}
@@ -217,12 +225,13 @@ func parseSample(out []byte) *Sample {
 			// Every total is the source's and every done the target's, so a
 			// dashboard can name the side each figure came from. Tables done is
 			// the total less what the source counted as still owed.
-			TablesTotal:  src[1],
-			TablesDone:   src[1] - src[5],
-			IndexesTotal: src[3],
-			IndexesDone:  tgt[3],
-			BytesTotal:   src[4],
-			BytesDone:    tgt[4],
+			TablesTotal:   src[1],
+			TablesDone:    src[1] - src[5],
+			IndexesTotal:  src[3],
+			IndexesDone:   tgt[3],
+			BytesTotal:    src[4],
+			BytesDone:     tgt[4],
+			EmptyOnTarget: owed,
 		}
 	}
 	return sample

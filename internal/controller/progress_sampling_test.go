@@ -328,8 +328,10 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		// still held no rows on the target, and the operator reported 57 of 57
 		// and let the cutover proceed
 		// (see docs/research/measurements.md#the-clone-done-marker-reported-a-table-no-rows-had-reached).
+		// The refusal names the table, so nobody has to go looking for it.
 		fake := &fakeProgress{src: int64p(9000), relations: &progress.RelationCounts{
-			TablesTotal: 57, TablesDone: 56, IndexesTotal: 81, IndexesDone: 81}}
+			TablesTotal: 57, TablesDone: 56, IndexesTotal: 81, IndexesDone: 81,
+			EmptyOnTarget: "public.documents"}}
 		sent := &fakeSentinel{state: &sentinel.State{
 			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
 		}}
@@ -353,11 +355,13 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
 		Expect(c.Reason).To(Equal(reasonTablesEmptyOnTarget))
 		Expect(c.Message).To(ContainSubstring("1 of 57"))
+		Expect(c.Message).To(ContainSubstring("none on the target: public.documents"))
 		Expect(got.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(got.Status.Progress.TablesDone).To(Equal(int64(56)))
 		Expect(meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionStreaming)).To(BeNil())
 		Expect(sent.setCount()).To(BeZero(), "no cutover may be driven off a base copy that owes a table")
-		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring(reasonTablesEmptyOnTarget)))
+		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
+			ContainSubstring(reasonTablesEmptyOnTarget), ContainSubstring("public.documents"))))
 
 		// The marker scrolls out of the bounded tail and the sampler misses a
 		// pass: the refusal stands on its own, and is not announced again.

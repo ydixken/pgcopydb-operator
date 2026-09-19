@@ -513,15 +513,21 @@ func tablesEmptySeen(m *v1beta1.Migration) bool {
 // CloneCompleted true. The marker is pgcopydb's own bookkeeping and has called
 // a table done that no rows ever reached
 // (docs/research/measurements.md#the-clone-done-marker-reported-a-table-no-rows-had-reached),
-// so this pass's own sample has the last word. The refusal latches in the
-// reason because the marker scrolls out of the bounded log tail; only a sample
-// that owes nothing clears it, and a pass without a sample neither causes nor
-// lifts one.
+// so this pass's own sample has the last word. The sample tests presence, not
+// a row count: the source runs ahead of the copy's snapshot until the stream
+// catches up, so a count can hold this gate shut for good. The refusal latches
+// in the reason because the marker scrolls out of the bounded log tail; only a
+// sample that owes nothing clears it, and a pass without a sample neither
+// causes nor lifts one.
 func (r *MigrationReconciler) confirmBaseCopy(m *v1beta1.Migration, counts *progress.RelationCounts) bool {
 	switch {
 	case counts != nil && counts.TablesDone < counts.TablesTotal:
-		msg := fmt.Sprintf("pgcopydb logged the base copy finished, but %d of %d in-scope tables hold rows on the source and none on the target; the copy is not reported complete until a sample finds them populated",
+		msg := fmt.Sprintf("pgcopydb logged the base copy finished, but %d of %d in-scope tables hold rows on the source and none on the target",
 			counts.TablesTotal-counts.TablesDone, counts.TablesTotal)
+		if counts.EmptyOnTarget != "" {
+			msg += ": " + truncate(counts.EmptyOnTarget, maxDetailLen)
+		}
+		msg += "; the copy is not reported complete until a sample finds a row in each of them"
 		if !tablesEmptySeen(m) {
 			r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonTablesEmptyOnTarget, "Clone", "%s", msg)
 		}

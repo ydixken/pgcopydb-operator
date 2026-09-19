@@ -254,6 +254,7 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
   The throughput panels note that, and the stalled-clone alert uses `delta()`.
 - The tables, indexes, and clone-byte series step once when pgcopydb's own count replaces the psql estimate.
   The estimate counts a table once it holds a row, so a table copied in parts counts before its last part lands.
+  It tests presence rather than a row count because a live source runs ahead of the copy's snapshot until the stream catches up, and a count compared against it never settles.
   The estimate therefore runs a little ahead, and the step is that correction.
   Nothing rounds the estimate up when the worker exits 0.
   A table that is empty on the source counts as done on its own.

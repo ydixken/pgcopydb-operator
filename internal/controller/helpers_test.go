@@ -22,7 +22,12 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/tools/events"
+
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 func TestTruncate(t *testing.T) {
@@ -40,6 +45,40 @@ func TestTruncate(t *testing.T) {
 		if got := truncate(tc.in, tc.n); got != tc.want {
 			t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
 		}
+	}
+}
+
+// The refusal names the tables the sample found empty on the target, says
+// nothing about names when the sampler carried none, and cuts a long list to
+// what an event can carry. The names are the one thing that tells an operator
+// which table to look at: a count alone once sent an investigation looking
+// for an empty table that a short one would have read the same as.
+func TestConfirmBaseCopy_NamesTheTables(t *testing.T) {
+	long := strings.Repeat("public.t, ", 100)
+	for name, tc := range map[string]struct {
+		owed, want, wantAbsent string
+	}{
+		"named":   {owed: "public.documents, public.orders", want: "none on the target: public.documents, public.orders; the copy"},
+		"unnamed": {owed: "", want: "none on the target; the copy"},
+		"long":    {owed: long, want: "...; the copy", wantAbsent: long},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &MigrationReconciler{Recorder: events.NewFakeRecorder(10)}
+			m := &v1beta1.Migration{}
+			if r.confirmBaseCopy(m, &progress.RelationCounts{TablesTotal: 57, TablesDone: 55, EmptyOnTarget: tc.owed}) {
+				t.Fatal("a sample owing tables confirmed the base copy")
+			}
+			c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+			if c == nil || c.Reason != reasonTablesEmptyOnTarget {
+				t.Fatalf("condition = %+v, want reason %s", c, reasonTablesEmptyOnTarget)
+			}
+			if !strings.Contains(c.Message, "2 of 57") || !strings.Contains(c.Message, tc.want) {
+				t.Fatalf("message = %q, want it to carry %q", c.Message, tc.want)
+			}
+			if tc.wantAbsent != "" && strings.Contains(c.Message, tc.wantAbsent) {
+				t.Fatalf("message carries the whole list, %d bytes", len(c.Message))
+			}
+		})
 	}
 }
 

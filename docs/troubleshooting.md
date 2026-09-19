@@ -287,14 +287,15 @@ Wait for the worker to print `All step are now done`.
 
 The live migration stays in `Cloning`, and `CloneCompleted` is `False` with reason `TablesEmptyOnTarget`.
 Meanwhile the worker log shows the base copy finished and the stream is applying.
-The operator's sample found tables that hold rows on the source and none on the target.
+The operator's sample found tables that hold rows on the source and none on the target, and the condition message names them.
 It therefore does not trust the worker's clone-completion line; see [#277](https://github.com/ydixken/pgcopydb-operator/issues/277).
-A table that got its first source rows after the clone's snapshot reads the same way until the stream delivers them.
+The sample tests whether each table holds a row, not how many, because the source runs ahead of the copy's snapshot until the stream catches up.
+A table that got its first source rows after that snapshot reads this way until the stream delivers one of them.
 
-List the target's tables without rows, then check those tables on the source.
-If the rows are genuinely missing, delete the Migration and run a fresh one.
+Check when the named tables got their rows on the source.
+Rows written after the base copy's snapshot arrive through the stream, and the condition clears on the first sample that finds one landed.
+Rows that predate the snapshot are missing from the copy: delete the Migration and run a fresh one.
 pgcopydb does not re-copy a table that its catalog calls done.
-If the stream is delivering them, the condition clears on the next sample.
 
 ### Phase `Failed` with reason `CloneIncomplete`
 
