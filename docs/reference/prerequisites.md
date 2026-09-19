@@ -1,6 +1,7 @@
 # Prerequisites
 
-What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes cluster before the operator can run it. The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
+What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes cluster before the operator can run it.
+The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
 Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/ea2dc96a47c2f7676d71a4967d044a1e469e4110) for all-databases behavior.
@@ -25,13 +26,17 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 ## Kubernetes
 
 - The `migrations.pgcopydb-operator.io` CRD MUST be installed (chart `crds.install=true`, or `config/crd`).
-- Credentials MUST live in Secrets in the Migration's namespace: a password Secret for the inline connection form, a full libpq URI Secret for `uriSecretRef`, or one details Secret for `secretRef`. TLS client material, if used, likewise.
+- Credentials MUST live in Secrets in the Migration's namespace: a password Secret for the inline connection form, a full libpq URI Secret for `uriSecretRef`, or one details Secret for `secretRef`.
+  TLS client material, if used, likewise.
 - A StorageClass MUST be able to provision the work-volume PVC (`spec.workVolume`); it is the unit of resumability.
-- Runner pods MUST be able to reach both endpoints on their PostgreSQL port. Both endpoints are plain libpq targets; they do not have to run on Kubernetes.
+- Runner pods MUST be able to reach both endpoints on their PostgreSQL port.
+  Both endpoints are plain libpq targets; they do not have to run on Kubernetes.
 
 ## Client tool versions
 
-The runner image bundles pgcopydb and the PostgreSQL client tools. `pg_dump`/`pg_restore` MUST be at least the target server's major version. The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools; for a newer target major, set `spec.runner.image` to an image with matching tools.
+The runner image bundles pgcopydb and the PostgreSQL client tools.
+`pg_dump`/`pg_restore` MUST be at least the target server's major version.
+The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools; for a newer target major, set `spec.runner.image` to an image with matching tools.
 
 pgcopydb 0.18 is also a floor for the replication lag reading, not only for the client tools.
 At pgcopydb 0.18 and above, `status.replication.lagBytes` reflects what the target has applied; below it the same figure reflects what the target has received, so it reads optimistically and a migration can look caught up while the apply is still behind.
@@ -70,14 +75,18 @@ The new owner's `CREATE` on the database and on the schemas it does not receive 
 
 Source role:
 
-- SELECT on every table and sequence being copied and USAGE on their schemas. Owning the objects covers all of it.
+- SELECT on every table and sequence being copied and USAGE on their schemas.
+  Owning the objects covers all of it.
 - Snapshot export needs no special privilege; plain clones need no replication privilege at all.
 
 Target role:
 
 - CREATE on the target database.
-- Ownership alignment: without `clone.noOwner`, `pg_restore` emits `ALTER OWNER`, which only works as superuser or as the owning role. The simplest non-superuser setup is the pattern the e2e fixtures use: the migration connects as the role that owns every migrated object on both sides. Otherwise set `clone.noOwner: true`, and add [`clone.ownerAfterRestore`](#ownership-after-restore-cloneownerafterrestore) when the objects have to end up under a role the migration cannot connect as.
-- `ALTER DATABASE ... SET` (the db-properties step) requires database ownership or superuser. If the target role has neither, add `dbProperties` to `clone.skip`.
+- Ownership alignment: without `clone.noOwner`, `pg_restore` emits `ALTER OWNER`, which only works as superuser or as the owning role.
+  The simplest non-superuser setup is the pattern the e2e fixtures use: the migration connects as the role that owns every migrated object on both sides.
+  Otherwise set `clone.noOwner: true`, and add [`clone.ownerAfterRestore`](#ownership-after-restore-cloneownerafterrestore) when the objects have to end up under a role the migration cannot connect as.
+- `ALTER DATABASE ... SET` (the db-properties step) requires database ownership or superuser.
+  If the target role has neither, add `dbProperties` to `clone.skip`.
 
 Superuser is required only for:
 
@@ -100,15 +109,19 @@ The probe is therefore a real `SET ROLE` inside a rolled-back transaction rather
 Two more requirements wait for the handover Job, because the restore has not created the schemas yet when preflight runs.
 The Job checks both before it alters anything, prints the exact `GRANT` when one is missing, and skips both when the migration role is a superuser (a third check, on inherited privileges, follows the same rule; see the callout below):
 
-- The **migration role** needs `CREATE` on the target database, and only when the handover transfers at least one schema. This is the migration role rather than the new owner because `ALTER SCHEMA ... OWNER TO` checks the current user's right to create schemas, the same check `CREATE SCHEMA` makes.
-- The **new owner** needs `CREATE` on every schema that holds objects it receives and that it does not receive itself. A schema in the transfer set supplies the privilege through its own `ALTER`, which runs first, so only the schemas that stay behind need a standing grant. `public` is the usual one: from PostgreSQL 15 it belongs to `pg_database_owner` and no longer grants `CREATE` to `PUBLIC`.
+- The **migration role** needs `CREATE` on the target database, and only when the handover transfers at least one schema.
+  This is the migration role rather than the new owner because `ALTER SCHEMA ... OWNER TO` checks the current user's right to create schemas, the same check `CREATE SCHEMA` makes.
+- The **new owner** needs `CREATE` on every schema that holds objects it receives and that it does not receive itself.
+  A schema in the transfer set supplies the privilege through its own `ALTER`, which runs first, so only the schemas that stay behind need a standing grant.
+  `public` is the usual one: from PostgreSQL 15 it belongs to `pg_database_owner` and no longer grants `CREATE` to `PUBLIC`.
 
 > [!important]
 > The migration role also needs `USAGE` on every schema it hands over: after the `ALTER SCHEMA`, it still has to name the objects left inside that schema.
 > Membership in the new owner supplies this when the membership carries inheritance, which is the default for `GRANT <owner> TO <migration role>` and therefore for the preflight's remediation too.
 > It does not when the migration role has the `NOINHERIT` attribute, or when the membership was granted `WITH INHERIT FALSE` (PostgreSQL 16 and later).
 > Both pass the `SET ROLE` probe, so the Job checks inherited privileges as a third pre-check, only when the handover transfers at least one schema, and prints the exact remediation for the target's version before altering anything: `GRANT <owner> TO <migration role> WITH INHERIT TRUE` from PostgreSQL 16, where inheritance is a property of the membership, or `ALTER ROLE <migration role> INHERIT` before that, where it is a role attribute instead.
-> `GRANT USAGE ON SCHEMA <schema> TO <migration role>` is not a working alternative: granting `USAGE` to a role that owns the schema collapses into that role's own ACL entry, and the `ALTER SCHEMA ... OWNER TO` the handover runs next rewrites that entry to the new owner, wiping the grant out. Fix the inheritance instead.
+> `GRANT USAGE ON SCHEMA <schema> TO <migration role>` is not a working alternative: granting `USAGE` to a role that owns the schema collapses into that role's own ACL entry, and the `ALTER SCHEMA ... OWNER TO` the handover runs next rewrites that entry to the new owner, wiping the grant out.
+> Fix the inheritance instead.
 
 The handover covers four object classes in the target database: schemas, relations (tables, partitions, sequences, views, materialized views, foreign tables), routines (functions, procedures, aggregates), and types including domains.
 It leaves extension members alone, so the platform's own extensions keep their owner, and it does not touch large objects, publications, subscriptions, event triggers, foreign-data wrappers, operators, collations, text search objects, or statistics objects.
@@ -161,12 +174,18 @@ Source instance:
 
 - `wal_level` MUST be `logical` (changing it requires a server restart).
 - One free replication slot per running live Migration (`max_replication_slots`) and one free WAL sender (`max_wal_senders`).
-- A replication slot retains WAL until it is dropped. Budget disk for the migration window, and mind `max_slot_wal_keep_size`: it caps retention, but a slot invalidated by the cap kills the migration. The operator drops the slot at cutover, on abort, and on Migration deletion.
-- `wal_sender_timeout` SHOULD be at its PostgreSQL default (60s) or higher. Aggressive values terminate pgcopydb's logical-decoding walsender whenever a status update is a few seconds late; CloudNativePG sets 5s by default for its own HA streaming, so CNPG sources SHOULD override it in `spec.postgresql.parameters` for the migration window.
+- A replication slot retains WAL until it is dropped.
+  Budget disk for the migration window, and mind `max_slot_wal_keep_size`: it caps retention, but a slot invalidated by the cap kills the migration.
+  The operator drops the slot at cutover, on abort, and on Migration deletion.
+- `wal_sender_timeout` SHOULD be at its PostgreSQL default (60s) or higher.
+  Aggressive values terminate pgcopydb's logical-decoding walsender whenever a status update is a few seconds late; CloudNativePG sets 5s by default for its own HA streaming, so CNPG sources SHOULD override it in `spec.postgresql.parameters` for the migration window.
 
 Source role:
 
-- MUST have the `REPLICATION` attribute (or be superuser): `ALTER ROLE app REPLICATION`. Without it, slot creation fails with "permission denied to start WAL sender". On CloudNativePG sources this is declarative: a role listed in the Cluster's `managed.roles` with `replication: true` reconciles to the attribute (verified live). CNPG does not manage its bootstrap owner role by default, so either declare that role under `managed.roles` or run the `ALTER ROLE` once.
+- MUST have the `REPLICATION` attribute (or be superuser): `ALTER ROLE app REPLICATION`.
+  Without it, slot creation fails with "permission denied to start WAL sender".
+  On CloudNativePG sources this is declarative: a role listed in the Cluster's `managed.roles` with `replication: true` reconciles to the attribute (verified live).
+  CNPG does not manage its bootstrap owner role by default, so either declare that role under `managed.roles` or run the `ALTER ROLE` once.
 - Publication: pgcopydb auto-creates a publication for the migrated tables (named after the slot) and drops it during cleanup.
   The role MUST have CREATE on the source database and own every published table.
   Alternatively, pre-create a publication (superuser is needed for `FOR ALL TABLES`) and point `spec.follow.publication` at it; pgcopydb then leaves it alone.
@@ -174,12 +193,20 @@ Source role:
   It drops an orphan publication only when the slot is absent, allowing pgcopydb to retry incomplete setup.
   A slot without its publication, or a failed catalog query, fails the attempt before pgcopydb starts; this guard does not recover every interrupted setup state.
   The guard never touches a publication named in `spec.follow.publication` and does not run for non-`pgoutput` plugins, including `wal2json` and `test_decoding`.
-- Plugin: `pgoutput` (default) and `test_decoding` ship with PostgreSQL; `wal2json` MUST be installed on the source and named in the source's `output_plugin_libraries` before selecting it. That parameter defaults to `pgoutput, test_decoding`, and since the 2026-08-13 minor releases (14.24, 15.19, 16.15, 17.11, 18.6, which close [CVE-2026-6471](https://www.postgresql.org/support/security/CVE-2026-6471/)) the server refuses every output plugin the list omits. Adding an entry takes a config reload, not a restart. The preflight cannot verify the installation: a logical decoding plugin is a bare shared library with no catalog entry to query, and the only positive probe (creating a slot with it) is too invasive for a check. A plugin the source will not load fails the first attempt at slot creation, with `library "wal2json" may not be used as an output plugin` when the list omits it and `could not access file "wal2json"` when the library itself is absent.
+- Plugin: `pgoutput` (default) and `test_decoding` ship with PostgreSQL; `wal2json` MUST be installed on the source and named in the source's `output_plugin_libraries` before selecting it.
+  That parameter defaults to `pgoutput, test_decoding`, and since the 2026-08-13 minor releases (14.24, 15.19, 16.15, 17.11, 18.6, which close [CVE-2026-6471](https://www.postgresql.org/support/security/CVE-2026-6471/)) the server refuses every output plugin the list omits.
+  Adding an entry takes a config reload, not a restart.
+  The preflight cannot verify the installation: a logical decoding plugin is a bare shared library with no catalog entry to query, and the only positive probe (creating a slot with it) is too invasive for a check.
+  A plugin the source will not load fails the first attempt at slot creation, with `library "wal2json" may not be used as an output plugin` when the list omits it and `could not access file "wal2json"` when the library itself is absent.
 
 Target role:
 
-- MUST be able to `SET session_replication_role` (the apply session runs with it set to `replica` to keep triggers and foreign keys quiet during replay). Superuser can always; on PostgreSQL 15+ grant it explicitly: `GRANT SET ON PARAMETER session_replication_role TO app;`. WARNING: with pgcopydb 0.18, a role without this privilege does not fail the migration; apply silently replays nothing while reporting success, and only a row count comparison exposes the loss. Grant it before every live migration.
-- MUST have EXECUTE on the `pg_replication_origin_*` catalog functions (superuser has it implicitly). Non-superuser grant, as used by the e2e fixtures:
+- MUST be able to `SET session_replication_role` (the apply session runs with it set to `replica` to keep triggers and foreign keys quiet during replay).
+  Superuser can always; on PostgreSQL 15+ grant it explicitly: `GRANT SET ON PARAMETER session_replication_role TO app;`.
+  WARNING: with pgcopydb 0.18, a role without this privilege does not fail the migration; apply silently replays nothing while reporting success, and only a row count comparison exposes the loss.
+  Grant it before every live migration.
+- MUST have EXECUTE on the `pg_replication_origin_*` catalog functions (superuser has it implicitly).
+  Non-superuser grant, as used by the e2e fixtures:
 
 ```sql
 DO $$
@@ -199,9 +226,13 @@ END $$;
 
 Schema and workload contract:
 
-- Every table that receives UPDATE or DELETE during the migration window MUST have a primary key or a replica identity (`REPLICA IDENTITY USING INDEX ...` or `REPLICA IDENTITY FULL`). With `pgoutput`, DML on a published table without one fails on the source at write time, breaking the application, not just the migration. The preflight audits all user tables for this and fails on offenders; it deliberately ignores `clone.filters`, since a filtered table can still take writes. Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
+- Every table that receives UPDATE or DELETE during the migration window MUST have a primary key or a replica identity (`REPLICA IDENTITY USING INDEX ...` or `REPLICA IDENTITY FULL`).
+  With `pgoutput`, DML on a published table without one fails on the source at write time, breaking the application, not just the migration.
+  The preflight audits all user tables for this and fails on offenders; it ignores `clone.filters`, since a filtered table can still take writes.
+  Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
-- Large-object changes during the window are not replicated (base copy only). Sequences need no handling: pgcopydb re-syncs them automatically after cutover.
+- Large-object changes during the window are not replicated (base copy only).
+  Sequences need no handling: pgcopydb re-syncs them automatically after cutover.
 
 ## Superuser remediation (`superuserSecretRef`)
 
@@ -213,7 +244,8 @@ It then applies the rights the regular role is missing, exactly these statements
 
 - `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (single-database migrations).
 - `GRANT CREATE ON SCHEMA <schema> TO <role>` on the target, one grant per restore-target schema the role cannot create in (single-database migrations).
-- `GRANT <owner> TO <role>` on the target, when the migration role cannot `SET ROLE` to `clone.ownerAfterRestore` (single-database migrations). The membership carries `SET` on every supported version, which is the part the handover needs.
+- `GRANT <owner> TO <role>` on the target, when the migration role cannot `SET ROLE` to `clone.ownerAfterRestore` (single-database migrations).
+  The membership carries `SET` on every supported version, which is the part the handover needs.
 - `ALTER ROLE <role> REPLICATION` on the source (follow only).
 - `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+; on older targets the grant fails loudly; follow only).
@@ -229,10 +261,16 @@ The reuse extends to TLS transport settings, including any client certificate; w
 
 ## Retries and snapshot consistency
 
-The operator retries a failed attempt with `pgcopydb clone --resume --not-consistent` on the same work volume: finished tables are skipped, interrupted tables are re-copied from scratch (each table's COPY is a single transaction, so a killed attempt leaves no partial rows). `--not-consistent` is not optional here: the first attempt's exported snapshot dies with its session, and a plain `--resume` fails before touching any data ("snapshot ... does not exist").
+The operator retries a failed attempt with `pgcopydb clone --resume --not-consistent` on the same work volume: finished tables are skipped, interrupted tables are re-copied from scratch (each table's COPY is a single transaction, so a killed attempt leaves no partial rows).
+`--not-consistent` is required here: the first attempt's exported snapshot dies with its session, and a plain `--resume` fails before touching any data ("snapshot ... does not exist").
 
-The trade-off: re-copied tables read a fresh snapshot. A retried clone of a source that keeps taking writes is therefore not one single point in time across tables. If that matters, stop writes across the retry window, or delete and recreate the Migration for a fresh consistent copy. Follow migrations replay every change since the slot's consistent point on top of the base copy, and the cutover drain-verify gate plus `spec.verification.data` are the checks that catch divergence.
+The trade-off: re-copied tables read a fresh snapshot.
+A retried clone of a source that keeps taking writes is therefore not one single point in time across tables.
+If that matters, stop writes across the retry window, or delete and recreate the Migration for a fresh consistent copy.
+Follow migrations replay every change since the slot's consistent point on top of the base copy, and the cutover drain-verify gate plus `spec.verification.data` are the checks that catch divergence.
 
 ## Cutover
 
-Cutover freezes the stream at the source's current LSN and drains it; anything written after that point does not reach the target. Writes to the source MUST be stopped before `spec.cutover.approved: true` in Manual mode, and before the lag drops under `follow.maxCatchupLag` in Automatic mode. Automatic is for sources that are already quiesced.
+Cutover freezes the stream at the source's current LSN and drains it; anything written after that point does not reach the target.
+Writes to the source MUST be stopped before `spec.cutover.approved: true` in Manual mode, and before the lag drops under `follow.maxCatchupLag` in Automatic mode.
+Automatic is for sources that are already quiesced.
