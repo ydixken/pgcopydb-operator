@@ -210,13 +210,11 @@ var _ = Describe("Migration Controller resilience", func() {
 	})
 
 	It("releases the finalizer when the namespace terminates mid-cleanup", func() {
-		// Live finding 2026-08-09: deleting a whole namespace forbade the
-		// cleanup Job create (Forbidden, cause NamespaceTerminating), the
-		// controller retried forever, and the namespace hung on the
-		// finalizer. envtest reproduces the apiserver side exactly: no
-		// namespace controller ever finishes the termination, and the
-		// NamespaceLifecycle admission plugin rejects new Jobs in the
-		// terminating namespace with that cause.
+		// Deleting a whole namespace forbids the cleanup Job create
+		// (Forbidden, cause NamespaceTerminating), so the controller retried
+		// forever and the namespace hung on its finalizer. envtest reproduces
+		// the apiserver side exactly: nothing finishes the termination, and
+		// NamespaceLifecycle rejects new Jobs there with that cause.
 		const name = "mig-ns-terminating"
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())

@@ -1065,22 +1065,19 @@ func e2eConn(cluster string) v1beta1.PostgresConnection {
 
 // reportCloneRate records how long a completed clone took, against the size of
 // the source it copied, as a Ginkgo report entry. Deliberately not an
-// assertion: two clones of identical data on this cluster minutes apart
-// measured 666s and 399s, so any threshold would fail for reasons that have
-// nothing to do with the operator.
+// assertion: identical clones minutes apart vary by enough that any threshold
+// would fail for reasons that have nothing to do with the operator.
 //
-// The divisor is the SOURCE DATABASE SIZE, which is not what crossed the wire
-// and is roughly 16% larger. A relation's size counts its indexes, page and
-// tuple headers, alignment padding and free space; a COPY stream carries none
-// of those, and the target rebuilds the indexes rather than receiving them.
-// One run measured 5078 MB transmitted against a 5886 MiB source. So this is a
-// number comparable between runs of the same scale, and not a transfer rate.
+// The divisor is the source database size, not what crossed the wire: a
+// relation's size counts its indexes, page and tuple headers, alignment padding
+// and free space, and a COPY stream carries none of those. That runs roughly
+// 16% high, so this is a number comparable between runs of the same scale and
+// not a transfer rate.
 //
 // pgcopydb's own COPY figure would be the honest divisor and is not reachable
 // here: status.progress stays empty for a plain clone even after it finishes,
 // because the catalog poll that fills it is gated off during the copy (it kills
-// workers) and gated on a runner-version allowlist besides. Reading pgcopydb's
-// end-of-run summary from the worker log would work and costs a log fetch.
+// workers) and gated on a runner-version allowlist besides.
 //
 // Nothing here names a node, because this repository's CI logs are public.
 func reportCloneRate(m *v1beta1.Migration) {

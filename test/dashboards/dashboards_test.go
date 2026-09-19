@@ -386,19 +386,9 @@ func TestHistoryYieldsToALiveMigration(t *testing.T) {
 	}
 }
 
-// The counters are sampled while the worker runs and stop when its pod exits,
-// so a tile reading only at the range end shows N/A for every finished
-// migration. Measured on e2e-follow-auto: no series at the range end, two over
-// six hours. The same defect the other run-fact tiles already had fixed.
-// A stat tile with colorMode "none" renders its value, and its noValue text,
-// in the default foreground: on the detail dashboard that reads as a white
-// N/A among blue ones. Every stat tile there carries a single blue threshold,
-// so the colour is only ever reached through colorMode. Tiles that show a
-// name rather than a reading are exempt: there is no value to colour.
-// One stat tile at a different text size reads as a different kind of tile:
-// Cutover Drain shipped at 48 while everything around it was 20. A dashboard
-// may leave the size to Grafana, which fits the text to the panel, but where
-// tiles state a size they have to agree.
+// One stat tile at a different text size reads as a different kind of tile. A
+// dashboard may leave the size to Grafana, which fits the text to the panel,
+// but where tiles state a size they have to agree.
 func TestStatTilesShareOneTextSize(t *testing.T) {
 	for name, d := range load(t) {
 		sizes := map[float64]string{}
@@ -414,6 +404,11 @@ func TestStatTilesShareOneTextSize(t *testing.T) {
 	}
 }
 
+// A stat tile with colorMode "none" renders its value, and its noValue text,
+// in the default foreground: on the detail dashboard that reads as a white
+// N/A among blue ones. Every stat tile there carries a single blue threshold,
+// so the colour is only ever reached through colorMode. Tiles that show a
+// name rather than a reading are exempt: there is no value to colour.
 func TestStatTilesTakeTheirThresholdColour(t *testing.T) {
 	for name, d := range load(t) {
 		for _, p := range d.AllPanels() {
@@ -452,6 +447,9 @@ func TestByteMetricsUseAByteUnit(t *testing.T) {
 	}
 }
 
+// The counters are sampled while the worker runs and stop when its pod exits,
+// so a tile reading only at the range end shows N/A for every finished
+// migration, the same defect the other run-fact tiles already had fixed.
 func TestCountTilesReadOverTheRange(t *testing.T) {
 	counters := []string{
 		"pgcopydb_migration_tables_total",

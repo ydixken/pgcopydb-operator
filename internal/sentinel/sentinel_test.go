@@ -292,14 +292,13 @@ func TestParseSample(t *testing.T) {
 // read from the source slot row with the same fallback, and the target's
 // replication origin must not appear here at all: it parks at the last
 // applied COMMIT, so on a source whose recent WAL is filtered or idle it
-// trails without bound, and driving lag off it hung a release candidate at
-// 1.95 GB of reported lag on a fully caught-up migration. The origin is the
-// stricter position and it keeps its job, one layer over, in buildVerifyJob.
+// trails without bound and reports gigabytes of lag on a fully caught-up
+// migration. The origin is the stricter position and it keeps its job, one
+// layer over, in buildVerifyJob.
 //
-// What this can prove is the wiring: if anyone reaches for the origin from
-// the watch again, this fails. What it cannot prove is the semantics, since
-// no fake answers two real LSN sources; that took two databases, and the
-// numbers are in the commit message.
+// This proves the wiring only: if anyone reaches for the origin from the
+// watch again, it fails. It cannot prove the semantics, because no fake
+// answers two real LSN sources.
 func TestReadScript(t *testing.T) {
 	script := readScript("ns_mig_1")
 	for _, want := range []string{
