@@ -8,25 +8,28 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 - [go](https://go.dev): the operator's language and test toolchain.
 - [task](https://taskfile.dev): task runner, the entrypoint for everything.
-- [yamllint](https://yamllint.readthedocs.io): lints all YAML; the only linter with work to do pre-scaffold.
-- [golangci-lint](https://golangci-lint.run) v2: Go linting, activates once `go.mod` exists.
+- [yamllint](https://yamllint.readthedocs.io): lints all YAML.
+- [golangci-lint](https://golangci-lint.run) v2: Go linting.
 - [kubectl](https://kubernetes.io/docs/reference/kubectl/): only needed for `task e2e`.
 - [gh](https://cli.github.com): PRs happen on GitHub.
-- Docker MAY be installed for local image builds; CI builds the published image. Building `images/runner` locally pulls the pinned `pgcopydb-builder` tag from ghcr instead of compiling pgcopydb; see [images/pgcopydb-builder](images/pgcopydb-builder/README.md).
+- Docker MAY be installed for local image builds; CI builds the published image.
+  Building `images/runner` locally pulls the pinned `pgcopydb-builder` tag from ghcr instead of compiling pgcopydb; see [images/pgcopydb-builder](images/pgcopydb-builder/README.md).
 
 ## Day-to-day loop
 
 1. Branch from `main`.
 1. Make one logical change.
 1. If the change touches `api/v1beta1`, run `make manifests`, `hack/sync-chart-crd.sh`, and `task docs`, then commit the regenerated CRD, chart template, and `docs/reference/api.md` with it.
-1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it. The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
+1. If the change touches a `+kubebuilder:rbac` marker, run `make manifests` and then `hack/sync-chart-rbac.sh`, and commit the regenerated `config/rbac/role.yaml` and chart templates with it.
+   The chart's rules are generated from `config/rbac`, and `task lint` fails when the two disagree.
 1. Format touched files before every commit and run `task lint`.
-   For CRD or RBAC changes, inspect and commit the generated files first, then rerun `task lint` before pushing: staged but uncommitted generated files deliberately fail the check.
+   For CRD or RBAC changes, inspect and commit the generated files first, then rerun `task lint` before pushing: staged but uncommitted generated files fail the check.
 1. Commit (see below), push the branch to GitHub, open a PR.
 1. Merge when the CI `lint`, `test`, and `docs` checks are green on the current head.
    No pull request runs the E2E suite; the next release candidate does (see [Releasing](#releasing)).
 
-`.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`. The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
+`.github/workflows/ci.yml` runs lint, tests and the docs build on every push and pull request, and those three jobs are the required checks on `main`.
+The GitLab project (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and never takes a commit or an MR.
 The pull request `lint` job runs GitHub Dependency Review and rejects new dependencies with moderate or higher known vulnerabilities, disallowed licenses, or violations in runtime, development, or unknown scopes.
 GitHub cannot fail Dependency Review for every unresolved license, so contributors MUST review those warnings and resolve each license from a public source before merging.
 
@@ -41,21 +44,27 @@ The two `ownerAfterRestore` tests run the handover's candidate query and the pre
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 
-Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret. Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job. The coverage total is printed in the job summary either way. `codecov.yml` excludes the `zz_generated*.go` files controller-gen writes, so the Codecov number reflects hand-written code.
+Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret.
+Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job.
+The coverage total is printed in the job summary either way.
+`codecov.yml` excludes the `zz_generated*.go` files controller-gen writes, so the Codecov number reflects hand-written code.
 
 ## Self-hosted runners
 
-Two runner scale sets serve this repository, both backed by Actions Runner Controller on the dev cluster, and between them they run every job. The scale sets, their GitHub App credentials and their Helm values are declared outside this repository (see private ops notes); nothing here configures them beyond the `runs-on:` label.
+Two runner scale sets serve this repository, both backed by Actions Runner Controller on the dev cluster, and between them they run every job.
+The scale sets, their GitHub App credentials and their Helm values are declared outside this repository (see private ops notes); nothing here configures them beyond the `runs-on:` label.
 
 `github-runner-pgcopydb-operator` runs builds, publication, and base CI.
 Its jobs get no Kubernetes API credentials for the cluster they run on.
 `github-runner-pgcopydb-e2e` runs release candidate and published-release E2E and can reach that Kubernetes API.
 Its ServiceAccount is scoped to the e2e namespaces, which GitOps owns; it can work inside them but cannot create or delete one, which is why CI runs the suite with `E2E_MANAGE_NAMESPACES=false`.
 
-Two rules hold because this repository is public and both scale sets are real machines on a private cluster:
-
-- No workflow that can be triggered by a fork MAY target them, on any code path a fork can reach.
-- `pull_request_target` MUST NOT be used in any workflow. It runs the base branch's copy of the workflow, with the base branch's secrets, against a fork's code, so the approval that gates a fork's first run never gets asked for.
+> [!warning]
+> Two rules hold because this repository is public and both scale sets are real machines on a private cluster:
+>
+> - No workflow that can be triggered by a fork MAY target them, on any code path a fork can reach.
+> - `pull_request_target` MUST NOT be used in any workflow.
+>   It runs the base branch's copy of the workflow, with the base branch's secrets, against a fork's code, so the approval that gates a fork's first run never gets asked for.
 
 `ci.yml` runs on `pull_request`, so it is the one workflow a fork can trigger, and it picks its runner per event instead of pinning one:
 
@@ -63,21 +72,39 @@ Two rules hold because this repository is public and both scale sets are real ma
 runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
 ```
 
-A push carries no `pull_request` payload and falls through to the cluster runner, as does a pull request from a branch in this repository; only a fork's pull request lands on a hosted one. GitHub's own gate is at its strictest setting (`approval_policy` is `all_external_contributors`) and a public-repo fork run gets a read-only token and no secrets, but that gate is deliberately not what we lean on: the runner namespaces carry no NetworkPolicy, so an approved fork run would have unrestricted east-west access to the cluster, and approving a pull request should not double as a cluster-security decision. Confining them is [issue #182](https://github.com/ydixken/pgcopydb-operator/issues/182); until it lands, that expression is the control.
+A push carries no `pull_request` payload and falls through to the cluster runner, as does a pull request from a branch in this repository; only a fork's pull request lands on a hosted one.
+GitHub's own gate is at its strictest setting (`approval_policy` is `all_external_contributors`), and a public-repo fork run gets a read-only token and no secrets.
+That gate is not what we lean on: approving a fork's pull request would also decide whether its code reaches a cluster runner, and a review approval should not double as a cluster-security decision.
+[Issue #182](https://github.com/ydixken/pgcopydb-operator/issues/182) tracks enforcing that in the cluster; until it lands, the expression above is the control.
 
-The e2e job backs the first rule with something GitHub enforces rather than something we remember. Its `environment: e2e-cluster` carries a deployment branch and tag policy that permits `main` and `v*` and nothing else, evaluated before the job is dispatched. A fork pull request runs at `refs/pull/N/merge`, matches neither, and never reaches a machine that can talk to the cluster.
+The e2e job backs the first rule with a control GitHub enforces.
+Its `environment: e2e-cluster` carries a deployment branch and tag policy that permits `main` and `v*` and nothing else, evaluated before the job is dispatched.
+A fork pull request runs at `refs/pull/N/merge`, matches neither, and never reaches a machine that can talk to the cluster.
 
-`pgcopydb-builder.yml` is the one workflow that deliberately uses a hosted runner. It compiles pgcopydb from C source for both architectures, and building arm64 on this cluster means QEMU, which was the entire cost of that job: 933 of 964 seconds. The vendored `sqlite3.c` is a single 9MB translation unit, so more cores do not help, and a layer cache cannot help either, because the things that rebuild it at all (a new pgcopydb commit, a Renovate bump of the debian digest) invalidate that layer by definition. Each architecture is built on a machine of that architecture instead, pushed by digest, and joined into one tag by `docker buildx imagetools create`. The arm64 half runs on `ubuntu-24.04-arm`, free for a public repository, and the workflow is not fork-triggerable.
+`pgcopydb-builder.yml` is the one workflow that targets a hosted runner unconditionally.
+It compiles pgcopydb from C source for both architectures, and building arm64 on the cluster runner means QEMU, which dominated that job ([measured](docs/research/measurements.md#qemu-emulation-was-the-whole-cost-of-the-builder-image)).
+A layer cache does not help either, because the things that rebuild it at all (a new pgcopydb commit, a Renovate bump of the debian digest) invalidate that layer by definition.
+Each architecture is built on a machine of that architecture instead, pushed by digest, and joined into one tag by `docker buildx imagetools create`.
+The arm64 half runs on `ubuntu-24.04-arm`, free for a public repository, and the workflow is not fork-triggerable.
 
-[release.yml](.github/workflows/release.yml) calls that workflow rather than repeating it. Its `builder-check` job asks whether the pinned tag is already published, which it almost always is, and `builder-build` runs the split only when it is not. `runner-image` then guards on `!cancelled()` rather than a plain `needs`, because a skipped dependency would otherwise skip the release itself.
+[release.yml](.github/workflows/release.yml) calls that workflow rather than repeating it.
+Its `builder-check` job tests whether the pinned tag is already published, which it almost always is, and `builder-build` runs the split only when it is not.
+`runner-image` then guards on `!cancelled()` rather than a plain `needs`, because a skipped dependency would otherwise skip the release itself.
 
-`runner-smoke.yml` is a `workflow_dispatch` build that exercises the build runner and its Docker daemon without publishing anything. Run it after any change to that scale set.
+`runner-smoke.yml` is a `workflow_dispatch` build that exercises the build runner and its Docker daemon without publishing anything.
+Run it after any change to that scale set.
 
-The runners boot `ghcr.io/ydixken/pgcopydb-operator/github-runner`, built from [`images/github-runner/`](images/github-runner/) by [github-runner-image.yml](.github/workflows/github-runner-image.yml). The stock `actions-runner` it starts from carries git, curl, jq, python3 and a Docker client, where a hosted runner ships hundreds of tools, so every job used to install the difference at runtime. The image bakes it instead: Go, make, gh, psql, Helm, kubectl, promtool, oras, yamllint, mkdocs-material, and the Makefile's own tools at a baked `LOCALBIN` with the envtest binaries and a warm module cache. `verify.sh` runs inside the image before it is pushed, so one that is missing something never becomes the tag the scale sets boot.
+The runners boot `ghcr.io/ydixken/pgcopydb-operator/github-runner`, built from [`images/github-runner/`](images/github-runner/) by [github-runner-image.yml](.github/workflows/github-runner-image.yml).
+The stock `actions-runner` it starts from carries git, curl, jq, python3 and a Docker client, where a hosted runner ships hundreds of tools, so every job used to install the difference at runtime.
+The image bakes it instead: Go, make, gh, psql, Helm, kubectl, promtool, oras, yamllint, mkdocs-material, and the Makefile's own tools at a baked `LOCALBIN` with the envtest binaries and a warm module cache.
+`verify.sh` runs inside the image before it is pushed, so one that is missing something never becomes the tag the scale sets boot.
 
-Versions are pinned so the image is reproducible and Renovate can see them, except Go, promtool and crd-ref-docs, which are read out of `go.mod`, `hack/ensure-promtool.sh` and `Taskfile.yml` at build time so the image cannot drift from what the Makefile and the docs gate use. Merging a Renovate bump rebuilds the image; the weekly schedule is for the apt packages, which move on their own.
+Versions are pinned so the image is reproducible and Renovate can see them, except Go, promtool and crd-ref-docs, which are read out of `go.mod`, `hack/ensure-promtool.sh` and `Taskfile.yml` at build time so the image cannot drift from what the Makefile and the docs gate use.
+Merging a Renovate bump rebuilds the image; the weekly schedule is for the apt packages, which move on their own.
 
-No job runs `actions/setup-go`. The image carries Go, and `GOTOOLCHAIN` is left at its default so a `go.mod` that has moved ahead of the image fetches the toolchain it asks for rather than failing. Pinning it to `local` deadlocked instead: the image rebuilds only once a bump is on `main`, so the pull request making the bump would be red with no way through, and a push to main races its own rebuild.
+No job runs `actions/setup-go`.
+The image carries Go, and `GOTOOLCHAIN` is left at its default so a `go.mod` that has moved ahead of the image fetches the toolchain it asks for rather than failing.
+Pinning it to `local` deadlocks: the image rebuilds only once a bump is on `main`, so the pull request making the bump would be red with no way through, and a push to main races its own rebuild.
 
 `setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner, and `ubuntu-latest` has neither Helm nor a guaranteed Python.
 
@@ -86,7 +113,8 @@ If the runner lacks actionlint, CI installs the version pinned in `images/github
 Local `task lint` runs actionlint when installed and prints a skip message otherwise.
 [`.github/actionlint.yaml`](.github/actionlint.yaml) declares the two self-hosted runner labels.
 
-The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set. Nothing goes through GitHub's cache service: the jobs used to spend 109 and 173 seconds shipping 444MB of Go cache to the internet and pulling it back, and buildx would have done the same with the image layers.
+The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set.
+Nothing goes through GitHub's cache service: a round trip to it cost more than it returned ([measured](docs/research/measurements.md#a-github-cache-round-trip-for-the-runner-image)), and buildx would have done the same with the image layers.
 
 ## E2e tests
 
@@ -117,26 +145,36 @@ Grant those three Pooler verbs through a dedicated Role and RoleBinding in `pgco
 The runner's ServiceAccount and GitOps RBAC live outside this repository (see private ops notes).
 The [chart's RBAC and ServiceAccount values](charts/pgcopydb-operator/README.md#rbac-and-serviceaccounts) configure the manager, which does not manage CNPG fixtures; changing them cannot repair a runner authorization failure.
 
-Two tiers, and the environment variables a run reads:
+The suite has two tiers, default and stress, and a run reads these environment variables, each shown with the default it takes when unset:
 
-| Variable                      | Default | Effect                                                                                                                                                     |
-|-------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `E2E_SCALE`                   | `1`     | Fixture and volume multiplier: 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.                                  |
-| `E2E_CNPG_INSTANCES`          | `1`     | Instances per shared source/target CNPG cluster. Raise it to 3 for chaos failover coverage. The pooling pair stays at one instance each. |
-| `E2E_EXTRA_TABLES`            | unset   | Adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`. The base fixture is deliberately lopsided (one table holds 73% of the bytes); this gives it a production shape. Must be set with `E2E_EXTRA_SIZE_GB`. |
-| `E2E_EXTRA_SIZE_GB`           | unset   | Total size of the extra tables. Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL. Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape. |
-| `E2E_EXTRA_JOBS`              | `4`     | Concurrent psql sessions that seed the extra tables. Each session derives the same deterministic layout and builds its assigned tables. |
-| `E2E_STRESS`                  | unset   | `true` selects the stress tier: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets. Use `task e2e:stress`.                               |
-| `E2E_KEEP_FIXTURES`           | unset   | `true` keeps the fixture namespaces and shared clusters for iteration; the next run reuses them and skips a matching seed. The pooling pair is always removed. |
-| `E2E_FORCE`                   | unset   | `true` takes over the helm release a crashed run left behind.                                                                                              |
-| `E2E_PG_SOURCE`               | `17`    | PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.                                                                                   |
-| `E2E_PG_TARGET`               | `17`    | PostgreSQL major for the target. MUST NOT be older than the source, and MUST be at least 15 (see below).                                                   |
-| `E2E_OPERATOR_TAG`            | unset   | Manager image tag to install instead of the pinned release; the runner follows it.                                                                         |
-| `E2E_RUNNER_TAG`              | unset   | Worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.              |
-| `E2E_STORAGE_CLASS`           | unset   | Pins the fixture volumes to one StorageClass, and wins over the suite-owned one. Setting it also skips the capacity check.                                 |
-| `E2E_MANAGE_NAMESPACES`       | `true`  | `false` works inside namespaces someone else owns: creates and deletes none, installs with `rbac.create=false`.                                            |
-| `E2E_PROMETHEUS_URL`          | unset   | Base URL of a Prometheus that scrapes the suite's operator install; enables the metrics specs.                                                             |
-| `E2E_PROMETHEUS_PORT_FORWARD` | unset   | `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.                                                |
+- `E2E_SCALE` (`1`) multiplies the fixture and volume sizes.
+  Scale 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.
+- `E2E_CNPG_INSTANCES` (`1`) sets the instances per shared source/target CNPG cluster.
+  Raise it to 3 for chaos failover coverage.
+  The pooling pair stays at one instance each.
+- `E2E_EXTRA_TABLES` (unset) adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`.
+  The base fixture is lopsided, one table holding 73% of the bytes, and the extra tables give it a production shape.
+  Must be set with `E2E_EXTRA_SIZE_GB`.
+- `E2E_EXTRA_SIZE_GB` (unset) is the total size of the extra tables.
+  Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL.
+  Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape.
+- `E2E_EXTRA_JOBS` (`4`) sets the concurrent psql sessions that seed the extra tables.
+  Each session derives the same deterministic layout and builds its assigned tables.
+- `E2E_STRESS` (unset) selects the stress tier when `true`: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets.
+  Use `task e2e:stress`.
+- `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
+  The pooling pair is always removed.
+- `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
+- `E2E_PG_SOURCE` (`17`) is the PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.
+- `E2E_PG_TARGET` (`17`) is the PostgreSQL major for the target.
+  It MUST NOT be older than the source, and MUST be at least 15 (see below).
+- `E2E_OPERATOR_TAG` (unset) is a manager image tag to install instead of the pinned release; the runner follows it.
+- `E2E_RUNNER_TAG` (unset) is the worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.
+- `E2E_STORAGE_CLASS` (unset) pins the fixture volumes to one StorageClass, and wins over the suite-owned one.
+  Setting it also skips the capacity check.
+- `E2E_MANAGE_NAMESPACES` (`true`) set to `false` works inside namespaces someone else owns: it creates and deletes none, and installs with `rbac.create=false`.
+- `E2E_PROMETHEUS_URL` (unset) is the base URL of a Prometheus that scrapes the suite's operator install, and enables the metrics specs.
+- `E2E_PROMETHEUS_PORT_FORWARD` (unset) is the `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.
 
 Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: the 0.1 release candidate tier gets 7/7/2Gi.
 `max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright.
@@ -144,14 +182,24 @@ The floor is there because WAL, indexes and the change spool need headroom that 
 Source and target sizes are per instance, so raising `E2E_CNPG_INSTANCES` multiplies those volumes; the work volume is one per migration and does not multiply.
 Fixed WAL-noise fixtures remain unscaled because they must exceed the default `16Mi` lag allowance.
 
-The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion. They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target. Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl. With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red. They assert metrics of the installed operator, so point `E2E_OPERATOR_TAG` at a build that exports them when the pinned default predates the metrics work.
+The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion.
+They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target.
+Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl.
+With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red.
+They assert metrics of the installed operator, so point `E2E_OPERATOR_TAG` at a build that exports them when the pinned default predates the metrics work.
 
-A kept cluster the run cannot adopt in place is deleted and recreated before the suite proceeds. Three things force that: a server on a different major than `E2E_PG_SOURCE`/`E2E_PG_TARGET` request, because CNPG cannot change majors in place; a different instance count; and a different StorageClass, which is immutable once a PVC is bound.
+A kept cluster the run cannot adopt in place is deleted and recreated before the suite proceeds.
+Three things force that: a server on a different major than `E2E_PG_SOURCE`/`E2E_PG_TARGET` request, because CNPG cannot change majors in place; a different instance count; and a different StorageClass, which is immutable once a PVC is bound.
 
-`task e2e:matrix` runs the full suite (chaos specs excluded) three times at `E2E_SCALE=0.1`, one version combo per run: PG 14 to 18, 18 to 18, and 15 to 17. One confirmation prompt up front covers all three; each combo is echoed before it starts. The fixture namespaces stay up between combos (only a cluster on the wrong major gets recreated) and the last combo tears them down. A failing combo does not stop the rest: the task prints a pass/fail summary at the end and exits nonzero if any combo failed. The matrix is upgrade-direction only because pgcopydb needs `pg_dump` at least at the target's major and a newer major's dump does not restore into an older server. PG14 appears as a source only because the follow-mode target contract includes `GRANT SET ON PARAMETER session_replication_role`, which PostgreSQL grew in 15 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md)).
+`task e2e:matrix` runs the full suite (chaos specs excluded) three times at `E2E_SCALE=0.1`, one version combo per run: PG 14 to 18, 18 to 18, and 15 to 17.
+One confirmation prompt up front covers all three; each combo is echoed before it starts.
+The fixture namespaces stay up between combos (only a cluster on the wrong major gets recreated) and the last combo tears them down.
+A failing combo does not stop the rest: the task prints a pass/fail summary at the end and exits nonzero if any combo failed.
+The matrix is upgrade-direction only because pgcopydb needs `pg_dump` at least at the target's major and a newer major's dump does not restore into an older server.
+PG14 appears as a source only because the follow-mode target contract includes `GRANT SET ON PARAMETER session_replication_role`, which PostgreSQL grew in 15 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md)).
 
 When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
-One Longhorn replica is deliberate: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
+The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
 Its requested-storage budget includes the shared pair, work volume, and two additional 1Gi pooling volumes before applying 20% headroom.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
@@ -161,16 +209,21 @@ Each shared CNPG cluster has one instance by default and uses preferred pod anti
 The runner Jobs carry anti-affinity against the two primaries so a migration's SQL legs cross the network instead of looping back inside one node.
 The target additionally repels the source's first instance, because CNPG's own anti-affinity only separates instances of the same cluster and the two primaries would otherwise share whichever node scores highest.
 Every suite-created pod also declares CPU and memory requests.
-A pod that requests nothing scores identically on every node, so the least-allocated node wins every scheduling decision and never gets any less attractive, and an entire run piles onto one node.
+A pod that requests nothing counts the same on every node, so the least-allocated node wins every scheduling decision, its allocation never rises, and an entire run piles onto one node.
 All placement rules are preferred, so a smaller cluster can co-locate the pods and still pass.
 
 Shared fixture servers get 2 CPUs and 4Gi, and the seed Job and migration runner Jobs the same.
 Requests only, so nothing is throttled.
 The caches are set by hand alongside them (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
 
-Two specs cover this. One reads what was rendered onto the pods, an anti-affinity term and non-zero requests, which is namespaced and so runs anywhere; the other counts the nodes the instances actually occupy, which needs to read nodes and skips where that is not permitted. The first is the one that binds: CloudNativePG defaults to a preferred hostname anti-affinity on its own, so the fixtures would still spread, and the node count alone would still pass, with the suite's own configuration deleted.
+Two specs cover this.
+One reads what was rendered onto the pods, an anti-affinity term and non-zero requests, which is namespaced and so runs anywhere; the other counts the nodes the instances actually occupy, which needs to read nodes and skips where that is not permitted.
+The first is the one that binds: CloudNativePG defaults to a preferred hostname anti-affinity on its own, so the fixtures would still spread, and the node count alone would still pass, with the suite's own configuration deleted.
 
-Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source. `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt. Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures. The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
+Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source.
+`task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt.
+Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures.
+The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
 `release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
 `E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
@@ -182,7 +235,7 @@ The published-release workflow `e2e.yml` defines its scale independently, defaul
 
 The progress-sampler bounds spec waits for follow to start, then gives replication lag five minutes to converge and waits up to another five minutes for `CutoverPending`.
 A missing replication sample or lag above the allowance fails with the convergence helper's diagnostic instead of consuming the clone's 30-minute budget.
-The EXTERNAL payload and recovery batch sizes remain deliberate: they exercise uncompressed storage traffic during recovery.
+The EXTERNAL payload and recovery batch sizes exercise uncompressed storage traffic during recovery.
 Recovery after unlocking has a separate 12-minute backlog drain budget shared by the wait and its target probes.
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
@@ -203,43 +256,48 @@ Final-query stderr comes from `exec.ExitError` when available, with the same pre
 The report uses a source-role label rather than a pod name, emits no raw command error or query output, and makes no additional Kubernetes requests.
 These diagnostics do not establish whether a broken pipe originated in SQL, the session, or the exec transport.
 
-No pull request runs the E2E suite, and there is no pre-merge cluster validation.
-The merge gate on `main` is the three `ci.yml` jobs, `lint`, `test`, and `docs`.
-A behavior change gets its first CI cluster run when `auto-release.yml` cuts the next candidate and `release.yml` runs the suite against it at `E2E_SCALE=0.1` (see [Releasing](#releasing)).
-That run is the only CI cluster coverage before promotion.
-
 The suite installs the chart with `crds.install=false` and never creates, upgrades, or deletes the Migration CRD; the CI identity may only `get` it by name.
 Before installing the operator, it compares the cluster's served schema with this checkout's generated CRD and fails naming every missing field, because admission would otherwise prune those fields silently.
 On the shared cluster the CRD follows `main` through GitOps (see private ops notes), so a field added on `main` is testable at the next candidate.
 The check polls for up to five minutes to cover a candidate tagged straight after a merge.
 
 A behavior pull request MUST ship its E2E specs in the same change, so the candidate exercises them.
-A contributor with a cluster SHOULD run the new specs locally with `task e2e:focus` before merging; that is the only cluster signal available before the candidate.
+A contributor with a cluster SHOULD run the new specs locally with `task e2e:focus` before merging.
 
 ## Releasing
 
-Releases cut themselves. Every Monday at 08:00 UTC `auto-release.yml` reads what landed since the last stable tag and pushes a release candidate: `vX.Y.Z-rc.1`, a patch bump unless a `feat:` commit is in the range, in which case a minor one. A week with nothing merged ends with no tag and a green run, which is not a failure. When a candidate for the same version already exists the number counts up, rather than reusing a tag whose images are published.
+Every Monday at 08:00 UTC, `auto-release.yml` reads what landed since the last stable tag and pushes a release candidate: `vX.Y.Z-rc.1`, a patch bump unless a `feat:` commit is in the range, in which case a minor one.
+A week with nothing merged ends with no tag and a green run, which is not a failure.
+When a candidate for the same version already exists the number counts up, rather than reusing a tag whose images are published.
 
 That tag starts `release.yml`, which publishes the manager and runner images (multi-arch) and the Helm chart as OCI, creates the GitHub release whose notes GitHub generates from the merged PRs, and runs the e2e suite against exactly those artifacts on the cluster.
 
-Every job below `builder-build` carries `!cancelled()` in its condition, and that is load-bearing rather than defensive. `builder-build` skips on the normal path, because the pinned builder tag is almost always published already, and GitHub propagates that skip to every descendant: a job in between that survives it with its own status function still passes the skip along to its own dependants. `v0.12.1-rc.2` published two images and then skipped the chart, the release notes and e2e, reporting success.
+Every job below `builder-build` carries `!cancelled()` in its condition.
+`builder-build` skips on the normal path, because the pinned builder tag is almost always published already, and GitHub propagates that skip to every descendant: a job in between that survives it with its own status function still passes the skip along to its own dependants.
+Without the condition, a run can publish the images and then skip the chart, the release notes and e2e while reporting success.
 
-Fail, and the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run. Fix forward on `main`, and the next candidate carries the fix.
+When the suite fails, the candidate's artifacts stay where they are, `latest` still points at the last stable release, and the workflow opens an issue naming the run.
+Fix forward on `main`, and the next candidate carries the fix.
 
-Pass, and nothing happens on its own. Promotion is [promote.yml](.github/workflows/promote.yml), dispatched by hand with the candidate tag. That is what lets several candidates stand between two releases: a candidate that is never promoted just stays a candidate, and rc.2 can supersede rc.1 without rc.1 having already become the release.
+A candidate that passes is not promoted on its own.
+Promotion is [promote.yml](.github/workflows/promote.yml), dispatched by hand with the candidate tag.
+That is what lets several candidates stand between two releases: a candidate that is never promoted just stays a candidate, and rc.2 can supersede rc.1 without rc.1 having already become the release.
 
 Promoting pushes the stable tag `vX.Y.Z`, which starts `release.yml` once more on the same commit: the same images from the same context, and this time `latest` moves and the release is not marked a prerelease.
 After `helm push`, the chart job uses the runner's existing ORAS tool and Helm login config to tag the published manifest as `latest`, preserving its digest.
 Chart version tags omit the leading `v`; image tags and chart `appVersion` retain it.
 `test/buildconfig` exercises the chart alias and image tag scripts for stable and prerelease tags, including chart retagging failures, without contacting a registry.
 
-The gate used to be `needs: [e2e, release-notes]`, which GitHub enforced. A manual promotion has to earn that back, so `promote.yml` reads the candidate's own release run and refuses unless its `e2e` job concluded `success`. Skipped, cancelled and never-ran are all refusals, not passes.
+The gate used to be `needs: [e2e, release-notes]`, which GitHub enforced.
+A manual promotion carries no such dependency, so `promote.yml` reads the candidate's own release run and refuses unless its `e2e` job concluded `success`.
+Skipped, cancelled and never-ran are all refusals, not passes.
 
 > [!important]
 > A release candidate publishes under its own tag and never moves `latest`.
 > Helm without an explicit version selects the highest stable SemVer chart tag, independently of the OCI `latest` alias.
 
-The chart job waits on both image jobs, so a published chart never points at an image that failed to build. A tag containing a hyphen is a SemVer prerelease and is marked as one on GitHub and Artifact Hub, so the candidate round stays out of the way of anyone browsing the releases page for a version to install.
+The chart job waits on both image jobs, so a published chart never points at an image that failed to build.
+A tag containing a hyphen is a SemVer prerelease and is marked as one on GitHub and Artifact Hub, so the candidate round stays out of the way of anyone browsing the releases page for a version to install.
 
 Tagging by hand is the out-of-band case, for a fix that cannot wait until Monday:
 
@@ -248,31 +306,47 @@ git tag -a v0.4.1 -m "v0.4.1: short subject"
 git push origin v0.4.1
 ```
 
-A stable tag pushed that way is published as it stands: it skips the candidate round and with it the e2e gate.
+> [!warning]
+> A stable tag pushed by hand is published as it stands.
+> It skips the candidate round, and with it the e2e gate.
 
-Versions are plain SemVer. The `-alpha.N` prereleases ran up to `v0.2.0-alpha.8` and stop there; `v0.3.0` is the first ordinary release. Pre-1.0 still means the API can change, which is what the major version zero says.
+Versions are plain SemVer.
+The `-alpha.N` prereleases ran up to `v0.2.0-alpha.8` and stop there; `v0.3.0` is the first ordinary release.
+Pre-1.0 means the API can change.
 
 `v1alpha1` MUST NOT be dropped from the CRD while the CRD's `status.storedVersions` still lists it.
 Before removing it, rewrite every stored object at `v1beta1` (a no-op update of each `Migration` is enough; [kube-storage-version-migrator](https://github.com/kubernetes-sigs/kube-storage-version-migrator) automates this), then patch `v1alpha1` out of `status.storedVersions`.
 Only then can a release stop serving it.
 
-Chart `version` and `appVersion` come from the tag, which is why the values committed in `Chart.yaml` are placeholders. `hack/stamp-chart.sh` runs just before packaging and fills in the three Artifact Hub annotations that only make sense per release: the image tags, the prerelease flag, and a changelog built from the `feat:`, `fix:`, `perf:` and `refactor:` commit subjects since the previous tag. It edits the checkout and commits nothing.
+Chart `version` and `appVersion` come from the tag, which is why the values committed in `Chart.yaml` are placeholders.
+`hack/stamp-chart.sh` runs just before packaging and fills in the three Artifact Hub annotations that only make sense per release: the image tags, the prerelease flag, and a changelog built from the `feat:`, `fix:`, `perf:` and `refactor:` commit subjects since the previous tag.
+It edits the checkout and commits nothing.
 
-Renovate keeps the e2e install pinned to the current release. A custom manager in `.renovaterc.json` watches `operatorTag` in `test/e2e/e2e_suite_test.go` and bumps it with the weekly dependency PR, so nobody writes that `chore:` commit by hand any more.
+Renovate keeps the e2e install pinned to the current release.
+A custom manager in `.renovaterc.json` watches `operatorTag` in `test/e2e/e2e_suite_test.go` and bumps it with the weekly dependency PR.
 
 ### Artifact Hub
 
-The chart is listed at [artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator). Artifact Hub reads the OCI repository directly, so a release needs no extra step to show up there.
+The chart is listed at [artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator).
+Artifact Hub reads the OCI repository directly, so a release needs no extra step to show up there.
 
-Ownership is proved by `charts/pgcopydb-operator/artifacthub-repo.yml`, pushed to the chart's OCI repository under the fixed `artifacthub.io` tag. That tag is not SemVer, so neither Helm nor Artifact Hub mistakes it for a chart version. `.github/workflows/artifacthub-metadata.yml` pushes it on any change to the file and on manual dispatch. `.helmignore` keeps it out of the packaged chart: it is a sibling artifact, not chart content.
+Ownership is proved by `charts/pgcopydb-operator/artifacthub-repo.yml`, pushed to the chart's OCI repository under the fixed `artifacthub.io` tag.
+That tag is not SemVer, so neither Helm nor Artifact Hub mistakes it for a chart version.
+`.github/workflows/artifacthub-metadata.yml` pushes it on any change to the file and on manual dispatch.
+`.helmignore` keeps it out of the packaged chart: it is a sibling artifact, not chart content.
 
-The rest of the listing comes from `Chart.yaml` annotations. Two are hand-maintained and worth knowing about:
+The rest of the listing comes from `Chart.yaml` annotations, and two of them are hand-maintained:
 
-- `artifacthub.io/crdsExamples` duplicates `docs/examples/01-clone-minimal.yaml` and `docs/examples/03-clone-platform-secret.yaml` with the comments stripped. Nothing enforces the copies, so update them when those examples change. Artifact Hub matches an example to a CRD by kind and renders only the first match, so keep the minimal clone first; further entries serve readers of the annotation itself.
-- `artifacthub.io/images` lists the runner image explicitly. The runner reaches the cluster as a `--runner-image` flag rather than as a container in a manifest, so Artifact Hub cannot discover it, and without the annotation it is never scanned for vulnerabilities.
+- `artifacthub.io/crdsExamples` duplicates `docs/examples/01-clone-minimal.yaml` and `docs/examples/03-clone-platform-secret.yaml` with the comments stripped.
+  Nothing enforces the copies, so update them when those examples change.
+  Artifact Hub matches an example to a CRD by kind and renders only the first match, so keep the minimal clone first; further entries serve readers of the annotation itself.
+- `artifacthub.io/images` lists the runner image explicitly.
+  The runner reaches the cluster as a `--runner-image` flag rather than as a container in a manifest, so Artifact Hub cannot discover it, and without the annotation it is never scanned for vulnerabilities.
 
 ## Commits and pull requests
 
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`.
-- One logical change per commit. Every commit MUST be lint-clean on its own.
-- `main` is protected: changes land via GitHub PRs, and `lint`, `test` and `docs` MUST be green. Nobody pushes to `main` directly.
+- One logical change per commit.
+  Every commit MUST be lint-clean on its own.
+- `main` is protected: changes land via GitHub PRs, and `lint`, `test` and `docs` MUST be green.
+  Nobody pushes to `main` directly.
