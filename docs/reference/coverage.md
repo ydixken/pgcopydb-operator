@@ -25,13 +25,13 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--no-tablespaces` | `spec.clone.noTablespaces` | |
 | `--skip-large-objects` | `spec.clone.skip: largeObjects` | |
 | `--skip-extensions` | `spec.clone.skip: extensions` | |
-| `--skip-ext-comments` | `spec.clone.skip: extensionComments` | Already implied by `skip: extensions`; listing it alone installs extensions without their COMMENTs. |
+| `--skip-ext-comments` | `spec.clone.skip: extensionComments` | Already implied by `skip: extensions`; on its own it installs extensions without their COMMENTs. |
 | `--skip-collations` | `spec.clone.skip: collations` | |
 | `--skip-vacuum` | `spec.clone.skip: vacuum` | |
 | `--skip-analyze` | `spec.clone.skip: analyze` | |
 | `--skip-db-properties` | `spec.clone.skip: dbProperties` | |
 | `--skip-split-by-ctid` | `spec.clone.skip: ctidSplit` | |
-| `--requirements` | not exposed (deliberate) | Needs a file produced by `pgcopydb list extensions --requirements --json`; no declarative story yet, revisit on demand. |
+| `--requirements` | not exposed | Needs a file produced by `pgcopydb list extensions --requirements --json`, which has no declarative form in the spec. |
 | `--filters` | `spec.clone.filters` | Rendered to the INI, mounted from an operator-owned ConfigMap. All eight filter sections are covered. |
 | `--fail-fast` | `spec.clone.failFast` | |
 | `--restart` | operator-managed | First attempt only: any pre-existing work-dir state is foreign and gets wiped. |
@@ -44,18 +44,19 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`; other plugins would silently ignore it. |
 | `--replay-no-op-updates` | `spec.follow.replayNoOpUpdates` | |
 | `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name; a set name is pattern-restricted to PostgreSQL's slot charset. |
-| `--create-slot` | not exposed (deliberate) | `clone --follow` creates the slot during setup; nothing to configure. |
+| `--create-slot` | not exposed | `clone --follow` creates the slot during setup; nothing to configure. |
 | `--origin` | operator-managed | Always the same generated per-Migration name as the slot; unique, so fan-in stays safe. |
 | `--endpos` | operator-managed | Cutover sets it at runtime via `stream sentinel set endpos --current`. |
 | `--use-copy-binary` | `spec.clone.useCopyBinary` | On by default. pgcopydb falls back to text per table when a column's binary encoding is unsafe. |
-| `--all-databases` | `spec.clone.allDatabases` | Requires superuser on both sides; see [All databases](../configuration.md#all-databases). |
-| `--host` / `--port` | not exposed (deliberate) | The operator drives the sentinel via `pods/exec`; the TCP coordinator stays the documented alternative if exec proves limiting. |
-| `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed (deliberate) | Runner logs are structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level; a verbosity knob can come with demand. |
+| `--all-databases` | `spec.clone.allDatabases` | Needs superuser on both sides; see [All databases](../configuration.md#all-databases). |
+| `--host` / `--port` | not exposed | The operator drives the sentinel via `pods/exec`, not the TCP coordinator. |
+| `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed | Runner logs are structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level. |
 
 ## `pgcopydb follow`
 
-The standalone `follow` command advertises a subset of the clone options with identical semantics; every one of them is covered by the rows above.
-The operator never runs standalone `follow`: it always runs `clone --follow`, so the base copy and the replication slot share one snapshot, which is what makes the result consistent.
+The standalone `follow` command exposes a subset of the clone options with identical semantics; the rows above cover all of them.
+The operator never runs standalone `follow`: it always runs `clone --follow`.
+The base copy and the replication slot then share one snapshot, which keeps the result consistent.
 
 `spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
 
@@ -66,6 +67,9 @@ Admission rejects `verification.data` in this mode because pgcopydb produces no 
 
 `spec.verification.schema` and `spec.verification.data` run `pgcopydb compare schema` and `pgcopydb compare data` after completion, each in its own Job on the work PVC.
 Both take source, target, and `--dir` from the same operator-managed values as the rows above.
-`compare data` adds `--json` and runs inside a wrapper, because the command logs a differing table and still exits 0: its own exit code cannot report a mismatch.
-The wrapper reads the report back through `psql` (the runner image has no other JSON parser), fails the Job when any table differs on row count or checksum, and fails it too when the compare could not run or the report could not be read.
-The report is printed either way, so the Job log keeps the per-table detail.
+`compare data` adds `--json` and runs inside a wrapper that takes its verdict from the report, not from the exit code.
+Stock pgcopydb 0.18 logs a differing table and still exits 0; the bundled runner's patched pgcopydb exits nonzero instead.
+The wrapper reads the report back through `psql`, the only JSON parser in the runner image.
+It fails the Job when a table differs on row count or checksum.
+A compare that could not run, or a report that could not be read, fails the Job too.
+The wrapper prints the report it evaluates, so the Job log keeps the per-table detail.
