@@ -41,17 +41,14 @@ The burst commits as one transaction: target rows can remain zero during healthy
 
 ## Idle-feedback regression
 
-The keepalive-feedback E2E cases use one app-owned published table and a separate, unpublished WAL generator.
-After clone and a confirmed target UPDATE, the published rows stay frozen.
-The cases require source replay, flush, and slot confirmed-flush feedback to cross a captured WAL boundary more than the default catch-up allowance beyond the durable target origin, while that origin and the exact published rows remain unchanged.
-Manual mode holds approval during this observation, so neither automatic cleanup nor the post-cutover logical-message nudge can mask a failure.
-No probe opens live SQLite catalogs.
+The keepalive-feedback E2E cases hold a published table frozen while unpublished WAL keeps advancing on the source.
+They require source replay, flush, and slot confirmed-flush feedback to cross a captured WAL boundary more than the default catch-up allowance beyond the durable target origin, while that origin and the exact published rows stay unchanged.
+The cases withhold approval during this observation, so neither automatic cleanup nor the post-cutover logical-message nudge can mask a failure.
 
 A second filtered-WAL burst runs with only the migration's walsender paused.
-Once the operator reports `Lagging`, each case arms Manual approval or patches the mutable `cutover.mode` to Automatic, then requires `Streaming` with no endpos while the sender remains paused.
+The operator must report `Lagging`, then `Streaming` with no endpos while the sender is still paused.
 Resuming the sender must lead to `Completed`, `CutoverCompleted`, and successful cleanup without published writes or a raised `maxCatchupLag`.
-The Automatic case keeps `approved: false`; only its confirmed catch-up verdict triggers cutover.
-The cases run in release-candidate CI without chaos or flaky labels.
+In Automatic mode the confirmed catch-up verdict alone triggers cutover; the case keeps `approved: false`.
 
 ## Why SQLite file sizes are not the replacement
 
@@ -73,8 +70,8 @@ Neither is implemented here; any worker probe must first have its paths and sema
 
 We use `backlogDrainTimeout = 12 * time.Minute` for early-cutover catch-up and progress-bounds recovery after unlocking.
 Each wait and its probes share one deadline.
-The five-minute `lagConvergeTimeout` still distinguishes idle catch-up from a stall; its existing stress-tier override is unchanged.
-The 20,000-row burst, 16Mi allowance, EXTERNAL payload, and recovery batch shape are unchanged.
+The five-minute `lagConvergeTimeout` distinguishes idle catch-up from a stall, and keeps its stress-tier override.
+The scenario keeps its 20,000-row burst, 16Mi allowance, EXTERNAL payload, and recovery batch shape.
 
 The A/B/A replay on 2026-09-13 (roughly 20:18 to 20:55 UTC) used the rc.5 paused-walsender scenario, digest-pinned images, fixed placement, and unchanged storage configuration.
 It measured:
@@ -90,7 +87,7 @@ A2 returned within 1.5% of A1, but performance mode did not restore the historic
 Both powersave phases exceeded 300 seconds, and CI remains on powersave.
 Those rc.5 measurements established a need for roughly 350 seconds plus operating headroom, not a measured 12-minute requirement.
 The [receive batching fix](../operations/performance.md#follow-receive-and-apply) addresses the per-insert sync cost behind that ceiling.
-We retain the 12-minute budget pending candidate E2E measurements with the new runner; the trade-off is slower reporting of a genuine failure.
+We retain the 12-minute budget until measurements with the bundled runner justify a smaller one; the trade-off is slower reporting of a genuine failure.
 
 > [!important]
 > This budget is environmental accommodation, not a resolution of the throughput investigation in [#260](https://github.com/ydixken/pgcopydb-operator/issues/260).
