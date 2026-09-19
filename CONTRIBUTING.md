@@ -252,6 +252,10 @@ A stable tag pushed that way is published as it stands: it skips the candidate r
 
 Versions are plain SemVer. The `-alpha.N` prereleases ran up to `v0.2.0-alpha.8` and stop there; `v0.3.0` is the first ordinary release. Pre-1.0 still means the API can change, which is what the major version zero says.
 
+`v1alpha1` MUST NOT be dropped from the CRD while the CRD's `status.storedVersions` still lists it.
+Before removing it, rewrite every stored object at `v1beta1` (a no-op update of each `Migration` is enough; [kube-storage-version-migrator](https://github.com/kubernetes-sigs/kube-storage-version-migrator) automates this), then patch `v1alpha1` out of `status.storedVersions`.
+Only then can a release stop serving it.
+
 Chart `version` and `appVersion` come from the tag, which is why the values committed in `Chart.yaml` are placeholders. `hack/stamp-chart.sh` runs just before packaging and fills in the three Artifact Hub annotations that only make sense per release: the image tags, the prerelease flag, and a changelog built from the `feat:`, `fix:`, `perf:` and `refactor:` commit subjects since the previous tag. It edits the checkout and commits nothing.
 
 Renovate keeps the e2e install pinned to the current release. A custom manager in `.renovaterc.json` watches `operatorTag` in `test/e2e/e2e_suite_test.go` and bumps it with the weekly dependency PR, so nobody writes that `chore:` commit by hand any more.
