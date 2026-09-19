@@ -62,7 +62,7 @@ Per-process CPU and I/O counts therefore do not separate the two stages, and the
 
 [SQLite WAL mode](https://www.sqlite.org/wal.html#avoiding_excessively_large_wal_files) normally recycles a checkpointed WAL file without truncating it.
 Database and WAL lengths are storage footprints, not cumulative bytes written or counts of unprocessed changes.
-Rotation, cleanup, page reuse, and checkpoint timing also affect their changes.
+Rotation, cleanup, page reuse, and checkpoint timing also change those lengths.
 Small synchronous writes make storage latency a plausible throughput constraint, but file lengths do not measure sync count, latency, or time spent waiting for storage.
 We do not add those sizes as stage diagnostics because they cannot answer the attribution question reliably.
 
