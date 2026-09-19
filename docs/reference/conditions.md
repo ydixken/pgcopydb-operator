@@ -88,8 +88,10 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
-| `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished. |
-| `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the base copy finished (detected from the worker's clone-completion log line) and change replay took over. |
+| `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged the base copy finished, but the pass's own sample found tables holding rows on the source and none on the target, which is how a `--resume` after killed attempts once called an 848MB table done. The marker is not trusted, the stream is reported but not driven, and the reason stands until a sample finds every such table populated. |
+| `CloneCompleted` | `False` | `CloneIncomplete` | Clone-only migration: the worker exited 0, but pgcopydb's own catalog, read from the exited pod, counts tables not done. The Migration fails with the same reason. |
+| `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished, and pgcopydb's catalog, where it could be read, counted every table done. |
+| `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the worker logged the base copy finished, the pass's own sample found no table holding rows on the source and none on the target, and change replay took over. |
 | `Streaming` | `True` | `Replaying` | The worker's apply process is replaying changes to the target. |
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
@@ -105,6 +107,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
+| `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
 
 A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call. `Complete` is set either way; see [Verification](../operations/verification.md).
@@ -117,6 +120,7 @@ Events carry the play-by-play; reasons are stable, messages are not. Terminal fa
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
+| `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; once per refusal, see the condition reason of the same name. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |

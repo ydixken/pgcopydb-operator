@@ -158,12 +158,22 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 		// with it exited, is its catalog nobody's. Best effort: the pod
 		// usually leaves Running along with the Job, and then there is nothing
 		// to sample, which is acceptable for a finished clone.
-		// Exit 0: every in-scope table was copied, whether or not any of them
-		// has rows for the count to see. This goes before the catalog read, not
-		// after, so pgcopydb's own accounting still has the last word.
-		settleProgress(m)
-		if !m.Spec.Clone.AllDatabases {
-			r.sampleCloneProgress(ctx, m, m.Status.JobName)
+		//
+		// Exit 0 is pgcopydb's word that every in-scope table was copied, and
+		// --resume has given that word for a table no rows reached (issue
+		// #277). Its catalog is the one check left with the worker gone, so
+		// where it can be read it decides: a count short of the total fails
+		// the migration. The copy-time estimate is no check here, since its
+		// last sample may predate the final commit, so it stands as observed
+		// and is never rounded up to its totals.
+		if !m.Spec.Clone.AllDatabases && r.sampleCloneProgress(ctx, m, m.Status.JobName) {
+			if p := m.Status.Progress; p.TablesDone < p.TablesTotal {
+				msg := fmt.Sprintf("pgcopydb exited 0 but its catalog counts %d of %d tables done; do not use the target as a complete copy",
+					p.TablesDone, p.TablesTotal)
+				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneIncomplete, msg)
+				r.fail(m, reasonCloneIncomplete, "Fail", msg)
+				return ctrl.Result{}, r.updateStatus(ctx, m, base)
+			}
 		}
 	}
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")

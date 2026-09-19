@@ -1174,7 +1174,7 @@
       "id": 31,
       "type": "stat",
       "title": "Tables (Target)",
-      "description": "Tables on the target holding data. A table counts once it holds any, so a half-copied one already counts. A copy that exits 0 squares this up to the source figure, because an in-scope table that is legitimately empty is invisible to a count that reads data on disk. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "Tables the copy owes nothing on: they hold rows on the target, or none on the source. A table counts once it holds a row, so one copied in parts counts before its last part lands. Nothing rounds this up when the worker exits 0: a finished copy reading one short has a table with rows on the source and none on the target. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1310,7 +1310,7 @@
       "id": 33,
       "type": "stat",
       "title": "Indexes (Target)",
-      "description": "Indexes built on the target so far. A copy that exits 0 squares this up to the source figure. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "Indexes built on the target so far. Nothing rounds this up when the worker exits 0. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1446,7 +1446,7 @@
       "id": 35,
       "type": "stat",
       "title": "Bytes (Target)",
-      "description": "Table bytes on the target, measured the same way. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. A copy that exits 0 squares the two up: they otherwise end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "Table bytes on the target, measured the same way. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. Nothing rounds the two up when the worker exits 0: they end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
