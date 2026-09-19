@@ -65,10 +65,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           CANDIDATE: ${{ inputs.candidate }}
-        # release.yml used to gate this with `needs: [e2e, release-notes]`, and
-        # a manual promotion has to earn that back rather than take the
-        # operator's word for it. An e2e job that was skipped, cancelled or
-        # never ran is not a pass.
+        # A manual promotion takes no job dependency on the candidate's gate, so
+        # it is checked here rather than taken on the operator's word. An e2e
+        # job that was skipped, cancelled or never ran is not a pass.
         run: |
           run=$(gh run list --workflow=release.yml --branch "$CANDIDATE" \
                   --limit 1 --json databaseId,conclusion -q '.[0]')

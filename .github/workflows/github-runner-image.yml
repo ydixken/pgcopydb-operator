@@ -5,7 +5,7 @@ name: GitHub runner image
 # is pinned, so it moves through a Renovate pull request: merging one rebuilds
 # the image, because the paths filter below watches the Dockerfile. Go and
 # promtool come from go.mod and hack/ensure-promtool.sh, which the same filter
-# watches, so the image follows the versions the Makefile actually uses.
+# watches, so the image follows the versions the Makefile uses.
 #
 # Only this repository can reach the runners it builds for, so the schedule is
 # harmless on a fork: the job would build an image nothing runs.

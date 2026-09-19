@@ -31,7 +31,7 @@ The five patches inherited from `e37d2bd` are:
 [Fork PR #9](https://github.com/ydixken/pgcopydb/pull/9), merged as `4873c18`, adds certified keepalive feedback and CDC regression fixes.
 The receiver can advance network replay and flush feedback to a genuine primary keepalive only after initialized durable apply covers every stored, non-skipped COMMIT, including retained spool, with no receive transaction open and endpos unset.
 The certified feedback floor is monotonic and leaves the data apply cursor, target replication origin, and sentinel replay position unchanged.
-This retains the confirmed-COMMIT and `synchronous_commit=on` guarantees from `aadc4bf`; it does not replace post-cutover drain verification.
+This keeps the confirmed-COMMIT and `synchronous_commit=on` guarantees from `aadc4bf`; it does not replace post-cutover drain verification.
 
 [Fork PR #11](https://github.com/ydixken/pgcopydb/pull/11), merged as `ea2dc96`, lets a retry initialize a missing sentinel only when that invocation created a fresh replication slot.
 Setup preserves every existing sentinel field, including startpos, endpos, apply mode, and receive/apply positions.
@@ -45,7 +45,7 @@ This bootstrap recovery does not repair interrupted index builds, eviction damag
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
 The manager and chart allow `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We retain all three older versions so upgrading the operator does not suppress counters for existing workers.
+We keep all three older versions so upgrading the operator does not suppress counters for existing workers.
 Version `0.18.13.g4873c18` provides certified idle keepalive feedback but not the missing-sentinel bootstrap recovery.
 Neither `0.18.10.gaadc4bf` nor `0.18.5.ge37d2bd` provides certified idle keepalive feedback.
 This allowlist does not select or upgrade worker images.

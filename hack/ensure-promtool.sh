@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs the pinned promtool into bin/. Pinned to the Prometheus version the
-# rules will actually run under, so a check here means the same parse there.
+# rules will run under, so a check here means the same parse there.
 # Renovate does not manage this pin; bump it alongside a Prometheus upgrade.
 set -eu
 

@@ -183,10 +183,8 @@ jobs:
           } >> "$GITHUB_ENV"
       # The runner image carries these; a hosted runner, which is what a fork's
       # pull request gets, does not. The check makes this a no-op on ours.
-      # psql is the one this suite genuinely needs rather than merely runs
-      # through: TestCompareDataQuery fails, not skips, when PGCOPYDB_TEST_PGURI
-      # is set and psql is missing, so a runner without it would have turned the
-      # compare-data gate red rather than quietly unrun.
+      # psql is the one this suite needs: TestCompareDataQuery fails, not skips,
+      # when PGCOPYDB_TEST_PGURI is set and psql is missing.
       - name: Install make and psql, which the runner image lacks
         run: |
           if ! command -v make >/dev/null || ! command -v psql >/dev/null; then
@@ -209,7 +207,7 @@ jobs:
       # rejected with "Token required - not valid tokenless upload". Skipped
       # outright when no CODECOV_TOKEN secret is set, so the absence is visible
       # as a skipped step rather than a green job that uploaded nothing; when
-      # the secret is set, a failed upload fails the job rather than lying.
+      # the secret is set, a failed upload fails the job.
       - name: Upload coverage
         if: env.CODECOV_TOKEN != ''
         env:

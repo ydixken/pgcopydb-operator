@@ -3,8 +3,8 @@
 #
 # A published image missing a tool turns every workflow red at once, and the
 # scale sets boot whatever tag they are pointed at without asking. Everything
-# here is something a job in this repository actually invokes, so a failure is
-# a job that would have failed later and further from the cause.
+# here is something a job in this repository invokes, so a failure is a job
+# that would have failed later and further from the cause.
 set -euo pipefail
 
 fail=0

@@ -56,7 +56,7 @@ expect_match() {
 }
 
 # Defaults (rbac.create=true, metrics.enabled=true): both objects exist, and
-# the binding names the ServiceAccount the Deployment actually runs as.
+# the binding names the ServiceAccount the Deployment runs as.
 expect_match '^kind: ClusterRole$'
 expect_match '^kind: ClusterRoleBinding$'
 expect_match '^  name: rel-pgcopydb-operator-metrics-auth$'

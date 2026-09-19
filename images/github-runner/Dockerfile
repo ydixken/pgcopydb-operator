@@ -90,9 +90,9 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 #
 # LOCALBIN is baked to a path outside the workspace and the whole tree is
 # handed to the runner user, so the Makefile's rules find their targets already
-# present and skip. Nothing writes here during a job, which matters: the rules
-# take the directory as their prerequisite, so a write would make make consider
-# every tool in it stale.
+# present and skip. Nothing writes here during a job: the rules take the
+# directory as their prerequisite, so a write would make make consider every
+# tool in it stale.
 # go build ./... leaves the whole dependency tree in the build cache. This
 # repository's own packages go stale with the next commit, which is what the
 # node cache under /cache is for; their dependencies do not.

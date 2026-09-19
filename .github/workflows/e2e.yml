@@ -47,8 +47,8 @@ jobs:
     timeout-minutes: 260
     steps:
       - uses: actions/checkout@v7
-      # The scale set runs a bare actions-runner image: git and node are all it
-      # ships, so every tool the suite shells out to is installed here.
+      # No setup- steps: both scale sets boot images/github-runner, which
+      # carries go, helm and kubectl.
       - name: Wait for the release images to be published
         # A tag push starts this workflow and release.yml at the same time, and
         # release.yml still has to build and push the images this run installs.

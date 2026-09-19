@@ -63,7 +63,7 @@ jobs:
       # in time and node disk than it returns
       # (see docs/research/measurements.md#a-layer-cache-for-the-manager-image-cost-more-than-it-returned).
       # The only layer it makes reusable is go mod download; go build, which is
-      # what actually costs time, is invalidated by the commit being released.
+      # what costs time, is invalidated by the commit being released.
       # There is no emulated work to keep either: the builder stage runs on
       # BUILDPLATFORM and cross-compiles.
       - uses: docker/build-push-action@v7
@@ -189,9 +189,9 @@ jobs:
           cache-to: ${{ steps.cacherun.outputs.dir && format('type=local,dest={0},mode=max', steps.cacherun.outputs.dir) || '' }}
       - name: Smoke-test pgcopydb and pg_dump versions
         # The build canary in images/runner/Dockerfile already asserts versions
-        # on both platforms; this proves the pushed image actually runs and
-        # carries the fork-built pgcopydb. The pull is a native amd64 one, so
-        # only that half of the manifest is exercised here.
+        # on both platforms; this proves the pushed image runs and carries the
+        # fork-built pgcopydb. The pull is a native amd64 one, so only that
+        # half of the manifest is exercised here.
         run: |
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.15.gea2dc96'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
@@ -232,7 +232,7 @@ jobs:
           esac
 
   release-notes:
-    # Last, so a release only appears once its artifacts are actually published.
+    # Last, so a release only appears once its artifacts are published.
     runs-on: github-runner-pgcopydb-operator
     needs: [chart]
     # Same reason as chart: the skip that starts at builder-build reaches every
@@ -295,8 +295,8 @@ jobs:
     timeout-minutes: 260
     steps:
       - uses: actions/checkout@v7
-      # The scale set runs a bare actions-runner image: git and node are all
-      # it ships, so every tool the suite shells out to is installed here.
+      # No setup- steps: both scale sets boot images/github-runner, which
+      # carries go, helm and kubectl.
       - name: Require the Prometheus URL
         # The metrics specs Skip when no Prometheus knob is set. On this gate
         # a missing repository variable must fail loudly, or the release would
@@ -348,7 +348,7 @@ jobs:
   e2e-failed:
     # A failed candidate is otherwise silent: its artifacts stay published, the
     # GitHub release stays a prerelease, `latest` never moved, and the next
-    # Monday would just cut -rc.N+1 over the same bug. The issue is the signal.
+    # Monday would just cut -rc.N+1 over the same bug.
     needs: [e2e]
     # failure() is what gets this job evaluated at all once a dependency went
     # red; the result check keeps it to an e2e failure, rather than firing on
