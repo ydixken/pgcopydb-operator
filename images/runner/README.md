@@ -1,6 +1,8 @@
 # Runner image
 
-Image for the migration Jobs the operator spawns. It contains pgcopydb 0.18, patched and copied in from a separate image (see below), and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql) from the PGDG apt repo on `debian:trixie-slim`. It does not reuse the upstream `dimitri/pgcopydb:v0.18` image because that one bundles postgresql-client-16, and pg_dump/pg_restore MUST be at least the target's major version.
+Image for the migration Jobs the operator spawns.
+It contains pgcopydb 0.18, patched and copied in from a separate image (see below), and the PostgreSQL 18 client tools (pg_dump, pg_restore, psql) from the PGDG apt repo on `debian:trixie-slim`.
+It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles postgresql-client-16 and a passwordless-sudo user: pg_dump/pg_restore MUST be at least the target's major version, and PGDG trixie ships postgresql-client-18 for both amd64 and arm64.
 
 ## Why pgcopydb comes from a fork
 
@@ -34,7 +36,7 @@ This retains the confirmed-COMMIT and `synchronous_commit=on` guarantees from `a
 [Fork PR #11](https://github.com/ydixken/pgcopydb/pull/11), merged as `ea2dc96`, lets a retry initialize a missing sentinel only when that invocation created a fresh replication slot.
 Setup preserves every existing sentinel field, including startpos, endpos, apply mode, and receive/apply positions.
 A retained slot without valid sentinel state, or a catalog SQL error, fails closed rather than resetting established progress.
-The merged tree matches feature `5d10b14`, tested by [Run Tests `35150666775`](https://github.com/ydixken/pgcopydb/actions/runs/35150666775) and [Nightly Tests `35150664335`](https://github.com/ydixken/pgcopydb/actions/runs/35150664335), with all 126 jobs passing.
+The merged tree matches feature `5d10b14`, tested by [Run Tests `35150666775`](https://github.com/ydixken/pgcopydb/actions/runs/35150666775) and [Nightly Tests `35150664335`](https://github.com/ydixken/pgcopydb/actions/runs/35150664335).
 This bootstrap recovery does not repair interrupted index builds, eviction damage, lost established-stream CDC files, or arbitrary corrupt metadata.
 
 > [!warning]
@@ -51,11 +53,14 @@ This allowlist does not select or upgrade worker images.
 Once an upstream release includes the required runtime fixes above, return to PGDG: swap `libgc1` for the `pgcopydb` package in the install line, drop the `COPY --from=pgcopydb` line, and update the version assertions and progress allowlists together.
 `images/pgcopydb-builder` can then go away entirely.
 
-The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume. No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment. The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
+The image runs as the non-root user `runner` (uid 65532) with `/work` as the working directory, where Jobs mount the migration work volume.
+No credentials are baked in: pgcopydb reads `PGCOPYDB_SOURCE_PGURI`, `PGCOPYDB_TARGET_PGURI`, and `PGPASSFILE` from the Job's environment.
+The entrypoint is empty, so the Job supplies the full command (`pgcopydb clone`, `pgcopydb follow`, and so on).
 
 ## Why it removes packages
 
-Debian ships no fixed version for most of what a scanner reports here, so patching cannot help. Removal can, for the parts a migration never executes:
+Debian ships no fixed version for most of what a scanner reports here, so patching cannot help.
+Removal can, for the parts a migration never executes:
 
 | | findings | critical | high |
 |---|---|---|---|
@@ -63,21 +68,31 @@ Debian ships no fixed version for most of what a scanner reports here, so patchi
 | perl removed | 177 | 0 | 14 |
 | plus util-linux, login, gzip | 92 | 0 | 3 |
 
-perl accounted for every critical. It arrives as a dependency of `postgresql-client-common`, whose only contribution is the pg_wrapper perl scripts in `/usr/bin`; `PATH` already prefers the real binaries in `/usr/lib/postgresql/18/bin`, so purging it removes a scripting language the image never runs. util-linux, `login` and gzip are likewise untouched by any migration.
+perl accounted for every critical.
+It arrives as a dependency of `postgresql-client-common`, whose only contribution is the pg_wrapper perl scripts in `/usr/bin`; `PATH` already prefers the real binaries in `/usr/lib/postgresql/18/bin`, so purging it removes a scripting language the image never runs.
+util-linux, `login` and gzip are likewise untouched by any migration.
 
-The three remaining are genuinely needed: `libacl1` because GNU sed links it, `libtinfo6` and `ncurses-base` because psql links readline. An earlier attempt purged libacl1 as well and broke sed outright, which the build canary caught.
+The three that stay are needed: `libacl1` because GNU sed links it, `libtinfo6` and `ncurses-base` because psql links readline.
+An earlier attempt purged libacl1 as well and broke sed outright, which the build canary caught.
 
-The removals happen inside the same `RUN` as the install. Files deleted in a later layer still occupy the earlier one, so splitting them would leave the image the same size; done in one layer it drops from 176 MB to 122 MB.
+The removals happen inside the same `RUN` as the install.
+Files deleted in a later layer still occupy the earlier one, so splitting them would leave the image the same size; done in one layer it drops from 176 MB to 122 MB.
 
-The cost is honest to state: `dpkg --purge --force-depends --force-remove-essential --force-remove-protected` leaves a package database that no longer satisfies its own dependencies. In an image that never runs apt again this is inert, but anything later added that expects perl or util-linux will not work.
+`dpkg --purge --force-depends --force-remove-essential --force-remove-protected` leaves a package database that no longer satisfies its own dependencies.
+In an image that never runs apt again this is inert, but anything added later that expects perl or util-linux will not work.
 
 ## Why not Alpine or Wolfi
 
 Both were built, measured and rejected.
 
-**Alpine** reported zero findings at 37 MB and does not work. pgcopydb's CLI relies on GNU `getopt_long` permuting argv, which is what lets `pgcopydb clone --dir /work --not-consistent` parse options written after the subcommand. musl's getopt does not permute; every worker Job died with `pgcopydb: unrecognized option: dir` and the migration burned its backoff limit without touching a database. Upstream fixed the Alpine *build* in [dimitri/pgcopydb#193](https://github.com/dimitri/pgcopydb/pull/193), which says nothing about runtime argument handling.
+**Alpine** reported zero findings at 37 MB and does not work.
+pgcopydb's CLI relies on GNU `getopt_long` permuting argv, which is what lets `pgcopydb clone --dir /work --not-consistent` parse options written after the subcommand.
+musl's getopt does not permute; every worker Job died with `pgcopydb: unrecognized option: dir` and the migration burned its backoff limit without touching a database.
+Upstream fixed the Alpine *build* in [dimitri/pgcopydb#193](https://github.com/dimitri/pgcopydb/pull/193), which says nothing about runtime argument handling.
 
-**Wolfi** is glibc and worked correctly, at zero findings and 111 MB. It was rejected because `cgr.dev` images sit behind Chainguard's catalog tiers, where the public tier serves only `:latest`, so the base would be a dependency on a vendor's pricing terms. Wolfi's packages are Apache-2.0, but the images are a product.
+**Wolfi** is glibc and worked correctly, at zero findings and 111 MB.
+It was rejected because `cgr.dev` images sit behind Chainguard's catalog tiers, where the public tier serves only `:latest`, so the base would be a dependency on a vendor's pricing terms.
+Wolfi's packages are Apache-2.0, but the images are a product.
 
 Staying on Debian keeps glibc, a free base, and metadata for the retained packages, so a scanner can enumerate them despite the purged dependencies.
 A `scratch` image assembled from copied binaries would also report near zero, while still containing openssl, krb5 and readline.

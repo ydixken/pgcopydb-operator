@@ -1,34 +1,9 @@
-# Runner image for the operator's migration Jobs: pgcopydb 0.18 plus the
-# PostgreSQL 18 client tools: pg_dump/pg_restore MUST be >= the newest server
-# major on either side, and 18 is the current release major.
-#
-# The fork supplies progress, comparison, receive batching, and apply
-# correctness fixes missing from stock 0.18. See images/runner/README.md
-# for the pinned patch list and the conditions for returning to PGDG.
-#
-# Built from debian:trixie-slim with the PGDG apt repo instead of the
-# upstream dimitri/pgcopydb:v0.18 image: upstream bundles postgresql-client-16
-# and a passwordless-sudo user, so basing on it would carry two client majors
-# plus sudo. PGDG trixie ships postgresql-client-18 for amd64 and arm64. The
-# pgcopydb binary itself comes from the pgcopydb-builder image, which compiles
-# it against the same server-dev packages on its own schedule (see
-# images/pgcopydb-builder/Dockerfile).
-#
-# The image then deletes what it does not run. Debian ships no fixed version
-# for most of what a scanner finds here, so patching cannot help; removal can.
-# perl arrives as a dependency of postgresql-client-common and accounted for
-# every critical in the image, and util-linux, login and gzip are never
-# executed by a migration. Dropping them takes the report from 241 findings
-# with 16 criticals to 92 with none.
-#
-# Alpine and Wolfi were both tried and rejected. Alpine is musl, and pgcopydb's
-# CLI needs GNU getopt_long to permute argv so that options can follow the
-# subcommand; every worker Job died with "unrecognized option: dir" before
-# touching a database. Wolfi is glibc and worked, but its images live behind
-# Chainguard's catalog tiers, which is not a dependency this project should
-# take. Staying on Debian keeps glibc, a free base, and an intact package
-# database, so what a scanner reports is the truth rather than an artifact of
-# having nothing left to enumerate.
+# Runner image for the operator's migration Jobs: the forked pgcopydb 0.18
+# plus the PostgreSQL 18 client tools, on debian:trixie-slim with the PGDG apt
+# repo. pg_dump/pg_restore MUST be >= the newest server major on either side.
+# The binary comes from the pgcopydb-builder image rather than from PGDG, and
+# the install purges what a migration never runs. See images/runner/README.md
+# for the pinned patch list, the removals, and why not Alpine or Wolfi.
 
 # Pinned by tag and digest, not just tag: a debian bump inside the
 # builder republishes this same tag, so only the digest stops that

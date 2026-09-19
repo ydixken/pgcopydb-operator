@@ -2,15 +2,9 @@
 # Sequential PG version-matrix e2e runs; invoked by `task e2e:matrix`, which
 # holds the single confirmation prompt. Runs against the CURRENT kubectl
 # context, so never call this directly against a cluster you did not intend.
-#
-# The combos are upgrade-direction only: pgcopydb needs pg_dump at least at
-# the target's major, and a newer major's dump does not restore into an older
-# server. PG14 appears as a source only: the follow-mode target contract
-# includes GRANT SET ON PARAMETER session_replication_role, which PostgreSQL
-# grew in 15 (docs/reference/prerequisites.md).
-#
-# Every combo runs even when an earlier one fails; the summary prints at the
-# end and any failure exits nonzero.
+# Upgrade-direction only: pg_dump must be at least the target's major, and a
+# newer major's dump does not restore into an older server. PG14 is a source
+# only; a follow-mode target needs PG15 (docs/reference/prerequisites.md).
 set -u
 
 combos="14:18 18:18 15:17"

@@ -1,15 +1,9 @@
 #!/bin/sh
-# Stamps the release-specific Artifact Hub annotations into the chart's
-# Chart.yaml in the working tree, right before `helm package`. All three depend
-# on the tag being released, so they are derived here instead of committed,
-# where they would be wrong for every version but one.
-#
-#   images     the __TAG__ placeholder becomes the tag
-#   prerelease set when the tag is a SemVer prerelease, so it stops being
-#              claimed by itself at the first stable release
-#   changes    the conventional-commit subjects since the previous tag
-#
-# The release workflow calls this; it edits a checkout and never commits.
+# Stamps the release-specific Artifact Hub annotations (images, prerelease and
+# changes) into the chart's Chart.yaml, right before `helm package`. All three
+# depend on the tag being released, so they are derived here instead of
+# committed, where they would be wrong for every version but one. The release
+# workflow calls this; it edits a checkout and never commits.
 set -eu
 
 tag=${1:?usage: hack/stamp-chart.sh <git-tag>}
