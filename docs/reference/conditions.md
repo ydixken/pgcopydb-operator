@@ -90,7 +90,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
-| `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged the base copy finished, but the pass's own sample found tables holding rows on the source and none on the target, which a `--resume` after killed attempts can produce. The marker is not trusted, the stream is reported but not driven, and the reason stands until a sample finds every such table populated. |
+| `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged the base copy finished, but the pass's own sample found tables holding rows on the source and none on the target, which a `--resume` after killed attempts can produce. The message names them. The marker is not trusted, the stream is reported but not driven, and the reason stands until a sample finds a row in each of them. |
 | `CloneCompleted` | `False` | `CloneIncomplete` | Clone-only migration: the worker exited 0, but pgcopydb's own catalog, read by a Job that mounts the same work dir once the worker is gone, counts tables not done. The Migration fails with the same reason. |
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished, and pgcopydb's catalog, where it could be read, counted every table done. |
 | `CloneCompleted` | `True` | `BaseCopyDone` | Live migration: the worker logged the base copy finished, the pass's own sample found no table holding rows on the source and none on the target, and change replay took over. |
@@ -136,7 +136,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
-| `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; once per refusal, see the condition reason of the same name. |
+| `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; the message names them. Once per refusal, see the condition reason of the same name. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |

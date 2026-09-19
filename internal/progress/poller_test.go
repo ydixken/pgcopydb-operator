@@ -201,23 +201,24 @@ func TestSample(t *testing.T) {
 	ctx := context.Background()
 	// Five fields a side: database size, tables, tables holding rows, indexes,
 	// table bytes; the source adds a sixth, the tables it holds rows in that
-	// the target holds none in.
+	// the target holds none in, and names them on a third line.
 	for name, tc := range map[string]struct {
 		out        string
 		src, tgt   *int64
 		wantCounts *RelationCounts
 	}{
 		"mid copy": {
-			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\n",
+			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\nowed=public.a, public.b\n",
 			src: ptr(1073741824), tgt: ptr(536870912),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 23,
 				IndexesTotal: 85, IndexesDone: 0,
 				BytesTotal: 48000000000, BytesDone: 12000000000,
+				EmptyOnTarget: "public.a, public.b",
 			},
 		},
 		"index build under way": {
-			out: "source=1073741824 60 60 85 48000000000 0\ntarget=1000000000 60 60 41 47000000000\n",
+			out: "source=1073741824 60 60 85 48000000000 0\ntarget=1000000000 60 60 41 47000000000\nowed=\n",
 			src: ptr(1073741824), tgt: ptr(1000000000),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 60,
@@ -228,20 +229,32 @@ func TestSample(t *testing.T) {
 		// The shape of issue #277: pgcopydb called every table done while
 		// one, populated on the source, held no rows on the target. Storage
 		// read 57 of 57 for it, since a TOAST relation occupies a page from
-		// the schema restore on; the owed count reads 56.
+		// the schema restore on; the owed count reads 56, and the name rides
+		// along for the condition message.
 		"table empty on the target": {
-			out: "source=10134634496 57 57 81 10134634496 1\ntarget=9247000000 57 56 81 9247000000\n",
+			out: "source=10134634496 57 57 81 10134634496 1\ntarget=9247000000 57 56 81 9247000000\nowed=public.documents\n",
 			src: ptr(10134634496), tgt: ptr(9247000000),
 			wantCounts: &RelationCounts{
 				TablesTotal: 57, TablesDone: 56,
 				IndexesTotal: 81, IndexesDone: 81,
 				BytesTotal: 10134634496, BytesDone: 9247000000,
+				EmptyOnTarget: "public.documents",
 			},
 		},
 		// A table empty on both sides owes nothing and counts done, so a
 		// finished copy reads whole without anything rounding it up.
 		"table empty on both sides": {
-			out: "source=1000 3 2 4 500 0\ntarget=900 3 2 4 480\n",
+			out: "source=1000 3 2 4 500 0\ntarget=900 3 2 4 480\nowed=\n",
+			src: ptr(1000), tgt: ptr(900),
+			wantCounts: &RelationCounts{
+				TablesTotal: 3, TablesDone: 3,
+				IndexesTotal: 4, IndexesDone: 4,
+				BytesTotal: 500, BytesDone: 480,
+			},
+		},
+		// The all-databases script prints no owed line; nothing is named.
+		"no owed line": {
+			out: "source=1000 3 3 4 500 0\ntarget=900 3 3 4 480\n",
 			src: ptr(1000), tgt: ptr(900),
 			wantCounts: &RelationCounts{
 				TablesTotal: 3, TablesDone: 3,
@@ -252,16 +265,17 @@ func TestSample(t *testing.T) {
 		// The schema restore has not run yet, so there is a size but nothing
 		// to count. 0 of 0 is an absent sample, not progress.
 		"target has no schema": {
-			out: "source=1073741824 60 60 85 48000000000 0\ntarget=8388608 0 0 0 0\n",
+			out: "source=1073741824 60 60 85 48000000000 0\ntarget=8388608 0 0 0 0\nowed=\n",
 			src: ptr(1073741824), tgt: ptr(8388608),
 		},
-		// One side unreadable: its size goes too, and counts need both.
+		// One side unreadable: its size goes too, and counts need both, so a
+		// name on the owed line has no count to ride with.
 		"source failed": {
-			out: "source=\ntarget=536870912 60 23 0 12000000000\n",
+			out: "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
 			tgt: ptr(536870912),
 		},
 		"target failed": {
-			out: "source=1073741824 60 60 85 48000000000 0\ntarget=\n",
+			out: "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
 			src: ptr(1073741824),
 		},
 		// A source row that is short or not numeric kills the counts, which
@@ -398,30 +412,43 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 	}
 }
 
-// A table is done once its exact row count on the target is at least the
-// source's, and only a read of the table can say so: its TOAST relation
+// A table owes the copy while it holds rows on the source and none on the
+// target, and only a read of the table can say so: its TOAST relation
 // occupies a page from the schema restore on, so a storage test called an
-// 848MB table with no rows on the target copied (issue #277), and a
-// has-any-row test called a table interrupted mid-copy done the instant it
-// held one row of many. The count travels in the target's scope list, which
-// lets the source count exactly the tables whose target count falls short of
-// its own; a table empty on both sides owes nothing.
-func TestRelationCountsScript_CountsRowsNotStorage(t *testing.T) {
+// 848MB table with no rows on the target copied (issue #277). Presence, not a
+// row count: a live source runs ahead of the copy's snapshot until the stream
+// catches up, and a count compared against it held the follow gate shut with
+// the base copy long finished (see
+// docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
+// A table copied in parts reads done here, and belongs to the checks that
+// read content: pgcopydb's catalog after a plain clone, the drain verification
+// after a cutover. The flag travels in the target's scope list, which lets the
+// source count and name exactly the tables the copy still owes; a table empty
+// on both sides owes nothing.
+func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 	for _, want := range []string{
-		`rowcount="(xpath('/row/count/text()', query_to_xml(format('select count(*) from %I.%I', t.nspname, t.relname), false, true, '')))[1]::text::bigint"`,
-		"(select count(*) from t where $rowcount > 0)",
-		"|| ',' || ($rowcount)::text || ')'",                   // the target's row carries the count per table
-		"join ($landed) as landed(name, rowcount)",             // and the source joins it
-		"where t.target_rowcount < $rowcount)",                 // owed: target short of source
-		`*\|?*) landed="values ${t#*|}"`,                       // the list rides the row as a second column
-		`*) landed="select null::text, 0::bigint where false"`, // and a target that did not answer joins nothing
+		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
+		"(select count(*) from t where $populated)",
+		"|| ',' || ($populated)::text || ')'",                                           // the target's row carries the flag per table
+		"join ($landed) as landed(name, populated)",                                     // and the source joins it
+		"from t where not t.populated and $populated)",                                  // owed: rows on the source, none on the target
+		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)", // named, for the condition message
+		`*\|?*) landed="values ${t#*|}"`,                                                // the list rides the row as a second column
+		`*) landed="select null::text, false where false"`,                              // and a target that did not answer joins nothing
+		`printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"`,            // the names leave the source row for a line of their own
 	} {
 		if !strings.Contains(sampleScript, want) {
 			t.Errorf("sampleScript is missing %q", want)
 		}
 	}
-	if strings.Contains(sampleScript, "pg_table_size(t.oid) > 0") {
-		t.Error("sampleScript calls a table done off its storage, which a TOAST relation occupies before any row lands")
+	for _, forbidden := range []string{
+		"pg_table_size(t.oid) > 0",   // storage, which a TOAST relation occupies before any row lands
+		"select count(*) from %I.%I", // a row count, which a live source moves ahead of the snapshot
+		"target_rowcount",
+	} {
+		if strings.Contains(sampleScript, forbidden) {
+			t.Errorf("sampleScript decides by %q", forbidden)
+		}
 	}
 }
 
@@ -447,10 +474,12 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 		t.Errorf("the target's row does not carry the table list:\n%s", target)
 	}
 	source := query("SOURCE")
-	if !strings.Contains(source, "join ($landed) as landed(name, rowcount) on landed.name = n.nspname || '.' || c.relname") {
+	if !strings.Contains(source, "join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname") {
 		t.Errorf("the source is not scoped to the target's tables:\n%s", source)
 	}
-	if strings.Contains(source, "string_agg") {
+	// The source names the tables it owes, but never builds a scope list of
+	// its own, which is what quote_literal is for.
+	if strings.Contains(source, "quote_literal") {
 		t.Errorf("the source builds a table list of its own:\n%s", source)
 	}
 }

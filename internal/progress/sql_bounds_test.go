@@ -177,56 +177,50 @@ WHERE c.relkind = 'r' AND n.nspname = 'public' AND pg_table_size(c.oid) > 0`); g
 		}
 		return s.Counts
 	}
-	// users landed, audit is empty on both sides, documents is owed.
-	if c := sample(); c.TablesTotal != 3 || c.TablesDone != 2 {
-		t.Fatalf("tables = %d of %d, want 2 of 3 with documents holding rows on the source and none on the target", c.TablesDone, c.TablesTotal)
+	// users landed, audit is empty on both sides, documents is owed and named.
+	if c := sample(); c.TablesTotal != 3 || c.TablesDone != 2 || c.EmptyOnTarget != "public.documents" {
+		t.Fatalf("tables = %d of %d owing %q, want 2 of 3 owing public.documents, which holds rows on the source and none on the target", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
 	}
 	sqlOutput(t, uris[1], "INSERT INTO documents SELECT i, repeat('x', 100) FROM generate_series(1, 50) i")
-	if c := sample(); c.TablesTotal != 3 || c.TablesDone != 3 {
-		t.Fatalf("tables = %d of %d after the rows landed, want 3 of 3", c.TablesDone, c.TablesTotal)
+	if c := sample(); c.TablesTotal != 3 || c.TablesDone != 3 || c.EmptyOnTarget != "" {
+		t.Fatalf("tables = %d of %d owing %q after the rows landed, want 3 of 3 owing nothing", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
 	}
 }
 
-// A table interrupted mid-copy with some but not all of its rows landed used
-// to read as done the instant it held any row at all. The sampler now counts
-// exactly, so a target short of the source's row count owes the difference,
-// whatever that count is.
-func TestProgressSampleCountsPartialRowsAsOwed(t *testing.T) {
+// A table holding rows on both sides reads done whatever the two counts are.
+// That is the shape of a live source, which runs ahead of the copy's snapshot
+// until the stream catches up: a sampler that compared the counts held the
+// follow gate shut with the base copy long finished (see
+// docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
+// A table copied in parts reads the same way, and belongs to the checks that
+// read content: pgcopydb's catalog after a plain clone, the drain
+// verification after a cutover.
+func TestProgressSampleCountsTargetBehindSourceAsDone(t *testing.T) {
 	admin := testPGURI(t)
 	uris := make([]string, 0, 2)
 	for _, side := range []string{"source", "target"} {
-		db := fmt.Sprintf("progress_partial_%s_%d", side, time.Now().UnixNano())
+		db := fmt.Sprintf("progress_behind_%s_%d", side, time.Now().UnixNano())
 		sqlOutput(t, admin, "CREATE DATABASE "+db)
 		t.Cleanup(func() { sqlOutput(t, admin, "DROP DATABASE "+db+" WITH (FORCE)") })
-		uri := namedURI(t, admin, db, "progress_partial_"+side)
+		uri := namedURI(t, admin, db, "progress_behind_"+side)
 		sqlOutput(t, uri, "CREATE TABLE orders (id integer PRIMARY KEY, note text)")
 		uris = append(uris, uri)
 	}
 	sqlOutput(t, uris[0], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 35000) i")
-	sample := func() *RelationCounts {
-		t.Helper()
-		argv := progressCommand(false)
-		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
-		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("sample failed: %v", err)
-		}
-		s := parseSample(out)
-		if s.Counts == nil {
-			t.Fatalf("no counts in %q", out)
-		}
-		return s.Counts
-	}
-	// The COPY that landed 12000 of 35000 rows was interrupted, not the whole
-	// table missing: a has-any-row check would have called this done.
 	sqlOutput(t, uris[1], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 12000) i")
-	if c := sample(); c.TablesTotal != 1 || c.TablesDone != 0 {
-		t.Fatalf("tables = %d of %d, want 0 of 1 with orders holding 12000 of 35000 rows on the target", c.TablesDone, c.TablesTotal)
+	argv := progressCommand(false)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sample failed: %v", err)
 	}
-	sqlOutput(t, uris[1], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(12001, 35000) i")
-	if c := sample(); c.TablesTotal != 1 || c.TablesDone != 1 {
-		t.Fatalf("tables = %d of %d after the remaining rows landed, want 1 of 1", c.TablesDone, c.TablesTotal)
+	c := parseSample(out).Counts
+	if c == nil {
+		t.Fatalf("no counts in %q", out)
+	}
+	if c.TablesTotal != 1 || c.TablesDone != 1 || c.EmptyOnTarget != "" {
+		t.Fatalf("tables = %d of %d owing %q, want 1 of 1 owing nothing with orders holding 12000 of 35000 rows on the target", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
 	}
 }
 

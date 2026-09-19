@@ -40,7 +40,7 @@ endpos is the source's WAL head at the approval instant, while the origin holds 
 
 ## Clone completion (issue #277)
 
-Two places where pgcopydb's own bookkeeping reported a copy complete that was not.
+Two places where pgcopydb's own bookkeeping reported a copy complete that was not, and one where the operator's own check for it could not clear.
 
 ### A stale estimate outlived the catalog that produced it
 
@@ -51,6 +51,13 @@ A pass that lost its status patch, or a worker restarted after the verify Job ex
 
 In `confirmBaseCopy`, `internal/controller/migration_controller.go`.
 `--resume` reported 57 of 57 tables done with 848MB on the source and the target empty.
+
+### An exact row count held the follow gate against a live source
+
+In `sampleScript`, `internal/progress/progress.go`.
+The sampler once compared each table's row count on the target against the live source, and a follow migration's source runs ahead of the copy's snapshot until the stream catches up.
+Measured live on a release candidate, with the migration's walsender paused and 20000 rows committed on the source after the snapshot: 16 of 17 tables done for ten minutes with no copy backend left, the lag byte-identical across every poll, and `CloneCompleted` latched on `TablesEmptyOnTarget`.
+The sampler tests presence instead, which the same table passes once one row lands.
 
 ## Worker sizing
 
