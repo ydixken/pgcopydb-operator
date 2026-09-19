@@ -1,12 +1,15 @@
 # Migrating into a CloudNativePG cluster
 
-[CloudNativePG](https://cloudnative-pg.io/) (CNPG) provisions and runs the target; the `Migration` moves the data in. This is the operator's best-tested path: the e2e suite migrates between live CNPG clusters in exactly the shape on this page.
+[CloudNativePG](https://cloudnative-pg.io/) (CNPG) provisions and runs the target; the `Migration` moves the data in.
+This is the operator's best-tested path: the e2e suite migrates between live CNPG clusters in exactly the shape on this page.
 
-The recipe assumes a CNPG `Cluster` named `shop-pg` in namespace `shop`, bootstrapped with the default `app` database owned by the `app` role. Substitute your names.
+The recipe assumes a CNPG `Cluster` named `shop-pg` in namespace `shop`, bootstrapped with the default `app` database owned by the `app` role.
+Substitute your names.
 
 ## 1. Target the `-rw` Service
 
-CNPG maintains a `<cluster>-rw` Service that always routes to the current primary and follows failovers. Use it as the target host, never a pod name:
+CNPG maintains a `<cluster>-rw` Service that always routes to the current primary and follows failovers.
+Use it as the target host, never a pod name:
 
 ```yaml
 target:
@@ -17,7 +20,8 @@ target:
 
 ## 2. Reuse the app Secret CNPG generated
 
-The `initdb` bootstrap creates a Secret named `<cluster>-app` with the owner role's credentials. Reference it directly instead of maintaining a second copy of the password:
+The `initdb` bootstrap creates a Secret named `<cluster>-app` with the owner role's credentials.
+Reference it directly instead of maintaining a second copy of the password:
 
 ```yaml
 target:
@@ -66,7 +70,8 @@ END $$;
 GRANT SET ON PARAMETER session_replication_role TO app;
 ```
 
-Skipping the second grant is the dangerous one: pgcopydb 0.18 reports success while applying nothing. The [preflight](live-migration.md#preflight) probes both before any data moves.
+The second grant is the dangerous one to skip: pgcopydb 0.18 reports success while applying nothing.
+The [preflight](live-migration.md#preflight) probes both before any data moves.
 
 The manual step has an alternative: set `spec.target.superuserSecretRef` to a Secret carrying superuser credentials (CNPG creates `<cluster>-superuser` when `enableSuperuserAccess` is on), and the preflight applies exactly these grants itself, logging them in a `PreflightRemediated` event; see the [prerequisites](../reference/prerequisites.md#superuser-remediation-superusersecretref).
 
@@ -86,8 +91,10 @@ spec:
       wal_sender_timeout: 60s  # CNPG defaults to 5s, which kills logical walsenders
 ```
 
-- `managed.roles` with `replication: true` gives the role the `REPLICATION` attribute declaratively. CNPG does not manage its bootstrap owner role by default, so listing it here starts managing it; alternatively run `ALTER ROLE app REPLICATION` once by hand.
-- `wal_sender_timeout` at CNPG's 5s default terminates pgcopydb's logical-decoding walsender whenever a status update arrives a few seconds late, burning attempts during catchup and drain. Raise it to the PostgreSQL default (60s) or more for the migration window; see [troubleshooting](../troubleshooting.md).
+- `managed.roles` with `replication: true` gives the role the `REPLICATION` attribute declaratively.
+  CNPG does not manage its bootstrap owner role by default, so listing it here starts managing it; alternatively run `ALTER ROLE app REPLICATION` once by hand.
+- `wal_sender_timeout` at CNPG's 5s default terminates pgcopydb's logical-decoding walsender whenever a status update arrives a few seconds late, burning attempts during catchup and drain.
+  Raise it to the PostgreSQL default (60s) or more for the migration window; see [troubleshooting](../troubleshooting.md).
 
 ## 5. The Migration
 
@@ -117,6 +124,7 @@ spec:
 
 From here the [live-migration runbook](live-migration.md) applies unchanged: watch `CaughtUp`, stop writes, approve the cutover, and point the application at `shop-pg-rw.shop.svc` once `CutoverCompleted` is True.
 
-CNPG's own `initdb.import` also moves data into a new cluster and is the simpler tool for a small, offline CNPG-to-CNPG copy. This operator earns its keep when the source is elsewhere, the database is large (parallel copy), or the application cannot stop for the duration: see the [comparison](../design/comparison.md).
+CNPG's own `initdb.import` also moves data into a new cluster and is the simpler tool for a small, offline CNPG-to-CNPG copy.
+This operator is the better choice when the source is elsewhere, the database is large (parallel copy), or the application cannot stop for the duration: see the [comparison](../design/comparison.md).
 
 The e2e suite runs this exact shape on every release: CNPG source and target clusters, the `app` role and Secret, the grants above, and `wal_sender_timeout: 60s` on the source.
