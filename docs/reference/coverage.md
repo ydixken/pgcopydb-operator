@@ -19,7 +19,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--drop-if-exists` | `spec.clone.dropIfExists` | |
 | `--roles` | `spec.clone.roles` | |
 | `--no-role-passwords` | `spec.clone.noRolePasswords` | |
-| `--no-owner` | `spec.clone.noOwner` | `spec.clone.ownerAfterRestore` builds on it: operator-level behavior, not a pgcopydb option. It hands the restored objects to a named role after the worker exits; see [Ownership after restore](prerequisites.md#ownership-after-restore-cloneownerafterrestore). |
+| `--no-owner` | `spec.clone.noOwner` | `spec.clone.ownerAfterRestore` builds on it, an operator-level handover run after the worker exits; see [Ownership after restore](prerequisites.md#ownership-after-restore-cloneownerafterrestore). |
 | `--no-acl` | `spec.clone.noACL` | |
 | `--no-comments` | `spec.clone.noComments` | |
 | `--no-tablespaces` | `spec.clone.noTablespaces` | |
@@ -37,7 +37,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--restart` | operator-managed | First attempt only: any pre-existing work-dir state is foreign and gets wiped. |
 | `--resume` | operator-managed | Retry attempts resume from the work-dir catalogs. |
 | `--not-consistent` | operator-managed | Paired with `--resume`: the failed attempt's snapshot died with its process. |
-| `--snapshot` | not exposed (deliberate, for now) | Needs a snapshot-holder sidecar; open M2 task, decided from spike S8 evidence. |
+| `--snapshot` | not exposed | Needs a snapshot-holder sidecar to keep the exported snapshot alive for the whole clone. |
 | `--follow` | `spec.follow.enabled` | |
 | `--plugin` | `spec.follow.plugin` | |
 | `--publication` | `spec.follow.publication` | Empty lets pgcopydb create and drop its own. |
@@ -54,7 +54,8 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 
 ## `pgcopydb follow`
 
-The standalone `follow` command advertises a subset of the clone options (research section 2.2) with identical semantics; every one of them is covered by the rows above. The operator never runs standalone `follow`: it always runs `clone --follow`, so the base copy and the replication slot share one snapshot, which is the whole consistency point.
+The standalone `follow` command advertises a subset of the clone options with identical semantics; every one of them is covered by the rows above.
+The operator never runs standalone `follow`: it always runs `clone --follow`, so the base copy and the replication slot share one snapshot, which is what makes the result consistent.
 
 `spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
 
@@ -63,4 +64,8 @@ The standalone `follow` command advertises a subset of the clone options (resear
 With `spec.clone.allDatabases: true`, the schema compare also receives `--all-databases`.
 Admission rejects `verification.data` in this mode because pgcopydb produces no JSON report for the strict wrapper to evaluate.
 
-`spec.verification.schema` and `spec.verification.data` run `pgcopydb compare schema` and `pgcopydb compare data` after completion, each in its own Job on the work PVC. Both take source, target, and `--dir` from the same operator-managed values as the rows above. `compare data` adds `--json` and runs inside a wrapper, because the command logs a differing table and still exits 0: its own exit code cannot report a mismatch. The wrapper reads the report back through `psql` (the runner image has no other JSON parser), fails the Job when any table differs on row count or checksum, and fails it too when the compare could not run or the report could not be read. The report is printed either way, so the Job log keeps the per-table detail.
+`spec.verification.schema` and `spec.verification.data` run `pgcopydb compare schema` and `pgcopydb compare data` after completion, each in its own Job on the work PVC.
+Both take source, target, and `--dir` from the same operator-managed values as the rows above.
+`compare data` adds `--json` and runs inside a wrapper, because the command logs a differing table and still exits 0: its own exit code cannot report a mismatch.
+The wrapper reads the report back through `psql` (the runner image has no other JSON parser), fails the Job when any table differs on row count or checksum, and fails it too when the compare could not run or the report could not be read.
+The report is printed either way, so the Job log keeps the per-table detail.

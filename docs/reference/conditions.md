@@ -1,6 +1,8 @@
 # Conditions and reasons
 
-The condition types and reason strings the controller writes to `status.conditions`. They are API contract: stable identifiers you can consume from automation (`kubectl wait`, GitOps health checks, alerting) without parsing messages. Every condition is a `metav1.Condition` and carries `observedGeneration`, so a stale condition is detectable after a spec change.
+The condition types and reason strings the controller writes to `status.conditions`.
+They are API contract: stable identifiers you can consume from automation (`kubectl wait`, GitOps health checks, alerting) without parsing messages.
+Every condition is a `metav1.Condition` and carries `observedGeneration`, so a stale condition is detectable after a spec change.
 
 `status.phase` summarizes conditions and worker progress for the printer column.
 Its initial `Pending` value records the controller's first observation, before conditions exist; API-server creation does not initialize status.
@@ -26,8 +28,8 @@ Automation should wait on conditions, not on phase strings.
 | `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
 | `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
 | `Verifying` | Running the requested `pgcopydb compare` checks | `Completed`, or `Failed` |
-| `Completed` | Finished. Terminal | |
-| `Failed` | Finished badly. Terminal | |
+| `Completed` | Finished; terminal | |
+| `Failed` | Finished badly; terminal | |
 | `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
 
 ### Inside `Cloning` and `Finalizing`
@@ -58,11 +60,12 @@ The query is scoped to the worker's own pod, so another migration's backends on 
 Reading pgcopydb's catalog while the copy is writing it kills workers, so the operator does not do it during a clone.
 `Finalizing` needs the probe to have seen this attempt's copy workers at least once, which the `CopyingData` reason below records.
 Until that first sighting, a sample with no copy workers and other backends busy leaves the phase at `Cloning`: the copy has not been seen running, so it cannot have been seen stopping.
-Zero on both counts is the unknown answer rather than the tail, and the phase stays where the last answered sample left it: not knowing is not evidence of finishing.
+Zero on both counts is the unknown answer, not the tail, so the phase stays where the last answered sample left it.
 
 ## Condition types
 
-Each type is named for what `True` means. Eight are normal-true (True is the desired state); `Failed` is abnormal-true (True means the migration ended in failure).
+Each type is named for what `True` means.
+Eight are normal-true (True is the desired state); `Failed` is abnormal-true (True means the migration ended in failure).
 
 | Type | Polarity | True means |
 |---|---|---|
@@ -113,14 +116,20 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
-| `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
-| `Failed` | `True` | `OwnershipFailed` | The ownership handover failed. The data is on the target; finish the handover by hand with the statements in the Job log, see [Ownership handover failures](../troubleshooting.md#ownership-handover-failures). On a live migration the slot is kept until the Migration is deleted. |
+| `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. |
+| `Failed` | `True` | `OwnershipFailed` | The ownership handover failed; the data is on the target. |
 
-A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call. `Complete` is set either way; see [Verification](../operations/verification.md).
+Two of those terminal reasons need a recovery step rather than a new Migration.
+On `DrainIncomplete`, do not switch applications to the target; [Phase Failed with reason DrainIncomplete](../troubleshooting.md#phase-failed-with-reason-drainincomplete) covers what the verify Job logs say and how to recover.
+On `OwnershipFailed`, finish the handover by hand with the statements in the Job log, following [Ownership handover failures](../troubleshooting.md#ownership-handover-failures); on a live migration the slot is kept until the Migration is deleted.
+
+A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call.
+`Complete` is set either way; see [Verification](../operations/verification.md).
 
 ## Event reasons
 
-Events carry the play-by-play; reasons are stable, messages are not. Terminal failures additionally emit a Warning event whose reason equals the `Failed` condition reason above.
+Events carry the play-by-play; reasons are stable, messages are not.
+Terminal failures additionally emit a Warning event whose reason equals the `Failed` condition reason above.
 
 | Reason | Type | Appears when |
 |---|---|---|
