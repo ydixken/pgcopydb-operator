@@ -271,6 +271,7 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// nothing was applied at all. In the log it tells a stream that never
 	// arrived (replay_lsn below endpos) from one consumed but not applied,
 	// which is what the lost-commits cutover looked like.
+	// The readings are in docs/research/measurements.md#cutover-verification.
 	script := `set -eu
 ` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)

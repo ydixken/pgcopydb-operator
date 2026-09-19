@@ -37,6 +37,9 @@ tasks:
       # A link into a directory mkdocs excludes renders dead on the site, and
       # mkdocs caps that message at INFO, so --strict cannot fail on it.
       - ./hack/check-docs-links.sh
+      # The measurement anchors live in Go comments as plain text, and
+      # docs/research/ is excluded from the site, so mkdocs never sees either end.
+      - ./hack/check-measurement-anchors.sh
       # yamllint proves a workflow is YAML, not that it is a workflow. A step
       # that lost its `uses:` is still valid YAML, and release.yml only runs on
       # a tag, so one shipped broken and nothing noticed until the next release

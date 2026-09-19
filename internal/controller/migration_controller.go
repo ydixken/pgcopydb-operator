@@ -585,7 +585,8 @@ func tablesEmptySeen(m *v1beta1.Migration) bool {
 // confirmBaseCopy decides whether the worker's clone-done marker turns
 // CloneCompleted true, and reports the outcome. The marker is pgcopydb's own
 // bookkeeping, and --resume has called a table done that no rows ever reached
-// (issue #277: 848MB on the source, empty on the target, 57 of 57 reported),
+// (issue #277: 848MB on the source, empty on the target, 57 of 57 reported,
+// docs/research/measurements.md#clone-completion-issue-277),
 // so the pass's own sample has the last word: one that finds a table holding
 // rows on the source and none on the target refuses. The refusal is latched
 // in the reason because the marker scrolls out of the bounded log tail, and

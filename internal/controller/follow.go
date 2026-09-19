@@ -436,7 +436,8 @@ func (r *MigrationReconciler) progressGate() string {
 // with nothing latched on the field: a pass that lost its status patch, or a
 // worker restarted after the verify Job existed, once left the estimate
 // standing as the final figure, 81 of 81 indexes over a catalog that counted
-// 75 (issue #277). The Job is finished, so the line cannot change. Best
+// 75 (issue #277, docs/research/measurements.md#clone-completion-issue-277).
+// The Job is finished, so the line cannot change. Best
 // effort otherwise: an unreadable log (pod not yet collected, or already
 // gone) or an unparsable line leaves the field as it is, and nothing here can
 // move the drain verdict.

@@ -149,7 +149,7 @@ esac
 // one populated table of three reported two. pg_relation_size counts only the
 // main fork, so a table of documents reported 256kB where pg_table_size
 // reported 66MB: on an e2e clone that read as 512MiB to copy while the target
-// grew past 3GB.
+// grew past 3GB. The readings are in docs/research/measurements.md#progress-sampling.
 //
 // A failed side prints empty and parses to no sample, never to zero. psql
 // touches no SQLite catalog, so unlike `list progress` this is safe while the
