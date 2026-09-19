@@ -1,22 +1,12 @@
 name: E2E
 
-# Runs the e2e suite against an already published release.
-#
-# Automatically on a stable tag, because promote rebuilds rather than retags:
-# the images a stable release ships are not the ones e2e checked on the
-# candidate. This run checks what users actually pull, and its result is what
-# the E2E badge reports: the badge carries ?event=push, because a tag run is
-# recorded against the tag and an unscoped badge only ever reads main.
-#
-# release.yml runs e2e once, against the candidate it just built. That answers
-# "is this candidate good" but cannot answer "which release did this start
-# failing in", because the suite, the chart and the images all move together
-# with the tag. This workflow holds the suite and the chart at the checked out
-# ref and varies only the images, so two runs differing by one tag isolate the
-# image as the cause.
-#
-# Nothing a fork can trigger may reach a runner that can talk to the cluster:
-# a tag push and workflow_dispatch both require write access.
+# Runs the e2e suite against an already published release, on a stable tag,
+# because promote rebuilds rather than retags: the images a stable release
+# ships are not the ones release.yml checked on the candidate. Holding the
+# suite and the chart at the checked out ref and varying only the images is
+# also what lets two runs a tag apart isolate an image as the cause. Nothing a
+# fork can trigger reaches the cluster: both triggers require write access.
+# The README badge needs ?event=push, or it reads main and never sees a tag.
 
 on:
   push:
@@ -50,7 +40,7 @@ jobs:
   e2e:
     # environment is the security control, matching release.yml: its deployment
     # policy admits only main and v*, and that is evaluated before any runner
-    # is assigned. The repository check below is belt and braces.
+    # is assigned. The repository check below is a second line, not the control.
     if: github.repository == 'ydixken/pgcopydb-operator'
     runs-on: github-runner-pgcopydb-e2e
     environment: e2e-cluster

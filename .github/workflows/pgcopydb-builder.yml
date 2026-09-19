@@ -4,8 +4,9 @@ name: pgcopydb builder image
 # tag. Safe to forget: runner-image builds it if it is missing.
 #
 # Built once per architecture on a machine of that architecture, then joined
-# into one manifest. It used to build both at once on the cluster runner, with
-# arm64 under QEMU, and that emulation was the whole cost: 933 of 964 seconds.
+# into one manifest: emulating the arm64 half was nearly the whole cost of
+# building it
+# (see docs/research/measurements.md#qemu-emulation-was-the-whole-cost-of-the-builder-image).
 # pgcopydb is a C project whose vendored sqlite3.c is a single 9MB translation
 # unit, so more cores do not help and emulation cannot be cached around, since
 # the cases that rebuild it at all (a pgcopydb commit, a Renovate bump of the

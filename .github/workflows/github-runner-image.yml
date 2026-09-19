@@ -62,9 +62,9 @@ jobs:
         # A date tag so a bad week can be rolled back to a named image, and
         # :latest because that is the tag the scale sets track. The layer cache
         # goes on the node beside the Go caches rather than through GitHub's
-        # cache service, which is the same round trip this repository already
-        # deleted from the lint and test jobs: 444MB and about two minutes a run
-        # to send a cache to the internet and pull it back.
+        # cache service: that is the same round trip this repository already
+        # deleted from the lint and test jobs, and it costs more than it saves
+        # (see docs/research/measurements.md#a-github-cache-round-trip-for-the-runner-image).
         run: |
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
           if [ -d /cache ]; then

@@ -38,9 +38,9 @@ jobs:
           [ -O /cache/buildx-runner ] || sudo chown "$(id -u):$(id -g)" /cache/buildx-runner
           echo "dir=/cache/buildx-runner" >> "$GITHUB_OUTPUT"
       - name: Build both platforms without pushing
-        # The runner base is now the pgcopydb-builder image (private, ghcr.io),
-        # so this needs the login above or it fails at pull access denied; the
-        # heavy compile that used to need QEMU here left with it.
+        # The runner base is the pgcopydb-builder image, which is private on
+        # ghcr.io, so this needs the login above or it fails at pull access
+        # denied.
         uses: docker/build-push-action@v7
         with:
           context: images/runner
