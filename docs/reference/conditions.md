@@ -130,7 +130,7 @@ A mismatch on `Verified` does not fail the Migration, because the transfer itsel
 
 Events record each transition.
 Reasons are stable; messages are not.
-Terminal failures additionally emit a Warning event whose reason equals the `Failed` condition reason above.
+Terminal failures also emit a Warning event whose reason equals the `Failed` condition reason above.
 
 | Reason | Type | Appears when |
 |---|---|---|

@@ -67,13 +67,7 @@ On an older version, omit the field or set it to `null` instead of `[]`, `""`, o
 ### Phase `Failed` at `Validating`
 
 Phase `Failed` at `Validating` with reason `PreflightFailed` means one preflight check failed.
-The possible causes are:
-
-- connectivity
-- selected extension availability or ownership
-- a clone privilege
-- an all-databases probe
-- a follow prerequisite
+The possible causes are connectivity, selected extension availability or ownership, a clone privilege, an all-databases probe, or a follow prerequisite.
 
 Follow the condition's recovery action, then create a new Migration.
 No worker attempt has started.
