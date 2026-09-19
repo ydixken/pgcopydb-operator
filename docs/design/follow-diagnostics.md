@@ -39,6 +39,22 @@ The burst commits as one transaction: target rows can remain zero during healthy
 > These snapshots are not a receive/transform/apply classifier.
 > Do not label downstream delay as apply-bound, or a flat file size as a stalled process.
 
+### The zero-guard window
+
+The sentinel seeds `replay_lsn` at `0/0`, and the [override that reports the apply cursor as the feedback flush position](https://github.com/ydixken/pgcopydb/blob/ea2dc96a47c2f7676d71a4967d044a1e469e4110/src/bin/pgcopydb/ld_stream.c#L1526-L1546) is guarded on that value being non-zero.
+Until the apply loop's first sentinel sync the worker keeps confirming its raw receive position instead, which is why the lag reads near zero whatever the apply backlog is.
+The worker also reports its apply position as `0/0` throughout that window, and PostgreSQL renders an invalid apply position as NULL, so `pg_stat_replication.replay_lsn` is NULL for exactly as long.
+`readScript` prefers that column and falls back to the slot's `confirmed_flush_lsn`, so the fallback lands on the polluted value.
+A walsender fallback is the obvious repair, and it is already in place and does not help.
+
+We answer the window with the `CaughtUp` latch rather than a better probe.
+A single below-threshold reading taken inside it cannot flip the condition: a wrong verdict needs the next sample, a poll interval later, to find the window still open (see [`ConfirmingCatchUp`](../reference/conditions.md#reasons)).
+The stream is reported but not acted on until the base copy completes, which covers a fresh start and leaves roughly one exposed sample at clone end and one after each worker restart.
+The latch costs a poll interval of cutover latency and prevents an endpos frozen at a source position the target has not applied to.
+
+The `0/0` seed, the zero guard, and the apply field of the feedback message are [upstream v0.18 code](https://github.com/dimitri/pgcopydb/blob/95ebd553790fa45de67c92b934917d777131bdd3/src/bin/pgcopydb/ld_stream.c#L1548-L1551), not additions of the bundled runner.
+The keepalive certification above is such an addition; the zero guard is not, so moving off that runner to stock v0.18 would keep this window.
+
 ## Idle-feedback regression
 
 The keepalive-feedback E2E cases hold a published table frozen while unpublished WAL keeps advancing on the source.
