@@ -27,7 +27,7 @@ Look at `kubectl describe migration <name>` first (conditions and events), then 
 | Migration `Failed`, condition reason `DrainIncomplete` | The verify Job found the target missing changes below the cutover LSN: `pgcopydb compare data` reported differing tables (typical cause: a crash inside the drain window, after which pgcopydb `--resume` exits 0 without replaying) | Do NOT switch applications to the target. No data is lost at the source: the slot is kept and retains WAL. The verify Job logs name the differing tables and print `endpos`, `replay_lsn` (below `endpos` means the stream was never consumed to the cutover LSN), and `origin_progress`. Simplest recovery: keep running on the source, delete the Migration (cleanup drops the slot), and run a fresh live migration |
 | Live migration stays in `Cloning`; `CloneCompleted` is `False` with reason `TablesEmptyOnTarget`, while the worker log shows the base copy finished and the stream is applying | The operator's sample found tables that hold rows on the source and none on the target, so it does not trust the worker's clone-completion line: a `--resume` after killed attempts has called such a table done ([#277](https://github.com/ydixken/pgcopydb-operator/issues/277)). A table that received its first rows on the source after the clone's snapshot reads the same way until the stream delivers them | Find the tables by listing the target's tables without rows and checking them on the source. If the rows are genuinely missing, delete the Migration and run a fresh one: pgcopydb does not re-copy a table its catalog calls done. If the stream is delivering them, the condition clears on the next sample |
 | Phase `Failed`, reason `CloneIncomplete` | A clone-only worker exited 0, but pgcopydb's own catalog counted tables not done | Do not use the target as a complete copy. Read `status.progress` and the worker log, then run a fresh Migration |
-| Migration `Failed`, condition reason `OwnershipFailed` | The `<name>-reown` Job could not hand the restored objects to `clone.ownerAfterRestore`: the role does not exist on the target, the migration role lacks `CREATE` on the database, the new owner lacks `CREATE` on a schema it would own objects in (the log prints the exact `GRANT`), or a lock wait timed out on all three pod attempts | The data is on the target. Apply what the Job log names, then finish the handover by hand: the log lists the `ALTER ... OWNER TO` statements, each commits on its own, and the ones already applied stay applied. On a live migration the replication slot is kept; deleting the Migration runs the cleanup Job and releases it |
+| Migration `Failed`, condition reason `OwnershipFailed` | The `<name>-reown` Job could not hand the restored objects to `clone.ownerAfterRestore`: the role does not exist on the target, a `CREATE` grant is missing (the log prints the exact `GRANT`), the migration role lost `USAGE` on a schema it had just handed over, or a lock wait timed out on all three pod attempts | The data is on the target and the handover is re-runnable. See [Ownership handover failures](#ownership-handover-failures) |
 | Retry fails with `publication ... already exists` or `publication retry refused` | Publication and resume state need inspection | See [Publication retry failures](#publication-retry-failures). |
 | Migration sits at attempt 1 with event `... exists but belongs to another owner` | The work PVC or ConfigMap of a just-deleted Migration with the same name is still awaiting garbage collection | Wait for GC to finish, or delete the leftover objects |
 | Logs: `pg_dump: error: server version mismatch` | Client tools in the runner image are older than a server major (`pg_dump` must be at least the newest major on either side) | The default runner ships PostgreSQL 18 client tools; if you pinned `spec.runner.image`, point it at an image with matching tools |
@@ -86,3 +86,70 @@ The migration role can own the extension, inherit the owning role's privileges, 
 Database ownership and `clone.noOwner` do not satisfy extension ownership checks, and `superuserSecretRef` does not change extension ownership.
 After correcting a terminal preflight failure, create a new Migration.
 Skipping extensions also bypasses the availability gate, so provide the required target extensions yourself.
+
+## Ownership handover failures
+
+Phase `Failed` with reason `OwnershipFailed` means the `<name>-reown` Job could not hand the restored objects to `clone.ownerAfterRestore`.
+The clone itself is finished: the data is on the target, and what is missing is some or all of the `ALTER ... OWNER TO` statements.
+This Migration cannot be resumed, because `Failed` is absorbing in this operator's state machine, and creating a new one would re-run the entire clone from scratch.
+Finish the handover by hand instead.
+
+1. Read the handover Job's log: `kubectl logs job/<migration>-reown`.
+   It names the pre-check that refused, if any, and otherwise lists the statements it generated (the first 200) and stops at the first one that failed.
+2. Apply what the log names: create the missing role on the target, or run the `GRANT` it printed verbatim.
+   `permission denied for schema <schema>` means something else: the migration role can no longer reach into a schema it has already handed over, which needs `USAGE` rather than a `CREATE` grant.
+   Both cases are in [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore).
+3. Replay the `ALTER ... OWNER TO` statements from the log against the target, connected as the migration role.
+   Each one commits on its own, the ones that already ran stay applied, and replaying those is a no-op: `ALTER ... OWNER TO` does nothing when the object already has that owner.
+4. Verify with the query below, connected as the migration role. It MUST come back empty.
+5. On a live migration, delete the Migration once the handover is done.
+   The finalizer runs the cleanup Job, which drops the replication slot and ends the WAL retention it causes on the source.
+   A terminal failure does not release the slot on its own, and deleting the Migration is the supported way to release it.
+
+The query is the set the Job itself re-checks before it reports success:
+
+```sql
+WITH me AS (
+  SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user
+),
+ext_member AS (
+  SELECT classid, objid FROM pg_catalog.pg_depend WHERE deptype = 'e'
+),
+user_schema AS (
+  SELECT oid, nspname, nspowner FROM pg_catalog.pg_namespace
+   WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'
+)
+SELECT 'schema' AS kind, n.nspname AS name
+  FROM user_schema n, me
+ WHERE n.nspowner = me.oid AND n.oid >= 16384
+   AND NOT EXISTS (SELECT 1 FROM ext_member e
+                    WHERE e.classid = 'pg_catalog.pg_namespace'::regclass AND e.objid = n.oid)
+UNION ALL
+SELECT 'relation', c.oid::regclass::text
+  FROM pg_catalog.pg_class c JOIN user_schema n ON n.oid = c.relnamespace, me
+ WHERE c.relowner = me.oid AND c.oid >= 16384
+   AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+   AND NOT EXISTS (SELECT 1 FROM ext_member e
+                    WHERE e.classid = 'pg_catalog.pg_class'::regclass AND e.objid = c.oid)
+UNION ALL
+SELECT 'routine', p.oid::regprocedure::text
+  FROM pg_catalog.pg_proc p JOIN user_schema n ON n.oid = p.pronamespace, me
+ WHERE p.proowner = me.oid AND p.oid >= 16384
+   AND NOT EXISTS (SELECT 1 FROM ext_member e
+                    WHERE e.classid = 'pg_catalog.pg_proc'::regclass AND e.objid = p.oid)
+UNION ALL
+SELECT 'type', t.oid::regtype::text
+  FROM pg_catalog.pg_type t JOIN user_schema n ON n.oid = t.typnamespace, me
+ WHERE t.typowner = me.oid AND t.oid >= 16384
+   AND NOT EXISTS (SELECT 1 FROM ext_member e
+                    WHERE e.classid = 'pg_catalog.pg_type'::regclass AND e.objid = t.oid)
+ORDER BY 1, 2;
+```
+
+Every row it returns is still owned by the migration role.
+Run it before step 3 too, to see what is outstanding.
+Array types and row types show up beside the type or relation they belong to; they follow it and need no statement of their own.
+
+A `canceling statement due to lock timeout` in the log is not a privilege problem: the Job caps each statement and its lock wait at 60 seconds, and a session on the target is holding a conflicting lock.
+`ALTER ... OWNER TO` is a catalog update that takes milliseconds, so the cap is there to keep a blocked handover from sitting on the cutover window.
+Clear the blocking session and replay.

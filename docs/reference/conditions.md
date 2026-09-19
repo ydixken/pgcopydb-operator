@@ -114,7 +114,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. Do not switch applications to the target; see the [troubleshooting table](../troubleshooting.md). |
-| `Failed` | `True` | `OwnershipFailed` | The ownership handover failed. The data is on the target; finish the handover by hand with the statements in the Job log, see the [troubleshooting table](../troubleshooting.md). On a live migration the slot is kept until the Migration is deleted. |
+| `Failed` | `True` | `OwnershipFailed` | The ownership handover failed. The data is on the target; finish the handover by hand with the statements in the Job log, see [Ownership handover failures](../troubleshooting.md#ownership-handover-failures). On a live migration the slot is kept until the Migration is deleted. |
 
 A mismatch on `Verified` does not fail the Migration: the transfer itself finished, and what to do about a content difference is your call. `Complete` is set either way; see [Verification](../operations/verification.md).
 

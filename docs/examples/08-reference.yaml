@@ -61,6 +61,7 @@ spec:
     roles: true                 # copy roles first (pg_dumpall --roles-only)
     noRolePasswords: true       # omits role passwords; allDatabases still needs superuser
     noOwner: true               # skip ALTER OWNER; restore as the connecting role
+    ownerAfterRestore: app_role  # hand the restored objects to this role; needs noOwner
     noACL: true                 # skip GRANT/REVOKE replay
     noComments: true            # skip COMMENT statements
     noTablespaces: true         # ignore source tablespace assignments
