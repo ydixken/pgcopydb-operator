@@ -14,12 +14,14 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
+A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup.
+Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
 **Documentation:** [ydixken.github.io/pgcopydb-operator](https://ydixken.github.io/pgcopydb-operator/)
 
 > [!important]
-> In development, pre-1.0. One-shot clone, live migration with follow and controlled cutover, and verification are functional and e2e-tested against real clusters.
+> In development, pre-1.0.
+> One-shot clone, live migration with follow and controlled cutover, and verification are functional and e2e-tested against real clusters.
 
 ## Install
 
