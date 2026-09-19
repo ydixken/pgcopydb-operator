@@ -5,12 +5,10 @@ The base copy is bound by the source read, the network, and the target write.
 Index builds are bound by the target's CPU and memory, and they happen after the data is in.
 In follow mode, source decoding, receive-spool writes, inline transformation, and target apply can each limit progress; measure the pipeline rather than assuming the target is the bottleneck.
 
-This page covers what the operator decides for you, what is left to you, and how to tell whether a change helped.
-
 ## Follow receive and apply
 
 The bundled pgcopydb `0.18.15.gea2dc96` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
-[Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch, crash/resume checks, and receive-process bpftrace measurements for one source transaction containing 20,000 four-column rows.
+[Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch and these measurements, for one source transaction containing 20,000 four-column rows.
 These measurements predate the [certified keepalive feedback](../design/follow-diagnostics.md) in `0.18.13.g4873c18` and the bootstrap recovery in `0.18.15.gea2dc96`; they measure neither version.
 The before/after runs used the same configuration, but not identical volume or cache state.
 Before values cover the row-only receive window; after values include the SQLite batch commit:
@@ -27,7 +25,6 @@ Before values cover the row-only receive window; after values include the SQLite
 
 Apply confirms each target COMMIT before publishing data progress and uses `synchronous_commit=on` for each source transaction.
 That durability wait may raise latency for workloads with many small transactions; its cost is unmeasured.
-The downstream receive defect is recorded in [#265](https://github.com/ydixken/pgcopydb-operator/issues/265); [#260](https://github.com/ydixken/pgcopydb-operator/issues/260) tracks the broader throughput investigation, including what rate is acceptable.
 Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
 A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
 
@@ -48,19 +45,16 @@ These five are the exceptions, because a default that suits an ad-hoc copy does 
 Everything else is pgcopydb's default: four index jobs, restore jobs following index jobs, four large-object jobs.
 
 > [!important]
-> Raising `spec.runner.resources.requests.cpu` is the single knob most migrations need.
-> It sizes the worker and the copy concurrency together, so there is no second field to keep in step.
+> Raising `spec.runner.resources.requests.cpu` sizes the worker and the copy concurrency together, so there is no second field to keep in step.
 
 ## Same-table concurrency
 
-This is the largest available win for the ordinary shape of a database, which is a handful of tables holding most of the bytes.
+Same-table concurrency matters when a handful of tables hold most of the bytes.
 Without it, `--table-jobs` parallelises *across* tables only: the biggest table gets one worker, and the clone cannot finish before that one worker does.
 With it, a table past the threshold is split into parts that are handed to separate workers out of the same table-jobs pool.
 
 The part count is the table size divided by the threshold, capped by `splitMaxParts`.
 Lowering the threshold makes more tables eligible and splits large ones further.
-
-Three things decide whether it engages at all, and two of them fail quietly.
 
 A table needs a single-column integer primary or unique key to be split on key ranges.
 Without one, pgcopydb falls back to splitting on `ctid`, which follows physical layout rather than key order, so each part is a separate scan over its own page range.
@@ -97,8 +91,7 @@ The worst case is roughly `tableJobs * 2 + indexJobs + largeObjectsJobs + 1`: ta
 The source sees the same table and large-object connections, without the index and vacuum ones.
 `skip: [vacuum]` removes the vacuum half if the target will be analysed separately after cutover.
 
-`clone.largeObjectsJobs` is worth setting to 1, or skipping with `skip: [largeObjects]`, unless the database is genuinely blob-heavy.
-The default of four opens four connection pairs whether or not there is anything to move through them.
+`clone.largeObjectsJobs` costs four connection pairs by default, whether or not there is anything to move through them: see [`largeObjectsJobs`](#largeobjectsjobs).
 
 ## Binary COPY
 
@@ -140,7 +133,7 @@ SELECT count(*), pg_size_pretty(sum(pg_column_size(data))) FROM pg_largeobject;
 ### `restoreJobs`
 
 Follows `indexJobs` unless you set it, which is pgcopydb's behaviour and not the operator's.
-The coupling matters: lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
+Lowering `indexJobs` to protect the target's memory silently lowers the restore parallelism too, even though `pg_restore` runs as a separate process and never receives the 1GB `maintenance_work_mem` that constrains index jobs.
 Whether that is a problem depends on whether the target is short of memory or short of cores, which again is not something the operator can see.
 Set both explicitly when they should differ.
 
@@ -158,7 +151,7 @@ It still applies to anything you build yourself afterwards.
 `shared_buffers` and `effective_cache_size` matter on both sides.
 `checkpoint_timeout` only binds when the load is slower than `max_wal_size` divided by it, so on a fast load it is inert.
 
-Two that circulate as advice and are not worth taking:
+Two settings are not worth changing:
 
 `synchronous_commit = off` buys close to nothing during a base copy, because pgcopydb copies a whole table, or one split part, in a single transaction.
 There is one commit per table, not per row.
@@ -190,7 +183,7 @@ spec:
 > The planner will use whatever it had, which on a freshly restored database is nothing, so the first real queries after cutover can choose badly.
 > Run `ANALYZE` on the target yourself before pointing traffic at it: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
 
-The operator does not skip it by default, because a migration target that silently lacks statistics is a worse failure than a slow one: it is invisible until a query plan goes wrong in production.
+The operator does not skip it by default, because a target that silently lacks statistics is invisible until a query plan goes wrong in production.
 
 ## What the defaults are worth, measured
 
@@ -220,13 +213,11 @@ More parts means more writers contending on one relation, and that costs more th
 Leave both at their defaults.
 
 The ceiling sits where it does because of round-trip latency.
-A copy worker traced mid-COPY sits at 7-12% CPU and moves roughly 14kB per socket round trip, one round trip at a time.
+A copy worker mid-COPY sits at 7-12% CPU and moves roughly 14kB per socket round trip, one round trip at a time.
 Each stream is bound by that latency, not by CPU, disk or network, so throughput is the number of streams multiplied by what one stream sustains.
 Adding streams therefore helps until the servers saturate, and adding jobs with no streams to fill does nothing.
 
 ## Measuring
-
-Tune nothing you cannot measure, and be careful what you measure with.
 
 Two clones of identical data on the same cluster minutes apart measured 666s and 399s.
 That is a 67% spread from thin provisioning alone: the first run writes into freshly allocated blocks, the second overwrites blocks that already exist.
@@ -243,7 +234,8 @@ Subtracting them gives the duration, which is the number to compare.
 `pgcopydb_migration_clone_copied_bytes` and `pgcopydb_migration_source_database_size_bytes` give you a rate to divide it into.
 [Monitoring](monitoring.md) has the full metric reference.
 
-For per-table detail, run `pgcopydb list progress --summary --json` against a finished Migration's work PVC (`<name>-work`) from a short-lived pod that mounts it, never with `kubectl exec` into a running worker: every pgcopydb invocation writes to the catalog, and one landing while a worker is mid-cursor kills that worker.
-It reports per-step and per-table timings, which is the only way to answer which table was slow.
+For per-table detail, run `pgcopydb list progress --summary --json` against a finished Migration's work PVC (`<name>-work`) from a short-lived pod that mounts it.
+Never run it with `kubectl exec` into a running worker: every pgcopydb invocation writes to the catalog, and one landing while a worker is mid-cursor kills that worker.
+It reports per-step and per-table timings, which is how you find which table was slow.
 On stock 0.18, skip it when the Migration used filters: `list progress` overwrites the stored filtering and poisons later resume (see the [upstream drafts](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/upstream-issues.md)).
 The bundled runner fixes that filter corruption, but the restriction against concurrent catalog access still applies.
