@@ -1,11 +1,11 @@
 # Configuration
 
-The knobs you reach for after the first clone works.
 Every field, with defaults and validation, is in the [CRD reference](reference/api.md); complete commented resources live in the [examples index](examples.md).
 
 ## Clone tuning
 
-Tuning (parallelism, same-table splitting, skips) is the `clone` block; see [04-clone-tuned.yaml](examples/04-clone-tuned.yaml) for the full commented version:
+The `clone` block holds parallelism, same-table splitting, and skips.
+See [04-clone-tuned.yaml](examples/04-clone-tuned.yaml) for the full commented version:
 
 ```yaml
 spec:
@@ -18,15 +18,17 @@ spec:
 
 The operator defaults table jobs to the worker's CPU request and enables same-table splitting; other unset options use pgcopydb's defaults.
 Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
-Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) is the map.
+Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) lists them.
 
 ### Extension comments and skips
 
-`clone.skip: [extensionComments]` suppresses only extension comments; table and other object comments are still restored.
+`clone.skip: [extensionComments]` suppresses only extension comments.
+The restore keeps table and other object comments.
 `clone.noComments: true` suppresses all restored comments.
-Both avoid the extension-comment ownership requirement that an otherwise empty `spec.clone: {}` can hit; neither avoids the one `dropIfExists: true` adds for `DROP EXTENSION`.
-`clone.skip: [extensions]` skips extension restoration, including extension comments, and bypasses both the availability and ownership preflight gates.
-When skipping extensions, provide the extensions required by the application on the target yourself.
+Both options avoid the extension-comment ownership check that an otherwise empty `spec.clone: {}` can hit.
+Neither avoids the check that `dropIfExists: true` adds for `DROP EXTENSION`.
+`clone.skip: [extensions]` skips extension restoration, including extension comments, and bypasses both the availability and ownership preflight checks.
+If you skip extensions, provide the extensions that the application needs on the target yourself.
 See [Prerequisites](reference/prerequisites.md#base-clone-every-migration) for the ownership rules and remedies.
 
 ### Ownership after restore
@@ -41,29 +43,32 @@ spec:
     ownerAfterRestore: app_role   # the application's owning role on the target
 ```
 
-Reach for it when the migration cannot connect as the role the objects have to end up under.
-That is the usual shape on managed PostgreSQL, where the admin role the provider hands out is not the application's owning role and creating one that owns both sides is not an option.
-`noOwner: true` is required alongside it, and the CRD rejects the pair without it: `pg_restore` would otherwise assign the source owners, and the handover would cover only the part of the schema that happened to land on the migration role.
-`clone.allDatabases` is rejected too, because the handover runs in the target connection's database only.
+Use it when the migration cannot connect as the role that must own the objects.
+This is the usual case on managed PostgreSQL, where the provider's admin role is not the application's owning role.
+You cannot create a role that owns both sides.
+`ownerAfterRestore` needs `noOwner: true`; the CRD rejects the field on its own.
+Otherwise `pg_restore` assigns the source owners, and the handover covers only the part of the schema that landed on the migration role.
+The CRD rejects `clone.allDatabases` too, because the handover runs only in the target connection's database.
 
-The handover runs as a `<name>-reown` Job after the worker has exited.
-On a plain clone it runs in `Finalizing`, before the verification compares, so nothing reads the target while ownership is still moving.
-On a live migration it is in `CuttingOver`, after the drain is proven and before `CutoverCompleted` turns True.
-That condition is the signal to point applications at the target, so the handover sits inside the cutover window and its duration is part of that window.
+The handover runs as a `<name>-reown` Job after the worker exits.
+On a plain clone it runs in `Finalizing`, before the verification compares, so nothing reads the target while ownership changes.
+On a live migration it runs in `CuttingOver`, after the drain is proven and before `CutoverCompleted` turns True.
+That condition is the signal to point applications at the target, so the handover time counts against the cutover window.
 
-Re-running is safe.
-The Job derives its statement list from current ownership each time, so a rerun selects only what is left, and each `ALTER` commits on its own rather than in one transaction that many partitions could push past `max_locks_per_transaction`.
-The field is immutable once the Migration exists, because preflight probes the role before the first attempt and the Job is built once.
+You can re-run the Job safely.
+Each `ALTER` commits on its own, so many partitions cannot push one transaction past `max_locks_per_transaction`.
+The field is immutable after the Migration exists: preflight probes the role before the first attempt, and the operator builds the Job once.
 
-See [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore) for the object classes it covers and the privileges it needs, and [Ownership handover failures](troubleshooting.md#ownership-handover-failures) for recovering one that failed.
+See [Ownership after restore](reference/prerequisites.md#ownership-after-restore-cloneownerafterrestore) for the object classes and privileges.
+See [Ownership handover failures](troubleshooting.md#ownership-handover-failures) to recover a failed handover.
 
 ## All databases
 
-Set `spec.clone.allDatabases: true` to clone the whole source instance using superuser credentials on both sides.
+Set `spec.clone.allDatabases: true` to clone the whole source instance with superuser credentials on both sides.
 
 Both connections MUST name an existing maintenance database, such as `postgres`.
 pgcopydb substitutes each database name into the connection URIs itself and creates missing target databases.
-[The all-databases contract](reference/prerequisites.md#all-databases) has the superuser requirement on each side and what preflight checks.
+[The all-databases contract](reference/prerequisites.md#all-databases) gives the superuser rules for each side and the preflight checks.
 See [09-all-databases.yaml](examples/09-all-databases.yaml) for a complete resource.
 
 > [!warning]
@@ -71,22 +76,30 @@ See [09-all-databases.yaml](examples/09-all-databases.yaml) for a complete resou
 > This includes objects in the target's `postgres` database.
 > Admission rejects `clone.dropIfExists`, `follow.enabled`, and `verification.data` with `allDatabases`.
 
-If admission does not enforce these rules, the controller rejects the same combinations with terminal reason `InvalidSpec` before creating any Jobs.
+Admission rejects those three options for these reasons:
 
-Roles are copied unconditionally, so `clone.roles: true` is allowed but redundant, and `clone.noRolePasswords` omits their passwords without relaxing the superuser contract.
-Filters, skip options, and other clone options apply to every database, and job counts are global across databases rather than multiplied per database.
+- pgcopydb ignores follow in this mode.
+- `dropIfExists` would drop the connected maintenance database.
+- `verification.data` gets no JSON verdict from the data compare.
+
+If admission does not enforce these rules, the controller rejects the same combinations with terminal reason `InvalidSpec` before it creates any Jobs.
+
+pgcopydb copies roles unconditionally, so `clone.roles: true` is allowed but redundant.
+`clone.noRolePasswords` omits the role passwords, and the superuser contract still applies.
+Filters, skip options, and other clone options apply to every database.
+Job counts are global across databases, not multiplied per database.
 Restart and resume use per-database work directories beneath the existing work directory.
 
-`verification.schema` is supported across all databases.
-Follow is rejected because pgcopydb ignores it in this mode; `dropIfExists` would try to drop the connected maintenance database, and the data compare produces no JSON verdict.
-Progress sampling reports summed database sizes on each side, without per-database relation counts or pgcopydb counters.
-`uriSecretRef` accepts both PostgreSQL URIs and libpq keyword/value DSNs for this mode.
-pgcopydb parses either form with `PQconninfoParse`, replaces the database name, and renders a per-database URI while preserving connection options, including passwords, TLS settings, and `passfile`.
-For inline and `secretRef` connections, the runner writes passfile entries as `host:*:*:user:password`; the wildcard database field lets the same credentials authenticate every per-database connection.
+The operator supports `verification.schema` across all databases.
+In this mode, `status.progress` reports summed database sizes on each side, without per-database relation counts or pgcopydb counters.
+`uriSecretRef` accepts both PostgreSQL URIs and libpq keyword/value connection strings (DSNs) for this mode.
+pgcopydb replaces only the database name and keeps the other options, including the password, TLS settings, and `passfile`.
+For inline and `secretRef` connections, the worker writes passfile entries as `host:*:*:user:password`, so one set of credentials authenticates every database.
 
 ## Filters
 
-`clone.filters` selects what to copy; the operator renders it to pgcopydb's filters INI in an operator-owned ConfigMap:
+`clone.filters` selects what to copy.
+The operator renders it to pgcopydb's filters INI file in an operator-owned ConfigMap:
 
 ```yaml
 spec:
@@ -97,12 +110,12 @@ spec:
 ```
 
 Table names follow PostgreSQL quoting and `~/regex/` patterns work.
-All eight pgcopydb filter sections are exposed; the [CRD reference](reference/api.md) lists them.
+`clone.filters` exposes all eight pgcopydb filter sections; the [CRD reference](reference/api.md) lists them.
 
 ## Work volume
 
-`spec.workVolume` sizes the PVC that holds pgcopydb's dumps and catalogs.
-It is the unit of resumability: retries resume from it.
+`spec.workVolume` sizes the PersistentVolumeClaim that holds pgcopydb's dumps and catalogs.
+Retries resume from it.
 
 ```yaml
 spec:
@@ -111,11 +124,12 @@ spec:
     storageClassName: fast-ssd    # empty uses the cluster default
 ```
 
-For live migrations the volume also buffers the change stream, so budget the clone's needs plus write rate times the expected migration window.
+For live migrations the volume also buffers the change stream.
+Budget the clone's needs plus write rate times the expected migration window.
 
 ## Runner image
 
-The worker Jobs run the operator-wide runner image (chart value `runner.image`, pgcopydb 0.18 with PostgreSQL 18 client tools).
+The worker Jobs run the operator-wide runner image from the chart value `runner.image`: pgcopydb 0.18 with PostgreSQL 18 client tools.
 `spec.runner` overrides it per Migration, along with pod placement and resources:
 
 ```yaml
@@ -128,18 +142,20 @@ spec:
 
 `pg_dump` in the image must be at least the target's major version; see [client tool versions](reference/prerequisites.md#client-tool-versions).
 
-Left unset, `resources` defaults to 4 CPUs and 4Gi, requests only.
-The copy concurrency follows that request, so raising it is usually the only tuning a migration needs; see [Performance tuning](operations/performance.md).
+If you leave `resources` unset, it defaults to 4 CPUs and 4Gi, requests only.
+Table jobs follow that CPU request unless `clone.tableJobs` sets them; see [Performance tuning](operations/performance.md).
 
-The runner version also gates the in-pod progress poll that fills `status.progress` and the byte-progress metrics.
-The chart value `runner.progressPollVersions` (manager flag `--progress-poll-versions`) lists the exact pgcopydb versions allowed to run it, and it fails closed: an unlisted version, such as a custom stock 0.18 image, never runs the catalog poll.
-Single-database clones retain their psql-based estimates; all-databases clones report only summed database sizes regardless of the allowlist.
-The [monitoring guide](operations/monitoring.md) lists which metrics that gate affects.
+The runner version also controls the in-pod progress poll that fills `status.progress` and the byte-progress metrics.
+The chart value `runner.progressPollVersions` lists the exact pgcopydb versions allowed to run it, and the manager flag is `--progress-poll-versions`.
+The allowlist fails closed: an unlisted version, such as a custom image with stock 0.18, never runs the catalog poll.
+Single-database clones keep their psql-based estimates, and all-databases clones report summed database sizes whatever the allowlist holds.
+The [monitoring guide](operations/monitoring.md) lists the metrics this affects.
 
 ## Credentials
 
-Passwords never appear in the CR, Job spec, or logs; they come from Secrets in the Migration's namespace and reach pgcopydb through a libpq passfile.
-Three forms, mutually exclusive per endpoint:
+Passwords never appear in the Migration resource, the Job spec, or the logs.
+They come from Secrets in the Migration's namespace, and reach pgcopydb through a libpq passfile.
+Each endpoint uses exactly one of three forms:
 
 ```yaml
 spec:
@@ -153,9 +169,10 @@ spec:
     uriSecretRef: {name: rds-target, key: uri}
 ```
 
-The DSN form fits DBaaS endpoints (RDS, Neon, ...) that hand you a complete connection URI; [02-clone-dsn-secret.yaml](examples/02-clone-dsn-secret.yaml) shows it together with TLS verification against a provider CA bundle.
+The DSN form fits managed database endpoints such as RDS or Neon that give you a complete connection URI.
+[02-clone-dsn-secret.yaml](examples/02-clone-dsn-secret.yaml) shows it with TLS verification against a provider CA bundle.
 
-The third form, `secretRef`, points at one Secret whose keys hold the connection parts, the way platform provisioners hand them out:
+The third form, `secretRef`, points at one Secret whose keys hold the connection parts, as platform provisioners issue them:
 
 ```yaml
 spec:
@@ -171,13 +188,22 @@ spec:
 
 `DB` holds either a bare database name or a full libpq URI.
 The URI MUST be password-free: the password comes from the `PW` key, which MUST exist in every layout, and a URI carrying credentials is rejected.
-A URI is authoritative for user, host, port, and database name, and keeps its own `sslmode` over the spec's; a URI that names no user falls back to the `USER` key.
-Values are used literally: anything containing URI syntax (`@`, `:`, `/`, `%`, and the like) is rejected by name, and a complete DSN belongs in `uriSecretRef` instead.
-With a bare name, the host comes from `URL` (or `URL_EXTERNAL` under `endpoint: external`) as `host` or `host:port` with 5432 as the default port, and the user from `USER`.
-`keys` remaps any of the five key names; `sslMode` fills the gap when the URI sets none, and the `tls` file paths always apply.
-The password stays a projected file feeding the passfile, with the same guarantee as the other forms.
+A URI is authoritative for user, host, port, and database name, and it keeps its own `sslmode` over the spec's.
+A URI that names no user falls back to the `USER` key.
+
+The worker uses the key values literally.
+It rejects a value that holds URI syntax, such as `@`, `:`, `/`, or `%`, and names the key in the error.
+Put a complete DSN in `uriSecretRef` instead.
+
+With a bare database name, the host comes from `URL` as `host` or `host:port`, and the user from `USER`.
+The default port is 5432, and `endpoint: external` takes the host from `URL_EXTERNAL`.
+
+`keys` remaps any of the five key names.
+If the URI sets no `sslmode`, the spec's `sslMode` applies, and the `tls` file paths always apply.
+The password stays a projected file that feeds the passfile, like the other forms.
 [03-clone-platform-secret.yaml](examples/03-clone-platform-secret.yaml) is the complete example.
 
-Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention naming a superuser on the same endpoint.
-For single-database migrations, the preflight checks it and applies the grants the regular role is missing, for the base clone (`GRANT CREATE` on the target database and schemas) and for follow alike.
-Each `PreflightRemediated` event lists the statements applied by one tier; [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) has the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) the example.
+Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention that names a superuser on the same endpoint.
+For single-database migrations, preflight checks that Secret and applies the grants the regular role is missing, for the base clone and for follow alike.
+Each `PreflightRemediated` event lists the statements that one tier applied.
+See [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) for the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) for the example.
