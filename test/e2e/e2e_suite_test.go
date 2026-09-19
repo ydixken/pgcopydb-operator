@@ -114,11 +114,11 @@ const (
 	// PostgreSQL gets a cache worth having. The caches are derived by hand
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
 	// request, so a bigger request alone would change nothing.
-	// Two, not four. Four was tried and measured: seeding ran at 16.6 MiB/s
-	// against 15.9 at two, which is noise. Issue #146 later found why: the
-	// seeding backend waits on WAL write and fsync, never on a core. It is
-	// not free either. Longhorn's instance manager holds a guaranteed 6 CPUs
-	// per node here, so six four-CPU instances leave no room for a worker and
+	// Two, not four: four did not seed faster
+	// (see docs/research/measurements.md#four-cpus-per-fixture-server-did-not-seed-faster-than-two),
+	// because the seeding backend waits on WAL write and fsync, never a core. It is
+	// not free either. Longhorn's instance manager holds a CPU guarantee on
+	// every node, so six four-CPU instances leave no room for a worker and
 	// the run dies on FailedScheduling instead of running slowly.
 	fixtureCPU    = "2"
 	fixtureMemory = "4Gi"
@@ -283,8 +283,8 @@ var (
 	// a quiet source produced during the base copy takes a pass or two, while a
 	// lag reading that cannot converge never moves at all.
 	lagConvergeTimeout = 5 * time.Minute
-	// 12m is headroom over ~350s on powersave, not a measured requirement; A/B/A on 2026-09-13 (#260):
-	// powersave/performance/powersave: 84.3/123.5/85.5 KB/s receive; cutover after resume: 347.2/236.9/337.3s.
+	// 12m is headroom over ~350s on powersave, not a measured requirement
+	// (see docs/research/measurements.md#cpu-governor-against-follow-throughput).
 	backlogDrainTimeout = 12 * time.Minute
 	// primaryTimeout bounds the wait for a cluster to carry exactly one
 	// primary. It only has to cover a CNPG promotion, not a bootstrap.

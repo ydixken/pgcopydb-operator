@@ -2,7 +2,7 @@
 # Regenerates the chart's CRD template from controller-gen output
 # (config/crd/bases), injecting the Helm gates the chart needs. With --check
 # it only verifies the template is current and exits 1 on drift; CI runs that
-# so the chart can never ship a stale CRD again.
+# so the chart cannot ship a stale CRD.
 set -eu
 
 src=config/crd/bases/pgcopydb-operator.io_migrations.yaml

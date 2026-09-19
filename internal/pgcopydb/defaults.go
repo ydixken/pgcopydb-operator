@@ -25,22 +25,14 @@ import (
 
 // The operator's opinion about performance, applied when a Migration leaves a
 // field unset. Without it the worker inherits pgcopydb's compiled-in defaults,
-// and one of those is worth overriding: split-tables-larger-than is 0, which
-// disables same-table concurrency outright. A single large table is then
-// copied by one process no matter how many table jobs are running, and one or
-// two large tables is the ordinary shape of a database.
+// and one of those is worth overriding: split-tables-larger-than defaults to
+// 0, which disables same-table concurrency outright, so a single large table
+// is copied by one process however many table jobs are running.
 const (
-	// defaultRunnerCPU is what a worker requests when the Migration says
-	// nothing. Four, matching pgcopydb's own default table-jobs, so a worker
+	// defaultRunnerCPU matches pgcopydb's own default table-jobs, so a worker
 	// never has fewer cores than the concurrency it was told to run.
-	//
-	// The headroom is generous rather than necessary. A copy worker traced
-	// mid-COPY measured 7-12% CPU: it spends its time waiting on socket round
-	// trips, roughly 14kB in flight per trip, not computing. Four cores are
-	// not what makes four jobs work, and a smaller request would very likely
-	// serve. Measured on one wide TOASTed table; a database of narrow rows
-	// puts more work per byte on the worker, so this stays as it is until
-	// that shape is measured too.
+	// A copy worker mid-COPY is not CPU bound
+	// (see docs/research/measurements.md#a-copy-worker-mid-copy-is-not-cpu-bound).
 	defaultRunnerCPU = "4"
 	// defaultRunnerMemory covers pgcopydb's per-process buffers at that
 	// concurrency. It is a request and not a limit, so a heavier run is
@@ -76,17 +68,11 @@ func EffectiveRunnerResources(r corev1.ResourceRequirements) corev1.ResourceRequ
 	return out
 }
 
-// tableJobsFor derives --table-jobs from the CPU the worker actually gets, so
-// raising spec.runner.resources raises the concurrency with it and there is no
-// second knob to keep in step. Never below pgcopydb's own default of four:
-// COPY spends most of its time on the network and on the servers, so a worker
-// with fewer cores than that still has something to overlap.
-//
-// Raising it past four buys nothing on a database with one dominant table,
-// because a table is one COPY stream unless pgcopydb splits it: measured 4
-// jobs at 103-131 MiB/s against 16 jobs at 102 MiB/s on the same fixture.
-// Splitting is what adds streams, and it has its own ceiling; see
-// defaultSplitMaxParts.
+// tableJobsFor derives --table-jobs from the CPU the worker gets, so there is
+// no second knob to keep in step. The floor of four is pgcopydb's own default:
+// COPY waits on the network and on the servers, so even a smaller worker has
+// something to overlap. Raising it past four buys nothing on one dominant table
+// (see docs/research/measurements.md#table-jobs-past-four-buy-nothing-on-one-dominant-table).
 func tableJobsFor(r corev1.ResourceRequirements) int32 {
 	// Requests always carries a CPU entry: EffectiveRunnerResources supplies
 	// one when the Migration did not, so there is no absent case to handle.
@@ -100,13 +86,11 @@ func tableJobsFor(r corev1.ResourceRequirements) int32 {
 }
 
 // splitTablesLargerThan returns the size past which a table is copied by
-// several processes, defaulting it when the Migration says nothing.
-//
-// Two traps ride along with this. pgcopydb silently disables splitting when
-// the source connection lands on a standby, so a Migration pointed at a read
-// replica gets no same-table concurrency and no warning. And a table without
-// an integer key falls back to splitting by ctid, which follows physical
-// layout rather than key order.
+// several processes. pgcopydb silently disables splitting when the source
+// connection lands on a standby, so a Migration pointed at a read replica gets
+// no same-table concurrency and no warning. A table without an integer key
+// falls back to splitting by ctid, which follows physical layout rather than
+// key order.
 func splitTablesLargerThan(c *v1beta1.CloneOptions) resource.Quantity {
 	if c.SplitTablesLargerThan != nil {
 		return *c.SplitTablesLargerThan

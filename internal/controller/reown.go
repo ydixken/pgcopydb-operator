@@ -34,19 +34,12 @@ import (
 // role reaches SQL only as a psql variable, never as shell or SQL text.
 const reownOwnerEnv = "REOWN_OWNER"
 
-// reownStatementBound caps a single ALTER and the wait for its lock. The
-// statements are catalog updates that take milliseconds; anything near this
-// is a session holding a conflicting lock, and failing beats a Job that sits
-// on the cutover window. PGCONNECT_TIMEOUT (scriptJob) bounds only the connect.
+// reownStatementBound caps each ALTER and its lock wait. Catalog updates take
+// milliseconds, so a long wait is a conflicting lock; fail rather than stall cutover.
 const reownStatementBound = "-c statement_timeout=60s -c lock_timeout=60s"
 
-// reownCandidatesCTE selects every object the handover alters, as
-// (sort, kind, nspoid, stmt), and ends without a final SELECT so the executed
-// set, the pre-checks and the post-check share one definition. Four filters
-// bound it, all load-bearing: owned by current_user, in a user schema,
-// oid >= 16384, and not an extension member. A migration role that is the
-// bootstrap superuser owns the whole system catalog, so the first filter
-// alone would hand pg_catalog to the application role.
+// reownCandidatesCTE is shared by the pre-checks, ALTERs and post-check, so it
+// ends without a SELECT. Keep every filter: a bootstrap superuser owns pg_catalog.
 const reownCandidatesCTE = `WITH me AS (
   SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user
 ),
@@ -146,22 +139,10 @@ func reownRequested(m *v1beta1.Migration) bool {
 	return m.Spec.Clone.OwnerAfterRestore != ""
 }
 
-// reownScript is the handover: same-role short circuit, role and privilege
-// pre-checks, a logged statement list, the ALTERs in autocommit, then a
-// re-enumeration that must come back empty. Autocommit is deliberate: one
-// transaction over many partitions can exhaust max_locks_per_transaction,
-// and a rerun after a failed statement picks up exactly what is left.
-// The pre-checks mirror what the server enforces: ALTER SCHEMA OWNER needs
-// CREATE on the database for the current role, every other ALTER OWNER needs
-// CREATE on the schema for the new owner, and a schema in the transfer set
-// grants that implicitly once its own ALTER (sort 1) has run. A schema
-// transfer also needs the migration role to hold the privileges of the new
-// owner, not merely SET ROLE to it: a NOINHERIT membership passes preflight's
-// SET ROLE probe but loses USAGE on the schema the moment ALTER SCHEMA OWNER
-// runs, which fails every later statement inside it with no way to detect or
-// re-remediate afterwards, so this must be caught before any ALTER runs.
-// Heredocs that expand $REOWN_CANDIDATES_CTE are unquoted; every other one
-// is quoted so no SQL is ever shell-evaluated.
+// reownScript is the handover: pre-checks, the ALTERs in autocommit (many
+// partitions would exhaust max_locks_per_transaction; a rerun picks up what is
+// left), then a re-check. NOINHERIT passes the SET ROLE probe but loses USAGE at
+// ALTER SCHEMA OWNER, hence the inherit pre-check. See docs/reference/prerequisites.md.
 func reownScript() string {
 	return `set -u
 reown() { psql "$PGCOPYDB_TARGET_PGURI" -XAtq -v ON_ERROR_STOP=1 -v owner="$REOWN_OWNER" -f -; }
@@ -243,10 +224,9 @@ echo "ok: ownership handed over to \"$REOWN_OWNER\""
 `
 }
 
-// buildReownJob assembles the handover as a script Job on the worker pod
-// shape. It connects as the migration role, not through superuserSecretRef:
-// the candidate set is "owned by current_user", and a different role would
-// select a different, wrong set.
+// buildReownJob assembles the handover as a script Job. It connects as the
+// migration role, not through superuserSecretRef: the candidate set is "owned
+// by current_user", so any other role would select the wrong set.
 func buildReownJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	job, err := scriptJob(m, runnerImage, reownJobName(m), reownScript())
 	if err != nil {
@@ -256,25 +236,21 @@ func buildReownJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, erro
 	c.Env = append(c.Env,
 		corev1.EnvVar{Name: reownOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore},
 		corev1.EnvVar{Name: "PGOPTIONS", Value: reownStatementBound})
-	// scriptJob's backoffLimit of 1 would spend a terminal failure on a lock
-	// timeout or an evicted pod. Three pod attempts absorb those, and a
-	// deterministic privilege error still fails all three and is terminal.
+	// scriptJob's backoffLimit of 1 would spend the terminal failure on a lock
+	// timeout or an evicted pod; a privilege error still fails all three attempts.
 	backoff := int32(2)
 	job.Spec.BackoffLimit = &backoff
 	deadline := int64(1800)
 	job.Spec.ActiveDeadlineSeconds = &deadline
-	// The log is the record of which objects changed owner, and the finished
-	// Job is this stage's completion memory across reconciles. TTL must not
-	// collect either; it lives until the Migration is deleted, via ownership.
+	// No TTL: the log is the record of which objects changed owner, and the
+	// finished Job is this stage's completion memory across reconciles.
 	job.Spec.TTLSecondsAfterFinished = nil
 	return job, nil
 }
 
-// reownGate runs the handover between the copy's end and the step that
-// publishes the migration as done. handled=true ends the pass here: the Job
-// is still running and the phase reads running, or it failed and the
-// Migration is failed with failNote appended to the verdict. Everything is
-// re-derived from the persisted Job, so a restarted operator loses nothing.
+// reownGate runs the handover before the migration is published as done.
+// handled=true ends the pass: the Job is still running (phase reads running),
+// or it failed (Migration failed, failNote appended to the verdict).
 func (r *MigrationReconciler) reownGate(ctx context.Context, m, base *v1beta1.Migration, running v1beta1.MigrationPhase, failNote string) (ctrl.Result, bool, error) {
 	if !reownRequested(m) {
 		return ctrl.Result{}, false, nil
@@ -297,10 +273,9 @@ func (r *MigrationReconciler) reownGate(ctx context.Context, m, base *v1beta1.Mi
 	return ctrl.Result{}, false, nil
 }
 
-// ensureReown creates and observes the handover Job. Returns (done,
-// failureMessage, err); done=false with an empty message means the Job is
-// still running. The failure message carries the pod's own last lines, which
-// name the missing role or the exact GRANT, with failNote before them.
+// ensureReown creates and observes the handover Job. done=false with an empty
+// message means it is still running. The failure message ends with the pod's
+// last lines, which name the missing role or the exact GRANT to run.
 func (r *MigrationReconciler) ensureReown(ctx context.Context, m *v1beta1.Migration, failNote string) (bool, string, error) {
 	owner := m.Spec.Clone.OwnerAfterRestore
 	job, created, err := r.ensureJob(ctx, m, reownJobName(m), func() (*batchv1.Job, error) {

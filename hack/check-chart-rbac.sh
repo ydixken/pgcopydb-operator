@@ -2,12 +2,9 @@
 # Renders the chart in the value combinations that decide whether an
 # authenticated metrics scrape can work at all: the metrics-auth RBAC, whom it
 # binds, and the token the ServiceMonitor sends. helm lint only ever renders
-# the defaults, so a template gated on the wrong value would otherwise ship
-# green and every scrape would be rejected.
-#
-# Scope: this asserts gating and wiring only. Whether the rules themselves
-# still match config/rbac is hack/sync-chart-rbac.sh --check, which runs
-# beside this one.
+# the defaults, so a template gated on the wrong value would ship green and
+# every scrape would be rejected. Gating and wiring only; whether the rules
+# still match config/rbac is hack/sync-chart-rbac.sh --check.
 set -eu
 
 chart=charts/pgcopydb-operator
@@ -59,7 +56,7 @@ expect_match() {
 }
 
 # Defaults (rbac.create=true, metrics.enabled=true): both objects exist, and
-# the binding names the ServiceAccount the Deployment actually runs as.
+# the binding names the ServiceAccount the Deployment runs as.
 expect_match '^kind: ClusterRole$'
 expect_match '^kind: ClusterRoleBinding$'
 expect_match '^  name: rel-pgcopydb-operator-metrics-auth$'
@@ -75,10 +72,9 @@ expect_absent --set rbac.create=false
 # A ServiceAccount the chart does not create must still be the bound subject.
 expect_match '^    name: custom$' --set serviceAccount.create=false --set serviceAccount.name=custom
 
-# The other half of the same story: the manager refuses an anonymous scrape
-# with 401, so dropping the token file breaks scraping just as thoroughly as
-# dropping the RBAC above. --api-versions stands in for the Prometheus
-# Operator CRDs, which the template checks for.
+# The manager refuses an anonymous scrape with 401, so dropping the token file
+# breaks scraping as thoroughly as dropping the RBAC above. --api-versions
+# stands in for the Prometheus Operator CRDs, which the template checks for.
 tpl=templates/servicemonitor.yaml
 expect_match '^      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token$' \
   --set metrics.serviceMonitor.enabled=true --api-versions monitoring.coreos.com/v1
@@ -86,8 +82,8 @@ expect_absent --api-versions monitoring.coreos.com/v1
 
 # The bindings are the last hand-written RBAC in the chart: sync-chart-rbac.sh
 # generates the rules, but nothing generates what binds them to the
-# ServiceAccount. A rule nobody is bound to grants nothing, so losing a binding
-# takes every permission away at once and leaves the rules looking correct.
+# ServiceAccount. A lost binding takes every permission away at once while the
+# rules still read as correct.
 tpl=templates/clusterrolebinding.yaml
 expect_match '^  name: rel-pgcopydb-operator-manager$'
 expect_match '^  kind: ClusterRole$'

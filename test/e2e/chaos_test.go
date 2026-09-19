@@ -200,7 +200,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		Expect(targetOriginCount()).To(Equal("0"))
 	})
 
-	// THE INVARIANT: a runner killed between endpos-set and drain-complete
+	// The invariant: a runner killed between endpos-set and drain-complete
 	// must leave the Migration in exactly one of two states. Either it
 	// recovers and reaches Completed with every source row on the target, or
 	// it reaches Failed with reason DrainIncomplete and the replication slot

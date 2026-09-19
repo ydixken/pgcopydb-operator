@@ -1,28 +1,22 @@
 name: Release
 
-# Publishes the public artifacts to ghcr.io on version tags:
-# manager image, runner image, and the Helm chart as OCI.
-# Images are multi-arch (linux/amd64 + linux/arm64) via buildx (M4). The manager
-# cross-compiles both from one native toolchain; only the runner needs QEMU,
-# for its apt install and version canary, both of which still run emulated on
-# arm64. pgcopydb itself is no longer compiled here; images/pgcopydb-builder
-# builds it and this workflow only copies the result in.
+# Publishes the public artifacts to ghcr.io on version tags: manager image,
+# runner image, and the Helm chart as OCI, all multi-arch via buildx. Only the
+# runner needs QEMU; the manager cross-compiles and images/pgcopydb-builder
+# compiles pgcopydb elsewhere. An -rc.N tag publishes and then runs e2e, and
+# promote.yml turns a candidate that passed into the stable tag, which is the
+# run that moves `latest`.
 #
-# A tag carrying an -rc.N suffix publishes the same artifacts, then runs e2e
-# against them on the cluster and pushes the stable tag when that passes. So
-# the workflow runs twice per release, once for the candidate and once for
-# what it promoted, and only the second run moves `latest`.
-#
-# The two image jobs run on the cluster's own runner scale set
-# (github-runner-pgcopydb-operator, an Actions Runner Controller install
-# managed from the app-of-apps repo). On the runner image itself the emulated
-# arm64 half is only an apt install and a version canary, where core count
-# buys almost nothing; the win is the pgcopydb builder compile that the same
-# job also runs, on the rare release where its tag is missing, where the
-# cluster nodes' 20 cores against a GitHub-hosted runner's 2 matter under
-# QEMU. That makes releases depend on the cluster being reachable; if it is
-# down the jobs queue rather than fail. The chart job stays hosted because
-# helm packaging gains nothing from the move.
+# The two image jobs run on the cluster's own runner scale set, an Actions
+# Runner Controller install managed from the GitOps repo. On the runner image
+# itself the emulated arm64 half is only an apt install and a version canary,
+# where core count buys almost nothing; the win is the pgcopydb builder
+# compile that the same job also runs, on the rare release where its tag is
+# missing, and there the cluster runner's advantage in cores over a
+# GitHub-hosted one matters under QEMU. That makes releases depend on the
+# cluster being reachable; if it is down the jobs queue rather than fail.
+# The chart job stays hosted because helm packaging gains nothing from the
+# move.
 
 on:
   push:
@@ -65,12 +59,13 @@ jobs:
             esac
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-      # No layer cache, unlike every other image here. Exporting it cost 92 of
-      # this job's 199 seconds and 1.1GB on the node, to make one layer
-      # reusable: go mod download. The layer that actually costs time, go build,
-      # is invalidated by the commit being released. This is also the only image
-      # that never emulates, because the builder stage runs on BUILDPLATFORM and
-      # cross-compiles, so there is no expensive emulated work to keep either.
+      # No layer cache, unlike every other image here: exporting one costs more
+      # in time and node disk than it returns
+      # (see docs/research/measurements.md#a-layer-cache-for-the-manager-image-cost-more-than-it-returned).
+      # The only layer it makes reusable is go mod download; go build, which is
+      # what costs time, is invalidated by the commit being released.
+      # There is no emulated work to keep either: the builder stage runs on
+      # BUILDPLATFORM and cross-compiles.
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -132,7 +127,8 @@ jobs:
   # The same split pgcopydb-builder.yml runs on its own: each architecture on a
   # machine of that architecture, joined into one tag afterwards. Calling it
   # rather than copying it keeps the arm64 half off QEMU here too, which is
-  # where roughly 15 of this job's 20 minutes used to go.
+  # where most of this job's time went
+  # (see docs/research/measurements.md#the-release-jobs-builder-build-spent-most-of-its-time-under-qemu).
   builder-build:
     needs: builder-check
     if: needs.builder-check.outputs.exists != 'true'
@@ -192,10 +188,10 @@ jobs:
           cache-from: ${{ steps.cacherun.outputs.dir && format('type=local,src={0}', steps.cacherun.outputs.dir) || '' }}
           cache-to: ${{ steps.cacherun.outputs.dir && format('type=local,dest={0},mode=max', steps.cacherun.outputs.dir) || '' }}
       - name: Smoke-test pgcopydb and pg_dump versions
-        # The build canary already asserts versions on both platforms; this
-        # proves the pushed image actually runs and carries the fork-built
-        # pgcopydb (see images/runner/Dockerfile). Native amd64 pull on the
-        # amd64 runner; the arm64 half was validated by spike S6 (podman).
+        # The build canary in images/runner/Dockerfile already asserts versions
+        # on both platforms; this proves the pushed image runs and carries the
+        # fork-built pgcopydb. The pull is a native amd64 one, so only that
+        # half of the manifest is exercised here.
         run: |
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.15.gea2dc96'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
@@ -207,7 +203,7 @@ jobs:
     # because the builder tag is almost always published already. A skip
     # propagates down `needs` unless each job in turn says otherwise, so
     # without this the whole release skips from here and reports success while
-    # publishing nothing. v0.12.1-rc.2 did exactly that.
+    # publishing nothing.
     if: >-
       !cancelled()
       && needs.manager-image.result == 'success'
@@ -236,7 +232,7 @@ jobs:
           esac
 
   release-notes:
-    # Last, so a release only appears once its artifacts are actually published.
+    # Last, so a release only appears once its artifacts are published.
     runs-on: github-runner-pgcopydb-operator
     needs: [chart]
     # Same reason as chart: the skip that starts at builder-build reaches every
@@ -264,19 +260,19 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes $prerelease
 
   e2e:
-    # Release candidates only. A stable tag reaches this workflow because the
-    # promote job below pushed it, which only happens once this job passed on
-    # the candidate that built the very same images.
+    # Release candidates only. A stable tag reaches this workflow because
+    # promote.yml pushed it, which only happens once this job passed on the
+    # candidate that built the very same images.
     #
     # `environment` is the security control: its deployment branch and tag
     # policy allows main and v* only, and GitHub evaluates that before the job
     # is dispatched to a runner. A fork pull request runs at refs/pull/N/merge,
     # which matches neither, so it never reaches a machine that can talk to the
-    # cluster. The repository and fork checks below are belt and braces, not
-    # the control: a fork owns its copy of this file and can delete them. They
-    # earn their place because what GitHub documents for a rejected ref is only
-    # that "the job will fail and the run will stop", not that it fails before
-    # a self-hosted runner is assigned.
+    # cluster. The repository and fork checks below are a second line rather
+    # than the control: a fork owns its copy of this file and can delete them.
+    # They earn their place because what GitHub documents for a rejected ref is
+    # only that "the job will fail and the run will stop", not that it fails
+    # before a self-hosted runner is assigned.
     #
     # !cancelled() relaxes none of that. Without a status function the implicit
     # success() applies, and the skip starting at builder-build would take this
@@ -299,8 +295,8 @@ jobs:
     timeout-minutes: 260
     steps:
       - uses: actions/checkout@v7
-      # The scale set runs a bare actions-runner image: git and node are all
-      # it ships, so every tool the suite shells out to is installed here.
+      # No setup- steps: both scale sets boot images/github-runner, which
+      # carries go, helm and kubectl.
       - name: Require the Prometheus URL
         # The metrics specs Skip when no Prometheus knob is set. On this gate
         # a missing repository variable must fail loudly, or the release would
@@ -325,10 +321,8 @@ jobs:
         # produces no output at all. poll-progress-after turns a spec that
         # wedges into a stack dump rather than silence.
         #
-        # 15m, not 5m. A healthy clone spec at the CI scale runs for minutes on
-        # end, so a five minute threshold fired on every one of them and the
-        # dump stopped meaning anything. A diagnostic that triggers on normal
-        # work is one nobody reads, which is worse than not having it.
+        # 15m, not 5m: the threshold has to sit above the runtime of a healthy
+        # spec, and a clone at this scale runs for minutes on end.
         run: |
           go test ./test/e2e/... -v -timeout 4h \
             -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=15m \
@@ -354,7 +348,7 @@ jobs:
   e2e-failed:
     # A failed candidate is otherwise silent: its artifacts stay published, the
     # GitHub release stays a prerelease, `latest` never moved, and the next
-    # Monday would just cut -rc.N+1 over the same bug. The issue is the signal.
+    # Monday would just cut -rc.N+1 over the same bug.
     needs: [e2e]
     # failure() is what gets this job evaluated at all once a dependency went
     # red; the result check keeps it to an e2e failure, rather than firing on

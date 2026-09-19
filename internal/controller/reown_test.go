@@ -114,12 +114,11 @@ func TestReownScriptGolden(t *testing.T) {
 	}
 }
 
-// TestReownScriptHeredocQuoting checks the one shell rule the script rests
-// on: a heredoc expands $REOWN_CANDIDATES_CTE only when unquoted, and any
-// other heredoc must be quoted so its SQL is never shell-evaluated. An
-// unquoted body may carry no other expansion: no $ or backtick, and a
-// backslash only where the shell leaves it alone (psql's \gexec), which is
-// anywhere but before $, a backtick, another backslash, or the line end.
+// TestReownScriptHeredocQuoting checks the one shell rule the script rests on:
+// only the heredoc expanding $REOWN_CANDIDATES_CTE is unquoted, every other one
+// is quoted so its SQL is never shell-evaluated, and that unquoted body carries
+// no further $, no backtick, and a backslash only where the shell leaves it
+// alone (psql's \gexec), never before $, a backtick, another backslash or a line end.
 func TestReownScriptHeredocQuoting(t *testing.T) {
 	lines := strings.Split(reownScript(), "\n")
 	seen := 0

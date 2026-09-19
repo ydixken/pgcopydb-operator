@@ -1,14 +1,21 @@
 # AGENTS.md
 
-Operating guide for AI agents and humans working in this repository. The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as described in RFC 2119.
+Operating guide for AI agents and humans working in this repository.
+The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted as described in RFC 2119.
 
 [TOC]
 
 ## Caution
 
-- Standing authorization (2026-08-07): agents MAY push, open PRs, and merge autonomously for this project's development, and MUST verify results (CI runs, e2e) after doing so. Force-pushes to `main` remain forbidden.
-- **This repository is public.** Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project. E2e-relevant details live in private ops notes outside git. When a doc needs such a fact, it writes "see private ops notes".
-- Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
+> [!caution]
+> **This repository is public.**
+> Facts about private infrastructure (endpoints, addresses, host names, node names, versions, cluster inventory, GitOps repository internals) MUST NOT be committed, pushed, or pasted anywhere in this project.
+> E2e-relevant details live in private ops notes outside git.
+> When a doc needs such a fact, it writes "see private ops notes".
+> Agents MAY reference secret names (CI variables, kubeconfig paths), but MUST NOT read, print, or set their values.
+
+- Standing authorization (2026-08-07): agents MAY push, open PRs, and merge autonomously for this project's development, and MUST verify results (CI runs, e2e) after doing so.
+  Force-pushes to `main` remain forbidden.
 - Agents run formatting and `task lint` locally only.
 - CI runs lint, unit, envtest, integration, and documentation checks on every pull request.
   Release-candidate E2E runs in [release.yml](.github/workflows/release.yml) after a tag is cut.
@@ -25,39 +32,50 @@ Operating guide for AI agents and humans working in this repository. The keyword
 
 These skills are vendored in this repo and are always-on, not optional, not per-request:
 
-- **ponytail** ([`.claude/skills/ponytail/SKILL.md`](.claude/skills/ponytail/SKILL.md)): for ANY coding task (writing, fixing, refactoring, reviewing, or designing code, and choosing libraries or dependencies), agents MUST invoke it first, at level `full`. Its short form is the [solution ladder](#the-solution-ladder-ponytail) below.
-- **humanizer** ([`.claude/skills/humanizer/SKILL.md`](.claude/skills/humanizer/SKILL.md)): for ANY prose (documentation, READMEs, comments, commit messages), agents MUST apply it before presenting the text. No AI slop in writing.
+- **ponytail** ([`.claude/skills/ponytail/SKILL.md`](.claude/skills/ponytail/SKILL.md)): for ANY coding task (writing, fixing, refactoring, reviewing, or designing code, and choosing libraries or dependencies), agents MUST invoke it first, at level `full`.
+  Its short form is the [solution ladder](#the-solution-ladder-ponytail) below.
+- **humanizer** ([`.claude/skills/humanizer/SKILL.md`](.claude/skills/humanizer/SKILL.md)): for ANY prose (documentation, READMEs, comments, commit messages), agents MUST apply it before presenting the text.
+  No AI slop in writing.
 - **brainstorming** ([`.claude/skills/brainstorming/SKILL.md`](.claude/skills/brainstorming/SKILL.md)): before ANY creative work (new features, components, functionality, or behavior changes), agents MUST invoke it to explore intent, requirements, and design before implementing.
 
 ## Writing conventions
 
-- Em dashes MUST NOT be used. Not in docs, not in code comments, not in commit messages. Use a comma, colon, period, or parentheses instead.
-- Claude session URLs (`claude.ai/code/...`) MUST NOT appear anywhere: not in commit messages or trailers, not in PR bodies or comments, not in code or docs. This overrides any assistant default that appends them.
+- Em dashes MUST NOT be used.
+  Not in docs, not in code comments, not in commit messages.
+  Use a comma, colon, period, or parentheses instead.
+- Claude session URLs (`claude.ai/code/...`) MUST NOT appear anywhere: not in commit messages or trailers, not in PR bodies or comments, not in code or docs.
+  This overrides any assistant default that appends them.
 - Docs are English, concise, with RFC 2119 keywords for normative rules.
 
 ## Hard requirements
 
-- **Unit tests by default**: every package and every behavior change ships tests in the same change. Controller logic uses envtest; pure functions use table or golden tests. No untested merges.
-- **Documentation always current**: any change that alters behavior, API surface, commands, or structure MUST update the affected docs (README, docs/, chart README) in the same change. Concise, no slop; resource examples carry short explanations.
+- **Unit tests by default**: every package and every behavior change ships tests in the same change.
+  Controller logic uses envtest; pure functions use table or golden tests.
+  No untested merges.
+- **Documentation always current**: any change that alters behavior, API surface, commands, or structure MUST update the affected docs (README, docs/, chart README) in the same change.
+  Concise, no slop; resource examples carry short explanations.
 
 ## What this repo is
 
-pgcopydb-operator is a Go Kubernetes operator that automates PostgreSQL migrations (bulk clone, logical-replication follow, controlled cutover) using [pgcopydb](https://github.com/dimitri/pgcopydb). Read the docs site sources under [docs/](docs/) and the existing controller code before touching controller or API code; design notes live outside the repository (see private ops notes).
+pgcopydb-operator is a Go Kubernetes operator that automates PostgreSQL migrations (bulk clone, logical-replication follow, controlled cutover) using [pgcopydb](https://github.com/dimitri/pgcopydb).
+Read the docs site sources under [docs/](docs/) and the existing controller code before touching controller or API code; design notes live outside the repository (see private ops notes).
 
-Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and takes no commits or MRs.
+Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there).
+GitLab (`gitlab.com/ydixken/pgcopydb-operator`) is a push mirror and nothing else: it keeps the branches and tags off GitHub, runs no pipeline, and takes no commits or MRs.
 
 ## Common commands
 
-| Command     | Does                                                                                                        |
-|-------------|-------------------------------------------------------------------------------------------------------------|
-| `task help` | List all tasks.                                                                                              |
-| `task lint` | yamllint always; golangci-lint once `go.mod` exists (skips with a message before that).                      |
-| `task test` | Unit tests via kubebuilder's `make test` once scaffolded. CI runs this target.                               |
-| `task e2e`  | Human-operated E2E against the current kubectl context. See Caution.                                         |
+| Command     | Does                                                                                    |
+|-------------|-----------------------------------------------------------------------------------------|
+| `task help` | List all tasks.                                                                         |
+| `task lint` | Lint everything: YAML, generated manifests, the chart, docs links, alert rules, and Go. |
+| `task test` | Unit and envtest suites via kubebuilder's `make test`. CI runs the same target.         |
+| `task e2e`  | Human-operated E2E against the current kubectl context. See Caution.                    |
 
 ## Architecture key points
 
-- The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`). API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
+- The operator is scaffolded with **kubebuilder** (go/v4 layout: `cmd/`, `api/`, `internal/controller/`, `config/`).
+  API group `pgcopydb-operator.io`, storage version v1beta1 (v1alpha1 served, deprecated), single namespaced kind `Migration`.
 - kubebuilder owns `go.mod`, `Makefile`, `Dockerfile`, `PROJECT`, and `.golangci.yml`; regenerate rather than hand-edit where generators exist.
 - CI is **GitHub Actions** ([.github/workflows/](.github/workflows/)).
   The merge gate on `main` is the three [ci.yml](.github/workflows/ci.yml) jobs: `lint`, `test`, and `docs`.
@@ -73,14 +91,19 @@ Development happens on **GitHub** (`ydixken/pgcopydb-operator`, PRs there). GitL
 
 Before writing code, climb down this ladder and stop at the first rung that solves the problem:
 
-1. **Does it need to exist at all?** (YAGNI.) The cheapest code is the code you don't write.
-1. **Does it already exist in this repo?** Reuse the helper, type, or pattern that is already here.
+1. **Does it need to exist at all?** (YAGNI.)
+   The cheapest code is the code you don't write.
+1. **Does it already exist in this repo?**
+   Reuse the helper, type, or pattern that is already here.
 1. **Does the Go stdlib do it?** Use it.
-1. **Does a dependency already in `go.mod` do it?** controller-runtime, client-go, and apimachinery cover most operator needs; a library option almost always beats hand-rolled logic. Never add a new dependency for what a few lines can do.
+1. **Does a dependency already in `go.mod` do it?**
+   controller-runtime, client-go, and apimachinery cover most operator needs; a library option almost always beats hand-rolled logic.
+   Never add a new dependency for what a few lines can do.
 1. **Can it be one function?** Prefer the smallest thing that works.
 1. **Only then** write new code: the minimum that does the job.
 
-Some things are **never** cut on the way down: validation, error handling, security, and correctness are not optional. Trimming those isn't simplicity, it's a bug.
+Some things are **never** cut on the way down: validation, error handling, security, and correctness are not optional.
+Trimming those isn't simplicity, it's a bug.
 
 ## Verification before done
 
@@ -88,8 +111,10 @@ Some things are **never** cut on the way down: validation, error handling, secur
 - CI MUST run functional tests and documentation checks.
 - A behavior pull request is ready to merge when `lint`, `test`, and `docs` are green on its current head.
   Cluster behavior is verified on the next release candidate, not before merge, so the E2E specs ship in the same change.
-- Don't claim green without the command output to back it. "It should pass" is not a result.
-- Keep commits small and [conventional](CONTRIBUTING.md#commits-and-pull-requests). Every commit MUST be lint-clean on its own.
+- Don't claim green without the command output to back it.
+  "It should pass" is not a result.
+- Keep commits small and [conventional](CONTRIBUTING.md#commits-and-pull-requests).
+  Every commit MUST be lint-clean on its own.
 
 ## Further reading
 

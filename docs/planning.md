@@ -1,24 +1,30 @@
 # Migration planning checklist
 
-A PostgreSQL migration is a change project, not only a `Migration` resource. Use this checklist to agree the scope, compatibility, operating plan, capacity, replication contract, cutover, recovery, and rehearsal before creating the resource.
+Answer these questions before you create a `Migration` resource.
+The operator's preflight covers only the items in the coverage notes below.
+A `Partial` or `Not checked` item remains an operator decision.
 
-The operator's preflight checks only the items listed in the coverage notes below. A `Partial` or `Not checked` item remains an operator decision. Start with the [operator prerequisites](reference/prerequisites.md), read the [live migration runbook](operations/live-migration.md) when follow mode is enabled, and use the [troubleshooting guide](troubleshooting.md) when a preflight check fails.
+Start with the [operator prerequisites](reference/prerequisites.md).
+When follow mode is enabled, read the [live migration runbook](operations/live-migration.md).
+When a preflight check fails, use the [troubleshooting guide](troubleshooting.md).
 
 pgcopydb is a migration tool, not a backup system.
 
 ## Migration checklist
 
-1. Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move or be excluded?
-2. What are the source and target PostgreSQL versions, and is the target compatible with required extensions, types, collations, and locales?
-3. What downtime, RPO, RTO, maintenance window, load impact, and acceptance criteria are agreed?
-4. Where will pgcopydb run, can it maintain TLS-verified connections to both endpoints, and which roles and credential process will it use?
-5. What are the database size, largest relations, write and WAL rates, largest transaction, growth, and available connection, compute, I/O, network, and work-disk capacity?
-6. Does the downtime requirement justify follow mode, and has a plain clone rehearsal established copy time and resource use?
-7. Is logical decoding ready, including logical WAL, slot and WAL sender capacity, plugin availability, HBA access, retention limits, and slot behavior after failover?
+1. Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move, and which must stay behind?
+2. What are the source and target PostgreSQL versions, and is the target compatible with the extensions, types, collations, and locales you need?
+3. What downtime, RPO, RTO, maintenance window, load impact, and acceptance criteria did you agree?
+4. Where does pgcopydb run, can it keep TLS-verified connections to both endpoints, and which roles and credential process does it use?
+5. What are the database size, largest relations, write and WAL rates, largest transaction, and growth?
+   What connection, compute, I/O, network, and work-disk capacity is available?
+6. Does the agreed downtime justify follow mode, and did a plain clone rehearsal measure copy time and resource use?
+7. Is logical decoding ready: logical WAL, slot and WAL sender capacity, plugin availability, HBA access, retention limits, and slot behavior after failover?
 8. Who stops source writes, confirms quiescence, sets the end position, waits for replay, switches clients, and authorizes cutover?
-9. Which validation checks must pass, when is rollback still safe, who decides, and when are replication resources cleaned up?
+9. Which validation checks must pass, when is rollback still safe, who decides, and when do you clean up the replication resources?
 10. What backup system protects the source, and when was the last successful test restore or point-in-time recovery?
-11. Can you create an isolated rehearsal environment from representative production data with no production write path and approved masking, access, retention, and teardown controls?
+11. Can you create an isolated rehearsal environment from representative production data?
+    Does it block every write path to production and apply approved controls for masked data, access, retention, and teardown?
 
 ## Operator preflight coverage
 
@@ -26,33 +32,37 @@ The controller exposes one aggregate gate through `Validated=Unknown` with `Pref
 Individual checks appear as `ok:` log lines.
 
 1. Partial.
-   API filter validation and `clone rights schemas` operate on declared scope, but preflight does not confirm operator intent.
+   The API validates the filters, but preflight does not check the declared scope against your intent.
 2. Partial.
-   Preflight checks selected extension availability and target ownership when restore drops extensions or restores their comments, but not extension version compatibility, package installation, installation privileges, collations, encodings, or wider source-to-target compatibility.
-   Server-version equality is not checked.
+   Preflight checks the selected extensions and their target ownership.
+   It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality, or wider source-to-target compatibility.
 3. Partial outside preflight.
-   `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not validate downtime, RPO, RTO, or acceptance criteria.
+   `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.
 4. Partial.
-   Exact checks include `connectivity source`, `connectivity target`, `selected extensions available` unless skipped, `selected extension ownership` when required, `clone rights database`, `clone rights schemas`, `clone rights db-properties` when enabled, `superuser source connected` when applicable, `superuser source verified` when applicable, `superuser target connected` when applicable, `superuser target verified` when applicable, and follow-specific `source replication attribute`, `target origin function grants`, and `target session_replication_role`.
-   With `clone.allDatabases`, `all-databases source superuser` and `all-databases target superuser` replace the clone-rights probes, and selected extensions are checked across every source database.
-   `all-databases source databases` and `all-databases existing target databases` log the database scope; they do not verify that target schemas are empty.
-   A `superuserSecretRef` role without `rolsuper` emits the corresponding warning instead of a verified line, but an all-databases migration connection without `rolsuper` fails preflight.
-   Preflight does not audit TLS policy or all required ownership and publication rights.
+   Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
+   See the [operator prerequisites](reference/prerequisites.md) for each check.
+   Preflight does not audit TLS policy, every ownership and publication right, or whether the target schemas are empty.
+   A `superuserSecretRef` role without `rolsuper` only logs a warning, but an all-databases migration connection without `rolsuper` fails preflight.
 5. Partial.
-   Scheduling and PVC binding problems may keep status at `PreflightRunning`, but preflight does not measure data size, free space, throughput, connection headroom, compute, I/O, network, WAL growth, or work-disk capacity.
+   A pending pod or an unbound PVC can keep the status at `PreflightRunning`.
+   Preflight does not measure data size, free space, throughput, connection headroom, compute, I/O, network, WAL growth, or work-disk capacity.
 6. Partial.
-   `spec.follow.enabled` chooses the follow check set, but the operator does not recommend clone versus follow or verify that a rehearsal occurred.
+   `spec.follow.enabled` adds the follow checks.
+   The operator does not choose between clone and follow, and it does not verify that a rehearsal ran.
 7. Partial.
-   Exact checks are `source wal_level logical`, `replication slot headroom`, and `source replication attribute`.
-   Preflight does not check WAL sender headroom, plugin installation, WAL retention budget, or slot behavior after failover.
+   Preflight covers logical WAL, replication slot headroom, and the source replication attribute.
+   It does not check WAL sender headroom, plugin installation, WAL retention budget, or slot behavior after failover.
 8. Partial outside preflight.
-    The API has cutover mode and approval fields, but preflight does not identify an owner, verify source writes stopped, or validate a maintenance window.
+   The API has cutover mode and approval fields.
+   Preflight does not name an owner, verify that source writes stopped, or check the maintenance window.
 9. Not checked by preflight.
-    Runtime may drain replay, run optional comparisons, and clean replication resources, but preflight does not validate acceptance tests, rollback criteria, or cleanup timing.
+   The runtime can drain replay, run comparisons, and clean the replication resources.
+   Preflight does not check acceptance tests, rollback criteria, or cleanup timing.
 10. Not checked.
-    Clone-right checks are not backup or restore-readiness checks, and the operator does not inspect backup recency, PITR, or restore drills.
+    Clone-right checks are not backup or restore-readiness checks.
+    The operator does not check backup recency, PITR, or restore drills.
 11. Not checked.
-    Product E2E tests do not prove that an operator rehearsal used representative data or adequate isolation controls.
+    Product E2E tests do not prove that your rehearsal used representative data or enough isolation controls.
 
 ## Official references
 

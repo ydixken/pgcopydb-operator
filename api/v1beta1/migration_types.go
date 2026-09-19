@@ -23,11 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// PostgresConnection describes how to reach one PostgreSQL endpoint. It is a
-// self-contained type so a reusable connection kind can reference it later.
-// Provide exactly one form: the inline fields (host/database/username plus a
-// password secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one
-// Secret holding the parts as individual keys).
+// PostgresConnection describes how to reach one PostgreSQL endpoint. Provide
+// exactly one form: the inline fields (host/database/username plus a password
+// secret), uriSecretRef (a full libpq URI/DSN), or secretRef (one Secret
+// holding the parts as individual keys).
 // +kubebuilder:validation:XValidation:rule="(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ? 1 : 0) + ((has(self.host) || has(self.username) || has(self.database) || has(self.passwordSecretRef)) ? 1 : 0) == 1",message="set exactly one of secretRef, uriSecretRef, or the inline connection fields"
 // +kubebuilder:validation:XValidation:rule="has(self.secretRef) || has(self.uriSecretRef) || (has(self.host) && has(self.username))",message="inline form needs both host and username"
 type PostgresConnection struct {
@@ -157,12 +156,10 @@ type TLSSecretRefs struct {
 // +kubebuilder:validation:Enum=largeObjects;extensions;extensionComments;collations;vacuum;analyze;dbProperties;ctidSplit
 type SkipOption string
 
-// CloneOptions maps the pgcopydb clone surface. All fields are optional. A
-// zero value means the operator decides, which for most fields is pgcopydb's
-// own default. Three it overrides, because pgcopydb's defaults are wrong for a
-// migration: tableJobs follows the worker's CPU request, and
-// splitTablesLargerThan and splitMaxParts turn on same-table concurrency,
-// which pgcopydb ships disabled. See docs/configuration.md.
+// CloneOptions maps the pgcopydb clone surface. All fields are optional; a zero
+// value means the operator decides, which for most fields is pgcopydb's own default.
+// It overrides three: tableJobs follows the worker's CPU request, and
+// splitTablesLargerThan and splitMaxParts turn on same-table concurrency. See docs/configuration.md.
 // +kubebuilder:validation:XValidation:rule="!(has(self.allDatabases) && self.allDatabases && has(self.dropIfExists) && self.dropIfExists)",message="allDatabases cannot be combined with dropIfExists: the maintenance database cannot be dropped"
 // +kubebuilder:validation:XValidation:rule="!(has(self.ownerAfterRestore) && !(has(self.noOwner) && self.noOwner))",message="ownerAfterRestore requires noOwner: true, or pg_restore assigns the source owners and the handover covers only part of the schema"
 // +kubebuilder:validation:XValidation:rule="!(has(self.ownerAfterRestore) && has(self.allDatabases) && self.allDatabases)",message="ownerAfterRestore cannot be combined with allDatabases: the handover runs in the target connection's database only"
@@ -202,10 +199,8 @@ type CloneOptions struct {
 
 	// splitTablesLargerThan enables same-table concurrency for tables at or
 	// above this size (--split-tables-larger-than), rendered to bytes. Unset
-	// defaults to 512Mi; pgcopydb itself ships this disabled, which leaves one
-	// large table to a single worker however many table jobs are running.
-	// Splitting needs a single-column integer key, or it falls back to ctid
-	// ranges, and pgcopydb disables it silently when the source is a standby.
+	// defaults to 512Mi. Splitting needs a single-column integer key, or it
+	// falls back to ctid ranges. See docs/operations/performance.md.
 	// +optional
 	SplitTablesLargerThan *resource.Quantity `json:"splitTablesLargerThan,omitempty"`
 
@@ -216,11 +211,10 @@ type CloneOptions struct {
 	// +optional
 	SplitMaxParts int32 `json:"splitMaxParts,omitempty"`
 
-	// estimateTableSizes bases split decisions on pg_class page-count
-	// estimates instead of exact size queries (--estimate-table-sizes). To
-	// refresh those estimates pgcopydb first runs vacuumdb --analyze-only
-	// (with tableJobs workers) on the SOURCE; add "analyze" to skip to leave
-	// the source untouched and trust its existing statistics.
+	// estimateTableSizes bases split decisions on pg_class page-count estimates
+	// instead of exact size queries (--estimate-table-sizes). To refresh those,
+	// pgcopydb first runs vacuumdb --analyze-only (with tableJobs workers) on
+	// the SOURCE; add "analyze" to skip to leave the source untouched.
 	// +optional
 	EstimateTableSizes bool `json:"estimateTableSizes,omitempty"`
 
@@ -242,15 +236,9 @@ type CloneOptions struct {
 	// +optional
 	NoOwner bool `json:"noOwner,omitempty"`
 
-	// ownerAfterRestore hands the restored objects to this role once the
-	// worker has finished. The operator reassigns every schema, relation,
-	// routine and type in the target database that the migration role owns,
-	// skipping extension members so the platform's own extensions keep their
-	// owner. It covers objects the migration role owned before this restore
-	// too, because the catalog does not record which objects a restore
-	// created. Needs noOwner: true, or pg_restore assigns the source owners
-	// and the handover covers only part of the schema. Immutable: the
-	// preflight probes the role before the first attempt.
+	// ownerAfterRestore hands the restored objects to this role once the worker
+	// has finished. Needs noOwner: true, or pg_restore assigns the source owners
+	// and the handover covers only part of the schema. Immutable.
 	// See docs/reference/prerequisites.md.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -270,21 +258,10 @@ type CloneOptions struct {
 	// +optional
 	NoTablespaces bool `json:"noTablespaces,omitempty"`
 
-	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), which
-	// is on by default. Text COPY encodes bytea as hex, two wire bytes per
-	// data byte, and the worker relays every row between source and target, so
-	// the cost lands on both legs. pgcopydb checks each table against the
-	// source catalog and falls back to text for any table with a column whose
-	// binary encoding is not safe, so this is per table rather than all or
-	// nothing. Set it false to force text everywhere.
-	//
-	// A pointer, and defaulted by the API server rather than by the operator,
-	// because this is the only shape where all three states are expressible.
-	// A plain bool cannot carry them: false is its zero value, so a Go client
-	// that never touches the field still marshals "useCopyBinary": false, the
-	// API server sees a value present and skips its default, and the setting
-	// silently stays off for everyone not writing YAML by hand. nil with
-	// omitempty leaves the key absent, which is what the default needs.
+	// useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), on by
+	// default. pgcopydb falls back to text for any table with a column whose
+	// binary encoding is not safe, so the choice is per table. Set it false to
+	// force text everywhere. See docs/operations/performance.md.
 	// +kubebuilder:default=true
 	// +optional
 	UseCopyBinary *bool `json:"useCopyBinary,omitempty"`
@@ -376,11 +353,10 @@ type FollowOptions struct {
 	// +optional
 	Plugin string `json:"plugin,omitempty"`
 
-	// slotName overrides the replication slot name (--slot-name). Empty means
-	// a generated name unique to this Migration; set it only when fanning
-	// several migrations out of one source instance deliberately. The pattern
-	// is PostgreSQL's own slot-name charset; the operator relies on it when
-	// interpolating the name into SQL (origin verification, retry cleanup).
+	// slotName overrides the replication slot name (--slot-name). Empty means a
+	// generated name unique to this Migration; set it only when deliberately
+	// fanning several migrations out of one source. The pattern is PostgreSQL's
+	// own slot-name charset, which the operator relies on when it interpolates it into SQL.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9_]+$`
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
@@ -403,15 +379,10 @@ type FollowOptions struct {
 	// +optional
 	ReplayNoOpUpdates bool `json:"replayNoOpUpdates,omitempty"`
 
-	// allowMissingReplicaIdentity acknowledges tables that the preflight
-	// replica-identity audit would otherwise fail on. Entries are
-	// schema-qualified table names exactly as the preflight prints them
-	// (schema.table, unquoted); the single entry "*" acknowledges every
-	// offender. Acknowledged tables are reported as a warning instead of
-	// failing the Migration. The risk stays: UPDATE or DELETE on such a
-	// table during the migration window fails on the source at write time,
-	// so acknowledge only tables that are read-only or insert-only while
-	// the migration runs. Immutable with the rest of follow.
+	// allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit
+	// would otherwise fail on, as schema-qualified names exactly as the preflight prints them
+	// ("*" covers every offender). UPDATE or DELETE on an acknowledged table still fails on the
+	// source at write time, so acknowledge only read-only or insert-only ones. Immutable with follow.
 	// +kubebuilder:validation:XValidation:rule="self.all(x, x != '')",message="entries must be non-empty table names (or \"*\")"
 	// +listType=set
 	// +optional
@@ -424,12 +395,10 @@ type FollowOptions struct {
 	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
 }
 
-// VerificationOptions selects post-migration pgcopydb compare checks. Both
-// default to off: even the schema compare costs a catalog fetch on both sides,
-// and the data compare reads every table row twice. Results are information,
-// not a gate: a mismatch sets the Verified condition to False and emits a
-// warning event, but the Migration still completes (the data has arrived; what
-// to do about a difference is the operator's call). Mutable until completion.
+// VerificationOptions selects post-migration pgcopydb compare checks, both off
+// by default because both are expensive. Results are information, not a gate: a
+// mismatch sets Verified to False and emits a warning event, but the Migration
+// still completes. Mutable until completion. See docs/operations/verification.md.
 type VerificationOptions struct {
 	// schema runs pgcopydb compare schema: tables, columns, indexes,
 	// constraints, and sequence values as pgcopydb models them. Not a full
@@ -573,16 +542,10 @@ const (
 	PhasePending    MigrationPhase = "Pending"
 	PhaseValidating MigrationPhase = "Validating"
 	PhaseCloning    MigrationPhase = "Cloning"
-	// PhaseFinalizing is the tail of a base copy: the data is across and the
-	// worker is building indexes, applying constraints and vacuuming. It is
-	// distinct from Cloning because it behaves nothing like it. The copy runs
-	// with every worker busy; the tail routinely narrows to a single VACUUM on
-	// the largest table, because a table's vacuum cannot start until its own
-	// copy finishes and the largest one finishes last. That tail measured
-	// roughly a fifth of a clone's wall clock, during which the target stops
-	// growing and every size-based estimate reads as finished. On a clone-only
-	// migration it also covers the ownership handover to ownerAfterRestore,
-	// which runs after the worker has exited.
+	// PhaseFinalizing is the tail of a base copy: data across, worker building
+	// indexes, applying constraints and vacuuming, and on a clone-only migration
+	// the ownerAfterRestore handover. The target stops growing, so size-based
+	// estimates read as finished. See docs/operations/performance.md#the-vacuum-tail.
 	PhaseFinalizing     MigrationPhase = "Finalizing"
 	PhaseStreaming      MigrationPhase = "Streaming"
 	PhaseCutoverPending MigrationPhase = "CutoverPending"
@@ -593,7 +556,8 @@ const (
 	PhaseSuspended      MigrationPhase = "Suspended"
 )
 
-// Condition type constants (positive polarity, per Kubernetes API conventions).
+// Condition type constants. Each is named for what True means: the first eight
+// are normal-true, ConditionFailed is abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -684,19 +648,19 @@ type MigrationStatus struct {
 // +kubebuilder:printcolumn:name="Attempts",type=integer,JSONPath=`.status.attempts`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Migration is the Schema for the migrations API.
+// Migration copies PostgreSQL data from a source endpoint to a target,
+// optionally following changes until cutover.
 type Migration struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of Migration
+	// spec is the migration to run; source and target are immutable.
 	// +required
 	Spec MigrationSpec `json:"spec"`
 
-	// status defines the observed state of Migration
+	// status reports progress. Conditions are authoritative; phase summarizes them.
 	// +optional
 	Status MigrationStatus `json:"status,omitzero"`
 }

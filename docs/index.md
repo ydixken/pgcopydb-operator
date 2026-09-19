@@ -1,8 +1,12 @@
 # pgcopydb-operator
 
-A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
+A Kubernetes operator that runs PostgreSQL migrations with [pgcopydb](https://github.com/dimitri/pgcopydb).
+Declare a `Migration` resource to get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup.
+Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
 
-**In development.** One-shot clone and live migration with follow and controlled cutover are functional and e2e-tested; verification shipped with envtest coverage. The API is v1beta1 (v1alpha1 stays served but is deprecated) and may still change.
+**In development.** One-shot clone, live migration with follow and controlled cutover, and verification are functional and e2e-tested.
+The API is v1beta1 and may still change.
+v1alpha1 stays served, and is deprecated.
 
 Where to go:
 
@@ -13,10 +17,10 @@ Where to go:
 - [Verification](operations/verification.md): `pgcopydb compare` after completion.
 - [Suspend, retries, deletion](operations/lifecycle.md): day-2 lifecycle of a Migration.
 - [Monitoring](operations/monitoring.md): per-Migration metrics, the bundled Grafana dashboards, and alert rules.
-- [Migrating into CloudNativePG](operations/cloudnativepg.md): the recipe for CNPG targets and sources.
+- [Migrating into CloudNativePG](operations/cloudnativepg.md): CNPG targets and sources.
 - [Argo CD health checks](operations/argocd.md): GitOps health for `Migration` resources.
 - [Troubleshooting](troubleshooting.md): symptoms mapped to causes and fixes.
 - [Prerequisites](reference/prerequisites.md): what your endpoints must provide; read this before a live migration.
-- [Planning checklist](planning.md): decisions to settle before creating a `Migration`.
+- [Planning checklist](planning.md): decisions to settle before you create a `Migration`.
 - [CRD reference](reference/api.md): every `Migration` field with defaults and validation.
 - [Conditions and reasons](reference/conditions.md): the condition types and reason strings as API contract.

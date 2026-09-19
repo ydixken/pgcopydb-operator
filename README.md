@@ -14,12 +14,14 @@
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-A Kubernetes operator that turns [pgcopydb](https://github.com/dimitri/pgcopydb) into Migration-as-a-service for PostgreSQL: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup. Source and target are plain libpq endpoints, so it works with any PostgreSQL: managed, operator-run, or bare.
+A Kubernetes operator that runs [pgcopydb](https://github.com/dimitri/pgcopydb) migrations: declare a `Migration` resource, get a supervised bulk clone, optional logical-replication follow with controlled cutover, verification, and cleanup.
+Source and target are plain libpq endpoints, managed, operator-run, or self-hosted, within the [prerequisites](docs/reference/prerequisites.md) each mode requires.
 
 **Documentation:** [ydixken.github.io/pgcopydb-operator](https://ydixken.github.io/pgcopydb-operator/)
 
 > [!important]
-> In development, pre-1.0. One-shot clone, live migration with follow and controlled cutover, and verification are functional and e2e-tested against real clusters.
+> In development, pre-1.0.
+> One-shot clone, live migration with follow and controlled cutover, and verification have E2E specs in [test/e2e/](test/e2e/), which a release candidate runs against a cluster at `E2E_SCALE=0.1`.
 
 ## Install
 
@@ -60,7 +62,7 @@ Taskfile.yml               # task help | lint | test | e2e
 
 ```sh
 task help   # list tasks
-task lint   # the pre-commit gate (yamllint + make lint)
+task lint   # the pre-commit gate (YAML, generated manifests, chart, docs links, alert rules, Go)
 task test   # unit and envtest suites
 task e2e    # e2e against your CURRENT kubectl context (local only; prompts first)
             # E2E_SCALE sizes the seeded fixtures (default 1 = ~12GB); task e2e:stress runs the ~120GB tier

@@ -27,9 +27,9 @@ func CompareSchemaArgs(allDatabases bool) []string {
 }
 
 // CompareDataArgs renders the argv for `pgcopydb compare data`. --json is
-// load-bearing, not a convenience: the command logs a differing table and
-// still exits 0, so the report is the only place a verdict can come from
-// (see compare_data_strict, which is what actually runs this argv).
+// required: the command logs a differing table and still exits 0, so the
+// report is the only place a verdict can come from (see compare_data_strict,
+// which runs this argv).
 func CompareDataArgs() []string {
 	return []string{"compare", "data", flagDir, WorkDir, "--json"}
 }

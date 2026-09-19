@@ -2,8 +2,8 @@
 # Regenerates the chart's RBAC templates from the kubebuilder sources in
 # config/rbac, wrapping each rules block in the Helm gate, name and labels the
 # chart needs. With --check it only verifies they are current and exits 1 on
-# drift; CI runs that. The chart's rules were ported by hand and drifted: the
-# metrics-auth role was never ported at all, and nothing noticed.
+# drift; CI runs that. These rules were hand-ported once and drifted, losing
+# a role outright, so nothing here is hand-written now.
 set -eu
 
 # Sources the chart deliberately does not ship, so a new file under
@@ -106,8 +106,7 @@ sync metrics_auth_role.yaml metrics-auth-rbac.yaml
 # Every Role and ClusterRole under config/rbac has to be generated above or
 # named in $skip. Keyed on kind rather than on kubebuilder's *_role.yaml
 # filename, so a role that arrives in a differently named file still has to be
-# accounted for. This is the assertion the original omission needed: a role
-# nobody ported fails here instead of shipping missing.
+# accounted for.
 for f in config/rbac/*.yaml; do
   grep -qE '^kind: (Cluster)?Role$' "$f" || continue
   base=${f##*/}

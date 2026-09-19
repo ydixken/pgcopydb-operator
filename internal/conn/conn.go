@@ -17,16 +17,9 @@ limitations under the License.
 // Package conn materializes PostgresConnection specs into the runner pod's
 // environment, volumes, and mounts.
 //
-// Credential rules: the operator never reads password values. Passwords are
-// projected as 0600 files and the runner's shell prelude (see Passfile fields)
-// assembles a libpq passfile at container start, so credentials appear in
-// neither the Job spec, nor argv, nor operator memory. Composed URIs carry no
-// password. The uriSecretRef path injects the full DSN via env valueFrom,
-// which keeps the literal out of the pod spec as well. The secretRef path
-// injects the non-credential keys via env valueFrom, mounts the password key
-// as a file, and leaves URI composition to the prelude (see secretRefPrelude).
-// Superuser credentials follow the secretRef pattern (USER env, PW file) and
-// reuse the side's primary URI for everything else (see superPrelude).
+// The operator never reads a password value. Passwords are projected as 0600
+// files and the runner's shell prelude assembles a libpq passfile at container
+// start, so no credential reaches the Job spec, argv, or operator memory.
 package conn
 
 import (
@@ -153,11 +146,8 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 }
 
 // passwordVolume projects one Secret key as a 0400 password file named after
-// prefix ("source", "target-super", ...) and returns the in-container path of
-// that file. optional tolerates a missing key at mount time so the prelude can
-// fail with a named error instead of the pod hanging in ContainerCreating; the
-// inline form keeps kubelet fail-fast because its spec names the key
-// explicitly.
+// prefix ("source", "target-super", ...) and returns its in-container path.
+// optional lets the prelude fail by name instead of hanging in ContainerCreating.
 func passwordVolume(prefix, secretName, key string, optional bool) (corev1.Volume, corev1.VolumeMount, string) {
 	mode := int32(0o400)
 	name := prefix + "-password"
@@ -259,13 +249,9 @@ func secretEnvRef(secretName, key string, opt *bool) *corev1.EnvVarSource {
 	}}
 }
 
-// MaterializeSuperuser renders one side's optional superuser credentials for
-// the preflight Job. The prelude swaps the userinfo of the side's primary URI,
-// so host, port, database, sslmode, and TLS paths are inherited and the
-// superuser Secret contributes only USER and PW; its URL keys, when present,
-// are verified at start to name the same endpoint. The snippet MUST run after
-// the side's primary snippet (it reads the composed URI and fails by name
-// otherwise). Returns nil when the side has no superuserSecretRef.
+// MaterializeSuperuser renders one side's optional superuser credentials for the
+// preflight Job, or nil when the side has no superuserSecretRef. Its prelude swaps
+// the userinfo of the primary URI, so it MUST run after the side's primary snippet.
 func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) *Materialized {
 	sr := c.SuperuserSecretRef
 	if sr == nil {
@@ -297,11 +283,8 @@ func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) *Materialized {
 }
 
 // superPrelude renders the shell that derives a side's superuser URI from the
-// already-composed primary URI: same endpoint, database, and query params,
-// userinfo swapped for the superuser (password-free; the PW file feeds the
-// passfile). A passfile line whose user matches the primary's is first-line-
-// wins and harmless. Non-URI primaries (key=value DSNs via uriSecretRef) are
-// rejected by name; brackets/IPv6 stay out of scope like the primary parser.
+// already-composed primary URI, userinfo swapped and password-free (the PW file
+// feeds the passfile). Host parsing follows the primary: no key=value DSNs, no IPv6.
 func superPrelude(s Side, pwFile, pwKey string) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 [ -n "${@BASE@-}" ] || { echo "@SIDE@ superuser secret: primary connection URI is not composed; prelude ordering bug" >&2; exit 1; }
@@ -404,15 +387,11 @@ func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
 	}
 }
 
-// secretRefPrelude renders the shell that turns one side's injected Secret
-// keys into the PGCOPYDB_*_PGURI env var and a passfile line. A DB value that
-// parses as a URI is authoritative (its user/host/port/database win); a bare
-// value composes from the HOST and USER envs. Values carrying URI syntax or
-// percent-encoding are rejected by name (they would compose a wrong URI or a
-// passfile line libpq never matches); uriSecretRef is the escape hatch, and
-// the DB URI must be password-free (the PW key carries the password).
-// ponytail: host parsing assumes host or host:port; bracketed IPv6 literals
-// are out of scope until someone needs them.
+// secretRefPrelude renders the shell that composes one side's PGCOPYDB_*_PGURI
+// and passfile line. Values carrying URI syntax or percent-encoding are
+// rejected by name, because they would compose a wrong URI or a passfile line
+// libpq never matches; uriSecretRef is the escape hatch.
+// Host parsing assumes host or host:port; bracketed IPv6 literals are out of scope.
 func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 db=$@DB@
@@ -478,9 +457,8 @@ printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(pf_esc "$(cat
 }
 
 // URIRecover returns the shell prefix that restores the PGCOPYDB_*_PGURI env
-// vars in commands exec'd into the runner: secretRef preludes compose them at
-// container start, where the pod spec env cannot carry them. No-op for the
-// other connection forms.
+// vars in commands exec'd into the pod: secretRef preludes compose them at
+// container start, where the pod spec env cannot carry them. No-op otherwise.
 func URIRecover() string {
 	var b strings.Builder
 	for _, s := range []Side{Source, Target} {
@@ -521,15 +499,10 @@ func tlsVolume(s Side, tls *v1beta1.TLSSecretRefs) (corev1.Volume, corev1.Volume
 	return vol, corev1.VolumeMount{Name: name, MountPath: tlsMountPath(s), ReadOnly: true}
 }
 
-// PreludeScript returns the shell prelude that assembles the passfile from the
-// projected password files, runs each side's snippet (secretRef URI
-// composition), runs the caller's setup commands, and then execs $0 (named by
-// the Job's Command) with the args appended via "$@". Escaping: libpq passfile
-// requires '\' and ':' in any field to be backslash-escaped; static entries
-// only escape the password (hosts/users come from the validated spec), the
-// snippets escape every field. setup runs after the passfile export so its
-// commands can already authenticate; it must be trusted, operator-composed
-// shell.
+// PreludeScript assembles the passfile, runs each side's snippet, then execs $0
+// with "$@". Static entries escape only the password: hosts and users come from
+// the validated spec. setup runs last so it can authenticate, and must be
+// trusted operator-composed shell.
 func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 	var pre []string
 	for _, p := range preludes {

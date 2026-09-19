@@ -382,14 +382,13 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 
 // TestJobScripts_ShellValid is a smoke check, and only that: every script the
 // operator ships into a Job parses under whatever shells this machine has. It
-// earns its place because a script that does not parse does not half-run (the
-// shell refuses the file, the Job exits non-zero, and for the verify Job that
-// reads as a refuted drain, which fails the Migration), and because an empty
-// progress allowlist did exactly that until it was fixed: dash refuses a case
-// statement with no pattern, and dash is what the runner image links /bin/sh
-// to (measured on the shipped image).
+// earns its place because a script that does not parse does not half-run: the
+// Job exits non-zero, and for the verify Job that reads as a refuted drain,
+// which fails the Migration. An empty progress allowlist did exactly that,
+// because dash refuses a case statement with no pattern and dash is what the
+// runner image links /bin/sh to (measured on the shipped image).
 //
-// What it does NOT guard is the leading "(" on the gate's pattern list. Which
+// What it does not guard is the leading "(" on the gate's pattern list. Which
 // shells are installed varies by machine, and the disagreement there is
 // between bash versions rather than between shells: only bash 3.2 refuses the
 // bare form, so this passes on a tree that has that bug wherever bash is
@@ -2086,11 +2085,6 @@ func TestPreflightScriptFor_CloneTier(t *testing.T) {
 	})
 }
 
-// TestPreflightScript_CloneRights executes the generated script under /bin/sh
-// with a stub psql, proving the clone tier end to end: the customer matrix
-// (database CREATE true, schema CREATE false) fails with the exact schema
-// GRANT, the shell filter keeps spec values out of the probe list, and the
-// db-properties failure names both ways out.
 // clonePreflightHarness writes the stateful stub psql and returns the runner
 // the two clone-tier tests share; splitting the tests keeps gocyclo quiet.
 func clonePreflightHarness(t *testing.T) func(*testing.T, *v1beta1.Migration, ...string) (string, int, string, string) {
@@ -2212,6 +2206,11 @@ esac
 	}
 }
 
+// TestPreflightScript_CloneRights executes the generated script under /bin/sh
+// with a stub psql, proving the clone tier end to end: the privilege matrix
+// that grants CREATE on the database but not on the schema fails with the exact
+// schema GRANT, the shell filter keeps spec values out of the probe list, and
+// the db-properties failure names both ways out.
 func TestPreflightScript_CloneRights(t *testing.T) {
 	run := clonePreflightHarness(t)
 	t.Run("customer matrix fails with the schema grant", func(t *testing.T) {

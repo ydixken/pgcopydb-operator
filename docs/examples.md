@@ -1,7 +1,6 @@
 # Examples
 
 Every example is a complete resource that applies as-is after you swap in your hosts and Secrets.
-`08-reference.yaml` is the annotated map of the whole spec; `09-all-databases.yaml` shows the clone-only whole-instance configuration.
 
 | Example | Shows | Start here when |
 |---|---|---|
@@ -10,10 +9,10 @@ Every example is a complete resource that applies as-is after you swap in your h
 | [03-clone-platform-secret](examples/03-clone-platform-secret.yaml) | One Secret with DB/PW/URL/URL_EXTERNAL/USER keys, remappable | Your platform provisions per-database credential Secrets |
 | [04-clone-tuned](examples/04-clone-tuned.yaml) | Parallelism, filters, placement, lifecycle | The default clone is too slow or copies too much |
 | [05-live-migration](examples/05-live-migration.yaml) | Follow mode with a Manual cutover | Downtime must stay in seconds, not hours |
-| [06-live-superuser](examples/06-live-superuser.yaml) | Preflight applies the missing grants itself | You have superuser credentials but no DBA time |
-| [07-verified](examples/07-verified.yaml) | Post-migration `pgcopydb compare` checks | The result must be proven, not assumed |
-| [08-reference](examples/08-reference.yaml) | Every spec knob, annotated | You are looking for a specific field |
-| [09-all-databases](examples/09-all-databases.yaml) | Whole-instance clone, roles implied | Both endpoints permit superuser access and target schemas are empty |
+| [06-live-superuser](examples/06-live-superuser.yaml) | Preflight applies the missing grants itself | You have superuser credentials and no grants applied yet |
+| [07-verified](examples/07-verified.yaml) | Post-migration `pgcopydb compare` checks | You must prove the target matches the source |
+| [08-reference](examples/08-reference.yaml) | Every spec field, annotated | You are looking for a specific field |
+| [09-all-databases](examples/09-all-databases.yaml) | Clone-only whole-instance copy, roles implied | Both endpoints permit superuser access and target schemas are empty |
 
-Alert rules for unattended migrations ship in the Helm chart rather than as an example here: set `metrics.prometheusRule.enabled=true` to install them.
+Alert rules ship in the Helm chart, not as an example here: set `metrics.prometheusRule.enabled=true` to install them.
 The [monitoring guide](operations/monitoring.md) documents them alongside the metrics and dashboards.

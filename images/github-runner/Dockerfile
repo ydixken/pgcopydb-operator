@@ -1,16 +1,9 @@
 # The runner image both scale sets boot for this repository's workflows.
-#
-# The stock actions-runner image carries git, curl, jq, python3 and a Docker
-# client, where a GitHub-hosted runner ships hundreds of tools. Every job made
-# up the difference at runtime: apt for make, gh and psql, a setup- action for
-# Go, Helm and kubectl. That is about 20 seconds a job against the 60 a warm
-# lint run costs, and it puts a network fetch in front of every build.
-#
-# Every version here is pinned so the image is reproducible and Renovate can
-# see it. Merging one of its bumps rebuilds this image, because the workflow
-# watches this file. Go and promtool are the exception: they are read out of
-# go.mod and hack/ensure-promtool.sh at build time, so this file cannot drift
-# from the versions the Makefile and the test suite actually use.
+# Stock actions-runner carries git, curl, jq, python3 and a Docker client, so
+# every job apt-installed make, gh and psql and ran a setup- action for Go,
+# Helm and kubectl: about 20 seconds against the 60 a warm lint run costs.
+# Go and promtool are read out of go.mod and hack/ensure-promtool.sh; the rest
+# is pinned below for Renovate, whose bumps rebuild this image.
 FROM ghcr.io/actions/actions-runner:2.337.0
 
 USER root
@@ -41,10 +34,10 @@ RUN apt-get update -qq \
     && rm -rf /var/lib/apt/lists/*
 
 # System-wide rather than through pipx: pipx installs into ~/.local/bin, which
-# is not on PATH in this image, and finding that out cost a red lint job.
-# mkdocs-material carries the same pin as ci.yml and docs.yml, and Renovate
-# bumps all three together, because a docs build that disagrees with the
-# staleness gate fails on a rendering diff rather than on anything real.
+# is not on PATH in this image. mkdocs-material carries the same pin as ci.yml
+# and docs.yml and Renovate bumps all three together, because a docs build
+# that disagrees with the staleness gate fails on a rendering diff, not on
+# anything real.
 RUN pip install --no-cache-dir --break-system-packages \
         "yamllint==${YAMLLINT_VERSION}" \
         mkdocs-material==9.7.7
@@ -97,9 +90,9 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 #
 # LOCALBIN is baked to a path outside the workspace and the whole tree is
 # handed to the runner user, so the Makefile's rules find their targets already
-# present and skip. Nothing writes here during a job, which matters: the rules
-# take the directory as their prerequisite, so a write would make make consider
-# every tool in it stale.
+# present and skip. Nothing writes here during a job: the rules take the
+# directory as their prerequisite, so a write would make make consider every
+# tool in it stale.
 # go build ./... leaves the whole dependency tree in the build cache. This
 # repository's own packages go stale with the next commit, which is what the
 # node cache under /cache is for; their dependencies do not.

@@ -85,8 +85,8 @@ func pin(t *testing.T, path, arg string) string {
 
 // Without --platform=$BUILDPLATFORM a FROM resolves to the stage's *target*
 // platform, so buildx runs the whole Go toolchain under QEMU for the arm64
-// half. Measured on release run 33242100882: 544.7s emulated against 55.6s
-// native for the same `go build`.
+// half, which costs an order of magnitude on the same `go build`
+// (see docs/research/measurements.md#emulated-against-native-go-build-for-the-manager-image).
 func TestManagerBuilderPinsBuildPlatform(t *testing.T) {
 	src := read(t, managerDockerfile)
 

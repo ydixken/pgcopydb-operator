@@ -324,9 +324,10 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-tables-owed"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		// Issue #277: the worker logged the base copy finished with one table,
-		// 848MB on the source, holding no rows on the target, and the operator
-		// reported 57 of 57 and let the cutover proceed.
+		// Issue #277: the worker logged the base copy finished while a table
+		// still held no rows on the target, and the operator reported 57 of 57
+		// and let the cutover proceed
+		// (see docs/research/measurements.md#the-clone-done-marker-reported-a-table-no-rows-had-reached).
 		fake := &fakeProgress{src: int64p(9000), relations: &progress.RelationCounts{
 			TablesTotal: 57, TablesDone: 56, IndexesTotal: 81, IndexesDone: 81}}
 		sent := &fakeSentinel{state: &sentinel.State{

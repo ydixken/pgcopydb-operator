@@ -15,16 +15,10 @@ limitations under the License.
 */
 
 // Package sentinel watches and drives a running follow migration from inside
-// the worker pod. Nothing here execs a pgcopydb command into a live worker
-// except the one that starts a cutover: watching is psql on the source and
-// the target only, because there is no such thing as a read-only pgcopydb
-// command. Every CLI invocation logs its own command line into the worker's
-// SQLite catalog, and that commit invalidates whatever read snapshot the
-// worker holds open. Its next write on that cursor then fails
-// SQLITE_BUSY_SNAPSHOT, which no retry can clear, and the attempt dies (see
-// docs/research/upstream-issues.md).
-// Driving the cutover still goes through the CLI, which owns the sentinel
-// table: one write, once, and there is no other way to ask for it.
+// the worker pod. Watching uses psql alone: every pgcopydb CLI invocation
+// commits to the worker's SQLite catalog, which can kill the running attempt
+// (see docs/research/upstream-issues.md). Setting the cutover endpos is the
+// one exception, because the CLI owns the sentinel table.
 package sentinel
 
 import (

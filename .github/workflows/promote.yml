@@ -1,11 +1,8 @@
 name: Promote a release candidate
 
 # Turns a candidate that passed its gate into the stable release, on purpose
-# and by hand. release.yml used to do this the moment e2e went green, which
-# made every candidate the release: there was no way to cut rc.2 over rc.1
-# without rc.1 already being vX.Y.Z. Several candidates can now stand between
-# two releases, and a candidate that is never promoted simply stays a
-# candidate.
+# and by hand, so that several candidates can stand between two releases and
+# one that is never promoted simply stays a candidate.
 #
 # Pushing the stable tag starts release.yml again on the same commit, which is
 # what publishes the release proper and moves :latest.
@@ -68,10 +65,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           CANDIDATE: ${{ inputs.candidate }}
-        # release.yml used to gate this with `needs: [e2e, release-notes]`, and
-        # a manual promotion has to earn that back rather than take the
-        # operator's word for it. An e2e job that was skipped, cancelled or
-        # never ran is not a pass.
+        # A manual promotion takes no job dependency on the candidate's gate, so
+        # it is checked here rather than taken on the operator's word. An e2e
+        # job that was skipped, cancelled or never ran is not a pass.
         run: |
           run=$(gh run list --workflow=release.yml --branch "$CANDIDATE" \
                   --limit 1 --json databaseId,conclusion -q '.[0]')

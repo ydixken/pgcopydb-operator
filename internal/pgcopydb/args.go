@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package pgcopydb renders a Migration spec into pgcopydb command-line
-// arguments and a --filters INI file. It is pure: no Kubernetes, no I/O, so it
-// is exhaustively covered by golden tests. Credentials never appear here;
-// connection strings are supplied to the runner through the environment
-// (PGCOPYDB_SOURCE_PGURI / PGCOPYDB_TARGET_PGURI), not argv.
+// arguments and a --filters INI file. It is pure: no Kubernetes, no I/O.
+// Credentials never appear here; connection strings are supplied to the runner
+// through the environment (PGCOPYDB_SOURCE_PGURI / PGCOPYDB_TARGET_PGURI), not
+// argv.
 package pgcopydb
 
 import (
@@ -71,24 +71,17 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	c := spec.Clone
 	args := []string{"clone", flagDir, WorkDir}
 
-	// Always emitted, derived from the worker's CPU when the spec is silent,
-	// so raising spec.runner.resources raises the copy concurrency with it.
-	// Note the target pays twice: pgcopydb sizes its VACUUM ANALYZE pool from
-	// this same number (copydb.c) and runs it alongside the copy, so N table
-	// jobs means up to 2N concurrent backends on the target.
+	// The target pays twice: pgcopydb sizes its VACUUM ANALYZE pool from this
+	// same number (copydb.c) and runs it alongside the copy, so N table jobs
+	// means up to 2N concurrent backends on the target.
 	if c.TableJobs > 0 {
 		args = append(args, "--table-jobs", itoa(c.TableJobs))
 	} else {
 		args = append(args, "--table-jobs", itoa(tableJobsFor(spec.Runner.Resources)))
 	}
-	// indexJobs deliberately has no operator default, because the binding
-	// constraint is on a machine the operator cannot see. Each index worker
-	// opens one target connection and immediately sets maintenance_work_mem to
-	// 1GB: pgcopydb hardcodes that in dstSettings (copydb.c) and applies it per
-	// worker (indexes.c), overriding whatever the target itself is configured
-	// with. So the cost of this number is indexJobs GB of target memory, and
-	// pgcopydb's own default of four asks for 4GB. Sizing it needs the target's
-	// RAM and cores; docs/configuration.md says how.
+	// indexJobs has no operator default: its cost is target memory the operator
+	// cannot see, because pgcopydb overrides the server's maintenance_work_mem
+	// per index worker. docs/configuration.md says how to size it.
 	if c.IndexJobs > 0 {
 		args = append(args, "--index-jobs", itoa(c.IndexJobs))
 	}
@@ -98,12 +91,9 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	if c.LargeObjectsJobs > 0 {
 		args = append(args, "--large-objects-jobs", itoa(c.LargeObjectsJobs))
 	}
-	// Same-table concurrency, always on. pgcopydb defaults the threshold to 0,
-	// which disables it outright and leaves one large table to one process
-	// however many table jobs are running; one or two large tables is the
-	// ordinary shape of a database. The part cap goes with it so the pair is
-	// never half-applied. pgcopydb accepts a plain byte count, and
-	// resource.Quantity.Value() gives bytes.
+	// Same-table concurrency, always on (see defaults.go). The part cap goes
+	// with it so the pair is never half-applied. pgcopydb accepts a plain byte
+	// count, and resource.Quantity.Value() gives bytes.
 	split := splitTablesLargerThan(&c)
 	args = append(args, "--split-tables-larger-than", fmt.Sprintf("%d", split.Value()))
 	args = append(args, "--split-max-parts", itoa(splitMaxParts(&c)))
@@ -141,7 +131,7 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 		args = append(args, "--fail-fast")
 	}
 
-	// Skip flags in a deterministic order so the argv is stable for golden tests.
+	// Skip flags in a deterministic order so the argv is stable across runs.
 	skips := append([]v1beta1.SkipOption(nil), c.Skip...)
 	slices.Sort(skips)
 	for _, s := range skips {

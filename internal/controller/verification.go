@@ -32,13 +32,9 @@ import (
 )
 
 // Verification (spec.verification) runs pgcopydb compare checks on the
-// migration's success path, one Job per enabled check. The result is
-// information, not a gate: Verified goes True or False (SchemaMismatch /
-// DataMismatch), a mismatch adds a warning event, and Complete is set either
-// way. Failing the Migration would claim the data did not arrive, which is
-// exactly what a finished clone or a verified drain already refuted; what to
-// do about a content difference is the operator's decision, not a rollback
-// the operator could perform.
+// migration's success path, one Job per enabled check. It reports rather than
+// gates: Verified goes True or False, a mismatch adds a warning event, and
+// Complete is set either way.
 
 // compareSchema and compareData name the two checks; the names appear in Job
 // names and event messages.
@@ -52,13 +48,10 @@ const (
 const compareReportPath = "/tmp/compare-data.json"
 
 // compareReportQuery names every table the report does not show as matching.
-// A row for a table whose source side is absent is deliberate: a report whose
-// keys the query cannot find would otherwise compare NULL against NULL and
-// read as a clean match, which is the blindness this whole change removes. So
-// is the row for an empty array, because a compare that examined no table has
-// not shown anything to match. psql reads the report itself instead of taking
-// it through -v, because Linux caps one argv string at 128 KiB, which a
-// pretty-printed report crosses at around 480 tables (measured).
+// An absent source side and an empty array count as unmatched, since NULL
+// against NULL would read as a clean match. psql reads the report from the
+// file, not through -v: Linux caps one argv string at 128 KiB, which a
+// pretty-printed report crosses at about 480 tables.
 var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select 'the report lists no table, so nothing was compared'
  where json_array_length(:'r'::json) = 0;
 select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)',
@@ -72,12 +65,10 @@ select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)
     or t->'source'->>'checksum' is null;
 `
 
-// pgcopydb compare data reports a row-count or checksum difference by logging
-// it and returning success anyway, so the Job's exit code carries no verdict
-// and every gate reading that code passes blind. compare_data_strict re-derives
-// the verdict from the --json report, with psql as the parser because the
-// runner image ships neither jq nor python, and treats a report it could not
-// produce or could not read as a mismatch rather than as a match.
+// pgcopydb compare data logs a row-count or checksum difference and still
+// exits 0, so compare_data_strict re-derives the verdict from the --json
+// report. psql parses it because the runner image ships no jq or python, and
+// a report that could not be produced or read counts as a mismatch.
 var compareDataStrict = `compare_data_strict() {
   if ! pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + compareReportPath + `; then
     echo "compare data could not run; refusing to read that as a match"
@@ -126,15 +117,12 @@ func enabledChecks(m *v1beta1.Migration) []string {
 }
 
 // buildCompareJob assembles one compare check as a Job on the worker pod
-// shape: pgcopydb compare wants the work-dir catalogs and both connections,
-// which is exactly what jobSkeleton provides. Backoff 1 absorbs one infra
-// flake (pod eviction) without reporting a false mismatch; a genuine mismatch
-// costs one redundant re-run, which is bounded. The data check runs through
-// compare_data_strict because the bare command cannot fail on a difference;
-// compare schema counts its own diffs and exits on them, so it runs as argv.
+// shape: pgcopydb compare needs the work-dir catalogs and both connections.
+// Backoff 1 absorbs a pod eviction without a false mismatch. Only the data
+// check needs compare_data_strict; compare schema exits on its own diffs.
 func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.Job, error) {
 	if check == compareData {
-		// Reconcile rejects this in buildJob first; retain a backstop for direct builder callers.
+		// Reconcile rejects this in buildJob first; keep a backstop for direct builder callers.
 		if m.Spec.Clone.AllDatabases {
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
@@ -154,17 +142,9 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 // the worker Job is gone, so it must stay idempotent.
 func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
-		// Exit 0 is pgcopydb's word that every in-scope table was copied, and
-		// --resume has given that word for a table no rows reached (issue
-		// #277). Its catalog is the one check left with the worker gone, and
-		// the worker's own pod is gone too by the time a Job reads finished
-		// (exec targets a running container, and this pod already left
-		// Running), so reading the catalog takes a Job of its own, the same
-		// way a follow migration's drain does (see buildCatalogJob). Where it
-		// answers, it decides: a count short of the total fails the
-		// migration. The copy-time estimate is no check here, since its last
-		// sample may predate the final commit, so it stands as observed and
-		// is never rounded up to its totals.
+		// --resume has exited 0 for a table no rows reached (issue #277), so
+		// the catalog decides. Reading it once the worker's pod has left
+		// Running takes a Job of its own (see buildCatalogJob).
 		if gate := r.progressGate(); !m.Spec.Clone.AllDatabases && gate != "" {
 			owed, checked, err := r.ensureCatalogCheck(ctx, m, gate)
 			if err != nil {
@@ -214,14 +194,9 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 }
 
 // ensureCatalogCheck creates and observes the post-exit catalog Job a plain
-// clone's completion gate reads (see buildCatalogJob and finishClone), and
-// reports (owed, checked, err): checked is false while the Job still runs,
-// meaning the caller should wait for the next pass; owed is the in-scope
-// tables pgcopydb's catalog counts short of the total, valid only once
-// checked is true. m.Status.Progress is updated from the Job's log either
-// way it can be read, the same as a follow migration's verify Job: a sampler
-// hiccup here reads as no evidence, not as a pass, so owed is 0 and the
-// estimate already in the field stands.
+// clone's completion gate reads (see buildCatalogJob). Reports (owed, checked,
+// err): checked is false while the Job still runs, and owed, the in-scope
+// tables the catalog counts short of the total, is valid only once checked.
 func (r *MigrationReconciler) ensureCatalogCheck(ctx context.Context, m *v1beta1.Migration, gate string) (owed int64, checked bool, err error) {
 	job, _, err := r.ensureJob(ctx, m, catalogJobName(m), func() (*batchv1.Job, error) {
 		return buildCatalogJob(m, r.RunnerImage, gate)
