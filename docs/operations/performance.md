@@ -119,11 +119,11 @@ Ask the source which case you are in:
 SELECT count(*), pg_size_pretty(sum(pg_column_size(data))) FROM pg_largeobject;
 ```
 
-- **No rows.** Use `skip: [largeObjects]`.
+- **No rows:** use `skip: [largeObjects]`.
   The pool is then not created at all, which beats setting the job count to 1 because it also skips the metadata pass.
-- **A handful, or a few MB.** Set `largeObjectsJobs: 1`.
+- **A handful, or a few MB:** set `largeObjectsJobs: 1`.
   The copy is short either way and the connections are better spent elsewhere.
-- **Many, or a large total.** Leave the default, and raise it if the large-object phase is visibly the tail of your migration.
+- **Many, or a large total:** leave the default, and raise it if the large-object phase is visibly the tail of your migration.
 
 > [!note]
 > Large objects are not the same thing as `bytea`.

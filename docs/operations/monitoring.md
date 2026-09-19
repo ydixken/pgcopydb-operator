@@ -159,9 +159,9 @@ kubectl get configmap -n monitoring -l grafana_dashboard=1
 
 Two sidecar settings then decide whether the dashboards show up, and where:
 
-- **Namespace.** The sidecar watches only its own namespace unless `sidecar.dashboards.searchNamespace` widens it, so `grafana.dashboards.namespace` has to name the namespace Grafana runs in.
+- **Namespace:** the sidecar watches only its own namespace unless `sidecar.dashboards.searchNamespace` widens it, so `grafana.dashboards.namespace` has to name the namespace Grafana runs in.
   The chart's release namespace is the default and is rarely correct.
-- **Folder.** `grafana.dashboards.folder` writes a `grafana_folder` annotation.
+- **Folder:** `grafana.dashboards.folder` writes a `grafana_folder` annotation.
   The sidecar acts on it only when its own `folderAnnotation` setting names that annotation and its dashboard provider has `foldersFromFilesStructure` enabled.
   Otherwise all three land in General, which is cosmetic.
 
