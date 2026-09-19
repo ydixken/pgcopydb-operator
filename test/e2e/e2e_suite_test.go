@@ -117,8 +117,8 @@ const (
 	// Two, not four: four did not seed faster
 	// (see docs/research/measurements.md#four-cpus-per-fixture-server-did-not-seed-faster-than-two),
 	// because the seeding backend waits on WAL write and fsync, never a core. It is
-	// not free either. Longhorn's instance manager holds a guaranteed 6 CPUs
-	// per node here, so six four-CPU instances leave no room for a worker and
+	// not free either. Longhorn's instance manager holds a CPU guarantee on
+	// every node, so six four-CPU instances leave no room for a worker and
 	// the run dies on FailedScheduling instead of running slowly.
 	fixtureCPU    = "2"
 	fixtureMemory = "4Gi"

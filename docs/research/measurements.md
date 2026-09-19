@@ -133,7 +133,7 @@ Where `test/e2e/e2e_suite_test.go` sizes the fixture servers and bounds the wait
 Seeding ran at 16.6 MiB/s at four against 15.9 at two, which is noise.
 Issue #146 later found why: the seeding backend waits on WAL write and fsync, never on a core.
 Four is not free either.
-Longhorn's instance manager holds a guaranteed 6 CPUs per node here, so six four-CPU instances leave no room for a worker and the run dies on FailedScheduling instead of running slowly.
+Longhorn's instance manager holds a CPU guarantee on every node, so six four-CPU instances leave no room for a worker and the run dies on FailedScheduling instead of running slowly.
 
 ### CPU governor against follow throughput
 

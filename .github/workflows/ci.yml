@@ -8,10 +8,9 @@ name: CI
 # the same cache steps; each rule below is stated here once instead.
 #
 # Runner selection.
-# Self-hosted for our own runs, hosted for a fork's. The cluster runner
-# sits in a namespace with no NetworkPolicy in front of it, so code from a
-# fork must never reach it; runner-smoke.yml states the same rule. A push
-# has no pull_request payload, so the expression falls through to the
+# Self-hosted for our own runs, hosted for a fork's: code from a fork must
+# never reach the cluster runner, and runner-smoke.yml states the same rule.
+# A push has no pull_request payload, so the expression falls through to the
 # cluster runner there.
 #
 # The cache volume. /cache is a directory on the node the runner landed on, so

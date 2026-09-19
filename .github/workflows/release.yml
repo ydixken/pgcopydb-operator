@@ -7,16 +7,16 @@ name: Release
 # promote.yml turns a candidate that passed into the stable tag, which is the
 # run that moves `latest`.
 #
-# The two image jobs run on the cluster's own runner scale set
-# (github-runner-pgcopydb-operator, an Actions Runner Controller install
-# managed from the app-of-apps repo). On the runner image itself the emulated
-# arm64 half is only an apt install and a version canary, where core count
-# buys almost nothing; the win is the pgcopydb builder compile that the same
-# job also runs, on the rare release where its tag is missing, where the
-# cluster nodes' 20 cores against a GitHub-hosted runner's 2 matter under
-# QEMU. That makes releases depend on the cluster being reachable; if it is
-# down the jobs queue rather than fail. The chart job stays hosted because
-# helm packaging gains nothing from the move.
+# The two image jobs run on the cluster's own runner scale set, an Actions
+# Runner Controller install managed from the GitOps repo. On the runner image
+# itself the emulated arm64 half is only an apt install and a version canary,
+# where core count buys almost nothing; the win is the pgcopydb builder
+# compile that the same job also runs, on the rare release where its tag is
+# missing, and there the cluster runner's advantage in cores over a
+# GitHub-hosted one matters under QEMU. That makes releases depend on the
+# cluster being reachable; if it is down the jobs queue rather than fail.
+# The chart job stays hosted because helm packaging gains nothing from the
+# move.
 
 on:
   push:
