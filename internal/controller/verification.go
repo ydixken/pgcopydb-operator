@@ -148,9 +148,10 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 	return job, nil
 }
 
-// finishClone ends a clone-only migration: CloneCompleted, then verification
-// when requested, then Complete. It runs on every pass while the worker Job
-// reads succeeded, so it must stay idempotent.
+// finishClone ends a clone-only migration: CloneCompleted, then the ownership
+// handover and the verification when requested, then Complete. It runs on
+// every pass while the worker Job reads succeeded, and on every pass after
+// the worker Job is gone, so it must stay idempotent.
 func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
 		// Exit 0 is pgcopydb's word that every in-scope table was copied, and
@@ -186,6 +187,12 @@ func (r *MigrationReconciler) finishClone(ctx context.Context, m, base *v1beta1.
 		}
 	}
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "CloneSucceeded", "pgcopydb clone finished")
+
+	// The handover runs before the compares: it is the last write, and a
+	// compare beside it would read a target still changing hands.
+	if res, handled, err := r.reownGate(ctx, m, base, v1beta1.PhaseFinalizing, ""); handled || err != nil {
+		return res, err
+	}
 
 	done, err := r.ensureVerification(ctx, m)
 	if err != nil {

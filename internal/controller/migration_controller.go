@@ -189,7 +189,6 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reconcileStart := r.currentTime()
-	log := logf.FromContext(ctx)
 
 	m := &v1beta1.Migration{}
 	if err := r.Get(ctx, req.NamespacedName, m); err != nil {
@@ -258,17 +257,15 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Job orchestration: observe the current attempt or start the next one.
 	if m.Status.JobName == "" {
-		return r.startAttempt(ctx, m, base)
+		return r.nextAttempt(ctx, m, base)
 	}
 
 	job := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: m.Status.JobName}, job)
 	switch {
 	case apierrors.IsNotFound(err):
-		// The Job vanished (TTL, manual delete, or a suspend cycle). Start
-		// the next attempt; pgcopydb resumes from the work-dir catalogs.
-		log.Info("worker Job missing, starting next attempt", "job", m.Status.JobName)
-		return r.startAttempt(ctx, m, base)
+		// The Job vanished (TTL, manual delete, or a suspend cycle).
+		return r.nextAttempt(ctx, m, base)
 	case err != nil:
 		return ctrl.Result{}, err
 	}
@@ -762,8 +759,63 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 			return ctrl.Result{}, err
 		}
 	}
+	// Suspended promises no further database writes, and the handover writes
+	// catalog rows. Foreground, so psql is gone before the Job object is; each
+	// ALTER commits on its own, so the rerun on resume picks up what is left.
+	// A finished Job stays: it is the audit trail, and deleting it would make
+	// resume run a completed handover again.
+	if reownRequested(m) {
+		rj := &batchv1.Job{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: reownJobName(m)}, rj)
+		if err == nil {
+			if done, _ := jobFinished(rj); !done {
+				policy := metav1.DeletePropagationForeground
+				if err := r.Delete(ctx, rj, &client.DeleteOptions{PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+				r.setCondition(m, v1beta1.ConditionOwnershipApplied, metav1.ConditionUnknown, "OwnershipSuspended",
+					"ownership handover stopped by suspend; it re-runs on resume and picks up what is left")
+				r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Suspended", "Suspend", "ownership handover Job deleted; it re-runs on resume")
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	}
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
+}
+
+// nextAttempt is where a pass lands with no worker Job to observe: none was
+// started yet, or the one on record vanished (TTL, manual delete, a suspend
+// cycle). It starts the next attempt, resuming from the work-dir catalogs,
+// unless only the finish path remains: a clone-only Migration whose copy is
+// done, or any Migration whose handover Job exists (nothing else creates it,
+// so the worker exited 0). Restarting pgcopydb there would put a second
+// writer on the target beside a handover still altering ownership.
+//
+// One window survives on purpose: a follow worker collected between its exit
+// 0 and the first finish pass has no handover Job yet, so it restarts, finds
+// endpos reached, exits 0 quickly, and the finish path runs then. Closing
+// that window would break the mid-stream restart a vanished follow worker
+// usually needs.
+func (r *MigrationReconciler) nextAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	exists, err := r.reownJobExists(ctx, m)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch {
+	case !followEnabled(m) && (exists || meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)):
+		log.Info("worker Job gone after the copy finished, resuming the finish path", "job", m.Status.JobName)
+		return r.finishClone(ctx, m, base)
+	case exists:
+		log.Info("worker Job gone after the handover started, resuming the finish path", "job", m.Status.JobName)
+		return r.finishFollow(ctx, m, base)
+	}
+	if m.Status.JobName != "" {
+		log.Info("worker Job missing, starting next attempt", "job", m.Status.JobName)
+	}
+	return r.startAttempt(ctx, m, base)
 }
 
 // startAttempt creates the next worker Job, unless the retry budget is spent.

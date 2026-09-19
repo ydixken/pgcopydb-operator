@@ -240,7 +240,7 @@ _Appears in:_
 | `Pending` | PhasePending is the first phase persisted by the controller for a new Migration.<br />API-server creation does not initialize status.<br /> |
 | `Validating` |  |
 | `Cloning` |  |
-| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a fifth of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished.<br /> |
+| `Finalizing` | PhaseFinalizing is the tail of a base copy: the data is across and the<br />worker is building indexes, applying constraints and vacuuming. It is<br />distinct from Cloning because it behaves nothing like it. The copy runs<br />with every worker busy; the tail routinely narrows to a single VACUUM on<br />the largest table, because a table's vacuum cannot start until its own<br />copy finishes and the largest one finishes last. That tail measured<br />roughly a fifth of a clone's wall clock, during which the target stops<br />growing and every size-based estimate reads as finished. On a clone-only<br />migration it also covers the ownership handover to ownerAfterRestore,<br />which runs after the worker has exited.<br /> |
 | `Streaming` |  |
 | `CutoverPending` |  |
 | `CuttingOver` |  |

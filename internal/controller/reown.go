@@ -17,8 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -246,4 +253,89 @@ func buildReownJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, erro
 	// collect either; it lives until the Migration is deleted, via ownership.
 	job.Spec.TTLSecondsAfterFinished = nil
 	return job, nil
+}
+
+// reownGate runs the handover between the copy's end and the step that
+// publishes the migration as done. handled=true ends the pass here: the Job
+// is still running and the phase reads running, or it failed and the
+// Migration is failed with failNote appended to the verdict. Everything is
+// re-derived from the persisted Job, so a restarted operator loses nothing.
+func (r *MigrationReconciler) reownGate(ctx context.Context, m, base *v1beta1.Migration, running v1beta1.MigrationPhase, failNote string) (ctrl.Result, bool, error) {
+	if !reownRequested(m) {
+		return ctrl.Result{}, false, nil
+	}
+	done, failMsg, err := r.ensureReown(ctx, m, failNote)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, true, err
+	case failMsg != "":
+		r.setCondition(m, v1beta1.ConditionOwnershipApplied, metav1.ConditionFalse, "OwnershipFailed", failMsg)
+		r.fail(m, "OwnershipFailed", "Reown", failMsg)
+		return ctrl.Result{}, true, r.updateStatus(ctx, m, base)
+	case !done:
+		m.Status.Phase = running
+		if err := r.updateStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, true, nil
+	}
+	return ctrl.Result{}, false, nil
+}
+
+// ensureReown creates and observes the handover Job. Returns (done,
+// failureMessage, err); done=false with an empty message means the Job is
+// still running. The failure message carries the pod's own last lines, which
+// name the missing role or the exact GRANT, with failNote before them.
+func (r *MigrationReconciler) ensureReown(ctx context.Context, m *v1beta1.Migration, failNote string) (bool, string, error) {
+	owner := m.Spec.Clone.OwnerAfterRestore
+	job, created, err := r.ensureJob(ctx, m, reownJobName(m), func() (*batchv1.Job, error) {
+		return buildReownJob(m, r.RunnerImage)
+	})
+	if err != nil {
+		return false, "", err
+	}
+	if created {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "OwnershipStarted", "Reown",
+			"handing the restored objects to role %s as Job %s", owner, reownJobName(m))
+	}
+	var done, ok bool
+	if job != nil {
+		done, ok = jobFinished(job)
+	}
+	switch {
+	case !done:
+		r.setCondition(m, v1beta1.ConditionOwnershipApplied, metav1.ConditionUnknown, "OwnershipRunning",
+			"ownership handover Job "+reownJobName(m)+" is running")
+		return false, "", nil
+	case ok:
+		// Once per handover, not per pass: finishClone re-runs this behind
+		// a long compare, and the audit trail wants one line.
+		if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionOwnershipApplied) {
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "OwnershipApplied", "Reown",
+				"restored objects now owned by %s", owner)
+		}
+		r.setCondition(m, v1beta1.ConditionOwnershipApplied, metav1.ConditionTrue, "OwnershipApplied",
+			"restored objects now owned by "+owner)
+		return true, "", nil
+	}
+	msg := "the data is on the target and only the ownership handover to " + owner +
+		" failed. The handover is re-runnable and may be partly applied; finish it by hand with the statements in the log of Job " +
+		reownJobName(m) + ", see docs/troubleshooting.md" + failNote
+	if tail := r.jobLogTail(ctx, m.Namespace, job.Name, preflightLogTail); tail != "" {
+		msg += ":\n" + tail
+	}
+	return false, msg, nil
+}
+
+// reownJobExists reports whether the handover Job is present. Its existence
+// proves the worker exited 0, because nothing else creates it.
+func (r *MigrationReconciler) reownJobExists(ctx context.Context, m *v1beta1.Migration) (bool, error) {
+	if !reownRequested(m) {
+		return false, nil
+	}
+	err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: reownJobName(m)}, &batchv1.Job{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
 }

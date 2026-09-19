@@ -580,7 +580,9 @@ const (
 	// the largest table, because a table's vacuum cannot start until its own
 	// copy finishes and the largest one finishes last. That tail measured
 	// roughly a fifth of a clone's wall clock, during which the target stops
-	// growing and every size-based estimate reads as finished.
+	// growing and every size-based estimate reads as finished. On a clone-only
+	// migration it also covers the ownership handover to ownerAfterRestore,
+	// which runs after the worker has exited.
 	PhaseFinalizing     MigrationPhase = "Finalizing"
 	PhaseStreaming      MigrationPhase = "Streaming"
 	PhaseCutoverPending MigrationPhase = "CutoverPending"
@@ -593,14 +595,15 @@ const (
 
 // Condition type constants (positive polarity, per Kubernetes API conventions).
 const (
-	ConditionValidated       = "Validated"
-	ConditionCloneCompleted  = "CloneCompleted"
-	ConditionStreaming       = "Streaming"
-	ConditionCaughtUp        = "CaughtUp"
-	ConditionCutoverComplete = "CutoverCompleted"
-	ConditionVerified        = "Verified"
-	ConditionComplete        = "Complete"
-	ConditionFailed          = "Failed"
+	ConditionValidated        = "Validated"
+	ConditionCloneCompleted   = "CloneCompleted"
+	ConditionStreaming        = "Streaming"
+	ConditionCaughtUp         = "CaughtUp"
+	ConditionCutoverComplete  = "CutoverCompleted"
+	ConditionOwnershipApplied = "OwnershipApplied"
+	ConditionVerified         = "Verified"
+	ConditionComplete         = "Complete"
+	ConditionFailed           = "Failed"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs
