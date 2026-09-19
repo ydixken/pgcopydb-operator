@@ -98,11 +98,9 @@ func isErrorSeverity(s string) bool {
 }
 
 // permissionWindow bounds how far from the end of the tail a permission line
-// may sit and still count as the attempt's terminal cause. pg_restore without
-// --exit-on-error tolerates per-object permission errors and keeps going, so
-// an old tolerated line must not classify an attempt that later died of
-// something else; the genuine terminal chain (error, ignored-count, process
-// termination) is a handful of lines.
+// may sit and still count as the attempt's terminal cause: pg_restore without
+// --exit-on-error tolerates per-object permission errors and keeps going, so an
+// old tolerated line must not classify an attempt that died of something else.
 const permissionWindow = 40
 
 func recentLogLines(raw []byte) []string {
@@ -120,16 +118,12 @@ func recentLogLines(raw []byte) []string {
 	return window
 }
 
-// PermissionDeniedLine returns a log line showing a PostgreSQL permission
-// error as the attempt's terminal cause, or "". The class is deliberately
-// tiny and severity-gated: an error-severity entry carrying "permission denied",
-// "must be owner of extension", or "SQLSTATE 42501", within the last permissionWindow
-// lines. JSON-wrapped lines count as severe on real severity or a quoted
-// libpq "FATAL:" passthrough; a quoted "ERROR:" alone does not, because that
-// is how pg_restore relays tolerated per-object errors while continuing.
-// Bare 42501 is not matched (row data could contain it). A miss only means
-// the caller keeps its normal retry behavior; extend the class only with
-// evidence that it is always deterministic and terminal.
+// PermissionDeniedLine returns a log line showing a PostgreSQL permission error
+// as the attempt's terminal cause, or "". A quoted "ERROR:" alone does not
+// count as severe, because that is how pg_restore relays tolerated per-object
+// errors while continuing, and bare 42501 is not matched because row data could
+// carry it. A miss only costs the caller its normal retry, so extend the class
+// only for errors known to be deterministic and terminal.
 func PermissionDeniedLine(raw []byte) string {
 	for _, msg := range recentLogLines(raw) {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
@@ -151,19 +145,12 @@ func PermissionDeniedLine(raw []byte) string {
 	return ""
 }
 
-// Clone-done markers in clone --follow mode, from the pgcopydb 0.18 source
-// (src/bin/pgcopydb/copydb_clone_database in cli_clone_follow.c). After the
-// post-data restore (whose banner, "STEP 10: restore the post-data section to
-// the target database", still counts as mid-copy) the clone sub-process logs,
-// in order:
-//
-//	log_info("Updating the pgcopydb.sentinel to enable applying changes");  (line 1061, follow only)
-//	log_info("All step are now done, %s elapsed", timing->ppDuration);      (line 1077)
-//
-// The first line announces exactly the transition the operator wants: base
-// copy finished, change replay may start. The second confirms it once the
-// summary timing is closed. Both strings appear nowhere else in the 0.18
-// source; matching either keeps detection alive if upstream rewords one.
+// Clone-done markers for clone --follow, both logged by copydb_clone_database
+// (cli_clone_follow.c, pgcopydb 0.18). The sentinel line is the transition the
+// operator wants: base copy finished, change replay may start. The STEP 10
+// post-data banner precedes it and still counts as mid-copy. Neither string
+// appears elsewhere in the 0.18 source, so matching either keeps detection
+// alive if upstream rewords one.
 const (
 	markerSentinelApply = "Updating the pgcopydb.sentinel to enable applying changes"
 	markerAllStepsDone  = "All step are now done"
@@ -198,13 +185,12 @@ func supervisorDeathLine(line string) bool {
 	return strings.Contains(line, markerCloneProcess) && strings.Contains(line, markerHasTerminated)
 }
 
-// SupervisorDeath scans a runtime-timestamped log tail (PodLogOptions
-// Timestamps: every line is "<RFC3339Nano> <message>") for the pgcopydb
-// supervisor-death markers and returns the runtime's timestamp of the first
-// marker line found. The kubelet's stamp dates the death without parsing
-// pgcopydb's own log fields, whose format is upstream's business. Marker
-// lines without a parsable timestamp are skipped, so mixed or truncated
-// input degrades to "not found".
+// SupervisorDeath returns the runtime timestamp of the first supervisor-death
+// marker in a log tail read with PodLogOptions Timestamps, so every line is
+// "<RFC3339Nano> <message>". The kubelet's stamp dates the death without
+// parsing pgcopydb's own log fields, whose format upstream may change. A line
+// without a parsable timestamp is skipped, so a truncated tail degrades to
+// "not found".
 func SupervisorDeath(raw []byte) (time.Time, bool) {
 	for line := range strings.Lines(string(raw)) {
 		if !supervisorDeathLine(line) {
