@@ -512,3 +512,102 @@ func testReownScript(t *testing.T, uri string) {
 		}
 	})
 }
+
+// TestReownInheritPreCheck confirms the handover pre-checks the migration
+// role's inherited privileges before any ALTER runs. SET ROLE alone lets a
+// NOINHERIT membership pass preflight's probe, but ALTER SCHEMA OWNER needs
+// the privileges of the new owner, not merely the ability to become it, so
+// this must fire only when a schema is actually being transferred.
+func TestReownInheritPreCheck(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Fatal("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance for ownership handover SQL regressions")
+	}
+	const from, to = "reown_inh_from_test", "reown_inh_to_test"
+	cleanup := `DROP SCHEMA IF EXISTS reown_inh_s, reown_inh_shared CASCADE;
+DO $reown_inh_cleanup$
+DECLARE r text;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['` + from + `', '` + to + `'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN
+      EXECUTE format('DROP OWNED BY %I', r);
+      EXECUTE format('DROP ROLE %I', r);
+    END IF;
+  END LOOP;
+END
+$reown_inh_cleanup$;
+`
+	setup := func(t *testing.T, noInherit, transferSchema bool) {
+		t.Helper()
+		reownPsql(t, uri, cleanup)
+		t.Cleanup(func() { reownPsql(t, uri, cleanup) })
+		inherit := "INHERIT"
+		if noInherit {
+			inherit = "NOINHERIT"
+		}
+		sql := "CREATE ROLE " + from + " " + inherit + ";\n" +
+			"CREATE ROLE " + to + ";\n" +
+			"GRANT " + to + " TO " + from + ";\n" +
+			"SELECT format('GRANT CREATE ON DATABASE %I TO " + from + "', current_database()) \\gexec\n" +
+			"CREATE SCHEMA reown_inh_shared;\n" +
+			"GRANT USAGE, CREATE ON SCHEMA reown_inh_shared TO " + from + ", " + to + ";\n" +
+			"SET ROLE " + from + ";\n" +
+			"CREATE TABLE reown_inh_shared.t (id int);\n" +
+			"RESET ROLE;\n"
+		if transferSchema {
+			sql += "SET ROLE " + from + ";\n" +
+				"CREATE SCHEMA reown_inh_s;\n" +
+				"CREATE TABLE reown_inh_s.t (id int);\n" +
+				"RESET ROLE;\n"
+		}
+		reownPsql(t, uri, sql)
+	}
+	run := func(t *testing.T) (string, int) {
+		t.Helper()
+		cmd := exec.Command(shellPath, "-c", reownScript())
+		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, reownOwnerEnv+"="+to,
+			"PGOPTIONS=-c role="+from+" "+reownStatementBound)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatalf("running the handover script: %v\n%s", err, out)
+		}
+		t.Logf("EXIT=%d\n%s", code, out)
+		return string(out), code
+	}
+	wantGrant := "GRANT " + to + " TO " + from + " WITH INHERIT TRUE"
+
+	t.Run("NOINHERIT membership with a transferred schema fires the pre-check", func(t *testing.T) {
+		setup(t, true, true)
+		out, code := run(t)
+		if code != 1 || !strings.Contains(out, wantGrant) {
+			t.Fatalf("want exit 1 naming %q, got exit %d:\n%s", wantGrant, code, out)
+		}
+		if got := reownPsql(t, uri, "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'reown_inh_s';"); got != from {
+			t.Fatalf("a failed pre-check must not hand anything over, reown_inh_s owned by %s", got)
+		}
+	})
+	t.Run("inheriting membership with a transferred schema stays silent", func(t *testing.T) {
+		setup(t, false, true)
+		out, code := run(t)
+		if code != 0 || strings.Contains(out, "WITH INHERIT") {
+			t.Fatalf("want a clean handover, got exit %d:\n%s", code, out)
+		}
+	})
+	t.Run("NOINHERIT membership with no schema transfer stays silent", func(t *testing.T) {
+		setup(t, true, false)
+		out, code := run(t)
+		if code != 0 || strings.Contains(out, "WITH INHERIT") {
+			t.Fatalf("want a clean handover, got exit %d:\n%s", code, out)
+		}
+	})
+	t.Run("inheriting membership with no schema transfer stays silent", func(t *testing.T) {
+		setup(t, false, false)
+		out, code := run(t)
+		if code != 0 || strings.Contains(out, "WITH INHERIT") {
+			t.Fatalf("want a clean handover, got exit %d:\n%s", code, out)
+		}
+	})
+}

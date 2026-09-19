@@ -154,7 +154,12 @@ func reownRequested(m *v1beta1.Migration) bool {
 // The pre-checks mirror what the server enforces: ALTER SCHEMA OWNER needs
 // CREATE on the database for the current role, every other ALTER OWNER needs
 // CREATE on the schema for the new owner, and a schema in the transfer set
-// grants that implicitly once its own ALTER (sort 1) has run.
+// grants that implicitly once its own ALTER (sort 1) has run. A schema
+// transfer also needs the migration role to hold the privileges of the new
+// owner, not merely SET ROLE to it: a NOINHERIT membership passes preflight's
+// SET ROLE probe but loses USAGE on the schema the moment ALTER SCHEMA OWNER
+// runs, which fails every later statement inside it with no way to detect or
+// re-remediate afterwards, so this must be caught before any ALTER runs.
 // Heredocs that expand $REOWN_CANDIDATES_CTE are unquoted; every other one
 // is quoted so no SQL is ever shell-evaluated.
 func reownScript() string {
@@ -201,6 +206,14 @@ SELECT string_agg(format('GRANT CREATE ON SCHEMA %I TO %I', n.nspname, :'owner')
 SQL
 ) || die "reown: probing CREATE on the schemas holding objects to hand over failed"
   [ -z "$grants" ] || die "reown: role \"$REOWN_OWNER\" lacks CREATE on schemas it would own objects in, which ALTER OWNER needs; run on the target: $grants"
+  inherit=$(reown <<SQL
+$REOWN_CANDIDATES_CTE
+SELECT format('GRANT %I TO %I WITH INHERIT TRUE', :'owner', current_user)
+ WHERE EXISTS (SELECT 1 FROM candidates c WHERE c.sort = 1)
+   AND NOT pg_catalog.pg_has_role(current_user, :'owner', 'USAGE');
+SQL
+) || die "reown: probing whether the migration role inherits \"$REOWN_OWNER\" failed"
+  [ -z "$inherit" ] || die "reown: the migration role can SET ROLE to \"$REOWN_OWNER\" but does not inherit its privileges, which ALTER SCHEMA OWNER needs; run on the target: $inherit"
 fi
 reown <<SQL || die "reown: counting the objects to hand over failed"
 $REOWN_CANDIDATES_CTE
@@ -211,7 +224,7 @@ reown <<SQL || die "reown: listing the objects to hand over failed"
 $REOWN_CANDIDATES_CTE
 SELECT stmt FROM candidates ORDER BY sort, stmt LIMIT 200;
 SQL
-reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun picks up the rest"
+reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun picks up the rest after a transient failure, but not after a permission error like this one"
 $REOWN_CANDIDATES_CTE
 SELECT stmt FROM candidates ORDER BY sort, stmt \gexec
 SQL

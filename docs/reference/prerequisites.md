@@ -98,7 +98,7 @@ The probe is therefore a real `SET ROLE` inside a rolled-back transaction rather
 `superuserSecretRef` remediates a refused `SET ROLE` with the `GRANT <owner> TO <migration role>` the preflight composes on the server.
 
 Two more requirements wait for the handover Job, because the restore has not created the schemas yet when preflight runs.
-The Job checks both before it alters anything, prints the exact `GRANT` when one is missing, and skips both when the migration role is a superuser:
+The Job checks both before it alters anything, prints the exact `GRANT` when one is missing, and skips both when the migration role is a superuser (a third check, on inherited privileges, follows the same rule; see the callout below):
 
 - The **migration role** needs `CREATE` on the target database, and only when the handover transfers at least one schema. This is the migration role rather than the new owner because `ALTER SCHEMA ... OWNER TO` checks the current user's right to create schemas, the same check `CREATE SCHEMA` makes.
 - The **new owner** needs `CREATE` on every schema that holds objects it receives and that it does not receive itself. A schema in the transfer set supplies the privilege through its own `ALTER`, which runs first, so only the schemas that stay behind need a standing grant. `public` is the usual one: from PostgreSQL 15 it belongs to `pg_database_owner` and no longer grants `CREATE` to `PUBLIC`.
@@ -107,7 +107,7 @@ The Job checks both before it alters anything, prints the exact `GRANT` when one
 > The migration role also needs `USAGE` on every schema it hands over: after the `ALTER SCHEMA`, it still has to name the objects left inside that schema.
 > Membership in the new owner supplies this when the membership carries inheritance, which is the default for `GRANT <owner> TO <migration role>` and therefore for the preflight's remediation too.
 > It does not when the migration role has the `NOINHERIT` attribute, or when the membership was granted `WITH INHERIT FALSE` (PostgreSQL 16 and later).
-> Both pass the `SET ROLE` probe and then fail the handover with `permission denied for schema <schema>` right after the first `ALTER SCHEMA`.
+> Both pass the `SET ROLE` probe, so the Job checks inherited privileges as a third pre-check, only when the handover transfers at least one schema, and prints the exact `GRANT <owner> TO <migration role> WITH INHERIT TRUE` before altering anything.
 > Grant the membership with inheritance, or `GRANT USAGE ON SCHEMA <schema> TO <migration role>` for every schema the handover transfers.
 
 The handover covers four object classes in the target database: schemas, relations (tables, partitions, sequences, views, materialized views, foreign tables), routines (functions, procedures, aggregates), and types including domains.
