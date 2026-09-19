@@ -129,10 +129,9 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
 	}
-	// Attempt 1 restarts (wipes) the work dir: any state found there is
-	// foreign. Attempt > 1 resumes from the catalogs; the snapshot of the
-	// failed attempt is gone with its process, so --resume needs
-	// --not-consistent (see the pgcopydb resume semantics upstream).
+	// Attempt 1 wipes the work dir: any state there is foreign. A retry
+	// resumes from the catalogs, and the failed attempt's snapshot died with
+	// its process, so --resume needs --not-consistent.
 	resume := attempt > 1
 	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
@@ -140,20 +139,16 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	if err != nil {
 		return nil, err
 	}
-	// Only this Job copies data, and only this Job gets the worker defaults.
-	// jobSkeleton also builds the preflight, compare and cleanup Jobs, and
-	// those do one statement each: giving them a copy worker's request would
-	// leave a cleanup Pending on a busy cluster, and a cleanup that never runs
-	// is a replication slot left behind on the source.
+	// Only this Job copies data, so only this Job gets the worker defaults:
+	// in jobSkeleton they would also reach the preflight, compare and cleanup
+	// Jobs, and a cleanup left Pending on a busy cluster leaks a source slot.
 	job.Spec.Template.Spec.Containers[0].Resources =
 		pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)
 	return job, nil
 }
 
-// publicationRetryDollarTag is a named PostgreSQL dollar-quote tag rather than
-// bare $$: kubelet's Container.Command/Args expansion reduces "$$" to a
-// literal "$" (see the Command godoc), which corrupts an anonymous DO $$
-// block before the shell ever sees it.
+// publicationRetryDollarTag is named, not bare $$: kubelet's Command/Args
+// expansion reduces "$$" to "$", which corrupts an anonymous DO $$ block.
 const publicationRetryDollarTag = "$publication_retry$"
 
 // pgcopydb creates the publication before the slot, but skips creation when
@@ -183,15 +178,12 @@ END;
 PUBLICATION_RETRY`
 }
 
-// buildCleanupJob tears down source/target replication state after a live
-// migration (or on abort/deletion): pgcopydb stream cleanup drops the slot,
-// the auto-created publication, and the target origin. It needs the work-dir
-// catalogs and both connections, so it reuses the worker pod shape. Job-level
-// retries are fine here: cleanup is idempotent.
+// buildCleanupJob drops the slot, the auto-created publication and the target
+// origin after a live migration, abort or deletion. It reuses the worker pod
+// shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	// Pass the migration's own slot and origin names explicitly: stream
-	// cleanup defaults --origin to "pgcopydb", so a follow migration with a
-	// generated per-migration origin would leave that origin behind on the
+	// Both names are passed explicitly: stream cleanup defaults --origin to
+	// "pgcopydb", so a generated per-migration origin would stay on the
 	// target (observed live: origins accumulate while slots are dropped).
 	slot := effectiveSlotName(m)
 	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir,
@@ -204,19 +196,13 @@ func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, er
 	return job, nil
 }
 
-// verifyProgressPrefix is the verify Job's log contract for the copy
-// counters: one line, the JSON `list progress` printed (see
-// recordCloneProgress for the reading half).
+// verifyProgressPrefix opens the verify Job's one-line copy-counter contract:
+// the JSON `list progress` output, read back by recordCloneProgress.
 const verifyProgressPrefix = "clone-progress: "
 
-// cloneCountersBlock reads the copy counters in the verify Job, which is the
-// only pod that may: the worker holds its catalog for as long as it runs, and
-// once it exits there is no pod left to exec into, while this Job mounts the
-// same work dir with the worker gone. It is a passenger and never a voter.
-// The gate runs with errors discarded and `set -e` off, so a shut gate, a
-// failed command, and a missing binary alike leave the line unprinted and the
-// drain verdict below untouched (all three exercised under a real shell).
-// gate is empty when no progress poller is wired, and then nothing is asked.
+// cloneCountersBlock reads the copy counters from the work dir the worker has
+// released. It never votes on the drain verdict: `set -e` is off and errors
+// are discarded, so a shut gate or a missing binary just prints no line.
 func cloneCountersBlock(gate string) string {
 	if gate == "" {
 		return ""
@@ -229,49 +215,25 @@ fi
 `
 }
 
-// buildVerifyJob checks, after the worker exited 0, that the target really
-// applied everything up to endpos. Exit code 0 is not proof of a complete
-// drain: a crash between endpos-set and drain-complete makes pgcopydb's
-// --resume short-circuit on the receive-side "endpos previously reached" and
-// exit 0 without replaying pending WAL (found live, silent data loss).
+// buildVerifyJob checks that the target applied everything up to endpos. The
+// worker's exit 0 is no proof of a drain: after a crash between endpos-set and
+// drain-complete, --resume short-circuits and exits 0 anyway.
 func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
-	// The gate has a fast path and a content path, because no LSN can prove
-	// the drain on its own.
-	//
-	// Fast path: the origin progress on the target equals the endpos recorded
-	// in the work-dir sentinel, exactly. The origin advances only inside a
-	// committed apply transaction, so equality proves nothing is outstanding.
-	// No other distance proves anything, in either direction: unapplied
-	// commits and publication-filtered WAL (autovacuum on unpublished tables,
-	// catalog churn, which pgcopydb never applies and which grows with idle
-	// time) are the same bytes seen from here. A byte tolerance guessed at
-	// that boundary blessed a cutover that had lost its last three commits,
-	// 1040 bytes below endpos against the 8192 it allowed (measured live,
-	// about 347 bytes per single-row commit). The null LSN is excluded from
-	// the equality: a work dir without a sentinel endpos reads 0/0, a target
-	// that applied nothing reads 0/0 through the coalesce, and the two
-	// matching would pass the gate on no evidence at all.
-	//
-	// Content path: every other reading, which is nearly every cutover, so
-	// the whole-database scan inside the cutover window is the normal cost of
-	// a verdict and not an idle-source exception. endpos is the source's WAL
-	// head at the approval instant while the origin holds the last commit the
-	// apply committed, and the two coincide only when nothing wrote in
-	// between (56 bytes apart right after write activity, measured live).
-	// pgcopydb compare data checksums the migrated tables and passes only
-	// when the report shows every one of them matching; it runs through
-	// compare_data_strict, because the bare command logs a difference and
-	// still exits 0. Both live-found loss modes (resume-skips-replay,
-	// silent-apply) leave rows missing on the target, so content catches
-	// them.
-	// replay_lsn is printed and never compared: pgcopydb advances it past
-	// records it never applies (keepalives, filtered transactions), and it
-	// read normally through the live session_replication_role incident where
-	// nothing was applied at all. In the log it tells a stream that never
-	// arrived (replay_lsn below endpos) from one consumed but not applied,
-	// which is what the lost-commits cutover looked like.
-	// The readings are in docs/research/measurements.md#cutover-verification.
+	// The gate has a fast path and a content path, because no LSN distance
+	// proves the drain on its own: unapplied commits and publication-filtered
+	// WAL measure alike from here, and a guessed byte tolerance once blessed a
+	// cutover that had lost commits
+	// (see docs/research/measurements.md#cutover-verification).
+	// Fast path: origin progress exactly equal to endpos, excluding the null
+	// LSN, which an empty sentinel and a target that applied nothing both read.
+	// Content path: every other reading, so nearly every cutover; the
+	// whole-database compare is the normal cost of a verdict, not an
+	// idle-source exception. compare_data_strict, because the bare command
+	// logs a difference and still exits 0.
+	// replay_lsn is printed, never compared: pgcopydb advances it past records
+	// it never applies, so it reads normal even where nothing was applied. In
+	// the log it separates a stream that never arrived from one not applied.
 	script := `set -eu
 ` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
@@ -298,50 +260,26 @@ exit 1`
 	return scriptJob(m, runnerImage, verifyJobName(m), script)
 }
 
-// buildCatalogJob reads pgcopydb's own catalog once a plain clone's worker
-// has exited, which exec cannot do: a Kubernetes exec targets a running
-// container, and the worker's pod has already left Running by the time its
-// Job is observed finished (issue #277's plain-clone gap: the fix that
-// gated a follow migration's clone-done marker on the catalog left the
-// plain-clone path exec-ing into a pod that was already gone, so the check
-// never ran). This Job mounts the same work dir with the worker dead, the
-// same way buildVerifyJob does for a follow migration's drain, and does
-// nothing but print the counters line; finishClone reads its own exit code
-// nowhere, only its log.
+// buildCatalogJob reads pgcopydb's catalog once a plain clone's worker has
+// exited, which exec cannot: the pod has left Running by then (#277).
+// finishClone reads only this Job's log, never its exit code.
 func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
 	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate))
 }
 
 // The preflight script is assembled per Migration by preflightScriptFor.
-// Connectivity leads unconditionally for every migration, the clone-rights
-// tier probes what the base copy needs on the target, and the follow battery
-// checks every prerequisite the operator can probe via psql before the first
-// worker runs; each failed check prints one line naming the exact GRANT or
-// setting that fixes it. Every loss and failure mode observed in live testing
-// trips one of these checks. The session_replication_role probe is the
-// silent-loss gate: without that SET, pgcopydb 0.18 applies nothing while
-// reporting success (see docs/reference/prerequisites.md).
-// Successful checks print "ok: <check>" and applied grants print
-// "remediated: <statement>" (follow tier) or "remediated-clone: <statement>"
-// (clone tier); those prefixes are the log contract emitPreflightOutcome
-// parses into per-tier events.
+// The session_replication_role probe is the silent-loss gate: without that SET,
+// pgcopydb 0.18 applies nothing while reporting success
+// (see docs/reference/prerequisites.md).
+// Checks print "ok: <check>"; applied grants print "remediated: " (follow tier)
+// or "remediated-clone: " (clone tier), which emitPreflightOutcome parses.
 
 // preflightHeader opens every preflight: general connectivity is validated
-// first, for clone and follow alike, and logged. Connects are retried so a
-// failover blip does not terminal-fail an otherwise sound Migration; six
-// misses over ~1 minute is a configuration error, and nothing else is worth
-// probing after it. Two consecutive permanent-class errors end the ladder
-// early. Two, not one: PgBouncer with auth_query and the managed proxies
-// answer "password authentication failed" from a cold auth backend after a
-// failover, and a preflight failure is terminal. The pattern set is tiny,
-// connect-phase messages libpq spells identically on every attempt (auth
-// failure 28P01, unknown role/database 3D000 family); extend it only with
-// evidence that a class is permanent, a miss just keeps the normal ladder.
-// note buffers failure lines and hint the field pointers, so the footer can
-// re-print both inside the log tail the condition carries.
-// PREFLIGHT_RETRY_SLEEP is a test seam; env values are never shell-evaluated.
-// checkv feeds the query via stdin because psql interpolates :'list' only in
-// file input, never in -c commands.
+// with retries. Two consecutive permanent-class errors end the ladder, not
+// one: PgBouncer with auth_query and the managed proxies answer "password
+// authentication failed" from a cold auth backend after a failover, and a
+// preflight failure is terminal.
+// checkv feeds its query on stdin: psql interpolates :'list' in file input only.
 const preflightHeader = `set -u
 fail=0
 fails=''
@@ -379,10 +317,9 @@ connect_retry "$PGCOPYDB_TARGET_PGURI" target "preflight: cannot connect to the 
 echo "ok: connectivity target"
 `
 
-// superVerifyBlock probes a configured superuser connection: it must connect
-// (retried like the primaries). rolsuper=false only warns: managed-Postgres
-// admin roles (rds_superuser and friends) can run the grants without the
-// attribute, and an apply that truly lacks rights still fails by name.
+// superVerifyBlock probes a configured superuser connection. rolsuper=false
+// only warns: managed admin roles (rds_superuser and friends) can run the
+// grants without the attribute, and a real lack of rights still fails by name.
 func superVerifyBlock(s conn.Side) string {
 	return strings.NewReplacer("@SIDE@", string(s), "@URI@", conn.SuperURIEnv(s)).Replace(
 		`connect_retry "$@URI@" "superuser @SIDE@" "preflight: cannot connect to the @SIDE@ database as the superuserSecretRef user"
@@ -396,9 +333,7 @@ fi
 }
 
 // remPrefixFollow and remPrefixClone open the remediated lines of the two
-// preflight tiers. Distinct prefixes let emitPreflightOutcome bundle each
-// tier into its own event; they are one half of the log contract, the parse
-// in emitPreflightOutcome is the other.
+// preflight tiers; emitPreflightOutcome parses them into per-tier events.
 const (
 	remPrefixFollow = "remediated: "
 	remPrefixClone  = "remediated-clone: "
@@ -409,10 +344,8 @@ const (
 const tgtSuperHint = "hint: spec.target.superuserSecretRef lets the operator apply this itself"
 
 // remSingle describes one probe/remediate/re-check block for a right fixed by
-// a single composed statement. Every capture is fail-closed: a psql failure
-// in the probe or the compose is its own named failure, never an ok line.
-// Messages are script-ready text and may reference $v, $stmt, and any
-// caller-captured context variables.
+// a single composed statement. Every capture is fail-closed: a psql failure is
+// its own named failure, never an ok line. Messages are shell text ($v, $stmt).
 type remSingle struct {
 	probe    string // command printing 1 when the right is present
 	cmdProbe string // alternative: command whose success IS the privilege test
@@ -575,24 +508,16 @@ const cloneDBCreateCheck = `check "$PGCOPYDB_TARGET_PGURI" "select has_database_
 const cloneDBCreateStmt = `check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT CREATE ON DATABASE %I TO %I', current_database(), current_user)"`
 
 // cloneSchemasQuery lists the source's non-system schemas; the shell filters
-// them against the spec's schema filters (grep -Fx, so filter values never
-// reach SQL) before the target probe.
+// them with grep -Fx afterwards, so spec filter values never reach SQL.
 const cloneSchemasQuery = `check "$PGCOPYDB_SOURCE_PGURI" "select n.nspname from pg_namespace n where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' order by 1"`
 
-// cloneSchemaGrantsQuery aggregates the missing GRANT CREATE statements for
-// the probed schemas that exist on the target; names come from catalogs and
-// are composed server-side (%I), never from the spec.
+// cloneSchemaGrantsQuery aggregates the missing GRANT CREATE statements; the
+// names come from catalogs and are composed server-side (%I), not from the spec.
 const cloneSchemaGrantsQuery = `checkv "$PGCOPYDB_TARGET_PGURI" "select string_agg(format('GRANT CREATE ON SCHEMA %I TO %I', n.nspname, current_user), '; ') from pg_namespace n where n.nspname = any(string_to_array(:'list', chr(10))) and not has_schema_privilege(current_user, n.oid, 'CREATE')" "$sc_list"`
 
-// cloneRightsBlock probes what the base copy needs on the target: CREATE on
-// the database, CREATE on every source schema (filter-honoring) already
-// present there, and, unless skipped, the ownership db-properties needs.
-// The schema probe is the load-bearing one: managed platforms grant database
-// CREATE while the PostgreSQL 15+ pg_database_owner split withholds the
-// schema right, and every attempt then dies in pg_restore (#119). With a
-// target superuser the db and schema grants apply and re-check like the
-// follow grants; db-properties needs ownership, not a grant, so it never
-// remediates.
+// cloneRightsBlock probes CREATE on the target database and the source schemas
+// present there, plus the ownership db-properties needs: managed platforms
+// grant the database right while pg_database_owner withholds the schema (#119).
 func cloneRightsBlock(superTgt, dbProperties bool) string {
 	superURI := ""
 	hint := tgtSuperHint
@@ -615,9 +540,8 @@ func cloneRightsBlock(superTgt, dbProperties bool) string {
 		onComp:   `preflight: composing the database GRANT failed`,
 		hint:     hint,
 	})
-	// The schema list is captured fail-closed too, then filtered in shell
-	// only (grep -Fx with an explicit operand guard, so spec values never
-	// reach SQL and option-looking schema names stay data).
+	// Filtered in shell only, with an explicit -- operand guard, so spec
+	// values never reach SQL and option-looking schema names stay data.
 	b += `if clone_schemas=$(` + cloneSchemasQuery + `); then
 sc_inc="${PREFLIGHT_SCHEMA_INCLUDE:-}"
 sc_exc="${PREFLIGHT_SCHEMA_EXCLUDE:-}"
@@ -660,9 +584,8 @@ fi
 	return b
 }
 
-// reownPreflightOwnerEnv carries clone.ownerAfterRestore into the preflight,
-// like reownOwnerEnv does for the handover: the role reaches SQL as a psql
-// variable only, never as shell or SQL text.
+// reownPreflightOwnerEnv carries clone.ownerAfterRestore into the preflight:
+// the role reaches SQL as a psql variable only, never as shell or SQL text.
 const reownPreflightOwnerEnv = "PREFLIGHT_OWNER_AFTER_RESTORE"
 
 const reownRoleExistsSQL = `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = :'list')::int`
@@ -670,8 +593,7 @@ const reownRoleExistsSQL = `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHE
 const reownRoleProbe = `checkv "$PGCOPYDB_TARGET_PGURI" "` + reownRoleExistsSQL + `" "$reown_owner"`
 
 // reownSetRoleSQL interpolates :"list" (an identifier), not :'list' (a quoted
-// literal), so the role name reaches SET ROLE already quoted. psql
-// interpolates either one in file input only, which is what checkv feeds.
+// literal), so the role name reaches SET ROLE already quoted as an identifier.
 const reownSetRoleSQL = `BEGIN; SET ROLE :"list"; ROLLBACK;`
 
 const reownSetRoleProbe = `checkv "$PGCOPYDB_TARGET_PGURI" '` + reownSetRoleSQL + `' "$reown_owner"`
@@ -682,18 +604,9 @@ const reownGrantSQL = `SELECT format('GRANT %I TO %I', :'list', current_user)`
 
 const reownGrantStmt = `checkv "$PGCOPYDB_TARGET_PGURI" "` + reownGrantSQL + `" "$reown_owner"`
 
-// ownerAfterRestoreBlock probes what the handover needs on the target before
-// any worker runs: the role must exist, and the migration role must be able
-// to SET ROLE to it, which is what ALTER ... OWNER TO requires.
-// The probe is that SET ROLE and not a pg_has_role(..., 'USAGE') test, which
-// answers a different question: whether the role's privileges are inherited
-// without SET ROLE. A NOINHERIT member has SET ROLE without USAGE on every
-// supported version, and PostgreSQL 16 added the reverse in WITH SET FALSE,
-// so a USAGE probe would reject handovers that work and admit ones that fail
-// (TestPreflightOwnerAfterRestoreQueries runs both live).
-// The third requirement, CREATE for the new owner on the database and on the
-// schemas it does not receive, waits for the handover Job: the restore has
-// not created those schemas yet (see reown.go).
+// ownerAfterRestoreBlock probes the handover before any worker runs. It uses a
+// rolled-back SET ROLE, not pg_has_role(..., 'USAGE'): the two diverge on
+// NOINHERIT members and on WITH SET FALSE (TestPreflightOwnerAfterRestoreQueries).
 func ownerAfterRestoreBlock(super bool) string {
 	superURI := ""
 	hint := tgtSuperHint
@@ -701,9 +614,8 @@ func ownerAfterRestoreBlock(super bool) string {
 		superURI = conn.SuperURIEnv(conn.Target)
 		hint = ""
 	}
-	// The stop between the probes keeps the diagnosis readable: a missing
-	// role fails the SET ROLE probe for that reason alone, and the note that
-	// names it must not scroll out of the condition's log tail.
+	// Stop here: a missing role also fails the SET ROLE probe, and its note
+	// must not scroll out of the condition's log tail.
 	return `reown_owner="${` + reownPreflightOwnerEnv + `:-}"
 ` + remSingleBlock(remSingle{
 		probe:   reownRoleProbe,
@@ -743,9 +655,8 @@ fi
 // replicationAttrCheck is the probe both variants of the block share.
 const replicationAttrCheck = `check "$PGCOPYDB_SOURCE_PGURI" 'select (rolreplication or rolsuper)::int from pg_roles where rolname = current_user'`
 
-// replicationAttrStmt composes the exact ALTER ROLE server-side: the server
-// escapes its own role name, so a quote-bearing name cannot break out of the
-// identifier when the statement later runs over the superuser connection.
+// replicationAttrStmt composes the ALTER ROLE server-side, so a quote-bearing
+// role name cannot break out of the identifier over the superuser connection.
 const replicationAttrStmt = `check "$PGCOPYDB_SOURCE_PGURI" "select format('ALTER ROLE \"%s\" REPLICATION', replace(current_user::text, '\"', '\"\"'))"`
 
 // replicationAttrBlock checks the source role's REPLICATION attribute. With a
@@ -837,12 +748,8 @@ func srrBlock(super bool) string {
 	})
 }
 
-// riAuditBlock lists tables where pgoutput would reject UPDATE and DELETE at
-// write time on the source (relreplident 'n', or 'd' without a primary key).
-// It deliberately audits all user tables, filters or not, because a table can
-// be filtered out yet still take writes. Never remediated: REPLICA IDENTITY is
-// a schema decision. Offenders in spec.follow.allowMissingReplicaIdentity (or
-// all of them, with "*") downgrade to a warning line.
+// riAuditBlock lists source tables pgoutput would reject UPDATE and DELETE on.
+// It covers all user tables, filters or not: a filtered table still takes writes.
 const riAuditBlock = `ri_offenders=$(check "$PGCOPYDB_SOURCE_PGURI" "select n.nspname || '.' || c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'r' and c.relpersistence = 'p' and n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and (c.relreplident = 'n' or (c.relreplident = 'd' and not exists (select 1 from pg_index i where i.indrelid = c.oid and i.indisprimary))) order by 1")
 if [ -n "$ri_offenders" ]; then
   printf '%s\n' "$ri_offenders" > /tmp/ri_offenders
@@ -860,12 +767,8 @@ else
   echo "ok: replica identity audit"
 fi`
 
-// preflightScriptFooter closes the check script; conditional blocks (the
-// wal2json note) slot in between. Failures re-print as a closing summary in
-// tail-survival order: the replica-identity audit first (it can run long),
-// then the notes carrying exact GRANT statements, hints last. The Failed
-// condition carries only the log tail, and the fix lines and field pointers
-// must never scroll out under a long audit.
+// preflightScriptFooter re-prints failures in tail-survival order, audit first
+// and hints last: the Failed condition carries only the log tail.
 const preflightScriptFooter = `
 if [ "$fail" -eq 0 ]; then
   echo "preflight: all checks passed"
@@ -1092,22 +995,14 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	return b.String()
 }
 
-// preflightWal2jsonNote is a note, not a check: wal2json ships as a bare
-// shared library with no extension control file (upstream README: "does not
-// need CREATE EXTENSION"), so neither pg_available_extensions nor
-// pg_available_extension_versions ever lists it and there is no catalog to
-// query. The only positive probe is creating a logical slot with the plugin,
-// which consumes a slot on the source; too invasive for a preflight. The
-// failure mode is caught on attempt 1 at slot creation instead.
+// preflightWal2jsonNote is a note, not a check: wal2json registers no catalog
+// entry, and the only positive probe would consume a source slot.
 const preflightWal2jsonNote = `
 echo "preflight: note: wal2json presence on the source cannot be verified from SQL (a logical decoding plugin registers no catalog entry); if it is not installed, the first attempt fails at slot creation with: could not access file \"wal2json\""`
 
 // buildPreflightJob probes connectivity and the follow prerequisites once,
-// before the first worker Job of any Migration. backoffLimit 1 absorbs a
-// single transient blip (pod eviction, connection reset) without failing the
-// Migration; a deterministic check failure fails twice and is terminal.
-// The replica-identity allowlist travels as an env var, not script text: env
-// values are never shell-evaluated, so table names need no quoting rules.
+// before the first worker Job. backoffLimit 1 absorbs one transient blip; a
+// deterministic check failure fails twice and is terminal.
 func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
 	// Superuser credentials ride only in this Job: every other Job stays at
 	// the migration role's privileges. Super preludes run after the primary
@@ -1148,14 +1043,12 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
-	// and autoscaling surface via PreflightRunning long before 30 minutes;
-	// the deadline fails the Job, which terminal-fails the Migration
-	// instead of looping in Validating.
+	// surface via PreflightRunning long before 30 minutes, and the deadline
+	// terminal-fails the Migration instead of looping in Validating.
 	deadline := int64(1800)
 	job.Spec.ActiveDeadlineSeconds = &deadline
 	// The finished preflight is the remediation audit trail and the gate's
-	// completion memory; spec TTL must not garbage-collect it. It lives
-	// until the Migration is deleted via ownership.
+	// completion memory, so spec TTL must not garbage-collect it.
 	job.Spec.TTLSecondsAfterFinished = nil
 	if f := m.Spec.Follow; f != nil && len(f.AllowMissingReplicaIdentity) > 0 {
 		c := &job.Spec.Template.Spec.Containers[0]
@@ -1167,11 +1060,9 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 			Value: strings.Join(f.AllowMissingReplicaIdentity, "\n"),
 		})
 	}
-	// The schema filters travel the same way for the clone-rights probe: the
-	// shell matches them with grep -Fx, so filter values never reach SQL.
-	// includeOnlyTables narrows the probe set to its tables' schemas: the
-	// restore touches nothing else, and demanding CREATE on bystander schemas
-	// terminally failed specs that migrated fine before the probe existed.
+	// The schema filters travel the same way. includeOnlyTables narrows the
+	// probe to its tables' schemas: the restore touches nothing else, and
+	// demanding CREATE on bystander schemas fails specs that migrate fine.
 	if f := m.Spec.Clone.Filters; f != nil {
 		c := &job.Spec.Template.Spec.Containers[0]
 		include := f.IncludeOnlySchemas
@@ -1204,11 +1095,9 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 // publicSchema is the schema an unqualified table name lands in.
 const publicSchema = "public"
 
-// probeSchemasFromTables maps includeOnlyTables entries to their schemas:
-// "schema.table" contributes its schema, an unqualified name means public.
-// Regex (~/.../) and quoted entries are beyond a faithful shell-side parse,
-// so any such entry reports !ok and the caller keeps the wider schema list:
-// over-probing fails closed, under-probing would green-light a missing grant.
+// probeSchemasFromTables maps includeOnlyTables entries to their schemas; an
+// unqualified name means public. Regex and quoted entries report !ok so the
+// caller keeps the wider list: over-probing fails closed, under-probing does not.
 func probeSchemasFromTables(tables []string) ([]string, bool) {
 	var out []string
 	for _, t := range tables {
@@ -1227,12 +1116,9 @@ func probeSchemasFromTables(tables []string) ([]string, bool) {
 	return out, true
 }
 
-// scriptJob reuses the worker pod shape (env, mounts, passfile prelude) to
-// run a shell script instead of a pgcopydb argv: the prelude execs $0, which
-// here is /bin/sh -c <script> instead of pgcopydb. Backoff 1 absorbs one
-// infra flake (pod eviction) without masking a real script failure as
-// several; every caller runs a bounded, idempotent script, so this is fixed
-// rather than a parameter every call site would just set to 1.
+// scriptJob reuses the worker pod shape to run a shell script instead of a
+// pgcopydb argv: the prelude execs $0, which here is /bin/sh. Backoff is fixed
+// at 1 because every caller runs a bounded, idempotent script.
 func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, extras ...*conn.Materialized) (*batchv1.Job, error) {
 	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, extras...)
 	if err != nil {
@@ -1244,21 +1130,17 @@ func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, extras ..
 	return job, nil
 }
 
-// addConnectTimeout bounds libpq connects for the operator's own control
-// Jobs (scripts, cleanup, compare); libpq's default is unlimited, which
-// wedged a customer's preflight. The worker is exempt: pgcopydb's many
-// data-path handshakes under load must not race a 10s cap, and a wedged
-// worker surfaces via zombie detection instead.
+// addConnectTimeout bounds libpq connects for the operator's control Jobs,
+// whose default is unlimited and can wedge a Job forever. The worker is exempt:
+// its data-path handshakes under load must not race a 10s cap.
 func addConnectTimeout(job *batchv1.Job) {
 	c := &job.Spec.Template.Spec.Containers[0]
 	c.Env = append(c.Env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 }
 
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
-// is optional shell run by the prelude after the passfile is assembled and
-// before pgcopydb starts (see conn.PreludeScript). extras are additional
-// credential sets (the preflight's superuser connections); their preludes run
-// after the primary sides' in the given order.
+// is shell the prelude runs after the passfile is assembled (conn.PreludeScript).
+// extras are credential sets whose preludes run after the primary sides'.
 func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, extras ...*conn.Materialized) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
@@ -1274,7 +1156,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 	for _, mat := range sets {
 		env = append(env, mat.Env...)
 	}
-	// Structured runner logs for humans and future machine parsing.
+	// Structured runner logs; pgcopydb.LastErrorLine parses them.
 	env = append(env, corev1.EnvVar{Name: "PGCOPYDB_LOG_JSON", Value: "on"})
 
 	var passfiles []conn.Passfile
@@ -1288,12 +1170,9 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 		}
 	}
 	if len(passfiles) > 0 || len(preludes) > 0 {
-		// PGPASSFILE must live in the container spec, not only in the
-		// prelude shell: commands the operator execs into the pod (sentinel
-		// reads, the WAL-head query, endpos setting) inherit the spec env,
-		// and without it they fail password authentication. Found live by
-		// the follow e2e suite; the prelude's own export stays for pid 1.
-		// secretRef sides (preludes) always assemble a passfile line too.
+		// PGPASSFILE must live in the container spec, not only in the prelude
+		// shell: commands the operator execs into the pod inherit the spec env
+		// and fail password authentication without it. The prelude export stays.
 		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
 	}
 
@@ -1371,10 +1250,9 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 					Containers: []corev1.Container{{
 						Name:  workerContainer,
 						Image: image,
-						// sh -c '<prelude>' pgcopydb <args...>: the prelude
-						// assembles the passfile, runs setup, and execs
-						// "$0" "$@", where $0 is "pgcopydb" (scriptJob swaps
-						// it for /bin/sh) and $@ are the Args below.
+						// The prelude assembles the passfile, runs setup, then
+						// execs "$0" "$@": $0 is "pgcopydb" here, and scriptJob
+						// swaps it for /bin/sh.
 						Command:      []string{shellPath, "-c", conn.PreludeScript(preludes, passfiles, setup), "pgcopydb"},
 						Args:         args,
 						Env:          env,
