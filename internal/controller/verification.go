@@ -122,7 +122,7 @@ func enabledChecks(m *v1beta1.Migration) []string {
 // check needs compare_data_strict; compare schema exits on its own diffs.
 func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.Job, error) {
 	if check == compareData {
-		// Reconcile rejects this in buildJob first; retain a backstop for direct builder callers.
+		// Reconcile rejects this in buildJob first; keep a backstop for direct builder callers.
 		if m.Spec.Clone.AllDatabases {
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}

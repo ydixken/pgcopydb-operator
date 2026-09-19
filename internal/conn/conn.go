@@ -457,7 +457,7 @@ printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(pf_esc "$(cat
 }
 
 // URIRecover returns the shell prefix that restores the PGCOPYDB_*_PGURI env
-// vars in commands exec'd into the runner: secretRef preludes compose them at
+// vars in commands exec'd into the pod: secretRef preludes compose them at
 // container start, where the pod spec env cannot carry them. No-op otherwise.
 func URIRecover() string {
 	var b strings.Builder
