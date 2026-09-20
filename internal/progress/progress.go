@@ -132,11 +132,14 @@ s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c
 printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
 `
 
-// Instance catalogs have no relation counters; zero counts preserve the sample row format without reporting progress.
-const allDatabasesSampleScript = progressSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'
-  from pg_database where datname not in ('template0', 'template1')"
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0'") || s=
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row") || t=
+// Instance catalogs have no relation counters; zero counts preserve the sample
+// row format without reporting progress. The FROM lives apart from the select
+// list so the source's sixth figure appends to the list: appended to the whole
+// query it lands on the WHERE clause, which then fails to parse (issue #277).
+const allDatabasesSampleScript = progressSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
+dbs="from pg_database where datname not in ('template0', 'template1')"
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs") || s=
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs") || t=
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
