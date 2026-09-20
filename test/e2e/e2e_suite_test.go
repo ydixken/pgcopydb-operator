@@ -1834,7 +1834,7 @@ func runSeedJob() {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: seedJobName}, job)).To(Succeed())
 		for _, c := range job.Status.Conditions {
 			if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
-				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", seedJobLogs(seedLogTail))
+				_, _ = fmt.Fprintf(GinkgoWriter, "seed Job failed, log tail:\n%s\n", jobLogs(seedJobName, seedLogTail))
 				StopTrying("seed Job exhausted its retries: " + c.Message).Now()
 			}
 		}
@@ -1845,7 +1845,7 @@ func runSeedJob() {
 	// per-phase profile and belongs in the run's output. Without it the only
 	// way to learn where the seed spends its minutes is to sample a live
 	// cluster while one happens to be running (issue #146).
-	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", seedJobLogs(seedLogTail))
+	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", jobLogs(seedJobName, seedLogTail))
 	AddReportEntry("seed wall clock", fmt.Sprintf("%s at scale %s (profile %s)",
 		time.Since(started).Round(time.Second), scaleArg(), seedProfile()))
 }
@@ -1897,10 +1897,11 @@ func buildSeedJob() *batchv1.Job {
 	}
 }
 
-// seedJobLogs returns the last lines of the seed Job's log. kubectl for the
-// same reason psql uses it: current context, no hand-rolled log streaming.
-func seedJobLogs(lines int) string {
-	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+seedJobName,
+// jobLogs returns the last lines of a Job's log, kubectl's error text
+// included: callers report it rather than assert on it, and "pod not found"
+// explains a missing log as well as the log would have.
+func jobLogs(job string, lines int) string {
+	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+job,
 		"--tail="+strconv.Itoa(lines)).CombinedOutput()
 	return string(out)
 }
