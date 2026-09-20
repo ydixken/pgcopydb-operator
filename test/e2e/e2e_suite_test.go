@@ -1676,6 +1676,10 @@ func resetTargetObjects() {
 	psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
 	psql(targetCluster, "DROP SCHEMA IF EXISTS public CASCADE")
 	psql(targetCluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	// A hand-made schema has a null ACL, where bootstrap public carries
+	// =U/pg_database_owner: PostgreSQL 15+ withdrew PUBLIC's CREATE, not its
+	// USAGE, so the grant is what makes this the shape a real target has.
+	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 

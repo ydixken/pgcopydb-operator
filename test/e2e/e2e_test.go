@@ -1033,7 +1033,6 @@ func makeLimitedTarget(secretName string) {
 	// no-dropIfExists remediation clone (pg_restore only drops what the
 	// incoming dump carries).
 	resetTargetObjects()
-	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 	pw := secretName + "-pw"
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
 	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
