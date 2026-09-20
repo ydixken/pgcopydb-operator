@@ -255,6 +255,67 @@ func TestProgressSampleAllDatabases(t *testing.T) {
 	}
 }
 
+// CloneStage's query is the other script no live instance had parsed, and it
+// answers "neither phase" when it fails, so a malformed one degrades to an
+// unknown stage rather than erroring: the silent shape of issue #277.
+func TestCloneStageQueryOnLiveInstance(t *testing.T) {
+	// The query counts backends named pgcopydb%, so the sampler's own
+	// connection must not be one or it counts itself as the tail.
+	uri := namedURI(t, testPGURI(t), "", "progress_stage_test")
+	stage := func() string {
+		t.Helper()
+		argv := progressCommand(true, false)
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("clone stage query failed: %v; psql said: %s", err, stderr.String())
+		}
+		return strings.TrimSpace(string(out))
+	}
+	worker := exec.Command("psql", namedURI(t, uri, "", "pgcopydb copy worker 3"), "-XqtA", "-v", "ON_ERROR_STOP=1")
+	stdin, err := worker.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = worker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		_, _ = io.WriteString(stdin, "ROLLBACK;\n\\q\n")
+		_ = stdin.Close()
+		if err := worker.Wait(); err != nil {
+			t.Errorf("copy worker failed: %v", err)
+		}
+	}
+	// A failed assertion must not leave the backend behind for the next test.
+	defer release()
+	// An open transaction holds the backend without keeping it active: the
+	// first counter has to match on the name alone.
+	if _, err = io.WriteString(stdin, "BEGIN;\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "copy worker backend never appeared", func() bool {
+		return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name='pgcopydb copy worker 3'") == "1"
+	})
+	// Copy backends first, then the tail: CloneStage reads the pair with
+	// Sscanf and calls anything else unknown.
+	if got := stage(); got != "1 0" {
+		t.Fatalf("clone stage = %q with one copy worker connected, want \"1 0\"", got)
+	}
+	release()
+	if got := stage(); got != "0 0" {
+		t.Fatalf("clone stage = %q with no pgcopydb backend left, want \"0 0\"", got)
+	}
+}
+
 // A held relation lock must cancel the sampled side without losing its peer.
 func TestProgressRelationLocks(t *testing.T) {
 	admin := testPGURI(t)
