@@ -367,8 +367,17 @@ func TestSample_AllDatabases(t *testing.T) {
 		t.Fatalf("sample = %+v, %v; want sizes without counts", got, err)
 	}
 	script := f.argv[2]
-	// The source row keeps the single-database shape, owed count included.
-	for _, want := range []string{conn.URIRecover(), progressSQL, "sum(pg_database_size(oid))", "not in ('template0', 'template1')", "PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI", `"$row || ' 0'"`} {
+	// The source row keeps the single-database shape, owed count included. Its
+	// extra figure appends to the select list, which is why the FROM lives in
+	// $dbs: inside $row the append lands on the WHERE clause (issue #277).
+	for _, want := range []string{
+		conn.URIRecover(), progressSQL,
+		"PGCOPYDB_SOURCE_PGURI", "PGCOPYDB_TARGET_PGURI",
+		"not in ('template0', 'template1')",
+		`row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"` + "\n",
+		`"$row || ' 0' $dbs"`,
+		`"$row $dbs"`,
+	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q", want)
 		}

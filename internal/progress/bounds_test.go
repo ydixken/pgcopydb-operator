@@ -39,13 +39,13 @@ func requireTimeout(t *testing.T) {
 	}
 }
 
-func progressCommand(stage bool) []string {
+func progressCommand(stage, allDatabases bool) []string {
 	f := &fakeExec{pod: "runner"}
 	p := NewFromExec(f, nil)
 	if stage {
 		p.CloneStage(context.Background(), "test", "job")
 	} else {
-		_, _ = p.Sample(context.Background(), "test", "job", false)
+		_, _ = p.Sample(context.Background(), "test", "job", allDatabases)
 	}
 	return f.argv
 }
@@ -125,7 +125,7 @@ esac
 			if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			argv := progressCommand(tc.stage)
+			argv := progressCommand(tc.stage, false)
 			cmd := exec.Command(argv[0], argv[1:]...)
 			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "PID_FILE="+pidFile,
 				"CHILD_FILE="+filepath.Join(dir, "children"), fmt.Sprintf("HANG=%d", tc.hang), fmt.Sprintf("RESIST=%t", tc.resist))

@@ -19,6 +19,7 @@ package e2e
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1033,7 +1034,6 @@ func makeLimitedTarget(secretName string) {
 	// no-dropIfExists remediation clone (pg_restore only drops what the
 	// incoming dump carries).
 	resetTargetObjects()
-	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
 	pw := secretName + "-pw"
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
 	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
@@ -1366,7 +1366,62 @@ func waitFollowStreaming(name string) {
 // attempt's pod log instead of raising backoffLimit.
 func expectSingleAttempt(m *v1beta1.Migration) {
 	GinkgoHelper()
+	// A Migration a later attempt completed keeps no trace of why the first
+	// one failed: the reason lives in the AttemptFailed event and the dead
+	// Job. v0.14.0-rc.2 failed here with both already gone (issue #292).
+	if m.Status.Attempts > 1 {
+		reportFailedAttempt(m)
+	}
 	Expect(m.Status.Attempts).To(Equal(int32(1)), "migration %s needed %d attempts", m.Name, m.Status.Attempts)
+}
+
+// attemptLogTail bounds the dead worker's log to where its failure is named:
+// pgcopydb's error lines come last, and the copy chatter would bury them.
+const attemptLogTail = 60
+
+// reportFailedAttempt gathers what explains a retry: the Migration's events,
+// carrying handleFailedJob's reason and any WorkerZombie reap, and the first
+// attempt's terminal Job. Every read reports rather than asserts, so a reaped
+// pod cannot replace the attempt-count failure with its own.
+func reportFailedAttempt(m *v1beta1.Migration) {
+	GinkgoHelper()
+	var b strings.Builder
+	events := &corev1.EventList{}
+	if err := k8sClient.List(ctx, events, client.InNamespace(m.Namespace)); err != nil {
+		fmt.Fprintf(&b, "events unavailable: %v\n", err)
+	} else {
+		mine := make([]corev1.Event, 0, len(events.Items))
+		for _, e := range events.Items {
+			if e.InvolvedObject.UID == m.UID {
+				mine = append(mine, e)
+			}
+		}
+		// Chronological: the order is what tells the retry's story.
+		slices.SortFunc(mine, func(a, b corev1.Event) int {
+			return a.LastTimestamp.Compare(b.LastTimestamp.Time)
+		})
+		for _, e := range mine {
+			fmt.Fprintf(&b, "%s %s/%s: %s\n",
+				e.LastTimestamp.Format(time.RFC3339), e.Type, e.Reason, e.Message)
+		}
+		if len(mine) == 0 {
+			b.WriteString("no events on the Migration; the TTL may have collected them\n")
+		}
+	}
+
+	first := m.Name + "-run-1"
+	job := &batchv1.Job{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: first}, job); err != nil {
+		fmt.Fprintf(&b, "\nJob %s unavailable: %v\n", first, err)
+	} else {
+		fmt.Fprintf(&b, "\nJob %s: %d succeeded, %d failed\n", first, job.Status.Succeeded, job.Status.Failed)
+		for _, c := range job.Status.Conditions {
+			fmt.Fprintf(&b, "  condition %s=%s %s: %s\n", c.Type, c.Status, c.Reason, c.Message)
+		}
+	}
+	fmt.Fprintf(&b, "\nJob %s log tail:\n%s\n", first, jobLogs(first, attemptLogTail))
+
+	AddReportEntry("first attempt failure", b.String(), ReportEntryVisibilityFailureOrVerbose)
 }
 
 // expectCleanupSucceeded asserts the <name>-cleanup Job ran pgcopydb stream
