@@ -2139,7 +2139,7 @@ case "$q" in
     printf '%s\n' "$q" >> "${APPLY_OUT:-/dev/null}"
     if [ "${PSQL_STICKY:-1}" = 1 ]; then : > "${STATE_DIR:?}/role-granted"; fi ;;
   *'SET ROLE'*) [ "${PSQL_SET_ROLE:-1}" = 1 ] || [ -f "${STATE_DIR:?}/role-granted" ] || exit 2 ;;
-  *'GRANT %I TO %I'*) echo 'GRANT "app_owner_role" TO "limited"' ;;
+  *'GRANT %I TO %I'*) printf 'GRANT "%s" TO "limited"\n' "$list" ;;
   *has_schema_privilege*)
     if [ -f "${STATE_DIR:-/nonexistent}/schemas-applied" ]; then :; else printf '%s' "${PSQL_SCHEMA_GRANTS:-}"; fi ;;
   *has_database_privilege*)
@@ -2588,6 +2588,28 @@ func TestPreflightScript_OwnerAfterRestore(t *testing.T) {
 			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
+}
+
+// TestPreflightScript_OwnerAfterRestoreBackslash guards the printf sinks: dash's
+// echo reads \c in a role name as "stop output" and cuts the audit line.
+func TestPreflightScript_OwnerAfterRestoreBackslash(t *testing.T) {
+	run := clonePreflightHarness(t)
+	m := reownMigration()
+	m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
+	m.Spec.Clone.OwnerAfterRestore = `ops\cadmin`
+	grant := `GRANT "ops\cadmin" TO "limited"`
+	out, code, _, applied := run(t, m, "PSQL_SET_ROLE=0")
+	if code != 0 || !strings.Contains(out, remPrefixClone+grant+"\n") ||
+		!strings.Contains(out, okOwnerSetRole) {
+		t.Fatalf("code=%d out:\n%s", code, out)
+	}
+	if strings.TrimSpace(applied) != grant {
+		t.Fatalf("applied = %q, want %q byte-for-byte", applied, grant)
+	}
+	out, code, _, _ = run(t, m, "PSQL_OWNER_EXISTS=0")
+	if code != 1 || !strings.Contains(out, `role "ops\cadmin" does not exist on the target`) {
+		t.Fatalf("code=%d out:\n%s", code, out)
+	}
 }
 
 // preflightOwnerFixture builds the membership shapes the SET ROLE probe must

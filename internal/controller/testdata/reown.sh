@@ -167,4 +167,4 @@ if [ -n "$left" ]; then
   printf '%s\n' "$left"
   die "reown: the objects above are still owned by the migration role after the handover"
 fi
-echo "ok: ownership handed over to \"$REOWN_OWNER\""
+printf '%s\n' "ok: ownership handed over to \"$REOWN_OWNER\""
