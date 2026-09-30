@@ -123,6 +123,11 @@ Superuser is needed only for:
 `clone.noOwner: true` leaves every restored object owned by the migration role.
 `clone.ownerAfterRestore` names the role that MUST own them instead: the restore still runs as the migration role, and a `<name>-reown` Job hands the objects over once the worker has exited.
 The field needs `noOwner: true`, does not combine with `clone.allDatabases`, and is immutable; the CRD enforces all three.
+Give the role name unquoted, exactly as PostgreSQL stores it.
+The operator quotes it as an identifier wherever it reaches SQL, so names such as `kkp-db-medium-dev` work as they are.
+The CRD accepts any name except one that contains a double quote or a control character, or is longer than 63 bytes.
+We reject the double quote because a self-quoted name such as `"db-admin"` would be quoted a second time and name a role that does not exist.
+The limit counts bytes, because PostgreSQL truncates a longer name to 63 bytes, and a name with non-ASCII characters reaches that before 63 characters.
 See [Ownership after restore](../configuration.md#ownership-after-restore) for when to use it.
 
 Preflight covers two of the requirements, ahead of the clone grant probes above: the role MUST exist on the target, and the migration role MUST be able to `SET ROLE` to it.

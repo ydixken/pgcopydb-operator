@@ -280,6 +280,8 @@ func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*b
 // authentication failed" from a cold auth backend after a failover, and a
 // preflight failure is terminal.
 // checkv feeds its query on stdin: psql interpolates :'list' in file input only.
+// Lines carrying spec or catalog names print with printf: dash's echo reads
+// backslash escapes, so a role such as ops\cadmin would cut the line short.
 const preflightHeader = `set -u
 fail=0
 fails=''
@@ -287,9 +289,9 @@ fails_audit=''
 hints=''
 check() { psql "$1" -XAtq -v ON_ERROR_STOP=1 -c "$2"; }
 checkv() { printf '%s' "$2" | psql "$1" -XAtq -v ON_ERROR_STOP=1 -v list="$3" -f -; }
-note() { echo "$1"; fails="$fails$1
+note() { printf '%s\n' "$1"; fails="$fails$1
 "; fail=1; }
-note_audit() { echo "$1"; fails_audit="$fails_audit$1
+note_audit() { printf '%s\n' "$1"; fails_audit="$fails_audit$1
 "; fail=1; }
 hint() { hints="$hints$1
 "; }
@@ -379,7 +381,7 @@ func remSingleBlock(c remSingle) string {
 	if c.superURI != "" {
 		missing = `    if stmt=$(` + c.compose + `); then
       if check "$` + c.superURI + `" "$stmt" >/dev/null; then
-        echo "` + c.prefix + `$stmt"
+        printf '%s\n' "` + c.prefix + `$stmt"
 ` + remRecheck(c) + `      else
         note "` + c.apply + `"
       fi
@@ -475,7 +477,7 @@ func remAggBlock(c remAggregate) string {
 	}
 	if c.superURI != "" {
 		missing = `    if check "$` + c.superURI + `" "$agg" >/dev/null; then
-      printf '%s\n' "$agg" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do echo "` + c.prefix + `$g` + c.term + `"; done
+      printf '%s\n' "$agg" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do printf '%s\n' "` + c.prefix + `$g` + c.term + `"; done
       if agg=$(` + c.query + `); then
         if [ -n "$agg" ]; then
           note "` + c.still + `"

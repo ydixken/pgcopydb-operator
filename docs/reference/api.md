@@ -41,7 +41,7 @@ _Appears in:_
 | `roles` _boolean_ | roles copies roles before the clone (--roles). Needs superuser on the<br />source unless noRolePasswords is also set. |  | Optional: \{\} <br /> |
 | `noRolePasswords` _boolean_ | noRolePasswords dumps roles without passwords (--no-role-passwords),<br />avoiding the superuser requirement of roles, but not of allDatabases. |  | Optional: \{\} <br /> |
 | `noOwner` _boolean_ | noOwner skips ALTER OWNER on restore (--no-owner). |  | Optional: \{\} <br /> |
-| `ownerAfterRestore` _string_ | ownerAfterRestore hands the restored objects to this role once the worker<br />has finished. Needs noOwner: true, or pg_restore assigns the source owners<br />and the handover covers only part of the schema. Immutable.<br />See docs/reference/prerequisites.md. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z_][A-Za-z0-9_$]*$` <br />Optional: \{\} <br /> |
+| `ownerAfterRestore` _string_ | ownerAfterRestore hands the restored objects to this role once the worker<br />has finished. Needs noOwner: true, or pg_restore assigns the source owners<br />and the handover covers only part of the schema. Immutable.<br />The operator quotes the name as an identifier, so give it unquoted.<br />See docs/reference/prerequisites.md. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[^"\x00-\x1F\x7F]+$` <br />Optional: \{\} <br /> |
 | `noACL` _boolean_ | noACL skips GRANT/REVOKE on restore (--no-acl). |  | Optional: \{\} <br /> |
 | `noComments` _boolean_ | noComments skips COMMENT statements (--no-comments). |  | Optional: \{\} <br /> |
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |

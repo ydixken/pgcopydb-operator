@@ -44,18 +44,20 @@ var _ = Describe("Ownership after restore", func() {
 		resetOwnerRole()
 
 		By("creating the incoming owner with the rights the handover needs")
-		psql(targetCluster, "CREATE ROLE app_owner NOLOGIN")
-		psql(targetCluster, "GRANT app_owner TO app")
+		// Hyphenated like the role names managed platforms generate, so the
+		// operator's quoting is what makes the handover work (#294).
+		psql(targetCluster, `CREATE ROLE "app-owner" NOLOGIN`)
+		psql(targetCluster, `GRANT "app-owner" TO app`)
 		// public stays owned by pg_database_owner, so the handover never
 		// transfers it and the objects in it need a standing CREATE grant for
 		// the incoming owner. audit needs none: app owns it after the restore,
 		// so it is transferred and carries CREATE with it.
-		psql(targetCluster, "GRANT CREATE ON SCHEMA public TO app_owner")
+		psql(targetCluster, `GRANT CREATE ON SCHEMA public TO "app-owner"`)
 
 		By("proving the preconditions the operator's own probes test")
 		// What the preflight probes, in the form it probes it: a plain GRANT
 		// carries SET on every supported version.
-		psql(targetCluster, "BEGIN; SET SESSION AUTHORIZATION app; SET ROLE app_owner; ROLLBACK")
+		psql(targetCluster, `BEGIN; SET SESSION AUTHORIZATION app; SET ROLE "app-owner"; ROLLBACK`)
 		// The handover's database pre-check tests the migration role, not the
 		// incoming owner (has_database_privilege(current_user, ...) in
 		// reown.go), and app owns the target database: nothing to grant.
@@ -70,7 +72,7 @@ var _ = Describe("Ownership after restore", func() {
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{
 			DropIfExists:      true,
 			NoOwner:           true,
-			OwnerAfterRestore: "app_owner",
+			OwnerAfterRestore: "app-owner",
 		})
 		// compare schema runs after the handover and models tables, columns,
 		// indexes, constraints and sequence values, not owners, so it has to
@@ -92,7 +94,7 @@ var _ = Describe("Ownership after restore", func() {
 
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
 		mig.Spec.Clone.NoOwner = true
-		mig.Spec.Clone.OwnerAfterRestore = "app_owner"
+		mig.Spec.Clone.OwnerAfterRestore = "app-owner"
 		create(mig)
 
 		By("waiting for the base copy to finish, streaming to start, and the lag to converge")
@@ -132,19 +134,19 @@ var _ = Describe("Ownership after restore", func() {
 // resetTargetObjects, which drops the objects this hands back.
 func resetOwnerRole() {
 	GinkgoHelper()
-	if psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_owner')") != "t" {
+	if psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner')") != "t" {
 		return
 	}
-	psql(targetCluster, "REASSIGN OWNED BY app_owner TO app")
-	psql(targetCluster, "DROP OWNED BY app_owner")
-	psql(targetCluster, "DROP ROLE app_owner")
+	psql(targetCluster, `REASSIGN OWNED BY "app-owner" TO app`)
+	psql(targetCluster, `DROP OWNED BY "app-owner"`)
+	psql(targetCluster, `DROP ROLE "app-owner"`)
 }
 
 // ownerCounts reads how many of the relations a predicate selects ended up
-// owned by app_owner, over how many exist at all. The pair is the point:
+// owned by app-owner, over how many exist at all. The pair is the point:
 // counting only the wrongly-owned ones would pass on a target with none.
 func ownerCounts(where string) string {
-	return "SELECT count(*) FILTER (WHERE pg_get_userbyid(c.relowner) = 'app_owner') || '/' || count(*)" +
+	return "SELECT count(*) FILTER (WHERE pg_get_userbyid(c.relowner) = 'app-owner') || '/' || count(*)" +
 		" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE " + where
 }
 
@@ -166,7 +168,7 @@ func expectHandoverApplied() {
 
 	// The schema itself, not only its contents.
 	Expect(psql(targetCluster,
-		"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'audit'")).To(Equal("app_owner"))
+		"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'audit'")).To(Equal("app-owner"))
 
 	// public is not transferred: it was never the migration role's to give.
 	Expect(psql(targetCluster,
@@ -185,10 +187,10 @@ func expectHandoverApplied() {
 	Expect(psql(targetCluster, "SELECT count(*) FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid"+
 		" WHERE a.attrelid = 'public.app_users'::regclass AND t.typname = 'citext'")).To(Equal("1"))
 	Expect(psql(targetCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class"+
-		" WHERE oid = 'public.app_users'::regclass")).To(Equal("app_owner"))
+		" WHERE oid = 'public.app_users'::regclass")).To(Equal("app-owner"))
 
 	// Ownership in fact, not only in the catalog: only an owner may alter a
 	// table, and SET ROLE drops the superuser attribute psql connects with.
-	psql(targetCluster, "BEGIN; SET ROLE app_owner;"+
+	psql(targetCluster, `BEGIN; SET ROLE "app-owner";`+
 		" ALTER TABLE public.customers ADD COLUMN reown_probe int; ROLLBACK")
 }

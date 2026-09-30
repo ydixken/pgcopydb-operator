@@ -31,9 +31,10 @@ import (
 const (
 	reownTestOwner = "app_owner_role"
 	reownFrom      = "reown_from_test"
-	reownTo        = "reown_to_test"
-	reownSuper     = "reown_super_test"
-	reownHandedOK  = "ok: ownership handed over"
+	// Hyphenated, so a statement that fails to quote the owner fails here (#294).
+	reownTo       = "reown-to-test"
+	reownSuper    = "reown_super_test"
+	reownHandedOK = "ok: ownership handed over"
 )
 
 func reownMigration() *v1beta1.Migration {
@@ -166,8 +167,8 @@ func TestReownScriptHeredocQuoting(t *testing.T) {
 // extension installed by a non-superuser leaves its members owned by the
 // bootstrap superuser; a superuser migration role owns them directly.
 const reownFixture = `CREATE ROLE reown_from_test;
-CREATE ROLE reown_to_test;
-GRANT reown_to_test TO reown_from_test;
+CREATE ROLE "reown-to-test";
+GRANT "reown-to-test" TO reown_from_test;
 SELECT format('GRANT CREATE ON DATABASE %I TO reown_from_test', current_database()) \gexec
 SET ROLE reown_from_test;
 CREATE SCHEMA reown_s;
@@ -218,7 +219,7 @@ const reownCleanup = `DROP SCHEMA IF EXISTS reown_s, reown_other, reown_super_s 
 DO $reown_cleanup$
 DECLARE r text;
 BEGIN
-  FOREACH r IN ARRAY ARRAY['reown_from_test', 'reown_to_test', 'reown_super_test'] LOOP
+  FOREACH r IN ARRAY ARRAY['reown_from_test', 'reown-to-test', 'reown_super_test'] LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN
       EXECUTE format('DROP OWNED BY %I', r);
       EXECUTE format('DROP ROLE %I', r);
@@ -308,12 +309,12 @@ func TestReownCandidateQueries(t *testing.T) {
 		}
 	}
 	t.Run("partitions and their parent each get a statement", func(t *testing.T) {
-		want(t, "2 ALTER TABLE reown_s.part OWNER TO reown_to_test",
-			"2 ALTER TABLE reown_s.part_1 OWNER TO reown_to_test",
-			"2 ALTER TABLE reown_s.part_2 OWNER TO reown_to_test")
+		want(t, `2 ALTER TABLE reown_s.part OWNER TO "reown-to-test"`,
+			`2 ALTER TABLE reown_s.part_1 OWNER TO "reown-to-test"`,
+			`2 ALTER TABLE reown_s.part_2 OWNER TO "reown-to-test"`)
 	})
 	t.Run("schema statements sort first", func(t *testing.T) {
-		if lines[0] != "1 ALTER SCHEMA reown_s OWNER TO reown_to_test" {
+		if lines[0] != `1 ALTER SCHEMA reown_s OWNER TO "reown-to-test"` {
 			t.Fatalf("first statement = %q", lines[0])
 		}
 		for _, line := range lines[1:] {
@@ -323,33 +324,33 @@ func TestReownCandidateQueries(t *testing.T) {
 		}
 	})
 	t.Run("table-owned sequences follow their table", func(t *testing.T) {
-		want(t, "2 ALTER SEQUENCE reown_s.standalone_seq OWNER TO reown_to_test")
+		want(t, `2 ALTER SEQUENCE reown_s.standalone_seq OWNER TO "reown-to-test"`)
 		absent(t, "", "ident_id_seq", "bigs_id_seq", "ext_table_id_seq")
 	})
 	t.Run("extension members are excluded", func(t *testing.T) {
 		absent(t, "", "citext", "ext_table", "tablefunc", "crosstab")
 	})
 	t.Run("types: composite, enum, domain and range only", func(t *testing.T) {
-		want(t, "4 ALTER TYPE reown_s.ctype OWNER TO reown_to_test",
-			"4 ALTER TYPE reown_s.mood OWNER TO reown_to_test",
-			"4 ALTER DOMAIN reown_s.posint OWNER TO reown_to_test",
-			"4 ALTER TYPE reown_s.myrange OWNER TO reown_to_test")
+		want(t, `4 ALTER TYPE reown_s.ctype OWNER TO "reown-to-test"`,
+			`4 ALTER TYPE reown_s.mood OWNER TO "reown-to-test"`,
+			`4 ALTER DOMAIN reown_s.posint OWNER TO "reown-to-test"`,
+			`4 ALTER TYPE reown_s.myrange OWNER TO "reown-to-test"`)
 		absent(t, "4 ", "[]", "reown_s.part", "reown_s.bigs", "reown_s.ident",
 			"reown_s.v ", "reown_s.mv", "reown_s.standalone_seq")
 		if reownPsql(t, uri, "SHOW server_version_num;") >= "170000" {
 			absent(t, "4 ", "mymultirange")
 		} else {
-			want(t, "4 ALTER TYPE reown_s.mymultirange OWNER TO reown_to_test")
+			want(t, `4 ALTER TYPE reown_s.mymultirange OWNER TO "reown-to-test"`)
 		}
 	})
 	t.Run("routine shapes", func(t *testing.T) {
-		want(t, "3 ALTER ROUTINE reown_s.f(integer) OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.f0() OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.fv(integer[]) OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.proc(integer) OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.sum2(integer) OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.cnt() OWNER TO reown_to_test",
-			"3 ALTER ROUTINE reown_s.osa(double precision,anyelement) OWNER TO reown_to_test")
+		want(t, `3 ALTER ROUTINE reown_s.f(integer) OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.f0() OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.fv(integer[]) OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.proc(integer) OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.sum2(integer) OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.cnt() OWNER TO "reown-to-test"`,
+			`3 ALTER ROUTINE reown_s.osa(double precision,anyelement) OWNER TO "reown-to-test"`)
 	})
 	t.Run("handover executes, census agrees, second pass is empty", func(t *testing.T) {
 		out := reownPsql(t, uri, "BEGIN;\n"+reownFixture+
@@ -462,9 +463,9 @@ func testReownScript(t *testing.T, uri string) {
 	})
 	t.Run("schema CREATE pre-check fires for untransferred schemas only", func(t *testing.T) {
 		setDBCreate(t, "GRANT", "TO")
-		reownPsql(t, uri, "REVOKE CREATE ON SCHEMA reown_other FROM reown_to_test;")
+		reownPsql(t, uri, `REVOKE CREATE ON SCHEMA reown_other FROM "reown-to-test";`)
 		out, code := run(t, reownFrom, reownTo)
-		if code != 1 || !strings.Contains(out, "GRANT CREATE ON SCHEMA reown_other TO reown_to_test") {
+		if code != 1 || !strings.Contains(out, `GRANT CREATE ON SCHEMA reown_other TO "reown-to-test"`) {
 			t.Fatal("want exit 1 naming the reown_other grant")
 		}
 		if strings.Contains(out, "reown_s TO") || strings.Contains(out, dbGrant) {
@@ -475,7 +476,7 @@ func testReownScript(t *testing.T, uri string) {
 		}
 	})
 	t.Run("granted pre-checks are silent and the handover lands", func(t *testing.T) {
-		reownPsql(t, uri, "GRANT CREATE ON SCHEMA reown_other TO reown_to_test;")
+		reownPsql(t, uri, `GRANT CREATE ON SCHEMA reown_other TO "reown-to-test";`)
 		out, code := run(t, reownFrom, reownTo)
 		if code != 0 || !strings.Contains(out, reownHandedOK) || strings.Contains(out, "GRANT CREATE") {
 			t.Fatal("want a clean handover")
@@ -499,7 +500,7 @@ func testReownScript(t *testing.T, uri string) {
 		}
 	})
 	t.Run("superuser skips the pre-checks", func(t *testing.T) {
-		reownPsql(t, uri, "REVOKE CREATE ON SCHEMA reown_other FROM reown_to_test;")
+		reownPsql(t, uri, `REVOKE CREATE ON SCHEMA reown_other FROM "reown-to-test";`)
 		out, code := run(t, reownSuper, reownTo)
 		if code != 0 || !strings.Contains(out, reownHandedOK) || strings.Contains(out, "GRANT CREATE") {
 			t.Fatal("a superuser migration role must hand over without grants")
