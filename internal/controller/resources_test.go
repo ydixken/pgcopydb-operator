@@ -2595,21 +2595,24 @@ func TestPreflightScript_OwnerAfterRestore(t *testing.T) {
 // reads the session user, not current_user, so each case needs its own psql
 // session with SET SESSION AUTHORIZATION; that, and the SUPERUSER role, need
 // the test connection to be a superuser.
-const preflightOwnerFixture = `CREATE ROLE pf_owner_test;
+const preflightOwnerFixture = `CREATE ROLE "pf-owner-test";
 CREATE ROLE pf_member_test;
 CREATE ROLE pf_noinherit_test NOINHERIT;
 CREATE ROLE pf_other_test;
 CREATE ROLE pf_super_test SUPERUSER;
-GRANT pf_owner_test TO pf_member_test, pf_noinherit_test;
+GRANT "pf-owner-test" TO pf_member_test, pf_noinherit_test;
 `
 
 // The members go before the role they are granted, and IF EXISTS also clears
 // what a crashed run left behind.
 const preflightOwnerCleanup = `DROP ROLE IF EXISTS pf_member_test, pf_noinherit_test,
-pf_other_test, pf_super_test, pf_noset_test, pf_owner_test;`
+pf_other_test, pf_super_test, pf_noset_test, "pf-owner-test";`
 
 const (
-	pfOwnerRole     = "pf_owner_test"
+	// Hyphenated, so the probes must quote it the way a managed platform's
+	// generated role names need (#294).
+	pfOwnerRole     = "pf-owner-test"
+	pfOwnerIdent    = `"pf-owner-test"`
 	pfNoInheritRole = "pf_noinherit_test"
 	pfOtherRole     = "pf_other_test"
 )
@@ -2689,18 +2692,18 @@ func TestPreflightOwnerAfterRestoreQueries(t *testing.T) {
 		if version < "160000" {
 			t.Skipf("GRANT ... WITH SET FALSE needs PostgreSQL 16, server is %s", version)
 		}
-		must(t, "CREATE ROLE pf_noset_test;\nGRANT pf_owner_test TO pf_noset_test WITH SET FALSE;", "")
+		must(t, "CREATE ROLE pf_noset_test;\nGRANT "+pfOwnerIdent+" TO pf_noset_test WITH SET FALSE;", "")
 		if _, err := psql(t, setRoleAs("pf_noset_test"), pfOwnerRole); err == nil {
 			t.Fatal("a membership without SET must not read as a handover the server will allow")
 		}
 	})
 	t.Run("the composed GRANT is what enables the SET ROLE", func(t *testing.T) {
 		stmt := must(t, "SET SESSION AUTHORIZATION "+pfOtherRole+";\n"+reownGrantSQL, pfOwnerRole)
-		if stmt != "GRANT "+pfOwnerRole+" TO "+pfOtherRole {
+		if stmt != "GRANT "+pfOwnerIdent+" TO "+pfOtherRole {
 			t.Fatalf("composed statement = %q", stmt)
 		}
 		must(t, stmt, "")
-		t.Cleanup(func() { must(t, "REVOKE "+pfOwnerRole+" FROM "+pfOtherRole+";", "") })
+		t.Cleanup(func() { must(t, "REVOKE "+pfOwnerIdent+" FROM "+pfOtherRole+";", "") })
 		if _, err := psql(t, setRoleAs(pfOtherRole), pfOwnerRole); err != nil {
 			t.Fatalf("the composed GRANT must grant SET too, on every supported version: %v", err)
 		}
