@@ -239,10 +239,12 @@ type CloneOptions struct {
 	// ownerAfterRestore hands the restored objects to this role once the worker
 	// has finished. Needs noOwner: true, or pg_restore assigns the source owners
 	// and the handover covers only part of the schema. Immutable.
+	// The operator quotes the name as an identifier, so give it unquoted.
 	// See docs/reference/prerequisites.md.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
-	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_$]*$`
+	// +kubebuilder:validation:Pattern=`^[^"\x00-\x1F\x7F]+$`
+	// +kubebuilder:validation:XValidation:rule="size(bytes(self)) <= 63",message="PostgreSQL role names are limited to 63 bytes (NAMEDATALEN); a longer name is truncated and can name a different role"
 	// +optional
 	OwnerAfterRestore string `json:"ownerAfterRestore,omitempty"`
 

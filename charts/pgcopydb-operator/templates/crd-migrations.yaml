@@ -183,11 +183,16 @@ spec:
                       ownerAfterRestore hands the restored objects to this role once the worker
                       has finished. Needs noOwner: true, or pg_restore assigns the source owners
                       and the handover covers only part of the schema. Immutable.
+                      The operator quotes the name as an identifier, so give it unquoted.
                       See docs/reference/prerequisites.md.
                     maxLength: 63
                     minLength: 1
-                    pattern: ^[A-Za-z_][A-Za-z0-9_$]*$
+                    pattern: ^[^"\x00-\x1F\x7F]+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: PostgreSQL role names are limited to 63 bytes (NAMEDATALEN);
+                        a longer name is truncated and can name a different role
+                      rule: size(bytes(self)) <= 63
                   restoreJobs:
                     description: restoreJobs is pg_restore --jobs (--restore-jobs);
                       0 follows indexJobs.
@@ -2365,11 +2370,16 @@ spec:
                       ownerAfterRestore hands the restored objects to this role once the worker
                       has finished. Needs noOwner: true, or pg_restore assigns the source owners
                       and the handover covers only part of the schema. Immutable.
+                      The operator quotes the name as an identifier, so give it unquoted.
                       See docs/reference/prerequisites.md.
                     maxLength: 63
                     minLength: 1
-                    pattern: ^[A-Za-z_][A-Za-z0-9_$]*$
+                    pattern: ^[^"\x00-\x1F\x7F]+$
                     type: string
+                    x-kubernetes-validations:
+                    - message: PostgreSQL role names are limited to 63 bytes (NAMEDATALEN);
+                        a longer name is truncated and can name a different role
+                      rule: size(bytes(self)) <= 63
                   restoreJobs:
                     description: restoreJobs is pg_restore --jobs (--restore-jobs);
                       0 follows indexJobs.

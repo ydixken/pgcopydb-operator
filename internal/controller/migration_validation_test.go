@@ -217,9 +217,16 @@ var _ = Describe("Migration CRD validation", func() {
 		}, "cannot be combined with allDatabases"),
 		// omitempty drops the key, so an empty value is an absent field.
 		Entry("owner handover left empty", "cel-owner-empty", owner(""), ""),
-		// The role name reaches SQL as an identifier; the charset pattern is
-		// the barrier, as it is for slot names.
-		Entry("owner name with a space", "cel-owner-space", owner("app owner"), "should match"),
+		// Every sink quotes the role name (%I, :"list"), so the CRD admits any
+		// quoted identifier except one the user already quoted (#294).
+		Entry("owner name with hyphens", "cel-owner-hyphens", owner("kkp-db-medium-dev"), ""),
+		Entry("owner name with one hyphen", "cel-owner-hyphen", owner("db-admin"), ""),
+		Entry("owner name with a space", "cel-owner-space", owner("app owner"), ""),
+		Entry("owner name with a leading digit", "cel-owner-digit", owner("1app"), ""),
+		Entry("owner name quoted by the user", "cel-owner-quoted", owner(`"kkp-db-medium-dev"`), "should match"),
+		Entry("owner name with a newline", "cel-owner-newline", owner("app\nowner"), "should match"),
+		// NAMEDATALEN counts bytes: 32 characters, 64 bytes, passes MaxLength.
+		Entry("owner name over 63 bytes", "cel-owner-bytes", owner(strings.Repeat("é", 32)), "limited to 63 bytes"),
 	)
 
 	// The CRD defaults are what Materialize relies on for partial keys; a bare

@@ -46,6 +46,7 @@ spec:
 Use it when the migration cannot connect as the role that must own the objects.
 This is the usual case on managed PostgreSQL, where the provider's admin role is not the application's owning role.
 You cannot create a role that owns both sides.
+Give the role name unquoted, as PostgreSQL stores it: the operator quotes it, so hyphenated names such as `db-admin` work.
 `ownerAfterRestore` needs `noOwner: true`; the CRD rejects the field on its own.
 Otherwise `pg_restore` assigns the source owners, and the handover covers only the part of the schema that landed on the migration role.
 The CRD rejects `clone.allDatabases` too, because the handover runs only in the target connection's database.
