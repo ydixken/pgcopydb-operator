@@ -6,8 +6,8 @@ A `Partial` or `Not checked` item remains an operator decision.
 
 Start with the [operator prerequisites](reference/prerequisites.md).
 When follow mode is enabled, read the [live migration runbook](operations/live-migration.md).
+Before the real run, create a [dry run](operations/lifecycle.md#dry-run): it runs the preflight against both databases and stops before pgcopydb starts.
 When a preflight check fails, use the [troubleshooting guide](troubleshooting.md).
-Start with a [dry run](operations/lifecycle.md#dry-run): it runs the preflight against both databases and stops before pgcopydb starts.
 
 pgcopydb is a migration tool, not a backup system.
 

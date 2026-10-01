@@ -207,4 +207,5 @@ The password stays a projected file that feeds the passfile, like the other form
 Each side MAY additionally set `superuserSecretRef`, a Secret in the same convention that names a superuser on the same endpoint.
 For single-database migrations, preflight checks that Secret and applies the grants the regular role is missing, for the base clone and for follow alike.
 Each `PreflightRemediated` event lists the statements that one tier applied.
+A [dry run](operations/lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 See [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) for the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) for the example.
