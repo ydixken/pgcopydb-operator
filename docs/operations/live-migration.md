@@ -53,6 +53,7 @@ kubectl get pgm billing -o jsonpath='{.status.conditions[?(@.type=="Validated")]
 
 With `superuserSecretRef` set, the preflight applies the grantable rights itself and re-checks them.
 It emits one `PreflightRemediated` event per tier, clone rights and follow rights, with the applied statements.
+A [dry run](lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 On success a `PreflightPassed` event counts the checks and the applied grants.
 The operator keeps the finished preflight Job as an audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
 

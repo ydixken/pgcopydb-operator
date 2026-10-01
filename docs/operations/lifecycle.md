@@ -1,6 +1,6 @@
-# Suspend, retries, deletion
+# Dry run, suspend, retries, deletion
 
-The day-2 lifecycle of a Migration: how to suspend it, how the operator retries failed attempts, and what deletion cleans up.
+The lifecycle of a Migration: how to check it with a dry run, how to suspend it, how the operator retries failed attempts, and what deletion cleans up.
 
 ## Initial status
 
@@ -8,6 +8,40 @@ The day-2 lifecycle of a Migration: how to suspend it, how the operator retries 
 The controller persists it, so it is not an API-server default at creation.
 `Pending` has no validation condition and no durable condition-transition timestamp.
 An API watch can see it, but a Prometheus scrape may miss the short-lived phase.
+
+## Dry run
+
+`spec.dryRun: true` runs the [preflight](live-migration.md#preflight) and stops there.
+No worker Job starts, so pgcopydb never runs: nothing is copied, and no replication slot, publication, or origin is created.
+A passed dry run ends in phase `Completed` with `Complete=True` and reason `DryRunSucceeded`, and `status.attempts` stays 0.
+A failed one ends like any failed preflight, in `Failed` with reason `PreflightFailed`.
+
+```yaml
+apiVersion: pgcopydb-operator.io/v1beta1
+kind: Migration
+metadata:
+  name: shop-dry-run
+spec:
+  dryRun: true                    # preflight only, no worker Job
+  source:
+    secretRef: {name: shop-source}
+  target:
+    secretRef: {name: shop-target}
+    superuserSecretRef: {name: shop-target-admin}  # verified; missing grants are reported, not applied
+```
+
+With a `superuserSecretRef`, the preflight still connects as that user and verifies it, but it applies no grant.
+It prints each statement it would apply as `would-remediate:` (follow rights) or `would-remediate-clone:` (clone rights), and emits one `PreflightWouldRemediate` event per tier that lists them.
+Without a `superuserSecretRef`, a missing grant fails the dry run exactly as it fails a real preflight.
+
+`dryRun` is immutable.
+For the real run, create a separate Migration without it.
+
+> [!important]
+> `spec.dryRun` has nothing to do with `kubectl apply --dry-run`: the Migration is created, and its preflight Job connects to both databases.
+> It still allocates the work PVC, because the preflight pod mounts it.
+> A passed dry run reports as `Completed`: Argo CD shows it `Healthy`, the fleet dashboard counts it as completed, and `kubectl wait --for=condition=Complete` returns.
+> A dry run is final whether it passes or fails, and it never turns into the real run.
 
 ## Suspend
 

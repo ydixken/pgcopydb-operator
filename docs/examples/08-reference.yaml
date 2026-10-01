@@ -109,5 +109,6 @@ spec:
     tolerations:
       - {key: workload, operator: Equal, value: batch, effect: NoSchedule}
   suspend: false                # true pauses between attempts; a follow slot keeps retaining WAL
+  dryRun: false                 # true runs the preflight only, then completes; immutable
   backoffLimit: 3               # worker retries after the first attempt
   ttlSecondsAfterFinished: 86400  # keep finished worker Jobs a day for log reading

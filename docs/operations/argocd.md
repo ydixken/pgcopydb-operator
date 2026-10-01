@@ -53,6 +53,8 @@ The mapping:
 - Everything else is `Progressing`, with the current phase in the message.
 
 Both terminal conditions are absorbing, so the health state settles once.
+A passed [dry run](lifecycle.md#dry-run) sets `Complete=True` with reason `DryRunSucceeded`, so it shows `Healthy` as well.
+Match that reason in the Lua if you need to tell the two apart.
 A verification mismatch does not set `Failed`, so a migration with `Verified=False` still reports `Healthy`.
 Alert on `Verified` separately.
 

@@ -8,6 +8,7 @@ It falls back to the bare Job message when the pod is already gone.
 | Symptom | Section |
 |---|---|
 | [`describe` shows no phase, no conditions, no events](#migration-has-no-status-and-the-log-repeats-is-immutable) | Spec and admission |
+| [An update fails with `dryRun is immutable`](#an-update-fails-with-dryrun-is-immutable) | Spec and admission |
 | [Phase `Failed` at `Validating`, reason `PreflightFailed`](#phase-failed-at-validating) | Preflight failures |
 | [`PreflightFailed` names the all-databases superuser requirement](#all-databases-superuser-requirement) | Preflight failures |
 | [`PreflightFailed` names unavailable selected extensions](#unavailable-selected-extensions) | Preflight failures |
@@ -61,6 +62,12 @@ Operators up to v0.8.1 rejected that spelling before any status could be set.
 
 Upgrade past v0.8.1, where both spellings work.
 On an older version, omit the field or set it to `null` instead of `[]`, `""`, or `false`.
+
+### An update fails with `dryRun is immutable`
+
+Admission rejects a change to `spec.dryRun` on an existing Migration with `dryRun is immutable: create a separate Migration for the real run`.
+A dry run stops before the first worker attempt, so turning it on mid-run would halt the migration between attempts, and turning it off after completion would change nothing.
+Create a new Migration with the same spec and without `dryRun`.
 
 ## Preflight failures
 
