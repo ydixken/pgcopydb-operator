@@ -305,6 +305,9 @@ It then applies the rights the regular role is missing, exactly these statements
 
 The preflight re-checks and logs every applied statement in its output.
 One `PreflightRemediated` event per tier (clone rights, follow rights) on the Migration lists that tier's statements.
+Under [`spec.dryRun`](../operations/lifecycle.md#dry-run) the preflight verifies the superuser connection and applies nothing.
+It prints each statement it would apply as `would-remediate:` or `would-remediate-clone:`, and one `PreflightWouldRemediate` event per tier lists them.
+It runs none of them, so a statement that would fail, such as the `session_replication_role` grant on a PostgreSQL 14 target, passes the dry run and fails the real preflight.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never alters schema objects or data; it only grants rights.
 It never touches replica identity, `wal_level`, plugin installation, database ownership, or extension ownership (the ownership probes only report remedies).

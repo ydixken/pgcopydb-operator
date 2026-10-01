@@ -15,7 +15,7 @@ Where to go:
 - [Configuration](configuration.md): clone tuning, filters, work volume, runner image, credentials.
 - [Live migration](operations/live-migration.md): follow mode, preflight, and the cutover runbook.
 - [Verification](operations/verification.md): `pgcopydb compare` after completion.
-- [Suspend, retries, deletion](operations/lifecycle.md): day-2 lifecycle of a Migration.
+- [Dry run, suspend, retries, deletion](operations/lifecycle.md): checking a Migration before it runs, and its day-2 lifecycle.
 - [Monitoring](operations/monitoring.md): per-Migration metrics, the bundled Grafana dashboards, and alert rules.
 - [Migrating into CloudNativePG](operations/cloudnativepg.md): CNPG targets and sources.
 - [Argo CD health checks](operations/argocd.md): GitOps health for `Migration` resources.

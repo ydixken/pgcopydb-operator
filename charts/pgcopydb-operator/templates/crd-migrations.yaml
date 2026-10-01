@@ -297,6 +297,14 @@ spec:
                     - Automatic
                     type: string
                 type: object
+              dryRun:
+                description: |-
+                  dryRun runs the preflight checks and stops: no worker Job, no data
+                  written, no replication slot, publication, or origin. A passed dry run
+                  ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef
+                  would apply are reported, not applied. Unrelated to kubectl --dry-run.
+                  Immutable: the real run is a separate Migration.
+                type: boolean
               follow:
                 description: |-
                   follow enables live migration (CDC after the base copy). Immutable:
@@ -2022,6 +2030,9 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: 'dryRun is immutable: create a separate Migration for the real
+                run'
+              rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2484,6 +2495,14 @@ spec:
                     - Automatic
                     type: string
                 type: object
+              dryRun:
+                description: |-
+                  dryRun runs the preflight checks and stops: no worker Job, no data
+                  written, no replication slot, publication, or origin. A passed dry run
+                  ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef
+                  would apply are reported, not applied. Unrelated to kubectl --dry-run.
+                  Immutable: the real run is a separate Migration.
+                type: boolean
               follow:
                 description: |-
                   follow enables live migration (CDC after the base copy). Immutable:
@@ -4209,6 +4228,9 @@ spec:
                 produces no JSON verdict in this mode'
               rule: '!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases
                 && has(self.verification) && has(self.verification.data) && self.verification.data)'
+            - message: 'dryRun is immutable: create a separate Migration for the real
+                run'
+              rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.

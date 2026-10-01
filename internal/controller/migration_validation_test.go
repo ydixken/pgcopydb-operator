@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -227,6 +228,8 @@ var _ = Describe("Migration CRD validation", func() {
 		Entry("owner name with a newline", "cel-owner-newline", owner("app\nowner"), "should match"),
 		// NAMEDATALEN counts bytes: 32 characters, 64 bytes, passes MaxLength.
 		Entry("owner name over 63 bytes", "cel-owner-bytes", owner(strings.Repeat("é", 32)), "limited to 63 bytes"),
+		// The immutability rule references oldSelf, so create skips it.
+		Entry("dry run", "cel-dry-run", func(m *v1beta1.Migration) { m.Spec.DryRun = true }, ""),
 	)
 
 	// The CRD defaults are what Materialize relies on for partial keys; a bare
@@ -344,5 +347,32 @@ var _ = Describe("Migration CRD validation", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, got)).To(Succeed())
 		got.Spec.Clone.OwnerAfterRestore = testOwnerRole
 		Expect(k8sClient.Update(ctx, got)).To(MatchError(ContainSubstring("ownerAfterRestore is immutable")))
+	})
+
+	It("pins dryRun in both directions", func() {
+		for _, created := range []bool{true, false} {
+			name := fmt.Sprintf("cel-dry-run-%t", created)
+			m := validMigration(name)
+			m.Spec.DryRun = created
+			Expect(k8sClient.Create(ctx, m)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+			fresh := func() *v1beta1.Migration {
+				got := &v1beta1.Migration{}
+				ExpectWithOffset(1, k8sClient.Get(ctx,
+					types.NamespacedName{Name: name, Namespace: testNS}, got)).To(Succeed())
+				return got
+			}
+
+			changed := fresh()
+			changed.Spec.DryRun = !created
+			Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring(
+				"dryRun is immutable: create a separate Migration for the real run")))
+
+			// Control: the rule pins one field, not the whole spec.
+			changed = fresh()
+			changed.Spec.Suspend = true
+			Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+		}
 	})
 })

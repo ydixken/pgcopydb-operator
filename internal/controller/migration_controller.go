@@ -223,6 +223,9 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// so a stuck gate never reads as a validated migration.
 	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly and the preflight passed")
 
+	if m.Spec.DryRun {
+		return r.completeDryRun(ctx, m, base)
+	}
 	if m.Status.JobName == "" {
 		return r.nextAttempt(ctx, m, base)
 	}
@@ -252,6 +255,19 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	return r.observeRunningJob(ctx, m, base, job, reconcileStart)
+}
+
+// completeDryRun ends a dry run once its preflight passed; the terminal check
+// absorbs every later pass. Attempts stays 0, so a follow Migration's
+// deletion skips the cleanup Job: no slot or origin was ever created.
+func (r *MigrationReconciler) completeDryRun(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	const msg = "dry run: preflight passed, no worker Job created"
+	now := metav1.Now()
+	m.Status.CompletedAt = &now
+	m.Status.Phase = v1beta1.PhaseCompleted
+	r.setCondition(m, v1beta1.ConditionComplete, metav1.ConditionTrue, "DryRunSucceeded", msg)
+	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "DryRunSucceeded", "Complete", "%s", msg)
+	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
 
 func statusIsEmpty(status v1beta1.MigrationStatus) bool {
@@ -309,12 +325,11 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 }
 
 // emitPreflightOutcome turns the finished preflight's log into events, one
-// PreflightRemediated bundle per tier. Not one event per statement: the
-// recorder collapses differing messages that share a reason and action into
-// a counter, so all but the first statement would be lost.
+// PreflightRemediated (or, in a dry run, PreflightWouldRemediate) bundle per
+// tier: the recorder collapses same reason-and-action events into a counter.
 func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
 	checks := 0
-	var clone, follow []string
+	var clone, follow, wouldClone, wouldFollow []string
 	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
 		switch {
@@ -324,19 +339,33 @@ func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1bet
 			clone = append(clone, strings.TrimPrefix(line, remPrefixClone))
 		case strings.HasPrefix(line, remPrefixFollow):
 			follow = append(follow, strings.TrimPrefix(line, remPrefixFollow))
+		case strings.HasPrefix(line, wouldPrefixClone):
+			wouldClone = append(wouldClone, strings.TrimPrefix(line, wouldPrefixClone))
+		case strings.HasPrefix(line, wouldPrefixFollow):
+			wouldFollow = append(wouldFollow, strings.TrimPrefix(line, wouldPrefixFollow))
 		}
 	}
-	if len(clone) > 0 {
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateClone",
-			"%s", truncate(strings.Join(clone, "\n"), remediatedNoteLen))
-	}
-	if len(follow) > 0 {
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightRemediated", "RemediateFollow",
-			"%s", truncate(strings.Join(follow, "\n"), remediatedNoteLen))
+	for _, b := range []struct {
+		reason, action string
+		stmts          []string
+	}{
+		{"PreflightRemediated", "RemediateClone", clone},
+		{"PreflightRemediated", "RemediateFollow", follow},
+		{"PreflightWouldRemediate", "RemediateClone", wouldClone},
+		{"PreflightWouldRemediate", "RemediateFollow", wouldFollow},
+	} {
+		if len(b.stmts) > 0 {
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, b.reason, b.action,
+				"%s", truncate(strings.Join(b.stmts, "\n"), remediatedNoteLen))
+		}
 	}
 	grants := len(clone) + len(follow)
+	would := len(wouldClone) + len(wouldFollow)
 	msg := "all preflight checks passed"
-	if checks > 0 || grants > 0 {
+	switch {
+	case would > 0:
+		msg = fmt.Sprintf("%d checks passed, %d grants would be applied", checks, would)
+	case checks > 0 || grants > 0:
 		msg = fmt.Sprintf("%d checks passed, %d grants applied", checks, grants)
 	}
 	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "PreflightPassed", "Preflight", "%s", msg)

@@ -781,14 +781,7 @@ var _ = Describe("Migration", Ordered, func() {
 		// like the app role does.
 		supers := map[string]string{name + "-super-src": sourceCluster, name + "-super-tgt": targetCluster}
 		for secName, cluster := range supers {
-			pw := secName + "-pw"
-			psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
-			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secName}}
-			_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
-				sec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(pw)}
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret %s", secName)
+			packSuperuserSecret(cluster, secName)
 		}
 
 		By("revoking all three grantable follow rights from the app role")
@@ -888,14 +881,7 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("recreating the managed-Postgres matrix plus a target superuser Secret")
 		makeLimitedTarget(name)
-		superPW := name + "-super-pw"
-		psql(targetCluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", superPW))
-		superSec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name + "-super"}}
-		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, superSec, func() error {
-			superSec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(superPW)}
-			return nil
-		})
-		Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret")
+		packSuperuserSecret(targetCluster, name+"-super")
 
 		// noOwner/noACL is the documented non-superuser restore shape, and the
 		// db-properties step stays skipped because a grant cannot confer
@@ -1038,6 +1024,20 @@ func makeLimitedTarget(secretName string) {
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
 	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
 	copySecret(nsE2E, secretName, []byte(pw))
+}
+
+// packSuperuserSecret gives postgres on cluster a password and stores it in
+// secretName, for a superuserSecretRef to name. Callers reset the password.
+func packSuperuserSecret(cluster, secretName string) {
+	GinkgoHelper()
+	pw := secretName + "-pw"
+	psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secretName}}
+	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
+		sec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(pw)}
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret %s", secretName)
 }
 
 // dropLimitedRole removes the limited role and everything it restored. The

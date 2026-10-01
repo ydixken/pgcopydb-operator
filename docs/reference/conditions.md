@@ -21,14 +21,14 @@ Automation should wait on conditions, not on phase strings.
 | Phase | The operator is | Next |
 |---|---|---|
 | `Pending` | Persisted its first observation, before validation or provisioning | `Validating`, `Failed`, or `Suspended` |
-| `Validating` | Materializing the spec and running the preflight Job | `Cloning`, or `Failed` |
+| `Validating` | Materializing the spec and running the preflight Job | `Cloning`, `Completed` (a passed dry run), or `Failed` |
 | `Cloning` | Running the worker: schema, then table data | `Finalizing`, `Streaming`, `Completed`, or `Failed` |
 | `Finalizing` | Past the data copy, finishing indexes, constraints and vacuum; on a clone with `clone.ownerAfterRestore`, also handing the restored objects over once the worker has exited | `Streaming`, `Verifying`, `Completed`, or `Failed` |
 | `Streaming` | Applying changes from the replication slot (live migrations) | `CutoverPending`, or `Failed` |
 | `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
 | `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
 | `Verifying` | Running the requested `pgcopydb compare` checks | `Completed`, or `Failed` |
-| `Completed` | Finished; terminal | |
+| `Completed` | Finished, or a `spec.dryRun` preflight passed; terminal | |
 | `Failed` | Finished badly; terminal | |
 | `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
 
@@ -109,6 +109,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Verified` | `False` | `SchemaMismatch` | `pgcopydb compare schema` reported differences. |
 | `Verified` | `False` | `DataMismatch` | `pgcopydb compare data` reported differences while the schema matched (or was not checked). |
 | `Complete` | `True` | `MigrationSucceeded` | The migration finished; on live migrations, set after cleanup and verification. |
+| `Complete` | `True` | `DryRunSucceeded` | A `spec.dryRun` Migration's preflight passed. No worker Job was created and no data moved. |
 | `Failed` | `True` | `InvalidSpec` | Spec validation failed; retrying cannot help (source and target are immutable). |
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
@@ -139,8 +140,10 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; the message names them. Once per refusal, see the condition reason of the same name. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could resume. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
-| `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants. |
+| `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants, or in a dry run the grants that would be applied. |
 | `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |
+| `PreflightWouldRemediate` | Normal | A dry run found grants `superuserSecretRef` would apply, and applied none; one event per tier, each message listing that tier's statements. |
+| `DryRunSucceeded` | Normal | A dry run's preflight passed; the Migration completed without a worker Job. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |

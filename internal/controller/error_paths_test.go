@@ -671,6 +671,23 @@ func TestFinishFollow_ErrorLegs(t *testing.T) {
 	}
 }
 
+// TestReconcile_DryRunStatusPatchFailure: the completion write failing must
+// surface, or a passed dry run never reads as finished.
+func TestReconcile_DryRunStatusPatchFailure(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.DryRun = true
+	m.Status.Phase = v1beta1.PhaseValidating
+	r := failingReconciler(t, failStatusPatch(), m, completeJob(preflightJobName(m)))
+	r.Logs = &fakeLogs{}
+	if _, err := r.reconcile(context.Background(), migrationRequest(m)); !errors.Is(err, errBoom) {
+		t.Fatalf("a dry-run completion status write failure must propagate, got %v", err)
+	}
+	err := r.Get(context.Background(), types.NamespacedName{Name: workerJob, Namespace: m.Namespace}, &batchv1.Job{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("a dry run must not create the worker Job, got %v", err)
+	}
+}
+
 // TestFinishClone_ErrorLegs: the clone-side verification legs, mirroring the
 // follow flow above.
 func TestFinishClone_ErrorLegs(t *testing.T) {

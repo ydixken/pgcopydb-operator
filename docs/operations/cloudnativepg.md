@@ -76,6 +76,7 @@ The [preflight](live-migration.md#preflight) probes both before any data moves.
 To skip the manual step, set `spec.target.superuserSecretRef` to a Secret with superuser credentials.
 CNPG creates `<cluster>-superuser` when `enableSuperuserAccess` is on.
 The preflight then applies exactly these grants itself and records a `PreflightRemediated` event.
+A [dry run](lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 See the [prerequisites](../reference/prerequisites.md#superuser-remediation-superusersecretref).
 
 ## 4. CNPG as the source
