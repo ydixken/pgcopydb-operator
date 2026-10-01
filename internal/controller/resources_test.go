@@ -2873,3 +2873,36 @@ func TestPreflightScript_DryRunClone(t *testing.T) {
 		}
 	})
 }
+
+// TestEmitPreflightOutcome_DryRun: would-remediate lines become one
+// PreflightWouldRemediate bundle per tier, and the summary says the grants
+// would be applied, not that they were.
+func TestEmitPreflightOutcome_DryRun(t *testing.T) {
+	log := "ok: connectivity source\nok: connectivity target\n" +
+		wouldPrefixClone + "GRANT CREATE ON DATABASE app TO limited\n" +
+		wouldPrefixFollow + `ALTER ROLE "app" REPLICATION` + "\n" +
+		wouldPrefixFollow + `GRANT SET ON PARAMETER session_replication_role TO "app"` + "\n" +
+		"preflight: all checks passed\n"
+	r := &MigrationReconciler{Recorder: events.NewFakeRecorder(20), Logs: &fakeLogs{out: log}}
+	r.emitPreflightOutcome(context.Background(), passwordMigration())
+	got := drainEvents(r.Recorder.(*events.FakeRecorder))
+	if len(got) != 3 {
+		t.Fatalf("want 3 events (clone bundle, follow bundle, summary), got %v", got)
+	}
+	if !strings.Contains(got[0], "PreflightWouldRemediate GRANT CREATE ON DATABASE app TO limited") ||
+		strings.Contains(got[0], "ALTER ROLE") {
+		t.Fatalf("clone bundle wrong: %s", got[0])
+	}
+	if !strings.Contains(got[1], `PreflightWouldRemediate ALTER ROLE "app" REPLICATION`+"\n"+`GRANT SET ON PARAMETER`) ||
+		strings.Contains(got[1], "GRANT CREATE") {
+		t.Fatalf("follow bundle wrong: %s", got[1])
+	}
+	if !strings.Contains(got[2], "PreflightPassed 2 checks passed, 3 grants would be applied") {
+		t.Fatalf("summary event wrong: %s", got[2])
+	}
+	for _, e := range got {
+		if strings.Contains(e, "PreflightRemediated") {
+			t.Fatalf("a dry run must not report applied grants: %v", got)
+		}
+	}
+}

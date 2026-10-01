@@ -239,6 +239,66 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 	})
 
+	It("ends a passed dry run at the preflight without a worker Job", func() {
+		const name = "mig-dry-run"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.DryRun = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: "ok: connectivity source\nok: connectivity target\n" +
+			wouldPrefixClone + `GRANT CREATE ON SCHEMA public TO "app"` + "\npreflight: all checks passed\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+		passGate(ctx, r, name)
+
+		m = getMigration(name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(m.Status.CompletedAt).NotTo(BeNil())
+		Expect(m.Status.Attempts).To(BeZero())
+		Expect(m.Status.JobName).To(BeEmpty())
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionValidated)).To(BeTrue())
+		complete := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionComplete)
+		Expect(complete).NotTo(BeNil())
+		Expect(complete.Status).To(Equal(metav1.ConditionTrue))
+		Expect(complete.Reason).To(Equal("DryRunSucceeded"))
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
+		evs := drainEvents(rec)
+		Expect(evs).To(ContainElement(ContainSubstring(`PreflightWouldRemediate GRANT CREATE ON SCHEMA public TO "app"`)))
+		Expect(evs).To(ContainElement(ContainSubstring("2 checks passed, 1 grants would be applied")))
+		Expect(evs).To(ContainElement(ContainSubstring("DryRunSucceeded")))
+
+		// Terminal state is absorbing: another pass writes and emits nothing.
+		after := reconcileAndGet(ctx, r, name)
+		Expect(after.ResourceVersion).To(Equal(m.ResourceVersion))
+		Expect(drainEvents(rec)).To(BeEmpty())
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("fails a dry run whose preflight fails, without a worker Job", func() {
+		const name = "mig-dry-run-fail"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.DryRun = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: "preflight failed:\npreflight: target role \"app\" lacks CREATE on the target database"}
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		m = reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		Expect(m.Status.Attempts).To(BeZero())
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed).NotTo(BeNil())
+		Expect(failed.Reason).To(Equal("PreflightFailed"))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionComplete)).To(BeNil())
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: name + "-run-1", Namespace: testNS}, &batchv1.Job{})
+		Expect(errors.IsNotFound(err)).To(BeTrue())
+	})
+
 	It("retries with --resume and fails after the budget", func() {
 		const name = "mig-retry"
 		defer removeMigration(ctx, name)
