@@ -335,11 +335,17 @@ fi
 }
 
 // remPrefixFollow and remPrefixClone open the remediated lines of the two
-// preflight tiers; emitPreflightOutcome parses them into per-tier events.
+// preflight tiers, the would prefixes their dry-run counterparts;
+// emitPreflightOutcome parses all four into per-tier events.
 const (
-	remPrefixFollow = "remediated: "
-	remPrefixClone  = "remediated-clone: "
+	remPrefixFollow   = "remediated: "
+	remPrefixClone    = "remediated-clone: "
+	wouldPrefixFollow = "would-remediate: "
+	wouldPrefixClone  = "would-remediate-clone: "
 )
+
+// wouldPrefix maps a tier's remediated prefix to its dry-run one.
+var wouldPrefix = map[string]string{remPrefixFollow: wouldPrefixFollow, remPrefixClone: wouldPrefixClone}
 
 // tgtSuperHint is the pointer printed when a target-side right is missing and
 // no target superuser is configured; with one configured the block remediates.
@@ -353,6 +359,7 @@ type remSingle struct {
 	cmdProbe string // alternative: command whose success IS the privilege test
 	compose  string // command printing the fixing statement; empty = probe-only block
 	superURI string // super env name; empty emits the note+hint variant
+	report   bool   // dry run: print the statement a super would apply, apply nothing
 	prefix   string // remediated-line prefix (log contract)
 	ok       string
 	missing  string // note when the right is missing and no super applies
@@ -385,6 +392,14 @@ func remSingleBlock(c remSingle) string {
 ` + remRecheck(c) + `      else
         note "` + c.apply + `"
       fi
+    else
+      note "` + c.onComp + `"
+    fi
+`
+	}
+	if c.superURI != "" && c.report {
+		missing = `    if stmt=$(` + c.compose + `); then
+      printf '%s\n' "` + wouldPrefix[c.prefix] + `$stmt"
     else
       note "` + c.onComp + `"
     fi
@@ -456,6 +471,7 @@ func shiftLeft(s string) string {
 type remAggregate struct {
 	query    string
 	superURI string
+	report   bool
 	prefix   string
 	term     string // per-statement terminator the re-echo restores
 	ok       string
@@ -466,8 +482,14 @@ type remAggregate struct {
 	hint     string
 }
 
-// remAggBlock emits the shared scaffold for remAggregate; the re-echo
-// pipeline that feeds the remediated-line contract exists only here.
+// remAggEcho prints $agg one statement per line under prefix; the composed
+// statements' own terminator, which the tr split strips, is restored as term.
+func remAggEcho(prefix, term string) string {
+	return `printf '%s\n' "$agg" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do printf '%s\n' "` + prefix + `$g` + term + `"; done
+`
+}
+
+// remAggBlock emits the shared scaffold for remAggregate.
 func remAggBlock(c remAggregate) string {
 	missing := `    note "` + c.missing + `"
 `
@@ -477,8 +499,7 @@ func remAggBlock(c remAggregate) string {
 	}
 	if c.superURI != "" {
 		missing = `    if check "$` + c.superURI + `" "$agg" >/dev/null; then
-      printf '%s\n' "$agg" | tr ';' '\n' | sed -e 's/^ *//' -e '/^$/d' | while IFS= read -r g; do printf '%s\n' "` + c.prefix + `$g` + c.term + `"; done
-      if agg=$(` + c.query + `); then
+      ` + remAggEcho(c.prefix, c.term) + `      if agg=$(` + c.query + `); then
         if [ -n "$agg" ]; then
           note "` + c.still + `"
         else
@@ -491,6 +512,9 @@ func remAggBlock(c remAggregate) string {
       note "` + c.apply + `"
     fi
 `
+	}
+	if c.superURI != "" && c.report {
+		missing = `    ` + remAggEcho(wouldPrefix[c.prefix], c.term)
 	}
 	return `if agg=$(` + c.query + `); then
   if [ -n "$agg" ]; then
@@ -520,7 +544,7 @@ const cloneSchemaGrantsQuery = `checkv "$PGCOPYDB_TARGET_PGURI" "select string_a
 // cloneRightsBlock probes CREATE on the target database and the source schemas
 // present there, plus the ownership db-properties needs: managed platforms
 // grant the database right while pg_database_owner withholds the schema (#119).
-func cloneRightsBlock(superTgt, dbProperties bool) string {
+func cloneRightsBlock(superTgt, dbProperties, dryRun bool) string {
 	superURI := ""
 	hint := tgtSuperHint
 	if superTgt {
@@ -533,6 +557,7 @@ func cloneRightsBlock(superTgt, dbProperties bool) string {
 		probe:    cloneDBCreateCheck,
 		compose:  cloneDBCreateStmt,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixClone,
 		ok:       "clone rights database",
 		missing:  `preflight: target role \"$tgt_user\" lacks CREATE on the target database: $stmt`,
@@ -561,6 +586,7 @@ if [ -n "$sc_list" ]; then
 ` + remAggBlock(remAggregate{
 		query:    cloneSchemaGrantsQuery,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixClone,
 		ok:       "clone rights schemas",
 		missing:  `preflight: target role \"$tgt_user\" lacks CREATE on schemas the restore targets, run on the target: $agg`,
@@ -609,7 +635,7 @@ const reownGrantStmt = `checkv "$PGCOPYDB_TARGET_PGURI" "` + reownGrantSQL + `" 
 // ownerAfterRestoreBlock probes the handover before any worker runs. It uses a
 // rolled-back SET ROLE, not pg_has_role(..., 'USAGE'): the two diverge on
 // NOINHERIT members and on WITH SET FALSE (TestPreflightOwnerAfterRestoreQueries).
-func ownerAfterRestoreBlock(super bool) string {
+func ownerAfterRestoreBlock(super, dryRun bool) string {
 	superURI := ""
 	hint := tgtSuperHint
 	if super {
@@ -628,6 +654,7 @@ func ownerAfterRestoreBlock(super bool) string {
 		cmdProbe: reownSetRoleProbe,
 		compose:  reownGrantStmt,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixClone,
 		ok:       "ownerAfterRestore SET ROLE",
 		missing:  `preflight: the migration role cannot SET ROLE to \"$reown_owner\", which the ownership handover needs: $stmt`,
@@ -664,7 +691,7 @@ const replicationAttrStmt = `check "$PGCOPYDB_SOURCE_PGURI" "select format('ALTE
 // replicationAttrBlock checks the source role's REPLICATION attribute. With a
 // source superuser the exact ALTER ROLE is applied and re-checked; without one
 // the hint names the field that would let the operator do it.
-func replicationAttrBlock(super bool) string {
+func replicationAttrBlock(super, dryRun bool) string {
 	superURI := ""
 	hint := "hint: spec.source.superuserSecretRef lets the operator apply this itself"
 	if super {
@@ -676,6 +703,7 @@ func replicationAttrBlock(super bool) string {
 		probe:    replicationAttrCheck,
 		compose:  replicationAttrStmt,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixFollow,
 		ok:       "source replication attribute",
 		missing:  `preflight: source role \"$src_user\" lacks the REPLICATION attribute: $stmt`,
@@ -694,7 +722,7 @@ const originGrantsQuery = `check "$PGCOPYDB_TARGET_PGURI" "select string_agg(for
 // originGrantsBlock audits EXECUTE on the origin functions. The remediation
 // runs the aggregated statements in one psql call, then prints them one per
 // line for the log contract; the event bundles them (see emitPreflightOutcome).
-func originGrantsBlock(super bool) string {
+func originGrantsBlock(super, dryRun bool) string {
 	superURI := ""
 	hint := tgtSuperHint
 	if super {
@@ -706,6 +734,7 @@ func originGrantsBlock(super bool) string {
 	return remAggBlock(remAggregate{
 		query:    originGrantsQuery,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixFollow,
 		term:     ";",
 		ok:       "target origin function grants",
@@ -728,7 +757,7 @@ const srrStmt = `check "$PGCOPYDB_TARGET_PGURI" "select format('GRANT SET ON PAR
 // srrBlock checks the silent-loss gate. The GRANT exists on PostgreSQL 15+
 // only; on older targets remediation fails loudly, which is still better than
 // pgcopydb applying nothing.
-func srrBlock(super bool) string {
+func srrBlock(super, dryRun bool) string {
 	superURI := ""
 	hint := tgtSuperHint
 	if super {
@@ -740,6 +769,7 @@ func srrBlock(super bool) string {
 		cmdProbe: srrProbe,
 		compose:  srrStmt,
 		superURI: superURI,
+		report:   dryRun,
 		prefix:   remPrefixFollow,
 		ok:       "target session_replication_role",
 		missing:  `preflight: target role \"$tgt_user\" cannot SET session_replication_role, so pgcopydb would apply NOTHING while reporting success: $stmt (PostgreSQL 15+; older targets need a superuser role)`,
@@ -978,16 +1008,17 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		}
 	}
 	dbProps := !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("dbProperties"))
+	dry := m.Spec.DryRun
 	if reownRequested(m) {
-		b.WriteString(ownerAfterRestoreBlock(superTgt))
+		b.WriteString(ownerAfterRestoreBlock(superTgt, dry))
 	}
-	b.WriteString(cloneRightsBlock(superTgt, dbProps))
+	b.WriteString(cloneRightsBlock(superTgt, dbProps, dry))
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
 		b.WriteString(slotHeadroomBlock)
-		b.WriteString(replicationAttrBlock(superSrc))
-		b.WriteString(originGrantsBlock(superTgt))
-		b.WriteString(srrBlock(superTgt))
+		b.WriteString(replicationAttrBlock(superSrc, dry))
+		b.WriteString(originGrantsBlock(superTgt, dry))
+		b.WriteString(srrBlock(superTgt, dry))
 		b.WriteString(riAuditBlock)
 		if m.Spec.Follow.Plugin == v1beta1.PluginWal2json {
 			b.WriteString(preflightWal2jsonNote)

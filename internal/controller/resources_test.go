@@ -416,6 +416,13 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		"owner after restore": func() (*batchv1.Job, error) {
 			return buildPreflightJob(reownMigration(), "img")
 		},
+		"dry run with every remediation block": func() (*batchv1.Job, error) {
+			dry := superMigration()
+			dry.Spec.DryRun = true
+			dry.Spec.Clone.NoOwner = true
+			dry.Spec.Clone.OwnerAfterRestore = reownTestOwner
+			return buildPreflightJob(dry, "img")
+		},
 		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
@@ -1132,6 +1139,7 @@ for a in "$@"; do
 done
 role="${ROLE_NAME:-app}"
 qrole=$(printf '%s' "$role" | sed 's/"/""/g')
+case "$uri" in *-super) printf '%s\n' "$q" >> "$STATE/super-queries" ;; esac
 apply() {
   [ "${REMEDY_MODE:-}" = reject ] && exit 1
   case "$uri" in src-super|tgt-super) ;; *) exit 1 ;; esac
@@ -2103,6 +2111,7 @@ for a in "$@"; do
     -f) q=$(cat) ;;
   esac
 done
+case "$uri" in *-super) printf '%s\n' "$q" >> "${SUPER_OUT:-/dev/null}" ;; esac
 case "$q" in *has_schema_privilege*) printf '%s' "$list" > "${LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *installed.extowner*) printf '%s' "$list" > "${PSQL_EXTENSION_LIST_OUT:-/dev/null}" ;; esac
 case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
@@ -2492,19 +2501,19 @@ func TestPreflightScriptFor_OwnerAfterRestore(t *testing.T) {
 	t.Run("target superuser remediates, otherwise hints", func(t *testing.T) {
 		m := reownMigration()
 		s := preflightScriptFor(m)
-		if !strings.Contains(s, ownerAfterRestoreBlock(false)) {
+		if !strings.Contains(s, ownerAfterRestoreBlock(false, false)) {
 			t.Fatalf("want the no-super variant:\n%s", s)
 		}
-		if !strings.Contains(ownerAfterRestoreBlock(false), `hint "`+tgtSuperHint) ||
-			strings.Contains(ownerAfterRestoreBlock(false), "SUPER_PGURI") {
+		if !strings.Contains(ownerAfterRestoreBlock(false, false), `hint "`+tgtSuperHint) ||
+			strings.Contains(ownerAfterRestoreBlock(false, false), "SUPER_PGURI") {
 			t.Fatal("without a target superuser the SET ROLE probe hints instead of remediating")
 		}
 		m.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
-		if !strings.Contains(preflightScriptFor(m), ownerAfterRestoreBlock(true)) {
+		if !strings.Contains(preflightScriptFor(m), ownerAfterRestoreBlock(true, false)) {
 			t.Fatal("a target superuser must select the remediating variant")
 		}
-		if !strings.Contains(ownerAfterRestoreBlock(true), `check "$PGM_TARGET_SUPER_PGURI" "$stmt"`) ||
-			strings.Contains(ownerAfterRestoreBlock(true), "hint: spec.") {
+		if !strings.Contains(ownerAfterRestoreBlock(true, false), `check "$PGM_TARGET_SUPER_PGURI" "$stmt"`) ||
+			strings.Contains(ownerAfterRestoreBlock(true, false), "hint: spec.") {
 			t.Fatal("the remediating variant applies the GRANT and drops the hint")
 		}
 	})
@@ -2728,6 +2737,139 @@ func TestPreflightOwnerAfterRestoreQueries(t *testing.T) {
 		t.Cleanup(func() { must(t, "REVOKE "+pfOwnerIdent+" FROM "+pfOtherRole+";", "") })
 		if _, err := psql(t, setRoleAs(pfOtherRole), pfOwnerRole); err != nil {
 			t.Fatalf("the composed GRANT must grant SET too, on every supported version: %v", err)
+		}
+	})
+}
+
+// superVerifyQueries are the statements superVerifyBlock sends. A dry run
+// sends nothing else over a superuser connection.
+var superVerifyQueries = []string{"select 1", "select rolsuper::int from pg_roles where rolname = current_user"}
+
+func expectOnlySuperVerify(t *testing.T, log string) {
+	t.Helper()
+	if strings.TrimSpace(log) == "" {
+		t.Fatal("no statement reached a superuser connection: the superuser verify block did not run")
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(log), "\n") {
+		if !slices.Contains(superVerifyQueries, line) {
+			t.Fatalf("a dry run sent %q over a superuser connection; all statements:\n%s", line, log)
+		}
+	}
+}
+
+// TestPreflightScript_DryRunFollow: with superusers on both sides a dry run
+// prints the follow-tier statements it would apply and passes, and the stub's
+// superuser log proves none of them was sent.
+func TestPreflightScript_DryRunFollow(t *testing.T) {
+	run := followPreflightHarness(t)
+	t.Run("super reports instead of applying", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.DryRun = true
+		out, code, state := run(t, preflightScriptFor(m), "")
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{
+			wouldPrefixFollow + `ALTER ROLE "app" REPLICATION`,
+			wouldPrefixFollow + `GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_oid(text) TO "app";`,
+			wouldPrefixFollow + `GRANT EXECUTE ON FUNCTION pg_catalog.pg_replication_origin_progress(text,boolean) TO "app";`,
+			wouldPrefixFollow + `GRANT SET ON PARAMETER session_replication_role TO "app"`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, remPrefixFollow) || strings.Contains(out, "ok: source replication attribute") {
+			t.Fatalf("a dry run must neither apply nor claim the right is present:\n%s", out)
+		}
+		applied, _ := filepath.Glob(filepath.Join(state, "applied-*"))
+		if len(applied) != 0 {
+			t.Fatalf("a dry run applied %v", applied)
+		}
+		superLog, err := os.ReadFile(filepath.Join(state, "super-queries"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectOnlySuperVerify(t, string(superLog))
+	})
+	t.Run("without super missing rights still fail", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.DryRun = true
+		m.Spec.Source.SuperuserSecretRef = nil
+		m.Spec.Target.SuperuserSecretRef = nil
+		out, code, _ := run(t, preflightScriptFor(m), "")
+		if code != 1 || strings.Count(out, "hint: spec.") != 3 {
+			t.Fatalf("code=%d, want 1 with 3 hints; out:\n%s", code, out)
+		}
+		if strings.Contains(out, "would-remediate") {
+			t.Fatalf("nothing can be reported as remediable without super:\n%s", out)
+		}
+	})
+}
+
+// TestPreflightScript_DryRunClone drives the clone-tier report-only variants:
+// the statements a target superuser would apply are printed, nothing is
+// applied, and every probe or compose failure still fails the dry run.
+func TestPreflightScript_DryRunClone(t *testing.T) {
+	run := clonePreflightHarness(t)
+	dryM := func(base *v1beta1.Migration) *v1beta1.Migration {
+		base.Spec.Target.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: testSuperSecret}
+		base.Spec.DryRun = true
+		return base
+	}
+	t.Run("super reports the database and schema grants", func(t *testing.T) {
+		superOut := filepath.Join(t.TempDir(), "super")
+		grants := `GRANT CREATE ON SCHEMA public TO "limited"; GRANT CREATE ON SCHEMA sales TO "limited"`
+		out, code, _, applied := run(t, dryM(passwordMigration()),
+			"PSQL_DB_CREATE=0", "PSQL_SCHEMA_GRANTS="+grants, "SUPER_OUT="+superOut)
+		if code != 0 || !strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{
+			wouldPrefixClone + `GRANT CREATE ON DATABASE "app" TO "limited"`,
+			wouldPrefixClone + `GRANT CREATE ON SCHEMA public TO "limited"` + "\n",
+			wouldPrefixClone + `GRANT CREATE ON SCHEMA sales TO "limited"` + "\n",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+		for _, absent := range []string{remPrefixClone, okCloneDB, okCloneSchema} {
+			if strings.Contains(out, absent) {
+				t.Fatalf("a dry run printed %q:\n%s", absent, out)
+			}
+		}
+		if strings.TrimSpace(applied) != "" {
+			t.Fatalf("a dry run applied %q", applied)
+		}
+		superLog, err := os.ReadFile(superOut)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expectOnlySuperVerify(t, string(superLog))
+	})
+	t.Run("super reports the ownerAfterRestore grant", func(t *testing.T) {
+		out, code, _, applied := run(t, dryM(reownMigration()), "PSQL_SET_ROLE=0")
+		if code != 0 || !strings.Contains(out, wouldPrefixClone+ownerRoleGrant+"\n") ||
+			strings.Contains(out, okOwnerSetRole) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if strings.TrimSpace(applied) != "" {
+			t.Fatalf("a dry run applied %q", applied)
+		}
+	})
+	t.Run("a failed compose still fails closed", func(t *testing.T) {
+		out, code, _, _ := run(t, dryM(passwordMigration()), "PSQL_DB_CREATE=0",
+			"PSQL_FAIL_SUBSTR=GRANT CREATE ON DATABASE %I")
+		if code != 1 || !strings.Contains(out, "composing the database GRANT failed") ||
+			strings.Contains(out, wouldPrefixClone) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("a failed probe still fails closed", func(t *testing.T) {
+		out, code, _, _ := run(t, dryM(passwordMigration()), "PSQL_FAIL_SUBSTR=has_schema_privilege")
+		if code != 1 || !strings.Contains(out, "probing CREATE on the restore's target schemas failed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
 		}
 	})
 }
