@@ -272,6 +272,7 @@ _Appears in:_
 | `workVolume` _[WorkVolume](#workvolume)_ | workVolume configures the work-directory PVC. |  | Optional: \{\} <br /> |
 | `runner` _[RunnerSpec](#runnerspec)_ | runner configures the worker pod. |  | Optional: \{\} <br /> |
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
+| `dryRun` _boolean_ | dryRun runs the preflight checks and stops: no worker Job, no data<br />written, no replication slot, publication, or origin. A passed dry run<br />ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef<br />would apply are reported, not applied. Unrelated to kubectl --dry-run.<br />Immutable: the real run is a separate Migration. |  | Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0) that resumes via the pgcopydb work directory. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished deletes owned Jobs this long after completion. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 

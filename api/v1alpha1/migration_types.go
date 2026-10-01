@@ -476,6 +476,7 @@ type ReplicationStatus struct {
 // immutable after creation (a migration is a one-shot job, like batch/v1 Job).
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode"
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
+// +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
@@ -518,6 +519,14 @@ type MigrationSpec struct {
 	// suspend stops the worker while preserving the work volume.
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
+
+	// dryRun runs the preflight checks and stops: no worker Job, no data
+	// written, no replication slot, publication, or origin. A passed dry run
+	// ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef
+	// would apply are reported, not applied. Unrelated to kubectl --dry-run.
+	// Immutable: the real run is a separate Migration.
+	// +optional
+	DryRun bool `json:"dryRun,omitempty"`
 
 	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
 	// Job (backoffLimit 0) that resumes via the pgcopydb work directory.
