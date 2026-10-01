@@ -34,6 +34,15 @@ With a `superuserSecretRef`, the preflight still connects as that user and verif
 It prints each statement it would apply as `would-remediate:` (follow rights) or `would-remediate-clone:` (clone rights), and emits one `PreflightWouldRemediate` event per tier that lists them.
 Without a `superuserSecretRef`, a missing grant fails the dry run exactly as it fails a real preflight.
 
+A dry run applies none of the statements it reports, so it cannot show that they succeed.
+On a PostgreSQL 14 target it reports `GRANT SET ON PARAMETER session_replication_role` and passes, although that grant exists only on PostgreSQL 15 and later.
+A `superuserSecretRef` user that lacks the right to grant passes too.
+Both fail the real preflight.
+
+> [!warning]
+> Upgrade the operator before you create a Migration with `dryRun: true`.
+> An operator release without the field ignores it and runs a real migration.
+
 `dryRun` is immutable.
 For the real run, create a separate Migration without it.
 
