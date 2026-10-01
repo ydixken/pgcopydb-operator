@@ -2805,6 +2805,18 @@ func TestPreflightScript_DryRunFollow(t *testing.T) {
 			t.Fatalf("nothing can be reported as remediable without super:\n%s", out)
 		}
 	})
+	t.Run("rolsuper warning promises no remediation", func(t *testing.T) {
+		m := superMigration()
+		m.Spec.DryRun = true
+		out, code, _ := run(t, preflightScriptFor(m), "", "ROLSUPER=0")
+		if code != 0 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		if !strings.Contains(out, "warn: source superuserSecretRef user lacks rolsuper; a real run would attempt remediation anyway") ||
+			strings.Contains(out, "attempting remediation") {
+			t.Fatalf("a dry run must word the rolsuper warning as a report:\n%s", out)
+		}
+	})
 }
 
 // TestPreflightScript_DryRunClone drives the clone-tier report-only variants:

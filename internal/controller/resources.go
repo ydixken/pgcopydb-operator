@@ -322,12 +322,16 @@ echo "ok: connectivity target"
 // superVerifyBlock probes a configured superuser connection. rolsuper=false
 // only warns: managed admin roles (rds_superuser and friends) can run the
 // grants without the attribute, and a real lack of rights still fails by name.
-func superVerifyBlock(s conn.Side) string {
-	return strings.NewReplacer("@SIDE@", string(s), "@URI@", conn.SuperURIEnv(s)).Replace(
+func superVerifyBlock(s conn.Side, dryRun bool) string {
+	then := "attempting remediation anyway"
+	if dryRun {
+		then = "a real run would attempt remediation anyway"
+	}
+	return strings.NewReplacer("@SIDE@", string(s), "@URI@", conn.SuperURIEnv(s), "@THEN@", then).Replace(
 		`connect_retry "$@URI@" "superuser @SIDE@" "preflight: cannot connect to the @SIDE@ database as the superuserSecretRef user"
 echo "ok: superuser @SIDE@ connected"
 if [ "$(check "$@URI@" 'select rolsuper::int from pg_roles where rolname = current_user')" != 1 ]; then
-  echo "warn: @SIDE@ superuserSecretRef user lacks rolsuper; attempting remediation anyway"
+  echo "warn: @SIDE@ superuserSecretRef user lacks rolsuper; @THEN@"
 else
   echo "ok: superuser @SIDE@ verified"
 fi
@@ -996,10 +1000,10 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	superSrc := m.Spec.Source.SuperuserSecretRef != nil
 	superTgt := m.Spec.Target.SuperuserSecretRef != nil
 	if superSrc {
-		b.WriteString(superVerifyBlock(conn.Source))
+		b.WriteString(superVerifyBlock(conn.Source, m.Spec.DryRun))
 	}
 	if superTgt {
-		b.WriteString(superVerifyBlock(conn.Target))
+		b.WriteString(superVerifyBlock(conn.Target, m.Spec.DryRun))
 	}
 	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
 		b.WriteString(extensionPreflightBlock(m.Spec.Clone.DropIfExists, false, false))
