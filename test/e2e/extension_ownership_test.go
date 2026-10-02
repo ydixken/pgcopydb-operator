@@ -52,20 +52,21 @@ var _ = Describe("Extension ownership", func() {
 				Expect(psql(cluster, installed)).To(Equal("f"))
 			})
 		}
-		psql(sourceCluster, "SET ROLE app; CREATE EXTENSION hstore WITH SCHEMA public; "+
+		psql(sourceCluster, asSourceAppRole()+"CREATE EXTENSION hstore WITH SCHEMA public; "+
 			"COMMENT ON EXTENSION hstore IS 'e2e source extension comment'")
-		// psql already runs as in-pod postgres; only the migration needs network credentials.
+		// psql already runs as the admin role; only the migration needs network credentials.
 		psql(targetCluster, "CREATE EXTENSION hstore WITH SCHEMA public; "+
 			"COMMENT ON EXTENSION hstore IS '"+targetComment+"'")
 
 		By("proving the selected extension has a comment and an inaccessible target owner")
-		Expect(psql(sourceCluster, owner)).To(Equal(appDB))
+		Expect(psql(sourceCluster, owner)).To(Equal(appRole(sourceCluster)))
 		Expect(psql(sourceCluster, comment)).To(Equal("e2e source extension comment"))
-		Expect(psql(targetCluster, owner)).To(Equal(postgresContainer))
+		Expect(psql(targetCluster, owner)).To(Equal(adminRole(targetCluster)))
 		Expect(psql(targetCluster, "SELECT pg_get_userbyid(datdba) FROM pg_database "+
-			"WHERE datname = current_database()")).To(Equal(appDB))
-		Expect(psql(targetCluster, "SELECT rolsuper OR pg_has_role('app', 'postgres', 'USAGE') "+
-			"FROM pg_roles WHERE rolname = 'app'")).To(Equal("f"))
+			"WHERE datname = current_database()")).To(Equal(appRole(targetCluster)))
+		app, admin := sqlLiteral(appRole(targetCluster)), sqlLiteral(adminRole(targetCluster))
+		Expect(psql(targetCluster, "SELECT rolsuper OR pg_has_role("+app+", "+admin+", 'USAGE') "+
+			"FROM pg_roles WHERE rolname = "+app)).To(Equal("f"))
 	})
 
 	for _, drop := range []bool{false, true} {
@@ -83,7 +84,8 @@ var _ = Describe("Extension ownership", func() {
 			}
 			Expect(msg).To(ContainSubstring("target extension ownership required for " + route))
 			Expect(msg).To(ContainSubstring(fmt.Sprintf("(dropIfExists: %t)", drop)))
-			Expect(msg).To(ContainSubstring("extension hstore (owner postgres, migration role app)"))
+			Expect(msg).To(ContainSubstring(fmt.Sprintf("extension hstore (owner %s, migration role %s)",
+				quoteIdentIfNeeded(adminRole(targetCluster)), quoteIdentIfNeeded(appRole(targetCluster)))))
 			Expect(msg).To(ContainSubstring("clone.skip: [" + skip + "]"))
 			Expect(failed.Status.Attempts).To(Equal(int32(0)), "an ownership rejection started a worker attempt")
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-1"}, &batchv1.Job{})
@@ -104,7 +106,7 @@ var _ = Describe("Extension ownership", func() {
 		Expect(completed.Status.Attempts).To(Equal(int32(1)))
 		Expect(psql(sourceCluster, "SELECT EXISTS (SELECT FROM customers)")).To(Equal("t"))
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
-		Expect(psql(targetCluster, owner)).To(Equal(postgresContainer))
+		Expect(psql(targetCluster, owner)).To(Equal(adminRole(targetCluster)))
 		Expect(psql(targetCluster, comment)).To(Equal(targetComment))
 	})
 })

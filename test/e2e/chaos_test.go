@@ -155,7 +155,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 
 		By("creating the app2 database and its per-database follow grants on the target")
 		if psql(targetCluster, "SELECT count(*) FROM pg_database WHERE datname = '"+dbB+"'") == "0" {
-			psql(targetCluster, "CREATE DATABASE "+dbB+" OWNER app")
+			psql(targetCluster, "CREATE DATABASE "+dbB+" OWNER "+sqlIdent(appRole(targetCluster)))
 		}
 		grantTargetFollowPrivileges(dbB)
 

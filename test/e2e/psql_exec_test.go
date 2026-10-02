@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,9 +109,8 @@ const (
 	psqlExecHelperExitEnv   = "PSQL_EXEC_HELPER_EXIT"
 	psqlExecTestTimeout     = 1_000 * time.Millisecond
 	psqlExecKubectl         = "kubectl"
-	psqlExecSubcommand      = "exec"
-	psqlExecProgram         = "psql"
 	psqlExecTestPod         = "source-1"
+	psqlExecTestDatabase    = "app"
 )
 
 type psqlExecResult struct {
@@ -248,7 +248,7 @@ func TestPSQLDBErrTimeoutIsTerminalAndReaped(t *testing.T) {
 
 	_, err := psqlDBErrWith(
 		cluster,
-		appDB,
+		psqlExecTestDatabase,
 		sql,
 		func(got string) string {
 			primaryCalls++
@@ -287,7 +287,7 @@ func TestPSQLDBErrRetriesEachSafeFailure(t *testing.T) {
 			var waits []time.Duration
 			out, err := psqlDBErrWith(
 				"source-cluster",
-				appDB,
+				psqlExecTestDatabase,
 				"SELECT 42",
 				func(string) string {
 					pod := fmt.Sprintf("source-%d", len(pods)+1)
@@ -329,7 +329,7 @@ func TestPSQLDBErrDoesNotRetryAmbiguousFailures(t *testing.T) {
 			waits := 0
 			_, err := psqlDBErrWith(
 				"source-cluster",
-				appDB,
+				psqlExecTestDatabase,
 				"UPDATE orders SET amount = 2",
 				func(string) string {
 					primaryCalls++
@@ -363,7 +363,7 @@ func TestPSQLDBErrStopsAtThreeSafeFailures(t *testing.T) {
 	var waits []time.Duration
 	_, err := psqlDBErrWith(
 		"source-cluster",
-		appDB,
+		psqlExecTestDatabase,
 		"SELECT 1",
 		func(string) string {
 			primaryCalls++
@@ -409,4 +409,56 @@ func TestPSQLDBErrReturnsTrimmedOutputAndExpectedArguments(t *testing.T) {
 		t.Fatalf("calls=%#v, want %#v", calls, want)
 	}
 	requirePSQLCommandsReaped(t, commands)
+}
+
+// TestPSQLArgvKeepsCNPGCommands pins psqlArgv output for each probe site's flag
+// shape to the argv that site spelled out before.
+func TestPSQLArgvKeepsCNPGCommands(t *testing.T) {
+	const (
+		pod           = "target-1"
+		db            = "app"
+		superuser     = "postgres"
+		sql           = "SELECT 1"
+		oneShot       = "-tAc"
+		stopOnErr     = "ON_ERROR_STOP=1"
+		bounded       = "SET statement_timeout=3000"
+		silence       = `exec 2>/dev/null; exec "$@"`
+		wantExec      = "exec"
+		wantPSQL      = "psql"
+		wantContainer = "postgres"
+	)
+	for _, tc := range []struct {
+		name      string
+		got, want []string
+	}{
+		{
+			name: "one statement",
+			got:  psqlArgv(sourceCluster, psqlExecTestPod, db, false, oneShot, sql),
+			want: []string{wantExec, "-n", nsE2E, psqlExecTestPod, "-c", wantContainer, "--",
+				wantPSQL, "-U", superuser, db, oneShot, sql},
+		},
+		{
+			name: "statement stream",
+			got:  psqlArgv(sourceCluster, psqlExecTestPod, db, true, "-q", "-v", stopOnErr),
+			want: []string{wantExec, "-i", "-n", nsE2E, psqlExecTestPod, "-c", wantContainer, "--",
+				wantPSQL, "-U", superuser, db, "-q", "-v", stopOnErr},
+		},
+		{
+			name: "bounded probe",
+			got:  psqlArgv(targetCluster, pod, db, false, "-XqtA", "-v", stopOnErr, "-c", bounded, "-c", sql),
+			want: []string{wantExec, "-n", nsE2E, pod, "-c", wantContainer, "--",
+				wantPSQL, "-U", superuser, db, "-XqtA", "-v", stopOnErr, "-c", bounded, "-c", sql},
+		},
+		{
+			name: "stderr-silenced probe",
+			got: slices.Concat(kubectlExecArgs(pod, false), []string{"sh", "-c", silence, "sh"},
+				psqlCommand(targetCluster, db, "-XAtq", "-c", sql)),
+			want: []string{wantExec, "-n", nsE2E, pod, "-c", wantContainer, "--",
+				"sh", "-c", silence, "sh", wantPSQL, "-U", superuser, db, "-XAtq", "-c", sql},
+		},
+	} {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s argv = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
 }

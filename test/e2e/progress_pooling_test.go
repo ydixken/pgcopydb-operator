@@ -130,7 +130,7 @@ WHERE oid=to_regprocedure('public.user_search(text)') AND pg_get_userbyid(proown
 			started, parseErr := strconv.ParseFloat(fields[1], 64)
 			Expect(parseErr).NotTo(HaveOccurred())
 			Expect(started).To(BeNumerically(">", 0))
-			Expect(fields[2:]).To(Equal([]string{"30s", appDB, appDB}))
+			Expect(fields[2:]).To(Equal([]string{"30s", cnpgAppRole, cnpgAppDatabase}))
 			Expect(query(side, progressPoolIdentitySQL)).To(Equal(baselines[i]),
 				"a new client must reuse the original backend and its timeout")
 			AddReportEntry(string(side)+" pooled backend before sampling", baselines[i])
@@ -493,7 +493,7 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 			job.OwnerReferences = []metav1.OwnerReference{owner}
 		}
 		connection := &v1beta1.PostgresConnection{
-			Host: pooler.GetName(), Database: appDB, Username: appDB, SSLMode: "require",
+			Host: pooler.GetName(), Database: cnpgAppDatabase, Username: cnpgAppRole, SSLMode: "require",
 			PasswordSecretRef: &corev1.SecretKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: clusterName + "-app"}, Key: passwordKey,
 			},

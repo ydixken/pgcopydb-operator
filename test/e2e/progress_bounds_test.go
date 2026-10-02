@@ -43,7 +43,7 @@ var _ = Describe("Progress sampler bounds", func() {
 		const table = progressProbeTable
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
-		psql(sourceCluster, progressProbeSetupSQL(appDB))
+		psql(sourceCluster, progressProbeSetupSQL(sqlIdent(appRole(sourceCluster))))
 		DeferCleanup(func() {
 			deleteMigration(name)
 			Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
@@ -52,7 +52,7 @@ var _ = Describe("Progress sampler bounds", func() {
 			psql(targetCluster, "DROP TABLE IF EXISTS "+table)
 		})
 		Expect(psql(sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
-			table+"'::regclass")).To(Equal(appDB), "the follow fixture must be owned by the migration role")
+			table+"'::regclass")).To(Equal(appRole(sourceCluster)), "the follow fixture must be owned by the migration role")
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		waitFollowStreaming(name)
 		waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
@@ -152,10 +152,10 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 					labelCNPGCluster: targetCluster, labelCNPGRole: rolePrimary,
 				}) == nil && len(primaries.Items) == 1
 				g.Expect(queryOK).To(BeTrue(), "target probe primary lookup unavailable")
-				out, queryErr := commandOutput(queryCtx, exec.CommandContext, "kubectl", "exec", "-n", nsE2E,
-					primaries.Items[0].Name, "-c", "postgres", "--", "psql", "-U", "postgres", appDB,
-					"-XqtA", "-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000",
-					"-c", "SELECT count(*) FROM "+table)
+				out, queryErr := commandOutput(queryCtx, exec.CommandContext, "kubectl",
+					psqlArgv(targetCluster, primaries.Items[0].Name, appDatabase(targetCluster), false,
+						"-XqtA", "-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000",
+						"-c", "SELECT count(*) FROM "+table)...)
 				rows, parseErr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 				queryOK = queryErr == nil && parseErr == nil && rows >= 0
 				g.Expect(queryOK).To(BeTrue(), "target probe row count unavailable")
@@ -314,16 +314,16 @@ func holdProgressLock(side, cluster, table string) func() {
 	pinnedSQL := func(sql string) (string, bool) {
 		queryCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
-		out, err := commandOutput(queryCtx, exec.CommandContext, "kubectl", "exec", "-n", nsE2E,
-			holder.Name, "-c", "postgres", "--", "psql", "-U", "postgres", appDB, "-XqtA",
-			"-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000", "-c", sql)
+		out, err := commandOutput(queryCtx, exec.CommandContext, "kubectl",
+			psqlArgv(cluster, holder.Name, appDatabase(cluster), false, "-XqtA",
+				"-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000", "-c", sql)...)
 		return strings.TrimSpace(string(out)), err == nil
 	}
 	lockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	cmd := exec.CommandContext(lockCtx, "kubectl", "exec", "-n", nsE2E, holder.Name, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-XqtA", "-v", "ON_ERROR_STOP=1",
+	cmd := exec.CommandContext(lockCtx, "kubectl", psqlArgv(cluster, holder.Name, appDatabase(cluster), false,
+		"-XqtA", "-v", "ON_ERROR_STOP=1",
 		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout=150000",
-		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")
+		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")...)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		Fail(side + " lock process could not start")

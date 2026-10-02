@@ -57,7 +57,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 		"WHERE s.slot_name='" + slot + "' AND s.database=current_database() " +
 		"AND s.slot_type='logical' AND s.active AND r.state='streaming'"
 	query := func(g Gomega, cluster, sql string) string {
-		out, err := psqlDBErr(cluster, appDB, sql)
+		out, err := psqlDBErr(cluster, appDatabase(cluster), sql)
 		// The helper's raw error can contain pod names and remote stderr.
 		queried := err == nil
 		g.Expect(queried).To(BeTrue(), "keepalive SQL probe failed on %s", cluster)
@@ -84,13 +84,13 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	})
 
 	By("cloning an app-owned table while Manual mode holds the cutover gate")
-	query(Default, sourceCluster, "SET ROLE app; CREATE TABLE "+dataTable+
+	query(Default, sourceCluster, asSourceAppRole()+"CREATE TABLE "+dataTable+
 		" (id integer PRIMARY KEY, payload text NOT NULL); INSERT INTO "+dataTable+
 		" VALUES (1, 'seed'), (2, 'seed'); CREATE TABLE "+noiseTable+
 		" (id integer PRIMARY KEY, payload text NOT NULL); ALTER TABLE "+noiseTable+
 		" ALTER COLUMN payload SET STORAGE EXTERNAL")
 	Expect(query(Default, sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
-		dataTable+"'::regclass")).To(Equal(appDB))
+		dataTable+"'::regclass")).To(Equal(appRole(sourceCluster)))
 	mig := newFollowMigration(name, v1beta1.CutoverManual)
 	mig.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyTables: []string{dataTable}}
 	Expect(mig.Spec.Follow.MaxCatchupLag).To(BeNil(), "exercise the admitted default, not a test allowance")
@@ -108,7 +108,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	Expect(query(Default, targetCluster, "SELECT to_regclass('"+noiseTable+"') IS NULL")).To(Equal("t"))
 
 	By("establishing a durable apply cursor, then stopping all published-table writes")
-	query(Default, sourceCluster, "SET ROLE app; UPDATE "+dataTable+" SET payload='applied' WHERE id=1")
+	query(Default, sourceCluster, asSourceAppRole()+"UPDATE "+dataTable+" SET payload='applied' WHERE id=1")
 	frozenData := query(Default, sourceCluster, dataSQL)
 	Expect(frozenData).To(Equal("1:applied,2:seed"))
 	Eventually(func(g Gomega) {
@@ -132,7 +132,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	generateFilteredWAL := func(batch int) string {
 		before := lsn(query(Default, sourceCluster, "SELECT pg_current_wal_lsn()::text"))
 		// EXTERNAL prevents compression from shrinking this below maxCatchupLag.
-		query(Default, sourceCluster, fmt.Sprintf("SET ROLE app; SET synchronous_commit=on; "+
+		query(Default, sourceCluster, asSourceAppRole()+fmt.Sprintf("SET synchronous_commit=on; "+
 			"INSERT INTO %s SELECT g, repeat(md5(g::text), 64) FROM generate_series(%d, %d) g",
 			noiseTable, (batch-1)*noiseRows+1, batch*noiseRows))
 		boundary := query(Default, sourceCluster, "SELECT pg_current_wal_lsn()::text")
@@ -166,7 +166,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	Expect(err).NotTo(HaveOccurred())
 	pod := primaryPod(sourceCluster)
 	signalSender := func(signal string) {
-		signalErr := signalSlotSender(pod, appDB, senderSQL, pid, signal)
+		signalErr := signalSlotSender(pod, appDatabase(sourceCluster), senderSQL, pid, signal)
 		signaled := signalErr == nil
 		Expect(signaled).To(BeTrue(), "could not %s the test-owned walsender", signal)
 	}

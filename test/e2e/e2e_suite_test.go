@@ -141,8 +141,6 @@ const (
 	// test without a replica to fail over to.
 	defaultCNPGInstances = 1
 
-	// appDB is the CNPG-bootstrapped database and its owning role.
-	appDB = "app"
 	// passwordKey is the password entry in the CNPG app secrets and their
 	// suite-made copies.
 	passwordKey = "password"
@@ -1366,8 +1364,8 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 				"requests": map[string]any{"cpu": fixtureCPU, "memory": fixtureMemory},
 			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
-				"database": appDB,
-				"owner":    appDB,
+				"database": cnpgAppDatabase,
+				"owner":    cnpgAppRole,
 			}},
 			"postgresql": map[string]any{
 				"parameters": map[string]any{
@@ -1875,8 +1873,8 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
-							{Name: "PGDATABASE", Value: appDB},
-							{Name: "PGUSER", Value: appDB},
+							{Name: "PGDATABASE", Value: appDatabase(sourceCluster)},
+							{Name: "PGUSER", Value: appRole(sourceCluster)},
 							{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
 								SecretKeyRef: &corev1.SecretKeySelector{
 									LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
@@ -2113,21 +2111,23 @@ func checkLonghornCapacity() {
 // targets (PG14 is a source only), so the statement always parses here.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
-	psql(sourceCluster, "ALTER ROLE app REPLICATION")
-	grantTargetFollowPrivileges(appDB)
+	psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" REPLICATION")
+	grantTargetFollowPrivileges(appDatabase(targetCluster))
 }
 
 // grantTargetFollowPrivileges grants the target-side follow prerequisites to
-// app in one database. EXECUTE on catalog functions is per-database, so a
-// second target database (the chaos fan-out scenario) needs its own pass; the
-// parameter grant is cluster-wide but idempotent and simply rides along.
+// the migration role in one database. EXECUTE on catalog functions is
+// per-database, so a second target database (the chaos fan-out scenario) needs
+// its own pass; the parameter grant is cluster-wide but idempotent and simply
+// rides along.
 func grantTargetFollowPrivileges(db string) {
 	GinkgoHelper()
 	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
-	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO app")
+		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, "+
+		sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
+	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster)))
 }
 
 // resetSourceReplication drops what a crashed follow run may have left on the
@@ -2307,10 +2307,10 @@ func primaryPod(cluster string) string {
 	return name
 }
 
-// psql runs one statement against the app database; see psqlDB.
+// psql runs one statement against the migration database; see psqlDB.
 func psql(cluster, sql string) string {
 	GinkgoHelper()
-	return psqlDB(cluster, appDB, sql)
+	return psqlDB(cluster, appDatabase(cluster), sql)
 }
 
 // psqlDB runs one statement as the in-pod postgres user on the current primary
@@ -2392,13 +2392,7 @@ func psqlDBErrWith(
 	for attempt := 1; attempt <= 3; attempt++ {
 		pod = primary(cluster)
 		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		out, err := commandOutput(
-			attemptCtx,
-			command,
-			"kubectl",
-			"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", db, "-tAc", sql,
-		)
+		out, err := commandOutput(attemptCtx, command, "kubectl", psqlArgv(cluster, pod, db, false, "-tAc", sql)...)
 		cancel()
 		if err == nil {
 			return strings.TrimSpace(string(out)), nil
@@ -2423,6 +2417,31 @@ func psqlDBErrWith(
 		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
+}
+
+const (
+	psqlExecSubcommand = "exec"
+	psqlExecProgram    = "psql"
+)
+
+// psqlArgv is the kubectl argv that runs psql on pod against db, connected as
+// cluster's admin role. stdin keeps psql reading statements until it closes.
+func psqlArgv(cluster, pod, db string, stdin bool, flags ...string) []string {
+	return append(kubectlExecArgs(pod, stdin), psqlCommand(cluster, db, flags...)...)
+}
+
+// kubectlExecArgs opens kubectl exec into the container on pod that runs psql.
+func kubectlExecArgs(pod string, stdin bool) []string {
+	args := []string{psqlExecSubcommand}
+	if stdin {
+		args = append(args, "-i")
+	}
+	return append(args, "-n", nsE2E, pod, "-c", postgresContainer, "--")
+}
+
+// psqlCommand is the psql invocation that reaches db as cluster's admin role.
+func psqlCommand(cluster, db string, flags ...string) []string {
+	return append([]string{psqlExecProgram, "-U", adminRole(cluster), db}, flags...)
 }
 
 // liveWriter sends ordered inserts through one psql child until stopped or a
@@ -2579,12 +2598,8 @@ func (w *liveWriter) readFinalMarker(marker, pod string) {
 	w.mu.Lock()
 	w.diag.queryStartedAt = time.Now()
 	w.mu.Unlock()
-	cmd := w.command(
-		queryCtx,
-		"kubectl",
-		"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-tAc", query,
-	)
+	cmd := w.command(queryCtx, "kubectl",
+		psqlArgv(sourceCluster, pod, appDatabase(sourceCluster), false, "-tAc", query)...)
 	cmd.WaitDelay = min(w.timeout, time.Second)
 	out, err := cmd.Output()
 	finishedAt := time.Now()
@@ -2670,8 +2685,8 @@ func (w *liveWriter) run(marker string) {
 	defer w.cancel()
 
 	pod := w.pod
-	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	cmd := w.command(w.ctx, "kubectl",
+		psqlArgv(sourceCluster, pod, appDatabase(sourceCluster), true, "-q", "-v", "ON_ERROR_STOP=1")...)
 	var stderr liveWriterStderr
 	cmd.Stderr = &stderr
 	// Bound inherited stderr descriptors after exit or explicit cancellation, not active writing.
@@ -2793,7 +2808,7 @@ func (w *liveWriter) stop() (int, error) {
 // called from failure messages, where a second assertion would replace the
 // diagnosis with its own error. Returns the error text in place of the value.
 func psqlDiag(cluster, sql string) string {
-	out, err := psqlDBErr(cluster, appDB, sql)
+	out, err := psqlDBErr(cluster, appDatabase(cluster), sql)
 	if err != nil {
 		return "(query failed: " + err.Error() + ")"
 	}
