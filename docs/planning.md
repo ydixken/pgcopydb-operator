@@ -63,7 +63,8 @@ Individual checks appear as `ok:` log lines.
     Clone-right checks are not backup or restore-readiness checks.
     The operator does not check backup recency, PITR, or restore drills.
 11. Not checked.
-    Product E2E tests do not prove that your rehearsal used representative data or enough isolation controls.
+    The [E2E suite in external mode](operations/e2e-external.md) can show that the operator works against a database pair and network like yours, but it seeds its own fixtures.
+    It does not prove that your rehearsal used representative data or enough isolation controls.
 
 ## Official references
 

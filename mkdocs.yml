@@ -48,6 +48,7 @@ nav:
       - Monitoring: operations/monitoring.md
       - Performance tuning: operations/performance.md
       - Migrating into CloudNativePG: operations/cloudnativepg.md
+      - Running the E2E suite against your databases: operations/e2e-external.md
       - Argo CD health checks: operations/argocd.md
   - Troubleshooting: troubleshooting.md
   - Reference:

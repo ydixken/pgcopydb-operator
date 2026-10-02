@@ -18,6 +18,7 @@ Where to go:
 - [Dry run, suspend, retries, deletion](operations/lifecycle.md): checking a Migration before it runs, and its day-2 lifecycle.
 - [Monitoring](operations/monitoring.md): per-Migration metrics, the bundled Grafana dashboards, and alert rules.
 - [Migrating into CloudNativePG](operations/cloudnativepg.md): CNPG targets and sources.
+- [Running the E2E suite against your databases](operations/e2e-external.md): the product's own tests against a disposable pair of yours.
 - [Argo CD health checks](operations/argocd.md): GitOps health for `Migration` resources.
 - [Troubleshooting](troubleshooting.md): symptoms mapped to causes and fixes.
 - [Prerequisites](reference/prerequisites.md): what your endpoints must provide; read this before a live migration.
