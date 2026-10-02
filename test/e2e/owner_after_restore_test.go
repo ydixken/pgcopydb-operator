@@ -50,8 +50,8 @@ var _ = Describe("Ownership after restore", func() {
 		psql(targetCluster, `GRANT "app-owner" TO `+sqlIdent(appRole(targetCluster)))
 		// public stays owned by pg_database_owner, so the handover never
 		// transfers it and the objects in it need a standing CREATE grant for
-		// the incoming owner. audit needs none: app owns it after the restore,
-		// so it is transferred and carries CREATE with it.
+		// the incoming owner. audit needs none: the migration role owns it
+		// after the restore, so it is transferred and carries CREATE with it.
 		psql(targetCluster, `GRANT CREATE ON SCHEMA public TO "app-owner"`)
 
 		By("proving the preconditions the operator's own probes test")
@@ -61,7 +61,7 @@ var _ = Describe("Ownership after restore", func() {
 			`; SET ROLE "app-owner"; ROLLBACK`)
 		// The handover's database pre-check tests the migration role, not the
 		// incoming owner (has_database_privilege(current_user, ...) in
-		// reown.go), and app owns the target database: nothing to grant.
+		// reown.go), and the migration role owns the target database: nothing to grant.
 		Expect(psql(targetCluster,
 			"SELECT has_database_privilege("+sqlLiteral(appRole(targetCluster))+
 				", current_database(), 'CREATE')")).To(Equal("t"))
