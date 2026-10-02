@@ -112,6 +112,7 @@ const (
 	psqlExecSubcommand      = "exec"
 	psqlExecProgram         = "psql"
 	psqlExecTestPod         = "source-1"
+	psqlExecTestDatabase    = "app"
 )
 
 type psqlExecResult struct {
@@ -249,7 +250,7 @@ func TestPSQLDBErrTimeoutIsTerminalAndReaped(t *testing.T) {
 
 	_, err := psqlDBErrWith(
 		cluster,
-		appDB,
+		psqlExecTestDatabase,
 		sql,
 		func(got string) string {
 			primaryCalls++
@@ -288,7 +289,7 @@ func TestPSQLDBErrRetriesEachSafeFailure(t *testing.T) {
 			var waits []time.Duration
 			out, err := psqlDBErrWith(
 				"source-cluster",
-				appDB,
+				psqlExecTestDatabase,
 				"SELECT 42",
 				func(string) string {
 					pod := fmt.Sprintf("source-%d", len(pods)+1)
@@ -330,7 +331,7 @@ func TestPSQLDBErrDoesNotRetryAmbiguousFailures(t *testing.T) {
 			waits := 0
 			_, err := psqlDBErrWith(
 				"source-cluster",
-				appDB,
+				psqlExecTestDatabase,
 				"UPDATE orders SET amount = 2",
 				func(string) string {
 					primaryCalls++
@@ -364,7 +365,7 @@ func TestPSQLDBErrStopsAtThreeSafeFailures(t *testing.T) {
 	var waits []time.Duration
 	_, err := psqlDBErrWith(
 		"source-cluster",
-		appDB,
+		psqlExecTestDatabase,
 		"SELECT 1",
 		func(string) string {
 			primaryCalls++

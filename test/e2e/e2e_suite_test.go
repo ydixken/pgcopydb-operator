@@ -141,8 +141,6 @@ const (
 	// test without a replica to fail over to.
 	defaultCNPGInstances = 1
 
-	// appDB is the CNPG-bootstrapped database and its owning role.
-	appDB = "app"
 	// passwordKey is the password entry in the CNPG app secrets and their
 	// suite-made copies.
 	passwordKey = "password"
@@ -1366,8 +1364,8 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 				"requests": map[string]any{"cpu": fixtureCPU, "memory": fixtureMemory},
 			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
-				"database": appDB,
-				"owner":    appDB,
+				"database": cnpgAppDatabase,
+				"owner":    cnpgAppRole,
 			}},
 			"postgresql": map[string]any{
 				"parameters": map[string]any{
@@ -1875,8 +1873,8 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
 							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
-							{Name: "PGDATABASE", Value: appDB},
-							{Name: "PGUSER", Value: appDB},
+							{Name: "PGDATABASE", Value: appDatabase(sourceCluster)},
+							{Name: "PGUSER", Value: appRole(sourceCluster)},
 							{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
 								SecretKeyRef: &corev1.SecretKeySelector{
 									LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},

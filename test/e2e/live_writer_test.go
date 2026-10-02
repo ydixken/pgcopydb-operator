@@ -376,14 +376,14 @@ func requireCall(t *testing.T, got helperCall, want helperCall) {
 func persistentArgs(pod string) []string {
 	return []string{
 		"exec", "-i", "-n", nsE2E, pod, "-c", postgresContainer, "--",
-		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1",
+		"psql", "-U", "postgres", psqlExecTestDatabase, "-q", "-v", "ON_ERROR_STOP=1",
 	}
 }
 
 func finalQueryArgs(pod, marker string) []string {
 	return []string{
 		"exec", "-n", nsE2E, pod, "-c", postgresContainer, "--",
-		"psql", "-U", "postgres", appDB, "-tAc", liveMarkerQuery(marker),
+		"psql", "-U", "postgres", psqlExecTestDatabase, "-tAc", liveMarkerQuery(marker),
 	}
 }
 

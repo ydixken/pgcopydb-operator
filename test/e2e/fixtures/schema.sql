@@ -1,6 +1,6 @@
--- Fixture schema for the e2e suite (base fixture). Runs as the app user against
--- the app database, so every object lands owned by app: superuser-owned
--- objects break the clone with permission errors when restoring as app.
+-- Fixture schema for the e2e suite (base fixture). Runs as the migration role
+-- against its database, so every object lands owned by that role: superuser-owned
+-- objects break the clone with permission errors when restoring as it.
 -- Primary keys and unique constraints only: the non-unique secondary indexes
 -- are in finish.sql, built after the data instead of maintained per insert.
 -- Every statement is idempotent (IF NOT EXISTS / OR REPLACE / exception
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 -- Second schema; audit.events keeps its v1 shape.
-CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION app;
+CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION CURRENT_USER;
 CREATE TABLE IF NOT EXISTS audit.events (
     id bigserial PRIMARY KEY,
     payload jsonb
