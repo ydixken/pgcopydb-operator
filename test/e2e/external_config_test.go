@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"reflect"
@@ -25,7 +26,14 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/onsi/gomega"
+
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 )
 
@@ -567,5 +575,40 @@ func TestExternalGuardPair(t *testing.T) {
 				t.Fatalf("guardPair() = %v, %v; want %v", got, err, tt.wantStamp)
 			}
 		})
+	}
+}
+
+// AfterSuite calls deleteExternalClient without consulting E2E_KEEP_FIXTURES,
+// so kept fixtures never keep the password Secrets.
+func TestExternalTeardownDeletesClientObjects(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	objs := []client.Object{
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalClientPod}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}},
+		// The cross-namespace spec's copy and a spec-built URI Secret hold app passwords too.
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsX, Name: externalCredentialsSecret}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-uris"}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	}
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "manager-token"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(objs...).WithObjects(foreign).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(deleteExternalClient); err != nil {
+		t.Fatalf("teardown failed: %v", err)
+	}
+	for _, obj := range objs {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s/%s survived teardown: %v", obj, obj.GetNamespace(), obj.GetName(), err)
+		}
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), foreign); err != nil {
+		t.Errorf("teardown deleted a Secret the suite did not write: %v", err)
+	}
+	// AfterSuite also runs after a BeforeSuite that never created them.
+	if err := InterceptGomegaFailure(deleteExternalClient); err != nil {
+		t.Fatalf("teardown of nothing failed: %v", err)
 	}
 }

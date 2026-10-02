@@ -537,3 +537,31 @@ func prepareExternalDatabases() {
 		resetDatabaseObjects(sourceCluster)
 	}
 }
+
+// cleanExternalReplication runs because nothing deletes the external servers:
+// a slot left behind would hold the source's WAL until someone noticed.
+func cleanExternalReplication() {
+	GinkgoHelper()
+	dropSourceReplication()
+	resetTargetReplication()
+	Expect(psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")).
+		To(Equal("0"), "pgcopydb replication slots are still active on the external source; drop them by hand")
+}
+
+// deleteExternalClient removes what external mode left in namespaces that
+// outlive the run. Every Secret the suite writes is named e2e-*, and here
+// they hold the supplied passwords, so all of them go.
+func deleteExternalClient() {
+	GinkgoHelper()
+	deleteSuiteObjects(append(seedObjects(),
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalClientPod}})...)
+	for _, ns := range []string{nsE2E, nsX} {
+		secrets := &corev1.SecretList{}
+		Expect(k8sClient.List(ctx, secrets, client.InNamespace(ns))).To(Succeed(), "failed to list Secrets in %s", ns)
+		for i := range secrets.Items {
+			if strings.HasPrefix(secrets.Items[i].Name, "e2e-") {
+				deleteSuiteObjects(&secrets.Items[i])
+			}
+		}
+	}
+}

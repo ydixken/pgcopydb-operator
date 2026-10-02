@@ -1228,6 +1228,14 @@ var _ = AfterSuite(func() {
 	By("deleting leftover Migrations while the operator still runs")
 	purgeMigrations(5 * time.Minute)
 
+	// Slots go before the operator does, kept fixtures or not, but a failure
+	// here is reported last so the operator and the password Secrets still go.
+	var replicationErr error
+	if externalPairGuarded {
+		By("dropping pgcopydb slots, publications and origins left on the external databases")
+		replicationErr = InterceptGomegaFailure(cleanExternalReplication)
+	}
+
 	// The throwaway operator always goes away, keep-fixtures or not: every
 	// run installs a fresh one.
 	By("uninstalling the suite's operator")
@@ -1237,19 +1245,28 @@ var _ = AfterSuite(func() {
 		deleteNamespaces(2*time.Minute, nsOperator)
 	}
 
-	if envTrue("E2E_KEEP_FIXTURES") {
+	// The e2e- Secrets hold the supplied passwords, so they go even when fixtures are kept.
+	if external != nil {
+		By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
+		deleteExternalClient()
+	}
+
+	switch {
+	case envTrue("E2E_KEEP_FIXTURES"):
 		_, _ = fmt.Fprintf(GinkgoWriter,
 			"E2E_KEEP_FIXTURES=true: keeping namespaces %s and %s for iteration\n", nsE2E, nsX)
-		return
-	}
-	if !manageNamespaces {
+	case external != nil && !manageNamespaces:
+		// deleteExternalClient above already emptied what the suite owns.
+	case !manageNamespaces:
 		By("deleting the fixtures inside " + nsE2E + " and " + nsX)
 		deleteFixtures(10 * time.Minute)
-		return
+	default:
+		By("deleting the fixture namespaces")
+		// CNPG teardown plus volume deletion takes a while on the shared cluster.
+		deleteNamespaces(10*time.Minute, nsX, nsE2E)
 	}
-	By("deleting the fixture namespaces")
-	// CNPG teardown plus volume deletion takes a while on the shared cluster.
-	deleteNamespaces(10*time.Minute, nsX, nsE2E)
+	Expect(replicationErr).NotTo(HaveOccurred(),
+		"pgcopydb replication state is left on the external pair; see docs/operations/e2e-external.md#cleanup")
 })
 
 // deleteFixtures empties the fixture namespaces instead of deleting them, for
@@ -2224,6 +2241,12 @@ func grantTargetFollowPrivileges(db string) {
 func resetSourceReplication() {
 	GinkgoHelper()
 	psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	dropSourceReplication()
+}
+
+// dropSourceReplication drops pgcopydb's inactive slots and its publications.
+func dropSourceReplication() {
+	GinkgoHelper()
 	psql(sourceCluster, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
 		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
 	psql(sourceCluster, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
