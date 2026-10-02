@@ -667,3 +667,20 @@ func TestExternalClearSuperuserPasswordDeletesSecret(t *testing.T) {
 		t.Errorf("the Secret holding the external admin password survived: %v", err)
 	}
 }
+
+func TestExternalRequireCNPGFixtures(t *testing.T) {
+	// Outside a running spec Ginkgo's Skip panics, which is how a test sees it.
+	skipped := func() (skipped bool) {
+		defer func() { skipped = recover() != nil }()
+		requireCNPGFixtures()
+		return false
+	}
+	withExternal(t, nil)
+	if skipped() {
+		t.Error("requireCNPGFixtures skipped a spec in CNPG mode")
+	}
+	withExternal(t, testExternalPair())
+	if !skipped() {
+		t.Error("requireCNPGFixtures let a pod-control spec run against an external pair")
+	}
+}

@@ -42,6 +42,7 @@ var _ = Describe("Keepalive feedback", func() {
 })
 
 func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
+	requireCNPGFixtures()
 	name := "e2e-keepalive-" + strings.ToLower(string(mode))
 	const dataTable = "public.e2e_keepalive_data"
 	const noiseTable = "public.e2e_keepalive_noise"

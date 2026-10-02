@@ -51,9 +51,10 @@ const (
 // spec inside the Ordered one below: a failure in an Ordered container skips
 // every spec after it, and a check on where pods landed must never be able to
 // take the functional suite down with it. Unlabeled on purpose, so it runs in
-// every functional run and never under task e2e:chaos, which deletes instance
+// every CNPG-mode functional run and never under task e2e:chaos, which deletes instance
 // pods deliberately.
 var _ = Describe("Fixture placement", func() {
+	BeforeEach(requireCNPGFixtures)
 	// The binding check. It reads what was rendered onto the pods rather than
 	// where they ended up, which makes it namespaced (so it runs under the
 	// confined CI identity, never skipped) and deterministic (no scheduler in

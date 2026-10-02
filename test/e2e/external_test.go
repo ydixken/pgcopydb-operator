@@ -584,3 +584,12 @@ func requirePlainSecretRefNames() {
 		}
 	}
 }
+
+// requireCNPGFixtures skips a spec that controls database pods or acts beyond
+// the two databases, checked at runtime so a missing label filter cannot
+// send such a spec at someone else's server.
+func requireCNPGFixtures() {
+	if external != nil {
+		Skip("needs the CNPG fixtures: it controls database pods or acts beyond the two supplied databases")
+	}
+}

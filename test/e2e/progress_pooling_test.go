@@ -60,6 +60,7 @@ FROM pg_stat_activity WHERE pid=pg_backend_pid();`
 
 var _ = Describe("Progress sampler transaction pooling", func() {
 	It("restores pooled backends after sampling and cancellation, then permits long COPY and indexes", func() {
+		requireCNPGFixtures()
 		sharedClusters := []string{sourceCluster, targetCluster}
 		catalogs := make([]string, len(sharedClusters))
 		for i, cluster := range sharedClusters {

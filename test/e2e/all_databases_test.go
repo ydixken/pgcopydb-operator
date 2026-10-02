@@ -34,6 +34,10 @@ import (
 )
 
 var _ = Describe("All databases", func() {
+	// Both specs act server-wide: the first creates and drops databases and
+	// sets the postgres password, the second connects to the postgres database.
+	BeforeEach(requireCNPGFixtures)
+
 	It("clones all databases as superuser, including a newly created database", func() {
 		const name = "e2e-all-databases"
 		const extraDB = "e2e_all_databases"

@@ -94,6 +94,7 @@ func TestSlotSenderPID(t *testing.T) {
 
 //nolint:gocyclo // Keep this ordered scenario and its bounded failure diagnostics together.
 func earlyManualCutover() {
+	requireCNPGFixtures()
 	const name = "e2e-follow-early"
 	const marker = "early-cutover-"
 	const backlogRows = 20000
