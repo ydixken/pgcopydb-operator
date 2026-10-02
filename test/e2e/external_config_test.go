@@ -628,3 +628,42 @@ func TestExternalTeardownFixturesSweepsSecretsWhenKeeping(t *testing.T) {
 		t.Errorf("Secret survived a keep-fixtures teardown: %v", err)
 	}
 }
+
+func TestExternalRequirePlainSecretRefNames(t *testing.T) {
+	skipped := func() (skipped bool) {
+		defer func() { skipped = recover() != nil }()
+		requirePlainSecretRefNames()
+		return false
+	}
+	for _, tc := range []struct {
+		name string
+		pair *externalConfig
+		want bool
+	}{
+		{"cnpg mode", nil, false},
+		{"plain names", testExternalPair(), false},
+		{"spaced source role", pairWith(func(p *externalConfig) { p.Source.AppRole = "Shop App" }), true},
+		{"quoted target database", pairWith(func(p *externalConfig) { p.Target.Database = "My'Shop" }), true},
+	} {
+		withExternal(t, tc.pair)
+		if got := skipped(); got != tc.want {
+			t.Errorf("%s: skipped = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExternalClearSuperuserPasswordDeletesSecret(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	withExternal(t, testExternalPair())
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-remediate-super-src"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(sec).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(func() { clearSuperuserPassword(sourceCluster, sec.Name) }); err != nil {
+		t.Fatalf("clearSuperuserPassword failed: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sec), sec); !apierrors.IsNotFound(err) {
+		t.Errorf("the Secret holding the external admin password survived: %v", err)
+	}
+}

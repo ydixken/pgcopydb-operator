@@ -565,3 +565,22 @@ func deleteExternalClient() {
 		}
 	}
 }
+
+// uriUnreserved is every character a role name keeps unescaped in a URI.
+const uriUnreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+// requirePlainSecretRefNames skips the secretRef details spec for names the
+// operator's secretRef form rejects: a percent-encoded user, or URI syntax
+// in the role and database keys.
+func requirePlainSecretRefNames() {
+	if external == nil {
+		return
+	}
+	for _, s := range []externalSide{external.Source, external.Target} {
+		for _, name := range []string{s.AppRole, s.Database} {
+			if strings.Trim(name, uriUnreserved) != "" {
+				Skip(fmt.Sprintf("the operator's secretRef form takes plain role and database names, and %q is not", name))
+			}
+		}
+	}
+}

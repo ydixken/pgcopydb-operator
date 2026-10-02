@@ -100,7 +100,6 @@ const (
 	// and which of them is primary moves on failover, so every statement
 	// resolves its pod by label through primaryPod instead of by name.
 	srcSecret = sourceCluster + "-app"
-	tgtSecret = targetCluster + "-app"
 
 	// CNPG's own pod labels: what the suite selects, schedules and kills by.
 	labelCNPGCluster  = "cnpg.io/cluster"
