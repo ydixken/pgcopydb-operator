@@ -246,9 +246,9 @@ var (
 	// (GitOps in CI): the suite then works inside them and creates none.
 	manageNamespaces = os.Getenv("E2E_MANAGE_NAMESPACES") != "false"
 
-	// pgSource and pgTarget pick the PostgreSQL major for each fixture
-	// cluster's operand image (E2E_PG_SOURCE/E2E_PG_TARGET, default 17).
-	// Upgrade direction only, and PG14 only as a source; init enforces both.
+	// pgSource and pgTarget are the PostgreSQL majors of the two servers:
+	// E2E_PG_SOURCE/E2E_PG_TARGET (default 17) in CNPG mode, read off the
+	// servers in external mode. checkMajors enforces the rules on both.
 	pgSource = 17
 	pgTarget = 17
 
@@ -542,12 +542,20 @@ func postgresIntAtLeast(n, minimum int) bool {
 }
 
 func init() {
+	cfg, err := loadExternalConfig(os.Getenv)
+	if err != nil {
+		panic(err.Error())
+	}
+	external = cfg
 	// Fixture volumes take the suite-owned single-replica class at every tier.
 	// CNPG already keeps cnpgInstances copies of the data, so a replicating
 	// default class would copy each of those again and store the fixtures nine
 	// times over for nothing a test can observe. ensureFixtureStorage falls
-	// back to the cluster default when the cluster has no Longhorn.
-	fixtureStorageClass = ephemeralStorageClass
+	// back to the cluster default when the cluster has no Longhorn. External
+	// mode has no fixture volumes, so its work volumes take the default.
+	if external == nil {
+		fixtureStorageClass = ephemeralStorageClass
+	}
 	if stress {
 		scale = 10
 		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
@@ -644,20 +652,19 @@ func init() {
 	if v := os.Getenv("E2E_RUNNER_TAG"); v != "" {
 		runnerTag = v
 	}
+	initMajors()
+}
+
+// initMajors reads the CNPG majors; external mode reads them off the servers
+// in BeforeSuite instead.
+func initMajors() {
+	if external != nil {
+		return
+	}
 	pgSource = pgMajorEnv("E2E_PG_SOURCE")
 	pgTarget = pgMajorEnv("E2E_PG_TARGET")
-	// The version matrix is upgrade-direction only: pgcopydb needs pg_dump at
-	// least at the target's major, and a newer major's dump does not restore
-	// into an older server. PG14 is a source only: the follow-mode target
-	// contract includes GRANT SET ON PARAMETER session_replication_role,
-	// which PostgreSQL grew in 15 (docs/reference/prerequisites.md).
-	if pgTarget < pgSource {
-		panic(fmt.Sprintf("E2E_PG_TARGET (%d) is older than E2E_PG_SOURCE (%d):"+
-			" the version matrix is upgrade-direction only", pgTarget, pgSource))
-	}
-	if pgTarget < 15 {
-		panic("E2E_PG_TARGET must be 15 or newer: the follow-mode target needs" +
-			" GRANT SET ON PARAMETER session_replication_role (PG15+); PG14 works as a source only")
+	if err := checkMajors(pgSource, pgTarget); err != nil {
+		panic("E2E_PG_SOURCE/E2E_PG_TARGET: " + err.Error())
 	}
 }
 
@@ -675,6 +682,21 @@ func pgMajorEnv(name string) int {
 		panic(name + " must be a plain PostgreSQL major between 14 and 18, got " + strconv.Quote(v))
 	}
 	return n
+}
+
+// checkMajors holds the version rules: upgrade direction only, since a newer
+// pg_dump does not restore into an older server, and a PG15+ target for
+// follow mode's GRANT SET ON PARAMETER (docs/reference/prerequisites.md).
+func checkMajors(source, target int) error {
+	if target < source {
+		return fmt.Errorf("target PostgreSQL %d is older than source %d: the suite runs upgrade direction only",
+			target, source)
+	}
+	if target < 15 {
+		return fmt.Errorf("target PostgreSQL %d is older than 15: follow mode needs GRANT SET ON PARAMETER"+
+			" session_replication_role; PG14 works as a source only", target)
+	}
+	return nil
 }
 
 // scaled mirrors e2e_scaled() in fixtures/schema.sql: the row count for a

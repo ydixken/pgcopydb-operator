@@ -17,7 +17,10 @@ limitations under the License.
 package e2e
 
 import (
+	"os"
+	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -204,4 +207,66 @@ func TestExternalSide(t *testing.T) {
 		}
 	}()
 	sideName("e2e-progress-pool-source")
+}
+
+func TestExternalInit(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "external-init" {
+		if external == nil || external.Source.Host != "source.example.com" {
+			t.Fatal("init did not load the external pair")
+		}
+		if fixtureStorageClass != "" {
+			t.Errorf("fixtureStorageClass = %q, want the cluster default", fixtureStorageClass)
+		}
+		return
+	}
+	full := []string{"E2E_TEST_CHILD=external-init"}
+	fixture := externalEnvFixture()
+	for _, name := range externalEnv {
+		full = append(full, name+"="+fixture[name])
+	}
+	for _, tt := range []struct {
+		name      string
+		env       []string
+		wantPanic string
+	}{
+		{name: "all eight set", env: full},
+		{name: "one missing", env: full[:len(full)-1], wantPanic: "missing E2E_TARGET_ADMIN_PASSWORD"},
+		{name: "CNPG major alongside the pair", env: append(slices.Clone(full), "E2E_PG_SOURCE=16"),
+			wantPanic: "E2E_PG_SOURCE picks a CNPG image"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestExternalInit$")
+			cmd.Env = tt.env
+			out, err := cmd.CombinedOutput()
+			if tt.wantPanic == "" {
+				if err != nil {
+					t.Fatalf("child failed: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(string(out), tt.wantPanic) {
+				t.Fatalf("child err = %v, want a panic containing %q; output:\n%s", err, tt.wantPanic, out)
+			}
+		})
+	}
+}
+
+func TestExternalServerMajors(t *testing.T) {
+	for _, tt := range []struct {
+		source, target int
+		wantErr        string
+	}{
+		{source: 17, target: 17},
+		{source: 14, target: 18},
+		{source: 16, target: 15, wantErr: "target PostgreSQL 15 is older than source 16"},
+		{source: 14, target: 14, wantErr: "target PostgreSQL 14 is older than 15"},
+	} {
+		err := checkMajors(tt.source, tt.target)
+		if tt.wantErr == "" && err != nil {
+			t.Errorf("checkMajors(%d, %d) = %v, want nil", tt.source, tt.target, err)
+		}
+		if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+			t.Errorf("checkMajors(%d, %d) = %v, want %q", tt.source, tt.target, err, tt.wantErr)
+		}
+	}
 }
