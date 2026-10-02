@@ -156,7 +156,7 @@ SELECT stmt FROM candidates ORDER BY sort, stmt LIMIT 200;
 SQL
 reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun re-applies the rest"
 $REOWN_CANDIDATES_CTE
-SELECT stmt FROM candidates ORDER BY sort, stmt \gexec
+SELECT 'BEGIN', 'SET LOCAL statement_timeout = ''60s''', 'SET LOCAL lock_timeout = ''60s''', stmt, 'COMMIT' FROM candidates ORDER BY sort, stmt \gexec
 SQL
 left=$(reown <<SQL
 $REOWN_CANDIDATES_CTE
