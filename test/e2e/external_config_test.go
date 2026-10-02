@@ -736,3 +736,73 @@ func TestExternalReplicationFilters(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalGuardRoles(t *testing.T) {
+	withExternal(t, testExternalPair())
+	for _, tt := range []struct {
+		name      string
+		unstamped map[string]string
+		wantErr   []string
+	}{
+		{name: "no same-named role, or only stamped ones", unstamped: map[string]string{}},
+		{name: "unstamped role on the target server",
+			unstamped: map[string]string{targetCluster: incomingOwnerRole},
+			wantErr:   []string{"target server target.example.com", incomingOwnerRole}},
+		{name: "unstamped role on the source server",
+			unstamped: map[string]string{sourceCluster: noSelectRole},
+			wantErr:   []string{"source server " + testSourceHost, noSelectRole}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := guardRoles(func(cluster string) string { return tt.unstamped[cluster] })
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("guardRoles() = %v, want nil", err)
+				}
+				return
+			}
+			for _, want := range tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("guardRoles() = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestExternalRoleSQL(t *testing.T) {
+	withExternal(t, nil)
+	// CNPG mode keeps the existence test resetOwnerRole always ran.
+	if got := suiteRoleExists(incomingOwnerRole); got != "EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner')" {
+		t.Errorf("CNPG suiteRoleExists() = %q changed", got)
+	}
+	stamp := "shobj_description(oid, 'pg_authid') = " + sqlLiteral(externalStamp)
+	if strings.Contains(dropRoleSQL(limitedRole), stamp) {
+		t.Error("CNPG dropRoleSQL() wants a stamp the suite's own servers never carry")
+	}
+
+	withExternal(t, testExternalPair())
+	for _, role := range []string{noSelectRole, limitedRole} {
+		got := dropRoleSQL(role)
+		if !strings.Contains(got, "IF EXISTS (SELECT FROM pg_roles WHERE rolname = '"+role+"' AND "+stamp+") THEN") ||
+			strings.Count(got, "DROP ROLE") != 1 || strings.Index(got, "DROP ROLE") < strings.Index(got, " THEN ") {
+			t.Errorf("external dropRoleSQL(%s) = %q drops the role without the stamp", role, got)
+		}
+	}
+	if got := suiteRoleExists(incomingOwnerRole); !strings.Contains(got, stamp) {
+		t.Errorf("external suiteRoleExists() = %q ignores the stamp", got)
+	}
+	for cluster, want := range map[string][]string{
+		sourceCluster: {"'e2e_noselect'"},
+		targetCluster: {"'app-owner'", "'e2e_limited'"},
+	} {
+		got := unstampedRolesSQL(cluster)
+		for _, role := range want {
+			if !strings.Contains(got, role) {
+				t.Errorf("unstampedRolesSQL(%s) = %q misses %s", cluster, got, role)
+			}
+		}
+		if !strings.Contains(got, "<> "+sqlLiteral(externalStamp)) {
+			t.Errorf("unstampedRolesSQL(%s) = %q does not test the stamp", cluster, got)
+		}
+	}
+}

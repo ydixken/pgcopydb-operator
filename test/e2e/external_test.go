@@ -445,6 +445,70 @@ const stampedSQL = "SELECT coalesce(shobj_description(oid, 'pg_database'), '') =
 const stampSQL = "DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '" +
 	externalStamp + "'); END $$"
 
+// The specs create these roles and drop them with everything they own. On
+// an external server a role of that name is the suite's only with the stamp.
+const (
+	incomingOwnerRole = "app-owner"
+	noSelectRole      = "e2e_noselect"
+)
+
+// suiteRoles lists the suite's role names by the side whose server holds them.
+var suiteRoles = map[string][]string{
+	sourceCluster: {noSelectRole},
+	targetCluster: {incomingOwnerRole, limitedRole},
+}
+
+// unstampedRolesSQL lists the suite's role names on cluster's server that do
+// not carry the stamp.
+func unstampedRolesSQL(cluster string) string {
+	names := make([]string, 0, len(suiteRoles[cluster]))
+	for _, role := range suiteRoles[cluster] {
+		names = append(names, sqlLiteral(role))
+	}
+	return "SELECT coalesce(string_agg(rolname, ', ' ORDER BY rolname), '') FROM pg_roles" +
+		" WHERE rolname IN (" + strings.Join(names, ", ") + ")" +
+		" AND coalesce(shobj_description(oid, 'pg_authid'), '') <> " + sqlLiteral(externalStamp)
+}
+
+// guardRoles refuses a server that holds one of the suite's role names
+// without the stamp. unstamped reports them per side ("" for none).
+func guardRoles(unstamped func(cluster string) string) error {
+	for _, cluster := range []string{sourceCluster, targetCluster} {
+		if roles := unstamped(cluster); roles != "" {
+			return fmt.Errorf("%s server %s holds role %s without the pgcopydb-e2e stamp, and the specs drop"+
+				" roles of that name with everything they own; rename the role or use another server",
+				sideName(cluster), external.side(cluster).Host, roles)
+		}
+	}
+	return nil
+}
+
+// stampRole marks a role the suite just created on an external server, so
+// the guard and the drop helpers know it as the suite's.
+func stampRole(cluster, role string) {
+	GinkgoHelper()
+	if external != nil {
+		psql(cluster, "COMMENT ON ROLE "+sqlIdent(role)+" IS "+sqlLiteral(externalStamp))
+	}
+}
+
+// suiteRoleExists is the SQL condition the drop helpers act under. On an
+// external server it also wants the stamp, so a same-named role stays.
+func suiteRoleExists(role string) string {
+	cond := "SELECT FROM pg_roles WHERE rolname = " + sqlLiteral(role)
+	if external != nil {
+		cond += " AND shobj_description(oid, 'pg_authid') = " + sqlLiteral(externalStamp)
+	}
+	return "EXISTS (" + cond + ")"
+}
+
+// dropRoleSQL drops a plainly named role and what it owns when
+// suiteRoleExists finds it. DROP OWNED has no IF EXISTS, hence the DO block.
+func dropRoleSQL(role string) string {
+	return fmt.Sprintf("DO $$ BEGIN IF %s THEN EXECUTE 'DROP OWNED BY %s CASCADE'; EXECUTE 'DROP ROLE %s';"+
+		" END IF; END $$", suiteRoleExists(role), role, role)
+}
+
 const externalClientReadyTimeout = 5 * time.Minute
 
 // externalPairGuarded is set once both databases passed the stamp guard.
@@ -526,6 +590,7 @@ func prepareExternalDatabases() {
 	By(fmt.Sprintf("checking the external source (PG %d) and target (PG %d) are empty or stamped",
 		pgSource, pgTarget))
 	Expect(checkMajors(pgSource, pgTarget)).To(Succeed())
+	Expect(guardRoles(func(cluster string) string { return psql(cluster, unstampedRolesSQL(cluster)) })).To(Succeed())
 	toStamp, err := guardPair(func(cluster string) (string, bool) {
 		return psql(cluster, userObjectsSQL), psql(cluster, stampedSQL) == "t"
 	})

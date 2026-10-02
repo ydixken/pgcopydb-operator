@@ -921,7 +921,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-permdenied"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
+			psql(sourceCluster, dropRoleSQL(noSelectRole))
 		})
 
 		By("creating a source role that can connect but not read")
@@ -929,12 +929,13 @@ var _ = Describe("Migration", Ordered, func() {
 		// SELECT still passes the gate and fails the copy itself: exactly the
 		// deterministic permission error the classifier must terminate on the
 		// first attempt instead of burning the budget.
-		psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
-		psql(sourceCluster, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
+		psql(sourceCluster, dropRoleSQL(noSelectRole))
+		psql(sourceCluster, "CREATE ROLE "+noSelectRole+" LOGIN PASSWORD 'e2e-noselect-pw'")
+		stampRole(sourceCluster, noSelectRole)
 		copySecret(nsE2E, name, passwordKey, []byte("e2e-noselect-pw"))
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
-		m.Spec.Source.Username = "e2e_noselect"
+		m.Spec.Source.Username = noSelectRole
 		m.Spec.Source.PasswordSecretRef = &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
 			Key:                  passwordKey,
@@ -1017,6 +1018,7 @@ func makeLimitedTarget(secretName string) {
 	resetTargetObjects()
 	pw := secretName + "-pw"
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
+	stampRole(targetCluster, limitedRole)
 	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s",
 		sqlIdent(appDatabase(targetCluster)), limitedRole))
 	copySecret(nsE2E, secretName, passwordKey, []byte(pw))
@@ -1052,13 +1054,10 @@ func clearSuperuserPassword(cluster, secretName string) {
 	psql(cluster, "ALTER ROLE postgres PASSWORD NULL")
 }
 
-// dropLimitedRole removes the limited role and everything it restored. The
-// DO block guards DROP OWNED, which unlike DROP ROLE has no IF EXISTS.
+// dropLimitedRole removes the limited role and everything it restored.
 func dropLimitedRole() {
 	GinkgoHelper()
-	psql(targetCluster, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
-		" THEN EXECUTE 'DROP OWNED BY %s CASCADE'; END IF; END $$", limitedRole, limitedRole))
-	psql(targetCluster, "DROP ROLE IF EXISTS "+limitedRole)
+	psql(targetCluster, dropRoleSQL(limitedRole))
 }
 
 // e2eConn is the app connection to one side: the fixture's rw service, fully

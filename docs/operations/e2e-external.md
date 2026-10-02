@@ -118,6 +118,9 @@ The suite checks both databases first, then stamps each with the database commen
 Every later run refuses to touch a database that lacks the stamp, and the error lists up to ten of the objects it found.
 When the source's seed has another scale or profile than the run asks for, the suite drops the fixture objects on the source and seeds it again.
 
+The roles the suite creates (`e2e_noselect` on the source, `e2e_limited` and `app-owner` on the target) carry the same text as a role comment.
+The specs drop these roles with everything they own, so the suite drops only a stamped one, and it refuses to start when a role of one of these names exists on its server without the stamp.
+
 > [!important]
 > A URI that points at the wrong, populated database stops the run instead of wiping it.
 > Do not create the stamp by hand to get past that check.
@@ -166,7 +169,12 @@ On the source, in the test database:
 ```sql
 SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
 WHERE database = current_database() AND slot_name LIKE 'pgcopydb\_pgcopydb\_e2e\_%' AND NOT active;
-DROP ROLE IF EXISTS e2e_noselect;
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'e2e_noselect'
+             AND shobj_description(oid, 'pg_authid') = 'pgcopydb-e2e: disposable, the e2e suite may wipe this database') THEN
+    EXECUTE 'DROP ROLE e2e_noselect';
+  END IF;
+END $$;
 ```
 
 On the target, in the test database, with `shop_app` replaced by your target app role:
@@ -175,11 +183,13 @@ On the target, in the test database, with `shop_app` replaced by your target app
 SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin
 WHERE roname LIKE 'pgcopydb\_pgcopydb\_e2e\_%';
 DO $$ BEGIN
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'e2e_limited') THEN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'e2e_limited'
+             AND shobj_description(oid, 'pg_authid') = 'pgcopydb-e2e: disposable, the e2e suite may wipe this database') THEN
     EXECUTE 'DROP OWNED BY e2e_limited CASCADE';
     EXECUTE 'DROP ROLE e2e_limited';
   END IF;
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner') THEN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner'
+             AND shobj_description(oid, 'pg_authid') = 'pgcopydb-e2e: disposable, the e2e suite may wipe this database') THEN
     EXECUTE 'REASSIGN OWNED BY "app-owner" TO shop_app';
     EXECUTE 'DROP OWNED BY "app-owner"';
     EXECUTE 'DROP ROLE "app-owner"';
