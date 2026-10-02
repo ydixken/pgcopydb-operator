@@ -127,10 +127,13 @@ func TestExternalConfig(t *testing.T) {
 			wantErr: "E2E_TARGET_URI is not a postgres:// or postgresql:// URI"},
 		{name: "password as a query parameter",
 			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?password=leaked-pw"),
-			wantErr: `E2E_SOURCE_URI carries query parameter "password"`},
+			wantErr: "E2E_SOURCE_URI carries a query parameter other than sslmode"},
+		{name: "a pasted password as a query key is not echoed",
+			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?sslmode=require&leaked-pw"),
+			wantErr: "E2E_SOURCE_URI carries a query parameter other than sslmode"},
 		{name: "unknown query parameter",
 			env:     set(envTargetAdminURI, "postgres://shop_admin@target.example.com?application_name=x"),
-			wantErr: `E2E_TARGET_ADMIN_URI carries query parameter "application_name"`},
+			wantErr: "E2E_TARGET_ADMIN_URI carries a query parameter other than sslmode"},
 		{name: "verify sslmode needs a CA the suite does not mount",
 			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?sslmode=verify-full"),
 			wantErr: "sslmode=verify-full"},
@@ -178,6 +181,9 @@ func TestExternalConfig(t *testing.T) {
 		{name: "CNPG major alongside the pair",
 			env:     set("E2E_PG_TARGET", "16"),
 			wantErr: "E2E_PG_TARGET picks a CNPG image"},
+		{name: "feature run label alongside the pair",
+			env:     set("E2E_RUN_LABEL_VALUE", featureRunOwnerFixture),
+			wantErr: "E2E_RUN_LABEL_VALUE skips the teardown external mode needs"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			env := externalEnvFixture()

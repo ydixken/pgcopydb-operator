@@ -120,7 +120,7 @@ type postgresURI struct {
 
 // loadExternalConfig reads the pair: nil when none of the eight variables is
 // set, an error unless all eight are set and valid. Errors name variables and
-// never quote values, because a misplaced password is a value.
+// never quote a URI, password, or query key, where a pasted password lands.
 func loadExternalConfig(getenv func(string) string) (*externalConfig, error) {
 	missing := make([]string, 0, len(externalEnv))
 	for _, name := range externalEnv {
@@ -139,6 +139,10 @@ func loadExternalConfig(getenv func(string) string) (*externalConfig, error) {
 		if getenv(name) != "" {
 			return nil, fmt.Errorf("%s picks a CNPG image and does nothing in external mode; unset it", name)
 		}
+	}
+	if getenv("E2E_RUN_LABEL_VALUE") != "" {
+		// A feature run skips AfterSuite, and with it the slot cleanup and the password Secret sweep.
+		return nil, errors.New("E2E_RUN_LABEL_VALUE skips the teardown external mode needs; unset it")
 	}
 	source, err := loadExternalSide("E2E_SOURCE", getenv)
 	if err != nil {
@@ -232,7 +236,8 @@ func parsePostgresURI(name, raw string) (postgresURI, error) {
 	// The inline Migration connection has a field for sslmode and nothing else.
 	for _, key := range slices.Sorted(maps.Keys(query)) {
 		if key != "sslmode" {
-			return postgresURI{}, fmt.Errorf("%s carries query parameter %q; only sslmode maps onto a Migration", name, key)
+			return postgresURI{}, fmt.Errorf("%s carries a query parameter other than sslmode, the only one that"+
+				" maps onto a Migration", name)
 		}
 	}
 	switch mode := query.Get("sslmode"); mode {

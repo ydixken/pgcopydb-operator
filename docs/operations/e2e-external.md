@@ -46,13 +46,14 @@ Unset them before you run a CloudNativePG task such as `task e2e`, which would o
 - `E2E_SOURCE_ADMIN_PASSWORD` is the admin role's password.
 - `E2E_TARGET_URI`, `E2E_TARGET_PASSWORD`, `E2E_TARGET_ADMIN_URI`, and `E2E_TARGET_ADMIN_PASSWORD` are the same four for the target.
 
-The suite checks the values before it touches anything and stops with an error naming the variable, never its value, when:
+The suite checks the values before it touches anything and stops with an error that names the variable, never quoting a URI, a password, or a query parameter, when:
 
 - a URI carries a password, or any query parameter other than `sslmode`, which is all the inline connection the suite gives each `Migration` can carry;
 - an admin URI names another host, port, or `sslmode` than its app URI, another database, or the app role itself;
 - the source and target URIs name the same database;
 - one role on one server is given two different passwords, or a password holds a line break;
-- a URI names an IPv6 literal host.
+- a URI names an IPv6 literal host;
+- `E2E_RUN_LABEL_VALUE` is set, because a run with that label skips the teardown that drops the slots and the password Secrets.
 
 The suite stores the passwords in the Secret `e2e-external-credentials` in `pgcopydb-e2e` and hands them to psql through a pgpass file in its client pod `e2e-psql`, never through argv.
 
