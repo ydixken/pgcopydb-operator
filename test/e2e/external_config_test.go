@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -35,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 const (
@@ -682,5 +685,54 @@ func TestExternalRequireCNPGFixtures(t *testing.T) {
 	withExternal(t, testExternalPair())
 	if !skipped() {
 		t.Error("requireCNPGFixtures let a pod-control spec run against an external pair")
+	}
+}
+
+func TestExternalReplicationFilters(t *testing.T) {
+	withExternal(t, nil)
+	if got := slotFilter(); got != "slot_name LIKE 'pgcopydb%'" {
+		t.Errorf("CNPG slotFilter() = %q changed", got)
+	}
+	if got := originFilter(); got != "roname LIKE 'pgcopydb%'" {
+		t.Errorf("CNPG originFilter() = %q changed", got)
+	}
+
+	withExternal(t, testExternalPair())
+	slots := slotFilter()
+	if !strings.HasPrefix(slots, "database = current_database() AND ") {
+		t.Errorf("external slotFilter() = %q reaches slots of other databases", slots)
+	}
+	origins := originFilter()
+	// LIKE prefixes with \_ unescaped: an unescaped _ would match any character.
+	prefixes := func(filter string) []string {
+		found := regexp.MustCompile(`LIKE '([^'%]*)%'`).FindAllStringSubmatch(filter, -1)
+		out := make([]string, 0, len(found))
+		for _, m := range found {
+			if strings.Count(m[1], "_") != strings.Count(m[1], `\_`) {
+				t.Errorf("pattern %q leaves an underscore unescaped", m[1])
+			}
+			out = append(out, strings.ReplaceAll(m[1], `\_`, "_"))
+		}
+		return out
+	}
+	for _, filter := range []string{slots, origins} {
+		ps := prefixes(filter)
+		matches := func(name string) bool {
+			return slices.ContainsFunc(ps, func(p string) bool { return strings.HasPrefix(name, p) })
+		}
+		for _, name := range []string{
+			pgcopydb.SlotName(nsE2E, "e2e-follow"),
+			pgcopydb.SlotName(nsX, "e2e-cross"),
+			pgcopydb.SlotName(nsE2E, strings.Repeat("e2e-very-long-migration-name", 3)),
+		} {
+			if !matches(name) {
+				t.Errorf("filter %q misses the suite's slot %s", filter, name)
+			}
+		}
+		for _, name := range []string{"pgcopydb", "pgcopydb_shop_orders_1a2b3c4d", pgcopydb.SlotName("prod", "follow")} {
+			if matches(name) {
+				t.Errorf("filter %q matches the foreign slot %s", filter, name)
+			}
+		}
 	}
 }

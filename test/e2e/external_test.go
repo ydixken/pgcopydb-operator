@@ -39,6 +39,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 const (
@@ -544,8 +546,36 @@ func cleanExternalReplication() {
 	GinkgoHelper()
 	dropSourceReplication()
 	resetTargetReplication()
-	Expect(psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")).
+	Expect(sourceSlotCount()).
 		To(Equal("0"), "pgcopydb replication slots are still active on the external source; drop them by hand")
+}
+
+// slotFilter selects the slots cleanup and counts touch. An external server
+// is shared, so there only this database's slots of the suite's Migrations.
+func slotFilter() string {
+	if external == nil {
+		return "slot_name LIKE 'pgcopydb%'"
+	}
+	return "database = current_database() AND " + suiteNameMatch("slot_name")
+}
+
+// originFilter is slotFilter for the target's origins, which belong to no database.
+func originFilter() string {
+	if external == nil {
+		return "roname LIKE 'pgcopydb%'"
+	}
+	return suiteNameMatch("roname")
+}
+
+// suiteNameMatch matches the names pgcopydb.SlotName gives Migrations in the
+// suite's namespaces: pgcopydb_<sanitized namespace>_, with LIKE's _ escaped.
+func suiteNameMatch(column string) string {
+	patterns := make([]string, 0, 2)
+	for _, ns := range []string{nsE2E, nsX} {
+		prefix := pgcopydb.SlotName(ns, "")[:len("pgcopydb_")+len(ns)+1]
+		patterns = append(patterns, column+" LIKE '"+strings.ReplaceAll(prefix, "_", `\_`)+"%'")
+	}
+	return "(" + strings.Join(patterns, " OR ") + ")"
 }
 
 // deleteExternalClient removes what external mode left in namespaces that

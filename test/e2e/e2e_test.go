@@ -1494,7 +1494,7 @@ func expectCleanupSucceeded(name string) {
 // generated names always start with pgcopydb_.
 func sourceSlotCount() string {
 	GinkgoHelper()
-	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")
+	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE "+slotFilter())
 }
 
 // targetOriginCount counts pgcopydb-created replication origins on the target.
@@ -1504,7 +1504,7 @@ func sourceSlotCount() string {
 // sees it.
 func targetOriginCount() string {
 	GinkgoHelper()
-	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE roname LIKE 'pgcopydb%'")
+	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
 }
 
 // copySecret merges one key into a secret, keeping any other key; CreateOrUpdate

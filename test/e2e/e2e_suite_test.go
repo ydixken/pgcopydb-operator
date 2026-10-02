@@ -2257,7 +2257,7 @@ func resetSourceReplication() {
 func dropSourceReplication() {
 	GinkgoHelper()
 	psql(sourceCluster, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
-		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
+		" WHERE "+slotFilter()+" AND NOT active")
 	psql(sourceCluster, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
 		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
 }
@@ -2272,7 +2272,7 @@ func dropSourceReplication() {
 func resetTargetReplication() {
 	GinkgoHelper()
 	psql(targetCluster, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
-		" WHERE roname LIKE 'pgcopydb%'")
+		" WHERE "+originFilter())
 }
 
 // instancePods returns the CNPG instance pods of one fixture cluster. A

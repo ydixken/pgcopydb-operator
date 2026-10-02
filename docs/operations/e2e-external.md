@@ -143,7 +143,8 @@ Release candidates run the suite against CloudNativePG fixtures only; CI covers 
 
 ## Cleanup
 
-At the end the suite drops the `pgcopydb` replication slots, publications, and origins on the pair, even with `E2E_KEEP_FIXTURES=true`, so nothing holds WAL on your source.
+At the end the suite drops the replication slots and origins its Migrations left and pgcopydb's publications in the source database, even with `E2E_KEEP_FIXTURES=true`, so nothing holds WAL on your source.
+It recognizes its own slots and origins by the `pgcopydb_pgcopydb_e2e_` prefix its namespaces give them, and on the source it looks only at the test database's slots, so other slots on your servers stay.
 The run fails if a slot is still there afterwards, once it has removed the operator and the Secrets below.
 It leaves the fixtures and the stamp in both databases, so the next run reuses the seed.
 
@@ -164,13 +165,15 @@ On the source, in the test database:
 
 ```sql
 SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots
-WHERE slot_name LIKE 'pgcopydb%' AND NOT active;
+WHERE database = current_database() AND slot_name LIKE 'pgcopydb\_pgcopydb\_e2e\_%' AND NOT active;
 DROP ROLE IF EXISTS e2e_noselect;
 ```
 
 On the target, in the test database, with `shop_app` replaced by your target app role:
 
 ```sql
+SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin
+WHERE roname LIKE 'pgcopydb\_pgcopydb\_e2e\_%';
 DO $$ BEGIN
   IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'e2e_limited') THEN
     EXECUTE 'DROP OWNED BY e2e_limited CASCADE';
