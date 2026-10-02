@@ -267,9 +267,9 @@ var _ = Describe("Migration", Ordered, func() {
 			// url.UserPassword escapes the generated password, whatever is in it.
 			u := url.URL{
 				Scheme: "postgresql",
-				User:   url.UserPassword(appDB, string(sec.Data[passwordKey])),
+				User:   url.UserPassword(appRole(cluster), string(sec.Data[passwordKey])),
 				Host:   cluster + "-rw." + nsE2E + ".svc:5432",
-				Path:   "/" + appDB,
+				Path:   "/" + appDatabase(cluster),
 			}
 			data[key] = []byte(u.String())
 		}
@@ -305,17 +305,18 @@ var _ = Describe("Migration", Ordered, func() {
 		// Source uses the convention keys with DB holding a password-free URI
 		// (the authoritative-URI branch); target remaps the keys and composes
 		// from parts, with a portless host exercising the :5432 default.
-		srcURI := fmt.Sprintf("postgresql://%s@%s-rw.%s.svc:5432/%s", appDB, sourceCluster, nsE2E, appDB)
+		srcURI := fmt.Sprintf("postgresql://%s@%s-rw.%s.svc:5432/%s",
+			appRole(sourceCluster), sourceCluster, nsE2E, appDatabase(sourceCluster))
 		details := map[string]map[string][]byte{
 			name + "-source": {
 				"DB": []byte(srcURI),
 				"PW": pw[sourceCluster],
 			},
 			name + "-target": {
-				"db":   []byte(appDB),
+				"db":   []byte(appDatabase(targetCluster)),
 				"pw":   pw[targetCluster],
 				"host": []byte(targetCluster + "-rw." + nsE2E + ".svc"),
-				"role": []byte(appDB),
+				"role": []byte(appRole(targetCluster)),
 			},
 		}
 		for secName, data := range details {
@@ -690,11 +691,11 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking REPLICATION from the app role on the source")
-		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
+		psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" NOREPLICATION")
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
-		Expect(failureMessage(m)).To(ContainSubstring(`ALTER ROLE "app" REPLICATION`),
+		Expect(failureMessage(m)).To(ContainSubstring("ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" REPLICATION"),
 			"preflight verdict must carry the exact re-grant hint")
 	})
 
@@ -711,7 +712,8 @@ var _ = Describe("Migration", Ordered, func() {
 		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', f::regprocedure, "+
+			sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
@@ -730,12 +732,12 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking SET on session_replication_role on the target")
-		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM "+sqlIdent(appRole(targetCluster)))
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
 		Expect(failureMessage(m)).To(
-			ContainSubstring(`GRANT SET ON PARAMETER session_replication_role TO "app"`),
+			ContainSubstring("GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster))),
 			"preflight verdict must carry the exact re-grant hint")
 	})
 
@@ -749,12 +751,13 @@ var _ = Describe("Migration", Ordered, func() {
 		})
 
 		By("revoking all three grantable follow rights from the app role")
-		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
+		psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" NOREPLICATION")
 		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
-		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', f::regprocedure, "+
+			sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM "+sqlIdent(appRole(targetCluster)))
 
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		m := waitFailed(name, "PreflightFailed")
@@ -785,12 +788,13 @@ var _ = Describe("Migration", Ordered, func() {
 		}
 
 		By("revoking all three grantable follow rights from the app role")
-		psql(sourceCluster, "ALTER ROLE app NOREPLICATION")
+		psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" NOREPLICATION")
 		psql(targetCluster, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 			" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure); END LOOP; END $$")
-		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM app")
+			" EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM %I', f::regprocedure, "+
+			sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
+		psql(targetCluster, "REVOKE SET ON PARAMETER session_replication_role FROM "+sqlIdent(appRole(targetCluster)))
 
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
 		mig.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: name + "-super-src"}
@@ -801,7 +805,8 @@ var _ = Describe("Migration", Ordered, func() {
 		waitFollowStreaming(name)
 
 		By("checking the applied grants were re-granted and recorded as events")
-		Expect(psql(sourceCluster, "SELECT rolreplication::int FROM pg_roles WHERE rolname = 'app'")).To(Equal("1"),
+		Expect(psql(sourceCluster, "SELECT rolreplication::int FROM pg_roles WHERE rolname = "+
+			sqlLiteral(appRole(sourceCluster)))).To(Equal("1"),
 			"remediation must restore the REPLICATION attribute")
 		got := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, got)).To(Succeed())
@@ -813,7 +818,7 @@ var _ = Describe("Migration", Ordered, func() {
 				if e.InvolvedObject.UID != got.UID || e.Reason != "PreflightRemediated" {
 					continue
 				}
-				if strings.Contains(e.Message, `ALTER ROLE "app" REPLICATION`) {
+				if strings.Contains(e.Message, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" REPLICATION") {
 					alterRole = true
 				}
 				if strings.Contains(e.Message, "GRANT EXECUTE ON FUNCTION") {
@@ -1022,7 +1027,8 @@ func makeLimitedTarget(secretName string) {
 	resetTargetObjects()
 	pw := secretName + "-pw"
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
-	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s", appDB, limitedRole))
+	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s",
+		sqlIdent(appDatabase(targetCluster)), limitedRole))
 	copySecret(nsE2E, secretName, []byte(pw))
 }
 
@@ -1054,8 +1060,8 @@ func dropLimitedRole() {
 func e2eConn(cluster string) v1beta1.PostgresConnection {
 	return v1beta1.PostgresConnection{
 		Host:     cluster + "-rw." + nsE2E + ".svc",
-		Database: appDB,
-		Username: appDB,
+		Database: appDatabase(cluster),
+		Username: appRole(cluster),
 		PasswordSecretRef: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: cluster + "-app"},
 			Key:                  passwordKey,

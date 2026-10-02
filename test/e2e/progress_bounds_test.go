@@ -43,7 +43,7 @@ var _ = Describe("Progress sampler bounds", func() {
 		const table = progressProbeTable
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
-		psql(sourceCluster, progressProbeSetupSQL(appDB))
+		psql(sourceCluster, progressProbeSetupSQL(sqlIdent(appRole(sourceCluster))))
 		DeferCleanup(func() {
 			deleteMigration(name)
 			Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
@@ -52,7 +52,7 @@ var _ = Describe("Progress sampler bounds", func() {
 			psql(targetCluster, "DROP TABLE IF EXISTS "+table)
 		})
 		Expect(psql(sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
-			table+"'::regclass")).To(Equal(appDB), "the follow fixture must be owned by the migration role")
+			table+"'::regclass")).To(Equal(appRole(sourceCluster)), "the follow fixture must be owned by the migration role")
 		create(newFollowMigration(name, v1beta1.CutoverManual))
 		waitFollowStreaming(name)
 		waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)

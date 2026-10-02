@@ -47,7 +47,7 @@ var _ = Describe("Ownership after restore", func() {
 		// Hyphenated like the role names managed platforms generate, so the
 		// operator's quoting is what makes the handover work (#294).
 		psql(targetCluster, `CREATE ROLE "app-owner" NOLOGIN`)
-		psql(targetCluster, `GRANT "app-owner" TO app`)
+		psql(targetCluster, `GRANT "app-owner" TO `+sqlIdent(appRole(targetCluster)))
 		// public stays owned by pg_database_owner, so the handover never
 		// transfers it and the objects in it need a standing CREATE grant for
 		// the incoming owner. audit needs none: app owns it after the restore,
@@ -57,12 +57,14 @@ var _ = Describe("Ownership after restore", func() {
 		By("proving the preconditions the operator's own probes test")
 		// What the preflight probes, in the form it probes it: a plain GRANT
 		// carries SET on every supported version.
-		psql(targetCluster, `BEGIN; SET SESSION AUTHORIZATION app; SET ROLE "app-owner"; ROLLBACK`)
+		psql(targetCluster, `BEGIN; SET SESSION AUTHORIZATION `+sqlIdent(appRole(targetCluster))+
+			`; SET ROLE "app-owner"; ROLLBACK`)
 		// The handover's database pre-check tests the migration role, not the
 		// incoming owner (has_database_privilege(current_user, ...) in
 		// reown.go), and app owns the target database: nothing to grant.
 		Expect(psql(targetCluster,
-			"SELECT has_database_privilege('app', current_database(), 'CREATE')")).To(Equal("t"))
+			"SELECT has_database_privilege("+sqlLiteral(appRole(targetCluster))+
+				", current_database(), 'CREATE')")).To(Equal("t"))
 	})
 
 	It("hands the restored objects to the target role", func() {
@@ -137,7 +139,7 @@ func resetOwnerRole() {
 	if psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner')") != "t" {
 		return
 	}
-	psql(targetCluster, `REASSIGN OWNED BY "app-owner" TO app`)
+	psql(targetCluster, `REASSIGN OWNED BY "app-owner" TO `+sqlIdent(appRole(targetCluster)))
 	psql(targetCluster, `DROP OWNED BY "app-owner"`)
 	psql(targetCluster, `DROP ROLE "app-owner"`)
 }
@@ -179,7 +181,7 @@ func expectHandoverApplied() {
 	// candidate set: reown.go excludes everything that depends on an extension
 	// with deptype e.
 	Expect(psql(targetCluster,
-		"SELECT pg_get_userbyid(extowner) FROM pg_extension WHERE extname = 'citext'")).To(Equal(appDB))
+		"SELECT pg_get_userbyid(extowner) FROM pg_extension WHERE extname = 'citext'")).To(Equal(appRole(targetCluster)))
 
 	// The exclusion is not overbroad: app_users has a citext column and is an
 	// ordinary candidate, so it moves like any other table. The regclass casts

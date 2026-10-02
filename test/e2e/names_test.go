@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,42 @@ func sqlIdent(name string) string {
 // sqlLiteral quotes a name for comparison with a catalog column.
 func sqlLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// plainIdent matches the names PostgreSQL's quote_ident leaves bare.
+var plainIdent = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
+
+// quotedKeywords are the keywords quote_ident quotes (every category but
+// unreserved), from PostgreSQL's kwlist.h.
+var quotedKeywords = func() map[string]bool {
+	m := map[string]bool{}
+	for k := range strings.FieldsSeq(`all analyse analyze and any array as asc asymmetric both case cast
+		check collate column constraint create current_catalog current_date current_role current_time
+		current_timestamp current_user default deferrable desc distinct do else end except false fetch
+		for foreign from grant group having in initially intersect into lateral leading limit localtime
+		localtimestamp not null offset on only or order placing primary references returning select
+		session_user some symmetric system_user table then to trailing true union unique user using
+		variadic when where window with authorization binary collation concurrently cross current_schema
+		freeze full ilike inner is isnull join left like natural notnull outer overlaps right similar
+		tablesample verbose between bigint bit boolean char character coalesce dec decimal exists
+		extract float greatest grouping inout int integer interval json json_array json_arrayagg
+		json_exists json_object json_objectagg json_query json_scalar json_serialize json_table
+		json_value least merge_action national nchar none normalize nullif numeric out overlay
+		position precision real row setof smallint substring time timestamp treat trim values varchar
+		xmlattributes xmlconcat xmlelement xmlexists xmlforest xmlnamespaces xmlparse xmlpi xmlroot
+		xmlserialize xmltable`) {
+		m[k] = true
+	}
+	return m
+}()
+
+// quoteIdentIfNeeded mirrors format('%I', name), the form the operator's
+// messages carry, so an asserted message stays exact for any role name.
+func quoteIdentIfNeeded(name string) string {
+	if plainIdent.MatchString(name) && !quotedKeywords[name] {
+		return name
+	}
+	return sqlIdent(name)
 }
 
 // asSourceAppRole prefixes source statements whose objects the migration role must own.
@@ -127,6 +164,25 @@ func TestE2ENamesQuoteForSQL(t *testing.T) {
 	} {
 		if tc.got != tc.want {
 			t.Errorf("quoted = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
+func TestE2ENamesQuoteIdentIfNeeded(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"app", "app"},
+		{"_app$1", "_app$1"},
+		{"snake_case_1", "snake_case_1"},
+		{"user", `"user"`},
+		{"authorization", `"authorization"`},
+		{"Orders", `"Orders"`},
+		{"1app", `"1app"`},
+		{"my-role", `"my-role"`},
+		{`say "hi"`, `"say ""hi"""`},
+		{"", `""`},
+	} {
+		if got := quoteIdentIfNeeded(tc.name); got != tc.want {
+			t.Errorf("quoteIdentIfNeeded(%q) = %s, want %s", tc.name, got, tc.want)
 		}
 	}
 }

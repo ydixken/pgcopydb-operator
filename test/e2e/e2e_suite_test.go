@@ -2113,12 +2113,12 @@ func checkLonghornCapacity() {
 // targets (PG14 is a source only), so the statement always parses here.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
-	psql(sourceCluster, "ALTER ROLE app REPLICATION")
-	grantTargetFollowPrivileges(appDB)
+	psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" REPLICATION")
+	grantTargetFollowPrivileges(appDatabase(targetCluster))
 }
 
 // grantTargetFollowPrivileges grants the target-side follow prerequisites to
-// app in one database. EXECUTE on catalog functions is per-database, so a
+// the migration role in one database. EXECUTE on catalog functions is per-database, so a
 // second target database (the chaos fan-out scenario) needs its own pass; the
 // parameter grant is cluster-wide but idempotent and simply rides along.
 func grantTargetFollowPrivileges(db string) {
@@ -2126,8 +2126,9 @@ func grantTargetFollowPrivileges(db string) {
 	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO app', f::regprocedure); END LOOP; END $$")
-	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO app")
+		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, "+
+		sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
+	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster)))
 }
 
 // resetSourceReplication drops what a crashed follow run may have left on the
@@ -2307,10 +2308,10 @@ func primaryPod(cluster string) string {
 	return name
 }
 
-// psql runs one statement against the app database; see psqlDB.
+// psql runs one statement against the migration database; see psqlDB.
 func psql(cluster, sql string) string {
 	GinkgoHelper()
-	return psqlDB(cluster, appDB, sql)
+	return psqlDB(cluster, appDatabase(cluster), sql)
 }
 
 // psqlDB runs one statement as the in-pod postgres user on the current primary
@@ -2803,7 +2804,7 @@ func (w *liveWriter) stop() (int, error) {
 // called from failure messages, where a second assertion would replace the
 // diagnosis with its own error. Returns the error text in place of the value.
 func psqlDiag(cluster, sql string) string {
-	out, err := psqlDBErr(cluster, appDB, sql)
+	out, err := psqlDBErr(cluster, appDatabase(cluster), sql)
 	if err != nil {
 		return "(query failed: " + err.Error() + ")"
 	}

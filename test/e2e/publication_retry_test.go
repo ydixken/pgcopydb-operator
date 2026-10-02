@@ -38,11 +38,20 @@ import (
 )
 
 const (
-	publicationRetryOwnerPattern = `^[0-9]+\|app\|0\|`
-	publicationRetryPubCount     = "SELECT count(*) FROM pg_publication WHERE pubname='"
-	publicationRetrySlotCount    = "SELECT count(*) FROM pg_replication_slots WHERE slot_name='"
-	publicationRetryInsert       = "SET ROLE app; INSERT INTO "
+	publicationRetryPubCount  = "SELECT count(*) FROM pg_publication WHERE pubname='"
+	publicationRetrySlotCount = "SELECT count(*) FROM pg_replication_slots WHERE slot_name='"
 )
+
+// publicationRetryOwnerPattern matches the head of publicationRetryStateSQL's
+// row for a publication the migration role owns that is not FOR ALL TABLES.
+func publicationRetryOwnerPattern() string {
+	return `^[0-9]+\|` + regexp.QuoteMeta(appRole(sourceCluster)) + `\|0\|`
+}
+
+// publicationRetryInsert starts a write the migration role makes, as an application would.
+func publicationRetryInsert() string {
+	return asSourceAppRole() + "INSERT INTO "
+}
 
 var _ = Describe("Automatic publication retries", func() {
 	It("preserves an established publication through a deliberate suspend and resume", func() {
@@ -53,11 +62,11 @@ var _ = Describe("Automatic publication retries", func() {
 		expectSingleAttempt(first)
 		expectPublicationRetrySlotActive(mig, slot, 1)
 		publication := psql(sourceCluster, publicationRetryStateSQL(slot))
-		Expect(publication).To(MatchRegexp(publicationRetryOwnerPattern + regexp.QuoteMeta(table) + `$`))
+		Expect(publication).To(MatchRegexp(publicationRetryOwnerPattern() + regexp.QuoteMeta(table) + `$`))
 
 		By("proving a unique post-clone marker was applied before stopping the worker")
 		marker := string(mig.UID)
-		psql(sourceCluster, publicationRetryInsert+table+" VALUES (1, '"+marker+"-before-stop')")
+		psql(sourceCluster, publicationRetryInsert()+table+" VALUES (1, '"+marker+"-before-stop')")
 		before := "0|baseline\n1|" + marker + "-before-stop"
 		expectPublicationRetryRows(table, before)
 		work := &corev1.PersistentVolumeClaim{}
@@ -85,10 +94,10 @@ var _ = Describe("Automatic publication retries", func() {
 		Expect(k8sClient.Get(ctx, key, work)).To(Succeed())
 		Expect(work.UID).To(Equal(workUID))
 		Eventually(func() (string, error) {
-			return psqlDBErr(sourceCluster, appDB, publicationRetrySlotCount+slot+"' AND NOT active")
+			return psqlDBErr(sourceCluster, appDatabase(sourceCluster), publicationRetrySlotCount+slot+"' AND NOT active")
 		}, time.Minute, time.Second).Should(Equal("1"))
 		Expect(psql(sourceCluster, publicationRetryStateSQL(slot))).To(Equal(publication))
-		psql(sourceCluster, publicationRetryInsert+table+" VALUES (2, '"+marker+"-suspended')")
+		psql(sourceCluster, publicationRetryInsert()+table+" VALUES (2, '"+marker+"-suspended')")
 		Expect(psql(targetCluster, publicationRetryRowsSQL(table))).To(Equal(before))
 
 		By("resuming the same work volume and proving delivery across the retry")
@@ -98,7 +107,7 @@ var _ = Describe("Automatic publication retries", func() {
 		expectPublicationRetrySlotActive(mig, slot, 2)
 		Expect(psql(sourceCluster, publicationRetryStateSQL(slot))).To(Equal(publication),
 			"the retry must preserve the publication OID, owner, and table membership")
-		psql(sourceCluster, publicationRetryInsert+table+" VALUES (3, '"+marker+"-resumed')")
+		psql(sourceCluster, publicationRetryInsert()+table+" VALUES (3, '"+marker+"-resumed')")
 		want := before + "\n2|" + marker + "-suspended\n3|" + marker + "-resumed"
 		expectPublicationRetryRows(table, want)
 		Expect(psql(sourceCluster, publicationRetryStateSQL(slot))).To(Equal(publication))
@@ -110,12 +119,12 @@ var _ = Describe("Automatic publication retries", func() {
 		other := strings.TrimPrefix(table, "public.") + "_other"
 		Expect(psql(sourceCluster, publicationRetryPubCount+other+"'")).To(Equal("0"))
 		DeferCleanup(func() { psql(sourceCluster, `DROP PUBLICATION IF EXISTS "`+other+`"`) })
-		psql(sourceCluster, `SET ROLE app; CREATE PUBLICATION "`+slot+`"; CREATE PUBLICATION "`+
+		psql(sourceCluster, asSourceAppRole()+`CREATE PUBLICATION "`+slot+`"; CREATE PUBLICATION "`+
 			other+`" FOR TABLE `+table)
 		orphan := psql(sourceCluster, publicationRetryStateSQL(slot))
-		Expect(orphan).To(MatchRegexp(publicationRetryOwnerPattern+`$`), "the orphan must be empty and app-owned")
+		Expect(orphan).To(MatchRegexp(publicationRetryOwnerPattern()+`$`), "the orphan must be empty and app-owned")
 		unrelated := psql(sourceCluster, publicationRetryStateSQL(other))
-		Expect(unrelated).To(MatchRegexp(publicationRetryOwnerPattern + regexp.QuoteMeta(table) + `$`))
+		Expect(unrelated).To(MatchRegexp(publicationRetryOwnerPattern() + regexp.QuoteMeta(table) + `$`))
 		Expect(psql(sourceCluster, publicationRetrySlotCount+slot+"'")).To(Equal("0"))
 
 		By("letting the real first worker encounter the duplicate publication")
@@ -144,12 +153,12 @@ var _ = Describe("Automatic publication retries", func() {
 		expectPublicationRetryAttempt(mig.Name)
 		expectPublicationRetrySlotActive(mig, slot, 2)
 		repaired := psql(sourceCluster, publicationRetryStateSQL(slot))
-		Expect(repaired).To(MatchRegexp(publicationRetryOwnerPattern + regexp.QuoteMeta(table) + `$`))
+		Expect(repaired).To(MatchRegexp(publicationRetryOwnerPattern() + regexp.QuoteMeta(table) + `$`))
 		Expect(strings.Split(repaired, "|")[0]).NotTo(Equal(strings.Split(orphan, "|")[0]),
 			"the orphan must be replaced, not reused as an empty publication")
 		Expect(psql(sourceCluster, publicationRetryStateSQL(other))).To(Equal(unrelated))
 		marker := string(mig.UID) + "-after-repair"
-		psql(sourceCluster, publicationRetryInsert+table+" VALUES (1, '"+marker+"')")
+		psql(sourceCluster, publicationRetryInsert()+table+" VALUES (1, '"+marker+"')")
 		want := "0|baseline\n1|" + marker
 		expectPublicationRetryRows(table, want)
 		completePublicationRetry(mig.Name, table, slot, want)
@@ -193,10 +202,10 @@ func publicationRetryFixture(name string) (*v1beta1.Migration, string, string) {
 		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
 	})
-	psql(sourceCluster, "SET ROLE app; CREATE TABLE "+table+
+	psql(sourceCluster, asSourceAppRole()+"CREATE TABLE "+table+
 		" (id integer PRIMARY KEY, marker text NOT NULL); INSERT INTO "+table+" VALUES (0, 'baseline')")
 	Expect(psql(sourceCluster, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='"+
-		table+"'::regclass")).To(Equal(appDB), "the migration role must own the follow fixture")
+		table+"'::regclass")).To(Equal(appRole(sourceCluster)), "the migration role must own the follow fixture")
 	return mig, table, slot
 }
 
@@ -210,7 +219,7 @@ func publicationRetryStateSQL(publication string) string {
 func expectPublicationRetryRows(table, want string) {
 	GinkgoHelper()
 	Eventually(func(g Gomega) {
-		out, err := psqlDBErr(targetCluster, appDB, publicationRetryRowsSQL(table))
+		out, err := psqlDBErr(targetCluster, appDatabase(targetCluster), publicationRetryRowsSQL(table))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(out).To(Equal(want), "exact marker rows must arrive before cutover")
 	}, lagConvergeTimeout, time.Second).Should(Succeed())
@@ -226,7 +235,7 @@ func expectPublicationRetrySlotActive(mig *v1beta1.Migration, slot string, attem
 		if err := publicationRetryWorkerState(ctx, k8sClient, mig, attempt); err != nil {
 			return "", err
 		}
-		out, err := psqlDBErr(sourceCluster, appDB, publicationRetrySlotCount+slot+
+		out, err := psqlDBErr(sourceCluster, appDatabase(sourceCluster), publicationRetrySlotCount+slot+
 			"' AND database=current_database() AND slot_type='logical' AND plugin='pgoutput' "+
 			"AND active AND confirmed_flush_lsn IS NOT NULL")
 		return out, publicationRetryProbeError(err)

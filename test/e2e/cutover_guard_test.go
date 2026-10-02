@@ -128,14 +128,14 @@ func earlyManualCutover() {
 		if apimeta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) {
 			StopTrying("base copy completed before the test could pause its walsender").Now()
 		}
-		out, err := psqlDBErr(sourceCluster, appDB, query)
+		out, err := psqlDBErr(sourceCluster, appDatabase(sourceCluster), query)
 		g.Expect(err).NotTo(HaveOccurred())
 		pid, err = slotSenderPID(out)
 		g.Expect(err).NotTo(HaveOccurred())
 	}, migrationTimeout, 200*time.Millisecond).Should(Succeed())
 	pod := primaryPod(sourceCluster)
 	signalSender := func(signal string) error {
-		return signalSlotSender(pod, appDB, query, pid, signal)
+		return signalSlotSender(pod, appDatabase(sourceCluster), query, pid, signal)
 	}
 	resumed := false
 	DeferCleanup(func() {
