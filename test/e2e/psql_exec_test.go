@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,4 +410,53 @@ func TestPSQLDBErrReturnsTrimmedOutputAndExpectedArguments(t *testing.T) {
 		t.Fatalf("calls=%#v, want %#v", calls, want)
 	}
 	requirePSQLCommandsReaped(t, commands)
+}
+
+// TestPSQLArgvKeepsCNPGCommands pins the builder's output for the flag shapes
+// the probe sites pass to the bytes those sites spelled out before.
+func TestPSQLArgvKeepsCNPGCommands(t *testing.T) {
+	const (
+		pod       = "target-1"
+		db        = "app"
+		superuser = "postgres"
+		sql       = "SELECT 1"
+		oneShot   = "-tAc"
+		stopOnErr = "ON_ERROR_STOP=1"
+		bounded   = "SET statement_timeout=3000"
+		silence   = `exec 2>/dev/null; exec "$@"`
+	)
+	for _, tc := range []struct {
+		name      string
+		got, want []string
+	}{
+		{
+			name: "one statement",
+			got:  psqlArgv(sourceCluster, psqlExecTestPod, db, false, oneShot, sql),
+			want: []string{psqlExecSubcommand, "-n", nsE2E, psqlExecTestPod, "-c", postgresContainer, "--",
+				psqlExecProgram, "-U", superuser, db, oneShot, sql},
+		},
+		{
+			name: "statement stream",
+			got:  psqlArgv(sourceCluster, psqlExecTestPod, db, true, "-q", "-v", stopOnErr),
+			want: []string{psqlExecSubcommand, "-i", "-n", nsE2E, psqlExecTestPod, "-c", postgresContainer, "--",
+				psqlExecProgram, "-U", superuser, db, "-q", "-v", stopOnErr},
+		},
+		{
+			name: "bounded probe",
+			got:  psqlArgv(targetCluster, pod, db, false, "-XqtA", "-v", stopOnErr, "-c", bounded, "-c", sql),
+			want: []string{psqlExecSubcommand, "-n", nsE2E, pod, "-c", postgresContainer, "--",
+				psqlExecProgram, "-U", superuser, db, "-XqtA", "-v", stopOnErr, "-c", bounded, "-c", sql},
+		},
+		{
+			name: "stderr-silenced probe",
+			got: slices.Concat(kubectlExecArgs(pod, false), []string{"sh", "-c", silence, "sh"},
+				psqlCommand(targetCluster, db, "-XAtq", "-c", sql)),
+			want: []string{psqlExecSubcommand, "-n", nsE2E, pod, "-c", postgresContainer, "--",
+				"sh", "-c", silence, "sh", psqlExecProgram, "-U", superuser, db, "-XAtq", "-c", sql},
+		},
+	} {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s argv = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
 }

@@ -269,9 +269,9 @@ func publicationRetrySQLDiagnostics(
 				label, len(pods.Items), publicationRetryProbeError(err))
 			continue
 		}
-		out, probeErr := commandOutput(probeCtx, command, "kubectl", "exec", "-n", nsE2E, pods.Items[0].Name,
-			"-c", "postgres", "--", "psql", "-U", "postgres", appDB, "-XAtq", "-v", "ON_ERROR_STOP=1",
-			"-c", "SET statement_timeout='5s'; SET lock_timeout='2s'; "+query.sql)
+		out, probeErr := commandOutput(probeCtx, command, "kubectl",
+			psqlArgv(cluster, pods.Items[0].Name, appDatabase(cluster), false, "-XAtq", "-v", "ON_ERROR_STOP=1",
+				"-c", "SET statement_timeout='5s'; SET lock_timeout='2s'; "+query.sql)...)
 		if probeErr != nil {
 			fmt.Fprintf(b, "[WARN] %s %v\n", label, publicationRetryProbeError(probeErr))
 			continue

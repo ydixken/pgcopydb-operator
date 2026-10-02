@@ -2392,13 +2392,7 @@ func psqlDBErrWith(
 	for attempt := 1; attempt <= 3; attempt++ {
 		pod = primary(cluster)
 		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		out, err := commandOutput(
-			attemptCtx,
-			command,
-			"kubectl",
-			"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-			"psql", "-U", "postgres", db, "-tAc", sql,
-		)
+		out, err := commandOutput(attemptCtx, command, "kubectl", psqlArgv(cluster, pod, db, false, "-tAc", sql)...)
 		cancel()
 		if err == nil {
 			return strings.TrimSpace(string(out)), nil
@@ -2423,6 +2417,26 @@ func psqlDBErrWith(
 		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
+}
+
+// psqlArgv is the kubectl argv that runs psql on pod against db, connected as
+// cluster's admin role. stdin keeps psql reading statements until it closes.
+func psqlArgv(cluster, pod, db string, stdin bool, flags ...string) []string {
+	return append(kubectlExecArgs(pod, stdin), psqlCommand(cluster, db, flags...)...)
+}
+
+// kubectlExecArgs opens kubectl exec into the container on pod that runs psql.
+func kubectlExecArgs(pod string, stdin bool) []string {
+	args := []string{psqlExecSubcommand}
+	if stdin {
+		args = append(args, "-i")
+	}
+	return append(args, "-n", nsE2E, pod, "-c", postgresContainer, "--")
+}
+
+// psqlCommand is the psql invocation that reaches db as cluster's admin role.
+func psqlCommand(cluster, db string, flags ...string) []string {
+	return append([]string{psqlExecProgram, "-U", adminRole(cluster), db}, flags...)
 }
 
 // liveWriter sends ordered inserts through one psql child until stopped or a
@@ -2579,12 +2593,8 @@ func (w *liveWriter) readFinalMarker(marker, pod string) {
 	w.mu.Lock()
 	w.diag.queryStartedAt = time.Now()
 	w.mu.Unlock()
-	cmd := w.command(
-		queryCtx,
-		"kubectl",
-		"exec", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-tAc", query,
-	)
+	cmd := w.command(queryCtx, "kubectl",
+		psqlArgv(sourceCluster, pod, appDatabase(sourceCluster), false, "-tAc", query)...)
 	cmd.WaitDelay = min(w.timeout, time.Second)
 	out, err := cmd.Output()
 	finishedAt := time.Now()
@@ -2670,8 +2680,8 @@ func (w *liveWriter) run(marker string) {
 	defer w.cancel()
 
 	pod := w.pod
-	cmd := w.command(w.ctx, "kubectl", "exec", "-i", "-n", nsE2E, pod, "-c", "postgres", "--",
-		"psql", "-U", "postgres", appDB, "-q", "-v", "ON_ERROR_STOP=1")
+	cmd := w.command(w.ctx, "kubectl",
+		psqlArgv(sourceCluster, pod, appDatabase(sourceCluster), true, "-q", "-v", "ON_ERROR_STOP=1")...)
 	var stderr liveWriterStderr
 	cmd.Stderr = &stderr
 	// Bound inherited stderr descriptors after exit or explicit cancellation, not active writing.
