@@ -18,6 +18,7 @@ That shows the operator works with your servers, network, and roles; it says not
   The suite installs the chart with `crds.install=false` and fails naming every field the served CRD lacks.
 - Rights to create the namespaces `pgcopydb-e2e`, `pgcopydb-e2e-x`, and `pgcopydb-e2e-system`, or `E2E_MANAGE_NAMESPACES=false` with those namespaces and the manager ServiceAccount provided by their owner (see the [contributor guide](https://github.com/ydixken/pgcopydb-operator/blob/main/CONTRIBUTING.md#e2e-tests)).
 - Network access from pods in those namespaces to both servers.
+- Image pulls from `ghcr.io` in the cluster: the operator and runner images under `ghcr.io/ydixken/pgcopydb-operator`, and `ghcr.io/cloudnative-pg/postgresql:18`, which the client pod and the seed Job run.
 - One database on each server, holding no user objects on the first run.
 - On each side, an app role that can log in, owns its database, and is not a superuser.
   The migrations run as this role, and the seed creates schemas and the `citext` extension as it.
@@ -57,7 +58,8 @@ The suite checks the values before it touches anything and stops with an error t
 
 The suite stores the passwords in the Secret `e2e-external-credentials` in `pgcopydb-e2e` and hands them to psql through a pgpass file in its client pod `e2e-psql`, never through argv.
 
-`E2E_SCALE` sizes the fixtures (the task defaults it to 0.1), `E2E_STORAGE_CLASS` picks the work volume's StorageClass, and `E2E_OPERATOR_TAG` picks the operator build, as in a normal run.
+`task e2e:external` sets `E2E_SCALE`, which sizes the fixtures, to 0.1 unless you pass `SCALE=` (see the examples below).
+`E2E_STORAGE_CLASS` picks the work volume's StorageClass and `E2E_OPERATOR_TAG` the operator build, as in a normal run.
 The suite reads the server majors from the servers, so it rejects `E2E_PG_SOURCE` and `E2E_PG_TARGET` in external mode, and `E2E_CNPG_INSTANCES` has no effect.
 
 ## Running it
@@ -116,7 +118,7 @@ Check out these **examples**:
 
 On the first run both databases must hold no user objects: no schema besides `public`, no table, view, sequence, function, or type outside the system schemas, no extension besides `plpgsql`, and no large object.
 The suite checks both databases first, then stamps each with the database comment `pgcopydb-e2e: disposable, the e2e suite may wipe this database` before it seeds or resets anything.
-Every later run refuses to touch a database that lacks the stamp, and the error lists up to ten of the objects it found.
+A later run treats a database the same way: it stamps one that is still empty and refuses one that holds objects but lacks the stamp, and the error lists up to ten of the objects it found.
 When the source's seed has another scale or profile than the run asks for, the suite drops the fixture objects on the source and seeds it again.
 
 The roles the suite creates (`e2e_noselect` on the source, `e2e_limited` and `app-owner` on the target) carry the same text as a role comment.
