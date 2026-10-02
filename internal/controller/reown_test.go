@@ -80,7 +80,8 @@ func TestBuildReownJob(t *testing.T) {
 	if c.Args[1] != reownScript() {
 		t.Fatal("the container must run the shipped handover script")
 	}
-	// PgBouncer refuses startup options at connect (#298), so the bounds travel in SQL.
+	// PgBouncer refuses startup options at connect (#298), so the bounds travel in SQL. No e2e can
+	// catch a regression: a CNPG Pooler always adds options to ignore_startup_parameters.
 	if slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "PGOPTIONS" }) {
 		t.Fatal("the handover Job must not carry PGOPTIONS")
 	}
