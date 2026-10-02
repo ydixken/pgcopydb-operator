@@ -1245,6 +1245,10 @@ var _ = AfterSuite(func() {
 		deleteNamespaces(2*time.Minute, nsOperator)
 	}
 
+	// By lives here, not in teardownFixtures: a unit test calls that helper outside a Ginkgo run.
+	if external != nil {
+		By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
+	}
 	teardownFixtures()
 	Expect(replicationErr).NotTo(HaveOccurred(),
 		"pgcopydb replication state is left on the external pair; see docs/operations/e2e-external.md#cleanup")
@@ -1256,7 +1260,6 @@ func teardownFixtures() {
 	GinkgoHelper()
 	// The e2e- Secrets hold the supplied passwords, so they go even when fixtures are kept.
 	if external != nil {
-		By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
 		deleteExternalClient()
 	}
 
