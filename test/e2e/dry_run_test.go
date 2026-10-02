@@ -61,7 +61,7 @@ var _ = Describe("Dry run", func() {
 		const name = "e2e-dry-run-grant"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(targetCluster, "ALTER ROLE postgres PASSWORD NULL")
+			clearSuperuserPassword(targetCluster, name+"-super")
 			dropLimitedRole()
 		})
 

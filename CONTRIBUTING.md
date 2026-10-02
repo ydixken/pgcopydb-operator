@@ -120,6 +120,7 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
 The suite installs a throwaway operator, creates a shared source/target CNPG pair with one instance each by default, and seeds the source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
+With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mode instead: it uses an existing database pair, creates no CNPG clusters, and seeds the source through the same Job (see [Running the E2E suite against your databases](docs/operations/e2e-external.md)).
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
 The non-unique secondary indexes are built once by `finish.sql` rather than maintained per insert.
@@ -175,6 +176,10 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_MANAGE_NAMESPACES` (`true`) set to `false` works inside namespaces someone else owns: it creates and deletes none, and installs with `rbac.create=false`.
 - `E2E_PROMETHEUS_URL` (unset) is the base URL of a Prometheus that scrapes the suite's operator install, and enables the metrics specs.
 - `E2E_PROMETHEUS_PORT_FORWARD` (unset) is the `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.
+- `E2E_SOURCE_URI` (unset) switches to external mode, which runs against an existing database pair instead of CNPG fixtures; use `task e2e:external`.
+  Setting it or any of its siblings makes all eight required: `E2E_SOURCE_URI`, `E2E_SOURCE_PASSWORD`, `E2E_SOURCE_ADMIN_URI`, `E2E_SOURCE_ADMIN_PASSWORD`, and the four `E2E_TARGET_*` counterparts.
+  The URIs carry no password and no query parameter except `sslmode`.
+  External mode reads the server majors from the servers, so it rejects `E2E_PG_SOURCE` and `E2E_PG_TARGET`, and `E2E_CNPG_INSTANCES` has no effect.
 
 Outside the stress tier the fixture volumes follow the scale, down from 50/50/12Gi at scale 1, with a floor at an eighth of that: the 0.1 release candidate tier gets 7/7/2Gi.
 `max_wal_size` follows the volume at a fifth of it, because CNPG keeps `pg_wal` inside PGDATA and a flat value sized for a big fixture fills a small one outright.
@@ -225,6 +230,11 @@ Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`
 Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures.
 The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 
+A spec that needs the database pods (exec into an instance, signal or delete one, or create its own CNPG clusters), or that acts beyond the two fixture databases (creates, drops, or connects to another database), MUST call `requireCNPGFixtures()` before it does.
+In external mode that skips the spec with a reason.
+We check at runtime rather than by label, so a run that forgets the label filter still cannot send such a spec at someone else's server.
+A spec that only runs SQL needs no gate: `psql` and the helpers built on `psqlArgv` reach either kind of server.
+
 `release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
 `E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
 It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
@@ -240,7 +250,7 @@ Recovery after unlocking has a separate 12-minute backlog drain budget shared by
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
-CI runs the cutover, publication-retry, live-writer, psql-channel, and e2e name helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`, `TestPSQL*`, `TestE2ENames*`) with `-race -v` without starting the cluster suite.
+CI runs the cutover, publication-retry, live-writer, psql-channel, e2e name, and external-mode helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`, `TestPSQL*`, `TestE2ENames*`, `TestExternal*`) with `-race -v` without starting the cluster suite.
 A new helper family goes into both that step's `-run` selector in `.github/workflows/ci.yml` and the family list in `test/buildconfig/buildconfig_test.go`, which rejects a selector that matches anything else.
 Verbose output makes actual test selection and the expected parent-only subprocess-helper skip visible; it does not waive any meaningful regression.
 The `TestLiveWriterHelper` subprocess entry point skips in the parent process; the lifecycle tests invoke it as a child.

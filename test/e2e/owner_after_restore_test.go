@@ -47,6 +47,7 @@ var _ = Describe("Ownership after restore", func() {
 		// Hyphenated like the role names managed platforms generate, so the
 		// operator's quoting is what makes the handover work (#294).
 		psql(targetCluster, `CREATE ROLE "app-owner" NOLOGIN`)
+		stampRole(targetCluster, incomingOwnerRole)
 		psql(targetCluster, `GRANT "app-owner" TO `+sqlIdent(appRole(targetCluster)))
 		// public stays owned by pg_database_owner, so the handover never
 		// transfers it and the objects in it need a standing CREATE grant for
@@ -136,7 +137,7 @@ var _ = Describe("Ownership after restore", func() {
 // resetTargetObjects, which drops the objects this hands back.
 func resetOwnerRole() {
 	GinkgoHelper()
-	if psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner')") != "t" {
+	if psql(targetCluster, "SELECT "+suiteRoleExists(incomingOwnerRole)) != "t" {
 		return
 	}
 	psql(targetCluster, `REASSIGN OWNED BY "app-owner" TO `+sqlIdent(appRole(targetCluster)))

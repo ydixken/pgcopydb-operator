@@ -151,6 +151,67 @@ tasks:
       - go test ./test/e2e/... -v -timeout 1h -ginkgo.v -ginkgo.timeout=1h
         -ginkgo.label-filter='!chaos' -ginkgo.focus='{{.FOCUS}}'
 
+  e2e:external:
+    desc: >-
+      Run the e2e suite against an existing source/target database pair
+      (external mode) from the CURRENT kubectl context. Needs all eight
+      E2E_SOURCE_* and E2E_TARGET_* variables; seeds and writes the source
+      and wipes the target. Defaults to scale 0.1 (SCALE= overrides);
+      FOCUS= narrows to matching specs. See docs/operations/e2e-external.md.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+      # host:port/database only; the URIs carry no password by contract.
+      SOURCE_DB:
+        sh: printf '%s' "${E2E_SOURCE_URI:-}" | sed -E 's#^[^:]*://([^@/]*@)?([^/?]*)/?([^?]*).*#\2/\3#'
+      TARGET_DB:
+        sh: printf '%s' "${E2E_TARGET_URI:-}" | sed -E 's#^[^:]*://([^@/]*@)?([^/?]*)/?([^?]*).*#\2/\3#'
+    prompt: >-
+      e2e EXTERNAL will seed source '{{.SOURCE_DB}}' and wipe target
+      '{{.TARGET_DB}}' from kubectl context '{{.KUBE_CONTEXT}}'. Continue?
+    preconditions:
+      - &external-env
+        sh: >-
+          for v in E2E_SOURCE_URI E2E_SOURCE_PASSWORD E2E_SOURCE_ADMIN_URI
+          E2E_SOURCE_ADMIN_PASSWORD E2E_TARGET_URI E2E_TARGET_PASSWORD
+          E2E_TARGET_ADMIN_URI E2E_TARGET_ADMIN_PASSWORD;
+          do test -n "${!v:-}" || exit 1; done
+        msg: |
+          External mode needs all eight variables set and non-empty:
+            E2E_SOURCE_URI E2E_SOURCE_PASSWORD E2E_SOURCE_ADMIN_URI E2E_SOURCE_ADMIN_PASSWORD
+            E2E_TARGET_URI E2E_TARGET_PASSWORD E2E_TARGET_ADMIN_URI E2E_TARGET_ADMIN_PASSWORD
+    cmds:
+      - task: e2e:external:run
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}'}
+
+  e2e:external:unattended:
+    desc: >-
+      e2e:external without the confirmation prompt, for a script that cannot
+      answer one. EXPECT_CONTEXT is required and must name the current
+      kubectl context, as for e2e:focus:unattended.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    preconditions:
+      - *external-env
+      - sh: test '{{.EXPECT_CONTEXT}}' = '{{.KUBE_CONTEXT}}'
+        msg: |
+          EXPECT_CONTEXT must name the context this will run against.
+            current context: {{.KUBE_CONTEXT}}
+            EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
+    cmds:
+      - task: e2e:external:run
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}'}
+
+  e2e:external:run:
+    internal: true
+    env:
+      E2E_SCALE: '{{.SCALE | default "0.1"}}'
+    # -run keeps the CNPG-pinned unit tests out; only the Ginkgo suite runs.
+    cmds:
+      - go test ./test/e2e/... -run '^TestE2E$' -v -timeout 3h -ginkgo.v -ginkgo.timeout=3h
+        -ginkgo.label-filter='!chaos && !flaky'{{if .FOCUS}} -ginkgo.focus='{{.FOCUS}}'{{end}}
+
   e2e:chaos:
     desc: >-
       Chaos e2e (pod kills, disk pressure, concurrent migrations; the specs

@@ -37,6 +37,7 @@ import (
 // this label.
 var _ = Describe("Migration chaos", Label("chaos"), func() {
 	It("recovers a clone after the source primary dies mid-copy", func() {
+		requireCNPGFixtures()
 		const name = "e2e-chaos-srckill"
 		// The kill has to land inside the COPY of documents, the biggest
 		// table (scale x ~8.5GB of TOAST). Below scale 0.05 (~425MB) that
@@ -138,6 +139,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 	})
 
 	It("fans two concurrent follow migrations from one source into two target databases", func() {
+		requireCNPGFixtures()
 		const (
 			nameA = "e2e-chaos-fan-a"
 			nameB = "e2e-chaos-fan-b"
@@ -263,6 +265,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 	})
 
 	It("resumes the stream without duplicates after the target primary dies mid-apply", func() {
+		requireCNPGFixtures()
 		const name = "e2e-chaos-tgtkill"
 		DeferCleanup(func() {
 			deleteMigration(name)

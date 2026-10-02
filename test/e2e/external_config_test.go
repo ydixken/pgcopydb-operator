@@ -1,0 +1,855 @@
+/*
+Copyright 2026 pgcopydb-operator contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"reflect"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	. "github.com/onsi/gomega"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+)
+
+const (
+	testSourceHost = "source.example.com"
+	testAppRole    = "shop_app"
+)
+
+// testExternalPair is the pair externalEnvFixture describes, built directly.
+func testExternalPair() *externalConfig {
+	return &externalConfig{
+		Source: externalSide{Host: testSourceHost, Port: 6432, Database: "shop",
+			AppRole: testAppRole, AdminRole: "shop_admin", SSLMode: sslRequire,
+			AppPassword: "src-app-pw", AdminPassword: "src-admin-pw"},
+		Target: externalSide{Host: "target.example.com", Port: 5432, Database: "shop_new",
+			AppRole: testAppRole, AdminRole: "shop_admin",
+			AppPassword: "tgt-app-pw", AdminPassword: "tgt-admin-pw"},
+	}
+}
+
+// pairWith is testExternalPair with one edit, for cases that differ in a field.
+func pairWith(edit func(*externalConfig)) *externalConfig {
+	pair := testExternalPair()
+	edit(pair)
+	return pair
+}
+
+func externalEnvFixture() map[string]string {
+	return map[string]string{
+		envSourceURI:           "postgresql://shop_app@source.example.com:6432/shop?sslmode=require",
+		envSourcePassword:      "src-app-pw",
+		envSourceAdminURI:      "postgresql://shop_admin@source.example.com:6432",
+		envSourceAdminPassword: "src-admin-pw",
+		envTargetURI:           "postgres://shop_app@target.example.com/shop_new",
+		envTargetPassword:      "tgt-app-pw",
+		envTargetAdminURI:      "postgres://shop_admin@target.example.com/shop_new",
+		envTargetAdminPassword: "tgt-admin-pw",
+	}
+}
+
+func TestExternalConfig(t *testing.T) {
+	set := func(kv ...string) func(map[string]string) {
+		return func(env map[string]string) {
+			for i := 0; i < len(kv); i += 2 {
+				env[kv[i]] = kv[i+1]
+			}
+		}
+	}
+	unset := func(names ...string) func(map[string]string) {
+		return func(env map[string]string) {
+			for _, name := range names {
+				delete(env, name)
+			}
+		}
+	}
+	for _, tt := range []struct {
+		name    string
+		env     func(map[string]string)
+		want    *externalConfig
+		wantErr string
+	}{
+		{name: "unset means CNPG mode", env: func(env map[string]string) { clear(env) }},
+		{name: "names, port default and sslmode extracted", env: set(), want: testExternalPair()},
+		{name: "percent-encoded names decode",
+			env: set(envSourceURI, "postgresql://Shop%20App@source.example.com:6432/My%27Shop?sslmode=require",
+				envSourceAdminURI, "postgresql://shop_admin@source.example.com:6432/My%27Shop"),
+			want: pairWith(func(p *externalConfig) { p.Source.AppRole, p.Source.Database = "Shop App", "My'Shop" })},
+		{name: "IPv6 host literal",
+			env: set(envSourceURI, "postgresql://shop_app@[fd00::5]:6432/shop?sslmode=require",
+				envSourceAdminURI, "postgresql://shop_admin@[fd00::5]:6432"),
+			wantErr: "E2E_SOURCE_URI names an IPv6 literal host"},
+		{name: "sslmode disable is kept",
+			env:  set(envTargetURI, "postgres://shop_app@target.example.com/shop_new?sslmode=disable"),
+			want: pairWith(func(p *externalConfig) { p.Target.SSLMode = sslDisable })},
+		{name: "partial set names the missing variables",
+			env:     unset(envSourcePassword, envTargetAdminPassword),
+			wantErr: "missing E2E_SOURCE_PASSWORD, E2E_TARGET_ADMIN_PASSWORD"},
+		{name: "target alone is not CNPG mode",
+			env:     unset(envSourceURI),
+			wantErr: "missing E2E_SOURCE_URI"},
+		{name: "password in the URI",
+			env:     set(envSourceURI, "postgresql://shop_app:leaked-pw@source.example.com:6432/shop"),
+			wantErr: "E2E_SOURCE_URI carries a password"},
+		{name: "password in an unparseable URI is not echoed",
+			env:     set(envTargetURI, "postgresql://shop_app:leaked-pw@target.example.com:port/shop_new"),
+			wantErr: "E2E_TARGET_URI is not a postgres:// or postgresql:// URI"},
+		{name: "password as a query parameter",
+			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?password=leaked-pw"),
+			wantErr: "E2E_SOURCE_URI carries a query parameter other than sslmode"},
+		{name: "a pasted password as a query key is not echoed",
+			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?sslmode=require&leaked-pw"),
+			wantErr: "E2E_SOURCE_URI carries a query parameter other than sslmode"},
+		{name: "unknown query parameter",
+			env:     set(envTargetAdminURI, "postgres://shop_admin@target.example.com?application_name=x"),
+			wantErr: "E2E_TARGET_ADMIN_URI carries a query parameter other than sslmode"},
+		{name: "verify sslmode needs a CA the suite does not mount",
+			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?sslmode=verify-full"),
+			wantErr: "sslmode=verify-full"},
+		{name: "unknown sslmode",
+			env:     set(envSourceURI, "postgresql://shop_app@source.example.com:6432/shop?sslmode=on"),
+			wantErr: `sslmode="on"`},
+		{name: "admin sslmode differs",
+			env:     set(envSourceAdminURI, "postgresql://shop_admin@source.example.com:6432?sslmode=disable"),
+			wantErr: "E2E_SOURCE_ADMIN_URI must use the sslmode of E2E_SOURCE_URI"},
+		{name: "admin database mismatch",
+			env:     set(envTargetAdminURI, "postgres://shop_admin@target.example.com/postgres"),
+			wantErr: `E2E_TARGET_ADMIN_URI names database "postgres"`},
+		{name: "admin host mismatch",
+			env:     set(envTargetAdminURI, "postgres://shop_admin@other.example.com/shop_new"),
+			wantErr: "E2E_TARGET_ADMIN_URI must name the host and port of E2E_TARGET_URI"},
+		{name: "admin and app are one login",
+			env:     set(envSourceAdminURI, "postgresql://shop_app@source.example.com:6432"),
+			wantErr: "E2E_SOURCE_ADMIN_URI names the app role"},
+		{name: "app URI without a database",
+			env:     set(envTargetURI, "postgres://shop_app@target.example.com"),
+			wantErr: "E2E_TARGET_URI names no database"},
+		{name: "URI without a role",
+			env:     set(envSourceAdminURI, "postgresql://source.example.com:6432"),
+			wantErr: "E2E_SOURCE_ADMIN_URI names no role"},
+		{name: "keyword conninfo is not a URI",
+			env:     set(envSourceURI, "host=source.example.com dbname=shop user=shop_app"),
+			wantErr: "E2E_SOURCE_URI is not a postgres:// or postgresql:// URI"},
+		{name: "several hosts",
+			env:     set(envSourceURI, "postgresql://shop_app@a.example.com,b.example.com/shop"),
+			wantErr: "E2E_SOURCE_URI must name exactly one TCP host"},
+		{name: "port zero",
+			env:     set(envTargetURI, "postgres://shop_app@target.example.com:0/shop_new"),
+			wantErr: "E2E_TARGET_URI has port 0"},
+		{name: "source and target are one database",
+			env: set(envTargetURI, "postgres://shop_app@source.example.com:6432/shop",
+				envTargetAdminURI, "postgres://shop_admin@source.example.com:6432"),
+			wantErr: "name the same database"},
+		{name: "one role with two passwords",
+			env: set(envTargetURI, "postgres://shop_app@source.example.com:6432/shop_new",
+				envTargetAdminURI, "postgres://shop_admin@source.example.com:6432/shop_new"),
+			wantErr: "role shop_app on source.example.com:6432 has two passwords"},
+		{name: "line break in a password",
+			env:     set(envSourceAdminPassword, "src-admin-pw\nsecond-line"),
+			wantErr: "E2E_SOURCE_ADMIN_PASSWORD holds a line break"},
+		{name: "CNPG major alongside the pair",
+			env:     set("E2E_PG_TARGET", "16"),
+			wantErr: "E2E_PG_TARGET picks a CNPG image"},
+		{name: "feature run label alongside the pair",
+			env:     set("E2E_RUN_LABEL_VALUE", featureRunOwnerFixture),
+			wantErr: "E2E_RUN_LABEL_VALUE skips the teardown external mode needs"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := externalEnvFixture()
+			tt.env(env)
+			got, err := loadExternalConfig(func(name string) string { return env[name] })
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("loadExternalConfig() error = %v", err)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Fatalf("loadExternalConfig() = %+v, want %+v", got, tt.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("loadExternalConfig() error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if got != nil {
+				t.Errorf("loadExternalConfig() returned a config alongside its error")
+			}
+			secrets := []string{"leaked-pw"}
+			for _, cred := range testExternalPair().credentials() {
+				secrets = append(secrets, cred.password)
+			}
+			for _, secret := range secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error %q leaks a password", err)
+				}
+			}
+		})
+	}
+}
+
+func TestExternalSide(t *testing.T) {
+	pair := testExternalPair()
+	if got := pair.side(sourceCluster); got != pair.Source {
+		t.Errorf("side(sourceCluster) = %+v, want the source", got)
+	}
+	if got := pair.side(targetCluster); got != pair.Target {
+		t.Errorf("side(targetCluster) = %+v, want the target", got)
+	}
+	if sideName(sourceCluster) != sourceKey || sideName(targetCluster) != targetKey {
+		t.Errorf("sideName maps the fixture clusters to %q and %q",
+			sideName(sourceCluster), sideName(targetCluster))
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("sideName accepted a cluster that is neither side")
+		}
+	}()
+	sideName("e2e-progress-pool-source")
+}
+
+func TestExternalInit(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "external-init" {
+		if external == nil || external.Source.Host != testSourceHost {
+			t.Fatal("init did not load the external pair")
+		}
+		if fixtureStorageClass != "" {
+			t.Errorf("fixtureStorageClass = %q, want the cluster default", fixtureStorageClass)
+		}
+		return
+	}
+	full := []string{"E2E_TEST_CHILD=external-init"}
+	fixture := externalEnvFixture()
+	for _, name := range externalEnv {
+		full = append(full, name+"="+fixture[name])
+	}
+	for _, tt := range []struct {
+		name      string
+		env       []string
+		wantPanic string
+	}{
+		{name: "all eight set", env: full},
+		{name: "one missing", env: full[:len(full)-1], wantPanic: "missing E2E_TARGET_ADMIN_PASSWORD"},
+		{name: "CNPG major alongside the pair", env: append(slices.Clone(full), "E2E_PG_SOURCE=16"),
+			wantPanic: "E2E_PG_SOURCE picks a CNPG image"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestExternalInit$")
+			cmd.Env = tt.env
+			out, err := cmd.CombinedOutput()
+			if tt.wantPanic == "" {
+				if err != nil {
+					t.Fatalf("child failed: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(string(out), tt.wantPanic) {
+				t.Fatalf("child err = %v, want a panic containing %q; output:\n%s", err, tt.wantPanic, out)
+			}
+		})
+	}
+}
+
+func TestExternalServerMajors(t *testing.T) {
+	for _, tt := range []struct {
+		source, target int
+		wantErr        string
+	}{
+		{source: 17, target: 17},
+		{source: 14, target: 18},
+		{source: 16, target: 15, wantErr: "target PostgreSQL 15 is older than source 16"},
+		{source: 14, target: 14, wantErr: "target PostgreSQL 14 is older than 15"},
+	} {
+		err := checkMajors(tt.source, tt.target)
+		if tt.wantErr == "" && err != nil {
+			t.Errorf("checkMajors(%d, %d) = %v, want nil", tt.source, tt.target, err)
+		}
+		if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+			t.Errorf("checkMajors(%d, %d) = %v, want %q", tt.source, tt.target, err, tt.wantErr)
+		}
+	}
+}
+
+// assertNoPasswords fails when a rendered manifest carries any of the pair's
+// passwords: pod specs end up in describe output and failure logs.
+func assertNoPasswords(t *testing.T, obj any, pair *externalConfig) {
+	t.Helper()
+	out, err := yaml.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cred := range pair.credentials() {
+		if strings.Contains(string(out), cred.password) {
+			t.Errorf("manifest carries the password of %s on %s", cred.role, cred.host)
+		}
+	}
+}
+
+func TestExternalPgpass(t *testing.T) {
+	pair := testExternalPair()
+	want := "source.example.com:6432:*:shop_app:src-app-pw\n" +
+		"source.example.com:6432:*:shop_admin:src-admin-pw\n" +
+		"target.example.com:5432:*:shop_app:tgt-app-pw\n" +
+		"target.example.com:5432:*:shop_admin:tgt-admin-pw\n"
+	if got := renderPgpass(pair); got != want {
+		t.Errorf("renderPgpass() =\n%s\nwant\n%s", got, want)
+	}
+
+	pair.Source.AppPassword = `pa:ss\word`
+	pair.Source.AdminRole = "odd:admin"
+	lines := strings.Split(renderPgpass(pair), "\n")
+	for i, want := range []string{
+		`source.example.com:6432:*:shop_app:pa\:ss\\word`,
+		`source.example.com:6432:*:odd\:admin:src-admin-pw`,
+	} {
+		if lines[i] != want {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestExternalSecretData(t *testing.T) {
+	pair := testExternalPair()
+	data := externalSecretData(pair)
+	want := map[string]string{
+		pgpassKey:             renderPgpass(pair),
+		"source-app-password": pair.Source.AppPassword,
+		"target-app-password": pair.Target.AppPassword,
+	}
+	if len(data) != len(want) {
+		t.Errorf("Secret has %d keys, want %d", len(data), len(want))
+	}
+	for key, value := range want {
+		if string(data[key]) != value {
+			t.Errorf("Secret key %s holds the wrong value", key)
+		}
+	}
+	if externalAppPasswordKey(targetCluster) != "target-app-password" {
+		t.Errorf("externalAppPasswordKey(targetCluster) = %q", externalAppPasswordKey(targetCluster))
+	}
+}
+
+func TestExternalClientPod(t *testing.T) {
+	pod := buildExternalClientPod()
+	if pod.Namespace != nsE2E || pod.Name != externalClientPod {
+		t.Fatalf("client pod is %s/%s", pod.Namespace, pod.Name)
+	}
+	if pod.Labels[labelAppName] != externalClientPod {
+		t.Errorf("client pod labels %v lack the selector sqlPodLabels uses", pod.Labels)
+	}
+	c := pod.Spec.Containers[0]
+	if c.Name != externalClientContainer || c.Image != seedImage {
+		t.Errorf("container %s runs %s", c.Name, c.Image)
+	}
+	if !slices.Contains(c.Env, corev1.EnvVar{Name: envPGPassfile, Value: pgpassFile}) {
+		t.Errorf("container env %v does not point libpq at %s", c.Env, pgpassFile)
+	}
+	if got := strings.Join(c.Command, " "); !strings.Contains(got, "install -m 0600 /credentials/pgpass /tmp/pgpass") {
+		t.Errorf("command %q does not copy the password file to mode 0600", got)
+	}
+	secret := pod.Spec.Volumes[0].Secret
+	if secret == nil || secret.SecretName != externalCredentialsSecret ||
+		len(secret.Items) != 1 || secret.Items[0].Key != pgpassKey {
+		t.Errorf("volume %+v must mount only the pgpass key of %s", secret, externalCredentialsSecret)
+	}
+	if sc := pod.Spec.SecurityContext; sc == nil || sc.FSGroup == nil || *sc.FSGroup != postgresUID {
+		t.Errorf("pod security context %+v cannot read the Secret volume as postgres", sc)
+	}
+	if c.ReadinessProbe == nil || c.ReadinessProbe.Exec == nil {
+		t.Error("client pod reports ready before its password file exists")
+	}
+}
+
+func TestExternalSeedJob(t *testing.T) {
+	pair := testExternalPair()
+	withExternal(t, pair)
+	job := buildSeedJob()
+	seed := job.Spec.Template.Spec.Containers[0]
+	env := map[string]corev1.EnvVar{}
+	for _, e := range seed.Env {
+		env[e.Name] = e
+	}
+	for name, want := range map[string]string{
+		envPGHost: testSourceHost, "PGPORT": "6432", envPGDatabase: "shop",
+		envPGUser: testAppRole, envPGSSLMode: "require", envPGPassfile: pgpassFile,
+	} {
+		if got := env[name].Value; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if _, found := env["PGPASSWORD"]; found {
+		t.Error("external seed Job still takes PGPASSWORD from the CNPG Secret")
+	}
+	if !slices.Equal(seed.Command, installPgpass("bash /fixtures/run.sh")) {
+		t.Errorf("command = %q", seed.Command)
+	}
+	if job.Spec.Template.Spec.SecurityContext == nil || len(job.Spec.Template.Spec.Volumes) != 2 {
+		t.Error("external seed Job lacks the credentials volume or the security context that reads it")
+	}
+	if !slices.Contains(seed.VolumeMounts, credentialsMount()) {
+		t.Errorf("seed container mounts %v, want the credentials at %s", seed.VolumeMounts, credentialsMountPath)
+	}
+	if !reflect.DeepEqual(seed.SecurityContext, restrictedContainer()) {
+		t.Errorf("seed container security context = %+v, want the restricted one", seed.SecurityContext)
+	}
+	assertNoPasswords(t, job, pair)
+
+	pair.Source.SSLMode = ""
+	for _, e := range buildSeedJob().Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "PGSSLMODE" {
+			t.Errorf("PGSSLMODE=%q set without an sslmode in the URI", e.Value)
+		}
+	}
+
+	external = nil
+	cnpg := buildSeedJob().Spec.Template.Spec
+	if !slices.Equal(cnpg.Containers[0].Command, []string{shell, "/fixtures/run.sh"}) ||
+		cnpg.SecurityContext != nil || len(cnpg.Volumes) != 1 {
+		t.Error("CNPG-mode seed Job changed shape")
+	}
+	found := false
+	for _, e := range cnpg.Containers[0].Env {
+		if e.Name == "PGPASSWORD" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
+			e.ValueFrom.SecretKeyRef.Name == srcSecret {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("CNPG-mode seed Job no longer reads PGPASSWORD from " + srcSecret)
+	}
+}
+
+func TestExternalPSQLArgv(t *testing.T) {
+	const (
+		sql     = "SELECT current_user"
+		oneShot = "-tAc"
+	)
+	pair := pairWith(func(p *externalConfig) {
+		p.Target.SSLMode, p.Target.AdminRole = sslDisable, `O'Brien \ Admin`
+	})
+	withExternal(t, pair)
+	cases := []struct {
+		name      string
+		got, want []string
+	}{
+		{
+			name: "source keeps require",
+			got:  psqlArgv(sourceCluster, externalClientPod, "shop", false, oneShot, sql),
+			want: []string{psqlExecSubcommand, "-n", nsE2E, externalClientPod, "-c", externalClientContainer, "--",
+				psqlExecProgram, "host='source.example.com' port=6432 dbname='shop' user='shop_admin' sslmode=require",
+				oneShot, sql},
+		},
+		{
+			name: "target quotes a spaced database and an odd role, and keeps disable",
+			got:  psqlArgv(targetCluster, externalClientPod, "fan out", true, "-q"),
+			want: []string{psqlExecSubcommand, "-i", "-n", nsE2E, externalClientPod, "-c", externalClientContainer, "--",
+				psqlExecProgram, `host='target.example.com' port=5432 dbname='fan out' user='O\'Brien \\ Admin' sslmode=disable`,
+				"-q"},
+		},
+	}
+	for _, tc := range cases {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s argv = %q, want %q", tc.name, tc.got, tc.want)
+		}
+		for _, cred := range pair.credentials() {
+			if strings.Contains(strings.Join(tc.got, " "), cred.password) {
+				t.Errorf("%s argv carries the password of %s", tc.name, cred.role)
+			}
+		}
+	}
+	withExternal(t, pairWith(func(p *externalConfig) { p.Source.SSLMode = "" }))
+	if got := adminConninfo(sourceCluster, "shop"); strings.Contains(got, "sslmode") {
+		t.Errorf("conninfo %q sets an sslmode the URI never named", got)
+	}
+}
+
+func TestExternalPSQLDBErrKeepsPasswordsOut(t *testing.T) {
+	pair := testExternalPair()
+	withExternal(t, pair)
+	command, state := newPSQLExecCommand(t, psqlExecResult{
+		stderr: `psql: error: connection to server at "source.example.com", port 6432 failed: ` +
+			`FATAL:  password authentication failed for user "shop_admin"`,
+		exitCode: 2,
+	})
+	_, err := psqlDBErrWith(sourceCluster, "shop", "SELECT count(*) FROM orders",
+		func(string) string { return externalClientPod },
+		func(time.Duration) { t.Fatal("retried a failed login") },
+		command, psqlExecTestTimeout)
+	if err == nil {
+		t.Fatal("psqlDBErrWith succeeded on a failed login")
+	}
+	calls, _, commands := state.snapshot()
+	requirePSQLCommandsReaped(t, commands)
+	if len(calls) != 1 || !slices.Contains(calls[0].args, externalClientContainer) {
+		t.Fatalf("calls = %q, want one exec into the client container", calls)
+	}
+	for _, cred := range pair.credentials() {
+		if strings.Contains(strings.Join(calls[0].args, " "), cred.password) ||
+			strings.Contains(err.Error(), cred.password) {
+			t.Errorf("the password of %s on %s reached argv or the error", cred.role, cred.host)
+		}
+	}
+}
+
+func TestExternalSQLPodLabels(t *testing.T) {
+	withExternal(t, nil)
+	cnpg := sqlPodLabels(targetCluster)
+	if cnpg[labelCNPGCluster] != targetCluster || cnpg[labelCNPGRole] != rolePrimary || len(cnpg) != 2 {
+		t.Errorf("CNPG mode selects %v, want the target's primary", cnpg)
+	}
+	withExternal(t, testExternalPair())
+	if got := sqlPodLabels(targetCluster); len(got) != 1 || got[labelAppName] != externalClientPod {
+		t.Errorf("external mode selects %v, want the client pod", got)
+	}
+}
+
+func TestExternalStampDecision(t *testing.T) {
+	for _, tt := range []struct {
+		name                     string
+		hasUserObjects, hasStamp bool
+		wantStamp, wantErr       bool
+	}{
+		{name: "first run on an empty database stamps it", wantStamp: true},
+		{name: "stamped and empty", hasStamp: true},
+		{name: "stamped and seeded", hasUserObjects: true, hasStamp: true},
+		{name: "unstamped with objects is refused", hasUserObjects: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stamp, err := stampDecision(tt.hasUserObjects, tt.hasStamp)
+			if stamp != tt.wantStamp || (err != nil) != tt.wantErr {
+				t.Errorf("stampDecision(%t, %t) = %t, %v; want %t, error %t",
+					tt.hasUserObjects, tt.hasStamp, stamp, err, tt.wantStamp, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExternalGuardPair(t *testing.T) {
+	withExternal(t, testExternalPair())
+	const found = "relation public.orders"
+	for _, tt := range []struct {
+		name      string
+		state     map[string]string // cluster to "objects|stamped"
+		wantStamp []string
+		wantErr   string
+	}{
+		{name: "first run stamps both",
+			state:     map[string]string{sourceCluster: "|f", targetCluster: "|f"},
+			wantStamp: []string{sourceCluster, targetCluster}},
+		{name: "later run stamps nothing",
+			state: map[string]string{sourceCluster: found + "|t", targetCluster: "|t"}},
+		{name: "populated target next to an empty source stamps neither",
+			state:   map[string]string{sourceCluster: "|f", targetCluster: found + "|f"},
+			wantErr: "target database shop_new on target.example.com"},
+		{name: "populated unstamped source is refused before the target is looked at",
+			state:   map[string]string{sourceCluster: found + "|f"},
+			wantErr: "source database shop on source.example.com"},
+		{name: "stamped source, new empty target",
+			state:     map[string]string{sourceCluster: found + "|t", targetCluster: "|f"},
+			wantStamp: []string{targetCluster}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := guardPair(func(cluster string) (string, bool) {
+				if _, listed := tt.state[cluster]; !listed {
+					t.Fatalf("guardPair() inspected %s, which this case does not describe", cluster)
+				}
+				objects, stamped, _ := strings.Cut(tt.state[cluster], "|")
+				return objects, stamped == "t"
+			})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), found) {
+					t.Fatalf("guardPair() error = %v, want it to name %q and the objects found", err, tt.wantErr)
+				}
+				if got != nil {
+					t.Errorf("guardPair() would stamp %v before refusing the pair", got)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tt.wantStamp) {
+				t.Fatalf("guardPair() = %v, %v; want %v", got, err, tt.wantStamp)
+			}
+		})
+	}
+}
+
+// teardownFixtures sweeps the e2e- Secrets even when E2E_KEEP_FIXTURES=true,
+// so kept fixtures never keep the password Secrets.
+func TestExternalTeardownDeletesClientObjects(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	objs := []client.Object{
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalClientPod}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}},
+		// The cross-namespace spec's copy and a spec-built URI Secret hold app passwords too.
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsX, Name: externalCredentialsSecret}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-uris"}},
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	}
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "manager-token"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(objs...).WithObjects(foreign).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(deleteExternalClient); err != nil {
+		t.Fatalf("teardown failed: %v", err)
+	}
+	for _, obj := range objs {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s/%s survived teardown: %v", obj, obj.GetNamespace(), obj.GetName(), err)
+		}
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), foreign); err != nil {
+		t.Errorf("teardown deleted a Secret the suite did not write: %v", err)
+	}
+	// AfterSuite also runs after a BeforeSuite that never created them.
+	if err := InterceptGomegaFailure(deleteExternalClient); err != nil {
+		t.Fatalf("teardown of nothing failed: %v", err)
+	}
+}
+
+func TestExternalTeardownFixturesSweepsSecretsWhenKeeping(t *testing.T) {
+	oldCtx, oldClient, oldExt, oldManage := ctx, k8sClient, external, manageNamespaces
+	t.Cleanup(func() { ctx, k8sClient, external, manageNamespaces = oldCtx, oldClient, oldExt, oldManage })
+	t.Setenv("E2E_KEEP_FIXTURES", "true")
+	ctx, external, manageNamespaces = context.Background(), testExternalPair(), false
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(secret).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(teardownFixtures); err != nil {
+		t.Fatalf("teardown failed: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); !apierrors.IsNotFound(err) {
+		t.Errorf("Secret survived a keep-fixtures teardown: %v", err)
+	}
+}
+
+func TestExternalRequirePlainSecretRefNames(t *testing.T) {
+	skipped := func() (skipped bool) {
+		defer func() { skipped = recover() != nil }()
+		requirePlainSecretRefNames()
+		return false
+	}
+	for _, tc := range []struct {
+		name string
+		pair *externalConfig
+		want bool
+	}{
+		{"cnpg mode", nil, false},
+		{"plain names", testExternalPair(), false},
+		{"spaced source role", pairWith(func(p *externalConfig) { p.Source.AppRole = "Shop App" }), true},
+		{"quoted target database", pairWith(func(p *externalConfig) { p.Target.Database = "My'Shop" }), true},
+	} {
+		withExternal(t, tc.pair)
+		if got := skipped(); got != tc.want {
+			t.Errorf("%s: skipped = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExternalClearSuperuserPasswordDeletesSecret(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	withExternal(t, testExternalPair())
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-remediate-super-src"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(sec).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(func() { clearSuperuserPassword(sourceCluster, sec.Name) }); err != nil {
+		t.Fatalf("clearSuperuserPassword failed: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sec), sec); !apierrors.IsNotFound(err) {
+		t.Errorf("the Secret holding the external admin password survived: %v", err)
+	}
+}
+
+func TestExternalRequireCNPGFixtures(t *testing.T) {
+	// Outside a running spec Ginkgo's Skip panics, which is how a test sees it.
+	skipped := func() (skipped bool) {
+		defer func() { skipped = recover() != nil }()
+		requireCNPGFixtures()
+		return false
+	}
+	withExternal(t, nil)
+	if skipped() {
+		t.Error("requireCNPGFixtures skipped a spec in CNPG mode")
+	}
+	withExternal(t, testExternalPair())
+	if !skipped() {
+		t.Error("requireCNPGFixtures let a pod-control spec run against an external pair")
+	}
+}
+
+func TestExternalReplicationFilters(t *testing.T) {
+	withExternal(t, nil)
+	if got := slotFilter(); got != "slot_name LIKE 'pgcopydb%'" {
+		t.Errorf("CNPG slotFilter() = %q changed", got)
+	}
+	if got := originFilter(); got != "roname LIKE 'pgcopydb%'" {
+		t.Errorf("CNPG originFilter() = %q changed", got)
+	}
+
+	withExternal(t, testExternalPair())
+	slots := slotFilter()
+	if !strings.HasPrefix(slots, "database = current_database() AND ") {
+		t.Errorf("external slotFilter() = %q reaches slots of other databases", slots)
+	}
+	origins := originFilter()
+	// LIKE prefixes with \_ unescaped: an unescaped _ would match any character.
+	prefixes := func(filter string) []string {
+		found := regexp.MustCompile(`LIKE '([^'%]*)%'`).FindAllStringSubmatch(filter, -1)
+		out := make([]string, 0, len(found))
+		for _, m := range found {
+			if strings.Count(m[1], "_") != strings.Count(m[1], `\_`) {
+				t.Errorf("pattern %q leaves an underscore unescaped", m[1])
+			}
+			out = append(out, strings.ReplaceAll(m[1], `\_`, "_"))
+		}
+		return out
+	}
+	for _, filter := range []string{slots, origins} {
+		ps := prefixes(filter)
+		matches := func(name string) bool {
+			return slices.ContainsFunc(ps, func(p string) bool { return strings.HasPrefix(name, p) })
+		}
+		for _, name := range []string{
+			pgcopydb.SlotName(nsE2E, "e2e-follow"),
+			pgcopydb.SlotName(nsX, "e2e-cross"),
+			pgcopydb.SlotName(nsE2E, strings.Repeat("e2e-very-long-migration-name", 3)),
+		} {
+			if !matches(name) {
+				t.Errorf("filter %q misses the suite's slot %s", filter, name)
+			}
+		}
+		for _, name := range []string{"pgcopydb", "pgcopydb_shop_orders_1a2b3c4d", pgcopydb.SlotName("prod", "follow")} {
+			if matches(name) {
+				t.Errorf("filter %q matches the foreign slot %s", filter, name)
+			}
+		}
+	}
+}
+
+func TestExternalGuardRoles(t *testing.T) {
+	withExternal(t, testExternalPair())
+	for _, tt := range []struct {
+		name      string
+		unstamped map[string]string
+		wantErr   []string
+	}{
+		{name: "no same-named role, or only stamped ones", unstamped: map[string]string{}},
+		{name: "unstamped role on the target server",
+			unstamped: map[string]string{targetCluster: incomingOwnerRole},
+			wantErr:   []string{"target server target.example.com", incomingOwnerRole}},
+		{name: "unstamped role on the source server",
+			unstamped: map[string]string{sourceCluster: noSelectRole},
+			wantErr:   []string{"source server " + testSourceHost, noSelectRole}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := guardRoles(func(cluster string) string { return tt.unstamped[cluster] })
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("guardRoles() = %v, want nil", err)
+				}
+				return
+			}
+			for _, want := range tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("guardRoles() = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestExternalRoleSQL(t *testing.T) {
+	withExternal(t, nil)
+	// CNPG mode keeps the existence test resetOwnerRole always ran.
+	if got := suiteRoleExists(incomingOwnerRole); got != "EXISTS (SELECT FROM pg_roles WHERE rolname = 'app-owner')" {
+		t.Errorf("CNPG suiteRoleExists() = %q changed", got)
+	}
+	stamp := "shobj_description(oid, 'pg_authid') = " + sqlLiteral(externalStamp)
+	if strings.Contains(dropRoleSQL(limitedRole), stamp) {
+		t.Error("CNPG dropRoleSQL() wants a stamp the suite's own servers never carry")
+	}
+
+	withExternal(t, testExternalPair())
+	for _, role := range []string{noSelectRole, limitedRole} {
+		got := dropRoleSQL(role)
+		if !strings.Contains(got, "IF EXISTS (SELECT FROM pg_roles WHERE rolname = '"+role+"' AND "+stamp+") THEN") ||
+			strings.Count(got, "DROP ROLE") != 1 || strings.Index(got, "DROP ROLE") < strings.Index(got, " THEN ") {
+			t.Errorf("external dropRoleSQL(%s) = %q drops the role without the stamp", role, got)
+		}
+	}
+	if got := suiteRoleExists(incomingOwnerRole); !strings.Contains(got, stamp) {
+		t.Errorf("external suiteRoleExists() = %q ignores the stamp", got)
+	}
+	for cluster, want := range map[string][]string{
+		sourceCluster: {"'e2e_noselect'"},
+		targetCluster: {"'app-owner'", "'e2e_limited'"},
+	} {
+		got := unstampedRolesSQL(cluster)
+		for _, role := range want {
+			if !strings.Contains(got, role) {
+				t.Errorf("unstampedRolesSQL(%s) = %q misses %s", cluster, got, role)
+			}
+		}
+		if !strings.Contains(got, "<> "+sqlLiteral(externalStamp)) {
+			t.Errorf("unstampedRolesSQL(%s) = %q does not test the stamp", cluster, got)
+		}
+	}
+}
+
+// A failed purge or uninstall must not keep the password Secrets in place.
+func TestExternalTeardownSurvivesFailedSteps(t *testing.T) {
+	oldCtx, oldClient, oldExt, oldManage := ctx, k8sClient, external, manageNamespaces
+	t.Cleanup(func() { ctx, k8sClient, external, manageNamespaces = oldCtx, oldClient, oldExt, oldManage })
+	t.Setenv("E2E_KEEP_FIXTURES", "true")
+	ctx, external, manageNamespaces = context.Background(), testExternalPair(), false
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}}
+	k8sClient = interceptor.NewClient(clientfake.NewClientBuilder().WithObjects(secret).Build(), interceptor.Funcs{
+		DeleteAllOf: func(context.Context, client.WithWatch, client.Object, ...client.DeleteAllOfOption) error {
+			return errors.New("purge refused")
+		},
+	})
+	RegisterTestingT(t)
+	err := runEach(
+		func() { purgeMigrations(time.Second) },
+		func() { Expect(errors.New("helm uninstall failed")).NotTo(HaveOccurred()) },
+		teardownFixtures,
+	)
+	if err == nil || !strings.Contains(err.Error(), "purge refused") ||
+		!strings.Contains(err.Error(), "helm uninstall failed") {
+		t.Errorf("runEach() = %v, want both failures reported", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); !apierrors.IsNotFound(err) {
+		t.Errorf("the credentials Secret survived a teardown whose purge and uninstall failed: %v", err)
+	}
+}

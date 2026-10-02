@@ -94,6 +94,7 @@ func TestSlotSenderPID(t *testing.T) {
 
 //nolint:gocyclo // Keep this ordered scenario and its bounded failure diagnostics together.
 func earlyManualCutover() {
+	requireCNPGFixtures()
 	const name = "e2e-follow-early"
 	const marker = "early-cutover-"
 	const backlogRows = 20000
@@ -231,9 +232,8 @@ func earlyManualCutover() {
 				break
 			}
 			primaries := &corev1.PodList{}
-			if err := k8sClient.List(probeCtx, primaries, client.InNamespace(nsE2E), client.MatchingLabels{
-				labelCNPGCluster: database, labelCNPGRole: rolePrimary,
-			}); err != nil || len(primaries.Items) != 1 || probeCtx.Err() != nil {
+			if err := k8sClient.List(probeCtx, primaries, client.InNamespace(nsE2E),
+				sqlPodLabels(database)); err != nil || len(primaries.Items) != 1 || probeCtx.Err() != nil {
 				continue
 			}
 			sql := sourceSQL

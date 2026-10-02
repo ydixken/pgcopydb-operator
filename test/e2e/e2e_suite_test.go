@@ -100,7 +100,6 @@ const (
 	// and which of them is primary moves on failover, so every statement
 	// resolves its pod by label through primaryPod instead of by name.
 	srcSecret = sourceCluster + "-app"
-	tgtSecret = targetCluster + "-app"
 
 	// CNPG's own pod labels: what the suite selects, schedules and kills by.
 	labelCNPGCluster  = "cnpg.io/cluster"
@@ -246,9 +245,9 @@ var (
 	// (GitOps in CI): the suite then works inside them and creates none.
 	manageNamespaces = os.Getenv("E2E_MANAGE_NAMESPACES") != "false"
 
-	// pgSource and pgTarget pick the PostgreSQL major for each fixture
-	// cluster's operand image (E2E_PG_SOURCE/E2E_PG_TARGET, default 17).
-	// Upgrade direction only, and PG14 only as a source; init enforces both.
+	// pgSource and pgTarget are the PostgreSQL majors of the two servers:
+	// E2E_PG_SOURCE/E2E_PG_TARGET (default 17) in CNPG mode, read off the
+	// servers in external mode. checkMajors enforces the rules on both.
 	pgSource = 17
 	pgTarget = 17
 
@@ -542,12 +541,20 @@ func postgresIntAtLeast(n, minimum int) bool {
 }
 
 func init() {
+	cfg, err := loadExternalConfig(os.Getenv)
+	if err != nil {
+		panic(err.Error())
+	}
+	external = cfg
 	// Fixture volumes take the suite-owned single-replica class at every tier.
 	// CNPG already keeps cnpgInstances copies of the data, so a replicating
 	// default class would copy each of those again and store the fixtures nine
 	// times over for nothing a test can observe. ensureFixtureStorage falls
-	// back to the cluster default when the cluster has no Longhorn.
-	fixtureStorageClass = ephemeralStorageClass
+	// back to the cluster default when the cluster has no Longhorn. External
+	// mode has no fixture volumes, so its work volumes take the default.
+	if external == nil {
+		fixtureStorageClass = ephemeralStorageClass
+	}
 	if stress {
 		scale = 10
 		srcStorageSize, tgtStorageSize, workVolumeSize = "200Gi", "150Gi", "50Gi"
@@ -644,20 +651,19 @@ func init() {
 	if v := os.Getenv("E2E_RUNNER_TAG"); v != "" {
 		runnerTag = v
 	}
+	initMajors()
+}
+
+// initMajors reads the CNPG majors; external mode reads them off the servers
+// in BeforeSuite instead.
+func initMajors() {
+	if external != nil {
+		return
+	}
 	pgSource = pgMajorEnv("E2E_PG_SOURCE")
 	pgTarget = pgMajorEnv("E2E_PG_TARGET")
-	// The version matrix is upgrade-direction only: pgcopydb needs pg_dump at
-	// least at the target's major, and a newer major's dump does not restore
-	// into an older server. PG14 is a source only: the follow-mode target
-	// contract includes GRANT SET ON PARAMETER session_replication_role,
-	// which PostgreSQL grew in 15 (docs/reference/prerequisites.md).
-	if pgTarget < pgSource {
-		panic(fmt.Sprintf("E2E_PG_TARGET (%d) is older than E2E_PG_SOURCE (%d):"+
-			" the version matrix is upgrade-direction only", pgTarget, pgSource))
-	}
-	if pgTarget < 15 {
-		panic("E2E_PG_TARGET must be 15 or newer: the follow-mode target needs" +
-			" GRANT SET ON PARAMETER session_replication_role (PG15+); PG14 works as a source only")
+	if err := checkMajors(pgSource, pgTarget); err != nil {
+		panic("E2E_PG_SOURCE/E2E_PG_TARGET: " + err.Error())
 	}
 }
 
@@ -675,6 +681,21 @@ func pgMajorEnv(name string) int {
 		panic(name + " must be a plain PostgreSQL major between 14 and 18, got " + strconv.Quote(v))
 	}
 	return n
+}
+
+// checkMajors holds the version rules: upgrade direction only, since a newer
+// pg_dump does not restore into an older server, and a PG15+ target for
+// follow mode's GRANT SET ON PARAMETER (docs/reference/prerequisites.md).
+func checkMajors(source, target int) error {
+	if target < source {
+		return fmt.Errorf("target PostgreSQL %d is older than source %d: the suite runs upgrade direction only",
+			target, source)
+	}
+	if target < 15 {
+		return fmt.Errorf("target PostgreSQL %d is older than 15: follow mode needs GRANT SET ON PARAMETER"+
+			" session_replication_role; PG14 works as a source only", target)
+	}
+	return nil
 }
 
 // scaled mirrors e2e_scaled() in fixtures/schema.sql: the row count for a
@@ -1095,8 +1116,10 @@ var _ = BeforeSuite(func() {
 				" let the sync land. Elsewhere apply config/crd from this checkout.", missing)
 	}, crdConvergeTimeout, 15*time.Second).Should(Succeed())
 
-	By("preparing the fixture StorageClass and checking Longhorn capacity")
-	ensureFixtureStorage()
+	if external == nil {
+		By("preparing the fixture StorageClass and checking Longhorn capacity")
+		ensureFixtureStorage()
+	}
 
 	// The suite is single-tenant per cluster: two runs share the release name,
 	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
@@ -1161,16 +1184,20 @@ var _ = BeforeSuite(func() {
 		purgeMigrations(2 * time.Minute)
 	}
 
-	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
-		pgSource, pgTarget))
-	ensureClusterShape(sourceCluster, pgSource)
-	ensureClusterShape(targetCluster, pgTarget)
-	staleSource := sourceSeedIsStale()
-	if staleSource {
-		By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+	if external == nil {
+		By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
+			pgSource, pgTarget))
+		ensureClusterShape(sourceCluster, pgSource)
+		ensureClusterShape(targetCluster, pgTarget)
+		staleSource := sourceSeedIsStale()
+		if staleSource {
+			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+		}
+		prepareSourceCluster(staleSource)
+		prepareTargetCluster()
+	} else {
+		prepareExternalDatabases()
 	}
-	prepareSourceCluster(staleSource)
-	prepareTargetCluster()
 
 	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
 	runSeedJob()
@@ -1192,37 +1219,71 @@ var _ = AfterSuite(func() {
 	if featureE2ERunValue != "" {
 		return
 	}
-	// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
-	// needs a live controller to run the cleanup Job and release, and that
-	// cleanup is what drops the replication slots. A failed or timed-out
-	// spec can leave Migrations behind; uninstalling first would orphan
-	// them and wedge the namespace deletion below for the full timeout.
-	By("deleting leftover Migrations while the operator still runs")
-	purgeMigrations(5 * time.Minute)
+	Expect(runEach(
+		func() {
+			// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
+			// needs a live controller to run the cleanup Job and release, and that
+			// cleanup is what drops the replication slots.
+			By("deleting leftover Migrations while the operator still runs")
+			purgeMigrations(5 * time.Minute)
+		},
+		func() {
+			if externalPairGuarded {
+				By("dropping pgcopydb slots, publications and origins left on the external databases")
+				cleanExternalReplication()
+			}
+		},
+		func() {
+			// The throwaway operator always goes away, keep-fixtures or not.
+			By("uninstalling the suite's operator")
+			helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+			if manageNamespaces {
+				By("deleting " + nsOperator)
+				deleteNamespaces(2*time.Minute, nsOperator)
+			}
+		},
+		func() {
+			// By lives here, not in teardownFixtures: a unit test calls that helper outside a Ginkgo run.
+			if external != nil {
+				By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
+			}
+			teardownFixtures()
+		},
+	)).To(Succeed(),
+		"the suite's teardown left state behind; after an external run see docs/operations/e2e-external.md#cleanup")
+})
 
-	// The throwaway operator always goes away, keep-fixtures or not: every
-	// run installs a fresh one.
-	By("uninstalling the suite's operator")
-	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
-	if manageNamespaces {
-		By("deleting " + nsOperator)
-		deleteNamespaces(2*time.Minute, nsOperator)
+// runEach runs every step even after one fails and returns their failures,
+// so the replication cleanup and the password Secret sweep always run.
+func runEach(steps ...func()) error {
+	errs := make([]error, 0, len(steps))
+	for _, step := range steps {
+		errs = append(errs, InterceptGomegaFailure(step))
+	}
+	return errors.Join(errs...)
+}
+
+// teardownFixtures runs after the operator is gone. The e2e- Secrets hold the
+// supplied passwords, so the external sweep precedes the keep-fixtures check.
+func teardownFixtures() {
+	GinkgoHelper()
+	if external != nil {
+		deleteExternalClient()
 	}
 
-	if envTrue("E2E_KEEP_FIXTURES") {
+	switch {
+	case envTrue("E2E_KEEP_FIXTURES"):
 		_, _ = fmt.Fprintf(GinkgoWriter,
 			"E2E_KEEP_FIXTURES=true: keeping namespaces %s and %s for iteration\n", nsE2E, nsX)
-		return
-	}
-	if !manageNamespaces {
+	case manageNamespaces:
+		By("deleting the fixture namespaces")
+		// CNPG teardown plus volume deletion takes a while on the shared cluster.
+		deleteNamespaces(10*time.Minute, nsX, nsE2E)
+	case external == nil:
 		By("deleting the fixtures inside " + nsE2E + " and " + nsX)
 		deleteFixtures(10 * time.Minute)
-		return
 	}
-	By("deleting the fixture namespaces")
-	// CNPG teardown plus volume deletion takes a while on the shared cluster.
-	deleteNamespaces(10*time.Minute, nsX, nsE2E)
-})
+}
 
 // deleteFixtures empties the fixture namespaces instead of deleting them, for
 // runs that do not own them. Migrations are gone by here; explicit PVC cleanup
@@ -1231,16 +1292,7 @@ func deleteFixtures(timeout time.Duration) {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
 	deleteCluster(targetCluster)
-	fg := metav1.DeletePropagationForeground
-	for _, obj := range []client.Object{
-		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
-	} {
-		err := k8sClient.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &fg})
-		if err != nil && !apierrors.IsNotFound(err) {
-			Expect(err).NotTo(HaveOccurred(), "failed to delete %s", obj.GetName())
-		}
-	}
+	deleteSuiteObjects(seedObjects()...)
 	for _, ns := range []string{nsE2E, nsX} {
 		Expect(k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, client.InNamespace(ns))).
 			To(Succeed(), "failed to delete the volumes in %s", ns)
@@ -1254,6 +1306,27 @@ func deleteFixtures(timeout time.Duration) {
 			g.Expect(pvcs.Items).To(BeEmpty(), "volumes still terminating in %s", ns)
 		}
 	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+// seedObjects are the seed Job and its ConfigMap, which outlive the run
+// whenever the fixture namespaces do.
+func seedObjects() []client.Object {
+	return []client.Object{
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	}
+}
+
+// deleteSuiteObjects deletes in the foreground; an object already gone is fine.
+func deleteSuiteObjects(objs ...client.Object) {
+	GinkgoHelper()
+	fg := metav1.DeletePropagationForeground
+	for _, obj := range objs {
+		err := k8sClient.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &fg})
+		if err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete %s", obj.GetName())
+		}
+	}
 }
 
 // helmRun executes helm against the current kubectl context, echoes its
@@ -1670,15 +1743,22 @@ func readMountedFilesystemCapacity(instance string) (int64, error) {
 // only drops objects in the incoming dump. Resetting also permits fresh clones.
 func resetTargetObjects() {
 	GinkgoHelper()
-	psql(targetCluster, "DROP EXTENSION IF EXISTS citext CASCADE")
-	psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(targetCluster, "DROP SCHEMA IF EXISTS public CASCADE")
-	psql(targetCluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	resetDatabaseObjects(targetCluster)
+}
+
+// resetDatabaseObjects drops everything the fixtures and clones create. The
+// stamp survives: it is a database comment, not an object in a schema.
+func resetDatabaseObjects(cluster string) {
+	GinkgoHelper()
+	psql(cluster, "DROP EXTENSION IF EXISTS citext CASCADE")
+	psql(cluster, "DROP SCHEMA IF EXISTS audit CASCADE")
+	psql(cluster, "DROP SCHEMA IF EXISTS public CASCADE")
+	psql(cluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
 	// A hand-made schema has a null ACL, where bootstrap public carries
 	// =U/pg_database_owner: PostgreSQL 15+ withdrew PUBLIC's CREATE, not its
 	// USAGE, so the grant is what makes this the shape a real target has.
-	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
-	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
+	psql(cluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
+	psql(cluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 
 // sourceSeedIsStale reports whether a kept source carries the wrong fixture
@@ -1692,13 +1772,20 @@ func sourceSeedIsStale() bool {
 		return false
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", sourceCluster)
-	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
-		match := psql(sourceCluster, fmt.Sprintf(
-			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
-			seedProfile(), scaleArg()))
-		return match != "t"
+	return seedMarkerStale()
+}
+
+// seedMarkerStale reports whether the source's seed marker names another
+// profile or scale. No marker table is fresh: the seed Job writes one.
+func seedMarkerStale() bool {
+	GinkgoHelper()
+	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") != "t" {
+		return false
 	}
-	return false
+	match := psql(sourceCluster, fmt.Sprintf(
+		"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
+		seedProfile(), scaleArg()))
+	return match != "t"
 }
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
@@ -1782,7 +1869,7 @@ func deleteMismatchedCluster(name string) {
 	deleteCluster(name)
 }
 
-// serverMajor asks the cluster's primary for its PostgreSQL major version.
+// serverMajor asks one side's server for its PostgreSQL major version.
 func serverMajor(cluster string) int {
 	GinkgoHelper()
 	num, err := strconv.Atoi(psql(cluster, "SELECT current_setting('server_version_num')"))
@@ -1850,7 +1937,7 @@ func runSeedJob() {
 
 func buildSeedJob() *batchv1.Job {
 	backoff := int32(2)
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
@@ -1872,15 +1959,6 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
-							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
-							{Name: "PGDATABASE", Value: appDatabase(sourceCluster)},
-							{Name: "PGUSER", Value: appRole(sourceCluster)},
-							{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
-									Key:                  passwordKey,
-								},
-							}},
 						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
 					}},
@@ -1893,6 +1971,50 @@ func buildSeedJob() *batchv1.Job {
 			},
 		},
 	}
+	// Appended outside the literal: the fixtures guard reads the SEED_ names
+	// from the literal and cannot follow a call.
+	seed := &job.Spec.Template.Spec.Containers[0]
+	seed.Env = append(seed.Env, seedConnEnv()...)
+	if external != nil {
+		pod := &job.Spec.Template.Spec
+		pod.SecurityContext = externalPodSecurity()
+		pod.Volumes = append(pod.Volumes, credentialsVolume())
+		seed.Command = installPgpass("bash /fixtures/run.sh")
+		seed.SecurityContext = restrictedContainer()
+		seed.VolumeMounts = append(seed.VolumeMounts, credentialsMount())
+	}
+	return job
+}
+
+// seedConnEnv connects the seed to the source as the app role, so every
+// fixture object belongs to the role the Migrations restore as.
+func seedConnEnv() []corev1.EnvVar {
+	if external == nil {
+		return []corev1.EnvVar{
+			{Name: envPGHost, Value: sourceCluster + "-rw." + nsE2E + ".svc"},
+			{Name: envPGDatabase, Value: appDatabase(sourceCluster)},
+			{Name: envPGUser, Value: appRole(sourceCluster)},
+			{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
+					Key:                  passwordKey,
+				},
+			}},
+		}
+	}
+	s := external.Source
+	env := []corev1.EnvVar{
+		{Name: envPGHost, Value: s.Host},
+		{Name: "PGPORT", Value: strconv.Itoa(int(s.Port))},
+		{Name: envPGDatabase, Value: s.Database},
+		{Name: envPGUser, Value: s.AppRole},
+		{Name: envPGPassfile, Value: pgpassFile},
+	}
+	// libpq reads an empty PGSSLMODE as an invalid value, not as the default.
+	if s.SSLMode != "" {
+		env = append(env, corev1.EnvVar{Name: envPGSSLMode, Value: s.SSLMode})
+	}
+	return env
 }
 
 // jobLogs returns the last lines of a Job's log, kubectl's error text
@@ -2138,8 +2260,14 @@ func grantTargetFollowPrivileges(db string) {
 func resetSourceReplication() {
 	GinkgoHelper()
 	psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	dropSourceReplication()
+}
+
+// dropSourceReplication drops pgcopydb's inactive slots and its publications.
+func dropSourceReplication() {
+	GinkgoHelper()
 	psql(sourceCluster, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots"+
-		" WHERE slot_name LIKE 'pgcopydb%' AND NOT active")
+		" WHERE "+slotFilter()+" AND NOT active")
 	psql(sourceCluster, "DO $$ DECLARE p text; BEGIN FOR p IN SELECT pubname FROM pg_publication"+
 		" WHERE pubname LIKE 'pgcopydb%' LOOP EXECUTE format('DROP PUBLICATION %I', p); END LOOP; END $$")
 }
@@ -2154,7 +2282,7 @@ func resetSourceReplication() {
 func resetTargetReplication() {
 	GinkgoHelper()
 	psql(targetCluster, "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin"+
-		" WHERE roname LIKE 'pgcopydb%'")
+		" WHERE "+originFilter())
 }
 
 // instancePods returns the CNPG instance pods of one fixture cluster. A
@@ -2283,28 +2411,32 @@ func usableNode(n *corev1.Node) bool {
 	return false
 }
 
-// primaryPod returns the pod name of the cluster's current primary. Which
-// instance carries the role moves on failover and the chaos scenarios force
-// failovers on purpose, so a hardcoded <cluster>-1 would send writes to a
-// read-only replica. A promotion leaves the cluster without a primary for a
-// few seconds, so this waits out the gap instead of failing into it.
+// primaryPod returns the pod psql runs in: the cluster's current CNPG primary,
+// which moves on failover (chaos forces some), or in external mode the client
+// pod. A promotion leaves no primary for a few seconds, so this waits it out.
 func primaryPod(cluster string) string {
 	GinkgoHelper()
 	var name string
 	Eventually(func(g Gomega) {
 		pods := &corev1.PodList{}
-		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
-			labelCNPGCluster: cluster,
-			labelCNPGRole:    rolePrimary,
-		})).To(Succeed())
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), sqlPodLabels(cluster))).To(Succeed())
 		// The count, never the slice: a failed HaveLen prints the pods it
 		// matched, node names and all, and this repository's CI logs are
 		// public. Bound to a variable so ginkgolinter does not rewrite it back.
 		found := len(pods.Items)
-		g.Expect(found).To(Equal(1), "CNPG cluster %s has %d primaries, want 1", cluster, found)
+		g.Expect(found).To(Equal(1), "%d pods run psql for %s, want 1", found, cluster)
 		name = pods.Items[0].Name
 	}, primaryTimeout, 2*time.Second).Should(Succeed())
 	return name
+}
+
+// sqlPodLabels selects the pod psql runs in for cluster: its CNPG primary, or
+// in external mode the client pod, which reaches both sides.
+func sqlPodLabels(cluster string) client.MatchingLabels {
+	if external != nil {
+		return client.MatchingLabels{labelAppName: externalClientPod}
+	}
+	return client.MatchingLabels{labelCNPGCluster: cluster, labelCNPGRole: rolePrimary}
 }
 
 // psql runs one statement against the migration database; see psqlDB.
@@ -2313,9 +2445,9 @@ func psql(cluster, sql string) string {
 	return psqlDB(cluster, appDatabase(cluster), sql)
 }
 
-// psqlDB runs one statement as the in-pod postgres user on the current primary
-// and returns trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for
-// spec goroutines.
+// psqlDB runs one statement as the in-pod postgres user on the current primary,
+// or in external mode as the admin role from the client pod, and returns
+// trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for spec goroutines.
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	out, err := psqlDBErr(cluster, db, sql)
@@ -2430,17 +2562,26 @@ func psqlArgv(cluster, pod, db string, stdin bool, flags ...string) []string {
 	return append(kubectlExecArgs(pod, stdin), psqlCommand(cluster, db, flags...)...)
 }
 
-// kubectlExecArgs opens kubectl exec into the container on pod that runs psql.
+// kubectlExecArgs opens kubectl exec into the container on pod that runs psql:
+// a CNPG instance's postgres container, or the external client pod's.
 func kubectlExecArgs(pod string, stdin bool) []string {
 	args := []string{psqlExecSubcommand}
 	if stdin {
 		args = append(args, "-i")
 	}
-	return append(args, "-n", nsE2E, pod, "-c", postgresContainer, "--")
+	container := postgresContainer
+	if external != nil {
+		container = externalClientContainer
+	}
+	return append(args, "-n", nsE2E, pod, "-c", container, "--")
 }
 
 // psqlCommand is the psql invocation that reaches db as cluster's admin role.
+// psql reads a first argument containing = as a whole conninfo.
 func psqlCommand(cluster, db string, flags ...string) []string {
+	if external != nil {
+		return append([]string{psqlExecProgram, adminConninfo(cluster, db)}, flags...)
+	}
 	return append([]string{psqlExecProgram, "-U", adminRole(cluster), db}, flags...)
 }
 

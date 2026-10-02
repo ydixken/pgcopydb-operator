@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strconv"
@@ -50,9 +51,10 @@ const (
 // spec inside the Ordered one below: a failure in an Ordered container skips
 // every spec after it, and a check on where pods landed must never be able to
 // take the functional suite down with it. Unlabeled on purpose, so it runs in
-// every functional run and never under task e2e:chaos, which deletes instance
+// every CNPG-mode functional run and never under task e2e:chaos, which deletes instance
 // pods deliberately.
 var _ = Describe("Fixture placement", func() {
+	BeforeEach(requireCNPGFixtures)
 	// The binding check. It reads what was rendered onto the pods rather than
 	// where they ended up, which makes it namespaced (so it runs under the
 	// confined CI identity, never skipped) and deterministic (no scheduler in
@@ -226,11 +228,11 @@ var _ = Describe("Migration", Ordered, func() {
 	It("clones across namespaces using local secrets and remote hosts", func() {
 		// Stand-in for cross-cluster: the Migration and its secrets live in
 		// one namespace, the databases are reached by service DNS in another.
-		By("copying the app secrets into " + nsX)
-		for _, name := range []string{srcSecret, tgtSecret} {
-			orig := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, orig)).To(Succeed())
-			copySecret(nsX, name, orig.Data[passwordKey])
+		// Both sides may share one Secret under different keys, so copySecret merges.
+		By("copying the app passwords into " + nsX)
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			ref := e2eConn(cluster).PasswordSecretRef
+			copySecret(nsX, ref.Name, ref.Key, appPassword(cluster))
 		}
 
 		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{DropIfExists: true}))
@@ -257,21 +259,12 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(err.Error()).To(ContainSubstring("set exactly one of secretRef, uriSecretRef"))
 	})
 
-	It("clones with uriSecretRef connections built from the CNPG secrets", func() {
+	It("clones with uriSecretRef connections built from the app credentials", func() {
 		const uriSecretName = "e2e-uris"
-		By("building libpq URIs from the app secrets and storing them in one Secret")
+		By("building libpq URIs from the app credentials and storing them in one Secret")
 		data := map[string][]byte{}
 		for key, cluster := range map[string]string{sourceKey: sourceCluster, targetKey: targetCluster} {
-			sec := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
-			// url.UserPassword escapes the generated password, whatever is in it.
-			u := url.URL{
-				Scheme: "postgresql",
-				User:   url.UserPassword(appRole(cluster), string(sec.Data[passwordKey])),
-				Host:   cluster + "-rw." + nsE2E + ".svc:5432",
-				Path:   "/" + appDatabase(cluster),
-			}
-			data[key] = []byte(u.String())
+			data[key] = []byte(appURL(cluster, appPassword(cluster)))
 		}
 		uriSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: uriSecretName}}
 		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, uriSecret, func() error {
@@ -292,31 +285,27 @@ var _ = Describe("Migration", Ordered, func() {
 	})
 
 	It("clones with connection details from a single Secret", func() {
+		requirePlainSecretRefNames()
 		const name = "e2e-details"
-		By("reading the CNPG-generated passwords")
-		pw := map[string][]byte{}
-		for _, cluster := range []string{sourceCluster, targetCluster} {
-			sec := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
-			pw[cluster] = sec.Data[passwordKey]
-		}
-
-		By("packing them into per-side detail Secrets")
+		By("packing the app credentials into per-side detail Secrets")
 		// Source uses the convention keys with DB holding a password-free URI
 		// (the authoritative-URI branch); target remaps the keys and composes
-		// from parts, with a portless host exercising the :5432 default.
-		srcURI := fmt.Sprintf("postgresql://%s@%s-rw.%s.svc:5432/%s",
-			appRole(sourceCluster), sourceCluster, nsE2E, appDatabase(sourceCluster))
+		// from parts, portless on 5432 to exercise the default.
+		tgt := e2eConn(targetCluster)
+		tgtHost := tgt.Host
+		if tgt.Port != 0 && tgt.Port != 5432 {
+			tgtHost = net.JoinHostPort(tgt.Host, strconv.Itoa(int(tgt.Port)))
+		}
 		details := map[string]map[string][]byte{
 			name + "-source": {
-				"DB": []byte(srcURI),
-				"PW": pw[sourceCluster],
+				"DB": []byte(appURL(sourceCluster, nil)),
+				"PW": appPassword(sourceCluster),
 			},
 			name + "-target": {
-				"db":   []byte(appDatabase(targetCluster)),
-				"pw":   pw[targetCluster],
-				"host": []byte(targetCluster + "-rw." + nsE2E + ".svc"),
-				"role": []byte(appRole(targetCluster)),
+				"db":   []byte(tgt.Database),
+				"pw":   appPassword(targetCluster),
+				"host": []byte(tgtHost),
+				"role": []byte(tgt.Username),
 			},
 		}
 		for secName, data := range details {
@@ -337,6 +326,7 @@ var _ = Describe("Migration", Ordered, func() {
 				Name: name + "-target",
 				Keys: &v1beta1.ConnectionSecretKeys{Database: "db", Password: "pw", URL: "host", Username: "role"},
 			},
+			SSLMode: tgt.SSLMode,
 		}
 		create(m)
 		waitCompleted(name, nsE2E)
@@ -349,7 +339,7 @@ var _ = Describe("Migration", Ordered, func() {
 		DeferCleanup(func() { deleteMigration(name) })
 
 		By("pointing the source at a Secret holding a wrong password")
-		copySecret(nsE2E, name, []byte("not-the-password"))
+		copySecret(nsE2E, name, passwordKey, []byte("not-the-password"))
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		m.Spec.Source.PasswordSecretRef = &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
@@ -771,15 +761,15 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-remediate"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(sourceCluster, "ALTER ROLE postgres PASSWORD NULL")
-			psql(targetCluster, "ALTER ROLE postgres PASSWORD NULL")
+			clearSuperuserPassword(sourceCluster, name+"-super-src")
+			clearSuperuserPassword(targetCluster, name+"-super-tgt")
 			ensureFollowPrivileges()
 			resetSourceReplication()
 			resetTargetReplication()
 		})
 
-		By("giving postgres a password on both clusters and packing superuser Secrets")
-		// CNPG's generated pg_hba ends in a host-all scram rule, so a
+		By("packing superuser Secrets for both sides")
+		// In CNPG mode the generated pg_hba ends in a host-all scram rule, so a
 		// password-enabled postgres authenticates over the rw service exactly
 		// like the app role does.
 		supers := map[string]string{name + "-super-src": sourceCluster, name + "-super-tgt": targetCluster}
@@ -879,7 +869,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-clonegrant-fix"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(targetCluster, "ALTER ROLE postgres PASSWORD NULL")
+			clearSuperuserPassword(targetCluster, name+"-super")
 			dropLimitedRole()
 			resetTargetObjects()
 		})
@@ -931,7 +921,7 @@ var _ = Describe("Migration", Ordered, func() {
 		const name = "e2e-permdenied"
 		DeferCleanup(func() {
 			deleteMigration(name)
-			psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
+			psql(sourceCluster, dropRoleSQL(noSelectRole))
 		})
 
 		By("creating a source role that can connect but not read")
@@ -939,12 +929,13 @@ var _ = Describe("Migration", Ordered, func() {
 		// SELECT still passes the gate and fails the copy itself: exactly the
 		// deterministic permission error the classifier must terminate on the
 		// first attempt instead of burning the budget.
-		psql(sourceCluster, "DROP ROLE IF EXISTS e2e_noselect")
-		psql(sourceCluster, "CREATE ROLE e2e_noselect LOGIN PASSWORD 'e2e-noselect-pw'")
-		copySecret(nsE2E, name, []byte("e2e-noselect-pw"))
+		psql(sourceCluster, dropRoleSQL(noSelectRole))
+		psql(sourceCluster, "CREATE ROLE "+noSelectRole+" LOGIN PASSWORD 'e2e-noselect-pw'")
+		stampRole(sourceCluster, noSelectRole)
+		copySecret(nsE2E, name, passwordKey, []byte("e2e-noselect-pw"))
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{})
-		m.Spec.Source.Username = "e2e_noselect"
+		m.Spec.Source.Username = noSelectRole
 		m.Spec.Source.PasswordSecretRef = &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{Name: name},
 			Key:                  passwordKey,
@@ -1027,38 +1018,53 @@ func makeLimitedTarget(secretName string) {
 	resetTargetObjects()
 	pw := secretName + "-pw"
 	psql(targetCluster, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s'", limitedRole, pw))
+	stampRole(targetCluster, limitedRole)
 	psql(targetCluster, fmt.Sprintf("GRANT CONNECT, CREATE ON DATABASE %s TO %s",
 		sqlIdent(appDatabase(targetCluster)), limitedRole))
-	copySecret(nsE2E, secretName, []byte(pw))
+	copySecret(nsE2E, secretName, passwordKey, []byte(pw))
 }
 
-// packSuperuserSecret gives postgres on cluster a password and stores it in
-// secretName, for a superuserSecretRef to name. Callers reset the password.
+// packSuperuserSecret stores a side's superuser credentials in secretName, for
+// a superuserSecretRef to name. In CNPG mode it first gives postgres a
+// password, which callers remove with clearSuperuserPassword.
 func packSuperuserSecret(cluster, secretName string) {
 	GinkgoHelper()
 	pw := secretName + "-pw"
-	psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+	if external != nil {
+		pw = external.side(cluster).AdminPassword
+	} else {
+		psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+	}
 	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secretName}}
 	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
-		sec.Data = map[string][]byte{"USER": []byte("postgres"), "PW": []byte(pw)}
+		sec.Data = map[string][]byte{"USER": []byte(adminRole(cluster)), "PW": []byte(pw)}
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred(), "failed to store the superuser secret %s", secretName)
 }
 
-// dropLimitedRole removes the limited role and everything it restored. The
-// DO block guards DROP OWNED, which unlike DROP ROLE has no IF EXISTS.
-func dropLimitedRole() {
+// clearSuperuserPassword undoes packSuperuserSecret. An external admin role
+// keeps its password, so the Secret holding it goes instead.
+func clearSuperuserPassword(cluster, secretName string) {
 	GinkgoHelper()
-	psql(targetCluster, fmt.Sprintf("DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '%s')"+
-		" THEN EXECUTE 'DROP OWNED BY %s CASCADE'; END IF; END $$", limitedRole, limitedRole))
-	psql(targetCluster, "DROP ROLE IF EXISTS "+limitedRole)
+	if external != nil {
+		deleteSuiteObjects(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: secretName}})
+		return
+	}
+	psql(cluster, "ALTER ROLE postgres PASSWORD NULL")
 }
 
-// e2eConn points at a fixture cluster through its rw service, fully qualified
-// so the same spec works from pgcopydb-e2e-x.
+// dropLimitedRole removes the limited role and everything it restored.
+func dropLimitedRole() {
+	GinkgoHelper()
+	psql(targetCluster, dropRoleSQL(limitedRole))
+}
+
+// e2eConn is the app connection to one side: the fixture's rw service, fully
+// qualified so the same spec works from pgcopydb-e2e-x, or the external pair's
+// app URI with its password in the suite's credentials Secret.
 func e2eConn(cluster string) v1beta1.PostgresConnection {
-	return v1beta1.PostgresConnection{
+	conn := v1beta1.PostgresConnection{
 		Host:     cluster + "-rw." + nsE2E + ".svc",
 		Database: appDatabase(cluster),
 		Username: appRole(cluster),
@@ -1067,6 +1073,49 @@ func e2eConn(cluster string) v1beta1.PostgresConnection {
 			Key:                  passwordKey,
 		},
 	}
+	if external != nil {
+		s := external.side(cluster)
+		conn.Host, conn.Port, conn.SSLMode = s.Host, s.Port, s.SSLMode
+		conn.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: externalCredentialsSecret},
+			Key:                  externalAppPasswordKey(cluster),
+		}
+	}
+	return conn
+}
+
+// appURL renders e2eConn as a libpq URI. A nil password gives the
+// password-free form a secretRef DB key requires.
+func appURL(cluster string, password []byte) string {
+	c := e2eConn(cluster)
+	port := c.Port
+	if port == 0 {
+		port = defaultPGPort
+	}
+	u := url.URL{
+		Scheme: "postgresql",
+		User:   url.User(c.Username),
+		Host:   net.JoinHostPort(c.Host, strconv.Itoa(int(port))),
+		Path:   "/" + c.Database,
+	}
+	if password != nil {
+		u.User = url.UserPassword(c.Username, string(password))
+	}
+	if c.SSLMode != "" {
+		u.RawQuery = url.Values{"sslmode": {c.SSLMode}}.Encode()
+	}
+	return u.String()
+}
+
+// appPassword reads the password e2eConn references. An empty value fails
+// here, so a missing key cannot pass as a blank password.
+func appPassword(cluster string) []byte {
+	GinkgoHelper()
+	ref := e2eConn(cluster).PasswordSecretRef
+	sec := &corev1.Secret{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: ref.Name}, sec)).To(Succeed())
+	Expect(sec.Data[ref.Key]).NotTo(BeEmpty(), "Secret %s has no %s key", ref.Name, ref.Key)
+	return sec.Data[ref.Key]
 }
 
 // reportCloneRate records how long a completed clone took, against the size of
@@ -1444,7 +1493,7 @@ func expectCleanupSucceeded(name string) {
 // generated names always start with pgcopydb_.
 func sourceSlotCount() string {
 	GinkgoHelper()
-	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'")
+	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE "+slotFilter())
 }
 
 // targetOriginCount counts pgcopydb-created replication origins on the target.
@@ -1454,16 +1503,19 @@ func sourceSlotCount() string {
 // sees it.
 func targetOriginCount() string {
 	GinkgoHelper()
-	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE roname LIKE 'pgcopydb%'")
+	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
 }
 
-// copySecret writes a password-only secret; CreateOrUpdate keeps reruns with
-// kept fixtures from tripping over AlreadyExists.
-func copySecret(ns, name string, password []byte) {
+// copySecret merges one key into a secret, keeping any other key; CreateOrUpdate
+// keeps reruns with kept fixtures from tripping over AlreadyExists.
+func copySecret(ns, name, key string, value []byte) {
 	GinkgoHelper()
 	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
-		sec.Data = map[string][]byte{passwordKey: password}
+		if sec.Data == nil {
+			sec.Data = map[string][]byte{}
+		}
+		sec.Data[key] = value
 		return nil
 	})
 	Expect(err).NotTo(HaveOccurred(), "failed to copy secret %s into %s", name, ns)

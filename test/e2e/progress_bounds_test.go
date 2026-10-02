@@ -148,9 +148,8 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
 				queryCtx, cancel := context.WithTimeout(ctx, min(5*time.Second, time.Until(recoveryDeadline)))
 				defer cancel()
 				primaries := &corev1.PodList{}
-				queryOK := k8sClient.List(queryCtx, primaries, client.InNamespace(nsE2E), client.MatchingLabels{
-					labelCNPGCluster: targetCluster, labelCNPGRole: rolePrimary,
-				}) == nil && len(primaries.Items) == 1
+				queryOK := k8sClient.List(queryCtx, primaries, client.InNamespace(nsE2E),
+					sqlPodLabels(targetCluster)) == nil && len(primaries.Items) == 1
 				g.Expect(queryOK).To(BeTrue(), "target probe primary lookup unavailable")
 				out, queryErr := commandOutput(queryCtx, exec.CommandContext, "kubectl",
 					psqlArgv(targetCluster, primaries.Items[0].Name, appDatabase(targetCluster), false,
@@ -297,9 +296,7 @@ func holdProgressLock(side, cluster, table string) func() {
 		lookupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
 		pods := &corev1.PodList{}
-		err := k8sClient.List(lookupCtx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
-			labelCNPGCluster: cluster, labelCNPGRole: rolePrimary,
-		})
+		err := k8sClient.List(lookupCtx, pods, client.InNamespace(nsE2E), sqlPodLabels(cluster))
 		if err != nil || len(pods.Items) != 1 {
 			return corev1.Pod{}, false
 		}
