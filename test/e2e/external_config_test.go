@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"reflect"
@@ -35,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/yaml"
 
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -804,5 +806,32 @@ func TestExternalRoleSQL(t *testing.T) {
 		if !strings.Contains(got, "<> "+sqlLiteral(externalStamp)) {
 			t.Errorf("unstampedRolesSQL(%s) = %q does not test the stamp", cluster, got)
 		}
+	}
+}
+
+// A failed purge or uninstall must not keep the password Secrets in place.
+func TestExternalTeardownSurvivesFailedSteps(t *testing.T) {
+	oldCtx, oldClient, oldExt, oldManage := ctx, k8sClient, external, manageNamespaces
+	t.Cleanup(func() { ctx, k8sClient, external, manageNamespaces = oldCtx, oldClient, oldExt, oldManage })
+	t.Setenv("E2E_KEEP_FIXTURES", "true")
+	ctx, external, manageNamespaces = context.Background(), testExternalPair(), false
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}}
+	k8sClient = interceptor.NewClient(clientfake.NewClientBuilder().WithObjects(secret).Build(), interceptor.Funcs{
+		DeleteAllOf: func(context.Context, client.WithWatch, client.Object, ...client.DeleteAllOfOption) error {
+			return errors.New("purge refused")
+		},
+	})
+	RegisterTestingT(t)
+	err := runEach(
+		func() { purgeMigrations(time.Second) },
+		func() { Expect(errors.New("helm uninstall failed")).NotTo(HaveOccurred()) },
+		teardownFixtures,
+	)
+	if err == nil || !strings.Contains(err.Error(), "purge refused") ||
+		!strings.Contains(err.Error(), "helm uninstall failed") {
+		t.Errorf("runEach() = %v, want both failures reported", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); !apierrors.IsNotFound(err) {
+		t.Errorf("the credentials Secret survived a teardown whose purge and uninstall failed: %v", err)
 	}
 }

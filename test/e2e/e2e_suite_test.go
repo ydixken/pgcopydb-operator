@@ -1219,45 +1219,54 @@ var _ = AfterSuite(func() {
 	if featureE2ERunValue != "" {
 		return
 	}
-	// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
-	// needs a live controller to run the cleanup Job and release, and that
-	// cleanup is what drops the replication slots. A failed or timed-out
-	// spec can leave Migrations behind; uninstalling first would orphan
-	// them and wedge the namespace deletion below for the full timeout.
-	By("deleting leftover Migrations while the operator still runs")
-	purgeMigrations(5 * time.Minute)
-
-	// Slots go before the operator does, kept fixtures or not, but a failure
-	// here is reported last so the operator and the password Secrets still go.
-	var replicationErr error
-	if externalPairGuarded {
-		By("dropping pgcopydb slots, publications and origins left on the external databases")
-		replicationErr = InterceptGomegaFailure(cleanExternalReplication)
-	}
-
-	// The throwaway operator always goes away, keep-fixtures or not: every
-	// run installs a fresh one.
-	By("uninstalling the suite's operator")
-	helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
-	if manageNamespaces {
-		By("deleting " + nsOperator)
-		deleteNamespaces(2*time.Minute, nsOperator)
-	}
-
-	// By lives here, not in teardownFixtures: a unit test calls that helper outside a Ginkgo run.
-	if external != nil {
-		By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
-	}
-	teardownFixtures()
-	Expect(replicationErr).NotTo(HaveOccurred(),
-		"pgcopydb replication state is left on the external pair; see docs/operations/e2e-external.md#cleanup")
+	Expect(runEach(
+		func() {
+			// Purge Migrations BEFORE the operator goes away: the cleanup finalizer
+			// needs a live controller to run the cleanup Job and release, and that
+			// cleanup is what drops the replication slots.
+			By("deleting leftover Migrations while the operator still runs")
+			purgeMigrations(5 * time.Minute)
+		},
+		func() {
+			if externalPairGuarded {
+				By("dropping pgcopydb slots, publications and origins left on the external databases")
+				cleanExternalReplication()
+			}
+		},
+		func() {
+			// The throwaway operator always goes away, keep-fixtures or not.
+			By("uninstalling the suite's operator")
+			helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+			if manageNamespaces {
+				By("deleting " + nsOperator)
+				deleteNamespaces(2*time.Minute, nsOperator)
+			}
+		},
+		func() {
+			// By lives here, not in teardownFixtures: a unit test calls that helper outside a Ginkgo run.
+			if external != nil {
+				By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
+			}
+			teardownFixtures()
+		},
+	)).To(Succeed(),
+		"the suite's teardown left state behind; after an external run see docs/operations/e2e-external.md#cleanup")
 })
+
+// runEach runs every step even after one fails and returns their failures,
+// so the replication cleanup and the password Secret sweep always run.
+func runEach(steps ...func()) error {
+	errs := make([]error, 0, len(steps))
+	for _, step := range steps {
+		errs = append(errs, InterceptGomegaFailure(step))
+	}
+	return errors.Join(errs...)
+}
 
 // teardownFixtures runs after the operator is gone. The e2e- Secrets hold the
 // supplied passwords, so the external sweep precedes the keep-fixtures check.
 func teardownFixtures() {
 	GinkgoHelper()
-	// The e2e- Secrets hold the supplied passwords, so they go even when fixtures are kept.
 	if external != nil {
 		deleteExternalClient()
 	}
@@ -1266,15 +1275,13 @@ func teardownFixtures() {
 	case envTrue("E2E_KEEP_FIXTURES"):
 		_, _ = fmt.Fprintf(GinkgoWriter,
 			"E2E_KEEP_FIXTURES=true: keeping namespaces %s and %s for iteration\n", nsE2E, nsX)
-	case external != nil && !manageNamespaces:
-		// deleteExternalClient above already emptied what the suite owns.
-	case !manageNamespaces:
-		By("deleting the fixtures inside " + nsE2E + " and " + nsX)
-		deleteFixtures(10 * time.Minute)
-	default:
+	case manageNamespaces:
 		By("deleting the fixture namespaces")
 		// CNPG teardown plus volume deletion takes a while on the shared cluster.
 		deleteNamespaces(10*time.Minute, nsX, nsE2E)
+	case external == nil:
+		By("deleting the fixtures inside " + nsE2E + " and " + nsX)
+		deleteFixtures(10 * time.Minute)
 	}
 }
 

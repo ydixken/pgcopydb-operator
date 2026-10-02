@@ -148,7 +148,8 @@ Release candidates run the suite against CloudNativePG fixtures only; CI covers 
 
 At the end the suite drops the replication slots and origins its Migrations left and pgcopydb's publications in the source database, even with `E2E_KEEP_FIXTURES=true`, so nothing holds WAL on your source.
 It recognizes its own slots and origins by the `pgcopydb_pgcopydb_e2e_` prefix its namespaces give them, and on the source it looks only at the test database's slots, so other slots on your servers stay.
-The run fails if a slot is still there afterwards, once it has removed the operator and the Secrets below.
+Every teardown step runs even when an earlier one fails, such as a leftover Migration that will not go away or a slot that is still there afterwards.
+The run fails after the last step, so the operator and the Secrets below are gone either way.
 It leaves the fixtures and the stamp in both databases, so the next run reuses the seed.
 
 The Secrets hold your passwords, so the suite deletes them on every run, even with `E2E_KEEP_FIXTURES=true`.
@@ -162,7 +163,8 @@ What else the suite removes from the cluster depends on two variables:
 > [!warning]
 > A run that is killed before its teardown can leave a pgcopydb replication slot on the source, and that slot holds WAL until someone drops it.
 > It can also leave the login roles `e2e_noselect` on the source and `e2e_limited` on the target, whose passwords are in this repository's source, and the role `app-owner` on the target.
-> Check both servers as the admin role after any interrupted run.
+> In the cluster it can leave the `e2e-` Secrets holding your passwords, `e2e-external-credentials` among them, in `pgcopydb-e2e` and `pgcopydb-e2e-x`.
+> Check both servers as the admin role, and both namespaces, after any interrupted run.
 
 On the source, in the test database:
 
