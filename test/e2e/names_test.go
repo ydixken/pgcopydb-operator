@@ -66,10 +66,10 @@ func sqlLiteral(value string) string {
 }
 
 // plainIdent matches the names PostgreSQL's quote_ident leaves bare.
-var plainIdent = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
+var plainIdent = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // quotedKeywords are the keywords quote_ident quotes (every category but
-// unreserved), from PostgreSQL's kwlist.h.
+// unreserved), from PostgreSQL 17/18's kwlist.h.
 var quotedKeywords = func() map[string]bool {
 	m := map[string]bool{}
 	for k := range strings.FieldsSeq(`all analyse analyze and any array as asc asymmetric both case cast
@@ -171,7 +171,9 @@ func TestE2ENamesQuoteForSQL(t *testing.T) {
 func TestE2ENamesQuoteIdentIfNeeded(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
 		{"app", "app"},
-		{"_app$1", "_app$1"},
+		{"_app$1", `"_app$1"`},
+		{"cascade", "cascade"},
+		{"between", `"between"`},
 		{"snake_case_1", "snake_case_1"},
 		{"user", `"user"`},
 		{"authorization", `"authorization"`},

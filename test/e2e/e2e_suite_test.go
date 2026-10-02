@@ -2116,9 +2116,10 @@ func ensureFollowPrivileges() {
 }
 
 // grantTargetFollowPrivileges grants the target-side follow prerequisites to
-// the migration role in one database. EXECUTE on catalog functions is per-database, so a
-// second target database (the chaos fan-out scenario) needs its own pass; the
-// parameter grant is cluster-wide but idempotent and simply rides along.
+// the migration role in one database. EXECUTE on catalog functions is
+// per-database, so a second target database (the chaos fan-out scenario) needs
+// its own pass; the parameter grant is cluster-wide but idempotent and simply
+// rides along.
 func grantTargetFollowPrivileges(db string) {
 	GinkgoHelper()
 	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
@@ -2417,6 +2418,11 @@ func psqlDBErrWith(
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
 }
+
+const (
+	psqlExecSubcommand = "exec"
+	psqlExecProgram    = "psql"
+)
 
 // psqlArgv is the kubectl argv that runs psql on pod against db, connected as
 // cluster's admin role. stdin keeps psql reading statements until it closes.
