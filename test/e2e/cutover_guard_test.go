@@ -231,9 +231,8 @@ func earlyManualCutover() {
 				break
 			}
 			primaries := &corev1.PodList{}
-			if err := k8sClient.List(probeCtx, primaries, client.InNamespace(nsE2E), client.MatchingLabels{
-				labelCNPGCluster: database, labelCNPGRole: rolePrimary,
-			}); err != nil || len(primaries.Items) != 1 || probeCtx.Err() != nil {
+			if err := k8sClient.List(probeCtx, primaries, client.InNamespace(nsE2E),
+				sqlPodLabels(database)); err != nil || len(primaries.Items) != 1 || probeCtx.Err() != nil {
 				continue
 			}
 			sql := sourceSQL

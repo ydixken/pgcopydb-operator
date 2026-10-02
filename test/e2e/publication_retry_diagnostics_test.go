@@ -259,9 +259,7 @@ func publicationRetrySQLDiagnostics(
 			"SELECT count(*) FROM pg_replication_origin WHERE roname='" + slot + "'"})
 	}
 	pods := &corev1.PodList{}
-	err := c.List(probeCtx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
-		labelCNPGCluster: cluster, labelCNPGRole: rolePrimary,
-	}, client.Limit(2))
+	err := c.List(probeCtx, pods, client.InNamespace(nsE2E), sqlPodLabels(cluster), client.Limit(2))
 	for _, query := range queries {
 		label := cluster + " " + query.label
 		if err != nil || len(pods.Items) != 1 {

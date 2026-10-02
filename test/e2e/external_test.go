@@ -64,6 +64,7 @@ const (
 	schemePostgres   = "postgres"
 	schemePostgresql = "postgresql"
 	sslRequire       = "require"
+	sslDisable       = "disable"
 )
 
 const (
@@ -226,7 +227,7 @@ func parsePostgresURI(name, raw string) (postgresURI, error) {
 		}
 	}
 	switch mode := query.Get("sslmode"); mode {
-	case "", "disable", "allow", "prefer", sslRequire:
+	case "", sslDisable, "allow", "prefer", sslRequire:
 		parsed.sslMode = mode
 	case "verify-ca", "verify-full":
 		return postgresURI{}, fmt.Errorf("%s asks for sslmode=%s, which needs a CA bundle the suite does not mount",
@@ -383,4 +384,24 @@ func buildExternalClientPod() *corev1.Pod {
 			Volumes: []corev1.Volume{credentialsVolume()},
 		},
 	}
+}
+
+// conninfoEscaper quotes a keyword conninfo value: libpq reads \' and \\
+// inside single quotes.
+var conninfoEscaper = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+
+// adminConninfo reaches db on cluster's side as its admin role. It names no
+// password: libpq reads that from PGPASSFILE in the client pod.
+func adminConninfo(cluster, db string) string {
+	s := external.side(cluster)
+	parts := []string{
+		"host='" + conninfoEscaper.Replace(s.Host) + "'",
+		"port=" + strconv.Itoa(int(s.Port)),
+		"dbname='" + conninfoEscaper.Replace(db) + "'",
+		"user='" + conninfoEscaper.Replace(s.AdminRole) + "'",
+	}
+	if s.SSLMode != "" {
+		parts = append(parts, "sslmode="+s.SSLMode)
+	}
+	return strings.Join(parts, " ")
 }

@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
@@ -98,7 +99,7 @@ func TestExternalConfig(t *testing.T) {
 			wantErr: "E2E_SOURCE_URI names an IPv6 literal host"},
 		{name: "sslmode disable is kept",
 			env:  set(envTargetURI, "postgres://shop_app@target.example.com/shop_new?sslmode=disable"),
-			want: pairWith(func(p *externalConfig) { p.Target.SSLMode = "disable" })},
+			want: pairWith(func(p *externalConfig) { p.Target.SSLMode = sslDisable })},
 		{name: "partial set names the missing variables",
 			env:     unset(envSourcePassword, envTargetAdminPassword),
 			wantErr: "missing E2E_SOURCE_PASSWORD, E2E_TARGET_ADMIN_PASSWORD"},
@@ -419,5 +420,89 @@ func TestExternalSeedJob(t *testing.T) {
 	}
 	if !found {
 		t.Error("CNPG-mode seed Job no longer reads PGPASSWORD from " + srcSecret)
+	}
+}
+
+func TestExternalPSQLArgv(t *testing.T) {
+	const (
+		sql     = "SELECT current_user"
+		oneShot = "-tAc"
+	)
+	pair := pairWith(func(p *externalConfig) {
+		p.Target.SSLMode, p.Target.AdminRole = sslDisable, `O'Brien \ Admin`
+	})
+	withExternal(t, pair)
+	cases := []struct {
+		name      string
+		got, want []string
+	}{
+		{
+			name: "source keeps require",
+			got:  psqlArgv(sourceCluster, externalClientPod, "shop", false, oneShot, sql),
+			want: []string{psqlExecSubcommand, "-n", nsE2E, externalClientPod, "-c", externalClientContainer, "--",
+				psqlExecProgram, "host='source.example.com' port=6432 dbname='shop' user='shop_admin' sslmode=require",
+				oneShot, sql},
+		},
+		{
+			name: "target quotes a spaced database and an odd role, and keeps disable",
+			got:  psqlArgv(targetCluster, externalClientPod, "fan out", true, "-q"),
+			want: []string{psqlExecSubcommand, "-i", "-n", nsE2E, externalClientPod, "-c", externalClientContainer, "--",
+				psqlExecProgram, `host='target.example.com' port=5432 dbname='fan out' user='O\'Brien \\ Admin' sslmode=disable`,
+				"-q"},
+		},
+	}
+	for _, tc := range cases {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s argv = %q, want %q", tc.name, tc.got, tc.want)
+		}
+		for _, cred := range pair.credentials() {
+			if strings.Contains(strings.Join(tc.got, " "), cred.password) {
+				t.Errorf("%s argv carries the password of %s", tc.name, cred.role)
+			}
+		}
+	}
+	withExternal(t, pairWith(func(p *externalConfig) { p.Source.SSLMode = "" }))
+	if got := adminConninfo(sourceCluster, "shop"); strings.Contains(got, "sslmode") {
+		t.Errorf("conninfo %q sets an sslmode the URI never named", got)
+	}
+}
+
+func TestExternalPSQLDBErrKeepsPasswordsOut(t *testing.T) {
+	pair := testExternalPair()
+	withExternal(t, pair)
+	command, state := newPSQLExecCommand(t, psqlExecResult{
+		stderr: `psql: error: connection to server at "source.example.com", port 6432 failed: ` +
+			`FATAL:  password authentication failed for user "shop_admin"`,
+		exitCode: 2,
+	})
+	_, err := psqlDBErrWith(sourceCluster, "shop", "SELECT count(*) FROM orders",
+		func(string) string { return externalClientPod },
+		func(time.Duration) { t.Fatal("retried a failed login") },
+		command, psqlExecTestTimeout)
+	if err == nil {
+		t.Fatal("psqlDBErrWith succeeded on a failed login")
+	}
+	calls, _, commands := state.snapshot()
+	requirePSQLCommandsReaped(t, commands)
+	if len(calls) != 1 || !slices.Contains(calls[0].args, externalClientContainer) {
+		t.Fatalf("calls = %q, want one exec into the client container", calls)
+	}
+	for _, cred := range pair.credentials() {
+		if strings.Contains(strings.Join(calls[0].args, " "), cred.password) ||
+			strings.Contains(err.Error(), cred.password) {
+			t.Errorf("the password of %s on %s reached argv or the error", cred.role, cred.host)
+		}
+	}
+}
+
+func TestExternalSQLPodLabels(t *testing.T) {
+	withExternal(t, nil)
+	cnpg := sqlPodLabels(targetCluster)
+	if cnpg[labelCNPGCluster] != targetCluster || cnpg[labelCNPGRole] != rolePrimary || len(cnpg) != 2 {
+		t.Errorf("CNPG mode selects %v, want the target's primary", cnpg)
+	}
+	withExternal(t, testExternalPair())
+	if got := sqlPodLabels(targetCluster); len(got) != 1 || got[labelAppName] != externalClientPod {
+		t.Errorf("external mode selects %v, want the client pod", got)
 	}
 }

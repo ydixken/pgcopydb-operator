@@ -2347,18 +2347,24 @@ func primaryPod(cluster string) string {
 	var name string
 	Eventually(func(g Gomega) {
 		pods := &corev1.PodList{}
-		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
-			labelCNPGCluster: cluster,
-			labelCNPGRole:    rolePrimary,
-		})).To(Succeed())
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), sqlPodLabels(cluster))).To(Succeed())
 		// The count, never the slice: a failed HaveLen prints the pods it
 		// matched, node names and all, and this repository's CI logs are
 		// public. Bound to a variable so ginkgolinter does not rewrite it back.
 		found := len(pods.Items)
-		g.Expect(found).To(Equal(1), "CNPG cluster %s has %d primaries, want 1", cluster, found)
+		g.Expect(found).To(Equal(1), "%d pods run psql for %s, want 1", found, cluster)
 		name = pods.Items[0].Name
 	}, primaryTimeout, 2*time.Second).Should(Succeed())
 	return name
+}
+
+// sqlPodLabels selects the pod psql runs in for cluster: its CNPG primary, or
+// in external mode the client pod, which reaches both sides.
+func sqlPodLabels(cluster string) client.MatchingLabels {
+	if external != nil {
+		return client.MatchingLabels{labelAppName: externalClientPod}
+	}
+	return client.MatchingLabels{labelCNPGCluster: cluster, labelCNPGRole: rolePrimary}
 }
 
 // psql runs one statement against the migration database; see psqlDB.
@@ -2484,17 +2490,26 @@ func psqlArgv(cluster, pod, db string, stdin bool, flags ...string) []string {
 	return append(kubectlExecArgs(pod, stdin), psqlCommand(cluster, db, flags...)...)
 }
 
-// kubectlExecArgs opens kubectl exec into the container on pod that runs psql.
+// kubectlExecArgs opens kubectl exec into the container on pod that runs psql:
+// a CNPG instance's postgres container, or the external client pod's.
 func kubectlExecArgs(pod string, stdin bool) []string {
 	args := []string{psqlExecSubcommand}
 	if stdin {
 		args = append(args, "-i")
 	}
-	return append(args, "-n", nsE2E, pod, "-c", postgresContainer, "--")
+	container := postgresContainer
+	if external != nil {
+		container = externalClientContainer
+	}
+	return append(args, "-n", nsE2E, pod, "-c", container, "--")
 }
 
 // psqlCommand is the psql invocation that reaches db as cluster's admin role.
+// psql reads a first argument containing = as a whole conninfo.
 func psqlCommand(cluster, db string, flags ...string) []string {
+	if external != nil {
+		return append([]string{psqlExecProgram, adminConninfo(cluster, db)}, flags...)
+	}
 	return append([]string{psqlExecProgram, "-U", adminRole(cluster), db}, flags...)
 }
 
