@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -24,6 +25,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -76,10 +80,14 @@ func TestBuildReownJob(t *testing.T) {
 	if c.Args[1] != reownScript() {
 		t.Fatal("the container must run the shipped handover script")
 	}
-	for _, want := range []string{"statement_timeout=60s", "lock_timeout=60s"} {
-		if !strings.Contains(envValue(c.Env, "PGOPTIONS"), want) {
-			t.Fatalf("PGOPTIONS lacks %s: %q", want, envValue(c.Env, "PGOPTIONS"))
-		}
+	// PgBouncer refuses startup options at connect (#298), so the bounds travel in SQL. No e2e can
+	// catch a regression: a CNPG Pooler always adds options to ignore_startup_parameters.
+	if slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "PGOPTIONS" }) {
+		t.Fatal("the handover Job must not carry PGOPTIONS")
+	}
+	const apply = `SELECT 'BEGIN', 'SET LOCAL statement_timeout = ''60s''', 'SET LOCAL lock_timeout = ''60s''', stmt, 'COMMIT' FROM candidates ORDER BY sort, stmt \gexec`
+	if !slices.Contains(strings.Split(reownScript(), "\n"), apply) {
+		t.Fatalf("each ALTER must run bounded in its own transaction, want the line:\n%s", apply)
 	}
 	if envValue(c.Env, "PGCONNECT_TIMEOUT") == "" {
 		t.Fatal("connect timeout missing")
@@ -255,6 +263,18 @@ func shippedReownCTE(t *testing.T) string {
 	return cte
 }
 
+// shippedReownApply returns the script line that runs the ALTERs.
+func shippedReownApply(t *testing.T) string {
+	t.Helper()
+	for line := range strings.SplitSeq(reownScript(), "\n") {
+		if strings.HasSuffix(line, `\gexec`) {
+			return line
+		}
+	}
+	t.Fatal("shipped ALTER line missing")
+	return ""
+}
+
 // reownPsql runs sql in one psql session with the owner variable bound the
 // way the script binds it.
 func reownPsql(t *testing.T, uri, sql string) string {
@@ -402,6 +422,21 @@ func TestReownCandidateQueries(t *testing.T) {
 			}
 		}
 	})
+	t.Run("bounds hold inside each ALTER's transaction and do not leak", func(t *testing.T) {
+		// The stand-in statement reports the bounds it runs under (60s reads back as 1min).
+		// SET LOCAL outside a transaction block is a no-op, so 1min also proves the BEGIN.
+		out := reownPsql(t, uri, `SET statement_timeout = '7s';
+SET lock_timeout = '8s';
+WITH candidates AS (
+  SELECT 1 AS sort, 'SELECT current_setting(''statement_timeout'') || '' '' || current_setting(''lock_timeout'')' AS stmt
+)
+`+shippedReownApply(t)+`
+SHOW statement_timeout;
+SHOW lock_timeout;`)
+		if out != "1min 1min\n7s\n8s" {
+			t.Fatalf("want the 60s bounds inside the transaction and the session's own after it, got:\n%s", out)
+		}
+	})
 	t.Run("script", func(t *testing.T) { testReownScript(t, uri) })
 }
 
@@ -414,7 +449,7 @@ func testReownScript(t *testing.T, uri string) {
 		t.Helper()
 		cmd := exec.Command(shellPath, "-c", reownScript())
 		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, reownOwnerEnv+"="+owner,
-			"PGOPTIONS=-c role="+role+" "+reownStatementBound)
+			"PGOPTIONS=-c role="+role)
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
@@ -475,6 +510,7 @@ func testReownScript(t *testing.T, uri string) {
 			t.Fatalf("a failed pre-check must not hand anything over, reown_other.t owned by %s", got)
 		}
 	})
+	t.Run("a held lock times out the ALTER instead of stalling the handover", func(t *testing.T) { testReownLockTimeout(t, uri) })
 	t.Run("granted pre-checks are silent and the handover lands", func(t *testing.T) {
 		reownPsql(t, uri, `GRANT CREATE ON SCHEMA reown_other TO "reown-to-test";`)
 		out, code := run(t, reownFrom, reownTo)
@@ -511,6 +547,55 @@ func testReownScript(t *testing.T, uri string) {
 			}
 		}
 	})
+}
+
+// testReownLockTimeout holds a conflicting lock in a second session and expects the
+// handover to fail on lock_timeout within seconds, with the blocked ALTER rolled back.
+func testReownLockTimeout(t *testing.T, uri string) {
+	reownPsql(t, uri, `GRANT CREATE ON SCHEMA reown_other TO "reown-to-test";`)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	holder := exec.CommandContext(ctx, "psql", uri, "-XAtq", "-v", "ON_ERROR_STOP=1")
+	stdin, err := holder.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Closing stdin ends psql, and the server rolls the open transaction back.
+	defer func() { _ = stdin.Close(); _ = holder.Wait() }()
+	if _, err := stdin.Write([]byte("BEGIN;\nLOCK TABLE reown_other.t IN ACCESS EXCLUSIVE MODE;\n")); err != nil {
+		t.Fatal(err)
+	}
+	held := `SELECT count(*) FROM pg_locks WHERE relation = 'reown_other.t'::regclass AND mode = 'AccessExclusiveLock' AND granted;`
+	for reownPsql(t, uri, held) != "1" {
+		if ctx.Err() != nil {
+			t.Fatal("the second session never took the lock")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Only the lock bound is shortened: at equal values statement_timeout can fire first.
+	const bound = "lock_timeout = ''60s''"
+	if strings.Count(reownScript(), bound) != 1 {
+		t.Fatal("the shipped script lacks the lock bound this test shortens")
+	}
+	script := strings.Replace(reownScript(), bound, "lock_timeout = ''1s''", 1)
+	cmd := exec.CommandContext(ctx, shellPath, "-c", script)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, reownOwnerEnv+"="+reownTo,
+		"PGOPTIONS=-c role="+reownFrom)
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	t.Logf("took %s\n%s", time.Since(start), out)
+	if err == nil || !strings.Contains(string(out), "canceling statement due to lock timeout") {
+		t.Fatal("want the handover to fail on the lock timeout")
+	}
+	if time.Since(start) > 20*time.Second {
+		t.Fatal("the lock timeout fired, but the handover still took too long")
+	}
+	if got := reownPsql(t, uri, "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'reown_other.t'::regclass;"); got != reownFrom {
+		t.Fatalf("the timed-out ALTER must roll back, reown_other.t owned by %s", got)
+	}
 }
 
 // TestReownInheritPreCheck confirms the handover pre-checks the migration
@@ -566,7 +651,7 @@ $reown_inh_cleanup$;
 		t.Helper()
 		cmd := exec.Command(shellPath, "-c", reownScript())
 		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, reownOwnerEnv+"="+to,
-			"PGOPTIONS=-c role="+from+" "+reownStatementBound)
+			"PGOPTIONS=-c role="+from)
 		out, err := cmd.CombinedOutput()
 		code := 0
 		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {

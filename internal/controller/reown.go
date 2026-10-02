@@ -34,9 +34,9 @@ import (
 // role reaches SQL only as a psql variable, never as shell or SQL text.
 const reownOwnerEnv = "REOWN_OWNER"
 
-// reownStatementBound caps each ALTER and its lock wait. Catalog updates take
-// milliseconds, so a long wait is a conflicting lock; fail rather than stall cutover.
-const reownStatementBound = "-c statement_timeout=60s -c lock_timeout=60s"
+// reownStatementBound caps each ALTER and its lock wait: catalog updates take milliseconds, so a long
+// wait is a conflicting lock; fail rather than stall cutover. SET LOCAL, because PgBouncer rejects startup options.
+const reownStatementBound = `'SET LOCAL statement_timeout = ''60s''', 'SET LOCAL lock_timeout = ''60s'''`
 
 // reownCandidatesCTE is shared by the pre-checks, ALTERs and post-check, so it
 // ends without a SELECT. Keep every filter: a bootstrap superuser owns pg_catalog.
@@ -139,9 +139,9 @@ func reownRequested(m *v1beta1.Migration) bool {
 	return m.Spec.Clone.OwnerAfterRestore != ""
 }
 
-// reownScript is the handover: pre-checks, the ALTERs in autocommit (many
-// partitions would exhaust max_locks_per_transaction; a rerun picks up what is
-// left), then a re-check. NOINHERIT passes the SET ROLE probe but loses USAGE at
+// reownScript is the handover: pre-checks, each ALTER in its own transaction
+// (many partitions in one would exhaust max_locks_per_transaction; a rerun picks
+// up what is left), then a re-check. NOINHERIT passes the SET ROLE probe but loses USAGE at
 // ALTER SCHEMA OWNER, hence the inherit pre-check. See docs/reference/prerequisites.md.
 func reownScript() string {
 	return `set -u
@@ -209,7 +209,7 @@ SELECT stmt FROM candidates ORDER BY sort, stmt LIMIT 200;
 SQL
 reown <<SQL || die "reown: a statement failed (psql stops at the first error, see above); statements already applied stay applied, and a rerun re-applies the rest"
 $REOWN_CANDIDATES_CTE
-SELECT stmt FROM candidates ORDER BY sort, stmt \gexec
+SELECT 'BEGIN', ` + reownStatementBound + `, stmt, 'COMMIT' FROM candidates ORDER BY sort, stmt \gexec
 SQL
 left=$(reown <<SQL
 $REOWN_CANDIDATES_CTE
@@ -233,9 +233,7 @@ func buildReownJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, erro
 		return nil, err
 	}
 	c := &job.Spec.Template.Spec.Containers[0]
-	c.Env = append(c.Env,
-		corev1.EnvVar{Name: reownOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore},
-		corev1.EnvVar{Name: "PGOPTIONS", Value: reownStatementBound})
+	c.Env = append(c.Env, corev1.EnvVar{Name: reownOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	// scriptJob's backoffLimit of 1 would spend the terminal failure on a lock
 	// timeout or an evicted pod; a privilege error still fails all three attempts.
 	backoff := int32(2)

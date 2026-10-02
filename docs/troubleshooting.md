@@ -411,7 +411,8 @@ Run it before step 3 too, to see what is outstanding.
 An array type and a row type show up beside the type or relation they belong to, and they need no statement of their own.
 
 A `canceling statement due to lock timeout` in the log is not a privilege problem.
-The Job caps each statement and its lock wait at 60 seconds, and a session on the target holds a conflicting lock.
+The Job caps each `ALTER` and its lock wait at 60 seconds, and a session on the target holds a conflicting lock.
+It sets both caps with `SET LOCAL` inside that statement's own transaction, so they also hold behind PgBouncer in session or transaction pooling.
 Clear that session, then replay.
 
 ## Workers and cluster objects
