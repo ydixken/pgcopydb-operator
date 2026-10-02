@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strconv"
@@ -266,7 +267,7 @@ var _ = Describe("Migration", Ordered, func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: cluster + "-app"}, sec)).To(Succeed())
 			// url.UserPassword escapes the generated password, whatever is in it.
 			u := url.URL{
-				Scheme: "postgresql",
+				Scheme: schemePostgresql,
 				User:   url.UserPassword(appRole(cluster), string(sec.Data[passwordKey])),
 				Host:   cluster + "-rw." + nsE2E + ".svc:5432",
 				Path:   "/" + appDatabase(cluster),
@@ -1055,10 +1056,11 @@ func dropLimitedRole() {
 	psql(targetCluster, "DROP ROLE IF EXISTS "+limitedRole)
 }
 
-// e2eConn points at a fixture cluster through its rw service, fully qualified
-// so the same spec works from pgcopydb-e2e-x.
+// e2eConn is the app connection to one side: the fixture's rw service, fully
+// qualified so the same spec works from pgcopydb-e2e-x, or the external pair's
+// app URI with its password in the suite's credentials Secret.
 func e2eConn(cluster string) v1beta1.PostgresConnection {
-	return v1beta1.PostgresConnection{
+	conn := v1beta1.PostgresConnection{
 		Host:     cluster + "-rw." + nsE2E + ".svc",
 		Database: appDatabase(cluster),
 		Username: appRole(cluster),
@@ -1067,6 +1069,38 @@ func e2eConn(cluster string) v1beta1.PostgresConnection {
 			Key:                  passwordKey,
 		},
 	}
+	if external != nil {
+		s := external.side(cluster)
+		conn.Host, conn.Port, conn.SSLMode = s.Host, s.Port, s.SSLMode
+		conn.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: externalCredentialsSecret},
+			Key:                  externalAppPasswordKey(cluster),
+		}
+	}
+	return conn
+}
+
+// appURL renders e2eConn as a libpq URI. A nil password gives the
+// password-free form a secretRef DB key requires.
+func appURL(cluster string, password []byte) string {
+	c := e2eConn(cluster)
+	port := c.Port
+	if port == 0 {
+		port = defaultPGPort
+	}
+	u := url.URL{
+		Scheme: "postgresql",
+		User:   url.User(c.Username),
+		Host:   net.JoinHostPort(c.Host, strconv.Itoa(int(port))),
+		Path:   "/" + c.Database,
+	}
+	if password != nil {
+		u.User = url.UserPassword(c.Username, string(password))
+	}
+	if c.SSLMode != "" {
+		u.RawQuery = url.Values{"sslmode": {c.SSLMode}}.Encode()
+	}
+	return u.String()
 }
 
 // reportCloneRate records how long a completed clone took, against the size of
