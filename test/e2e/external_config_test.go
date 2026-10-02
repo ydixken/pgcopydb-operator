@@ -578,7 +578,7 @@ func TestExternalGuardPair(t *testing.T) {
 	}
 }
 
-// AfterSuite calls deleteExternalClient without consulting E2E_KEEP_FIXTURES,
+// teardownFixtures sweeps the e2e- Secrets even when E2E_KEEP_FIXTURES=true,
 // so kept fixtures never keep the password Secrets.
 func TestExternalTeardownDeletesClientObjects(t *testing.T) {
 	oldCtx, oldClient := ctx, k8sClient
@@ -610,5 +610,21 @@ func TestExternalTeardownDeletesClientObjects(t *testing.T) {
 	// AfterSuite also runs after a BeforeSuite that never created them.
 	if err := InterceptGomegaFailure(deleteExternalClient); err != nil {
 		t.Fatalf("teardown of nothing failed: %v", err)
+	}
+}
+
+func TestExternalTeardownFixturesSweepsSecretsWhenKeeping(t *testing.T) {
+	oldCtx, oldClient, oldExt, oldManage := ctx, k8sClient, external, manageNamespaces
+	t.Cleanup(func() { ctx, k8sClient, external, manageNamespaces = oldCtx, oldClient, oldExt, oldManage })
+	t.Setenv("E2E_KEEP_FIXTURES", "true")
+	ctx, external, manageNamespaces = context.Background(), testExternalPair(), false
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(secret).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(teardownFixtures); err != nil {
+		t.Fatalf("teardown failed: %v", err)
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret); !apierrors.IsNotFound(err) {
+		t.Errorf("Secret survived a keep-fixtures teardown: %v", err)
 	}
 }

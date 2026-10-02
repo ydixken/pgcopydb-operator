@@ -1245,6 +1245,15 @@ var _ = AfterSuite(func() {
 		deleteNamespaces(2*time.Minute, nsOperator)
 	}
 
+	teardownFixtures()
+	Expect(replicationErr).NotTo(HaveOccurred(),
+		"pgcopydb replication state is left on the external pair; see docs/operations/e2e-external.md#cleanup")
+})
+
+// teardownFixtures runs after the operator is gone. The e2e- Secrets hold the
+// supplied passwords, so the external sweep precedes the keep-fixtures check.
+func teardownFixtures() {
+	GinkgoHelper()
 	// The e2e- Secrets hold the supplied passwords, so they go even when fixtures are kept.
 	if external != nil {
 		By("deleting the client pod, the seed Job and every e2e- Secret inside " + nsE2E + " and " + nsX)
@@ -1265,9 +1274,7 @@ var _ = AfterSuite(func() {
 		// CNPG teardown plus volume deletion takes a while on the shared cluster.
 		deleteNamespaces(10*time.Minute, nsX, nsE2E)
 	}
-	Expect(replicationErr).NotTo(HaveOccurred(),
-		"pgcopydb replication state is left on the external pair; see docs/operations/e2e-external.md#cleanup")
-})
+}
 
 // deleteFixtures empties the fixture namespaces instead of deleting them, for
 // runs that do not own them. Migrations are gone by here; explicit PVC cleanup
