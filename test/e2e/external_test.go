@@ -28,9 +28,37 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
-const defaultPGPort = 5432
+const (
+	defaultPGPort = 5432
+
+	externalClientPod         = "e2e-psql"
+	externalClientContainer   = "psql"
+	externalCredentialsSecret = "e2e-external-credentials"
+	pgpassKey                 = "pgpass"
+	credentialsMountPath      = "/credentials"
+	// libpq ignores a password file that group or others may read, and a
+	// Secret volume is root-owned, so pods copy it here with mode 0600.
+	pgpassFile = "/tmp/pgpass"
+	// postgresUID is the postgres user of seedImage, the CNPG operand image.
+	postgresUID = 26
+	// labelAppName marks the client pod so the suite's primary lookups find it.
+	labelAppName = "app.kubernetes.io/name"
+
+	shell         = "bash"
+	envPGHost     = "PGHOST"
+	envPGDatabase = "PGDATABASE"
+	envPGUser     = "PGUSER"
+	envPGPassfile = "PGPASSFILE"
+	envPGSSLMode  = "PGSSLMODE"
+)
+
+var pgpassEscaper = strings.NewReplacer(`\`, `\\`, `:`, `\:`)
 
 const (
 	schemePostgres   = "postgres"
@@ -257,4 +285,102 @@ func (c *externalConfig) side(cluster string) externalSide {
 		return c.Source
 	}
 	return c.Target
+}
+
+// renderPgpass writes one line per role and server. The database is a
+// wildcard because the admin role also connects to databases besides the pair.
+func renderPgpass(cfg *externalConfig) string {
+	creds := cfg.credentials()
+	lines := make([]string, 0, len(creds))
+	for _, c := range creds {
+		lines = append(lines, fmt.Sprintf("%s:%d:*:%s:%s", pgpassEscaper.Replace(c.host), c.port,
+			pgpassEscaper.Replace(c.role), pgpassEscaper.Replace(c.password)))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// externalAppPasswordKey names a side's app password in
+// externalCredentialsSecret, where e2eConn's PasswordSecretRef points.
+func externalAppPasswordKey(cluster string) string {
+	return sideName(cluster) + "-app-password"
+}
+
+func externalSecretData(cfg *externalConfig) map[string][]byte {
+	return map[string][]byte{
+		pgpassKey:                             []byte(renderPgpass(cfg)),
+		externalAppPasswordKey(sourceCluster): []byte(cfg.Source.AppPassword),
+		externalAppPasswordKey(targetCluster): []byte(cfg.Target.AppPassword),
+	}
+}
+
+// installPgpass runs next once the password file is in place with the mode
+// libpq demands.
+func installPgpass(next string) []string {
+	return []string{shell, "-c",
+		"install -m 0600 " + credentialsMountPath + "/" + pgpassKey + " " + pgpassFile + " && exec " + next}
+}
+
+func credentialsVolume() corev1.Volume {
+	return corev1.Volume{Name: "credentials", VolumeSource: corev1.VolumeSource{
+		Secret: &corev1.SecretVolumeSource{
+			SecretName:  externalCredentialsSecret,
+			Items:       []corev1.KeyToPath{{Key: pgpassKey, Path: pgpassKey}},
+			DefaultMode: ptr.To(int32(0o440)),
+		},
+	}}
+}
+
+func credentialsMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: "credentials", MountPath: credentialsMountPath, ReadOnly: true}
+}
+
+// externalPodSecurity meets the restricted Pod Security Standard, which a
+// customer namespace may enforce. fsGroup lets postgres read the Secret volume.
+func externalPodSecurity() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(true), RunAsUser: ptr.To(int64(postgresUID)),
+		RunAsGroup: ptr.To(int64(postgresUID)), FSGroup: ptr.To(int64(postgresUID)),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+func restrictedContainer() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+}
+
+// buildExternalClientPod takes no config on purpose: a password cannot reach
+// its spec, only the Secret it mounts.
+func buildExternalClientPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: nsE2E, Name: externalClientPod,
+			Labels: map[string]string{labelAppName: externalClientPod},
+		},
+		Spec: corev1.PodSpec{
+			AutomountServiceAccountToken: ptr.To(false),
+			// sleep as PID 1 ignores SIGTERM, and nothing here needs draining.
+			TerminationGracePeriodSeconds: ptr.To(int64(0)),
+			SecurityContext:               externalPodSecurity(),
+			Containers: []corev1.Container{{
+				Name:            externalClientContainer,
+				Image:           seedImage,
+				Command:         installPgpass("sleep infinity"),
+				Env:             []corev1.EnvVar{{Name: envPGPassfile, Value: pgpassFile}},
+				Resources:       workerResources("100m", "128Mi"),
+				SecurityContext: restrictedContainer(),
+				VolumeMounts:    []corev1.VolumeMount{credentialsMount()},
+				// Ready means the password file exists, so the first exec cannot race the copy.
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						Exec: &corev1.ExecAction{Command: []string{"test", "-s", pgpassFile}},
+					},
+					PeriodSeconds: 1,
+				},
+			}},
+			Volumes: []corev1.Volume{credentialsVolume()},
+		},
+	}
 }

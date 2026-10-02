@@ -1872,7 +1872,7 @@ func runSeedJob() {
 
 func buildSeedJob() *batchv1.Job {
 	backoff := int32(2)
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
@@ -1887,23 +1887,14 @@ func buildSeedJob() *batchv1.Job {
 						// bash, not sh: run.sh reads PIPESTATUS to report the
 						// failing stage rather than the exit of the sed that
 						// labels its output.
-						Command: []string{"bash", "/fixtures/run.sh"},
-						Env: []corev1.EnvVar{
+						Command: []string{shell, "/fixtures/run.sh"},
+						Env: append([]corev1.EnvVar{
 							{Name: "SEED_SCALE", Value: scaleArg()},
 							{Name: "SEED_PROFILE", Value: seedProfile()},
 							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
-							{Name: "PGHOST", Value: sourceCluster + "-rw." + nsE2E + ".svc"},
-							{Name: "PGDATABASE", Value: appDatabase(sourceCluster)},
-							{Name: "PGUSER", Value: appRole(sourceCluster)},
-							{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
-								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
-									Key:                  passwordKey,
-								},
-							}},
-						},
+						}, seedConnEnv()...),
 						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
 					}},
 					Volumes: []corev1.Volume{{Name: "fixtures", VolumeSource: corev1.VolumeSource{
@@ -1915,6 +1906,47 @@ func buildSeedJob() *batchv1.Job {
 			},
 		},
 	}
+	if external != nil {
+		pod := &job.Spec.Template.Spec
+		pod.SecurityContext = externalPodSecurity()
+		pod.Volumes = append(pod.Volumes, credentialsVolume())
+		seed := &pod.Containers[0]
+		seed.Command = installPgpass("bash /fixtures/run.sh")
+		seed.SecurityContext = restrictedContainer()
+		seed.VolumeMounts = append(seed.VolumeMounts, credentialsMount())
+	}
+	return job
+}
+
+// seedConnEnv connects the seed to the source as the app role, so every
+// fixture object belongs to the role the Migrations restore as.
+func seedConnEnv() []corev1.EnvVar {
+	if external == nil {
+		return []corev1.EnvVar{
+			{Name: envPGHost, Value: sourceCluster + "-rw." + nsE2E + ".svc"},
+			{Name: envPGDatabase, Value: appDatabase(sourceCluster)},
+			{Name: envPGUser, Value: appRole(sourceCluster)},
+			{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
+					Key:                  passwordKey,
+				},
+			}},
+		}
+	}
+	s := external.Source
+	env := []corev1.EnvVar{
+		{Name: envPGHost, Value: s.Host},
+		{Name: "PGPORT", Value: strconv.Itoa(int(s.Port))},
+		{Name: envPGDatabase, Value: s.Database},
+		{Name: envPGUser, Value: s.AppRole},
+		{Name: envPGPassfile, Value: pgpassFile},
+	}
+	// libpq reads an empty PGSSLMODE as an invalid value, not as the default.
+	if s.SSLMode != "" {
+		env = append(env, corev1.EnvVar{Name: envPGSSLMode, Value: s.SSLMode})
+	}
+	return env
 }
 
 // jobLogs returns the last lines of a Job's log, kubectl's error text

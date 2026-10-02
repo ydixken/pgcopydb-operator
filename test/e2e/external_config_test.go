@@ -23,16 +23,24 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
+)
+
+const (
+	testSourceHost = "source.example.com"
+	testAppRole    = "shop_app"
 )
 
 // testExternalPair is the pair externalEnvFixture describes, built directly.
 func testExternalPair() *externalConfig {
 	return &externalConfig{
-		Source: externalSide{Host: "source.example.com", Port: 6432, Database: "shop",
-			AppRole: "shop_app", AdminRole: "shop_admin", SSLMode: sslRequire,
+		Source: externalSide{Host: testSourceHost, Port: 6432, Database: "shop",
+			AppRole: testAppRole, AdminRole: "shop_admin", SSLMode: sslRequire,
 			AppPassword: "src-app-pw", AdminPassword: "src-admin-pw"},
 		Target: externalSide{Host: "target.example.com", Port: 5432, Database: "shop_new",
-			AppRole: "shop_app", AdminRole: "shop_admin",
+			AppRole: testAppRole, AdminRole: "shop_admin",
 			AppPassword: "tgt-app-pw", AdminPassword: "tgt-admin-pw"},
 	}
 }
@@ -211,7 +219,7 @@ func TestExternalSide(t *testing.T) {
 
 func TestExternalInit(t *testing.T) {
 	if os.Getenv("E2E_TEST_CHILD") == "external-init" {
-		if external == nil || external.Source.Host != "source.example.com" {
+		if external == nil || external.Source.Host != testSourceHost {
 			t.Fatal("init did not load the external pair")
 		}
 		if fixtureStorageClass != "" {
@@ -268,5 +276,148 @@ func TestExternalServerMajors(t *testing.T) {
 		if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 			t.Errorf("checkMajors(%d, %d) = %v, want %q", tt.source, tt.target, err, tt.wantErr)
 		}
+	}
+}
+
+// assertNoPasswords fails when a rendered manifest carries any of the pair's
+// passwords: pod specs end up in describe output and failure logs.
+func assertNoPasswords(t *testing.T, obj any, pair *externalConfig) {
+	t.Helper()
+	out, err := yaml.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cred := range pair.credentials() {
+		if strings.Contains(string(out), cred.password) {
+			t.Errorf("manifest carries the password of %s on %s", cred.role, cred.host)
+		}
+	}
+}
+
+func TestExternalPgpass(t *testing.T) {
+	pair := testExternalPair()
+	want := "source.example.com:6432:*:shop_app:src-app-pw\n" +
+		"source.example.com:6432:*:shop_admin:src-admin-pw\n" +
+		"target.example.com:5432:*:shop_app:tgt-app-pw\n" +
+		"target.example.com:5432:*:shop_admin:tgt-admin-pw\n"
+	if got := renderPgpass(pair); got != want {
+		t.Errorf("renderPgpass() =\n%s\nwant\n%s", got, want)
+	}
+
+	pair.Source.AppPassword = `pa:ss\word`
+	pair.Source.AdminRole = "odd:admin"
+	lines := strings.Split(renderPgpass(pair), "\n")
+	for i, want := range []string{
+		`source.example.com:6432:*:shop_app:pa\:ss\\word`,
+		`source.example.com:6432:*:odd\:admin:src-admin-pw`,
+	} {
+		if lines[i] != want {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want)
+		}
+	}
+}
+
+func TestExternalSecretData(t *testing.T) {
+	pair := testExternalPair()
+	data := externalSecretData(pair)
+	want := map[string]string{
+		pgpassKey:             renderPgpass(pair),
+		"source-app-password": pair.Source.AppPassword,
+		"target-app-password": pair.Target.AppPassword,
+	}
+	if len(data) != len(want) {
+		t.Errorf("Secret has %d keys, want %d", len(data), len(want))
+	}
+	for key, value := range want {
+		if string(data[key]) != value {
+			t.Errorf("Secret key %s holds the wrong value", key)
+		}
+	}
+	if externalAppPasswordKey(targetCluster) != "target-app-password" {
+		t.Errorf("externalAppPasswordKey(targetCluster) = %q", externalAppPasswordKey(targetCluster))
+	}
+}
+
+func TestExternalClientPod(t *testing.T) {
+	pod := buildExternalClientPod()
+	if pod.Namespace != nsE2E || pod.Name != externalClientPod {
+		t.Fatalf("client pod is %s/%s", pod.Namespace, pod.Name)
+	}
+	if pod.Labels[labelAppName] != externalClientPod {
+		t.Errorf("client pod labels %v lack the selector sqlPodLabels uses", pod.Labels)
+	}
+	c := pod.Spec.Containers[0]
+	if c.Name != externalClientContainer || c.Image != seedImage {
+		t.Errorf("container %s runs %s", c.Name, c.Image)
+	}
+	if !slices.Contains(c.Env, corev1.EnvVar{Name: envPGPassfile, Value: pgpassFile}) {
+		t.Errorf("container env %v does not point libpq at %s", c.Env, pgpassFile)
+	}
+	if got := strings.Join(c.Command, " "); !strings.Contains(got, "install -m 0600 /credentials/pgpass /tmp/pgpass") {
+		t.Errorf("command %q does not copy the password file to mode 0600", got)
+	}
+	secret := pod.Spec.Volumes[0].Secret
+	if secret == nil || secret.SecretName != externalCredentialsSecret ||
+		len(secret.Items) != 1 || secret.Items[0].Key != pgpassKey {
+		t.Errorf("volume %+v must mount only the pgpass key of %s", secret, externalCredentialsSecret)
+	}
+	if sc := pod.Spec.SecurityContext; sc == nil || sc.FSGroup == nil || *sc.FSGroup != postgresUID {
+		t.Errorf("pod security context %+v cannot read the Secret volume as postgres", sc)
+	}
+	if c.ReadinessProbe == nil || c.ReadinessProbe.Exec == nil {
+		t.Error("client pod reports ready before its password file exists")
+	}
+}
+
+func TestExternalSeedJob(t *testing.T) {
+	pair := testExternalPair()
+	withExternal(t, pair)
+	job := buildSeedJob()
+	seed := job.Spec.Template.Spec.Containers[0]
+	env := map[string]corev1.EnvVar{}
+	for _, e := range seed.Env {
+		env[e.Name] = e
+	}
+	for name, want := range map[string]string{
+		envPGHost: testSourceHost, "PGPORT": "6432", envPGDatabase: "shop",
+		envPGUser: testAppRole, envPGSSLMode: "require", envPGPassfile: pgpassFile,
+	} {
+		if got := env[name].Value; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if _, found := env["PGPASSWORD"]; found {
+		t.Error("external seed Job still takes PGPASSWORD from the CNPG Secret")
+	}
+	if !slices.Equal(seed.Command, installPgpass("bash /fixtures/run.sh")) {
+		t.Errorf("command = %q", seed.Command)
+	}
+	if job.Spec.Template.Spec.SecurityContext == nil || len(job.Spec.Template.Spec.Volumes) != 2 {
+		t.Error("external seed Job lacks the credentials volume or the security context that reads it")
+	}
+	assertNoPasswords(t, job, pair)
+
+	pair.Source.SSLMode = ""
+	for _, e := range buildSeedJob().Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "PGSSLMODE" {
+			t.Errorf("PGSSLMODE=%q set without an sslmode in the URI", e.Value)
+		}
+	}
+
+	external = nil
+	cnpg := buildSeedJob().Spec.Template.Spec
+	if !slices.Equal(cnpg.Containers[0].Command, []string{shell, "/fixtures/run.sh"}) ||
+		cnpg.SecurityContext != nil || len(cnpg.Volumes) != 1 {
+		t.Error("CNPG-mode seed Job changed shape")
+	}
+	found := false
+	for _, e := range cnpg.Containers[0].Env {
+		if e.Name == "PGPASSWORD" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
+			e.ValueFrom.SecretKeyRef.Name == srcSecret {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("CNPG-mode seed Job no longer reads PGPASSWORD from " + srcSecret)
 	}
 }
