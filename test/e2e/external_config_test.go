@@ -506,3 +506,66 @@ func TestExternalSQLPodLabels(t *testing.T) {
 		t.Errorf("external mode selects %v, want the client pod", got)
 	}
 }
+
+func TestExternalStampDecision(t *testing.T) {
+	for _, tt := range []struct {
+		name                     string
+		hasUserObjects, hasStamp bool
+		wantStamp, wantErr       bool
+	}{
+		{name: "first run on an empty database stamps it", wantStamp: true},
+		{name: "stamped and empty", hasStamp: true},
+		{name: "stamped and seeded", hasUserObjects: true, hasStamp: true},
+		{name: "unstamped with objects is refused", hasUserObjects: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stamp, err := stampDecision(tt.hasUserObjects, tt.hasStamp)
+			if stamp != tt.wantStamp || (err != nil) != tt.wantErr {
+				t.Errorf("stampDecision(%t, %t) = %t, %v; want %t, error %t",
+					tt.hasUserObjects, tt.hasStamp, stamp, err, tt.wantStamp, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExternalGuardPair(t *testing.T) {
+	withExternal(t, testExternalPair())
+	const found = "relation public.orders"
+	for _, tt := range []struct {
+		name      string
+		state     map[string]string // cluster to "objects|stamped"
+		wantStamp []string
+		wantErr   string
+	}{
+		{name: "first run stamps both",
+			state:     map[string]string{sourceCluster: "|f", targetCluster: "|f"},
+			wantStamp: []string{sourceCluster, targetCluster}},
+		{name: "later run stamps nothing",
+			state: map[string]string{sourceCluster: found + "|t", targetCluster: "|t"}},
+		{name: "populated target next to an empty source stamps neither",
+			state:   map[string]string{sourceCluster: "|f", targetCluster: found + "|f"},
+			wantErr: "target database shop_new on target.example.com"},
+		{name: "stamped source, new empty target",
+			state:     map[string]string{sourceCluster: found + "|t", targetCluster: "|f"},
+			wantStamp: []string{targetCluster}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := guardPair(func(cluster string) (string, bool) {
+				objects, stamped, _ := strings.Cut(tt.state[cluster], "|")
+				return objects, stamped == "t"
+			})
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), found) {
+					t.Fatalf("guardPair() error = %v, want it to name %q and the objects found", err, tt.wantErr)
+				}
+				if got != nil {
+					t.Errorf("guardPair() would stamp %v before refusing the pair", got)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tt.wantStamp) {
+				t.Fatalf("guardPair() = %v, %v; want %v", got, err, tt.wantStamp)
+			}
+		})
+	}
+}

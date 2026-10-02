@@ -1117,8 +1117,10 @@ var _ = BeforeSuite(func() {
 				" let the sync land. Elsewhere apply config/crd from this checkout.", missing)
 	}, crdConvergeTimeout, 15*time.Second).Should(Succeed())
 
-	By("preparing the fixture StorageClass and checking Longhorn capacity")
-	ensureFixtureStorage()
+	if external == nil {
+		By("preparing the fixture StorageClass and checking Longhorn capacity")
+		ensureFixtureStorage()
+	}
 
 	// The suite is single-tenant per cluster: two runs share the release name,
 	// the fixture namespaces, and the CNPG clusters, and the second BeforeSuite
@@ -1183,16 +1185,20 @@ var _ = BeforeSuite(func() {
 		purgeMigrations(2 * time.Minute)
 	}
 
-	By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
-		pgSource, pgTarget))
-	ensureClusterShape(sourceCluster, pgSource)
-	ensureClusterShape(targetCluster, pgTarget)
-	staleSource := sourceSeedIsStale()
-	if staleSource {
-		By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+	if external == nil {
+		By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
+			pgSource, pgTarget))
+		ensureClusterShape(sourceCluster, pgSource)
+		ensureClusterShape(targetCluster, pgTarget)
+		staleSource := sourceSeedIsStale()
+		if staleSource {
+			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
+		}
+		prepareSourceCluster(staleSource)
+		prepareTargetCluster()
+	} else {
+		prepareExternalDatabases()
 	}
-	prepareSourceCluster(staleSource)
-	prepareTargetCluster()
 
 	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
 	runSeedJob()
@@ -1253,16 +1259,7 @@ func deleteFixtures(timeout time.Duration) {
 	GinkgoHelper()
 	deleteCluster(sourceCluster)
 	deleteCluster(targetCluster)
-	fg := metav1.DeletePropagationForeground
-	for _, obj := range []client.Object{
-		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
-	} {
-		err := k8sClient.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &fg})
-		if err != nil && !apierrors.IsNotFound(err) {
-			Expect(err).NotTo(HaveOccurred(), "failed to delete %s", obj.GetName())
-		}
-	}
+	deleteSuiteObjects(seedObjects()...)
 	for _, ns := range []string{nsE2E, nsX} {
 		Expect(k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, client.InNamespace(ns))).
 			To(Succeed(), "failed to delete the volumes in %s", ns)
@@ -1276,6 +1273,27 @@ func deleteFixtures(timeout time.Duration) {
 			g.Expect(pvcs.Items).To(BeEmpty(), "volumes still terminating in %s", ns)
 		}
 	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+// seedObjects are the seed Job and its ConfigMap, which outlive the run
+// whenever the fixture namespaces do.
+func seedObjects() []client.Object {
+	return []client.Object{
+		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	}
+}
+
+// deleteSuiteObjects deletes in the foreground; an object already gone is fine.
+func deleteSuiteObjects(objs ...client.Object) {
+	GinkgoHelper()
+	fg := metav1.DeletePropagationForeground
+	for _, obj := range objs {
+		err := k8sClient.Delete(ctx, obj, &client.DeleteOptions{PropagationPolicy: &fg})
+		if err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete %s", obj.GetName())
+		}
+	}
 }
 
 // helmRun executes helm against the current kubectl context, echoes its
@@ -1692,15 +1710,22 @@ func readMountedFilesystemCapacity(instance string) (int64, error) {
 // only drops objects in the incoming dump. Resetting also permits fresh clones.
 func resetTargetObjects() {
 	GinkgoHelper()
-	psql(targetCluster, "DROP EXTENSION IF EXISTS citext CASCADE")
-	psql(targetCluster, "DROP SCHEMA IF EXISTS audit CASCADE")
-	psql(targetCluster, "DROP SCHEMA IF EXISTS public CASCADE")
-	psql(targetCluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
+	resetDatabaseObjects(targetCluster)
+}
+
+// resetDatabaseObjects drops everything the fixtures and clones create. The
+// stamp survives: it is a database comment, not an object in a schema.
+func resetDatabaseObjects(cluster string) {
+	GinkgoHelper()
+	psql(cluster, "DROP EXTENSION IF EXISTS citext CASCADE")
+	psql(cluster, "DROP SCHEMA IF EXISTS audit CASCADE")
+	psql(cluster, "DROP SCHEMA IF EXISTS public CASCADE")
+	psql(cluster, "CREATE SCHEMA public AUTHORIZATION pg_database_owner")
 	// A hand-made schema has a null ACL, where bootstrap public carries
 	// =U/pg_database_owner: PostgreSQL 15+ withdrew PUBLIC's CREATE, not its
 	// USAGE, so the grant is what makes this the shape a real target has.
-	psql(targetCluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
-	psql(targetCluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
+	psql(cluster, "GRANT USAGE ON SCHEMA public TO PUBLIC")
+	psql(cluster, "SELECT lo_unlink(oid) FROM pg_largeobject_metadata")
 }
 
 // sourceSeedIsStale reports whether a kept source carries the wrong fixture
@@ -1714,13 +1739,20 @@ func sourceSeedIsStale() bool {
 		return false
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to get CNPG cluster %s", sourceCluster)
-	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") == "t" {
-		match := psql(sourceCluster, fmt.Sprintf(
-			"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
-			seedProfile(), scaleArg()))
-		return match != "t"
+	return seedMarkerStale()
+}
+
+// seedMarkerStale reports whether the source's seed marker names another
+// profile or scale. No marker table is fresh: the seed Job writes one.
+func seedMarkerStale() bool {
+	GinkgoHelper()
+	if psql(sourceCluster, "SELECT to_regclass('public.e2e_seed') IS NOT NULL") != "t" {
+		return false
 	}
-	return false
+	match := psql(sourceCluster, fmt.Sprintf(
+		"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
+		seedProfile(), scaleArg()))
+	return match != "t"
 }
 
 // recreateSourceCluster deletes the source CNPG cluster (volumes included)
@@ -1804,7 +1836,7 @@ func deleteMismatchedCluster(name string) {
 	deleteCluster(name)
 }
 
-// serverMajor asks the cluster's primary for its PostgreSQL major version.
+// serverMajor asks one side's server for its PostgreSQL major version.
 func serverMajor(cluster string) int {
 	GinkgoHelper()
 	num, err := strconv.Atoi(psql(cluster, "SELECT current_setting('server_version_num')"))

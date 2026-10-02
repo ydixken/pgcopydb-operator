@@ -28,10 +28,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
@@ -404,4 +411,129 @@ func adminConninfo(cluster, db string) string {
 		parts = append(parts, "sslmode="+s.SSLMode)
 	}
 	return strings.Join(parts, " ")
+}
+
+// externalStamp marks a database as the suite's to wipe. It is a database
+// comment because pg_dump without --create never copies one to the target.
+const externalStamp = "pgcopydb-e2e: disposable, the e2e suite may wipe this database"
+
+// userObjectsSQL names up to ten objects a freshly created database lacks.
+const userObjectsSQL = `SELECT coalesce(string_agg(o, ', '), '') FROM (SELECT o FROM (
+	SELECT 'schema ' || n.nspname AS o FROM pg_namespace n
+	 WHERE n.nspname NOT IN ('public', 'information_schema') AND n.nspname NOT LIKE 'pg\_%'
+	UNION ALL
+	SELECT 'relation ' || c.oid::regclass FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+	 WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+	UNION ALL
+	SELECT 'routine ' || p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+	 WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+	UNION ALL
+	SELECT 'type ' || t.oid::regtype FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+	 WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'
+	   AND t.typrelid = 0 AND t.typelem = 0
+	UNION ALL
+	SELECT 'extension ' || e.extname FROM pg_extension e WHERE e.extname <> 'plpgsql'
+	UNION ALL
+	SELECT 'large object ' || l.oid FROM pg_largeobject_metadata l
+) found ORDER BY o LIMIT 10) firsts`
+
+const stampedSQL = "SELECT coalesce(shobj_description(oid, 'pg_database'), '') = '" + externalStamp + "'" +
+	" FROM pg_database WHERE datname = current_database()"
+
+const stampSQL = "DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '" +
+	externalStamp + "'); END $$"
+
+const externalClientReadyTimeout = 5 * time.Minute
+
+// externalPairGuarded is set once both databases passed the stamp guard.
+// AfterSuite touches the pair only then, never a database it refused.
+var externalPairGuarded bool
+
+// stampDecision: a stamped database is the suite's, an empty one becomes the
+// suite's by being stamped first, and anything else is refused.
+func stampDecision(hasUserObjects, hasStamp bool) (stampFirst bool, err error) {
+	switch {
+	case hasStamp:
+		return false, nil
+	case !hasUserObjects:
+		return true, nil
+	default:
+		return false, errors.New("the database holds objects and no pgcopydb-e2e stamp; the suite only" +
+			" seeds, resets, and wipes a database that was empty on its first run")
+	}
+}
+
+// guardPair decides both sides before either is stamped, so a refused target
+// leaves a first-run source as it found it. inspect reports a side's first
+// user objects ("" for none) and whether it carries the stamp.
+func guardPair(inspect func(cluster string) (objects string, stamped bool)) ([]string, error) {
+	var toStamp []string
+	for _, cluster := range []string{sourceCluster, targetCluster} {
+		objects, stamped := inspect(cluster)
+		stampFirst, err := stampDecision(objects != "", stamped)
+		if err != nil {
+			s := external.side(cluster)
+			return nil, fmt.Errorf("%s database %s on %s: %w; first objects found: %s",
+				sideName(cluster), s.Database, s.Host, err, objects)
+		}
+		if stampFirst {
+			toStamp = append(toStamp, cluster)
+		}
+	}
+	return toStamp, nil
+}
+
+// ensureExternalClient writes the credentials and starts a fresh client pod:
+// a kept pod would still hold the password file of an earlier run.
+func ensureExternalClient() {
+	GinkgoHelper()
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalCredentialsSecret}}
+	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
+		sec.Data = externalSecretData(external)
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to apply Secret %s", externalCredentialsSecret)
+
+	key := client.ObjectKey{Namespace: nsE2E, Name: externalClientPod}
+	deleteSuiteObjects(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: externalClientPod}})
+	Eventually(func(g Gomega) {
+		err := k8sClient.Get(ctx, key, &corev1.Pod{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "previous client pod still terminating")
+	}, 2*time.Minute, 2*time.Second).Should(Succeed())
+	Expect(k8sClient.Create(ctx, buildExternalClientPod())).To(Succeed(), "failed to create the client pod")
+	Eventually(func(g Gomega) {
+		pod := &corev1.Pod{}
+		g.Expect(k8sClient.Get(ctx, key, pod)).To(Succeed())
+		ready := false
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady {
+				ready = condition.Status == corev1.ConditionTrue
+			}
+		}
+		g.Expect(ready).To(BeTrue(), "client pod %s is not ready", externalClientPod)
+	}, externalClientReadyTimeout, 2*time.Second).Should(Succeed())
+}
+
+// prepareExternalDatabases stands in for the CNPG fixture setup. Nothing
+// writes to either database before both passed the guard.
+func prepareExternalDatabases() {
+	GinkgoHelper()
+	By("starting the psql client pod for the external databases")
+	ensureExternalClient()
+	pgSource, pgTarget = serverMajor(sourceCluster), serverMajor(targetCluster)
+	By(fmt.Sprintf("checking the external source (PG %d) and target (PG %d) are empty or stamped",
+		pgSource, pgTarget))
+	Expect(checkMajors(pgSource, pgTarget)).To(Succeed())
+	toStamp, err := guardPair(func(cluster string) (string, bool) {
+		return psql(cluster, userObjectsSQL), psql(cluster, stampedSQL) == "t"
+	})
+	Expect(err).NotTo(HaveOccurred())
+	for _, cluster := range toStamp {
+		psql(cluster, stampSQL)
+	}
+	externalPairGuarded = true
+	if seedMarkerStale() {
+		By("wiping the stamped source: its seed carries a different profile or scale")
+		resetDatabaseObjects(sourceCluster)
+	}
 }
