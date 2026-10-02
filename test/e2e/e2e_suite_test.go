@@ -1952,14 +1952,14 @@ func buildSeedJob() *batchv1.Job {
 						// bash, not sh: run.sh reads PIPESTATUS to report the
 						// failing stage rather than the exit of the sed that
 						// labels its output.
-						Command: []string{shell, "/fixtures/run.sh"},
-						Env: append([]corev1.EnvVar{
+						Command: []string{"bash", "/fixtures/run.sh"},
+						Env: []corev1.EnvVar{
 							{Name: "SEED_SCALE", Value: scaleArg()},
 							{Name: "SEED_PROFILE", Value: seedProfile()},
 							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
-						}, seedConnEnv()...),
+						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
 					}},
 					Volumes: []corev1.Volume{{Name: "fixtures", VolumeSource: corev1.VolumeSource{
@@ -1971,11 +1971,14 @@ func buildSeedJob() *batchv1.Job {
 			},
 		},
 	}
+	// Appended outside the literal: the fixtures guard reads the SEED_ names
+	// from the literal and cannot follow a call.
+	seed := &job.Spec.Template.Spec.Containers[0]
+	seed.Env = append(seed.Env, seedConnEnv()...)
 	if external != nil {
 		pod := &job.Spec.Template.Spec
 		pod.SecurityContext = externalPodSecurity()
 		pod.Volumes = append(pod.Volumes, credentialsVolume())
-		seed := &pod.Containers[0]
 		seed.Command = installPgpass("bash /fixtures/run.sh")
 		seed.SecurityContext = restrictedContainer()
 		seed.VolumeMounts = append(seed.VolumeMounts, credentialsMount())
