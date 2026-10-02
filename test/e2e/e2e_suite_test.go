@@ -2408,11 +2408,9 @@ func usableNode(n *corev1.Node) bool {
 	return false
 }
 
-// primaryPod returns the pod name of the cluster's current primary. Which
-// instance carries the role moves on failover and the chaos scenarios force
-// failovers on purpose, so a hardcoded <cluster>-1 would send writes to a
-// read-only replica. A promotion leaves the cluster without a primary for a
-// few seconds, so this waits out the gap instead of failing into it.
+// primaryPod returns the pod psql runs in: the cluster's current CNPG primary,
+// which moves on failover (chaos forces some), or in external mode the client
+// pod. A promotion leaves no primary for a few seconds, so this waits it out.
 func primaryPod(cluster string) string {
 	GinkgoHelper()
 	var name string
@@ -2444,9 +2442,9 @@ func psql(cluster, sql string) string {
 	return psqlDB(cluster, appDatabase(cluster), sql)
 }
 
-// psqlDB runs one statement as the in-pod postgres user on the current primary
-// and returns trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for
-// spec goroutines.
+// psqlDB runs one statement as the in-pod postgres user on the current primary,
+// or in external mode as the admin role from the client pod, and returns
+// trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for spec goroutines.
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
 	out, err := psqlDBErr(cluster, db, sql)

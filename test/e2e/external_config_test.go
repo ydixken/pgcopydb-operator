@@ -415,6 +415,12 @@ func TestExternalSeedJob(t *testing.T) {
 	if job.Spec.Template.Spec.SecurityContext == nil || len(job.Spec.Template.Spec.Volumes) != 2 {
 		t.Error("external seed Job lacks the credentials volume or the security context that reads it")
 	}
+	if !slices.Contains(seed.VolumeMounts, credentialsMount()) {
+		t.Errorf("seed container mounts %v, want the credentials at %s", seed.VolumeMounts, credentialsMountPath)
+	}
+	if !reflect.DeepEqual(seed.SecurityContext, restrictedContainer()) {
+		t.Errorf("seed container security context = %+v, want the restricted one", seed.SecurityContext)
+	}
 	assertNoPasswords(t, job, pair)
 
 	pair.Source.SSLMode = ""
@@ -564,12 +570,18 @@ func TestExternalGuardPair(t *testing.T) {
 		{name: "populated target next to an empty source stamps neither",
 			state:   map[string]string{sourceCluster: "|f", targetCluster: found + "|f"},
 			wantErr: "target database shop_new on target.example.com"},
+		{name: "populated unstamped source is refused before the target is looked at",
+			state:   map[string]string{sourceCluster: found + "|f"},
+			wantErr: "source database shop on source.example.com"},
 		{name: "stamped source, new empty target",
 			state:     map[string]string{sourceCluster: found + "|t", targetCluster: "|f"},
 			wantStamp: []string{targetCluster}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := guardPair(func(cluster string) (string, bool) {
+				if _, listed := tt.state[cluster]; !listed {
+					t.Fatalf("guardPair() inspected %s, which this case does not describe", cluster)
+				}
 				objects, stamped, _ := strings.Cut(tt.state[cluster], "|")
 				return objects, stamped == "t"
 			})
