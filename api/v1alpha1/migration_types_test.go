@@ -142,6 +142,7 @@ func fullMigration() *Migration {
 				TablesTotal: 10, TablesDone: 5, IndexesTotal: 4, IndexesDone: 1,
 				BytesTotal: resource.NewQuantity(1024, resource.BinarySI),
 				BytesDone:  resource.NewQuantity(512, resource.BinarySI),
+				ObservedAt: &now,
 			},
 			Replication: &ReplicationStatus{
 				SlotName: "slot_1", WriteLSN: "0/20", ReplayLSN: "0/10",
@@ -209,6 +210,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	*c.Spec.TTLSecondsAfterFinished = 1
 	c.Status.Conditions[0].Reason = mutated
 	*c.Status.Progress.BytesDone = resource.MustParse("9Gi")
+	c.Status.Progress.ObservedAt.Time = time.Unix(1, 0)
 	*c.Status.Replication.LagBytes = 9
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")

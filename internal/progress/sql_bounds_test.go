@@ -192,9 +192,9 @@ WHERE c.relkind = 'r' AND n.nspname = 'public' AND pg_table_size(c.oid) > 0`); g
 // until the stream catches up: a sampler that compared the counts held the
 // follow gate shut with the base copy long finished (see
 // docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table copied in parts reads the same way, and belongs to the checks that
-// read content: pgcopydb's catalog after a plain clone, the drain
-// verification after a cutover.
+// A table copied in parts reads the same way once no part of it is in flight,
+// and belongs to the checks that read content: pgcopydb's catalog after a
+// plain clone, the drain verification after a cutover.
 func TestProgressSampleCountsTargetBehindSourceAsDone(t *testing.T) {
 	admin := testPGURI(t)
 	uris := make([]string, 0, 2)
@@ -317,6 +317,7 @@ func TestCloneStageQueryOnLiveInstance(t *testing.T) {
 }
 
 // A held relation lock must cancel the sampled side without losing its peer.
+// The lock here belongs to no copy, so the target waits on it as before.
 func TestProgressRelationLocks(t *testing.T) {
 	admin := testPGURI(t)
 	const source, target = "source", "target"
@@ -376,7 +377,7 @@ func TestProgressRelationLocks(t *testing.T) {
 					}
 				}()
 				waitFor(t, 3*time.Second, "sampler never waited on the held relation lock", func() bool {
-					return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid() and wait_event_type='Lock' and query like 'with t as (%'") == "1"
+					return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid() and wait_event_type='Lock' and query like 'with %'") == "1"
 				})
 				select {
 				case err := <-done:
@@ -409,5 +410,261 @@ func TestProgressRelationLocks(t *testing.T) {
 				t.Fatal("sampling did not recover after unlocking")
 			}
 		})
+	}
+}
+
+// openCopy starts a session that runs setup and then a COPY FROM STDIN it
+// never ends, the shape of a part in flight. It returns once the server has
+// read every row it was sent.
+func openCopy(t *testing.T, uri, app, setup, table string) {
+	t.Helper()
+	if sqlOutput(t, uri, "select current_setting('server_version_num')::int < 140000") == "t" {
+		t.Skip("pg_stat_progress_copy arrived in PostgreSQL 14; older targets probe every table")
+	}
+	var b strings.Builder
+	b.WriteString("BEGIN;\n" + setup + "COPY " + table + " FROM STDIN;\n")
+	for i := range 20000 {
+		fmt.Fprintf(&b, "%d\t%s\n", i, strings.Repeat("x", 40))
+	}
+	holdOpen(t, uri, app, b.String())
+	last := ""
+	waitFor(t, 10*time.Second, "the copy never settled", func() bool {
+		got := copyBytes(t, uri, table)
+		settled := got != "0" && got == last
+		last = got
+		time.Sleep(100 * time.Millisecond)
+		return settled
+	})
+}
+
+// holdOpen sends script to a psql session that stays connected, and so keeps
+// its transaction open, until the test ends. It returns the session's input.
+func holdOpen(t *testing.T, uri, app, script string) io.Writer {
+	t.Helper()
+	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Killing psql drops the connection, which aborts the open transaction.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if _, err = io.WriteString(stdin, script); err != nil {
+		t.Fatal(err)
+	}
+	return stdin
+}
+
+// pgcopydbWorker names a session the way pgcopydb names its copy workers.
+const pgcopydbWorker = "pgcopydb[1] copy worker"
+
+// copyBytes reads the bytes the open copy into table has processed.
+func copyBytes(t *testing.T, uri, table string) string {
+	t.Helper()
+	return sqlOutput(t, uri, "select coalesce(sum(bytes_processed), 0) from pg_stat_progress_copy where relid = '"+table+"'::regclass")
+}
+
+// sampleDatabases creates a source and a target database, each running setup,
+// and returns their URIs.
+func sampleDatabases(t *testing.T, name, setup string) (source, target string) {
+	t.Helper()
+	admin := testPGURI(t)
+	uris := make([]string, 0, 2)
+	for _, side := range []string{sourceSide, targetSide} {
+		db := fmt.Sprintf("progress_%s_%s_%d", name, side, time.Now().UnixNano())
+		sqlOutput(t, admin, "CREATE DATABASE "+db)
+		t.Cleanup(func() { sqlOutput(t, admin, "DROP DATABASE "+db+" WITH (FORCE)") })
+		uri := namedURI(t, admin, db, "progress_"+name+"_"+side)
+		sqlOutput(t, uri, setup)
+		uris = append(uris, uri)
+	}
+	return uris[0], uris[1]
+}
+
+// runSample runs the single-database sampler against the pair and fails the
+// test unless both sides answered within the SQL budget.
+func runSample(t *testing.T, source, target string) *Sample {
+	t.Helper()
+	argv := progressCommand(false, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+source, "PGCOPYDB_TARGET_PGURI="+target)
+	start := time.Now()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sample failed: %v", err)
+	}
+	s := parseSample(out)
+	if s.SourceSize == nil || s.TargetSize == nil || s.Counts == nil {
+		t.Fatalf("sample lost a side after %s: %q", time.Since(start).Round(time.Millisecond), out)
+	}
+	return s
+}
+
+// pgcopydb copies an unsplit table as BEGIN; TRUNCATE; COPY FREEZE under an
+// AccessExclusiveLock, so the sample sizes it from the copy's byte count. A
+// worker that reconnected after a failed copy is named after the table instead.
+func TestProgressSampleReadsAnExclusiveCopy(t *testing.T) {
+	for _, app := range []string{pgcopydbWorker, "pgcopydb[1] copy public.items"} {
+		t.Run(app, func(t *testing.T) {
+			source, target := sampleDatabases(t, "exclusive", "CREATE TABLE items (id integer, note text); INSERT INTO items VALUES (1, 'x')")
+			openCopy(t, target, app, "TRUNCATE items;\n", "items")
+			if got := sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted"); got != "1" {
+				t.Fatalf("fixture: %s granted AccessExclusiveLock on items, want 1", got)
+			}
+			before := copyBytes(t, target, "items")
+			c := runSample(t, source, target).Counts
+			after := copyBytes(t, target, "items")
+			if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public.items" {
+				t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.items while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+			}
+			if got := fmt.Sprint(c.BytesDone); got != before || got != after {
+				t.Fatalf("bytes done = %s, want the copy's bytes processed (%s before the sample, %s after)", got, before, after)
+			}
+		})
+	}
+}
+
+// pgcopydb's index workers take AccessExclusiveLock too, on a table already
+// copied, to attach a constraint to its index. That table stays done and
+// sized on disk, so the sample waits out the short ALTER instead.
+func TestProgressSampleWaitsOutAnIndexWorkersLock(t *testing.T) {
+	source, target := sampleDatabases(t, "index_lock", `CREATE TABLE items (id integer, note text);
+INSERT INTO items SELECT i, 'x' FROM generate_series(1, 20000) i;
+CREATE UNIQUE INDEX items_idx ON items (id)`)
+	alter := holdOpen(t, target, "pgcopydb[1] create index public.items_idx",
+		"BEGIN;\nALTER TABLE items ADD CONSTRAINT items_pk PRIMARY KEY USING INDEX items_idx;\n")
+	waitFor(t, 5*time.Second, "the index worker never held items exclusively", func() bool {
+		return sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted") == "1"
+	})
+	// Commit once the sampler waits on the lock. This goroutine cannot fail
+	// the test, so it commits at its deadline regardless.
+	go func() {
+		waiting := "select count(*) from pg_stat_activity where application_name = current_setting('application_name') and pid <> pg_backend_pid() and wait_event_type = 'Lock'"
+		for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+			if out, _ := exec.Command("psql", target, "-XqtAc", waiting).Output(); strings.TrimSpace(string(out)) == "1" {
+				break
+			}
+		}
+		_, _ = io.WriteString(alter, "COMMIT;\n")
+	}()
+	c := runSample(t, source, target).Counts
+	if c.TablesTotal != 1 || c.TablesDone != 1 || c.EmptyOnTarget != "" {
+		t.Fatalf("tables = %d of %d owing %q, want 1 of 1: an index worker's lock is no copy", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+	}
+	if want := sqlOutput(t, target, "select pg_table_size('items')"); fmt.Sprint(c.BytesDone) != want {
+		t.Fatalf("bytes done = %d, want %s, the table's size on disk", c.BytesDone, want)
+	}
+}
+
+// An open part's rows stay invisible until it commits, so a probe reads the
+// whole uncommitted heap. The sample must call the table owed without scanning
+// it, and keep sizing it on disk (a part holds only RowExclusiveLock).
+func TestProgressSampleNeverScansAnOpenCopy(t *testing.T) {
+	source, target := sampleDatabases(t, "open_copy", `CREATE TABLE big (id integer, note text);
+CREATE TABLE small (id integer, note text);
+INSERT INTO small VALUES (1, 'x')`)
+	sqlOutput(t, source, "INSERT INTO big VALUES (1, 'x')")
+	openCopy(t, target, pgcopydbWorker, "", "big")
+	// Another client's copy is not this migration's, so small stays done.
+	openCopy(t, target, "progress_foreign_copy", "", "small")
+	// Nor is a copy named like pgcopydb's from another address: dblink's
+	// socket session has none, and its COPY waits for rows dblink never sends.
+	holdOpen(t, target, "progress_socket_copy", `CREATE EXTENSION dblink;
+SELECT dblink_connect('f', format('dbname=%s application_name=%L', current_database(), 'pgcopydb[2] copy worker'));
+SELECT dblink_send_query('f', 'COPY small FROM STDIN');
+`)
+	waitFor(t, 5*time.Second, "the socket session's copy never opened", func() bool {
+		return sqlOutput(t, target, "select count(*) from pg_stat_progress_copy p join pg_stat_activity a using (pid) where p.relid = 'small'::regclass and a.client_addr is null") == "1"
+	})
+	scans := func() (big, small string) {
+		t.Helper()
+		row := sqlOutput(t, target, "select string_agg(seq_scan::text, ' ' order by relname) from pg_stat_user_tables where relname in ('big', 'small')")
+		big, small, _ = strings.Cut(row, " ")
+		return big, small
+	}
+	bigBefore, smallBefore := scans()
+	c := runSample(t, source, target).Counts
+	if c.TablesTotal != 2 || c.TablesDone != 1 || c.EmptyOnTarget != "public.big" {
+		t.Fatalf("tables = %d of %d owing %q, want 1 of 2 owing public.big while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+	}
+	if want := sqlOutput(t, target, "select pg_table_size('big') + pg_table_size('small')"); fmt.Sprint(c.BytesDone) != want {
+		t.Fatalf("bytes done = %d, want %s, the on-disk size of both tables, uncommitted pages included", c.BytesDone, want)
+	}
+	// The sampler's backend reports its scans when it exits, and on
+	// PostgreSQL 14 they reach the view a moment later, so wait for the probe
+	// of small before reading big's counter.
+	var bigAfter string
+	waitFor(t, 5*time.Second, "the sampler's probe of small never reached pg_stat_user_tables", func() bool {
+		var smallAfter string
+		bigAfter, smallAfter = scans()
+		return smallAfter != smallBefore
+	})
+	if bigAfter != bigBefore {
+		t.Fatalf("big seq_scan went from %s to %s across the sample: the probe scanned a table whose copy is open", bigBefore, bigAfter)
+	}
+}
+
+// pgcopydb truncates before its copy opens, and truncating a partitioned
+// parent locks every partition while the copy's progress names only the
+// parent. A partition held that way must neither be sized nor probed.
+func TestProgressSampleSkipsTablesTheWorkerHoldsExclusively(t *testing.T) {
+	setup := "CREATE TABLE items (id integer, note text)"
+	partitioned := "CREATE TABLE items (id integer, note text) PARTITION BY RANGE (id); CREATE TABLE items_p1 PARTITION OF items FOR VALUES FROM (0) TO (100000)"
+	for _, tc := range []struct {
+		name, setup, leaf string
+		hold              func(t *testing.T, target string)
+	}{
+		{"truncated before its copy", setup, "items", func(t *testing.T, target string) {
+			holdOpen(t, target, pgcopydbWorker, "BEGIN;\nTRUNCATE items;\n")
+		}},
+		{"partition under a copied parent", partitioned, "items_p1", func(t *testing.T, target string) {
+			openCopy(t, target, pgcopydbWorker, "TRUNCATE items;\n", "items")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, target := sampleDatabases(t, "held", tc.setup+"; INSERT INTO items VALUES (1, 'x')")
+			tc.hold(t, target)
+			waitFor(t, 5*time.Second, "the worker never held the table exclusively", func() bool {
+				return sqlOutput(t, target, "select count(*) from pg_locks where relation = '"+tc.leaf+"'::regclass and mode = 'AccessExclusiveLock' and granted") == "1"
+			})
+			c := runSample(t, source, target).Counts
+			if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public."+tc.leaf {
+				t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.%s while it is held", c.TablesDone, c.TablesTotal, c.EmptyOnTarget, tc.leaf)
+			}
+			if c.BytesDone != 0 {
+				t.Fatalf("bytes done = %d, want 0: no copy streams into the held table itself", c.BytesDone)
+			}
+		})
+	}
+}
+
+// libpq echoes a connection URI it cannot parse, password included, and the
+// lost-side log carries the reason, so only a server's own words may pass.
+func TestProgressSampleWithholdsAnEchoedURI(t *testing.T) {
+	source := testPGURI(t)
+	for _, target := range []string{
+		"postgresql://app:hunter%zz2@127.0.0.1:1/postgres",
+		"postgresql://app:hunter2@[::1:5432/postgres",
+	} {
+		argv := progressCommand(false, false)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+source, "PGCOPYDB_TARGET_PGURI="+target)
+		out, err := cmd.Output()
+		cancel()
+		if err != nil {
+			t.Fatalf("sample failed: %v", err)
+		}
+		if !strings.Contains(string(out), "hunter") {
+			t.Fatalf("psql no longer echoes the URI, so this test proves nothing: %q", out)
+		}
+		reason, lost := parseSample(out).Lost[targetSide]
+		if !lost || reason != withheldReason {
+			t.Errorf("target reason = %q (lost %v), want the withheld reason", reason, lost)
+		}
 	}
 }

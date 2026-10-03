@@ -72,6 +72,7 @@ _Appears in:_
 | `indexesDone` _integer_ |  |  | Optional: \{\} <br /> |
 | `bytesTotal` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesTotal is the total bytes to copy: the in-scope tables' size on the<br />source, or pgcopydb's own figure once it has answered. |  | Optional: \{\} <br /> |
 | `bytesDone` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | bytesDone is the bytes copied so far. |  | Optional: \{\} <br /> |
+| `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | observedAt is when a live sample last wrote these figures. A failed sample<br />leaves it and them unchanged; pgcopydb's own counts carry none. |  | Optional: \{\} <br /> |
 
 
 #### ConnectionSecret

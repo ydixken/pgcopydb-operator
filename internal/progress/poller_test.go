@@ -17,13 +17,18 @@ limitations under the License.
 package progress
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
@@ -206,6 +211,7 @@ func TestSample(t *testing.T) {
 		out        string
 		src, tgt   *int64
 		wantCounts *RelationCounts
+		lost       map[string]string
 	}{
 		"mid copy": {
 			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\nowed=public.a, public.b\n",
@@ -271,18 +277,48 @@ func TestSample(t *testing.T) {
 		// One side unreadable: its size goes too, and counts need both, so a
 		// name on the owed line has no count to ride with.
 		"source failed": {
-			out: "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
-			tgt: ptr(536870912),
+			out:  "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
+			tgt:  ptr(536870912),
+			lost: map[string]string{sourceSide: ""},
 		},
 		"target failed": {
-			out: "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
-			src: ptr(1073741824),
+			out:  "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
+			src:  ptr(1073741824),
+			lost: map[string]string{targetSide: ""},
+		},
+		// The script names what psql said, so the log can carry it.
+		"target timed out": {
+			out:  "target_error=ERROR:  canceling statement due to statement timeout \nsource=1073741824 0 0 0 0 0\ntarget=\nowed=\n",
+			src:  ptr(1073741824),
+			lost: map[string]string{targetSide: "ERROR:  canceling statement due to statement timeout"},
+		},
+		"target refused the connection": {
+			out:  "target_error=psql: error: connection to server at \"db\" (10.0.0.1), port 5432 failed: Connection refused \nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: `psql: error: connection to server at "db" (10.0.0.1), port 5432 failed: Connection refused`},
+		},
+		"source rejected the password": {
+			out:  "source_error=FATAL:  password authentication failed for user \"app\"\nsource=\ntarget=1 0 0 0 0\n",
+			tgt:  ptr(1),
+			lost: map[string]string{sourceSide: `FATAL:  password authentication failed for user "app"`},
+		},
+		// libpq echoes a URI it cannot parse, password and all; the log must not.
+		"target URI unparsable": {
+			out:  "target_error=psql: error: invalid percent-encoded token: \"hunter%zz2\"\nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: withheldReason},
+		},
+		// dash reports a SIGKILLed child on stderr; that is not a server error.
+		"target killed": {
+			out:  "target_error=Killed \nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: withheldReason},
 		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
-		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
-		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
-		"no output":           {out: ""},
+		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"no output":           {out: "", lost: map[string]string{sourceSide: "", targetSide: ""}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeExec{pod: "p", out: []byte(tc.out)}
@@ -304,7 +340,47 @@ func TestSample(t *testing.T) {
 			case tc.wantCounts != nil && *got.Counts != *tc.wantCounts:
 				t.Errorf("counts = %+v, want %+v", got.Counts, tc.wantCounts)
 			}
+			if !maps.Equal(got.Lost, tc.lost) {
+				t.Errorf("lost = %q, want %q", got.Lost, tc.lost)
+			}
 		})
+	}
+}
+
+// A lost side logs once when it stops answering and once when it answers
+// again, not on every pass: the sampler runs every ten seconds.
+func TestSample_LogsLostSidesOnTransition(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := logf.IntoContext(context.Background(), zap.New(zap.WriteTo(&buf)))
+	f := &fakeExec{pod: "p"}
+	p := NewFromExec(f, nil)
+	healthy := "source=1 1 1 0 8 0\ntarget=1 1 1 0 8\nowed=\n"
+	timedOut := "target_error=ERROR:  canceling statement due to statement timeout\nsource=1 0 0 0 0 0\ntarget=\nowed=\n"
+	for i, step := range []struct {
+		out  string
+		want []string
+	}{
+		{healthy, nil},
+		{timedOut, []string{`"msg":"progress sample lost a side; status keeps its last progress until it answers again","job":"ns/job","side":"target","reason":"ERROR:  canceling statement due to statement timeout"`}},
+		{timedOut, nil},
+		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"target"`}},
+		{healthy, nil},
+		{"", []string{`"side":"source","reason":""`, `"side":"target","reason":""`}},
+	} {
+		buf.Reset()
+		f.out = []byte(step.out)
+		if _, err := p.Sample(ctx, "ns", "job", false); err != nil {
+			t.Fatal(err)
+		}
+		logs := strings.FieldsFunc(buf.String(), func(r rune) bool { return r == '\n' })
+		if len(logs) != len(step.want) {
+			t.Fatalf("step %d logged %q, want %d lines", i, logs, len(step.want))
+		}
+		for j, want := range step.want {
+			if !strings.Contains(logs[j], want) {
+				t.Errorf("step %d line %d = %s, want it to contain %s", i, j, logs[j], want)
+			}
+		}
 	}
 }
 
@@ -422,23 +498,14 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 }
 
 // A table owes the copy while it holds rows on the source and none on the
-// target, and only a read of the table can say so: its TOAST relation
-// occupies a page from the schema restore on, so a storage test called an
-// 848MB table with no rows on the target copied (issue #277). Presence, not a
-// row count: a live source runs ahead of the copy's snapshot until the stream
-// catches up, and a count compared against it held the follow gate shut with
-// the base copy long finished (see
-// docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table copied in parts reads done here, and belongs to the checks that
-// read content: pgcopydb's catalog after a plain clone, the drain verification
-// after a cutover. The flag travels in the target's scope list, which lets the
-// source count and name exactly the tables the copy still owes; a table empty
-// on both sides owes nothing.
+// target: presence, not a row count, and a table in flight owes it unprobed
+// (docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
 func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 	for _, want := range []string{
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
-		"(select count(*) from t where $populated)",
-		"|| ',' || ($populated)::text || ')'",                                           // the target's row carries the flag per table
+		`present="case when t.copying then false else $populated end"`, // a table in flight owes the copy unprobed
+		"(select count(*) from t where $present)",
+		"|| ',' || ($present)::text || ')'",                                             // the target's row carries the flag per table
 		"join ($landed) as landed(name, populated)",                                     // and the source joins it
 		"from t where not t.populated and $populated)",                                  // owed: rows on the source, none on the target
 		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)", // named, for the condition message
@@ -467,7 +534,7 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 // filtered migration then shows a denominator it can never reach.
 func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 	// query returns the SQL one side is sent: from its progress_sql call to
-	// the `") || ` that ends every such call in the script.
+	// the quote and paren that end every such call in the script.
 	query := func(side string) string {
 		t.Helper()
 		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI"`)
@@ -475,7 +542,7 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 			t.Fatalf("sampleScript never asks the %s", side)
 		}
 		rest := sampleScript[start:]
-		return rest[:strings.Index(rest, `") || `)]
+		return rest[:strings.Index(rest, `") ||`)]
 	}
 	// The list is built on the target, quoted, and the source joins it in
 	// place of reading its own catalog unscoped.

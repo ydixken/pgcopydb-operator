@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -519,12 +520,17 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		}
 		r := newReconciler()
 		r.Progress = fake
+		clock := time.Now().Truncate(time.Second)
+		r.now = func() time.Time { return clock }
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 
 		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(1)))
 		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(376)))
+		Expect(m.Status.Progress.ObservedAt.Time).To(BeTemporally("==", clock))
+
+		clock = clock.Add(10 * time.Second)
 
 		fake.setRelations(&progress.RelationCounts{
 			TablesTotal: 17, TablesDone: 12, IndexesTotal: 41, IndexesDone: 8,
@@ -534,6 +540,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(m.Status.Progress.TablesDone).To(Equal(int64(12)))
 		Expect(m.Status.Progress.IndexesDone).To(Equal(int64(8)))
 		Expect(m.Status.Progress.BytesDone.Value()).To(Equal(int64(402000)))
+		Expect(m.Status.Progress.ObservedAt.Time).To(BeTemporally("==", clock))
 
 		got, found := gaugeValue("pgcopydb_migration_clone_copied_bytes", migLabels(name))
 		Expect(found).To(BeTrue())
@@ -574,10 +581,13 @@ var _ = Describe("Migration Controller progress sampling", func() {
 				IndexesTotal: 4, IndexesDone: 1, BytesTotal: 4000, BytesDone: 900}}
 		r := newReconciler()
 		r.Progress = fake
+		clock := time.Now().Truncate(time.Second)
+		r.now = func() time.Time { return clock }
 		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
 		passGate(ctx, r, name)
 		baseline := reconcileAndGet(ctx, r, name)
 		Expect(baseline.Status.Progress).NotTo(BeNil())
+		Expect(baseline.Status.Progress.ObservedAt).NotTo(BeNil())
 		for _, tc := range []struct {
 			src, tgt               *int64
 			err                    error
@@ -588,6 +598,9 @@ var _ = Describe("Migration Controller progress sampling", func() {
 			{int64p(5500), nil, nil, 5500, 1200},
 			{nil, nil, nil, 5500, 1200},
 		} {
+			// The clock moves, so a lost sample that stamped observedAt would no
+			// longer equal the baseline.
+			clock = clock.Add(10 * time.Second)
 			fake.mu.Lock()
 			fake.src, fake.tgt, fake.sizesErr = tc.src, tc.tgt, tc.err
 			fake.relations, fake.copying = nil, false

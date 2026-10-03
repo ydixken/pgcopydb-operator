@@ -600,6 +600,10 @@ type CloneProgress struct {
 	// bytesDone is the bytes copied so far.
 	// +optional
 	BytesDone *resource.Quantity `json:"bytesDone,omitempty"`
+	// observedAt is when a live sample last wrote these figures. A failed sample
+	// leaves it and them unchanged; pgcopydb's own counts carry none.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
 // MigrationStatus is the observed state of a Migration.

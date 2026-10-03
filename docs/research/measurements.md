@@ -8,10 +8,31 @@ Each section is referenced from the code by anchor.
 Where `internal/progress/progress.go` decides whether a table still owes the copy.
 The counts are read exactly, with a one-row select per table, because no size function answers the question.
 
+`sampleScript` asks each database for one row of sizes and counts.
+The source row ends in a sixth figure, the tables that hold rows on the source and none on the target, and their names follow on an `owed=` line.
+The source is asked about the target's tables rather than its own, because the target holds the in-scope schema, and an unscoped source would count toward a total the copy can never reach.
+The sample tests presence rather than a row count, because storage cannot tell an empty table from a copied one, and a live source runs ahead of the copy's snapshot, so a count compared against it never settles in follow mode (see [An exact row count held the follow gate against a live source](#an-exact-row-count-held-the-follow-gate-against-a-live-source)).
+A table this worker is copying into owes the copy and is never probed, because the probe would read its whole uncommitted heap (see [A presence probe read a whole uncommitted copy](#a-presence-probe-read-a-whole-uncommitted-copy)).
+Targets before PostgreSQL 14 have no `pg_stat_progress_copy`, so they probe every table they do not see locked.
+Bytes come from `pg_table_size`, because its neighbours add the indexes or drop the TOAST (see the last two sections below).
+`pg_table_size` would wait on a table a copy worker holds under AccessExclusiveLock: a whole-table copy, or every partition under a truncated parent.
+Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
+This worker's backends are those named `pgcopydb...` from the sampler's own client address, so another migration's copy into the same database is not mistaken for this one's.
+Among them, a copy worker is one named a copy worker or whose last statement was a COPY, so the sample waits out an index worker's short ALTER on a copied table.
+Unlike `finalizingScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
+A failed side prints an empty row and parses to no sample, never to zero.
+
 ### Storage cannot tell an empty table from a copied one
 
 A table's TOAST relation occupies a page from the moment the schema is restored.
 A `pg_table_size` test therefore counted an 848MB table with no rows on the target as copied (issue #277).
+
+### A presence probe read a whole uncommitted copy
+
+Measured in podman on PostgreSQL 14 and 18, with one table holding an open copy that had not committed.
+`select 1 from <table> limit 1` scanned every uncommitted page and returned no row, while `pg_table_size` on the same table took about a millisecond.
+From about 7.8GB of uncommitted heap the target's sample ran past its 5-second statement timeout.
+A table pgcopydb copies whole is truncated in the copy's own transaction, so the probe and `pg_table_size` both waited on its AccessExclusiveLock instead.
 
 ### pg_total_relation_size counts the indexes
 
