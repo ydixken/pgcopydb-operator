@@ -120,6 +120,8 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
 The suite installs a throwaway operator and creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
+If the suite can list nodes, each one-instance cluster prefers one node, so CNPG's initdb pod and the instance pod use the same volume attachment.
+Pair N's source prefers usable node N in name order, and its target prefers the next node.
 It seeds each source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
 With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mode instead: it uses an existing database pair, creates no CNPG clusters, and seeds the source through the same Job (see [Running the E2E suite against your databases](docs/operations/e2e-external.md)).
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.

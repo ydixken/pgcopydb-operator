@@ -2918,3 +2918,185 @@ func TestEmitPreflightOutcome_DryRun(t *testing.T) {
 		}
 	}
 }
+
+// nodeA and nodeB stand in for node names, which this public repository never records.
+const nodeA, nodeB = "node-a", "node-b"
+
+func TestRunnerAffinity_WorkNodePreference(t *testing.T) {
+	prefer := corev1.PreferredSchedulingTerm{Weight: 100, Preference: corev1.NodeSelectorTerm{
+		MatchFields: []corev1.NodeSelectorRequirement{{
+			Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{nodeB},
+		}},
+	}}
+	userRequired := &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+		MatchExpressions: []corev1.NodeSelectorRequirement{{
+			Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{"db"},
+		}},
+	}}}
+	userPreferred := corev1.PreferredSchedulingTerm{Weight: 10, Preference: corev1.NodeSelectorTerm{
+		MatchExpressions: []corev1.NodeSelectorRequirement{{
+			Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"},
+		}},
+	}}
+	userPodAnti := &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+		TopologyKey: corev1.LabelHostname,
+	}}}
+	userAffinity := func() *corev1.Affinity {
+		return &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution:  userRequired,
+				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{userPreferred},
+			},
+			PodAntiAffinity: userPodAnti,
+		}
+	}
+	tests := []struct {
+		name string
+		node string
+		user *corev1.Affinity
+		want *corev1.Affinity
+	}{
+		{name: "no annotation, no user affinity", want: nil},
+		{name: "no annotation keeps the user affinity", user: userAffinity(), want: userAffinity()},
+		{name: "annotation alone", node: nodeB, want: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{prefer},
+		}}},
+		{name: "annotation adds to the user affinity", node: nodeB, user: userAffinity(), want: &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution:  userRequired,
+				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{userPreferred, prefer},
+			},
+			PodAntiAffinity: userPodAnti,
+		}},
+		{name: "annotation with only a user pod affinity", node: nodeB,
+			user: &corev1.Affinity{PodAntiAffinity: userPodAnti},
+			want: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{prefer},
+				},
+				PodAntiAffinity: userPodAnti,
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validMigration("affinity")
+			m.Spec.Runner.Affinity = tc.user
+			m.Spec.Runner.NodeSelector = map[string]string{"pool": "db"}
+			m.Spec.Runner.Tolerations = []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists}}
+			if tc.node != "" {
+				m.Annotations = map[string]string{annotationWorkNode: tc.node}
+			}
+			before := m.Spec.Runner.DeepCopy()
+			for _, build := range []func() (*batchv1.Job, error){
+				func() (*batchv1.Job, error) { return buildJob(m, testRunnerImage, 1) },
+				func() (*batchv1.Job, error) { return buildPreflightJob(m, testRunnerImage) },
+				func() (*batchv1.Job, error) { return buildCleanupJob(m, testRunnerImage) },
+			} {
+				job, err := build()
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec := job.Spec.Template.Spec
+				if !reflect.DeepEqual(spec.Affinity, tc.want) {
+					t.Errorf("%s affinity = %+v, want %+v", job.Name, spec.Affinity, tc.want)
+				}
+				if !reflect.DeepEqual(spec.NodeSelector, before.NodeSelector) ||
+					!reflect.DeepEqual(spec.Tolerations, before.Tolerations) {
+					t.Errorf("%s dropped the user nodeSelector or tolerations", job.Name)
+				}
+			}
+			if !reflect.DeepEqual(m.Spec.Runner, *before) {
+				t.Errorf("the spec was mutated: %+v", m.Spec.Runner.Affinity)
+			}
+		})
+	}
+}
+
+// TestRecordWorkNode covers the pod choice and the no-op and error legs that
+// envtest cannot order by creation time or inject.
+func TestRecordWorkNode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{v1beta1.AddToScheme, corev1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(sec int64) metav1.Time { return metav1.Unix(1_700_000_000+sec, 0) }
+	pod := func(name, node string, created metav1.Time, migration string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: testNS, CreationTimestamp: created,
+				Labels: map[string]string{labelManagedBy: managerName, labelMigration: migration},
+			},
+			Spec: corev1.PodSpec{NodeName: node},
+		}
+	}
+	tests := []struct {
+		name    string
+		before  string
+		pods    []client.Object
+		want    string
+		patches int
+	}{
+		{name: "no pods", want: ""},
+		{name: "newest scheduled pod wins", want: nodeB, patches: 1, pods: []client.Object{
+			pod("old", nodeA, at(0), "work"),
+			pod("new", nodeB, at(10), "work"),
+			pod("pending", "", at(20), "work"),
+			pod("other-migration", "node-c", at(30), "other"),
+		}},
+		{name: "unchanged node sends no patch", before: nodeA, want: nodeA,
+			pods: []client.Object{pod("p", nodeA, at(0), "work")}},
+		{name: "only unscheduled pods keep the last value", before: nodeA, want: nodeA,
+			pods: []client.Object{pod("p", "", at(0), "work")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validMigration("work")
+			if tc.before != "" {
+				m.Annotations = map[string]string{annotationWorkNode: tc.before}
+			}
+			patches := 0
+			c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(append(tc.pods, m)...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+						patches++
+						return cl.Patch(ctx, obj, p, opts...)
+					},
+				}).Build()
+			r := &MigrationReconciler{Client: c, Scheme: scheme}
+			r.recordWorkNode(context.Background(), m)
+			got := &v1beta1.Migration{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Annotations[annotationWorkNode] != tc.want || patches != tc.patches {
+				t.Errorf("annotation %q after %d patches, want %q after %d",
+					got.Annotations[annotationWorkNode], patches, tc.want, tc.patches)
+			}
+		})
+	}
+
+	t.Run("list and patch failures leave the pass running", func(t *testing.T) {
+		boom := errors.New("boom")
+		m := validMigration("work")
+		for _, funcs := range []interceptor.Funcs{
+			{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return boom }},
+			{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return boom
+			}},
+		} {
+			c := clientfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(m.DeepCopy(), pod("p", nodeA, at(0), "work")).
+				WithInterceptorFuncs(funcs).Build()
+			(&MigrationReconciler{Client: c, Scheme: scheme}).recordWorkNode(context.Background(), m.DeepCopy())
+			got := &v1beta1.Migration{}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			if v, ok := got.Annotations[annotationWorkNode]; ok {
+				t.Errorf("annotation %q stored despite the failure", v)
+			}
+		}
+	})
+}

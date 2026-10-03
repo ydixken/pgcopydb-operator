@@ -228,6 +228,7 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.ensureOwned(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
+	r.recordWorkNode(ctx, m)
 
 	if res, handled, err := r.preflightGate(ctx, m, base); handled || err != nil {
 		return res, err
@@ -974,6 +975,33 @@ func (r *MigrationReconciler) ensureJob(ctx context.Context, m *v1beta1.Migratio
 		return nil, false, err
 	}
 	return nil, true, nil
+}
+
+// recordWorkNode stores the node of the newest scheduled Job pod (every one
+// mounts the work PVC) in annotationWorkNode for runnerAffinity. Best effort:
+// the preference only saves a volume detach, so a failure must not stop a pass.
+func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Migration) {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(m.Namespace),
+		client.MatchingLabels{labelManagedBy: managerName, labelMigration: m.Name}); err != nil {
+		logf.FromContext(ctx).V(1).Info("work node lookup failed", "error", err)
+		return
+	}
+	var newest *corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Spec.NodeName != "" && (newest == nil || newest.CreationTimestamp.Before(&p.CreationTimestamp)) {
+			newest = p
+		}
+	}
+	if newest == nil || m.Annotations[annotationWorkNode] == newest.Spec.NodeName {
+		return
+	}
+	base := m.DeepCopy()
+	metav1.SetMetaDataAnnotation(&m.ObjectMeta, annotationWorkNode, newest.Spec.NodeName)
+	if err := r.Patch(ctx, m, client.MergeFrom(base)); err != nil {
+		logf.FromContext(ctx).V(1).Info("work node annotation failed", "error", err)
+	}
 }
 
 // jobFinished reports (finished, succeeded) from the Job's conditions.

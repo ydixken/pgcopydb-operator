@@ -40,6 +40,10 @@ const (
 	labelManagedBy     = "app.kubernetes.io/managed-by"
 	managerName        = "pgcopydb-operator"
 
+	// annotationWorkNode on the Migration names the node of the newest pod
+	// on the work PVC. The operator has no PVC patch right, so it lives here.
+	annotationWorkNode = "pgcopydb-operator.io/work-volume-node"
+
 	// runnerUID matches the runner image's non-root user (distroless
 	// nonroot convention, uid 65532).
 	runnerUID int64 = 65532
@@ -1282,7 +1286,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 					},
 					NodeSelector: m.Spec.Runner.NodeSelector,
 					Tolerations:  m.Spec.Runner.Tolerations,
-					Affinity:     m.Spec.Runner.Affinity,
+					Affinity:     runnerAffinity(m),
 					Volumes:      volumes,
 					Containers: []corev1.Container{{
 						Name:  workerContainer,
@@ -1306,6 +1310,32 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 		},
 	}
 	return job, nil
+}
+
+// runnerAffinity adds a preference for the node in annotationWorkNode to the
+// user's affinity. A ReadWriteOnce volume attaches to one node at a time, so a
+// pod on another node waits for the detach.
+func runnerAffinity(m *v1beta1.Migration) *corev1.Affinity {
+	node := m.Annotations[annotationWorkNode]
+	if node == "" {
+		return m.Spec.Runner.Affinity
+	}
+	a := m.Spec.Runner.Affinity.DeepCopy()
+	if a == nil {
+		a = &corev1.Affinity{}
+	}
+	if a.NodeAffinity == nil {
+		a.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	// metadata.name, not the hostname label: the two differ on some providers.
+	a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+		a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+		corev1.PreferredSchedulingTerm{Weight: 100, Preference: corev1.NodeSelectorTerm{
+			MatchFields: []corev1.NodeSelectorRequirement{{
+				Key: metav1.ObjectNameField, Operator: corev1.NodeSelectorOpIn, Values: []string{node},
+			}},
+		}})
+	return a
 }
 
 func defaultWorkVolumeSize() resource.Quantity {

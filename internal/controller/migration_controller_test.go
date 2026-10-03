@@ -172,6 +172,45 @@ var _ = Describe("Migration Controller", func() {
 		Expect(errors.IsNotFound(err)).To(BeTrue())
 	})
 
+	It("keeps the next Job on the node that last held the work volume", func() {
+		const name = "mig-work-node"
+		defer removeMigration(ctx, name)
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		r := newReconciler()
+		reconcileAndGet(ctx, r, name)
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Annotations).NotTo(HaveKey(annotationWorkNode))
+		Expect(fetchJob(ctx, name+"-preflight").Spec.Template.Spec.Affinity).To(BeNil())
+
+		// envtest runs no scheduler: the test binds the preflight pod itself.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name + "-preflight-pod", Namespace: testNS,
+				Labels: map[string]string{labelManagedBy: managerName, labelMigration: name},
+			},
+			Spec: corev1.PodSpec{
+				NodeName:      nodeA,
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: testPodContainer, Image: testPodImage}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pod, client.GracePeriodSeconds(0)) })
+		finishJob(ctx, name+"-preflight", true)
+
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Annotations).To(HaveKeyWithValue(annotationWorkNode, nodeA))
+		affinity := fetchJob(ctx, name+"-run-1").Spec.Template.Spec.Affinity
+		Expect(affinity).NotTo(BeNil())
+		Expect(affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution).To(ConsistOf(
+			corev1.PreferredSchedulingTerm{Weight: 100, Preference: corev1.NodeSelectorTerm{
+				MatchFields: []corev1.NodeSelectorRequirement{{
+					Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{nodeA},
+				}},
+			}}))
+		Expect(affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution).To(BeNil())
+	})
+
 	It("creates the work PVC and the first attempt Job", func() {
 		const name = "mig-first-attempt"
 		defer removeMigration(ctx, name)
