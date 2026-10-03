@@ -61,8 +61,9 @@ The "Exists" column is the contract for when a series is present:
   It weighs indexes the target has built against the indexes the source has.
   A table with no rows on the source has nothing to copy and counts as done.
   A table with rows on the source and none on the target does not, whatever storage its restored schema holds.
-  Neither does a table that this worker holds under an exclusive lock, or, on a PostgreSQL 14 or later target, any table it is still copying into.
+  Neither does a table that one of pgcopydb's copy workers holds under an exclusive lock, or, on a PostgreSQL 14 or later target, any table the worker is still copying into.
   The sample never reads such a table, because its rows stay invisible until that copy commits.
+  Any other pgcopydb lock is short, such as an index worker attaching a constraint to a copied table, and the sample waits for it.
   The sample needs psql and GNU `timeout` in the runner.
   pgcopydb's own accounting then replaces it where it can be read: at clone completion for a plain clone, and from the verify Job's log after cutover for a follow migration.
   Both need an allowlisted runner version (see [Troubleshooting](../troubleshooting.md)).
@@ -208,7 +209,7 @@ The tiles read as follows:
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
   Bytes compares table bytes on disk on both sides, so pgcopydb's own wire tally never replaces it.
   A wire count under an on-disk total would read as a shortfall that is not there.
-  The one exception is a table the worker holds under an exclusive lock, such as one pgcopydb copies whole.
+  The one exception is a table a copy worker holds under an exclusive lock, such as one pgcopydb copies whole.
   Until that copy commits, the target counts the bytes the copy has streamed into it, which a target before PostgreSQL 14 cannot report and counts as zero.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.

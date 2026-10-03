@@ -1446,7 +1446,7 @@
       "id": 35,
       "type": "stat",
       "title": "Bytes (Target)",
-      "description": "Table bytes on the target, measured the same way, except that a table the worker holds under an exclusive lock, such as one copied whole, counts the bytes its copy has streamed until it commits. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. Nothing rounds the two up when the worker exits 0: they end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "Table bytes on the target, measured the same way, except that a table a copy worker holds under an exclusive lock, such as one copied whole, counts the bytes its copy has streamed until it commits. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. Nothing rounds the two up when the worker exits 0: they end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

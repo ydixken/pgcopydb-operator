@@ -438,8 +438,8 @@ func openCopy(t *testing.T, uri, app, setup, table string) {
 }
 
 // holdOpen sends script to a psql session that stays connected, and so keeps
-// its transaction open, until the test ends.
-func holdOpen(t *testing.T, uri, app, script string) {
+// its transaction open, until the test ends. It returns the session's input.
+func holdOpen(t *testing.T, uri, app, script string) io.Writer {
 	t.Helper()
 	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
 	stdin, err := cmd.StdinPipe()
@@ -454,6 +454,7 @@ func holdOpen(t *testing.T, uri, app, script string) {
 	if _, err = io.WriteString(stdin, script); err != nil {
 		t.Fatal(err)
 	}
+	return stdin
 }
 
 // pgcopydbWorker names a session the way pgcopydb names its copy workers.
@@ -503,23 +504,59 @@ func runSample(t *testing.T, source, target string) *Sample {
 	return s
 }
 
-// pgcopydb copies an unsplit table as BEGIN; TRUNCATE; COPY FREEZE, so the
-// table sits under an AccessExclusiveLock for the whole copy. The sample must
-// size it from the copy's own byte count rather than wait on that lock.
+// pgcopydb copies an unsplit table as BEGIN; TRUNCATE; COPY FREEZE under an
+// AccessExclusiveLock, so the sample sizes it from the copy's byte count. A
+// worker that reconnected after a failed copy is named after the table instead.
 func TestProgressSampleReadsAnExclusiveCopy(t *testing.T) {
-	source, target := sampleDatabases(t, "exclusive", "CREATE TABLE items (id integer, note text); INSERT INTO items VALUES (1, 'x')")
-	openCopy(t, target, pgcopydbWorker, "TRUNCATE items;\n", "items")
-	if got := sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted"); got != "1" {
-		t.Fatalf("fixture: %s granted AccessExclusiveLock on items, want 1", got)
+	for _, app := range []string{pgcopydbWorker, "pgcopydb[1] copy public.items"} {
+		t.Run(app, func(t *testing.T) {
+			source, target := sampleDatabases(t, "exclusive", "CREATE TABLE items (id integer, note text); INSERT INTO items VALUES (1, 'x')")
+			openCopy(t, target, app, "TRUNCATE items;\n", "items")
+			if got := sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted"); got != "1" {
+				t.Fatalf("fixture: %s granted AccessExclusiveLock on items, want 1", got)
+			}
+			before := copyBytes(t, target, "items")
+			c := runSample(t, source, target).Counts
+			after := copyBytes(t, target, "items")
+			if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public.items" {
+				t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.items while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+			}
+			if got := fmt.Sprint(c.BytesDone); got != before || got != after {
+				t.Fatalf("bytes done = %s, want the copy's bytes processed (%s before the sample, %s after)", got, before, after)
+			}
+		})
 	}
-	before := copyBytes(t, target, "items")
+}
+
+// pgcopydb's index workers take AccessExclusiveLock too, on a table already
+// copied, to attach a constraint to its index. That table stays done and
+// sized on disk, so the sample waits out the short ALTER instead.
+func TestProgressSampleWaitsOutAnIndexWorkersLock(t *testing.T) {
+	source, target := sampleDatabases(t, "index_lock", `CREATE TABLE items (id integer, note text);
+INSERT INTO items SELECT i, 'x' FROM generate_series(1, 20000) i;
+CREATE UNIQUE INDEX items_idx ON items (id)`)
+	alter := holdOpen(t, target, "pgcopydb[1] create index public.items_idx",
+		"BEGIN;\nALTER TABLE items ADD CONSTRAINT items_pk PRIMARY KEY USING INDEX items_idx;\n")
+	waitFor(t, 5*time.Second, "the index worker never held items exclusively", func() bool {
+		return sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted") == "1"
+	})
+	// Commit once the sampler waits on the lock. This goroutine cannot fail
+	// the test, so it commits at its deadline regardless.
+	go func() {
+		waiting := "select count(*) from pg_stat_activity where application_name = current_setting('application_name') and pid <> pg_backend_pid() and wait_event_type = 'Lock'"
+		for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+			if out, _ := exec.Command("psql", target, "-XqtAc", waiting).Output(); strings.TrimSpace(string(out)) == "1" {
+				break
+			}
+		}
+		_, _ = io.WriteString(alter, "COMMIT;\n")
+	}()
 	c := runSample(t, source, target).Counts
-	after := copyBytes(t, target, "items")
-	if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public.items" {
-		t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.items while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+	if c.TablesTotal != 1 || c.TablesDone != 1 || c.EmptyOnTarget != "" {
+		t.Fatalf("tables = %d of %d owing %q, want 1 of 1: an index worker's lock is no copy", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
 	}
-	if got := fmt.Sprint(c.BytesDone); got != before || got != after {
-		t.Fatalf("bytes done = %s, want the copy's bytes processed (%s before the sample, %s after)", got, before, after)
+	if want := sqlOutput(t, target, "select pg_table_size('items')"); fmt.Sprint(c.BytesDone) != want {
+		t.Fatalf("bytes done = %d, want %s, the table's size on disk", c.BytesDone, want)
 	}
 }
 
