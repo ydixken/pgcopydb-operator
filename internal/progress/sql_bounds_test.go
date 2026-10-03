@@ -412,3 +412,147 @@ func TestProgressRelationLocks(t *testing.T) {
 		})
 	}
 }
+
+// openCopy starts a session that runs setup and then a COPY FROM STDIN it
+// never ends, the shape of a part in flight. It returns once the server has
+// read every row it was sent.
+func openCopy(t *testing.T, uri, app, setup, table string) {
+	t.Helper()
+	if sqlOutput(t, uri, "select current_setting('server_version_num')::int < 140000") == "t" {
+		t.Skip("pg_stat_progress_copy arrived in PostgreSQL 14; older targets probe every table")
+	}
+	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Killing psql drops the connection, which aborts the copy's transaction.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var b strings.Builder
+	b.WriteString("BEGIN;\n" + setup + "COPY " + table + " FROM STDIN;\n")
+	for i := range 20000 {
+		fmt.Fprintf(&b, "%d\t%s\n", i, strings.Repeat("x", 40))
+	}
+	if _, err = io.WriteString(stdin, b.String()); err != nil {
+		t.Fatal(err)
+	}
+	last := ""
+	waitFor(t, 10*time.Second, "the copy never settled", func() bool {
+		got := copyBytes(t, uri, table)
+		settled := got != "0" && got == last
+		last = got
+		time.Sleep(100 * time.Millisecond)
+		return settled
+	})
+}
+
+// pgcopydbWorker names a session the way pgcopydb names its copy workers.
+const pgcopydbWorker = "pgcopydb[1] copy worker"
+
+// copyBytes reads the bytes the open copy into table has processed.
+func copyBytes(t *testing.T, uri, table string) string {
+	t.Helper()
+	return sqlOutput(t, uri, "select coalesce(sum(bytes_processed), 0) from pg_stat_progress_copy where relid = '"+table+"'::regclass")
+}
+
+// sampleDatabases creates a source and a target database, each running setup,
+// and returns their URIs.
+func sampleDatabases(t *testing.T, name, setup string) (source, target string) {
+	t.Helper()
+	admin := testPGURI(t)
+	uris := make([]string, 0, 2)
+	for _, side := range []string{sourceSide, targetSide} {
+		db := fmt.Sprintf("progress_%s_%s_%d", name, side, time.Now().UnixNano())
+		sqlOutput(t, admin, "CREATE DATABASE "+db)
+		t.Cleanup(func() { sqlOutput(t, admin, "DROP DATABASE "+db+" WITH (FORCE)") })
+		uri := namedURI(t, admin, db, "progress_"+name+"_"+side)
+		sqlOutput(t, uri, setup)
+		uris = append(uris, uri)
+	}
+	return uris[0], uris[1]
+}
+
+// runSample runs the single-database sampler against the pair and fails the
+// test unless both sides answered within the SQL budget.
+func runSample(t *testing.T, source, target string) *Sample {
+	t.Helper()
+	argv := progressCommand(false, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+source, "PGCOPYDB_TARGET_PGURI="+target)
+	start := time.Now()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sample failed: %v", err)
+	}
+	s := parseSample(out)
+	if s.SourceSize == nil || s.TargetSize == nil || s.Counts == nil {
+		t.Fatalf("sample lost a side after %s: %q", time.Since(start).Round(time.Millisecond), out)
+	}
+	return s
+}
+
+// pgcopydb copies an unsplit table as BEGIN; TRUNCATE; COPY FREEZE, so the
+// table sits under an AccessExclusiveLock for the whole copy. The sample must
+// size it from the copy's own byte count rather than wait on that lock.
+func TestProgressSampleReadsAnExclusiveCopy(t *testing.T) {
+	source, target := sampleDatabases(t, "exclusive", "CREATE TABLE items (id integer, note text); INSERT INTO items VALUES (1, 'x')")
+	openCopy(t, target, pgcopydbWorker, "TRUNCATE items;\n", "items")
+	if got := sqlOutput(t, target, "select count(*) from pg_locks where relation = 'items'::regclass and mode = 'AccessExclusiveLock' and granted"); got != "1" {
+		t.Fatalf("fixture: %s granted AccessExclusiveLock on items, want 1", got)
+	}
+	before := copyBytes(t, target, "items")
+	c := runSample(t, source, target).Counts
+	after := copyBytes(t, target, "items")
+	if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public.items" {
+		t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.items while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+	}
+	if got := fmt.Sprint(c.BytesDone); got != before || got != after {
+		t.Fatalf("bytes done = %s, want the copy's bytes processed (%s before the sample, %s after)", got, before, after)
+	}
+}
+
+// A table copied in parts holds each part's rows invisible until it commits,
+// so a presence probe reads the whole uncommitted heap before it finds
+// nothing: several gigabytes ran the target past its statement timeout. The
+// sample must call the table owed without scanning it, and keep sizing it on
+// disk, because a part holds only RowExclusiveLock.
+func TestProgressSampleNeverScansAnOpenCopy(t *testing.T) {
+	source, target := sampleDatabases(t, "open_copy", `CREATE TABLE big (id integer, note text);
+CREATE TABLE small (id integer, note text);
+INSERT INTO small VALUES (1, 'x')`)
+	sqlOutput(t, source, "INSERT INTO big VALUES (1, 'x')")
+	openCopy(t, target, pgcopydbWorker, "", "big")
+	// Another client's copy is not this migration's, so small stays done.
+	openCopy(t, target, "progress_foreign_copy", "", "small")
+	scans := func() (big, small string) {
+		t.Helper()
+		row := sqlOutput(t, target, "select string_agg(seq_scan::text, ' ' order by relname) from pg_stat_user_tables where relname in ('big', 'small')")
+		big, small, _ = strings.Cut(row, " ")
+		return big, small
+	}
+	bigBefore, smallBefore := scans()
+	c := runSample(t, source, target).Counts
+	if c.TablesTotal != 2 || c.TablesDone != 1 || c.EmptyOnTarget != "public.big" {
+		t.Fatalf("tables = %d of %d owing %q, want 1 of 2 owing public.big while its copy is open", c.TablesDone, c.TablesTotal, c.EmptyOnTarget)
+	}
+	if want := sqlOutput(t, target, "select pg_table_size('big') + pg_table_size('small')"); fmt.Sprint(c.BytesDone) != want {
+		t.Fatalf("bytes done = %d, want %s, the on-disk size of both tables, uncommitted pages included", c.BytesDone, want)
+	}
+	// The sampler's backend reports its scans when it exits, and on
+	// PostgreSQL 14 they reach the view a moment later, so wait for the probe
+	// of small before reading big's counter.
+	var bigAfter string
+	waitFor(t, 5*time.Second, "the sampler's probe of small never reached pg_stat_user_tables", func() bool {
+		var smallAfter string
+		bigAfter, smallAfter = scans()
+		return smallAfter != smallBefore
+	})
+	if bigAfter != bigBefore {
+		t.Fatalf("big seq_scan went from %s to %s across the sample: the probe scanned a table whose copy is open", bigBefore, bigAfter)
+	}
+}
