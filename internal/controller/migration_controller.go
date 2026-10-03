@@ -589,16 +589,15 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	// Metrics only: sizes are observability, not state.
 	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
 	if s.Counts != nil {
-		applyCounts(m, s.Counts)
+		applyCounts(m, s.Counts, r.currentTime())
 	}
 	return s.Counts
 }
 
-// applyCounts writes the newest estimate over whatever is there: every sample
-// counts the databases afresh, and keeping an earlier reading froze the
-// dashboard tiles at the first sample of the clone. No estimate outlives
-// pgcopydb's own catalog, which overwrites the field (see recordCloneProgress).
-func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
+// applyCounts writes the newest estimate, stamped with now, over whatever is
+// there: keeping an earlier reading froze the tiles at the clone's first sample.
+// pgcopydb's own catalog overwrites the field (see recordCloneProgress).
+func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts, now time.Time) {
 	if m.Status.Progress == nil {
 		m.Status.Progress = &v1beta1.CloneProgress{}
 	}
@@ -607,6 +606,7 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts) {
 	p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
 	p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
 	p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
+	p.ObservedAt = &metav1.Time{Time: now}
 }
 
 // reapZombieWorker deletes a worker pod pgcopydb 0.18 leaves alive: the
