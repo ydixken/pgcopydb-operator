@@ -101,6 +101,7 @@ A table is one COPY stream unless pgcopydb splits it, so splitting is what adds 
 
 Where `stageScript` in `internal/progress/progress.go`, the first query of every sample, counts pgcopydb's own backends on the target to tell a running copy from its vacuum tail.
 Copy workers count by connection, the tail only while active.
+Index and vacuum workers count by connection too, as proof that the copy started: pgcopydb restores the schema before it starts any of them (`STEP 3` in its `cli_clone_follow.c`).
 
 ### A copy worker's connection outlives the statement it is running
 

@@ -91,11 +91,11 @@ func TestProgressProcessBounds(t *testing.T) {
 		resist bool
 		want   string
 	}{
-		{"success", 0, false, "stage=4 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
+		{"success", 0, false, "stage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
 		{"stage", 1, false, "stage=\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
-		{"target count", 2, false, "target_error=\nstage=4 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
-		{"source count", 3, false, "source_error=\nstage=4 0\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
-		{"term-resistant", 2, true, "target_error=\nstage=4 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"target count", 2, false, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"source count", 3, false, "source_error=\nstage=4 0 0\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
+		{"term-resistant", 2, true, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -114,7 +114,7 @@ for arg do query=$arg; done
 case "$query" in
   *quote_literal*) echo "100 2 1 3 80|('public.items',false),('public.other',true)" ;;
   *"not t.populated"*) echo "100 2 2 3 80 1|public.items" ;;
-  *pg_stat_activity*) echo '4 0' ;;
+  *pg_stat_activity*) echo '4 0 0' ;;
   *) echo '100 2 2 3 80' ;;
 esac
 `
