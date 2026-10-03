@@ -178,12 +178,14 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL`, pids[i]))).To(Equal("1"),
 		Expect(*allDB.TargetSize).To(BeNumerically(">", 0))
 		Expect(allDB.Counts).To(BeNil())
 		assertRestored()
-		copying, finalizing := poller.CloneStage(ctx, nsE2E, job.Name)
-		Expect(copying).To(BeFalse())
-		Expect(finalizing).To(BeFalse())
+		// No pgcopydb backend reaches the target through the pooler, so the stage reads unknown.
+		for _, got := range []*progress.Sample{baseline, allDB} {
+			Expect(got.Copying).To(BeFalse())
+			Expect(got.Finalizing).To(BeFalse())
+		}
 		Expect(psql(clusters[1], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity
 WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1]))).To(Equal("1"),
-			"the stage probe must complete a transaction, not silently return no sample")
+			"the target queries must complete a transaction, not silently return no sample")
 		assertRestored()
 
 		for i, side := range sides {

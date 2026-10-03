@@ -164,7 +164,7 @@ WHERE c.relkind = 'r' AND n.nspname = 'public' AND pg_table_size(c.oid) > 0`); g
 	}
 	sample := func() *RelationCounts {
 		t.Helper()
-		argv := progressCommand(false, false)
+		argv := progressCommand(false)
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
 		out, err := cmd.Output()
@@ -208,7 +208,7 @@ func TestProgressSampleCountsTargetBehindSourceAsDone(t *testing.T) {
 	}
 	sqlOutput(t, uris[0], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 35000) i")
 	sqlOutput(t, uris[1], "INSERT INTO orders SELECT i, repeat('x', 50) FROM generate_series(1, 12000) i")
-	argv := progressCommand(false, false)
+	argv := progressCommand(false)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
 	out, err := cmd.Output()
@@ -230,7 +230,7 @@ func TestProgressSampleCountsTargetBehindSourceAsDone(t *testing.T) {
 // green.
 func TestProgressSampleAllDatabases(t *testing.T) {
 	uri := namedURI(t, testPGURI(t), "", "progress_all_databases")
-	argv := progressCommand(false, true)
+	argv := progressCommand(true)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uri, "PGCOPYDB_TARGET_PGURI="+uri)
 	var stderr bytes.Buffer
@@ -255,25 +255,30 @@ func TestProgressSampleAllDatabases(t *testing.T) {
 	}
 }
 
-// CloneStage's query is the other script no live instance had parsed, and it
-// answers "neither phase" when it fails, so a malformed one degrades to an
-// unknown stage rather than erroring: the silent shape of issue #277.
-func TestCloneStageQueryOnLiveInstance(t *testing.T) {
+// The stage query answers "neither phase" when it fails, so a malformed one
+// degrades to an unknown stage rather than erroring: the silent shape of issue #277.
+func TestStageQueryOnLiveInstance(t *testing.T) {
 	// The query counts backends named pgcopydb%, so the sampler's own
 	// connection must not be one or it counts itself as the tail.
 	uri := namedURI(t, testPGURI(t), "", "progress_stage_test")
 	stage := func() string {
 		t.Helper()
-		argv := progressCommand(true, false)
+		argv := progressCommand(false)
 		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, "PGCOPYDB_SOURCE_PGURI="+uri)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("clone stage query failed: %v; psql said: %s", err, stderr.String())
+			t.Fatalf("sample script failed: %v; psql said: %s", err, stderr.String())
 		}
-		return strings.TrimSpace(string(out))
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if v, ok := strings.CutPrefix(line, "stage="); ok {
+				return v
+			}
+		}
+		t.Fatalf("sample printed no stage line:\n%s", out)
+		return ""
 	}
 	worker := exec.Command("psql", namedURI(t, uri, "", "pgcopydb copy worker 3"), "-XqtA", "-v", "ON_ERROR_STOP=1")
 	stdin, err := worker.StdinPipe()
@@ -305,7 +310,7 @@ func TestCloneStageQueryOnLiveInstance(t *testing.T) {
 	waitFor(t, 5*time.Second, "copy worker backend never appeared", func() bool {
 		return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name='pgcopydb copy worker 3'") == "1"
 	})
-	// Copy backends first, then the tail: CloneStage reads the pair with
+	// Copy backends first, then the tail: parseStage reads the pair with
 	// Sscanf and calls anything else unknown.
 	if got := stage(); got != "1 0" {
 		t.Fatalf("clone stage = %q with one copy worker connected, want \"1 0\"", got)
@@ -360,7 +365,7 @@ func TestProgressRelationLocks(t *testing.T) {
 				return sqlOutput(t, uri, "select count(*) from pg_locks l join pg_stat_activity a using(pid) where a.application_name='progress_blocker' and l.relation='items'::regclass and l.mode='AccessExclusiveLock' and l.granted") == "1"
 			})
 			for range 3 {
-				argv := progressCommand(false, false)
+				argv := progressCommand(false)
 				cmd := exec.Command(argv[0], argv[1:]...)
 				cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
 				var out bytes.Buffer
@@ -400,7 +405,7 @@ func TestProgressRelationLocks(t *testing.T) {
 				}
 			}
 			release()
-			argv := progressCommand(false, false)
+			argv := progressCommand(false)
 			cmd := exec.Command(argv[0], argv[1:]...)
 			cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uris[0], "PGCOPYDB_TARGET_PGURI="+uris[1])
 			out, err := cmd.Output()
@@ -488,7 +493,7 @@ func sampleDatabases(t *testing.T, name, setup string) (source, target string) {
 // test unless both sides answered within the SQL budget.
 func runSample(t *testing.T, source, target string) *Sample {
 	t.Helper()
-	argv := progressCommand(false, false)
+	argv := progressCommand(false)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -651,7 +656,7 @@ func TestProgressSampleWithholdsAnEchoedURI(t *testing.T) {
 		"postgresql://app:hunter%zz2@127.0.0.1:1/postgres",
 		"postgresql://app:hunter2@[::1:5432/postgres",
 	} {
-		argv := progressCommand(false, false)
+		argv := progressCommand(false)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+source, "PGCOPYDB_TARGET_PGURI="+target)

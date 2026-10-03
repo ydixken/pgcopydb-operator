@@ -19,7 +19,7 @@ Bytes come from `pg_table_size`, because its neighbours add the indexes or drop 
 Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
 This worker's backends are those named `pgcopydb...` from the sampler's own client address, so another migration's copy into the same database is not mistaken for this one's.
 Among them, a copy worker is one named a copy worker or whose last statement was a COPY, so the sample waits out an index worker's short ALTER on a copied table.
-Unlike `finalizingScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
+Unlike `stageScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
 A failed side prints an empty row and parses to no sample, never to zero.
 
 ### Storage cannot tell an empty table from a copied one
@@ -99,7 +99,7 @@ A table is one COPY stream unless pgcopydb splits it, so splitting is what adds 
 
 ## Clone-stage probe
 
-Where `finalizingScript` in `internal/progress/progress.go` counts pgcopydb's own backends on the target to tell a running copy from its vacuum tail.
+Where `stageScript` in `internal/progress/progress.go`, the first query of every sample, counts pgcopydb's own backends on the target to tell a running copy from its vacuum tail.
 Copy workers count by connection, the tail only while active.
 
 ### A copy worker's connection outlives the statement it is running
