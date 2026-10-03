@@ -200,6 +200,104 @@ var _ = Describe("Migration", func() {
 		ensureFollowPrivileges()
 	})
 
+	// Each follow scenario asserts the source is free of pgcopydb replication
+	// slots when it finishes, and the next one on the same pair relies on that
+	// clean slate for its own slot counting.
+	It("holds early Manual approval until a paused backlog catches up", SpecPriority(3), earlyManualCutover)
+
+	It("loses no committed transaction when the source is written throughout", SpecPriority(3), func() {
+		const name = "e2e-follow-load"
+		const marker = "live-load"
+
+		// CaughtUp proves the stream was consumed, not that the data matches:
+		// the lag converges the same whether the apply process changed
+		// anything or not. Data verification proves equality instead of
+		// inferring it from the lag.
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		mig.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+
+		By("writing to the source continuously, starting before the base copy")
+		w := startLiveWriter(marker)
+		// A writer that outlives this spec corrupts every later spec on this pair.
+		DeferCleanup(func() {
+			_, _ = w.stop()
+			if CurrentSpecReport().Failed() {
+				AddReportEntry("live writer after stop", w.diagnostics().String(), ReportEntryVisibilityFailureOrVerbose)
+			}
+		})
+		create(mig)
+
+		By("waiting for streaming with the source still moving")
+		waitFollowStreaming(name)
+
+		By("verifying status.replication fills in from the sentinel")
+		m := &v1beta1.Migration{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+			rep := m.Status.Replication
+			g.Expect(rep).NotTo(BeNil(), "status.replication not populated yet")
+			g.Expect(rep.WriteLSN).NotTo(BeEmpty(), "writeLSN empty")
+			g.Expect(rep.ReplayLSN).NotTo(BeEmpty(), "replayLSN empty")
+			g.Expect(rep.LagBytes).NotTo(BeNil(), "lagBytes absent")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+		// Stop before approval, not at it: cutover freezes the source, and
+		// the row compare below only means something once nothing can write
+		// after it.
+		By("stopping the writer, so the source is quiescent from the freeze onward")
+		last, err := w.stop()
+		Expect(publicationRetryProbeError(err)).NotTo(HaveOccurred(),
+			"the live writer failed; see the live writer diagnostic report for final marker availability")
+		Expect(last).To(BeNumerically(">", 100),
+			"the writer committed only %d rows, too few to exercise a migration under load", last)
+		sourceLast := psql(sourceCluster, liveMarkerQuery(marker))
+		Expect(fmt.Sprint(last)).To(Equal(sourceLast),
+			"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
+
+		By("waiting for CutoverPending (caught up, Manual gate holds)")
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+
+		approveCutover(name)
+		// A follow migration with data verification can run two whole
+		// compares, the drain's fallback and the one Verifying does, so
+		// this spec gets the follow budget, not the clone one.
+		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectSingleAttempt(m)
+		expectConditionTrue(m, v1beta1.ConditionVerified)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
+		expectCleanupSucceeded(name)
+
+		By("checking every committed row arrived, with no gaps")
+		// last is the source maximum after the psql child exits. Keep the count
+		// comparison to prove every row for this marker reached the target.
+		srcRows := psql(sourceCluster, fmt.Sprintf(
+			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))
+		Expect(psql(targetCluster, fmt.Sprintf(
+			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))).To(Equal(srcRows),
+			func() string { return writeLoadDiagnosis(marker, last, srcRows) })
+
+		firstGap := psql(targetCluster, fmt.Sprintf(
+			"SELECT coalesce(min(g), 0) FROM generate_series(1, %d) g"+
+				" WHERE NOT EXISTS (SELECT 1 FROM orders WHERE note = '%s-' || g)", last, marker))
+		Expect(firstGap).To(Equal("0"),
+			"target is missing row %s of %d: a gap proves a lost transaction, not a slow one", firstGap, last)
+
+		By("comparing all orders and sequences after cutover")
+		srcOrders := psql(sourceCluster, "SELECT count(*) FROM orders")
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
+			"target orders count differs from source after cutover")
+		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
+
+		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"replication slot leaked on the source by the write-load cutover")
+		Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin leaked on the target by the write-load cutover")
+
+		By("restoring the fixture for the specs that follow")
+		psql(sourceCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
+		psql(targetCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
+	})
+
 	// Labelled flaky, not skipped: it fails about three runs in four at
 	// E2E_SCALE=0.1 (see issue 88), which is often enough to stop every
 	// automated release, and it still passes reliably enough by hand to be
@@ -418,11 +516,6 @@ var _ = Describe("Migration", func() {
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 
-	// Each follow scenario asserts the source is free of pgcopydb replication
-	// slots when it finishes, and the next one on the same pair relies on that
-	// clean slate for its own slot counting.
-	It("holds early Manual approval until a paused backlog catches up", SpecPriority(3), earlyManualCutover)
-
 	It("runs an Automatic cutover to completion unattended", func() {
 		const name = "e2e-follow-auto"
 		// Schema verification on top: after cutover and cleanup the compare
@@ -447,99 +540,6 @@ var _ = Describe("Migration", func() {
 		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
-	})
-
-	It("loses no committed transaction when the source is written throughout", SpecPriority(3), func() {
-		const name = "e2e-follow-load"
-		const marker = "live-load"
-
-		// CaughtUp proves the stream was consumed, not that the data matches:
-		// the lag converges the same whether the apply process changed
-		// anything or not. Data verification proves equality instead of
-		// inferring it from the lag.
-		mig := newFollowMigration(name, v1beta1.CutoverManual)
-		mig.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
-
-		By("writing to the source continuously, starting before the base copy")
-		w := startLiveWriter(marker)
-		// A writer that outlives this spec corrupts every later spec on this pair.
-		DeferCleanup(func() {
-			_, _ = w.stop()
-			if CurrentSpecReport().Failed() {
-				AddReportEntry("live writer after stop", w.diagnostics().String(), ReportEntryVisibilityFailureOrVerbose)
-			}
-		})
-		create(mig)
-
-		By("waiting for streaming with the source still moving")
-		waitFollowStreaming(name)
-
-		By("verifying status.replication fills in from the sentinel")
-		m := &v1beta1.Migration{}
-		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-			rep := m.Status.Replication
-			g.Expect(rep).NotTo(BeNil(), "status.replication not populated yet")
-			g.Expect(rep.WriteLSN).NotTo(BeEmpty(), "writeLSN empty")
-			g.Expect(rep.ReplayLSN).NotTo(BeEmpty(), "replayLSN empty")
-			g.Expect(rep.LagBytes).NotTo(BeNil(), "lagBytes absent")
-		}, 3*time.Minute, 2*time.Second).Should(Succeed())
-
-		// Stop before approval, not at it: cutover freezes the source, and
-		// the row compare below only means something once nothing can write
-		// after it.
-		By("stopping the writer, so the source is quiescent from the freeze onward")
-		last, err := w.stop()
-		Expect(publicationRetryProbeError(err)).NotTo(HaveOccurred(),
-			"the live writer failed; see the live writer diagnostic report for final marker availability")
-		Expect(last).To(BeNumerically(">", 100),
-			"the writer committed only %d rows, too few to exercise a migration under load", last)
-		sourceLast := psql(sourceCluster, liveMarkerQuery(marker))
-		Expect(fmt.Sprint(last)).To(Equal(sourceLast),
-			"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
-
-		By("waiting for CutoverPending (caught up, Manual gate holds)")
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
-
-		approveCutover(name)
-		// A follow migration with data verification can run two whole
-		// compares, the drain's fallback and the one Verifying does, so
-		// this spec gets the follow budget, not the clone one.
-		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
-		expectSingleAttempt(m)
-		expectConditionTrue(m, v1beta1.ConditionVerified)
-		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
-		expectCleanupSucceeded(name)
-
-		By("checking every committed row arrived, with no gaps")
-		// last is the source maximum after the psql child exits. Keep the count
-		// comparison to prove every row for this marker reached the target.
-		srcRows := psql(sourceCluster, fmt.Sprintf(
-			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))
-		Expect(psql(targetCluster, fmt.Sprintf(
-			"SELECT count(*) FROM orders WHERE note LIKE '%s-%%'", marker))).To(Equal(srcRows),
-			func() string { return writeLoadDiagnosis(marker, last, srcRows) })
-
-		firstGap := psql(targetCluster, fmt.Sprintf(
-			"SELECT coalesce(min(g), 0) FROM generate_series(1, %d) g"+
-				" WHERE NOT EXISTS (SELECT 1 FROM orders WHERE note = '%s-' || g)", last, marker))
-		Expect(firstGap).To(Equal("0"),
-			"target is missing row %s of %d: a gap proves a lost transaction, not a slow one", firstGap, last)
-
-		By("comparing all orders and sequences after cutover")
-		srcOrders := psql(sourceCluster, "SELECT count(*) FROM orders")
-		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
-			"target orders count differs from source after cutover")
-		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
-
-		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
-			"replication slot leaked on the source by the write-load cutover")
-		Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
-			"pgcopydb replication origin leaked on the target by the write-load cutover")
-
-		By("restoring the fixture for the specs that follow")
-		psql(sourceCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
-		psql(targetCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
 	})
 
 	It("drops the replication slot when a streaming Migration is deleted", func() {

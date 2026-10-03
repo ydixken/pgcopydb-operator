@@ -282,7 +282,8 @@ The progress-sampler bounds spec is not `Serial`: its locks stall only the backg
 A container or spec that runs for two minutes or more SHOULD carry a `SpecPriority`, so that it starts early and not last.
 Ginkgo starts the higher value first, so the tiers order the longest specs first: `SpecPriority(3)` for about 230 seconds and up, `SpecPriority(2)` for 180 to 229 seconds, and `SpecPriority(1)` for 120 to 179 seconds.
 An Ordered container carries its priority on the container.
-Ginkgo orders top-level containers by the highest priority of any spec inside them, and keeps file order within a container, so a spec only moves earlier when its top-level container does.
+Ginkgo orders top-level containers by the highest priority of any spec inside them, and keeps file order within a container.
+Place the longest specs first in a container that is not Ordered: the decorator moves the container, and the position in the file orders the specs inside it.
 
 ### Cluster coverage
 
