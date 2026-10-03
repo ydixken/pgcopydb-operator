@@ -224,8 +224,10 @@ func TestProgressProbePublicationOwnership(t *testing.T) {
 	if got := runSQL(probeURI, progressLockSnapshotSQL(progressProbeTable)); got != "0 0 0 0 0 0 0" {
 		t.Fatal("unowned progress lock snapshot was not empty")
 	}
+	// psql before 15 prints only the last statement's result of a -c string, so
+	// the snapshot must come last. The session ends without COMMIT, which rolls back.
 	lockedSnapshot := "SET application_name='e2e_progress_blocker'; BEGIN; LOCK " +
-		progressProbeTable + " IN ACCESS EXCLUSIVE MODE; " + progressLockSnapshotSQL(progressProbeTable) + "; COMMIT"
+		progressProbeTable + " IN ACCESS EXCLUSIVE MODE; " + progressLockSnapshotSQL(progressProbeTable)
 	if got := runSQL(probeURI, lockedSnapshot); got != "1 1 0 0 0 0 0" {
 		t.Fatal("owned progress lock snapshot did not identify the granted lock")
 	}
