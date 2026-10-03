@@ -571,6 +571,15 @@ INSERT INTO small VALUES (1, 'x')`)
 	openCopy(t, target, pgcopydbWorker, "", "big")
 	// Another client's copy is not this migration's, so small stays done.
 	openCopy(t, target, "progress_foreign_copy", "", "small")
+	// Nor is a copy named like pgcopydb's from another address: dblink's
+	// socket session has none, and its COPY waits for rows dblink never sends.
+	holdOpen(t, target, "progress_socket_copy", `CREATE EXTENSION dblink;
+SELECT dblink_connect('f', format('dbname=%s application_name=%L', current_database(), 'pgcopydb[2] copy worker'));
+SELECT dblink_send_query('f', 'COPY small FROM STDIN');
+`)
+	waitFor(t, 5*time.Second, "the socket session's copy never opened", func() bool {
+		return sqlOutput(t, target, "select count(*) from pg_stat_progress_copy p join pg_stat_activity a using (pid) where p.relid = 'small'::regclass and a.client_addr is null") == "1"
+	})
 	scans := func() (big, small string) {
 		t.Helper()
 		row := sqlOutput(t, target, "select string_agg(seq_scan::text, ' ' order by relname) from pg_stat_user_tables where relname in ('big', 'small')")
