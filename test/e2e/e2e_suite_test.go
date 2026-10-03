@@ -1369,14 +1369,29 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		if staleSource {
 			By("recreating the source cluster: kept fixtures carry a different seed profile or scale")
 		}
-		prepareSourceCluster(staleSource)
-		prepareTargetCluster()
+		applySourceCluster(staleSource)
+		targetSize := applyTargetCluster()
+		// The target is only needed after seeding, so its start-up overlaps the seed.
+		// Gomega failures become errors here: the goroutine has no Ginkgo node of its own.
+		var wg sync.WaitGroup
+		var targetErr error
+		wg.Go(func() { targetErr = InterceptGomegaFailure(func() { waitTargetCluster(targetSize) }) })
+		sourceErr := InterceptGomegaFailure(func() {
+			waitSourceCluster()
+			By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
+			runSeedJob()
+		})
+		wg.Wait()
+		for _, err := range []error{sourceErr, targetErr} {
+			if err != nil {
+				Fail(err.Error())
+			}
+		}
 	} else {
 		prepareExternalDatabases()
+		By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
+		runSeedJob()
 	}
-
-	By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
-	runSeedJob()
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
 	resetTargetObjects()
@@ -1860,18 +1875,40 @@ func waitFixtureStorageReady(name, size string) {
 }
 
 func prepareSourceCluster(staleSeed bool) {
+	applySourceCluster(staleSeed)
+	waitSourceCluster()
+}
+
+// applySourceCluster returns once the manifest is applied, so a pair can start
+// both clusters before waiting on either. A stale seed means delete and recreate.
+func applySourceCluster(staleSeed bool) {
+	GinkgoHelper()
 	if staleSeed {
-		recreateSourceCluster()
-		return
+		deleteCluster(sourceCluster)
+		waitSourceVolumesDeleted()
 	}
 	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
+}
+
+func waitSourceCluster() {
+	GinkgoHelper()
 	waitClusterReady(sourceCluster)
 	waitFixtureStorageReady(sourceCluster, srcStorageSize)
 }
 
 func prepareTargetCluster() {
+	waitTargetCluster(applyTargetCluster())
+}
+
+func applyTargetCluster() string {
+	GinkgoHelper()
 	size := effectiveTargetStorageSize()
 	applyCluster(cnpgCluster(targetCluster, size, pgTarget))
+	return size
+}
+
+func waitTargetCluster(size string) {
+	GinkgoHelper()
 	waitClusterReady(targetCluster)
 	waitFixtureStorageReady(targetCluster, size)
 }
@@ -1986,19 +2023,6 @@ func seedMarkerStale() bool {
 		"SELECT EXISTS (SELECT 1 FROM e2e_seed WHERE profile = '%s' AND scale = '%s'::numeric)",
 		seedProfile(), scaleArg()))
 	return match != "t"
-}
-
-// recreateSourceCluster deletes the source CNPG cluster (volumes included)
-// and brings a fresh one up. Used when kept fixtures carry a stale seed
-// profile or scale; a major, instance-count or storage-class mismatch on a
-// kept cluster is handled earlier by ensureClusterShape, for the target too.
-func recreateSourceCluster() {
-	GinkgoHelper()
-	deleteCluster(sourceCluster)
-	waitSourceVolumesDeleted()
-	applyCluster(cnpgCluster(sourceCluster, srcStorageSize, pgSource))
-	waitClusterReady(sourceCluster)
-	waitFixtureStorageReady(sourceCluster, srcStorageSize)
 }
 
 func waitSourceVolumesDeleted() {
