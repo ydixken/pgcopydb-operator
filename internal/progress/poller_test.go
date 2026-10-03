@@ -691,3 +691,17 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
 	}
 }
+
+// The e2e lock specs (progress_pooling_test.go, progress_bounds_test.go) find the sampler's
+// backend in pg_stat_activity by SamplerFragment; each side's query must carry it.
+func TestSampleScript_BothQueriesCarrySamplerFragment(t *testing.T) {
+	target, source, ok := strings.Cut(sampleScript, `progress_sql "$PGCOPYDB_SOURCE_PGURI"`)
+	if !ok || !strings.Contains(target, `progress_sql "$PGCOPYDB_TARGET_PGURI"`) {
+		t.Fatal("sampleScript no longer asks the target and then the source")
+	}
+	for side, query := range map[string]string{targetSide: target, sourceSide: source} {
+		if !strings.Contains(query, SamplerFragment) {
+			t.Errorf("the %s query lacks %q, so the e2e specs cannot find its backend", side, SamplerFragment)
+		}
+	}
+}
