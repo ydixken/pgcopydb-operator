@@ -1378,7 +1378,7 @@
       "id": 34,
       "type": "stat",
       "title": "Bytes (Source)",
-      "description": "This tile shows the size of the table data on the source, with TOAST and without indexes. The target is often a little smaller, as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
+      "description": "This tile shows the size of the table data on the source, with TOAST and without indexes. Bytes (Target) is often a little lower, as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1446,7 +1446,7 @@
       "id": 35,
       "type": "stat",
       "title": "Bytes (Target)",
-      "description": "This tile shows the size of the table data on the target, measured as for Bytes (Source). After the copy, it can show the bytes that pgcopydb sent. The value is often a little lower than Bytes (Source), as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
+      "description": "This tile shows the size of the table data on the target, or by default after the copy the bytes that pgcopydb sent. It is often a little lower than Bytes (Source) but can be higher, as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1518,7 +1518,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "This tile shows the result of pgcopydb compare schema for tables, columns, indexes, constraints and sequence values. It shows Deactivated when spec.verification.schema is false, which is the default.",
+      "description": "This tile shows the result of pgcopydb compare schema for tables, columns, indexes, constraints and sequence values. It shows Deactivated when spec.verification.schema is false (the default) and no result exists.",
       "gridPos": {
         "h": 3,
         "w": 6,
@@ -1608,7 +1608,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "This tile shows whether the row counts and checksums of each table match, from pgcopydb compare data. It shows Deactivated when spec.verification.data is false, which is the default.",
+      "description": "This tile shows whether the row counts and checksums of each table match, from pgcopydb compare data. It shows Deactivated when spec.verification.data is false (the default) and no result exists.",
       "gridPos": {
         "h": 3,
         "w": 6,
@@ -1698,7 +1698,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "This table shows when the dashboard first saw each phase in the time range. A phase shorter than one scrape does not appear here, but its condition changes appear in Condition Timeline.",
+      "description": "This table shows when the dashboard first saw each phase in the time range. A phase shorter than one scrape does not appear here, but its condition appears in Condition Timeline.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -1787,7 +1787,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "This table shows when each condition last changed status. It also shows a condition that held for less than one scrape, and it keeps the rows of a deleted Migration.",
+      "description": "This table shows when each condition last changed status, and it keeps the rows of a deleted Migration. A phase shorter than one scrape still shows here through its condition.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -2023,7 +2023,7 @@
           "sort": "desc"
         }
       },
-      "description": "This panel shows how fast the target database grows (Target Growth) and how fast Bytes (Target) grows (Clone Copy). Clone Copy can jump up or down at the end, when pgcopydb's own count replaces the estimate.",
+      "description": "This panel shows how fast the target database grows (Target Growth, never below 0) and how fast Bytes (Target) grows (Clone Copy). Clone Copy can jump up or down at the end, when pgcopydb's own count replaces the estimate.",
       "interval": "10s"
     },
     {
@@ -2349,7 +2349,7 @@
           "valueSize": 32
         }
       },
-      "description": "This tile shows the bytes that the target must still replay to reach the cutover endpos. A value of 0 does not prove the drain, only the CutoverCompleted condition does.",
+      "description": "This tile shows the bytes that the target must still replay to reach the cutover endpos. Only the CutoverCompleted condition, not a value of 0, proves that the drain is complete.",
       "interval": "10s"
     }
   ]
