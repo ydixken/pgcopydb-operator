@@ -177,16 +177,16 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL`, pids[i]))).To(Equal("1"),
 		Expect(*allDB.SourceSize).To(BeNumerically(">", 0))
 		Expect(*allDB.TargetSize).To(BeNumerically(">", 0))
 		Expect(allDB.Counts).To(BeNil())
+		// Read before assertRestored: its identity query replaces the sampler's COMMIT as the last statement.
+		Expect(psql(clusters[1], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity
+WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1]))).To(Equal("1"),
+			"the target queries must complete a transaction, not silently return no sample")
 		assertRestored()
 		// No pgcopydb backend reaches the target through the pooler, so the stage reads unknown.
 		for _, got := range []*progress.Sample{baseline, allDB} {
 			Expect(got.Copying).To(BeFalse())
 			Expect(got.Finalizing).To(BeFalse())
 		}
-		Expect(psql(clusters[1], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity
-WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1]))).To(Equal("1"),
-			"the target queries must complete a transaction, not silently return no sample")
-		assertRestored()
 
 		for i, side := range sides {
 			By("observing and cancelling a sampler blocked on the " + string(side) + " fixture lock")
