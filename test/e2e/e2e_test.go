@@ -1249,7 +1249,7 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.Migration
 		}
 		g.Expect(want).To(ContainElement(m.Status.Phase),
 			"migration %s/%s at phase %q, attempts %d", ns, name, m.Status.Phase, m.Status.Attempts)
-	}, timeout, 2*time.Second).Should(Succeed())
+	}, timeout, time.Second).Should(Succeed())
 	return m
 }
 

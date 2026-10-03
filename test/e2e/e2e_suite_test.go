@@ -3161,7 +3161,7 @@ func waitFailed(name, reason string) *v1beta1.Migration {
 		c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		g.Expect(c).NotTo(BeNil(), "Failed condition missing on %s", name)
 		g.Expect(c.Reason).To(Equal(reason), "Failed reason is %q, message: %s", c.Reason, c.Message)
-	}, migrationTimeout, 2*time.Second).Should(Succeed())
+	}, migrationTimeout, time.Second).Should(Succeed())
 	return m
 }
 
@@ -3199,7 +3199,7 @@ func purgeMigrations(timeout time.Duration) {
 			g.Expect(k8sClient.List(ctx, list, client.InNamespace(ns))).To(Succeed())
 			g.Expect(list.Items).To(BeEmpty(), "Migrations still terminating in %s", ns)
 		}
-	}, timeout, 2*time.Second).Should(Succeed())
+	}, timeout, time.Second).Should(Succeed())
 }
 
 func deleteMigration(name string) {
@@ -3238,7 +3238,7 @@ func deleteMigration(name string) {
 			StopTrying(fmt.Sprintf("refusing to delete replacement feature Migration %s", name)).Now()
 		}
 		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Migration %s still terminating", name)
-	}, 5*time.Minute, 2*time.Second).Should(Succeed())
+	}, 5*time.Minute, time.Second).Should(Succeed())
 }
 
 var transientExecErrorPatterns = []*regexp.Regexp{
