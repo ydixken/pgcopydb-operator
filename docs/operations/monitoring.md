@@ -95,6 +95,11 @@ The reason is the server's error or the failed connection's host and port.
 Any other psql message is withheld, because libpq echoes a connection URI it cannot parse, password included.
 A failed sample never completes or fails a migration.
 
+`status.progress.observedAt` is when a sample last wrote the relation counts into status.
+A sample that loses either side writes nothing, so the timestamp stops with the counts and its age is how long they have stood still.
+Read it next to the log: an `observedAt` minutes old after a `progress sample lost a side` line, with no `progress sample side answers again` since, means status is showing old figures, and the worker log tells whether the copy itself still moves.
+It is absent before the first counted sample and in all-databases mode, and pgcopydb's own count drops it when it replaces the estimate.
+
 `pgcopydb_migration_phase` is an instantaneous gauge; after the first `Pending` bootstrap, the phase summarizes the conditions.
 A phase shorter than the scrape interval is never sampled.
 A transition timestamp survives that, because the value stands for as long as the condition holds.

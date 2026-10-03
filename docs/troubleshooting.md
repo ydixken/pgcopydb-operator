@@ -29,6 +29,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [The worker pod runs and logs, but the phase never moves](#the-worker-pod-runs-but-the-phase-never-moves) | Clone progress |
 | [`Finalizing` runs long with the target size flat](#finalizing-takes-a-long-time) | Clone progress |
 | [`Streaming` and `CaughtUp` stay unset during the clone](#streaming-and-caughtup-stay-unset-during-the-clone) | Clone progress |
+| [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
 | [Phase `Failed`, reason `CloneIncomplete`](#phase-failed-with-reason-cloneincomplete) | Clone progress |
 | [The `<name>-verify` pod runs for a long time](#the-verify-pod-runs-for-a-long-time) | Cutover and verification |
@@ -300,6 +301,7 @@ The sample probed it for a row and read every uncommitted page of the open copy,
 Either ran the target query past its 5-second timeout, and status kept its last figures, without a log line, until a copy into the table committed.
 Later versions skip the tables a copy worker holds locked on any target, and skip every open copy on a PostgreSQL 14 or later target.
 They log `progress sample lost a side` with the server's error when a sample side fails.
+`status.progress.observedAt` shows how old the figures are: it stops while samples are lost and moves again with the next one that answers.
 On an older target the probe still reads an open part, and that log line shows the statement timeout.
 
 Upgrade the operator, and on a target before PostgreSQL 14 also shrink the parts.
