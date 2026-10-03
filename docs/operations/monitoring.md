@@ -247,7 +247,7 @@ The bytes that the copy sent are not a size on disk, so they can be lower or hig
 
 In one of our test runs, they were 1.19 times **Bytes (Source)**.
 
-While the worker runs, both figures are sizes on disk.
+While the worker runs, both figures are sizes on disk, except for a table under a copy worker's exclusive lock (see the tile notes above).
 The copy writes every row again into new pages, so the target is often a little smaller than the source.
 Updates and deletes leave dead rows and free space in the source tables, and the copy does not carry that space.
 In our test, a plain `VACUUM` did not make the source table smaller.
