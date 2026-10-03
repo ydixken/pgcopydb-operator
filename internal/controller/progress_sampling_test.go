@@ -53,7 +53,8 @@ type fakeProgress struct {
 	sizeCalls    int
 	allDatabases bool
 
-	copying, finalizing bool
+	// started alone stands for index or vacuum workers with no copy worker left.
+	copying, finalizing, started bool
 }
 
 // GateScript stands in for the poller's version gate. Specs assert on this
@@ -82,7 +83,7 @@ func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool)
 		return nil, nil
 	}
 	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations,
-		Copying: f.copying, Finalizing: f.finalizing}, nil
+		Copying: f.copying, Finalizing: f.finalizing, CopyStarted: f.copying || f.started}, nil
 }
 
 // counts returns the size samples seen so far.

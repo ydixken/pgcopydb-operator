@@ -65,7 +65,9 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **once sampled**: the sizes are live samples from the worker pod, so they appear during an attempt.
   They keep their last value after the pod ends.
-  The target size starts once a sample has seen this attempt's copy workers, because before that the target still holds whatever an earlier run left there.
+  The target size starts once a sample sees this attempt's copy, index or vacuum workers, because pgcopydb starts them only after it has cleaned the target.
+  Before that the target still holds whatever was there before the copy.
+  A retry resumes into the same target, so its target size keeps the previous attempt's last value until a sample sees the retry's workers.
 - **once sampled** for single-database counters too, but they have two sources and the second is more exact.
   While the copy runs, the psql sample that reads the sizes also counts relations on both databases.
   It weighs tables that hold rows on the target, and their table bytes, against the tables the target was given and their size on the source.
@@ -219,7 +221,7 @@ The tiles read as follows:
 
 - **Phase** is the state the operator is in.
   **Current Work** is the activity inside that state: `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
-  Vacuum And Index Builds appears only after the operator has seen the copy workers start and then stop.
+  Vacuum And Index Builds appears only after a sample has seen this attempt's copy, index or vacuum workers, and only once no copy worker is left.
 - **Elapsed** is how long the run has taken, and it stops when the run completes.
   **Completed At** reads Still Running until the run ends.
 - **Percent** is target size over source size, clamped at 100.
@@ -336,6 +338,6 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
   It can step up or down when a table copied whole commits, and once when pgcopydb's own count replaces the estimate.
 - A custom stock 0.18 runner with psql and GNU `timeout` still feeds these series, because the sample needs no pgcopydb command.
   That runner gives up the exact count that replaces the estimate at the end.
-- `Finalizing` needs the phase probe to have seen this attempt's copy workers at least once.
-  The probe runs with every sample, and each pass, about every 10 seconds, reads the latest one, so only a copy that ends within one pass keeps `Cloning` through its tail.
+- `Finalizing` needs the phase probe to have seen this attempt's copy, index or vacuum workers at least once.
+  The probe runs with every sample, and the sampler remembers a sighting for the pass that reads the latest sample, so only a copy whose workers all come and go between two samples keeps `Cloning` through its tail.
   The stalled-clone alert still needs an hour of flat target size, which a copy that short does not produce.

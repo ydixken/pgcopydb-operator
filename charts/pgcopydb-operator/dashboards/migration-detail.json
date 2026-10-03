@@ -1951,7 +1951,7 @@
           "sort": "desc"
         }
       },
-      "description": "This panel shows the size of the source and target databases, with indexes and catalogs. The values stop at the last sample when the worker pod ends. The operator samples them every 5 seconds until the copy is done, then every 10. The target line starts once this attempt's copy is seen, so it never shows what an earlier run left on the target.",
+      "description": "This panel shows the size of the source and target databases, with indexes and catalogs. The values stop at the last sample when the worker pod ends. The operator samples them every 5 seconds until the copy is done, then every 10. The target line starts once a sample sees this attempt's copy, index or vacuum workers, so it does not show what the target held before the copy. A retry keeps the previous attempt's last value until then.",
       "interval": "5s"
     },
     {

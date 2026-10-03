@@ -37,6 +37,9 @@ type sampled struct {
 	sample *progress.Sample
 	err    error
 	at     time.Time
+	// copySeen: this or an earlier sample of the run saw the copy start, which a
+	// superseded sample would otherwise take with it.
+	copySeen bool
 }
 
 // samplerHint is what status knows about the copy that a sample alone cannot tell,
@@ -67,6 +70,7 @@ type samplerRun struct {
 	cancel       context.CancelFunc
 	hint         samplerHint
 	last         sampled
+	copySeen     bool
 }
 
 // NewSampler builds a sampler; it samples nothing until the manager starts it.
@@ -112,7 +116,36 @@ func (s *Sampler) Observe(key types.NamespacedName, job string, allDatabases boo
 		go s.loop(ctx, key, run)
 	}
 	run.hint = hint
-	return run.last, true
+	got := run.last
+	got.copySeen = run.copySeen
+	return got, true
+}
+
+// SampleNow takes a sample for the pass at once and keeps it as the run's own, so a
+// later Observe never hands the pass an older one.
+func (s *Sampler) SampleNow(ctx context.Context, key types.NamespacedName, job string, allDatabases bool) sampled {
+	at := time.Now()
+	smp, err := s.progress.Sample(ctx, key.Namespace, job, allDatabases)
+	got := sampled{sample: smp, err: err, at: at, copySeen: smp != nil && smp.CopyStarted}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run := s.runs[key]; run != nil && run.job == job {
+		got = s.keepLocked(key, run, got)
+	}
+	return got
+}
+
+// keepLocked latches the copy and stores got with its sizes, unless the run already
+// holds a newer sample: status and the gauges never step back.
+func (s *Sampler) keepLocked(key types.NamespacedName, run *samplerRun, got sampled) sampled {
+	run.copySeen = run.copySeen || got.copySeen
+	got.copySeen = run.copySeen
+	if got.at.Before(run.last.at) {
+		return got
+	}
+	run.last = got
+	recordSizes(key.Namespace, key.Name, got.sample, run.hint.copyStarted || run.copySeen)
+	return got
 }
 
 // Stop ends the Migration's run. Once it returns the run writes no gauge, so a
@@ -143,9 +176,8 @@ func (s *Sampler) loop(ctx context.Context, key types.NamespacedName, run *sampl
 			s.mu.Unlock()
 			return
 		}
-		run.last = sampled{sample: smp, err: err, at: at}
+		s.keepLocked(key, run, sampled{sample: smp, err: err, at: at, copySeen: smp != nil && smp.CopyStarted})
 		hint := run.hint
-		recordSizes(key.Namespace, key.Name, smp, hint.copyStarted)
 		s.mu.Unlock()
 
 		period := s.copyPeriod
@@ -176,7 +208,7 @@ func recordSizes(namespace, name string, s *progress.Sample, copyStarted bool) {
 		return
 	}
 	target := s.TargetSize
-	if !copyStarted && !s.Copying {
+	if !copyStarted {
 		target = nil
 	}
 	metrics.RecordDatabaseSizes(namespace, name, s.SourceSize, target)
