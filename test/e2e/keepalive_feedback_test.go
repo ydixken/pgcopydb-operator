@@ -156,7 +156,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 		unchangedData(g)
 		g.Expect(query(g, sourceCluster, feedbackSQL)).To(Equal("t"),
 			"replay, flush, and confirmed_flush must cross the captured filtered-WAL boundary")
-	}, lagConvergeTimeout, 5*time.Second).Should(Succeed())
+	}, lagConvergeTimeout, time.Second).Should(Succeed())
 	m = waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
 	expectConditionTrue(m, v1beta1.ConditionCaughtUp)
 	unchangedData(Default)

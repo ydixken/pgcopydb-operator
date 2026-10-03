@@ -1435,7 +1435,7 @@ func waitFollowStreaming(name string) {
 		g.Expect(*rep.LagBytes).To(BeNumerically("<=", want),
 			"%s: lag stuck at %d bytes, threshold %d (maxCatchupLag); CaughtUp cannot go True and no cutover will start",
 			name, *rep.LagBytes, want)
-	}, lagConvergeTimeout, 5*time.Second).Should(Succeed())
+	}, lagConvergeTimeout, time.Second).Should(Succeed())
 }
 
 // expectSingleAttempt asserts the Migration finished on its first worker
