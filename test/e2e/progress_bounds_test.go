@@ -419,7 +419,7 @@ for p in /proc/[0-9]*; do
   case "$kind:$comm" in
     sampler:psql)
       args=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null) || continue
-      case "$args" in *'with t as ('*|*string_agg*) ;; *) continue ;; esac ;;
+      case "$args" in *'` + progress.SamplerMarker + `'*) ;; *) continue ;; esac ;;
     worker:pgcopydb*) [ "$p" = /proc/1 ] || continue ;;
     *) continue ;;
   esac
