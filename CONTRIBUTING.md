@@ -164,6 +164,8 @@ The suite has two tiers, default and stress, and a run reads these environment v
   It is part of the seed marker, so changing it rebuilds a kept fixture.
 - `E2E_EXTRA_JOBS` (`4`) sets the concurrent psql sessions that seed the extra tables.
   Each session derives the same deterministic layout and builds its assigned tables.
+  Tables go largest first to the least-loaded session, so a few large tables do not queue behind each other on one session.
+  Each table loads in transactions of about 128MB, and a retried seed Job resumes a table after its highest committed id.
 - `E2E_STRESS` (unset) selects the stress tier when `true`: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets.
   Use `task e2e:stress`.
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.

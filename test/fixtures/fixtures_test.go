@@ -499,39 +499,45 @@ func TestExtraFixtureRejectsImpossibleShapes(t *testing.T) {
 }
 
 func TestExtraFixtureAllocatesTheExactTotalBeforeSharding(t *testing.T) {
-	body := read(t, "seed_extra.sql")
-	steps := []string{
+	inOrder(t, read(t, "seed_extra.sql"),
 		"remaining_mb := total_mb - n_tables",
 		"cumulative_w := cumulative_w + weights[i]",
 		"next_allocated_mb := round(cumulative_w / total_w * remaining_mb)::bigint",
 		"mb := 1 + next_allocated_mb - allocated_mb",
 		"allocated_mb := next_allocated_mb",
-		"CONTINUE WHEN (i % shards) <> shard",
-	}
-	previous := -1
+		"END LOOP;",
+		"IF allocated_mb + n_tables <> total_mb THEN",
+		"ORDER BY t.size_mb DESC, t.n LOOP",
+		"CONTINUE WHEN session_of[i] <> shard",
+	)
+}
+
+// A single INSERT per table held a 100GB table in one transaction, and a
+// retried Job started it over from id 1.
+func TestExtraFixtureCommitsInBatchesAndResumes(t *testing.T) {
+	inOrder(t, read(t, "seed_extra.sql"),
+		"CONTINUE WHEN session_of[i] <> shard",
+		"SELECT coalesce(max(id), 0) + 1 FROM %I",
+		"WHILE first_id <= n_rows LOOP",
+		"INSERT INTO %I",
+		"FROM generate_series(%s, %s) g",
+		"first_id, least(first_id + batch_rows - 1, n_rows)",
+		"COMMIT;",
+		"first_id := first_id + batch_rows;",
+	)
+}
+
+// inOrder fails unless every step appears in body, each after the previous.
+func inOrder(t *testing.T, body string, steps ...string) {
+	t.Helper()
+	from := 0
 	for _, step := range steps {
-		at := strings.Index(body, step)
+		at := strings.Index(body[from:], step)
 		if at < 0 {
-			t.Errorf("seed_extra.sql does not contain allocation step %q", step)
-			continue
+			t.Errorf("no %q after the preceding step", step)
+			return
 		}
-		if at < previous {
-			t.Errorf("seed_extra.sql performs %q before the preceding allocation step", step)
-		}
-		previous = at
-	}
-	allocationLoop := strings.LastIndex(body, "FOR i IN 1..n_tables LOOP")
-	if allocationLoop < 0 {
-		t.Fatal("seed_extra.sql has no allocation loop")
-	}
-	loopEnd := strings.Index(body[allocationLoop:], "END LOOP;")
-	if loopEnd < 0 {
-		t.Fatal("seed_extra.sql leaves the allocation loop unterminated")
-	}
-	loopEnd += allocationLoop
-	invariant := strings.Index(body, "IF allocated_mb + n_tables <> total_mb THEN")
-	if invariant < loopEnd {
-		t.Error("seed_extra.sql does not verify the exact total after the allocation loop")
+		from += at + len(step)
 	}
 }
 

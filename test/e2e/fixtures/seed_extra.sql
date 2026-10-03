@@ -20,6 +20,10 @@ DECLARE
     -- rather than TOAST round trips: the point here is the table count and
     -- size spread, which seed_documents already covers for TOAST.
     rows_per_mb constant int := 1750;
+    -- About 128MB per transaction, like seed_documents: a 100GB table never
+    -- sits uncommitted and a retry loses one batch at most. The procedure
+    -- e2e_seed_batches would need this template's % escaped twice.
+    batch_rows constant bigint := 128 * rows_per_mb;
     mean_mb   numeric;
     sigma     numeric;
     weights   numeric[] := '{}';
@@ -33,6 +37,13 @@ DECLARE
     z         numeric;
     w         numeric;
     mb        bigint;
+    sizes     bigint[] := '{}';
+    session_of int[];
+    loads     bigint[];
+    bins      int;
+    bin       int;
+    n_rows    bigint;
+    first_id  bigint;
     i         int;
 BEGIN
     IF n_tables IS NULL OR n_tables = 0 THEN
@@ -85,28 +96,57 @@ BEGIN
         next_allocated_mb := round(cumulative_w / total_w * remaining_mb)::bigint;
         mb := 1 + next_allocated_mb - allocated_mb;
         allocated_mb := next_allocated_mb;
-        -- Every session computes every size, so sharding cannot change the
-        -- deterministic layout.
-        CONTINUE WHEN (i % shards) <> shard;
-        EXECUTE format(
-            'CREATE TABLE IF NOT EXISTS %I (id bigint PRIMARY KEY, k int, tag text, payload text)',
-            format('x_%s', lpad(i::text, 3, '0')));
-        -- Content and width both vary per row. A constant payload would give
-        -- every row the same bytes and the same length, which no real table
-        -- has, and would let the target's page layout be unrealistically
-        -- uniform. The width swings between roughly 300 and 1100 bytes, so
-        -- rows_per_mb above is an average rather than an exact figure.
-        EXECUTE format($f$
-            INSERT INTO %I (id, k, tag, payload)
-            SELECT g, g %% 1000, 'x' || (g %% 17),
-                   repeat(md5(g::text || ':%s'), 9 + (g %% 25))
-            FROM generate_series(1, %s) g
-            ON CONFLICT (id) DO NOTHING
-        $f$, format('x_%s', lpad(i::text, 3, '0')), i, mb * rows_per_mb);
-        RAISE NOTICE 'x_% -> % MB', lpad(i::text, 3, '0'), mb;
+        sizes := sizes || mb;
     END LOOP;
     IF allocated_mb + n_tables <> total_mb THEN
         RAISE EXCEPTION 'extra table allocation was % MB, expected % MB',
             allocated_mb + n_tables, total_mb;
     END IF;
+
+    -- Largest table first onto the least-loaded session, ties to the lower
+    -- number, so giants spread out and every session derives the same plan.
+    -- ponytail: O(tables x sessions), fine for the hundreds x_NNN names imply.
+    bins := least(shards, n_tables);
+    loads := array_fill(0::bigint, ARRAY[bins]);
+    session_of := array_fill(0, ARRAY[n_tables]);
+    FOR i IN SELECT t.n FROM unnest(sizes) WITH ORDINALITY AS t(size_mb, n)
+             ORDER BY t.size_mb DESC, t.n LOOP
+        bin := 1;
+        FOR b IN 2..bins LOOP
+            IF loads[b] < loads[bin] THEN
+                bin := b;
+            END IF;
+        END LOOP;
+        loads[bin] := loads[bin] + sizes[i];
+        session_of[i] := bin - 1;
+    END LOOP;
+
+    FOR i IN 1..n_tables LOOP
+        CONTINUE WHEN session_of[i] <> shard;
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I (id bigint PRIMARY KEY, k int, tag text, payload text)',
+            format('x_%s', lpad(i::text, 3, '0')));
+        n_rows := sizes[i] * rows_per_mb;
+        -- Batches commit in id order, so the highest id present is where a
+        -- retried Job resumes instead of starting the table over.
+        EXECUTE format('SELECT coalesce(max(id), 0) + 1 FROM %I',
+            format('x_%s', lpad(i::text, 3, '0'))) INTO first_id;
+        WHILE first_id <= n_rows LOOP
+            -- Content and width both vary per row. A constant payload would
+            -- give every row the same bytes and length, which no real table
+            -- has. The width swings between roughly 300 and 1100 bytes, so
+            -- rows_per_mb above is an average rather than an exact figure.
+            EXECUTE format($f$
+                INSERT INTO %I (id, k, tag, payload)
+                SELECT g, g %% 1000, 'x' || (g %% 17),
+                       repeat(md5(g::text || ':%s'), 9 + (g %% 25))
+                FROM generate_series(%s, %s) g
+                ON CONFLICT (id) DO NOTHING
+            $f$, format('x_%s', lpad(i::text, 3, '0')), i,
+                first_id, least(first_id + batch_rows - 1, n_rows));
+            COMMIT;
+            first_id := first_id + batch_rows;
+        END LOOP;
+        RAISE NOTICE 'x_% -> % MB', lpad(i::text, 3, '0'), sizes[i];
+    END LOOP;
 END $$;
