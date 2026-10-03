@@ -118,8 +118,10 @@ var _ = Describe("Fixture placement", func() {
 // The clone chain runs in order on one pair: the re-clone needs the target the
 // fresh clone populated, and the filter spec cleans up after the re-clone.
 // Every other Migration scenario stands alone in the container below, so a
-// failure here skips three specs, not the whole set.
-var _ = Describe("Migration", Ordered, func() {
+// failure here skips three specs, not the whole set. In a parallel run the
+// longest units carry a SpecPriority so they start first and none of them
+// starts last; the chain is the longest of all.
+var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 	// Ginkgo randomizes top-level container order per seed, so another
 	// container may have populated the target or may still be dropping its
 	// replication state; restore the clean slate the specs assume.

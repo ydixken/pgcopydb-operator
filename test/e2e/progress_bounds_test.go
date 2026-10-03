@@ -38,7 +38,9 @@ import (
 )
 
 // The follow worker keeps real observation traffic running between held locks.
-var _ = Describe("Progress sampler bounds", func() {
+// Serial: the blocked samplers hold the operator's single reconcile worker on
+// purpose, which would stall every other process's Migrations meanwhile.
+var _ = Describe("Progress sampler bounds", Serial, func() {
 	It("releases blocked source and target samplers across repeated polls and recovers", func() {
 		const name = "e2e-progress-bounds"
 		const table = progressProbeTable

@@ -223,8 +223,8 @@ const (
 // emptyOK lists the panels that are legitimately empty for a healthy,
 // completed migration; every other panel must return data.
 var emptyOK = map[panelKey]bool{
-	// The sweep runs once every spec migration is Completed, so the sum over
-	// the in-flight phases has no series left to add up.
+	// In a one-process run the sweep runs once every spec migration is
+	// Completed, so the in-flight sum has nothing to add up.
 	{uid: uidFleet, title: "Active", ref: "A"}: true,
 	// A Failed series would have failed its own spec first; none is the point.
 	{uid: uidFleet, title: "Failed", ref: "A"}: true,
@@ -271,7 +271,7 @@ func panelFailure(title, expr string, mayBeEmpty bool) string {
 // series after cutover, every dashboard panel query, and series removal on
 // deletion. They need a Prometheus that scrapes the suite's operator install
 // (the chart's ServiceMonitor, which BeforeSuite enables).
-var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
+var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(1), func() {
 	BeforeAll(func() {
 		urlEnv := os.Getenv("E2E_PROMETHEUS_URL")
 		pfEnv := os.Getenv("E2E_PROMETHEUS_PORT_FORWARD")

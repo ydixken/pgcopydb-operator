@@ -58,7 +58,7 @@ current_setting('statement_timeout'), current_user, current_database()
 FROM pg_stat_activity WHERE pid=pg_backend_pid();`
 )
 
-var _ = Describe("Progress sampler transaction pooling", func() {
+var _ = Describe("Progress sampler transaction pooling", SpecPriority(1), func() {
 	It("restores pooled backends after sampling and cancellation, then permits long COPY and indexes", func() {
 		requireCNPGFixtures()
 		sharedClusters := []string{sourceCluster, targetCluster}
