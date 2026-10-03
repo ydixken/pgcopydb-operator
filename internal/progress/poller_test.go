@@ -692,16 +692,33 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 	}
 }
 
-// The e2e lock specs (progress_pooling_test.go, progress_bounds_test.go) find the sampler's
-// backend in pg_stat_activity by SamplerFragment; each side's query must carry it.
-func TestSampleScript_BothQueriesCarrySamplerFragment(t *testing.T) {
-	target, source, ok := strings.Cut(sampleScript, `progress_sql "$PGCOPYDB_SOURCE_PGURI"`)
-	if !ok || !strings.Contains(target, `progress_sql "$PGCOPYDB_TARGET_PGURI"`) {
-		t.Fatal("sampleScript no longer asks the target and then the source")
+// The e2e lock specs find the sampler's backend by SamplerMarker as a LIKE prefix, and
+// pg_stat_activity keeps only a query's first 1023 bytes by default.
+func TestSampleScript_BothQueriesLeadWithSamplerMarker(t *testing.T) {
+	if strings.ContainsAny(SamplerMarker, `%_\'`) {
+		t.Fatalf("%q is not a literal LIKE prefix", SamplerMarker)
 	}
-	for side, query := range map[string]string{targetSide: target, sourceSide: source} {
-		if !strings.Contains(query, SamplerFragment) {
-			t.Errorf("the %s query lacks %q, so the e2e specs cannot find its backend", side, SamplerFragment)
+	if !strings.HasPrefix(sampleScript, sampleSQL) {
+		t.Fatal("sampleScript no longer opens with sampleSQL, so the stub below cannot replace it")
+	}
+	// The stub records each query as the shell expands it and fails the side.
+	stub := `progress_sql() { printf '%s\036' "$2" >&2; return 1; }
+why() { :; }
+err=` + filepath.Join(t.TempDir(), "err") + "\n"
+	cmd := exec.Command("sh", "-c", stub+strings.TrimPrefix(sampleScript, sampleSQL))
+	var sent bytes.Buffer
+	cmd.Stderr = &sent
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("sampleScript failed: %v\n%s", err, sent.String())
+	}
+	queries := strings.Split(strings.TrimSuffix(sent.String(), "\036"), "\036")
+	if len(queries) != 2 {
+		t.Fatalf("sampleScript sent %d queries, want the target's and the source's", len(queries))
+	}
+	for i, query := range queries {
+		if seen := query[:min(len(query), 1023)]; !strings.HasPrefix(seen, SamplerMarker+" ") {
+			t.Errorf("the %s query does not open with %q, so the e2e specs cannot find its backend:\n%s",
+				[]string{targetSide, sourceSide}[i], SamplerMarker, seen)
 		}
 	}
 }

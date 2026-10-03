@@ -376,8 +376,9 @@ func TestProgressRelationLocks(t *testing.T) {
 						<-done
 					}
 				}()
+				// The e2e specs' predicate, under the server's own track_activity_query_size.
 				waitFor(t, 3*time.Second, "sampler never waited on the held relation lock", func() bool {
-					return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid() and wait_event_type='Lock' and query like 'with %'") == "1"
+					return sqlOutput(t, uri, "select count(*) from pg_stat_activity a where a.application_name=current_setting('application_name') and a.pid<>pg_backend_pid() and a.wait_event_type='Lock' and a.query like '"+SamplerMarker+"%' and exists (select 1 from pg_stat_activity b where b.application_name='progress_blocker' and b.pid=any(pg_blocking_pids(a.pid)))") == "1"
 				})
 				select {
 				case err := <-done:

@@ -291,8 +291,8 @@ func TestProgressLockSnapshotProjection(t *testing.T) {
 	}
 }
 
-// progressSamplerMatch selects the sampler's backend on either side; the CTE name differs per side.
-const progressSamplerMatch = "a.query LIKE 'with %' AND a.query LIKE '%" + progress.SamplerFragment + "%'"
+// progressSamplerMatch selects the sampler's backend on either side by the marker each query opens with.
+const progressSamplerMatch = "a.query LIKE '" + progress.SamplerMarker + "%'"
 
 func holdProgressLock(side, cluster, table string) func() {
 	GinkgoHelper()

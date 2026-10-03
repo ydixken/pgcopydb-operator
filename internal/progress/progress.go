@@ -101,9 +101,9 @@ esac
 `
 }
 
-// SamplerFragment is in both side queries; the e2e specs find the sampler's backend by it,
-// so a CTE rename cannot hide it from them.
-const SamplerFragment = "pg_table_size(c.oid)"
+// SamplerMarker opens both side queries, the prefix the e2e specs find the sampler by:
+// pg_stat_activity keeps only the first track_activity_query_size bytes (1kB by default).
+const SamplerMarker = "/* pgcopydb-operator progress sample */"
 
 // sampleScript prints six source figures, five target figures and the tables still owed;
 // a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
@@ -122,7 +122,7 @@ row="pg_database_size(current_database()) || ' ' ||
 copies="select pid, relid, bytes_processed from pg_stat_progress_copy
     where command = ''COPY FROM'' and relid <> 0 and datname = current_database()"
 none="select 0 as pid, 0::oid as relid, 0::bigint as bytes_processed where false"
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with mine as (select pid, application_name ilike '%copy worker%' or query ilike 'copy %' as copier
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "` + SamplerMarker + ` with mine as (select pid, application_name ilike '%copy worker%' or query ilike 'copy %' as copier
     from pg_stat_activity where application_name like 'pgcopydb%' and client_addr = inet_client_addr()),
   copying as (select x.relid, sum(x.bytes_processed) as bytes
     from xmltable('/table/row' passing query_to_xml(case when to_regclass('pg_catalog.pg_stat_progress_copy') is null then '$none' else '$copies' end, false, false, '')
@@ -142,7 +142,7 @@ case $t in
   *) landed="select null::text, false where false" ;;
 esac
 t=${t%%|*}
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "` + SamplerMarker + ` with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
     join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
   select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
     from t where not t.populated and $populated)") ||
