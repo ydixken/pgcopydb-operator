@@ -294,14 +294,16 @@ Wait for the worker to print `All step are now done`.
 
 `status.progress` and the target size gauge stand still for minutes while the worker log shows a large table copying.
 The copy itself is unaffected.
-An operator that logs `progress sample lost a side` names the cause there, with psql's error.
 
-An operator without that log line has the older sampler, which waited on the table being copied.
-It probed the table for a row and read every uncommitted page of the open copy, or it waited on the exclusive lock of a table copied whole.
-Either ran the target query past its 5-second timeout, and status kept its last figures until a copy into the table committed.
+Operator v0.16.0 and earlier read the table being copied.
+The sample probed it for a row and read every uncommitted page of the open copy, or it waited on the exclusive lock of a table copied whole.
+Either ran the target query past its 5-second timeout, and status kept its last figures, without a log line, until a copy into the table committed.
+Later versions skip the tables the worker holds locked on any target, and skip every open copy on a PostgreSQL 14 or later target.
+They log `progress sample lost a side` with psql's error when a sample side fails.
+On an older target the probe still reads an open part, and that log line shows the statement timeout.
 
-Upgrade the operator.
-Until then, raise `spec.clone.splitMaxParts` or lower `spec.clone.splitTablesLargerThan`, so each copy is a smaller part that commits sooner.
+Upgrade the operator, and on a target before PostgreSQL 14 also shrink the parts.
+Raise `spec.clone.splitMaxParts` or lower `spec.clone.splitTablesLargerThan`, so each copy is a smaller part that commits sooner.
 See [Same-table concurrency](operations/performance.md#same-table-concurrency).
 
 ### `CloneCompleted` is False with reason `TablesEmptyOnTarget`
