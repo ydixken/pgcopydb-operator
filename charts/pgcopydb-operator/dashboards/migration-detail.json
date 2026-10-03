@@ -1708,7 +1708,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1000 * min by (phase) (min_over_time((timestamp(pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))[$__range:10s]))",
+          "expr": "1000 * min by (phase) (min_over_time((timestamp(pgcopydb_migration_phase{namespace=\"$namespace\", name=\"$name\"} == 1))[$__range:5s]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1951,8 +1951,8 @@
           "sort": "desc"
         }
       },
-      "description": "This panel shows the size of the source and target databases, with indexes and catalogs. The values stop at the last sample when the worker pod ends.",
-      "interval": "10s"
+      "description": "This panel shows the size of the source and target databases, with indexes and catalogs. The values stop at the last sample when the worker pod ends. The operator samples them every 5 seconds until the copy is done, then every 10. The target line starts once this attempt's copy is seen, so it never shows what an earlier run left on the target.",
+      "interval": "5s"
     },
     {
       "id": 10,
@@ -1971,7 +1971,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[20s]), 0)",
+          "expr": "clamp_min(deriv(pgcopydb_migration_target_database_size_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval]), 0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1980,12 +1980,13 @@
         },
         {
           "refId": "B",
-          "expr": "deriv(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[20s])",
+          "expr": "deriv(pgcopydb_migration_clone_copied_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "Clone Copy"
+          "legendFormat": "Clone Copy",
+          "interval": "10s"
         }
       ],
       "fieldConfig": {
@@ -2023,8 +2024,8 @@
           "sort": "desc"
         }
       },
-      "description": "This panel shows how fast the target database grows (Target Growth, never below 0) and how fast Bytes (Target) grows (Clone Copy). Clone Copy can jump up or down at the end, when pgcopydb's own count replaces the estimate.",
-      "interval": "10s"
+      "description": "This panel shows how fast the target database grows (Target Growth, never below 0) and how fast Bytes (Target) grows (Clone Copy). Clone Copy can jump up or down at the end, when pgcopydb's own count replaces the estimate. Clone Copy changes once per reconcile pass, every 10 seconds, so it uses a wider window than Target Growth.",
+      "interval": "5s"
     },
     {
       "id": 13,
@@ -2226,7 +2227,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_source_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[20s])",
+          "expr": "deriv(pgcopydb_migration_source_lsn_bytes{namespace=\"$namespace\", name=\"$name\"}[$__rate_interval])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

@@ -460,7 +460,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(1)
 		}
 		vars := map[string]string{"namespace": nsE2E, "name": metricsMigration, "job": metricsJob()}
 		// A subquery over the run, as Grafana's range query reads it. The 5s
-		// step is below the chart's 10s scrape, so it cannot step over a sample.
+		// step matches the chart's scrape, so it cannot step over a sample.
 		m := &v1beta1.Migration{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}, m)).To(Succeed())
 		Expect(m.Status.StartedAt).NotTo(BeNil(), "status.startedAt absent")
