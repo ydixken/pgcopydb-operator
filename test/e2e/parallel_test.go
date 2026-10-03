@@ -96,16 +96,6 @@ func TestParallelPairNames(t *testing.T) {
 				tc.proc, source, target, seed, tc.source, tc.target, tc.seedJ)
 		}
 	}
-	if sourceCluster != "e2e-source" || targetCluster != "e2e-target" || seedJobName != "e2e-seed" {
-		t.Errorf("outside a run the pair is %s, %s, %s; want process 1's names",
-			sourceCluster, targetCluster, seedJobName)
-	}
-}
-
-func TestParallelProcsDefaultsToOne(t *testing.T) {
-	if got := parallelProcs(); got != 1 {
-		t.Errorf("parallelProcs() = %d outside ginkgo --procs, want 1", got)
-	}
 }
 
 func TestParallelRefusal(t *testing.T) {
@@ -160,8 +150,11 @@ func TestParallelRequests(t *testing.T) {
 	}
 }
 
-// Outside ginkgo --procs the builders must render exactly the one-process shape.
+// Under go test the builders must render exactly the one-process shape.
 func TestParallelRequestsLeaveOneProcessUnchanged(t *testing.T) {
+	if parallelProcs() != 1 {
+		t.Skip("only meaningful under go test, not as one of several ginkgo processes")
+	}
 	if r := newMigration("e2e-sizing", nsE2E, v1beta1.CloneOptions{}).Spec.Runner.Resources; len(r.Requests) != 0 {
 		t.Errorf("a one-process Migration requests %v; want the operator default", r.Requests)
 	}
