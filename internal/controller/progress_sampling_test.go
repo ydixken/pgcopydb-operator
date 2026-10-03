@@ -54,20 +54,12 @@ type fakeProgress struct {
 	allDatabases bool
 
 	copying, finalizing bool
-	stageCalls          int
 }
 
 // GateScript stands in for the poller's version gate. Specs assert on this
 // text reaching the verify Job, not on a real allowlist.
 func (f *fakeProgress) GateScript() string {
 	return "pgcopydb list progress --json --dir /work/pgcopydb\n"
-}
-
-func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.stageCalls++
-	return f.copying, f.finalizing
 }
 
 // setRelations changes what the next Sample answers, so a spec can prove a
@@ -89,7 +81,8 @@ func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool)
 	if f.nilSample {
 		return nil, nil
 	}
-	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
+	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations,
+		Copying: f.copying, Finalizing: f.finalizing}, nil
 }
 
 // counts returns the size samples seen so far.

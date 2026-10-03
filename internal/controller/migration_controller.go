@@ -102,10 +102,9 @@ type LogReader interface {
 // injects a fake). Best effort throughout: a nil sample keeps the previous
 // value and an error never fails the pass.
 type ProgressOps interface {
-	// Sample reads both databases in one exec. Safe on a pass with a live
-	// worker, which is what makes the progress fields move during a copy.
+	// Sample reads both databases and the clone stage in one exec. Safe with a
+	// live worker, which is what makes the progress fields move during a copy.
 	Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*progress.Sample, error)
-	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
 	// carries: the allowlist lives here, so both callers share one gate.
 	GateScript() string
@@ -442,33 +441,12 @@ func (r *MigrationReconciler) observeRunningJob(
 		timings = append(timings, name, r.currentTime().Sub(started))
 	}
 
-	// The tail (index builds, a vacuum on the largest table) stops the target
-	// growing, so a size estimate reads as finished; reporting it apart tells a
-	// slow tail from a stall. Finalizing needs the copy seen first, or a sample
-	// catching every worker between statements reports the tail mid-copy.
-	started := r.currentTime()
-	if r.Progress != nil {
-		copying, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name)
-		switch {
-		case copying:
-			m.Status.Phase = v1beta1.PhaseCloning
-			// A refused marker outranks the probe: its latch is the only
-			// memory of the marker once that scrolls out of the log tail.
-			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
-				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
-					"base copy running, copy workers connected to the target")
-			}
-		case finalizing && copySeen(m):
-			m.Status.Phase = v1beta1.PhaseFinalizing
-		}
-		record("clone_stage", started)
-	}
 	follow := followEnabled(m)
 
 	// One log fetch per pass serves both the clone-done and the zombie check.
 	// Unreadable logs degrade to an empty tail; the next poll retries.
 	var logTail []byte
-	started = r.currentTime()
+	started := r.currentTime()
 	if follow && r.Logs != nil {
 		raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
 		if err != nil {
@@ -588,10 +566,29 @@ func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Mig
 	}
 	// Metrics only: sizes are observability, not state.
 	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
+	r.applyStage(m, s)
 	if s.Counts != nil {
 		applyCounts(m, s.Counts, r.currentTime())
 	}
 	return s.Counts
+}
+
+// applyStage reports the tail (index builds, a vacuum on the largest table) apart
+// from the copy, which tells a slow tail from a stall. Finalizing needs the copy seen
+// first, or a sample catching every worker between statements reports the tail mid-copy.
+func (r *MigrationReconciler) applyStage(m *v1beta1.Migration, s *progress.Sample) {
+	switch {
+	case s.Copying:
+		m.Status.Phase = v1beta1.PhaseCloning
+		// A refused marker outranks the probe: its latch is the only
+		// memory of the marker once that scrolls out of the log tail.
+		if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
+			r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
+				"base copy running, copy workers connected to the target")
+		}
+	case s.Finalizing && copySeen(m):
+		m.Status.Phase = v1beta1.PhaseFinalizing
+	}
 }
 
 // applyCounts writes the newest estimate, stamped with now, over whatever is
