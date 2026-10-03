@@ -2153,6 +2153,12 @@ spec:
                   indexesTotal:
                     format: int64
                     type: integer
+                  observedAt:
+                    description: |-
+                      observedAt is when a live sample last wrote these figures. A failed sample
+                      leaves it and them unchanged; pgcopydb's own counts carry none.
+                    format: date-time
+                    type: string
                   tablesDone:
                     format: int64
                     type: integer
@@ -4351,6 +4357,12 @@ spec:
                   indexesTotal:
                     format: int64
                     type: integer
+                  observedAt:
+                    description: |-
+                      observedAt is when a live sample last wrote these figures. A failed sample
+                      leaves it and them unchanged; pgcopydb's own counts carry none.
+                    format: date-time
+                    type: string
                   tablesDone:
                     format: int64
                     type: integer
