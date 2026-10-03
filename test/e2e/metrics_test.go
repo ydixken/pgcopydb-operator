@@ -204,8 +204,8 @@ func e2eSeries(metric string) string {
 	return fmt.Sprintf("%s{job=%q, namespace=%q, name=%q}", metric, metricsJob(), nsE2E, metricsMigration)
 }
 
-// panelKey identifies a dashboard panel for the emptyOK allowlist.
-type panelKey struct{ uid, title string }
+// panelKey identifies one panel target for the emptyOK allowlist.
+type panelKey struct{ uid, title, ref string }
 
 // The chart's dashboard uids, as the JSON files declare them.
 const (
@@ -214,31 +214,50 @@ const (
 	uidOperator = "pgcopydb-operator"
 )
 
+// Detail panels with one emptyOK entry per target.
+const (
+	panelLSNPositions = "LSN Positions"
+	panelLagSplit     = "Replication Lag Split"
+)
+
 // emptyOK lists the panels that are legitimately empty for a healthy,
 // completed migration; every other panel must return data.
 var emptyOK = map[panelKey]bool{
 	// The sweep runs once every spec migration is Completed, so the sum over
 	// the in-flight phases has no series left to add up.
-	{uid: uidFleet, title: "Active"}: true,
+	{uid: uidFleet, title: "Active", ref: "A"}: true,
 	// A Failed series would have failed its own spec first; none is the point.
-	{uid: uidFleet, title: "Failed"}: true,
+	{uid: uidFleet, title: "Failed", ref: "A"}: true,
 	// The suite never leaves a migration suspended.
-	{uid: uidFleet, title: "Suspended"}: true,
+	{uid: uidFleet, title: "Suspended", ref: "A"}: true,
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
-	{uid: uidOperator, title: "Leader Elected"}: true,
+	{uid: uidOperator, title: "Leader Elected", ref: "A"}: true,
+	// The lag and LSN series leave with the stream, so a Completed migration
+	// has none at the sweep's instant. The streaming spec checks them live.
+	{uid: uidFleet, title: "Total Lag", ref: "A"}:                    true,
+	{uid: uidFleet, title: "All Migrations", ref: "E"}:               true,
+	{uid: uidFleet, title: "Replication Lag By Migration", ref: "A"}: true,
+	{uid: uidDetail, title: panelLSNPositions, ref: "A"}:             true,
+	{uid: uidDetail, title: panelLSNPositions, ref: "B"}:             true,
+	{uid: uidDetail, title: panelLSNPositions, ref: "C"}:             true,
+	{uid: uidDetail, title: panelLSNPositions, ref: "D"}:             true,
+	{uid: uidDetail, title: panelLagSplit, ref: "A"}:                 true,
+	{uid: uidDetail, title: panelLagSplit, ref: "B"}:                 true,
+	{uid: uidDetail, title: panelLagSplit, ref: "C"}:                 true,
+	{uid: uidDetail, title: "WAL Generation", ref: "A"}:              true,
 }
 
 // panelFailure replays one panel target and describes what is wrong with the
 // answer, or returns "" when the panel passes.
-func panelFailure(d *dashboards.Dashboard, title, expr string) string {
+func panelFailure(d *dashboards.Dashboard, title, ref, expr string) string {
 	code, pr, err := promQuery(expr)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("%q: %v", title, err)
 	case code != http.StatusOK || pr.Status != "success":
 		return fmt.Sprintf("%q: HTTP %d, status %q: %s (%s)", title, code, pr.Status, promErr(pr), expr)
-	case len(pr.Data.Result) == 0 && !emptyOK[panelKey{uid: d.UID, title: title}]:
+	case len(pr.Data.Result) == 0 && !emptyOK[panelKey{uid: d.UID, title: title, ref: ref}]:
 		return fmt.Sprintf("%q: empty result (%s)", title, expr)
 	}
 	return ""
@@ -414,19 +433,22 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		loaded, err := dashboards.Load(filepath.Join(chartPath, "dashboards"))
 		Expect(err).NotTo(HaveOccurred())
 
-		// emptyOK is keyed by panel title, so renaming a panel orphans its
-		// entry and the panel starts failing the sweep for the wrong reason.
-		// Catch that here, where the message names the stale key, rather than
-		// three minutes later as an unexplained empty result.
+		// emptyOK is keyed by panel title and refId, so renaming either
+		// orphans its entry and the target starts failing the sweep for the
+		// wrong reason. Catch that here, where the message names the stale
+		// key, rather than three minutes later as an unexplained empty result.
 		titles := map[panelKey]bool{}
 		for _, d := range loaded {
 			for _, p := range d.AllPanels() {
-				titles[panelKey{uid: d.UID, title: p.Title}] = true
+				for _, t := range p.Targets {
+					titles[panelKey{uid: d.UID, title: p.Title, ref: t.RefID}] = true
+				}
 			}
 		}
 		for k := range emptyOK {
 			Expect(titles).To(HaveKey(k),
-				"emptyOK names %q on dashboard %q, which has no such panel; a rename left it stale", k.title, k.uid)
+				"emptyOK names %q target %s on dashboard %q, which has no such target; a rename left it stale",
+				k.title, k.ref, k.uid)
 		}
 		vars := map[string]string{"namespace": nsE2E, "name": metricsMigration, "job": metricsJob()}
 		// One Eventually around the whole sweep: each pass reports every
@@ -441,7 +463,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 						if t.Expr == "" {
 							continue
 						}
-						if msg := panelFailure(d, p.Title, dashboards.Substitute(t.Expr, vars)); msg != "" {
+						if msg := panelFailure(d, p.Title, t.RefID, dashboards.Substitute(t.Expr, vars)); msg != "" {
 							failures = append(failures, file+" "+msg)
 						}
 					}

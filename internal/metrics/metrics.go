@@ -250,11 +250,24 @@ func recordConditionTransitions(m *v1beta1.Migration) {
 	}
 }
 
+// samplingPhases are the phases whose worker refreshes status.replication.
+// Outside them its figures are frozen, so they must not read as current.
+var samplingPhases = map[v1beta1.MigrationPhase]bool{
+	v1beta1.PhaseCloning: true, v1beta1.PhaseFinalizing: true, v1beta1.PhaseStreaming: true,
+	v1beta1.PhaseCutoverPending: true, v1beta1.PhaseCuttingOver: true,
+}
+
 // recordReplication maps status.replication onto the lag and LSN gauges; each
 // gauge is set only on a successful parse, absent-over-fake-zero throughout.
 func recordReplication(m *v1beta1.Migration) {
 	r := m.Status.Replication
-	if r == nil {
+	if r == nil || !samplingPhases[m.Status.Phase] {
+		l := prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name}
+		for _, g := range []*prometheus.GaugeVec{
+			replicationLagBytes, sourceLSNBytes, writeLSNBytes, replayLSNBytes, endposLSNBytes,
+		} {
+			g.DeletePartialMatch(l)
+		}
 		return
 	}
 	if r.LagBytes != nil {

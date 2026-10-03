@@ -290,17 +290,23 @@ func TestTimelinesSurviveAnOperatorRestart(t *testing.T) {
 		"pgcopydb_migration_condition_transition_timestamp_seconds": "max by (type, status)",
 	}
 	seen := map[string]bool{}
-	for _, expr := range load(t)["migration-detail.json"].Exprs() {
-		for metric, agg := range want {
-			// Only the timelines aggregate; the stat tiles read the same
-			// metrics at a point in time and reduce in Grafana instead.
-			if !slices.Contains(Metrics(expr), metric) || !strings.Contains(expr, "_over_time(") {
-				continue
-			}
-			seen[metric] = true
-			if !strings.Contains(expr, agg) {
-				t.Errorf("timeline over %s does not aggregate with %q, so it doubles its rows per operator pod:\n  %s",
-					metric, agg, expr)
+	for _, p := range load(t)["migration-detail.json"].AllPanels() {
+		// Only the timelines aggregate; the stat tiles read the same
+		// metrics at a point in time and reduce in Grafana instead.
+		if p.Type == statPanel {
+			continue
+		}
+		for _, tg := range p.Targets {
+			expr := tg.Expr
+			for metric, agg := range want {
+				if !slices.Contains(Metrics(expr), metric) || !strings.Contains(expr, "_over_time(") {
+					continue
+				}
+				seen[metric] = true
+				if !strings.Contains(expr, agg) {
+					t.Errorf("timeline over %s does not aggregate with %q, so it doubles its rows per operator pod:\n  %s",
+						metric, agg, expr)
+				}
 			}
 		}
 	}
