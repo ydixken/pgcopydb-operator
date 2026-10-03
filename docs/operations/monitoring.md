@@ -70,6 +70,9 @@ The "Exists" column is the contract for when a series is present:
   Both need an allowlisted runner version (see [Troubleshooting](../troubleshooting.md)).
 - **follow, streaming**: a plain clone never produces these lag and log sequence number (LSN) gauges.
   In follow mode they appear as soon as the replication slot answers, which is during the base copy and before the `Streaming` phase.
+  The worker samples them from `Cloning` through `CuttingOver`.
+  In every other phase the operator removes them, the endpos gauge included, because the last sample is old and does not show the final drain.
+  Prometheus keeps their history, so the graphs still show the run.
 - **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
   A flip retires the old `{type,status}` pair and stamps a new one, so the endpoint never carries more than one series per condition type.
   The retired pair keeps its samples in Prometheus, so query the timeline as `last_over_time(...[$__range])` rather than at the range end.
@@ -226,6 +229,8 @@ The tiles read as follows:
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
   It reads No Endpos until a cutover sets one, and 0 B once source-visible replay feedback reaches it, which is what the screenshot shows.
   Only `CutoverCompleted`, after target-origin or content verification, proves the drain.
+  After `CuttingOver`, the LSN series are gone, so the tile reads their last values in the time range.
+  These values come from the last worker sample, which can be before the end of the drain.
 
 Every tile is scoped to one Migration, so an empty result reads N/A.
 Some tiles report a fact about the run rather than its current state: Attempts, Elapsed, Completed At, the two verification tiles, and Cutover Drain.
@@ -281,10 +286,14 @@ Thresholds and windows are defaults; the promtool unit tests under `test/alerts/
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
 | `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
-| `PgcopydbMigrationCutoverStalled` | critical | An endpos is set and not reached for 15m |
+| `PgcopydbMigrationCutoverStalled` | critical | The endpos is not reached for 15m in `CuttingOver` |
 
 `PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing` and leaves the target size flat while nothing is stalled.
 `PgcopydbMigrationReplicationLagHigh` skips the base copy, where the lag gauge already exists, a large lag is normal, and nothing can act on it.
+`PgcopydbMigrationCutoverStalled` matches `CuttingOver` alone and stops when `CutoverCompleted` is `True`.
+After the worker exits, the replay gauge keeps its last sample, which can be below the endpos.
+The phase stays `CuttingOver` through the drain verification, the ownership handover, and the cleanup.
+Without these two limits, a complete drain can fire the alert.
 
 No alert covers slot retention.
 While a follow migration is suspended, failed, or streaming, its replication slot keeps WAL on the **source**, and the operator's metrics cannot see the source's disk.
@@ -299,7 +308,8 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
 
 - The gauges are process state in the manager, so an operator restart clears them and the next reconcile of each Migration restores them.
   A scrape gap around a restart is normal.
-- A finished migration has no worker pod, so the two size series do not come back after an operator restart, though its other series do.
+- A finished migration has no worker pod, so the two size series do not come back after an operator restart.
+  Its other series come back, except the lag and LSN series, which a finished migration does not have.
 - `rate()` over the size gauges misreads a database that shrinks as a counter reset.
   The dashboard panels use `deriv()` instead, and the stalled-clone alert uses `delta()`.
 - The tables, indexes, and clone-byte series step once when pgcopydb's own count replaces the psql estimate.
