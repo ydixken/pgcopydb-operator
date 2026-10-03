@@ -101,26 +101,8 @@ esac
 `
 }
 
-// sampleScript asks each database for one row of sizes and counts, the source
-// row ending in a sixth figure: the tables that hold rows on the source and
-// none on the target. Their names follow on an owed= line. The source is asked
-// about the target's tables rather than its own, because the target holds the
-// in-scope schema and an unscoped source counts toward a denominator the copy
-// can never reach. Presence is tested, not a row count, because storage cannot
-// tell an empty table from a copied one and a live source runs ahead of the
-// copy's snapshot, so a count compared against it never settles in follow mode
-// (see docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table this worker is copying into owes the copy and is never probed, since
-// the probe would read its whole uncommitted heap (see
-// docs/research/measurements.md#a-presence-probe-read-a-whole-uncommitted-copy).
-// Targets before PostgreSQL 14 have no pg_stat_progress_copy and probe every
-// table they do not see locked. Bytes come from pg_table_size, whose neighbours
-// add the indexes or drop the TOAST (see docs/research/measurements.md#progress-sampling),
-// but it would wait on a table a copy worker holds AccessExclusiveLock on: a
-// whole-table copy, or every partition under a truncated parent. Such a table
-// counts its own copy's bytes, or none. Copy workers match as finalizingScript
-// counts them, so an index worker's short ALTER on a copied table is waited
-// out. A failed side prints empty and parses to no sample, never to zero.
+// sampleScript prints six source figures, five target figures and the tables still owed;
+// a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
 const sampleScript = sampleSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 present="case when t.copying then false else $populated end"
 tables="from pg_class c

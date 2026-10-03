@@ -8,6 +8,18 @@ Each section is referenced from the code by anchor.
 Where `internal/progress/progress.go` decides whether a table still owes the copy.
 The counts are read exactly, with a one-row select per table, because no size function answers the question.
 
+`sampleScript` asks each database for one row of sizes and counts.
+The source row ends in a sixth figure, the tables that hold rows on the source and none on the target, and their names follow on an `owed=` line.
+The source is asked about the target's tables rather than its own, because the target holds the in-scope schema, and an unscoped source would count toward a total the copy can never reach.
+The sample tests presence rather than a row count, because storage cannot tell an empty table from a copied one, and a live source runs ahead of the copy's snapshot, so a count compared against it never settles in follow mode (see [An exact row count held the follow gate against a live source](#an-exact-row-count-held-the-follow-gate-against-a-live-source)).
+A table this worker is copying into owes the copy and is never probed, because the probe would read its whole uncommitted heap (see [A presence probe read a whole uncommitted copy](#a-presence-probe-read-a-whole-uncommitted-copy)).
+Targets before PostgreSQL 14 have no `pg_stat_progress_copy`, so they probe every table they do not see locked.
+Bytes come from `pg_table_size`, because its neighbours add the indexes or drop the TOAST (see the last two sections below).
+`pg_table_size` would wait on a table a copy worker holds under AccessExclusiveLock: a whole-table copy, or every partition under a truncated parent.
+Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
+Copy workers match the way `finalizingScript` counts them, so the sample waits out an index worker's short ALTER on a copied table.
+A failed side prints an empty row and parses to no sample, never to zero.
+
 ### Storage cannot tell an empty table from a copied one
 
 A table's TOAST relation occupies a page from the moment the schema is restored.
