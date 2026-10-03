@@ -192,9 +192,9 @@ WHERE c.relkind = 'r' AND n.nspname = 'public' AND pg_table_size(c.oid) > 0`); g
 // until the stream catches up: a sampler that compared the counts held the
 // follow gate shut with the base copy long finished (see
 // docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table copied in parts reads the same way, and belongs to the checks that
-// read content: pgcopydb's catalog after a plain clone, the drain
-// verification after a cutover.
+// A table copied in parts reads the same way once no part of it is in flight,
+// and belongs to the checks that read content: pgcopydb's catalog after a
+// plain clone, the drain verification after a cutover.
 func TestProgressSampleCountsTargetBehindSourceAsDone(t *testing.T) {
 	admin := testPGURI(t)
 	uris := make([]string, 0, 2)
@@ -317,6 +317,7 @@ func TestCloneStageQueryOnLiveInstance(t *testing.T) {
 }
 
 // A held relation lock must cancel the sampled side without losing its peer.
+// The lock here belongs to no copy, so the target waits on it as before.
 func TestProgressRelationLocks(t *testing.T) {
 	admin := testPGURI(t)
 	const source, target = "source", "target"
@@ -376,7 +377,7 @@ func TestProgressRelationLocks(t *testing.T) {
 					}
 				}()
 				waitFor(t, 3*time.Second, "sampler never waited on the held relation lock", func() bool {
-					return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid() and wait_event_type='Lock' and query like 'with t as (%'") == "1"
+					return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name=current_setting('application_name') and pid<>pg_backend_pid() and wait_event_type='Lock' and query like 'with %'") == "1"
 				})
 				select {
 				case err := <-done:

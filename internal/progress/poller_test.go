@@ -429,16 +429,17 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 // catches up, and a count compared against it held the follow gate shut with
 // the base copy long finished (see
 // docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table copied in parts reads done here, and belongs to the checks that
-// read content: pgcopydb's catalog after a plain clone, the drain verification
-// after a cutover. The flag travels in the target's scope list, which lets the
+// A table copied in parts reads done whenever no part of it is in flight, and
+// belongs to the checks that read content: pgcopydb's catalog after a plain
+// clone, the drain verification after a cutover. The flag travels in the target's scope list, which lets the
 // source count and name exactly the tables the copy still owes; a table empty
 // on both sides owes nothing.
 func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 	for _, want := range []string{
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
-		"(select count(*) from t where $populated)",
-		"|| ',' || ($populated)::text || ')'",                                           // the target's row carries the flag per table
+		`present="case when t.copying then false else $populated end"`, // a table in flight owes the copy unprobed
+		"(select count(*) from t where $present)",
+		"|| ',' || ($present)::text || ')'",                                             // the target's row carries the flag per table
 		"join ($landed) as landed(name, populated)",                                     // and the source joins it
 		"from t where not t.populated and $populated)",                                  // owed: rows on the source, none on the target
 		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)", // named, for the condition message

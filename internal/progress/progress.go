@@ -104,10 +104,17 @@ esac
 // tell an empty table from a copied one and a live source runs ahead of the
 // copy's snapshot, so a count compared against it never settles in follow mode
 // (see docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// Bytes come from pg_table_size, whose neighbours add the indexes or drop the
-// TOAST (see docs/research/measurements.md#progress-sampling). A failed side
-// prints empty and parses to no sample, never to zero.
+// A table this worker is copying into owes the copy and is never probed, since
+// the probe would read its whole uncommitted heap (see
+// docs/research/measurements.md#a-presence-probe-read-a-whole-uncommitted-copy).
+// Targets before PostgreSQL 14 have no pg_stat_progress_copy and probe every
+// table. Bytes come from pg_table_size, whose neighbours add the indexes or
+// drop the TOAST (see docs/research/measurements.md#progress-sampling), but it
+// would wait on a whole-table copy's AccessExclusiveLock, so that copy's own
+// byte count stands in. A failed side prints empty and parses to no sample,
+// never to zero.
 const sampleScript = progressSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
+present="case when t.copying then false else $populated end"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
 user_tables="where c.relkind = 'r'
@@ -115,17 +122,29 @@ user_tables="where c.relkind = 'r'
     and n.nspname not like 'pg_toast%'"
 row="pg_database_size(current_database()) || ' ' ||
   (select count(*) from t) || ' ' ||
-  (select count(*) from t where $populated) || ' ' ||
+  (select count(*) from t where $present) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
-  (select coalesce(sum(pg_table_size(t.oid)), 0) from t)"
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with t as (select c.oid, n.nspname, c.relname $tables $user_tables)
-  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($populated)::text || ')', ','), '') from t)") || t=
+  (select coalesce(sum(t.bytes), 0) from t)"
+copies="select p.relid, p.bytes_processed, exists (select from pg_locks l where l.pid = p.pid and l.locktype = ''relation''
+      and l.relation = p.relid and l.mode = ''AccessExclusiveLock'' and l.granted) as exclusive
+    from pg_stat_progress_copy p join pg_stat_activity a on a.pid = p.pid
+    where p.command = ''COPY FROM'' and p.relid <> 0 and p.datname = current_database()
+      and a.application_name like ''pgcopydb%'' and a.client_addr = inet_client_addr()"
+none="select 0::oid as relid, 0::bigint as bytes_processed, false as exclusive where false"
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with copying as (select x.relid, sum(x.bytes_processed) as bytes, bool_or(x.exclusive) as exclusive
+    from xmltable('/table/row' passing query_to_xml(case when to_regclass('pg_catalog.pg_stat_progress_copy') is null then '$none' else '$copies' end, false, false, '')
+      columns relid oid, bytes_processed bigint, exclusive boolean) x
+    group by x.relid),
+  t as (select c.oid, n.nspname, c.relname, k.relid is not null as copying,
+      case when k.exclusive then k.bytes else pg_table_size(c.oid) end as bytes $tables
+    left join copying k on k.relid = c.oid $user_tables)
+  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)") || t=
 case $t in
   *\|?*) landed="values ${t#*|}" ;;
   *) landed="select null::text, false where false" ;;
 esac
 t=${t%%|*}
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated $tables
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
     join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
   select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
     from t where not t.populated and $populated)") || s=
