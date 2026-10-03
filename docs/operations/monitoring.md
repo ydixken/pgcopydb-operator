@@ -39,11 +39,11 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time of that condition's `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
 | `pgcopydb_migration_verification_check` | `check`: `schema` or `data` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it | once the spec is read, except a requested check with no result yet |
-| `pgcopydb_migration_source_database_size_bytes` | | Source database size; summed over the instance with `allDatabases` | worker running |
-| `pgcopydb_migration_target_database_size_bytes` | | Target database size; summed over the instance with `allDatabases` | worker running |
-| `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied and tables planned | worker running |
-| `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built and indexes planned | worker running |
-| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Base-copy bytes moved and bytes planned | worker running |
+| `pgcopydb_migration_source_database_size_bytes` | | Source database size, summed over the instance with `allDatabases` | once sampled |
+| `pgcopydb_migration_target_database_size_bytes` | | Target database size, summed over the instance with `allDatabases` | once sampled |
+| `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied and tables planned | once sampled |
+| `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built and indexes planned | once sampled |
+| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Table data on the target and on the source, then pgcopydb's counts after the copy (see [below](#why-does-the-target-show-fewer-bytes-than-the-source)) | once sampled |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source write-ahead log (WAL) head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The walsender's `write_lsn` on the source, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
@@ -54,8 +54,9 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 The "Exists" column is the contract for when a series is present:
 
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
-- **worker running**: the sizes are live samples from the worker pod, so they appear during an attempt and end with the pod.
-- **worker running** for single-database counters too, but they have two sources and the second is more exact.
+- **once sampled**: the sizes are live samples from the worker pod, so they appear during an attempt.
+  They keep their last value after the pod ends.
+- **once sampled** for single-database counters too, but they have two sources and the second is more exact.
   While the copy runs, the psql sample that reads the sizes also counts relations on both databases.
   It weighs tables that hold rows on the target, and their table bytes, against the tables the target was given and their size on the source.
   It weighs indexes the target has built against the indexes the source has.
@@ -75,7 +76,8 @@ The "Exists" column is the contract for when a series is present:
   That puts both sides of a flip on the panel, and it is the only way to read a Migration that was deleted.
 
 Read the timeline off the condition transitions, not off the phase.
-Read completion off the table and index counters: the clone-byte ratio stops a few percent short of 100, for the reason in the [caveats](#caveats) below.
+Read completion off the table and index counters, not off the bytes.
+The two byte figures can end apart after a complete copy (see [Why does the target show fewer bytes than the source?](#why-does-the-target-show-fewer-bytes-than-the-source)).
 
 With `spec.clone.allDatabases: true`, each size gauge sums `pg_database_size(oid)` over its endpoint's databases and skips only `template0` and `template1`.
 The target sum includes databases that already existed, not only the ones this Migration created.
@@ -110,7 +112,7 @@ Four quantities stay in PromQL and get no metric of their own:
 - Receive lag is `source - write`.
 - Apply backlog is `write - replay`.
 - WAL generation is `rate(source_lsn_bytes)`.
-- Percent done divides the done gauges by their totals.
+- Percent done divides the target size by the source size.
 
 Receive lag reads high by one confirmation wherever `write` fell back to the slot's confirmed flush position.
 A pass whose source row carried no confirmed position keeps the earlier replay and lag values, so both read stale for one pass rather than wrong.
@@ -208,15 +210,14 @@ The tiles read as follows:
 - **Elapsed** is how long the run has taken, and it stops when the run completes.
   **Completed At** reads Still Running until the run ends.
 - **Percent** is target size over source size, clamped at 100.
-  It is the coarsest progress reading, because it covers whole databases with their WAL and catalog overhead.
+  It is the coarsest progress reading, because it covers whole databases with their indexes and catalogs.
   The counters beside it weigh only the tables in scope.
   **ETA By Size** divides the bytes left by the current growth rate of the target.
   It reads No ETA outside `Cloning`, because index builds, the cutover drain, and verification do not move bytes at a steady rate.
 - **Tables**, **Indexes**, and **Bytes** are six tiles, one per side: a `(Source)` total beside the `(Target)` figure measured against it.
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
-  Bytes compares table bytes on disk on both sides, so pgcopydb's own wire tally never replaces it.
-  A wire count under an on-disk total would read as a shortfall that is not there.
-  The one exception is a table a copy worker holds under an exclusive lock, such as one pgcopydb copies whole.
+  **Bytes** compares table data on both sides (see [Why does the target show fewer bytes than the source?](#why-does-the-target-show-fewer-bytes-than-the-source)).
+  While the copy runs, one exception is a table a copy worker holds under an exclusive lock, such as one pgcopydb copies whole.
   Until that copy commits, the target counts the bytes the copy has streamed into it, which a target before PostgreSQL 14 cannot report and counts as zero.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
@@ -230,6 +231,42 @@ Every tile is scoped to one Migration, so an empty result reads N/A.
 Some tiles report a fact about the run rather than its current state: Attempts, Elapsed, Completed At, the two verification tiles, and Cutover Drain.
 These read over the whole range, so a deleted Migration keeps what it last reported instead of N/A.
 They read the range end first, so a live Migration wins: a wide range can also hold an earlier run that reused the name.
+
+### Why does the target show fewer bytes than the source?
+
+**Bytes (Source)** is the size of the table data on the source: the tables in scope with their TOAST, without indexes.
+While the worker runs, **Bytes (Target)** measures the target in the same way.
+With the default runner and settings, pgcopydb's own count replaces both figures after the copy (see [Metric reference](#metric-reference)).
+**Bytes (Source)** then shows the source table size from pgcopydb's catalog, and **Bytes (Target)** shows the bytes that the copy sent.
+
+The bytes that the copy sent are not a size on disk, so they can be lower or higher than **Bytes (Source)**:
+
+- They do not include dead rows.
+- They do not include page headers, row headers, or free space.
+- They carry TOAST values without compression.
+
+In one of our test runs, they were 1.19 times **Bytes (Source)**.
+
+While the worker runs, both figures are sizes on disk, except for a table under a copy worker's exclusive lock (see the tile notes above).
+The copy writes every row again into new pages, so the target is often a little smaller than the source.
+Updates and deletes leave dead rows and free space in the source tables, and the copy does not carry that space.
+In our test, a plain `VACUUM` did not make the source table smaller.
+Two settings can also change the size of the target on disk:
+
+- A column without its own compression method takes the `default_toast_compression` of the target.
+  In our tests, a change between `pglz` and `lz4` made a table of documents 25% smaller or 33% larger.
+- A `fillfactor` that you set after you loaded the source table applies to every copied row.
+  It does not apply to the rows that the source table already has.
+  In our test, a fillfactor of 50 made the copy twice as large.
+
+In our tests, a table without dead rows copied to within 1% of its size on disk.
+A table with every row updated once and half of the rows deleted copied to a quarter of its size on disk.
+**Database Size** and **Percent** use whole database sizes on disk, so the same reasons apply, and **Percent** can stop short of 100.
+
+> [!important]
+> Do not use the byte tiles to decide that the copy is complete.
+> Request `spec.verification.data` and read **Data Verification**, which compares row counts and checksums per table.
+> Also compare **Tables (Target)** with **Tables (Source)**.
 
 ## Alerts
 
@@ -263,8 +300,8 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
 - The gauges are process state in the manager, so an operator restart clears them and the next reconcile of each Migration restores them.
   A scrape gap around a restart is normal.
 - A finished migration has no worker pod, so the two size series do not come back after an operator restart, though its other series do.
-- `rate()` and `delta()` over the size gauges misread a database that shrinks as a counter reset.
-  The throughput panels note that, and the stalled-clone alert uses `delta()`.
+- `rate()` over the size gauges misreads a database that shrinks as a counter reset.
+  The dashboard panels use `deriv()` instead, and the stalled-clone alert uses `delta()`.
 - The tables, indexes, and clone-byte series step once when pgcopydb's own count replaces the psql estimate.
   The estimate counts a table once it holds a committed row and, on a PostgreSQL 14 or later target, no copy into it is open.
   A table copied in parts can therefore count between two of its parts, and during them on an older target.
@@ -273,19 +310,17 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
   Nothing rounds the estimate up when the worker exits 0.
   A table that is empty on the source counts as done on its own.
   A finished copy that still reads one table short is therefore a finding: that table holds rows on the source and none on the target ([#277](https://github.com/ydixken/pgcopydb-operator/issues/277)).
-  The byte figures are not rounded up either, because fillfactor, bloat, and alignment leave the two sides a little apart.
+  The operator does not correct the byte figures either.
+  A complete copy can still show them apart, as [Why does the target show fewer bytes than the source?](#why-does-the-target-show-fewer-bytes-than-the-source) explains.
   Read a shortfall there against the table count beside it.
   A failed copy keeps its partial figures.
 - The `by size` percent-done series can read above 100 during `Finalizing`.
   Index builds and pre-vacuum bloat put the target ahead of the source in bytes until vacuum reclaims the space.
   The query clamps the series at 100.
-- The planned clone bytes come from pgcopydb's table-size statistics.
-  The ratio of copied to planned bytes stays a few percent short of 100.
-  A relation's on-disk size carries page and tuple headers, alignment padding, and free space that a COPY stream does not move.
 - Copy Throughput clamps target growth at 0.
   Vacuum reclaims space during `Finalizing`, and the negative slope that follows is real but useless as a byte rate.
-  Clone copy needs no clamp.
-  A retry resumes from the same work-dir catalog, and a killed `COPY` credits no partial bytes, so the tally never runs backward.
+  Clone Copy is the slope of **Bytes (Target)** and has no clamp.
+  It can step up or down when a table copied whole commits, and once when pgcopydb's own count replaces the estimate.
 - A custom stock 0.18 runner with psql and GNU `timeout` still feeds these series, because the sample needs no pgcopydb command.
   That runner gives up the exact count that replaces the estimate at the end.
 - `Finalizing` needs the phase probe to have seen this attempt's copy workers at least once.

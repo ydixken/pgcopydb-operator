@@ -572,7 +572,7 @@
           "valueSize": 32
         }
       },
-      "description": "What the worker is doing right now; Phase is the state name, this is the activity inside it.",
+      "description": "This tile shows what the worker does now, inside the phase that the Phase tile shows.",
       "interval": "10s"
     },
     {
@@ -766,7 +766,7 @@
         }
       },
       "interval": "10s",
-      "description": "Worker Jobs created so far. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A. No fallback value: the operator records this gauge on every reconcile, so its absence only ever means the Migration is not here."
+      "description": "This tile shows the number of worker Jobs that the operator created for this Migration. After you delete the Migration, the tile shows its last value in the time range."
     },
     {
       "id": 5,
@@ -845,7 +845,7 @@
           "valueSize": 32
         }
       },
-      "description": "How long the run took once it completed, and how long it has been going while it has not. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",
+      "description": "This tile shows how long the run took. While the run continues, it shows the time since the start.",
       "interval": "10s"
     },
     {
@@ -926,7 +926,7 @@
         }
       },
       "interval": "10s",
-      "description": "When the run ended. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A."
+      "description": "This tile shows when the run ended. It shows Still Running until then."
     },
     {
       "id": 23,
@@ -1099,14 +1099,14 @@
           "valueSize": 32
         }
       },
-      "description": "Remaining size over how fast the target is currently growing, in whole minutes. Anything under a minute reads as ~1m, because a sub-minute estimate is false precision on a migration. Zero and a day upward both read as Calculating, because both are clamps rather than estimates. Zero means the numerator hit its floor, which is not a finished migration: the target routinely overtakes the source in bytes while index builds and vacuum are still running, since index builds, WAL and page bloat mean the copy never lands byte for byte. A day upward means the denominator hit its floor, because the target stops growing during index builds and deriv falls to zero. deriv and not rate: these are gauges, and rate treats the drop when dropIfExists empties the target as a counter reset. The window follows the dashboard's rate interval rather than a fixed 15m, because a clone can finish inside 15m and a window longer than the run averages the rate down to nothing. Byte-based extrapolation only means anything during Cloning: every later phase has no bytes left to project from, so the panel reads No ETA instead of a clamp that would look like a real number; Phase and Current work, right beside it, already say which phase and what is running.",
+      "description": "This tile estimates the minutes until the target size reaches the source size, from the current growth rate of the target. It shows Calculating when it cannot estimate, and No ETA outside the Cloning phase.",
       "interval": "10s"
     },
     {
       "id": 30,
       "type": "stat",
       "title": "Tables (Source)",
-      "description": "In-scope tables on the source. The source is asked only about the tables the target actually has, so a filtered migration counts only what it was asked to copy. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the number of source tables that also exist on the target, so a filtered migration counts only its own tables.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1174,7 +1174,7 @@
       "id": 31,
       "type": "stat",
       "title": "Tables (Target)",
-      "description": "Tables the copy owes nothing on: they hold rows on the target, or none on the source. A table counts once it holds a committed row and, on a PostgreSQL 14 or later target, no copy into it is open, so one copied in parts can count before its last part lands. Nothing rounds this up when the worker exits 0: a finished copy reading one short has a table with rows on the source and none on the target. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the number of tables that have rows on the target or no rows on the source. If a finished copy shows fewer tables than the source, a table with rows on the source has no rows on the target.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1242,7 +1242,7 @@
       "id": 32,
       "type": "stat",
       "title": "Indexes (Source)",
-      "description": "Indexes on the source, for the tables the target has. The target cannot supply this: it builds indexes after the data, so their absence is what is being measured. excludeIndexes is not applied here, so a migration using it reads high. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the number of source indexes on the tables that the target has. It ignores excludeIndexes, so the value is too high when a migration uses that option.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1310,7 +1310,7 @@
       "id": 33,
       "type": "stat",
       "title": "Indexes (Target)",
-      "description": "Indexes built on the target so far. Nothing rounds this up when the worker exits 0. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the number of indexes that exist on the target.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1378,7 +1378,7 @@
       "id": 34,
       "type": "stat",
       "title": "Bytes (Source)",
-      "description": "Table bytes on the source, pg_table_size: the table with its TOAST, without its indexes. A document-heavy table keeps nearly all of its data in TOAST, so leaving it out understates the table by orders of magnitude. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the size of the table data on the source, with TOAST and without indexes. Bytes (Target) can differ from it, lower or higher, as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1446,7 +1446,7 @@
       "id": 35,
       "type": "stat",
       "title": "Bytes (Target)",
-      "description": "Table bytes on the target, measured the same way, except that a table a copy worker holds under an exclusive lock, such as one copied whole, counts the bytes its copy has streamed until it commits. pgcopydb's own byte tally never replaces this, because it counts what crossed the wire, and a wire count under an on-disk total reads as a shortfall that is not there. Nothing rounds the two up when the worker exits 0: they end a little apart through fillfactor, bloat and alignment. Counted with psql in both databases on the same poll that reads the database sizes, so it moves every ten seconds and needs no pgcopydb command. Read across the dashboard range because the sample stops when the worker pod exits.",
+      "description": "This tile shows the size of the table data on the target, or by default after the copy the bytes that pgcopydb sent. It is often a little lower than Bytes (Source) but can be higher, as [Why does the target show fewer bytes than the source?](https://ydixken.github.io/pgcopydb-operator/operations/monitoring/#why-does-the-target-show-fewer-bytes-than-the-source) explains.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1518,7 +1518,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "pgcopydb compare schema: tables, columns, indexes, constraints and sequence values as pgcopydb models them. Deactivated means spec.verification.schema is false, which is also the default, so a migration that never opted in reads Deactivated rather than waiting forever on a check nobody asked for. Pending means the check is requested and has not run yet. A result outranks the spec: switching a check off after it reported a mismatch still reads FAIL.",
+      "description": "This tile shows the result of pgcopydb compare schema for tables, columns, indexes, constraints and sequence values. It shows Deactivated when spec.verification.schema is false (the default) and no result exists.",
       "gridPos": {
         "h": 3,
         "w": 6,
@@ -1608,7 +1608,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "pgcopydb compare data: per-table row counts and full-table checksums. Deactivated means spec.verification.data is false, which is also the default, so a migration that never opted in reads Deactivated rather than waiting forever on a check nobody asked for. Pending means the check is requested and has not run yet. A result outranks the spec: switching a check off after it reported a mismatch still reads FAIL.",
+      "description": "This tile shows whether the row counts and checksums of each table match, from pgcopydb compare data. It shows Deactivated when spec.verification.data is false (the default) and no result exists.",
       "gridPos": {
         "h": 3,
         "w": 6,
@@ -1698,7 +1698,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "When each phase was first seen in the dashboard range, so a phase entered before the range reads as the range start. The subquery steps at the scrape interval: a phase gauge series only stands until the next scrape marks it stale, so a coarser step walks past short phases entirely. A phase shorter than one scrape leaves no sample at all and cannot appear here; Condition Timeline, beside this, reads the transition times off the CR and does keep those.",
+      "description": "This table shows when the dashboard first saw each phase in the time range. A phase shorter than one scrape can be missing here. Condition Timeline shows the condition changes of most phases.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -1787,7 +1787,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "When each condition last changed status, straight from its lastTransitionTime, so a phase that lasted a second is still here. Read across the dashboard range rather than at its end: a condition that has since flipped keeps both of its rows, and a Migration that has since been deleted keeps its timeline. Aggregated by condition so an operator restart, which rescrapes the same transition under a new pod label, does not double every row.",
+      "description": "This table shows when each condition last changed status, and it keeps the rows of a deleted Migration. Most phases change a condition, so a short phase such as Validating can still show here.",
       "gridPos": {
         "h": 6,
         "w": 12,
@@ -1951,7 +1951,7 @@
           "sort": "desc"
         }
       },
-      "description": "Sampled from the worker pod; the series exist only while a worker runs.",
+      "description": "This panel shows the size of the source and target databases, with indexes and catalogs. The values stop at the last sample when the worker pod ends.",
       "interval": "10s"
     },
     {
@@ -2023,7 +2023,7 @@
           "sort": "desc"
         }
       },
-      "description": "rate() over gauges: a shrinking target reads as a counter reset. Clone copy needs the bundled (patched) runner and stays empty otherwise. Target growth is clamped at 0: vacuum reclaims space during Finalizing, and the resulting negative slope is real but meaningless as a byte rate. Clone copy needs no such clamp: it is a monotonic tally from the work-dir catalog that a retry resumes rather than rewinds.",
+      "description": "This panel shows how fast the target database grows (Target Growth, never below 0) and how fast Bytes (Target) grows (Clone Copy). Clone Copy can jump up or down at the end, when pgcopydb's own count replaces the estimate.",
       "interval": "10s"
     },
     {
@@ -2126,7 +2126,7 @@
           "sort": "desc"
         }
       },
-      "description": "Absolute WAL byte positions. Present in follow mode once streaming starts; endpos appears when cutover sets it.",
+      "description": "This panel shows the Source, Write, Replay and Endpos WAL positions as absolute byte values. It has data only in follow mode, and Endpos appears when a cutover sets it.",
       "interval": "10s"
     },
     {
@@ -2269,7 +2269,7 @@
           "sort": "desc"
         }
       },
-      "description": "How fast the source produces WAL; what the target has to keep up with.",
+      "description": "This panel shows how fast the source writes WAL. The target must replay WAL at this rate to stay current.",
       "interval": "10s"
     },
     {
@@ -2349,7 +2349,7 @@
           "valueSize": 32
         }
       },
-      "description": "Bytes left to replay to reach the cutover endpos; 0 means the drain is done. Read at the range end first, then over the range only once the Migration is gone: a deleted run keeps what it last reported, while a live one is never answered for by an earlier run that reused its name. Nothing in the range at all reads N/A.",
+      "description": "This tile shows the bytes that the target must still replay to reach the cutover endpos. Only the CutoverCompleted condition, not a value of 0, proves that the drain is complete.",
       "interval": "10s"
     }
   ]
