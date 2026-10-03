@@ -121,7 +121,9 @@ func TestEphemeralParamsFollowsTheClusterDataEngine(t *testing.T) {
 // change when the requested shape does. Without the extra tables folded in, a
 // run asking for a different spread would silently reuse the old one.
 func TestSeedProfileTracksTheRequestedShape(t *testing.T) {
-	defer func(n, mb int) { extraTables, extraSizeMB = n, mb }(extraTables, extraSizeMB)
+	defer func(n, mb int, skew float64) {
+		extraTables, extraSizeMB, extraSkew = n, mb, skew
+	}(extraTables, extraSizeMB, extraSkew)
 
 	extraTables, extraSizeMB = 0, 0
 	if got := seedProfile(); got != baseSeedProfile {
@@ -142,6 +144,22 @@ func TestSeedProfileTracksTheRequestedShape(t *testing.T) {
 	extraTables, extraSizeMB = 20, 8192
 	if third := seedProfile(); third == first {
 		t.Errorf("a different table count gave the same profile %q", third)
+	}
+
+	// Unset, the skew must leave the profile byte-identical, or every kept
+	// fixture would be rebuilt for a knob nobody turned.
+	extraTables, extraSizeMB = 40, 8192
+	if got := seedProfile(); got != "v4+x40x8192MB" {
+		t.Errorf("no skew: seedProfile() = %q, want %q", got, "v4+x40x8192MB")
+	}
+	extraSkew = 1.5
+	skewed := seedProfile()
+	if skewed == first {
+		t.Errorf("a skewed spread gave the same profile %q as the normal one", skewed)
+	}
+	extraSkew = 2
+	if got := seedProfile(); got == skewed {
+		t.Errorf("a different skew gave the same profile %q", got)
 	}
 }
 

@@ -16,6 +16,7 @@ SELECT set_config('e2e.extra_tables', :'extra_tables', false);
 SELECT set_config('e2e.extra_mb', :'extra_mb', false);
 SELECT set_config('e2e.extra_shards', :'extra_shards', false);
 SELECT set_config('e2e.extra_shard', :'extra_shard', false);
+SELECT set_config('e2e.extra_skew', :'extra_skew', false);
 
 -- One Time: line per table, which is what makes the Job log a per-phase
 -- profile of the seed instead of a list of table names (issue #146).
