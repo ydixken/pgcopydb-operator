@@ -519,11 +519,13 @@ func TestExtraFixtureCommitsInBatchesAndResumes(t *testing.T) {
 		"CONTINUE WHEN session_of[i] <> shard",
 		"SELECT coalesce(max(id), 0) + 1 FROM %I",
 		"WHILE first_id <= n_rows LOOP",
+		"last_id := first_id + least(batch_rows - 1, n_rows - first_id)",
 		"INSERT INTO %I",
 		"FROM generate_series(%s, %s) g",
-		"first_id, least(first_id + batch_rows - 1, n_rows)",
+		"first_id, last_id",
 		"COMMIT;",
-		"first_id := first_id + batch_rows;",
+		"EXIT WHEN last_id = n_rows;",
+		"first_id := last_id + 1;",
 	)
 }
 

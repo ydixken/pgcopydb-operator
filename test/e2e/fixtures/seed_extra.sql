@@ -21,8 +21,7 @@ DECLARE
     -- size spread, which seed_documents already covers for TOAST.
     rows_per_mb constant int := 1750;
     -- About 128MB per transaction, like seed_documents: a 100GB table never
-    -- sits uncommitted and a retry loses one batch at most. The procedure
-    -- e2e_seed_batches would need this template's % escaped twice.
+    -- sits uncommitted and a retry loses one batch at most.
     batch_rows constant bigint := 128 * rows_per_mb;
     mean_mb   numeric;
     sigma     numeric;
@@ -44,6 +43,7 @@ DECLARE
     bin       int;
     n_rows    bigint;
     first_id  bigint;
+    last_id   bigint;
     i         int;
 BEGIN
     IF n_tables IS NULL OR n_tables = 0 THEN
@@ -132,6 +132,8 @@ BEGIN
         EXECUTE format('SELECT coalesce(max(id), 0) + 1 FROM %I',
             format('x_%s', lpad(i::text, 3, '0'))) INTO first_id;
         WHILE first_id <= n_rows LOOP
+            -- Never past n_rows, which the Go cap lets sit near the bigint max.
+            last_id := first_id + least(batch_rows - 1, n_rows - first_id);
             -- Content and width both vary per row. A constant payload would
             -- give every row the same bytes and length, which no real table
             -- has. The width swings between roughly 300 and 1100 bytes, so
@@ -143,9 +145,10 @@ BEGIN
                 FROM generate_series(%s, %s) g
                 ON CONFLICT (id) DO NOTHING
             $f$, format('x_%s', lpad(i::text, 3, '0')), i,
-                first_id, least(first_id + batch_rows - 1, n_rows));
+                first_id, last_id);
             COMMIT;
-            first_id := first_id + batch_rows;
+            EXIT WHEN last_id = n_rows;
+            first_id := last_id + 1;
         END LOOP;
         RAISE NOTICE 'x_% -> % MB', lpad(i::text, 3, '0'), sizes[i];
     END LOOP;
