@@ -457,17 +457,23 @@ const (
 	noSelectRole      = "e2e_noselect"
 )
 
-// suiteRoles lists the suite's role names by the side whose server holds them.
-var suiteRoles = map[string][]string{
-	sourceCluster: {noSelectRole},
-	targetCluster: {incomingOwnerRole, limitedRole},
+// suiteRoles lists the suite's role names on cluster's server. A function, not
+// a map, because the pair names are only known once the process starts.
+func suiteRoles(cluster string) []string {
+	switch cluster {
+	case sourceCluster:
+		return []string{noSelectRole}
+	case targetCluster:
+		return []string{incomingOwnerRole, limitedRole}
+	}
+	return nil
 }
 
 // unstampedRolesSQL lists the suite's role names on cluster's server that do
 // not carry the stamp.
 func unstampedRolesSQL(cluster string) string {
-	names := make([]string, 0, len(suiteRoles[cluster]))
-	for _, role := range suiteRoles[cluster] {
+	names := make([]string, 0, len(suiteRoles(cluster)))
+	for _, role := range suiteRoles(cluster) {
 		names = append(names, sqlLiteral(role))
 	}
 	return "SELECT coalesce(string_agg(rolname, ', ' ORDER BY rolname), '') FROM pg_roles" +

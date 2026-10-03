@@ -439,12 +439,12 @@ func TestExternalSeedJob(t *testing.T) {
 	found := false
 	for _, e := range cnpg.Containers[0].Env {
 		if e.Name == "PGPASSWORD" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
-			e.ValueFrom.SecretKeyRef.Name == srcSecret {
+			e.ValueFrom.SecretKeyRef.Name == srcSecret() {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("CNPG-mode seed Job no longer reads PGPASSWORD from " + srcSecret)
+		t.Error("CNPG-mode seed Job no longer reads PGPASSWORD from " + srcSecret())
 	}
 }
 

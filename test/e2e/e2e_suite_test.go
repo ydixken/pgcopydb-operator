@@ -94,13 +94,6 @@ const (
 	labelFeatureE2ERun     = "pgcopydb-operator.io/feature-e2e-run"
 	featureRunOwnerFixture = "0123456789abcdef0123456789abcdef"
 
-	sourceCluster = "e2e-source"
-	targetCluster = "e2e-target"
-	// CNPG names the app secret <cluster>-app. Instance pods are <cluster>-N,
-	// and which of them is primary moves on failover, so every statement
-	// resolves its pod by label through primaryPod instead of by name.
-	srcSecret = sourceCluster + "-app"
-
 	// CNPG's own pod labels: what the suite selects, schedules and kills by.
 	labelCNPGCluster  = "cnpg.io/cluster"
 	labelCNPGRole     = "cnpg.io/instanceRole"
@@ -154,8 +147,7 @@ const (
 	// seedProfile names the fixture generation; bump it when the schema,
 	// seeded shapes, or seed preparation changes so kept clusters get recreated.
 	baseSeedProfile = "v4"
-	// seedJobName and seedConfigMap are the seed Job and its mounted SQL.
-	seedJobName   = "e2e-seed"
+	// seedConfigMap is the SQL every pair's seed Job mounts.
 	seedConfigMap = "e2e-fixtures"
 	// seedImage only needs a psql client; the CNPG operand image has one and
 	// is already pulled on any cluster running CNPG fixtures.
@@ -169,6 +161,17 @@ const (
 	// CNPG has already replicated do not triple themselves again underneath.
 	ephemeralStorageClass = "longhorn-e2e-ephemeral"
 )
+
+// sourceCluster, targetCluster and seedJobName are this Ginkgo process's
+// fixture pair and seed Job. SynchronizedBeforeSuite sets them per process.
+var sourceCluster, targetCluster, seedJobName = pairNames(1)
+
+// srcSecret is the source's app Secret. CNPG names it <cluster>-app. Instance
+// pods are <cluster>-N, and which of them is primary moves on failover, so
+// every statement resolves its pod by label through primaryPod.
+func srcSecret() string {
+	return sourceCluster + "-app"
+}
 
 var nsOperator = envDefault("E2E_OPERATOR_NAMESPACE", defaultOperatorNamespace)
 
@@ -1221,7 +1224,9 @@ func TestE2E(t *testing.T) {
 	RunSpecs(t, "pgcopydb-operator e2e suite")
 }
 
-var _ = BeforeSuite(func() {
+// connectSuite builds this process's API client.
+func connectSuite() {
+	GinkgoHelper()
 	ctx = context.Background()
 	Expect(validateFeatureE2ERunValue()).To(Succeed())
 
@@ -1238,6 +1243,14 @@ var _ = BeforeSuite(func() {
 	baseClient, err := client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).NotTo(HaveOccurred())
 	k8sClient = featureLabelingClient{Client: baseClient}
+}
+
+// Process 1 prepares what the run shares: the CRD check, storage, the operator
+// install, the namespaces and the seed ConfigMap. Then every process brings up
+// and seeds its own source/target pair, concurrently with the others.
+var _ = SynchronizedBeforeSuite(func() []byte {
+	connectSuite()
+	Expect(parallelRefusal(parallelProcs(), external != nil, featureE2ERunValue != "")).To(Succeed())
 
 	By("checking the Migration CRD exists (the suite does not manage it)")
 	const crdName = "migrations.pgcopydb-operator.io"
@@ -1333,9 +1346,18 @@ var _ = BeforeSuite(func() {
 		purgeMigrations(2 * time.Minute)
 	}
 
+	By("applying the fixture ConfigMap the seed Jobs mount")
+	applySeedConfigMap()
+	// ensureFixtureStorage may fall back to the default class; every pair follows it.
+	return []byte(fixtureStorageClass)
+}, func(storageClass []byte) {
+	connectSuite()
+	fixtureStorageClass = string(storageClass)
+	sourceCluster, targetCluster, seedJobName = pairNames(GinkgoParallelProcess())
+
 	if external == nil {
-		By(fmt.Sprintf("creating or adopting the CNPG source (PG %d) and target (PG %d) clusters",
-			pgSource, pgTarget))
+		By(fmt.Sprintf("creating or adopting the CNPG source %s (PG %d) and target %s (PG %d)",
+			sourceCluster, pgSource, targetCluster, pgTarget))
 		ensureClusterShape(sourceCluster, pgSource)
 		ensureClusterShape(targetCluster, pgTarget)
 		staleSource := sourceSeedIsStale()
@@ -1364,7 +1386,9 @@ var _ = BeforeSuite(func() {
 	ensureFollowPrivileges()
 })
 
-var _ = AfterSuite(func() {
+// Nothing is torn down per process: process 1 removes every pair once the
+// other processes have exited, while the operator still runs for the purge.
+var _ = SynchronizedAfterSuite(func() {}, func() {
 	if featureE2ERunValue != "" {
 		return
 	}
@@ -1439,8 +1463,11 @@ func teardownFixtures() {
 // also handles retained or orphaned fixture volumes after cluster deletion.
 func deleteFixtures(timeout time.Duration) {
 	GinkgoHelper()
-	deleteCluster(sourceCluster)
-	deleteCluster(targetCluster)
+	for proc := 1; proc <= parallelProcs(); proc++ {
+		source, target, _ := pairNames(proc)
+		deleteCluster(source)
+		deleteCluster(target)
+	}
 	deleteSuiteObjects(seedObjects()...)
 	for _, ns := range []string{nsE2E, nsX} {
 		Expect(k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, client.InNamespace(ns))).
@@ -1457,13 +1484,15 @@ func deleteFixtures(timeout time.Duration) {
 	}, timeout, 5*time.Second).Should(Succeed())
 }
 
-// seedObjects are the seed Job and its ConfigMap, which outlive the run
-// whenever the fixture namespaces do.
+// seedObjects are every pair's seed Job and their ConfigMap, which outlive
+// the run whenever the fixture namespaces do.
 func seedObjects() []client.Object {
-	return []client.Object{
-		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}},
+	objs := []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}}
+	for proc := 1; proc <= parallelProcs(); proc++ {
+		_, _, job := pairNames(proc)
+		objs = append(objs, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: job}})
 	}
+	return objs
 }
 
 // deleteSuiteObjects deletes in the foreground; an object already gone is fine.
@@ -2034,21 +2063,6 @@ func serverMajor(cluster string) int {
 // on failure as the diagnosis, on success as the seed's per-phase profile.
 func runSeedJob() {
 	GinkgoHelper()
-	entries, err := fixturesFS.ReadDir("fixtures")
-	Expect(err).NotTo(HaveOccurred(), "failed to read the embedded fixtures")
-	files := make(map[string]string, len(entries))
-	for _, e := range entries {
-		b, err := fixturesFS.ReadFile("fixtures/" + e.Name())
-		Expect(err).NotTo(HaveOccurred(), "failed to read fixture %s", e.Name())
-		files[e.Name()] = string(b)
-	}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}
-	_, err = controllerutil.CreateOrUpdate(ctx, k8sClient, cm, func() error {
-		cm.Data = files
-		return nil
-	})
-	Expect(err).NotTo(HaveOccurred(), "failed to apply the fixture ConfigMap")
-
 	// A finished Job is immutable; drop the previous run's before creating.
 	fg := metav1.DeletePropagationForeground
 	stale := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName}}
@@ -2082,6 +2096,26 @@ func runSeedJob() {
 	_, _ = fmt.Fprintf(GinkgoWriter, "seed Job log:\n%s\n", jobLogs(seedJobName, seedLogTail))
 	AddReportEntry("seed wall clock", fmt.Sprintf("%s at scale %s (profile %s)",
 		time.Since(started).Round(time.Second), scaleArg(), seedProfile()))
+}
+
+// applySeedConfigMap stores the embedded fixtures in the ConfigMap every
+// pair's seed Job mounts.
+func applySeedConfigMap() {
+	GinkgoHelper()
+	entries, err := fixturesFS.ReadDir("fixtures")
+	Expect(err).NotTo(HaveOccurred(), "failed to read the embedded fixtures")
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		b, err := fixturesFS.ReadFile("fixtures/" + e.Name())
+		Expect(err).NotTo(HaveOccurred(), "failed to read fixture %s", e.Name())
+		files[e.Name()] = string(b)
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}
+	_, err = controllerutil.CreateOrUpdate(ctx, k8sClient, cm, func() error {
+		cm.Data = files
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to apply the fixture ConfigMap")
 }
 
 func buildSeedJob() *batchv1.Job {
@@ -2146,7 +2180,7 @@ func seedConnEnv() []corev1.EnvVar {
 			{Name: envPGUser, Value: appRole(sourceCluster)},
 			{Name: "PGPASSWORD", ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret},
+					LocalObjectReference: corev1.LocalObjectReference{Name: srcSecret()},
 					Key:                  passwordKey,
 				},
 			}},
@@ -2345,18 +2379,8 @@ func checkLonghornCapacity() {
 			}
 		}
 	}
-	// Every CNPG instance carries a full copy of its cluster's data, so the
-	// source and target volumes are provisioned once per instance. The work
-	// volume is one per migration and does not multiply.
-	var required int64
-	for _, size := range []string{srcStorageSize, tgtStorageSize} {
-		q := resource.MustParse(size)
-		required += q.Value() * int64(cnpgInstances)
-	}
-	work := resource.MustParse(workVolumeSize)
-	required += work.Value()
-	pool := resource.MustParse(progressPoolStorageSize)
-	required += 2 * pool.Value()
+	pairs := parallelProcs()
+	required := fixtureBytes(pairs)
 	// numberOfReplicas is 1 on the ephemeral StorageClass, so requested
 	// bytes map 1:1 to consumed bytes; 1.2 leaves headroom for WAL churn
 	// and everything else living on the shared disks.
@@ -2364,11 +2388,26 @@ func checkLonghornCapacity() {
 	need := required * replicas * 12 / 10
 	if available < need {
 		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
-			" (%dGi requested x %d replica x 1.2 headroom, source and target sized for"+
+			" (%dGi requested x %d replica x 1.2 headroom, %d source/target pairs sized for"+
 			" %d CNPG instances each, plus the dedicated pooling pair) but only %dGi are free;"+
-			" free up space or lower E2E_SCALE",
-			need>>30, required>>30, replicas, cnpgInstances, available>>30))
+			" free up space, lower E2E_SCALE or run fewer Ginkgo processes",
+			need>>30, required>>30, replicas, pairs, cnpgInstances, available>>30))
 	}
+}
+
+// fixtureBytes is the volume space of pairs fixture pairs: source and target
+// once per CNPG instance, each holding a full copy, one work volume per pair,
+// and the dedicated pooling pair once per run.
+func fixtureBytes(pairs int) int64 {
+	var perPair int64
+	for _, size := range []string{srcStorageSize, tgtStorageSize} {
+		q := resource.MustParse(size)
+		perPair += q.Value() * int64(cnpgInstances)
+	}
+	work := resource.MustParse(workVolumeSize)
+	perPair += work.Value()
+	pool := resource.MustParse(progressPoolStorageSize)
+	return perPair*int64(pairs) + 2*pool.Value()
 }
 
 // ensureFollowPrivileges grants the app role the non-superuser follow
