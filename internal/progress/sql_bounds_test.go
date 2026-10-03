@@ -421,24 +421,12 @@ func openCopy(t *testing.T, uri, app, setup, table string) {
 	if sqlOutput(t, uri, "select current_setting('server_version_num')::int < 140000") == "t" {
 		t.Skip("pg_stat_progress_copy arrived in PostgreSQL 14; older targets probe every table")
 	}
-	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	// Killing psql drops the connection, which aborts the copy's transaction.
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	var b strings.Builder
 	b.WriteString("BEGIN;\n" + setup + "COPY " + table + " FROM STDIN;\n")
 	for i := range 20000 {
 		fmt.Fprintf(&b, "%d\t%s\n", i, strings.Repeat("x", 40))
 	}
-	if _, err = io.WriteString(stdin, b.String()); err != nil {
-		t.Fatal(err)
-	}
+	holdOpen(t, uri, app, b.String())
 	last := ""
 	waitFor(t, 10*time.Second, "the copy never settled", func() bool {
 		got := copyBytes(t, uri, table)
@@ -447,6 +435,25 @@ func openCopy(t *testing.T, uri, app, setup, table string) {
 		time.Sleep(100 * time.Millisecond)
 		return settled
 	})
+}
+
+// holdOpen sends script to a psql session that stays connected, and so keeps
+// its transaction open, until the test ends.
+func holdOpen(t *testing.T, uri, app, script string) {
+	t.Helper()
+	cmd := exec.Command("psql", namedURI(t, uri, "", app), "-Xq", "-v", "ON_ERROR_STOP=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Killing psql drops the connection, which aborts the open transaction.
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if _, err = io.WriteString(stdin, script); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // pgcopydbWorker names a session the way pgcopydb names its copy workers.
@@ -554,5 +561,39 @@ INSERT INTO small VALUES (1, 'x')`)
 	})
 	if bigAfter != bigBefore {
 		t.Fatalf("big seq_scan went from %s to %s across the sample: the probe scanned a table whose copy is open", bigBefore, bigAfter)
+	}
+}
+
+// pgcopydb truncates before its copy opens, and truncating a partitioned
+// parent locks every partition while the copy's progress names only the
+// parent. A partition held that way must neither be sized nor probed.
+func TestProgressSampleSkipsTablesTheWorkerHoldsExclusively(t *testing.T) {
+	setup := "CREATE TABLE items (id integer, note text)"
+	partitioned := "CREATE TABLE items (id integer, note text) PARTITION BY RANGE (id); CREATE TABLE items_p1 PARTITION OF items FOR VALUES FROM (0) TO (100000)"
+	for _, tc := range []struct {
+		name, setup, leaf string
+		hold              func(t *testing.T, target string)
+	}{
+		{"truncated before its copy", setup, "items", func(t *testing.T, target string) {
+			holdOpen(t, target, pgcopydbWorker, "BEGIN;\nTRUNCATE items;\n")
+		}},
+		{"partition under a copied parent", partitioned, "items_p1", func(t *testing.T, target string) {
+			openCopy(t, target, pgcopydbWorker, "TRUNCATE items;\n", "items")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, target := sampleDatabases(t, "held", tc.setup+"; INSERT INTO items VALUES (1, 'x')")
+			tc.hold(t, target)
+			waitFor(t, 5*time.Second, "the worker never held the table exclusively", func() bool {
+				return sqlOutput(t, target, "select count(*) from pg_locks where relation = '"+tc.leaf+"'::regclass and mode = 'AccessExclusiveLock' and granted") == "1"
+			})
+			c := runSample(t, source, target).Counts
+			if c.TablesTotal != 1 || c.TablesDone != 0 || c.EmptyOnTarget != "public."+tc.leaf {
+				t.Fatalf("tables = %d of %d owing %q, want 0 of 1 owing public.%s while it is held", c.TablesDone, c.TablesTotal, c.EmptyOnTarget, tc.leaf)
+			}
+			if c.BytesDone != 0 {
+				t.Fatalf("bytes done = %d, want 0: no copy streams into the held table itself", c.BytesDone)
+			}
+		})
 	}
 }

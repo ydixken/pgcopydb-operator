@@ -114,11 +114,12 @@ esac
 // the probe would read its whole uncommitted heap (see
 // docs/research/measurements.md#a-presence-probe-read-a-whole-uncommitted-copy).
 // Targets before PostgreSQL 14 have no pg_stat_progress_copy and probe every
-// table. Bytes come from pg_table_size, whose neighbours add the indexes or
-// drop the TOAST (see docs/research/measurements.md#progress-sampling), but it
-// would wait on a whole-table copy's AccessExclusiveLock, so that copy's own
-// byte count stands in. A failed side prints empty and parses to no sample,
-// never to zero.
+// table they do not see locked. Bytes come from pg_table_size, whose neighbours
+// add the indexes or drop the TOAST (see docs/research/measurements.md#progress-sampling),
+// but it would wait on a table this worker holds AccessExclusiveLock on: a
+// whole-table copy, or every partition under a truncated parent. Such a table
+// counts its own copy's bytes, or none. A failed side prints empty and parses
+// to no sample, never to zero.
 const sampleScript = sampleSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 present="case when t.copying then false else $populated end"
 tables="from pg_class c
@@ -131,19 +132,22 @@ row="pg_database_size(current_database()) || ' ' ||
   (select count(*) from t where $present) || ' ' ||
   (select count(*) from pg_index i where i.indrelid in (select oid from t)) || ' ' ||
   (select coalesce(sum(t.bytes), 0) from t)"
-copies="select p.relid, p.bytes_processed, exists (select from pg_locks l where l.pid = p.pid and l.locktype = ''relation''
-      and l.relation = p.relid and l.mode = ''AccessExclusiveLock'' and l.granted) as exclusive
-    from pg_stat_progress_copy p join pg_stat_activity a on a.pid = p.pid
-    where p.command = ''COPY FROM'' and p.relid <> 0 and p.datname = current_database()
-      and a.application_name like ''pgcopydb%'' and a.client_addr = inet_client_addr()"
-none="select 0::oid as relid, 0::bigint as bytes_processed, false as exclusive where false"
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with copying as (select x.relid, sum(x.bytes_processed) as bytes, bool_or(x.exclusive) as exclusive
+copies="select pid, relid, bytes_processed from pg_stat_progress_copy
+    where command = ''COPY FROM'' and relid <> 0 and datname = current_database()"
+none="select 0 as pid, 0::oid as relid, 0::bigint as bytes_processed where false"
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with mine as (select pid from pg_stat_activity
+    where application_name like 'pgcopydb%' and client_addr = inet_client_addr()),
+  copying as (select x.relid, sum(x.bytes_processed) as bytes
     from xmltable('/table/row' passing query_to_xml(case when to_regclass('pg_catalog.pg_stat_progress_copy') is null then '$none' else '$copies' end, false, false, '')
-      columns relid oid, bytes_processed bigint, exclusive boolean) x
-    group by x.relid),
-  t as (select c.oid, n.nspname, c.relname, k.relid is not null as copying,
-      case when k.exclusive then k.bytes else pg_table_size(c.oid) end as bytes $tables
-    left join copying k on k.relid = c.oid $user_tables)
+      columns pid integer, relid oid, bytes_processed bigint) x
+    where x.pid in (select pid from mine) group by x.relid),
+  exclusive as (select distinct l.relation from pg_locks l
+    where l.locktype = 'relation' and l.mode = 'AccessExclusiveLock' and l.granted and l.pid in (select pid from mine)
+      and l.database = (select d.oid from pg_database d where d.datname = current_database())),
+  t as (select c.oid, n.nspname, c.relname, k.relid is not null or e.relation is not null as copying,
+      case when e.relation is not null then coalesce(k.bytes, 0) else pg_table_size(c.oid) end as bytes $tables
+    left join copying k on k.relid = c.oid
+    left join exclusive e on e.relation = c.oid $user_tables)
   select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)" 2>"$err") ||
   { t=; printf 'target_error=%s\n' "$(why)"; }
 case $t in
