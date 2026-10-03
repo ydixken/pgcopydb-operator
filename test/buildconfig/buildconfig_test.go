@@ -852,7 +852,7 @@ func TestCIDiagnosticStepSelectsHelperFamiliesWithoutACluster(t *testing.T) {
 	funcRe := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
 	families := []string{
 		"TestCutoverDiagnostic", "TestPublicationRetry", "TestLiveWriter", "TestPSQL", "TestE2ENames", "TestExternal",
-		"TestExtraFixture", "TestSeedProfile",
+		"TestExtraFixture", "TestSeedProfile", "TestTimeoutOverride",
 	}
 	found := make(map[string]bool, len(families))
 	for _, entry := range entries {

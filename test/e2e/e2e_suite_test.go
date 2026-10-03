@@ -562,6 +562,9 @@ func init() {
 		migrationTimeout, followTimeout, seedTimeout = 2*time.Hour, 3*time.Hour, 3*time.Hour
 		lagConvergeTimeout = 20 * time.Minute
 	}
+	// For a fixture shape neither tier's budgets were sized for.
+	seedTimeout = durationEnv("E2E_SEED_TIMEOUT", seedTimeout)
+	migrationTimeout = durationEnv("E2E_MIGRATION_TIMEOUT", migrationTimeout)
 	if v := os.Getenv("E2E_SCALE"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil || f <= 0 {
@@ -671,6 +674,61 @@ func initExtraTables() {
 			panic("E2E_EXTRA_JOBS must be a positive PostgreSQL int, got " + strconv.Quote(v))
 		}
 		extraJobs = n
+	}
+}
+
+// durationEnv reads a positive Go duration from the environment, or returns
+// def when the variable is unset.
+func durationEnv(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		panic(name + " must be a positive Go duration, got " + strconv.Quote(v))
+	}
+	return d
+}
+
+func TestTimeoutOverridesApplyFromEnvironment(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "timeouts" {
+		if seedTimeout != 5*time.Hour || migrationTimeout != 90*time.Minute {
+			t.Errorf("seedTimeout = %s, migrationTimeout = %s, want 5h0m0s and 1h30m0s",
+				seedTimeout, migrationTimeout)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTimeoutOverridesApplyFromEnvironment$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=timeouts",
+		"E2E_SEED_TIMEOUT=5h",
+		"E2E_MIGRATION_TIMEOUT=90m",
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("timeout overrides were rejected: %v\n%s", err, out)
+	}
+}
+
+func TestTimeoutOverridesRejectNonPositiveDurations(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "bad-timeout" {
+		return
+	}
+
+	for _, name := range []string{"E2E_SEED_TIMEOUT", "E2E_MIGRATION_TIMEOUT"} {
+		for _, v := range []string{"0s", "-1h", "90", "soon"} {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestTimeoutOverridesRejectNonPositiveDurations$")
+			cmd.Env = []string{"E2E_TEST_CHILD=bad-timeout", name + "=" + v}
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("%s=%s was accepted", name, v)
+				continue
+			}
+			if !strings.Contains(string(out), name+" must be a positive Go duration") {
+				t.Errorf("%s=%s: unexpected rejection: %v\n%s", name, v, err, out)
+			}
+		}
 	}
 }
 

@@ -204,7 +204,7 @@ jobs:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: >-
           go test ./test/e2e
-          -run '^(TestCutoverDiagnostic|TestPublicationRetry|TestLiveWriter|TestPSQL|TestE2ENames|TestExternal|TestExtraFixture|TestSeedProfile)'
+          -run '^(TestCutoverDiagnostic|TestPublicationRetry|TestLiveWriter|TestPSQL|TestE2ENames|TestExternal|TestExtraFixture|TestSeedProfile|TestTimeoutOverride)'
           -count=1 -race -v
       # yamllint enable rule:line-length
       - name: Coverage total

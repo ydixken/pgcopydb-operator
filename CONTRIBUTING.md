@@ -168,6 +168,10 @@ The suite has two tiers, default and stress, and a run reads these environment v
   Each table loads in transactions of about 128MB, and a retried seed Job resumes a table after its highest committed id.
 - `E2E_STRESS` (unset) selects the stress tier when `true`: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets.
   Use `task e2e:stress`.
+- `E2E_SEED_TIMEOUT` (`30m`, `3h` under stress) bounds the seed Job, as a Go duration such as `4h`.
+  Set it for a fixture larger than the tier was sized for, for example a large `E2E_EXTRA_SIZE_GB`.
+- `E2E_MIGRATION_TIMEOUT` (`30m`, `2h` under stress) bounds each wait for a Migration to reach a phase, as a Go duration.
+  The run's own `go test` timeout still has to cover the seed and the migrations.
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
   The pooling pair is always removed.
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
