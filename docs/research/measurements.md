@@ -17,7 +17,9 @@ Targets before PostgreSQL 14 have no `pg_stat_progress_copy`, so they probe ever
 Bytes come from `pg_table_size`, because its neighbours add the indexes or drop the TOAST (see the last two sections below).
 `pg_table_size` would wait on a table a copy worker holds under AccessExclusiveLock: a whole-table copy, or every partition under a truncated parent.
 Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
-Copy workers match the way `finalizingScript` counts them, so the sample waits out an index worker's short ALTER on a copied table.
+This worker's backends are those named `pgcopydb...` from the sampler's own client address, so another migration's copy into the same database is not mistaken for this one's.
+Among them, a copy worker is one named a copy worker or whose last statement was a COPY, so the sample waits out an index worker's short ALTER on a copied table.
+Unlike `finalizingScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
 A failed side prints an empty row and parses to no sample, never to zero.
 
 ### Storage cannot tell an empty table from a copied one
