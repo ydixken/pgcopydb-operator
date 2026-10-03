@@ -229,9 +229,10 @@ All placement rules are preferred, so a smaller cluster can co-locate the pods a
 
 Shared fixture servers get 2 CPUs and 4Gi and the seed Job the same, while migration runner Jobs keep the operator's default request.
 A parallel run (more than one Ginkgo process) lowers these requests, so that one pair per process fits the cluster.
-Each fixture server then requests 1 CPU and 2Gi, each seed Job 100m and 128Mi, and each runner 250m and 512Mi.
+Each fixture server then requests 1 CPU and 1Gi, each seed Job 100m and 128Mi, and each runner 250m and 512Mi.
 Requests only, so nothing is throttled.
-The caches are set by hand alongside them (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
+A parallel run also halves the caches (512MB `shared_buffers`), so a fixture stays near its 1Gi request.
+The caches are set by hand alongside the requests (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
 
 Two specs cover this.
 One reads what was rendered onto the pods, an anti-affinity term and non-zero requests, which is namespaced and so runs anywhere; the other counts the nodes the instances actually occupy, which needs to read nodes and skips where that is not permitted.
@@ -256,7 +257,7 @@ The published-release workflow `e2e.yml` defines its scale independently, defaul
 
 ### How does a parallel run work?
 
-`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value, which is 4.
+`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value, which is 6.
 `go test` cannot run Ginkgo in parallel, so they use the ginkgo CLI at the version that `go.mod` pins.
 Local tasks such as `task e2e` run one process.
 

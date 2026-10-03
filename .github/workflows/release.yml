@@ -316,7 +316,7 @@ jobs:
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
           # Ginkgo processes, each with its own CNPG source/target pair.
-          E2E_PROCS: "4"
+          E2E_PROCS: "6"
         # go test cannot run Ginkgo in parallel, so go run builds the CLI at
         # the version go.mod pins. With several processes -v prints each spec
         # when it ends, not live; poll-progress-after still turns a spec that
