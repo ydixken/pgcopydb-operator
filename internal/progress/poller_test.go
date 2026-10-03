@@ -492,18 +492,8 @@ func TestRelationCountsScript_MeasuresTheTableAndItsToast(t *testing.T) {
 }
 
 // A table owes the copy while it holds rows on the source and none on the
-// target, and only a read of the table can say so: its TOAST relation
-// occupies a page from the schema restore on, so a storage test called an
-// 848MB table with no rows on the target copied (issue #277). Presence, not a
-// row count: a live source runs ahead of the copy's snapshot until the stream
-// catches up, and a count compared against it held the follow gate shut with
-// the base copy long finished (see
-// docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
-// A table copied in parts reads done whenever no part of it is in flight, and
-// belongs to the checks that read content: pgcopydb's catalog after a plain
-// clone, the drain verification after a cutover. The flag travels in the target's scope list, which lets the
-// source count and name exactly the tables the copy still owes; a table empty
-// on both sides owes nothing.
+// target: presence, not a row count, and a table in flight owes it unprobed
+// (docs/research/measurements.md#an-exact-row-count-held-the-follow-gate-against-a-live-source).
 func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 	for _, want := range []string{
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,

@@ -560,11 +560,9 @@ CREATE UNIQUE INDEX items_idx ON items (id)`)
 	}
 }
 
-// A table copied in parts holds each part's rows invisible until it commits,
-// so a presence probe reads the whole uncommitted heap before it finds
-// nothing: several gigabytes ran the target past its statement timeout. The
-// sample must call the table owed without scanning it, and keep sizing it on
-// disk, because a part holds only RowExclusiveLock.
+// An open part's rows stay invisible until it commits, so a probe reads the
+// whole uncommitted heap. The sample must call the table owed without scanning
+// it, and keep sizing it on disk (a part holds only RowExclusiveLock).
 func TestProgressSampleNeverScansAnOpenCopy(t *testing.T) {
 	source, target := sampleDatabases(t, "open_copy", `CREATE TABLE big (id integer, note text);
 CREATE TABLE small (id integer, note text);
