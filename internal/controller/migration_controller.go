@@ -496,7 +496,7 @@ func (r *MigrationReconciler) observeRunningJob(
 	}
 	var counts *progress.RelationCounts
 	if s := got.sample; s != nil {
-		r.applyStage(m, s)
+		r.applyStage(m, s, got.copySeen)
 		if s.Counts != nil {
 			applyCounts(m, s.Counts, got.at)
 			counts = s.Counts
@@ -592,22 +592,23 @@ func (r *MigrationReconciler) progressSample(ctx context.Context, m *v1beta1.Mig
 	if r.Progress == nil {
 		return sampled{}
 	}
+	key := client.ObjectKeyFromObject(m)
 	hint := hintFor(m)
-	sampling := false
 	if r.Sampler != nil {
-		got, ok := r.Sampler.Observe(client.ObjectKeyFromObject(m), jobName, m.Spec.Clone.AllDatabases, hint)
-		if ok && !now {
+		got, ok := r.Sampler.Observe(key, jobName, m.Spec.Clone.AllDatabases, hint)
+		switch {
+		case ok && now:
+			// The run owns the size gauges and orders this sample against its own.
+			return r.Sampler.SampleNow(ctx, key, jobName, m.Spec.Clone.AllDatabases)
+		case ok:
 			return got
 		}
-		sampling = ok
 	}
 	at := r.currentTime()
 	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
-	if !sampling {
-		// A running sampler owns the size gauges; a second writer could set them out of order.
-		recordSizes(m.Namespace, m.Name, s, hint.copyStarted)
-	}
-	return sampled{sample: s, err: err, at: at}
+	got := sampled{sample: s, err: err, at: at, copySeen: s != nil && s.CopyStarted}
+	recordSizes(m.Namespace, m.Name, s, hint.copyStarted || got.copySeen)
+	return got
 }
 
 // hintFor reads the copy's progress off status, the memory that survives a restart.
@@ -623,16 +624,16 @@ func hintFor(m *v1beta1.Migration) samplerHint {
 // applyStage reports the tail (index builds, a vacuum on the largest table) apart
 // from the copy, which tells a slow tail from a stall. Finalizing needs the copy seen
 // first, or a sample catching every worker between statements reports the tail mid-copy.
-func (r *MigrationReconciler) applyStage(m *v1beta1.Migration, s *progress.Sample) {
+func (r *MigrationReconciler) applyStage(m *v1beta1.Migration, s *progress.Sample, started bool) {
+	// A refused marker outranks the probe: its latch is the only
+	// memory of the marker once that scrolls out of the log tail.
+	if started && meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
+			"base copy started, pgcopydb's copy workers reached the target")
+	}
 	switch {
 	case s.Copying:
 		m.Status.Phase = v1beta1.PhaseCloning
-		// A refused marker outranks the probe: its latch is the only
-		// memory of the marker once that scrolls out of the log tail.
-		if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
-			r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
-				"base copy running, copy workers connected to the target")
-		}
 	case s.Finalizing && copySeen(m):
 		m.Status.Phase = v1beta1.PhaseFinalizing
 	}

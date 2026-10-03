@@ -194,7 +194,8 @@ var _ = Describe("Migration Controller background sampler", func() {
 	It("withholds the target size until this attempt's copy is seen", func() {
 		const name = "sampler-stale-target"
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{src: int64p(5000), tgt: int64p(3_000_000)}
+		// Active pgcopydb backends and no worker: the schema restore, before the target is cleaned.
+		fake := &fakeProgress{src: int64p(5000), tgt: int64p(3_000_000), finalizing: true}
 		s, _, _ := startSampler(&pacedProgress{fake: fake}, 10*time.Millisecond, time.Hour)
 		defer s.Stop(key(name))
 		s.Observe(key(name), "job", false, samplerHint{})
@@ -206,13 +207,36 @@ var _ = Describe("Migration Controller background sampler", func() {
 		_, found := gaugeValue("pgcopydb_migration_target_database_size_bytes", migLabels(name))
 		Expect(found).To(BeFalse())
 
+		// A copy too short for any sample to catch: its index or vacuum workers prove it ran.
 		fake.mu.Lock()
-		fake.copying, fake.tgt = true, int64p(400)
+		fake.started, fake.tgt = true, int64p(400)
 		fake.mu.Unlock()
 		Eventually(func() float64 {
 			v, _ := gaugeValue("pgcopydb_migration_target_database_size_bytes", migLabels(name))
 			return v
 		}).Should(Equal(float64(400)))
+	})
+
+	It("never hands the pass a sample older than one it already holds", func() {
+		p := &pacedProgress{fake: &fakeProgress{}}
+		s, _, _ := startSampler(p, time.Hour, time.Hour)
+		k := key("sampler-monotonic")
+		defer s.Stop(k)
+		s.Observe(k, "job", false, samplerHint{})
+		Eventually(p.count).Should(Equal(1))
+		judged := s.SampleNow(ctx, k, "job", false)
+		got, _ := s.Observe(k, "job", false, samplerHint{})
+		Expect(got.at).To(Equal(judged.at), "the pass's own sample becomes the run's latest")
+
+		// A background sample that started first and answers last.
+		s.mu.Lock()
+		s.keepLocked(k, s.runs[k], sampled{sample: &progress.Sample{Copying: true, CopyStarted: true},
+			at: judged.at.Add(-time.Second), copySeen: true})
+		s.mu.Unlock()
+		got, _ = s.Observe(k, "job", false, samplerHint{})
+		Expect(got.at).To(Equal(judged.at))
+		Expect(got.sample.Copying).To(BeFalse())
+		Expect(got.copySeen).To(BeTrue(), "an older sample still latches the copy")
 	})
 
 	It("writes nothing once stopped, so a Forget after Stop is final", func() {
@@ -275,6 +299,27 @@ var _ = Describe("Migration Controller background sampler", func() {
 			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 			Expect(m.Status.Progress.TablesDone).To(Equal(int64(1)))
 			Expect(copySeen(m)).To(BeTrue())
+		})
+
+		It("latches a copy that a newer sample replaced before any pass read it", func() {
+			const name = "sampler-superseded-copy"
+			defer removeMigration(ctx, name)
+			defer metrics.Forget(testNS, name)
+			fake := &fakeProgress{src: int64p(9000), tgt: int64p(100), copying: true}
+			p := &pacedProgress{fake: fake}
+			r, _ := runningClone(name, p, 5*time.Millisecond)
+			Eventually(p.count).Should(BeNumerically(">=", 2))
+			fake.mu.Lock()
+			fake.copying, fake.finalizing, fake.tgt = false, true, int64p(5000)
+			fake.mu.Unlock()
+			seen := p.count()
+			Eventually(p.count).Should(BeNumerically(">=", seen+3))
+
+			m := reconcileAndGet(ctx, r, name)
+			Expect(copySeen(m)).To(BeTrue(), "%+v", m.Status.Conditions)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFinalizing))
+			v, _ := gaugeValue("pgcopydb_migration_target_database_size_bytes", migLabels(name))
+			Expect(v).To(Equal(float64(5000)))
 		})
 
 		It("keeps its cadence through a slow reconcile pass", func() {
