@@ -125,11 +125,12 @@ jobs:
         run: ./hack/check-chart-rbac.sh
       - name: Chart monitoring renders as expected
         run: ./hack/check-chart-monitoring.sh
-      - name: promtool checks and unit-tests the alert rules
+      - name: promtool checks and unit-tests the alert rules and panel queries
         run: |
           ./hack/ensure-promtool.sh
           bin/promtool check rules charts/pgcopydb-operator/rules/migrations.yaml
           bin/promtool test rules test/alerts/migrations_test.yaml
+          bin/promtool test rules test/dashboards/panels_test.yaml
       - name: golangci-lint
         run: make lint
 

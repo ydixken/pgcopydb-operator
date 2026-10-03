@@ -194,18 +194,42 @@ tests:
         alertname: PgcopydbMigrationReplicationLagHigh
         exp_alerts: []
 
-  # A drain that never reaches endpos fires after 15m; a replay that catches
-  # up at 10m drops out of the expression and stays silent.
+  # A drain that never reaches endpos fires after 15m, and a replay that
+  # catches up at 10m drops out of the expression. The other two are not
+  # draining, so their frozen gap stays silent. "done" is the gauges a
+  # Completed migration kept exporting: its last replay sample predated the
+  # final drain. "verified" is in CuttingOver for its handover and cleanup,
+  # after the drain verification proved endpos.
   - interval: 1m
     input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="bad", phase="CuttingOver"}'
+        values: "1x30"
       - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="bad"}'
         values: "5000x30"
       - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="bad"}'
         values: "1000x30"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="ok", phase="CuttingOver"}'
+        values: "1x30"
       - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="ok"}'
         values: "5000x30"
       - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="ok"}'
         values: "0+500x30"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="done", phase="Completed"}'
+        values: "1x30"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="done"}'
+        values: "5000x30"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="done"}'
+        values: "1000x30"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="verified", phase="CuttingOver"}'
+        values: "1x30"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="default", name="verified"}'
+        values: "5000x30"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="default", name="verified"}'
+        values: "1000x30"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="verified", type="CutoverCompleted", status="True"}
+        values: "1700000000x30"
     alert_rule_test:
       - eval_time: 20m
         alertname: PgcopydbMigrationCutoverStalled

@@ -55,9 +55,8 @@ groups:
             --resume. The Failed condition and the AttemptFailed events on the
             Migration carry the worker's last error.
       # Clone without progress: the target database stopped growing. The size
-      # gauge is sampled from the running worker pod, so the series fades out
-      # with the worker and a crash-looping one cannot fire this;
-      # PgcopydbMigrationRetrying covers that case instead.
+      # gauge keeps its last sample after the worker pod ends, so a worker that
+      # fails for 1h of Cloning fires this beside PgcopydbMigrationRetrying.
       - alert: PgcopydbMigrationCloneStalled
         expr: >-
           (pgcopydb_migration_phase{phase="Cloning"} == 1)
@@ -101,12 +100,19 @@ groups:
             source.
       # Cutover drain. endpos only exists once cutover has set it, and the
       # trailing filter drops the series when replay reaches endpos, so a
-      # healthy drain resolves this on its own.
+      # healthy drain resolves this on its own. Replay is the last sample
+      # before the worker exits, so the gap can stand after the drain ends:
+      # the phase and the CutoverCompleted condition scope it to a drain that
+      # is still unproven.
       - alert: PgcopydbMigrationCutoverStalled
         expr: >-
-          (pgcopydb_migration_endpos_lsn_bytes > 0)
+          ((pgcopydb_migration_endpos_lsn_bytes > 0)
           - on (namespace, name)
-          pgcopydb_migration_replay_lsn_bytes > 0
+          pgcopydb_migration_replay_lsn_bytes > 0)
+          and on (namespace, name)
+          (pgcopydb_migration_phase{phase="CuttingOver"} == 1)
+          unless on (namespace, name)
+          pgcopydb_migration_condition_transition_timestamp_seconds{type="CutoverCompleted", status="True"}
         for: 15m
         labels:
           severity: critical

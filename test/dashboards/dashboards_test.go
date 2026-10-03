@@ -37,6 +37,9 @@ const (
 	statPanel     = "stat"
 	// textModeName is a stat tile that shows a label, not a reading.
 	textModeName = "name"
+	// nsVar and nameVar are the template variables that pick one Migration.
+	nsVar   = "namespace"
+	nameVar = "name"
 )
 
 // ruleExprs reads every alert expression from the chart's rule file.
@@ -290,17 +293,23 @@ func TestTimelinesSurviveAnOperatorRestart(t *testing.T) {
 		"pgcopydb_migration_condition_transition_timestamp_seconds": "max by (type, status)",
 	}
 	seen := map[string]bool{}
-	for _, expr := range load(t)["migration-detail.json"].Exprs() {
-		for metric, agg := range want {
-			// Only the timelines aggregate; the stat tiles read the same
-			// metrics at a point in time and reduce in Grafana instead.
-			if !slices.Contains(Metrics(expr), metric) || !strings.Contains(expr, "_over_time(") {
-				continue
-			}
-			seen[metric] = true
-			if !strings.Contains(expr, agg) {
-				t.Errorf("timeline over %s does not aggregate with %q, so it doubles its rows per operator pod:\n  %s",
-					metric, agg, expr)
+	for _, p := range load(t)["migration-detail.json"].AllPanels() {
+		// Only the timelines aggregate; the stat tiles read the same
+		// metrics at a point in time and reduce in Grafana instead.
+		if p.Type == statPanel {
+			continue
+		}
+		for _, tg := range p.Targets {
+			expr := tg.Expr
+			for metric, agg := range want {
+				if !slices.Contains(Metrics(expr), metric) || !strings.Contains(expr, "_over_time(") {
+					continue
+				}
+				seen[metric] = true
+				if !strings.Contains(expr, agg) {
+					t.Errorf("timeline over %s does not aggregate with %q, so it doubles its rows per operator pod:\n  %s",
+						metric, agg, expr)
+				}
 			}
 		}
 	}
@@ -383,6 +392,44 @@ func TestHistoryYieldsToALiveMigration(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// panels_test.yaml evaluates panel targets under promtool. A copy that drifts
+// from the dashboard tests a query nobody runs, so each expr must still be one.
+func TestPanelCasesMatchTheDashboard(t *testing.T) {
+	data, err := os.ReadFile("panels_test.yaml")
+	if err != nil {
+		t.Fatalf("read panel cases: %v", err)
+	}
+	var cases struct {
+		Tests []struct {
+			Exprs []struct {
+				Expr string `json:"expr"`
+			} `json:"promql_expr_test"`
+		} `json:"tests"`
+	}
+	if err := yaml.Unmarshal(data, &cases); err != nil {
+		t.Fatalf("parse panel cases: %v", err)
+	}
+	targets := map[string]bool{}
+	vars := map[string]string{nsVar: "ns", nameVar: "m"}
+	for _, d := range load(t) {
+		for _, expr := range d.Exprs() {
+			targets[Substitute(expr, vars)] = true
+		}
+	}
+	var n int
+	for _, c := range cases.Tests {
+		for _, e := range c.Exprs {
+			n++
+			if !targets[e.Expr] {
+				t.Errorf("panels_test.yaml tests a query no panel runs:\n  %s", e.Expr)
+			}
+		}
+	}
+	if n == 0 {
+		t.Error("panels_test.yaml has no promql_expr_test; this check is guarding nothing")
 	}
 }
 
@@ -525,7 +572,7 @@ func TestVariablesDeclared(t *testing.T) {
 		}
 	}
 	detail := ds["migration-detail.json"]
-	for _, must := range []string{"namespace", "name", "datasource"} {
+	for _, must := range []string{nsVar, nameVar, "datasource"} {
 		found := false
 		for _, v := range detail.Templating.List {
 			if v.Name == must {
@@ -663,7 +710,7 @@ func TestVars(t *testing.T) {
 func TestSubstitute(t *testing.T) {
 	got := Substitute(
 		`rate(x{ns="$namespace", n="$name"}[$__rate_interval]) or y{j="${job}"}`,
-		map[string]string{"namespace": "prod", "name": "shop", "job": "op"},
+		map[string]string{nsVar: "prod", nameVar: "shop", "job": "op"},
 	)
 	want := `rate(x{ns="prod", n="shop"}[5m]) or y{j="op"}`
 	if got != want {

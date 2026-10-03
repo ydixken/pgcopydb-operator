@@ -1,0 +1,93 @@
+# Promtool tests for dashboard panel queries that branch on what Prometheus
+# holds. Each expr is a panel target with $namespace=ns, $name=m and the
+# default $__range of 1h; TestPanelCasesMatchTheDashboard keeps them in step.
+# Run via `bin/promtool test rules test/dashboards/panels_test.yaml`.
+rule_files: []
+
+evaluation_interval: 1m
+
+tests:
+  # Cutover Drain. A follow Migration drained 5000 - 4000 in its first 10m
+  # and then Completed. The LSN series leave with the stream.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_info{namespace="ns", name="m", mode="follow"}'
+        values: "1x180"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="CuttingOver"}'
+        values: "1x10 0x170"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="Completed"}'
+        values: "0x10 1x170"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="ns", name="m"}'
+        values: "5000x10"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"}'
+        values: "4000x10"
+    promql_expr_test:
+      # The cutover is in the range: the tile reads the last gap.
+      - expr: &drain >-
+          (max by (namespace, name) (pgcopydb_migration_endpos_lsn_bytes{namespace="ns", name="m"}) - max by (namespace,
+          name) (pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"})) or ((max by (namespace, name)
+          (last_over_time(pgcopydb_migration_endpos_lsn_bytes{namespace="ns", name="m"}[1h])) - max by (namespace, name)
+          (last_over_time(pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"}[1h]))) unless max by (namespace,
+          name) (pgcopydb_migration_phase{namespace="ns", name="m",
+          phase=~"Pending|Validating|Cloning|Finalizing|Streaming|CutoverPending"} == 1 or
+          pgcopydb_migration_info{namespace="ns", name="m", mode="clone"})) or (max by (namespace, name)
+          (pgcopydb_migration_info{namespace="ns", name="m"} * -1) unless max by (namespace, name)
+          (pgcopydb_migration_phase{namespace="ns", name="m", phase=~"CuttingOver|Verifying|Completed|Failed|Suspended"}
+          == 1 and on (namespace, name) pgcopydb_migration_info{namespace="ns", name="m", mode="follow"}))
+        eval_time: 30m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: 1000
+      # The cutover is before the range: the tile cannot know the gap, and
+      # No Endpos would be false. It reads N/A.
+      - expr: *drain
+        eval_time: 3h
+        exp_samples: []
+
+  # A clone never has an endpos, in any phase.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_info{namespace="ns", name="m", mode="clone"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="Completed"}'
+        values: "1x10"
+    promql_expr_test:
+      - expr: *drain
+        eval_time: 10m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: -1
+
+  # A follow Migration streams and no cutover has set an endpos yet.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_info{namespace="ns", name="m", mode="follow"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="Streaming"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"}'
+        values: "4000x10"
+    promql_expr_test:
+      - expr: *drain
+        eval_time: 10m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: -1
+
+  # A live drain reads the current gap.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_info{namespace="ns", name="m", mode="follow"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="CuttingOver"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="ns", name="m"}'
+        values: "5000x10"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"}'
+        values: "4000+50x10"
+    promql_expr_test:
+      - expr: *drain
+        eval_time: 10m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: 500

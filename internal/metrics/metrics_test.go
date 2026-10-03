@@ -100,6 +100,7 @@ func TestRecordGauges(t *testing.T) {
 func TestRecordReplicationLag(t *testing.T) {
 	m := newMigration("ns1", "lag")
 	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+	m.Status.Phase = v1beta1.PhaseStreaming
 
 	// No replication block at all: no series.
 	Record(m)
@@ -200,6 +201,7 @@ func TestRecordCloneBytes(t *testing.T) {
 func TestRecordLSNs(t *testing.T) {
 	m := newMigration("ns1", "lsn")
 	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+	m.Status.Phase = v1beta1.PhaseStreaming
 
 	// Empty LSN fields and no lag: no LSN series at all.
 	m.Status.Replication = &v1beta1.ReplicationStatus{}
@@ -238,9 +240,44 @@ func TestRecordLSNs(t *testing.T) {
 	}
 }
 
+// status.replication keeps its last sample once the worker stops, so the lag
+// and LSN series must leave with the phases that refresh it. The other series
+// stay: a Completed run still reports its phase and attempts.
+func TestRecordReplicationLeavesWithTheStream(t *testing.T) {
+	stream := []*prometheus.GaugeVec{replicationLagBytes, sourceLSNBytes, writeLSNBytes, replayLSNBytes, endposLSNBytes}
+	for _, phase := range []v1beta1.MigrationPhase{
+		v1beta1.PhaseVerifying, v1beta1.PhaseCompleted, v1beta1.PhaseFailed, v1beta1.PhaseSuspended,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			m := newMigration("ns1", "stream-ends")
+			t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+			loadMigration(m)
+			m.Status.Phase = v1beta1.PhaseCuttingOver
+			Record(m)
+			for i, g := range stream {
+				if got := testutil.CollectAndCount(g); got != 1 {
+					t.Fatalf("CuttingOver: series %d = %d, want 1", i, got)
+				}
+			}
+
+			m.Status.Phase = phase
+			Record(m)
+			for i, g := range stream {
+				if got := testutil.CollectAndCount(g); got != 0 {
+					t.Errorf("%s: series %d = %d, want 0", phase, i, got)
+				}
+			}
+			if got := testutil.CollectAndCount(attempts); got != 1 {
+				t.Errorf("%s: attempts series = %d, want 1", phase, got)
+			}
+		})
+	}
+}
+
 func TestRecordLSNs_Unparseable(t *testing.T) {
 	m := newMigration("ns1", "lsn-garbage")
 	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+	m.Status.Phase = v1beta1.PhaseStreaming
 
 	lag := int64(512)
 	m.Status.Replication = &v1beta1.ReplicationStatus{
