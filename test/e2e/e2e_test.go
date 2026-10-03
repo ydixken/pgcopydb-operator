@@ -115,12 +115,12 @@ var _ = Describe("Fixture placement", func() {
 	})
 })
 
-// The clone chain runs in order on one pair: the re-clone needs the target the
-// fresh clone populated, and the filter spec cleans up after the re-clone.
+// The clone chain runs in order on one pair: the filter spec re-clones with
+// dropIfExists onto the target the fresh clone populated.
 // Every other Migration scenario stands alone in the container below, so a
-// failure here skips three specs, not the whole set. In a parallel run the
+// failure here skips two specs, not the whole set. In a parallel run the
 // longest units carry a SpecPriority so they start first and none of them
-// starts last; the chain is the longest of all.
+// starts last; the chain cannot be split, so it goes first of all.
 var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 	// Ginkgo randomizes top-level container order per seed, so another
 	// container may have populated the target or may still be dropping its
@@ -164,12 +164,6 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 	})
 
-	It("re-clones onto the populated target with dropIfExists", func() {
-		create(newMigration("e2e-reclone", nsE2E, v1beta1.CloneOptions{DropIfExists: true}))
-		m := waitCompleted("e2e-reclone", nsE2E)
-		Expect(m.Status.Attempts).To(Equal(int32(1)))
-	})
-
 	It("excludes filtered schemas from the clone", func() {
 		// The filtered dump carries no DROP for excluded objects, so the audit
 		// schema left by the previous scenario must go by hand for the
@@ -181,7 +175,8 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 			DropIfExists: true,
 			Filters:      &v1beta1.Filters{ExcludeSchemas: []string{"audit"}},
 		}))
-		waitCompleted("e2e-filters", nsE2E)
+		m := waitCompleted("e2e-filters", nsE2E)
+		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
 		By("checking audit stayed away while public tables arrived")
 		Expect(psql(targetCluster, "SELECT to_regclass('audit.events') IS NULL")).To(Equal("t"))
