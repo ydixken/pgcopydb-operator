@@ -565,26 +565,32 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 // both flags false, which leaves the caller reporting Cloning.
 func TestSampleStage(t *testing.T) {
 	for _, tc := range []struct {
-		name, out           string
-		copying, finalizing bool
+		name, out                    string
+		copying, finalizing, started bool
 	}{
-		{name: "copy workers busy", out: "stage=4 0\n", copying: true},
-		{name: "only the tail left", out: "stage=0 1\n", finalizing: true},
+		{name: "copy workers busy", out: "stage=4 0 0\n", copying: true, started: true},
+		{name: "only the tail left", out: "stage=0 1 1\n", finalizing: true, started: true},
+		// Active pgcopydb backends but no worker: the schema restore, which
+		// runs before pgcopydb cleans the target, so the copy has not started.
+		{name: "schema restore", out: "stage=0 1 0\n", finalizing: true},
 		// Both counts zero is a worker that holds no backend the query
 		// counts: not connected yet, or already gone. Neither state.
-		{name: "no counted backends", out: "stage=0 0\n"},
+		{name: "no counted backends", out: "stage=0 0 0\n"},
+		// Index or vacuum workers idle between statements: the copy is over.
+		{name: "tail workers idle", out: "stage=0 0 2\n", started: true},
 		// The copy is winding down while the tail has started. Still
 		// copying, because data is still moving.
-		{name: "both kinds active", out: "stage=2 3\n", copying: true},
+		{name: "both kinds active", out: "stage=2 3 1\n", copying: true, started: true},
+		{name: "two counts", out: "stage=4 0\n"},
 		{name: "stage query failed", out: "stage=\nsource=1 1 1 1 1 0\n"},
 		{name: "unparseable output", out: "stage=ERROR: nope\n"},
 		{name: "no stage line", out: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := parseSample([]byte(tc.out))
-			if s.Copying != tc.copying || s.Finalizing != tc.finalizing {
-				t.Errorf("copying=%v finalizing=%v, want copying=%v finalizing=%v",
-					s.Copying, s.Finalizing, tc.copying, tc.finalizing)
+			if s.Copying != tc.copying || s.Finalizing != tc.finalizing || s.CopyStarted != tc.started {
+				t.Errorf("copying=%v finalizing=%v started=%v, want copying=%v finalizing=%v started=%v",
+					s.Copying, s.Finalizing, s.CopyStarted, tc.copying, tc.finalizing, tc.started)
 			}
 		})
 	}
@@ -593,7 +599,7 @@ func TestSampleStage(t *testing.T) {
 // stageQuery returns the stage probe's SQL as the sample exec sends it.
 func stageQuery(t *testing.T) string {
 	t.Helper()
-	f := &fakeExec{pod: "w", out: []byte("stage=0 1\n")}
+	f := &fakeExec{pod: "w", out: []byte("stage=0 1 0\n")}
 	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", false); err != nil {
 		t.Fatal(err)
 	}
@@ -673,6 +679,10 @@ func TestStageCountsCopyWorkersByConnection(t *testing.T) {
 	}
 	if strings.Contains(where, "state") {
 		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
+	}
+	// Index and vacuum workers idle between statements, and still prove the copy started.
+	if _, workers, ok := strings.Cut(tailCount, "|| ' ' ||"); !ok || strings.Contains(workers, "state") {
+		t.Errorf("index and vacuum workers are not counted by connection: %s", tailCount)
 	}
 }
 

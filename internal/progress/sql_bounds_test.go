@@ -280,44 +280,54 @@ func TestStageQueryOnLiveInstance(t *testing.T) {
 		t.Fatalf("sample printed no stage line:\n%s", out)
 		return ""
 	}
-	worker := exec.Command("psql", namedURI(t, uri, "", "pgcopydb copy worker 3"), "-XqtA", "-v", "ON_ERROR_STOP=1")
-	stdin, err := worker.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = worker.Start(); err != nil {
-		t.Fatal(err)
-	}
-	released := false
-	release := func() {
-		if released {
-			return
+	// hold keeps a backend named app connected and idle in a transaction, so a
+	// counter has to match on the name alone.
+	hold := func(app string) (release func()) {
+		t.Helper()
+		worker := exec.Command("psql", namedURI(t, uri, "", app), "-XqtA", "-v", "ON_ERROR_STOP=1")
+		stdin, err := worker.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
 		}
-		released = true
-		_, _ = io.WriteString(stdin, "ROLLBACK;\n\\q\n")
-		_ = stdin.Close()
-		if err := worker.Wait(); err != nil {
-			t.Errorf("copy worker failed: %v", err)
+		if err = worker.Start(); err != nil {
+			t.Fatal(err)
 		}
+		released := false
+		release = func() {
+			if released {
+				return
+			}
+			released = true
+			_, _ = io.WriteString(stdin, "ROLLBACK;\n\\q\n")
+			_ = stdin.Close()
+			if err := worker.Wait(); err != nil {
+				t.Errorf("%s failed: %v", app, err)
+			}
+		}
+		// A failed assertion must not leave the backend behind for the next test.
+		t.Cleanup(release)
+		if _, err = io.WriteString(stdin, "BEGIN;\n"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, app+" backend never appeared", func() bool {
+			return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name='"+app+"'") == "1"
+		})
+		return release
 	}
-	// A failed assertion must not leave the backend behind for the next test.
-	defer release()
-	// An open transaction holds the backend without keeping it active: the
-	// first counter has to match on the name alone.
-	if _, err = io.WriteString(stdin, "BEGIN;\n"); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 5*time.Second, "copy worker backend never appeared", func() bool {
-		return sqlOutput(t, uri, "select count(*) from pg_stat_activity where application_name='pgcopydb copy worker 3'") == "1"
-	})
-	// Copy backends first, then the tail: parseStage reads the pair with
-	// Sscanf and calls anything else unknown.
-	if got := stage(); got != "1 0" {
-		t.Fatalf("clone stage = %q with one copy worker connected, want \"1 0\"", got)
+	// Copy backends first, then the tail, then the workers that show the copy
+	// started: parseStage reads the three with Sscanf and calls anything else unknown.
+	release := hold("pgcopydb copy worker 3")
+	if got := stage(); got != "1 0 0" {
+		t.Fatalf("clone stage = %q with one copy worker connected, want \"1 0 0\"", got)
 	}
 	release()
-	if got := stage(); got != "0 0" {
-		t.Fatalf("clone stage = %q with no pgcopydb backend left, want \"0 0\"", got)
+	release = hold("pgcopydb[4] create index worker")
+	if got := stage(); got != "0 0 1" {
+		t.Fatalf("clone stage = %q with one idle index worker connected, want \"0 0 1\"", got)
+	}
+	release()
+	if got := stage(); got != "0 0 0" {
+		t.Fatalf("clone stage = %q with no pgcopydb backend left, want \"0 0 0\"", got)
 	}
 }
 

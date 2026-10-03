@@ -206,6 +206,9 @@ type Sample struct {
 
 	// Copying and Finalizing are the clone stage; both false is unknown.
 	Copying, Finalizing bool
+	// CopyStarted: a copy, index or vacuum worker is connected. pgcopydb starts them after
+	// restoring the schema, so the target no longer holds what an earlier run left.
+	CopyStarted bool
 
 	// Lost maps each side that returned no row to psql's error, empty when
 	// the script captured none, withheld when no server wrote it.
@@ -280,7 +283,7 @@ func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string
 func parseSample(out []byte) *Sample {
 	var src, tgt []int64
 	var owed string
-	var copying, finalizing bool
+	var copying, finalizing, started bool
 	reasons := map[string]string{}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		if v, ok := strings.CutPrefix(line, "source="); ok {
@@ -290,12 +293,12 @@ func parseSample(out []byte) *Sample {
 		} else if v, ok := strings.CutPrefix(line, "owed="); ok {
 			owed = strings.TrimSpace(v)
 		} else if v, ok := strings.CutPrefix(line, "stage="); ok {
-			copying, finalizing = parseStage(v)
+			copying, finalizing, started = parseStage(v)
 		} else if side, v, ok := strings.Cut(line, "_error="); ok {
 			reasons[side] = serverReason(strings.TrimSpace(v))
 		}
 	}
-	sample := &Sample{Lost: map[string]string{}, Copying: copying, Finalizing: finalizing}
+	sample := &Sample{Lost: map[string]string{}, Copying: copying, Finalizing: finalizing, CopyStarted: started}
 	if len(src) == 6 {
 		sample.SourceSize = &src[0]
 	} else {
@@ -340,7 +343,7 @@ func parseFields(s string) []int64 {
 }
 
 // stageScript counts pgcopydb's own backends on the target, ahead of the sizes, so a
-// sample that sees the copy reads the target after pgcopydb has cleaned it. Both tests
+// sample that sees the copy reads the target after pgcopydb has cleaned it. The tests
 // are case insensitive because pgcopydb emits the copy statement lowercase,
 // and copy workers count by connection while the tail counts only active ones
 // (see docs/research/measurements.md#a-copy-workers-connection-outlives-the-statement-it-is-running).
@@ -351,20 +354,22 @@ const stageScript = `g=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "select
                       or (state = 'active' and query ilike 'copy %')) || ' ' ||
   count(*) filter (where state = 'active'
                      and application_name not ilike '%copy worker%'
-                     and query not ilike 'copy %')
+                     and query not ilike 'copy %') || ' ' ||
+  count(*) filter (where application_name ilike '%index worker%'
+                      or application_name ilike '%vacuum worker%')
 from pg_stat_activity
 where application_name like 'pgcopydb%' and client_addr = inet_client_addr()") || g=
 `
 
 // parseStage reads the stage= line: copying while any copy worker is left, finalizing
-// once only the tail is (index builds, constraints, vacuum). Both false is unknown,
-// since a failed query and no matching backend must not read as either state.
-func parseStage(v string) (copying, finalizing bool) {
-	var nCopy, nOther int
-	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d %d", &nCopy, &nOther); err != nil {
-		return false, false
+// once only the tail is active, started while a copy, index or vacuum worker is connected.
+// All false is unknown, since a failed query must not read as any state.
+func parseStage(v string) (copying, finalizing, started bool) {
+	var nCopy, nOther, nWorkers int
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d %d %d", &nCopy, &nOther, &nWorkers); err != nil {
+		return false, false, false
 	}
-	return nCopy > 0, nCopy == 0 && nOther > 0
+	return nCopy > 0, nCopy == 0 && nOther > 0, nCopy > 0 || nWorkers > 0
 }
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
