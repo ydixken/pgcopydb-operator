@@ -87,7 +87,7 @@ jobs:
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
           # Ginkgo processes, each with its own CNPG source/target pair.
-          E2E_PROCS: "4"
+          E2E_PROCS: "6"
         run: |
           go run github.com/onsi/ginkgo/v2/ginkgo --procs="$E2E_PROCS" -v \
             --timeout=4h --poll-progress-after=15m \
