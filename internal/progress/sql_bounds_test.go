@@ -634,3 +634,30 @@ func TestProgressSampleSkipsTablesTheWorkerHoldsExclusively(t *testing.T) {
 		})
 	}
 }
+
+// libpq echoes a connection URI it cannot parse, password included, and the
+// lost-side log carries the reason, so only a server's own words may pass.
+func TestProgressSampleWithholdsAnEchoedURI(t *testing.T) {
+	source := testPGURI(t)
+	for _, target := range []string{
+		"postgresql://app:hunter%zz2@127.0.0.1:1/postgres",
+		"postgresql://app:hunter2@[::1:5432/postgres",
+	} {
+		argv := progressCommand(false, false)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+source, "PGCOPYDB_TARGET_PGURI="+target)
+		out, err := cmd.Output()
+		cancel()
+		if err != nil {
+			t.Fatalf("sample failed: %v", err)
+		}
+		if !strings.Contains(string(out), "hunter") {
+			t.Fatalf("psql no longer echoes the URI, so this test proves nothing: %q", out)
+		}
+		reason, lost := parseSample(out).Lost[targetSide]
+		if !lost || reason != withheldReason {
+			t.Errorf("target reason = %q (lost %v), want the withheld reason", reason, lost)
+		}
+	}
+}

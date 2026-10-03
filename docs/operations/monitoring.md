@@ -90,7 +90,9 @@ The operator reads neither per-database relation counts nor the instance catalog
 Each progress query runs under a timeout that connection-string options cannot disable.
 A sample therefore leaves no session timeout behind for a later COPY or index build to inherit.
 When one side fails, its gauges keep their last value while the other side updates.
-The operator logs `progress sample lost a side` with psql's error when a side stops answering, and logs again when it answers.
+The operator logs `progress sample lost a side` with the reason when a side stops answering, and logs again when it answers.
+The reason is the server's error or the failed connection's host and port.
+Any other psql message is withheld, because libpq echoes a connection URI it cannot parse, password included.
 A failed sample never completes or fails a migration.
 
 `pgcopydb_migration_phase` is an instantaneous gauge; after the first `Pending` bootstrap, the phase summarizes the conditions.

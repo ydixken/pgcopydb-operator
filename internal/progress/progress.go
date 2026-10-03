@@ -194,6 +194,21 @@ why() { tr '\n' ' ' < "$err" | cut -c 1-300; }
 // The sides a sample reads, as the script names them on its output lines.
 const sourceSide, targetSide = "source", "target"
 
+// withheldReason replaces any psql message a server did not write: libpq echoes
+// a connection URI it cannot parse, password included, and the reason is logged.
+const withheldReason = "psql failed with a client-side message, withheld because it can echo the connection URI"
+
+// serverReason passes psql's message on only when it starts as a server error
+// or as libpq's connection failure, which names the host and port but no URI.
+func serverReason(msg string) string {
+	for _, prefix := range []string{"ERROR:", "FATAL:", "psql: error: connection to server at "} {
+		if msg == "" || strings.HasPrefix(msg, prefix) {
+			return msg
+		}
+	}
+	return withheldReason
+}
+
 // Sample is one poll of both databases: their sizes, and the relation counts
 // when the target has a schema to count.
 type Sample struct {
@@ -202,7 +217,7 @@ type Sample struct {
 	Counts     *RelationCounts
 
 	// Lost maps each side that returned no row to psql's error, empty when
-	// the script captured none.
+	// the script captured none, withheld when no server wrote it.
 	Lost map[string]string
 }
 
@@ -283,7 +298,7 @@ func parseSample(out []byte) *Sample {
 		} else if v, ok := strings.CutPrefix(line, "owed="); ok {
 			owed = strings.TrimSpace(v)
 		} else if side, v, ok := strings.Cut(line, "_error="); ok {
-			reasons[side] = strings.TrimSpace(v)
+			reasons[side] = serverReason(strings.TrimSpace(v))
 		}
 	}
 	sample := &Sample{Lost: map[string]string{}}

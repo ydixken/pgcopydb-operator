@@ -299,7 +299,7 @@ Operator v0.16.0 and earlier read the table being copied.
 The sample probed it for a row and read every uncommitted page of the open copy, or it waited on the exclusive lock of a table copied whole.
 Either ran the target query past its 5-second timeout, and status kept its last figures, without a log line, until a copy into the table committed.
 Later versions skip the tables a copy worker holds locked on any target, and skip every open copy on a PostgreSQL 14 or later target.
-They log `progress sample lost a side` with psql's error when a sample side fails.
+They log `progress sample lost a side` with the server's error when a sample side fails.
 On an older target the probe still reads an open part, and that log line shows the statement timeout.
 
 Upgrade the operator, and on a target before PostgreSQL 14 also shrink the parts.

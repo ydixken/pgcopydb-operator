@@ -292,6 +292,22 @@ func TestSample(t *testing.T) {
 			src:  ptr(1073741824),
 			lost: map[string]string{targetSide: "ERROR:  canceling statement due to statement timeout"},
 		},
+		"target refused the connection": {
+			out:  "target_error=psql: error: connection to server at \"db\" (10.0.0.1), port 5432 failed: Connection refused \nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: `psql: error: connection to server at "db" (10.0.0.1), port 5432 failed: Connection refused`},
+		},
+		"source rejected the password": {
+			out:  "source_error=FATAL:  password authentication failed for user \"app\"\nsource=\ntarget=1 0 0 0 0\n",
+			tgt:  ptr(1),
+			lost: map[string]string{sourceSide: `FATAL:  password authentication failed for user "app"`},
+		},
+		// libpq echoes a URI it cannot parse, password and all; the log must not.
+		"target URI unparsable": {
+			out:  "target_error=psql: error: invalid percent-encoded token: \"hunter%zz2\"\nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: withheldReason},
+		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
 		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
