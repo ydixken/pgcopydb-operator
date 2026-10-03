@@ -1165,7 +1165,7 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 		sc := fixtureStorageClass
 		wv.StorageClassName = &sc
 	}
-	return &v1beta1.Migration{
+	m := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1beta1.MigrationSpec{
 			Source:     e2eConn(sourceCluster),
@@ -1182,6 +1182,12 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			},
 		},
 	}
+	// Except in a parallel run: a default-sized runner per pair next to the
+	// fixtures does not fit the cluster, so it pins a smaller request.
+	if _, _, runner := suiteRequests(parallelProcs()); runner.cpu != "" {
+		m.Spec.Runner.Resources = workerResources(runner.cpu, runner.memory)
+	}
+	return m
 }
 
 func create(m *v1beta1.Migration) {

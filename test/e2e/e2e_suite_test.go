@@ -101,7 +101,8 @@ const (
 	labelCNPGInstance = "cnpg.io/instanceName"
 	rolePrimary       = "primary"
 
-	// Fixture server sizing. Requests only, so nothing is ever throttled, but
+	// Fixture server sizing for a one-process run; suiteRequests shrinks it
+	// when several pairs share the cluster. Requests only, so nothing is ever throttled, but
 	// large enough that a seeding or restoring backend gets a real core and
 	// PostgreSQL gets a cache worth having. The caches are derived by hand
 	// rather than by ratio: CNPG does not size shared_buffers from the memory
@@ -1561,6 +1562,7 @@ func ensureNamespace(name string) {
 // Seeding runs in a separate Job so it survives pod restarts and can reuse kept fixtures.
 // Unstructured avoids importing the CNPG API just for test fixtures.
 func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
+	fixture, _, _ := suiteRequests(parallelProcs())
 	storage := map[string]any{"size": size}
 	if fixtureStorageClass != "" {
 		storage["storageClass"] = fixtureStorageClass
@@ -1612,7 +1614,7 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 			// least-allocated node, and they size the server: a quarter core
 			// left a seeding backend pinned at its request for minutes.
 			"resources": map[string]any{
-				"requests": map[string]any{"cpu": fixtureCPU, "memory": fixtureMemory},
+				"requests": map[string]any{"cpu": fixture.cpu, "memory": fixture.memory},
 			},
 			"bootstrap": map[string]any{"initdb": map[string]any{
 				"database": cnpgAppDatabase,
@@ -2119,6 +2121,7 @@ func applySeedConfigMap() {
 }
 
 func buildSeedJob() *batchv1.Job {
+	_, seedRequests, _ := suiteRequests(parallelProcs())
 	backoff := int32(2)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedJobName},
@@ -2131,7 +2134,7 @@ func buildSeedJob() *batchv1.Job {
 					Containers: []corev1.Container{{
 						Name:      "seed",
 						Image:     seedImage,
-						Resources: workerResources(workerCPU, workerMemory),
+						Resources: workerResources(seedRequests.cpu, seedRequests.memory),
 						// bash, not sh: run.sh reads PIPESTATUS to report the
 						// failing stage rather than the exit of the sed that
 						// labels its output.

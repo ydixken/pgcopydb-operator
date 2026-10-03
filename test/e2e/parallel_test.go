@@ -22,6 +22,9 @@ import (
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
 // pairNames names process proc's source, target and seed Job. Process 1 keeps
@@ -38,6 +41,28 @@ func pairNames(proc int) (source, target, seedJob string) {
 func parallelProcs() int {
 	cfg, _ := GinkgoConfiguration()
 	return cfg.ParallelTotal
+}
+
+// Requests for a parallel run, from the peaks of a scale 0.25 run: a fixture
+// near 1.5GiB with its buffers, a runner under 200MiB, a seed Job about 25MiB.
+const (
+	parallelFixtureCPU, parallelFixtureMemory = "1", "2Gi"
+	parallelSeedCPU, parallelSeedMemory       = "100m", "128Mi"
+	parallelRunnerCPU, parallelRunnerMemory   = "250m", "512Mi"
+)
+
+// requests is one pod's CPU and memory request.
+type requests struct{ cpu, memory string }
+
+// suiteRequests sizes fixture servers, seed Jobs and Migration runners. One
+// pair per process does not fit the one-process sizes, so several get less.
+func suiteRequests(procs int) (fixture, seed, runner requests) {
+	if procs > 1 {
+		return requests{parallelFixtureCPU, parallelFixtureMemory}, requests{parallelSeedCPU, parallelSeedMemory},
+			requests{parallelRunnerCPU, parallelRunnerMemory}
+	}
+	// No runner request: one process exercises the operator's own default.
+	return requests{fixtureCPU, fixtureMemory}, requests{workerCPU, workerMemory}, requests{}
 }
 
 // parallelRefusal says why a run cannot spread over procs processes. External
@@ -111,12 +136,42 @@ func TestParallelFixtureBytesScaleWithPairs(t *testing.T) {
 	t.Cleanup(func() {
 		srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = oldSrc, oldTgt, oldWork, oldInstances
 	})
-	srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = "5Gi", "4Gi", "1Gi", 2
+	srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = "5Gi", "6Gi", "1Gi", 2
 	const gi = int64(1) << 30
-	// Per pair: (5 + 4) x 2 instances + 1 work; the 1Gi pooling pair counts once.
-	for pairs, want := range map[int]int64{1: 19*gi + 2*gi, 4: 4*19*gi + 2*gi} {
+	// Per pair: (5 + 6) x 2 instances + 1 work; the 1Gi pooling pair counts once.
+	for pairs, want := range map[int]int64{1: 23*gi + 2*gi, 4: 4*23*gi + 2*gi} {
 		if got := fixtureBytes(pairs); got != want {
 			t.Errorf("fixtureBytes(%d) = %dGi, want %dGi", pairs, got/gi, want/gi)
 		}
+	}
+}
+
+func TestParallelRequests(t *testing.T) {
+	fixture, seed, runner := suiteRequests(1)
+	if fixture != (requests{fixtureCPU, fixtureMemory}) || seed != (requests{workerCPU, workerMemory}) ||
+		runner != (requests{}) {
+		t.Errorf("one process requests %v, %v, %v; want the fixed sizes and no runner request", fixture, seed, runner)
+	}
+	fixture, seed, runner = suiteRequests(4)
+	if fixture != (requests{parallelFixtureCPU, parallelFixtureMemory}) ||
+		seed != (requests{parallelSeedCPU, parallelSeedMemory}) ||
+		runner != (requests{parallelRunnerCPU, parallelRunnerMemory}) {
+		t.Errorf("four processes request %v, %v, %v; want the parallel sizes", fixture, seed, runner)
+	}
+}
+
+// Outside ginkgo --procs the builders must render exactly the one-process shape.
+func TestParallelRequestsLeaveOneProcessUnchanged(t *testing.T) {
+	if r := newMigration("e2e-sizing", nsE2E, v1beta1.CloneOptions{}).Spec.Runner.Resources; len(r.Requests) != 0 {
+		t.Errorf("a one-process Migration requests %v; want the operator default", r.Requests)
+	}
+	if got := buildSeedJob().Spec.Template.Spec.Containers[0].Resources.Requests; got.Cpu().String() != workerCPU ||
+		got.Memory().String() != workerMemory {
+		t.Errorf("a one-process seed Job requests %v, want %s CPU and %s", got, workerCPU, workerMemory)
+	}
+	fixture, _, _ := unstructured.NestedStringMap(cnpgCluster(sourceCluster, "1Gi", 17).Object,
+		"spec", "resources", "requests")
+	if fixture["cpu"] != fixtureCPU || fixture["memory"] != fixtureMemory {
+		t.Errorf("a one-process fixture requests %v, want %s CPU and %s", fixture, fixtureCPU, fixtureMemory)
 	}
 }
