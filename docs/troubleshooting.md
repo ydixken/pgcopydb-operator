@@ -290,6 +290,20 @@ The pass is healthy while the `STEP` lines advance.
 Wait for the worker to print `All step are now done`.
 `CloneCompleted` then goes True on the next pass, and the stream conditions engage.
 
+### Progress stops moving while a large table copies
+
+`status.progress` and the target size gauge stand still for minutes while the worker log shows a large table copying.
+The copy itself is unaffected.
+An operator that logs `progress sample lost a side` names the cause there, with psql's error.
+
+An operator without that log line has the older sampler, which waited on the table being copied.
+It probed the table for a row and read every uncommitted page of the open copy, or it waited on the exclusive lock of a table copied whole.
+Either ran the target query past its 5-second timeout, and status kept its last figures until a copy into the table committed.
+
+Upgrade the operator.
+Until then, raise `spec.clone.splitMaxParts` or lower `spec.clone.splitTablesLargerThan`, so each copy is a smaller part that commits sooner.
+See [Same-table concurrency](operations/performance.md#same-table-concurrency).
+
 ### `CloneCompleted` is False with reason `TablesEmptyOnTarget`
 
 The live migration stays in `Cloning`, and `CloneCompleted` is `False` with reason `TablesEmptyOnTarget`.

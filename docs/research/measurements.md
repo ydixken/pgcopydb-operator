@@ -13,6 +13,13 @@ The counts are read exactly, with a one-row select per table, because no size fu
 A table's TOAST relation occupies a page from the moment the schema is restored.
 A `pg_table_size` test therefore counted an 848MB table with no rows on the target as copied (issue #277).
 
+### A presence probe read a whole uncommitted copy
+
+Measured in podman on PostgreSQL 14 and 18, with one table holding an open copy that had not committed.
+`select 1 from <table> limit 1` scanned every uncommitted page and returned no row, while `pg_table_size` on the same table took about a millisecond.
+From about 7.8GB of uncommitted heap the target's sample ran past its 5-second statement timeout.
+A table pgcopydb copies whole is truncated in the copy's own transaction, so the probe and `pg_table_size` both waited on its AccessExclusiveLock instead.
+
 ### pg_total_relation_size counts the indexes
 
 An empty table carrying a primary key counted as copied.

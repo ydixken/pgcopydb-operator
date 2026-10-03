@@ -61,6 +61,7 @@ The "Exists" column is the contract for when a series is present:
   It weighs indexes the target has built against the indexes the source has.
   A table with no rows on the source has nothing to copy and counts as done.
   A table with rows on the source and none on the target does not, whatever storage its restored schema holds.
+  Neither does a table that this worker is still copying into: the sample never reads it, because its rows stay invisible until that copy commits.
   The sample needs psql and GNU `timeout` in the runner.
   pgcopydb's own accounting then replaces it where it can be read: at clone completion for a plain clone, and from the verify Job's log after cutover for a follow migration.
   Both need an allowlisted runner version (see [Troubleshooting](../troubleshooting.md)).
@@ -87,6 +88,7 @@ The operator reads neither per-database relation counts nor the instance catalog
 Each progress query runs under a timeout that connection-string options cannot disable.
 A sample therefore leaves no session timeout behind for a later COPY or index build to inherit.
 When one side fails, its gauges keep their last value while the other side updates.
+The operator logs `progress sample lost a side` with psql's error when a side stops answering, and logs again when it answers.
 A failed sample never completes or fails a migration.
 
 `pgcopydb_migration_phase` is an instantaneous gauge; after the first `Pending` bootstrap, the phase summarizes the conditions.
@@ -205,6 +207,7 @@ The tiles read as follows:
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
   Bytes compares table bytes on disk on both sides, so pgcopydb's own wire tally never replaces it.
   A wire count under an on-disk total would read as a shortfall that is not there.
+  The one exception is a table pgcopydb copies whole, which it holds under an exclusive lock: until that copy commits, the target counts the bytes the copy has streamed.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
   A check that `spec.verification` does not request reads Deactivated, which is the default for both.
@@ -253,7 +256,7 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
 - `rate()` and `delta()` over the size gauges misread a database that shrinks as a counter reset.
   The throughput panels note that, and the stalled-clone alert uses `delta()`.
 - The tables, indexes, and clone-byte series step once when pgcopydb's own count replaces the psql estimate.
-  The estimate counts a table once it holds a row, so a table copied in parts counts before its last part lands.
+  The estimate counts a table once it holds a committed row and no copy into it is open, so a table copied in parts can count between two of its parts.
   It tests presence rather than a row count because a live source runs ahead of the copy's snapshot until the stream catches up, and a count compared against it never settles.
   The estimate therefore runs a little ahead, and the step is that correction.
   Nothing rounds the estimate up when the worker exits 0.
