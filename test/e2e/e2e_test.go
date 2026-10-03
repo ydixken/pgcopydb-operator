@@ -253,7 +253,12 @@ var _ = Describe("Migration", func() {
 			copySecret(nsX, ref.Name, ref.Key, appPassword(cluster))
 		}
 
-		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{DropIfExists: true}))
+		// One plain table is enough: the subject is reaching the databases
+		// from another namespace, and the fresh clone already covers the data.
+		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{
+			DropIfExists: true,
+			Filters:      &v1beta1.Filters{IncludeOnlyTables: []string{"public.customers"}},
+		}))
 		waitCompleted("e2e-xns", nsX)
 	})
 
