@@ -2349,6 +2349,9 @@ const (
 	// paramReplicas how many copies it keeps.
 	paramDataEngine = "dataEngine"
 	paramReplicas   = "numberOfReplicas"
+	// paramDataLocality "best-effort" moves the single replica to the node
+	// its pod runs on, so parallel fixture pairs spread over the nodes' disks.
+	paramDataLocality = "dataLocality"
 )
 
 // ephemeralParams builds the parameters for the suite's own class, carrying
@@ -2360,7 +2363,7 @@ const (
 // fixture pods sit unschedulable on pending claims that say nothing about
 // why. Copying rather than pinning keeps the suite working on either engine.
 func ephemeralParams(classes []storagev1.StorageClass) map[string]string {
-	p := map[string]string{paramReplicas: "1", "staleReplicaTimeout": "30"}
+	p := map[string]string{paramReplicas: "1", paramDataLocality: "best-effort", "staleReplicaTimeout": "30"}
 	for _, sc := range classes {
 		if sc.Name == ephemeralStorageClass || sc.Provisioner != longhornProvisioner {
 			continue

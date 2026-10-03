@@ -217,6 +217,7 @@ PG14 appears as a source only because the follow-mode target contract includes `
 
 When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
 The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
+The class also sets `dataLocality: best-effort`, so the single replica follows its pod to the pod's node and the pairs' I/O spreads over the nodes' disks instead of landing on the disk with the most free space.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
 Its requested-storage budget includes the shared pair, work volume, and two additional 1Gi pooling volumes before applying 20% headroom.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
