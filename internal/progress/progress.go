@@ -101,6 +101,10 @@ esac
 `
 }
 
+// SamplerFragment is in both side queries; the e2e specs find the sampler's backend by it,
+// so a CTE rename cannot hide it from them.
+const SamplerFragment = "pg_table_size(c.oid)"
+
 // sampleScript prints six source figures, five target figures and the tables still owed;
 // a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
 const sampleScript = sampleSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"

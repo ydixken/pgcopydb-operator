@@ -204,9 +204,9 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1
 				}()
 				Eventually(func() string {
 					return psql(clusters[i], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity a
-WHERE a.pid=%d AND a.query LIKE 'with t as (%%' AND a.wait_event_type='Lock'
+WHERE a.pid=%d AND %s AND a.wait_event_type='Lock'
 AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
-AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i]))
+AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
 				}, 15*time.Second, 200*time.Millisecond).Should(Equal("1"),
 					"the original pooled backend must wait on the test-owned lock before cancellation")
 				var completed result

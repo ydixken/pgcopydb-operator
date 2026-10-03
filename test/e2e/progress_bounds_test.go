@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // The follow worker keeps real observation traffic running between held locks.
@@ -86,10 +87,10 @@ var _ = Describe("Progress sampler bounds", func() {
 				for range 3 {
 					var backend string
 					Eventually(func() string {
-						backend = psql(cluster, `SELECT a.pid::text FROM pg_stat_activity a
-WHERE a.pid<>pg_backend_pid() AND a.query LIKE 'with t as (%' AND a.wait_event_type='Lock'
+						backend = psql(cluster, fmt.Sprintf(`SELECT a.pid::text FROM pg_stat_activity a
+WHERE a.pid<>pg_backend_pid() AND %s AND a.wait_event_type='Lock'
 AND EXISTS (SELECT 1 FROM pg_stat_activity b WHERE b.application_name='e2e_progress_blocker'
-AND b.pid=ANY(pg_blocking_pids(a.pid)))`)
+AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 						return backend
 					}, time.Minute, 200*time.Millisecond).ShouldNot(BeEmpty(),
 						"must observe a sampler waiting on the test-owned relation lock")
@@ -289,6 +290,9 @@ func TestProgressLockSnapshotProjection(t *testing.T) {
 		}
 	}
 }
+
+// progressSamplerMatch selects the sampler's backend on either side; the CTE name differs per side.
+const progressSamplerMatch = "a.query LIKE 'with %' AND a.query LIKE '%" + progress.SamplerFragment + "%'"
 
 func holdProgressLock(side, cluster, table string) func() {
 	GinkgoHelper()
