@@ -227,10 +227,14 @@ The tiles read as follows:
   A check that `spec.verification` does not request reads Deactivated, which is the default for both.
   A result outranks the spec, so a check you switch off after it reported a mismatch still reads FAIL.
 - **Cutover Drain** is the bytes still to replay before the endpos is reached.
-  It reads No Endpos until a cutover sets one, and 0 B once source-visible replay feedback reaches it, which is what the screenshot shows.
+  It reads No Endpos for a clone, and for a follow migration before a cutover sets an endpos.
+  It reads 0 B once source-visible replay feedback reaches the endpos, which is what the screenshot shows.
   Only `CutoverCompleted`, after target-origin or content verification, proves the drain.
   After `CuttingOver`, the LSN series are gone, so the tile reads their last values in the time range.
   These values come from the last worker sample, which can be before the end of the drain.
+  If the time range starts after that sample, the tile reads N/A.
+  A follow migration that is `Failed` or `Suspended` also reads N/A when the time range has no endpos sample.
+  The tile cannot tell if a cutover set an endpos for that migration.
 
 Every tile is scoped to one Migration, so an empty result reads N/A.
 Some tiles report a fact about the run rather than its current state: Attempts, Elapsed, Completed At, the two verification tiles, and Cutover Drain.
@@ -302,7 +306,10 @@ Alert on inactive slots or on a `safe_wal_size` that falls.
 
 ## How this is tested
 
-Static checks and promtool unit tests gate every panel query and alert rule, and each release candidate replays them against a live migration.
+Static checks gate every panel query and alert rule.
+Promtool unit tests gate every alert rule, and the panel queries in `test/dashboards/panels_test.yaml`.
+Each release candidate replays every panel query against a live migration.
+It replays the lag and LSN panels over the whole run, because their series are gone when the migration completes.
 
 ## Caveats
 
