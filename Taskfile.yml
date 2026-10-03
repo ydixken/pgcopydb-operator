@@ -101,7 +101,8 @@ tasks:
       fixtures make a repeat run start in seconds rather than reseeding, and
       namespaces are left alone because on the shared dev cluster teardown
       would delete the Argo-provisioned system namespace. Override with
-      SCALE=, KEEP=, MANAGE_NS=.
+      SCALE=, KEEP=, MANAGE_NS=, and TIMEOUT= (default 1h, a Go duration
+      bounding the whole run).
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context
@@ -115,7 +116,7 @@ tasks:
             task e2e:focus FOCUS='loses no committed transaction'
     cmds:
       - task: e2e:focus:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
 
   e2e:focus:unattended:
     desc: >-
@@ -139,7 +140,7 @@ tasks:
             EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
     cmds:
       - task: e2e:focus:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
 
   e2e:focus:run:
     internal: true
@@ -148,7 +149,8 @@ tasks:
       E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
       E2E_MANAGE_NAMESPACES: '{{.MANAGE_NS | default "false"}}'
     cmds:
-      - go test ./test/e2e/... -v -timeout 1h -ginkgo.v -ginkgo.timeout=1h
+      - go test ./test/e2e/... -v -timeout '{{.TIMEOUT | default "1h"}}' -ginkgo.v
+        -ginkgo.timeout='{{.TIMEOUT | default "1h"}}'
         -ginkgo.label-filter='!chaos' -ginkgo.focus='{{.FOCUS}}'
 
   e2e:external:

@@ -171,7 +171,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_SEED_TIMEOUT` (`30m`, `3h` under stress) bounds the seed Job, as a Go duration such as `4h`.
   Set it for a fixture larger than the tier was sized for, for example a large `E2E_EXTRA_SIZE_GB`.
 - `E2E_MIGRATION_TIMEOUT` (`30m`, `2h` under stress) bounds each wait for a Migration to reach a phase, as a Go duration.
-  The run's own `go test` timeout still has to cover the seed and the migrations.
+  The run's own `go test` timeout still has to cover the seed and the migrations; `task e2e:focus` and `task e2e:focus:unattended` take it as `TIMEOUT=` (default `1h`).
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
   The pooling pair is always removed.
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
