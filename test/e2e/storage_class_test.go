@@ -125,7 +125,7 @@ func TestSeedProfileTracksTheRequestedShape(t *testing.T) {
 		extraTables, extraSizeMB, extraSkew = n, mb, skew
 	}(extraTables, extraSizeMB, extraSkew)
 
-	extraTables, extraSizeMB = 0, 0
+	extraTables, extraSizeMB, extraSkew = 0, 0, 0
 	if got := seedProfile(); got != baseSeedProfile {
 		t.Errorf("no extras: seedProfile() = %q, want %q", got, baseSeedProfile)
 	}
