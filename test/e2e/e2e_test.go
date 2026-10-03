@@ -421,57 +421,6 @@ var _ = Describe("Migration", func() {
 	// Each follow scenario asserts the source is free of pgcopydb replication
 	// slots when it finishes, and the next one on the same pair relies on that
 	// clean slate for its own slot counting.
-	It("streams live writes and completes a Manual cutover", func() {
-		const name = "e2e-follow-manual"
-		mig := newFollowMigration(name, v1beta1.CutoverManual)
-		create(mig)
-
-		By("waiting for the base copy to finish, streaming to start, and the lag to converge")
-		waitFollowStreaming(name)
-
-		By("inserting 1000 fresh rows into source orders while streaming")
-		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
-			" (g %% 90)::numeric / 3, 'live-' || g FROM generate_series(1, 1000) g", scaled(50000)))
-
-		By("verifying status.replication fills in from the sentinel")
-		m := &v1beta1.Migration{}
-		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
-			rep := m.Status.Replication
-			g.Expect(rep).NotTo(BeNil(), "status.replication not populated yet")
-			g.Expect(rep.WriteLSN).NotTo(BeEmpty(), "writeLSN empty")
-			g.Expect(rep.ReplayLSN).NotTo(BeEmpty(), "replayLSN empty")
-			g.Expect(rep.LagBytes).NotTo(BeNil(), "lagBytes absent")
-		}, 3*time.Minute, 2*time.Second).Should(Succeed())
-
-		By("waiting for CutoverPending (caught up, Manual gate holds)")
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
-
-		// The burst above was the only writer, so writes are already stopped;
-		// approving now is safe.
-		By("approving the cutover")
-		approveCutover(name)
-
-		By("waiting for the cutover to drain and complete")
-		m = waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
-		expectSingleAttempt(m)
-		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
-		expectCleanupSucceeded(name)
-
-		By("comparing data, sequences, and slot state after cutover")
-		srcOrders := psql(sourceCluster, "SELECT count(*) FROM orders")
-		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
-			"target orders count differs from source after cutover")
-		Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-%'")).To(Equal("1000"),
-			"live rows written during streaming did not all arrive on the target")
-		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
-		Expect(sourceSlotCount()).To(Equal("0"), "replication slot left behind on the source")
-		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
-
-		By("removing the live rows so the source matches the seeded fixture again")
-		psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
-	})
-
 	It("holds early Manual approval until a paused backlog catches up", earlyManualCutover)
 
 	It("runs an Automatic cutover to completion unattended", func() {
@@ -525,6 +474,17 @@ var _ = Describe("Migration", func() {
 		By("waiting for streaming with the source still moving")
 		waitFollowStreaming(name)
 
+		By("verifying status.replication fills in from the sentinel")
+		m := &v1beta1.Migration{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+			rep := m.Status.Replication
+			g.Expect(rep).NotTo(BeNil(), "status.replication not populated yet")
+			g.Expect(rep.WriteLSN).NotTo(BeEmpty(), "writeLSN empty")
+			g.Expect(rep.ReplayLSN).NotTo(BeEmpty(), "replayLSN empty")
+			g.Expect(rep.LagBytes).NotTo(BeNil(), "lagBytes absent")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+
 		// Stop before approval, not at it: cutover freezes the source, and
 		// the row compare below only means something once nothing can write
 		// after it.
@@ -538,13 +498,18 @@ var _ = Describe("Migration", func() {
 		Expect(fmt.Sprint(last)).To(Equal(sourceLast),
 			"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
 
+		By("waiting for CutoverPending (caught up, Manual gate holds)")
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+
 		approveCutover(name)
 		// A follow migration with data verification can run two whole
 		// compares, the drain's fallback and the one Verifying does, so
 		// this spec gets the follow budget, not the clone one.
-		m := waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
 		expectSingleAttempt(m)
 		expectConditionTrue(m, v1beta1.ConditionVerified)
+		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
+		expectCleanupSucceeded(name)
 
 		By("checking every committed row arrived, with no gaps")
 		// last is the source maximum after the psql child exits. Keep the count
@@ -560,6 +525,12 @@ var _ = Describe("Migration", func() {
 				" WHERE NOT EXISTS (SELECT 1 FROM orders WHERE note = '%s-' || g)", last, marker))
 		Expect(firstGap).To(Equal("0"),
 			"target is missing row %s of %d: a gap proves a lost transaction, not a slow one", firstGap, last)
+
+		By("comparing all orders and sequences after cutover")
+		srcOrders := psql(sourceCluster, "SELECT count(*) FROM orders")
+		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(srcOrders),
+			"target orders count differs from source after cutover")
+		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 
 		Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 			"replication slot leaked on the source by the write-load cutover")
