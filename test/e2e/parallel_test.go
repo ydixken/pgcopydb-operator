@@ -1,0 +1,216 @@
+/*
+Copyright 2026 pgcopydb-operator contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"context"
+	"errors"
+	"regexp"
+	"strconv"
+	"testing"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+)
+
+// pairNames names process proc's source, target and seed Job. Process 1 keeps
+// the unsuffixed names, so a one-process run and its kept fixtures look as before.
+func pairNames(proc int) (source, target, seedJob string) {
+	suffix := ""
+	if proc > 1 {
+		suffix = "-" + strconv.Itoa(proc)
+	}
+	return "e2e-source" + suffix, "e2e-target" + suffix, "e2e-seed" + suffix
+}
+
+// seedJobPattern matches the seed Job of any process number pairNames gives.
+var seedJobPattern = regexp.MustCompile(`^e2e-seed(-[0-9]+)?$`)
+
+// parallelProcs is the run's Ginkgo process count, one fixture pair each.
+func parallelProcs() int {
+	cfg, _ := GinkgoConfiguration()
+	return cfg.ParallelTotal
+}
+
+// Requests for a parallel run, from the peaks of a scale 0.25 run: a fixture
+// near 1.5GiB with its buffers, a runner under 200MiB, a seed Job about 25MiB.
+const (
+	parallelFixtureCPU, parallelFixtureMemory = "1", "2Gi"
+	parallelSeedCPU, parallelSeedMemory       = "100m", "128Mi"
+	parallelRunnerCPU, parallelRunnerMemory   = "250m", "512Mi"
+)
+
+// requests is one pod's CPU and memory request.
+type requests struct{ cpu, memory string }
+
+// suiteRequests sizes fixture servers, seed Jobs and Migration runners. One
+// pair per process does not fit the one-process sizes, so several get less.
+func suiteRequests(procs int) (fixture, seed, runner requests) {
+	if procs > 1 {
+		return requests{parallelFixtureCPU, parallelFixtureMemory}, requests{parallelSeedCPU, parallelSeedMemory},
+			requests{parallelRunnerCPU, parallelRunnerMemory}
+	}
+	// No runner request: one process exercises the operator's own default.
+	return requests{fixtureCPU, fixtureMemory}, requests{workerCPU, workerMemory}, requests{}
+}
+
+// parallelRefusal says why a run cannot spread over procs processes. External
+// mode has one supplied pair, and a protected feature run owns one pair's teardown.
+func parallelRefusal(procs int, externalMode, featureRun bool) error {
+	switch {
+	case procs <= 1:
+		return nil
+	case externalMode:
+		return errors.New("external mode tests one supplied database pair, so it runs as one Ginkgo process;" +
+			" drop --procs")
+	case featureRun:
+		return errors.New("a protected feature run (E2E_RUN_LABEL_VALUE) owns the teardown of one fixture pair," +
+			" so it runs as one Ginkgo process; drop --procs")
+	}
+	return nil
+}
+
+func TestParallelPairNames(t *testing.T) {
+	for _, tc := range []struct {
+		proc                  int
+		source, target, seedJ string
+	}{
+		{1, "e2e-source", "e2e-target", "e2e-seed"},
+		{2, "e2e-source-2", "e2e-target-2", "e2e-seed-2"},
+		{4, "e2e-source-4", "e2e-target-4", "e2e-seed-4"},
+	} {
+		source, target, seed := pairNames(tc.proc)
+		if source != tc.source || target != tc.target || seed != tc.seedJ {
+			t.Errorf("pairNames(%d) = %s, %s, %s; want %s, %s, %s",
+				tc.proc, source, target, seed, tc.source, tc.target, tc.seedJ)
+		}
+	}
+}
+
+func TestParallelRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		procs                    int
+		externalMode, featureRun bool
+		refused                  bool
+	}{
+		{"one process, CNPG", 1, false, false, false},
+		{"one process, external", 1, true, false, false},
+		{"one process, feature run", 1, false, true, false},
+		{"four processes, CNPG", 4, false, false, false},
+		{"four processes, external", 4, true, false, true},
+		{"two processes, feature run", 2, false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := parallelRefusal(tc.procs, tc.externalMode, tc.featureRun); (err != nil) != tc.refused {
+				t.Errorf("parallelRefusal(%d, %t, %t) = %v, want refused %t",
+					tc.procs, tc.externalMode, tc.featureRun, err, tc.refused)
+			}
+		})
+	}
+}
+
+func TestParallelFixtureBytesScaleWithPairs(t *testing.T) {
+	oldSrc, oldTgt, oldWork, oldInstances := srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances
+	t.Cleanup(func() {
+		srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = oldSrc, oldTgt, oldWork, oldInstances
+	})
+	srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = "5Gi", "6Gi", "1Gi", 2
+	const gi = int64(1) << 30
+	// Per pair: (5 + 6) x 2 instances + 1 work; the 1Gi pooling pair counts once.
+	for pairs, want := range map[int]int64{1: 23*gi + 2*gi, 4: 4*23*gi + 2*gi} {
+		if got := fixtureBytes(pairs); got != want {
+			t.Errorf("fixtureBytes(%d) = %dGi, want %dGi", pairs, got/gi, want/gi)
+		}
+	}
+}
+
+func TestParallelRequests(t *testing.T) {
+	fixture, seed, runner := suiteRequests(1)
+	if fixture != (requests{fixtureCPU, fixtureMemory}) || seed != (requests{workerCPU, workerMemory}) ||
+		runner != (requests{}) {
+		t.Errorf("one process requests %v, %v, %v; want the fixed sizes and no runner request", fixture, seed, runner)
+	}
+	fixture, seed, runner = suiteRequests(4)
+	if fixture != (requests{parallelFixtureCPU, parallelFixtureMemory}) ||
+		seed != (requests{parallelSeedCPU, parallelSeedMemory}) ||
+		runner != (requests{parallelRunnerCPU, parallelRunnerMemory}) {
+		t.Errorf("four processes request %v, %v, %v; want the parallel sizes", fixture, seed, runner)
+	}
+}
+
+// Under go test the builders must render exactly the one-process shape.
+func TestParallelRequestsLeaveOneProcessUnchanged(t *testing.T) {
+	if parallelProcs() != 1 {
+		t.Skip("only meaningful under go test, not as one of several ginkgo processes")
+	}
+	if r := newMigration("e2e-sizing", nsE2E, v1beta1.CloneOptions{}).Spec.Runner.Resources; len(r.Requests) != 0 {
+		t.Errorf("a one-process Migration requests %v; want the operator default", r.Requests)
+	}
+	if got := buildSeedJob().Spec.Template.Spec.Containers[0].Resources.Requests; got.Cpu().String() != workerCPU ||
+		got.Memory().String() != workerMemory {
+		t.Errorf("a one-process seed Job requests %v, want %s CPU and %s", got, workerCPU, workerMemory)
+	}
+	fixture, _, _ := unstructured.NestedStringMap(cnpgCluster(sourceCluster, "1Gi", 17).Object,
+		"spec", "resources", "requests")
+	if fixture["cpu"] != fixtureCPU || fixture["memory"] != fixtureMemory {
+		t.Errorf("a one-process fixture requests %v, want %s CPU and %s", fixture, fixtureCPU, fixtureMemory)
+	}
+}
+
+// A one-process teardown must also remove pairs a wider run left behind, or
+// their clusters hold volumes that the PVC wait expects gone.
+func TestParallelDeleteFixturesRemovesEveryPair(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	var objs []client.Object
+	for proc := 1; proc <= 4; proc++ {
+		source, target, seed := pairNames(proc)
+		for _, name := range []string{source, target} {
+			c := &unstructured.Unstructured{}
+			c.SetGroupVersionKind(cnpgGVK)
+			c.SetNamespace(nsE2E)
+			c.SetName(name)
+			objs = append(objs, c)
+		}
+		objs = append(objs, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seed}})
+	}
+	other := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-seeder"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(append(objs, other)...).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(func() { deleteFixtures(time.Second) }); err != nil {
+		t.Fatalf("deleteFixtures failed: %v", err)
+	}
+	for _, obj := range objs {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%s survived the teardown: %v", obj.GetName(), err)
+		}
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other); err != nil {
+		t.Errorf("teardown deleted a Job that is not a seed Job: %v", err)
+	}
+}

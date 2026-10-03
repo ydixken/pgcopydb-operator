@@ -115,11 +115,13 @@ var _ = Describe("Fixture placement", func() {
 	})
 })
 
-// The scenarios share the two CNPG fixtures and run in order: later ones
-// build on the populated target that earlier ones leave behind.
-// All-databases specs reset the target and clean up independently, so they
-// live outside this Ordered container to avoid skips after unrelated failures.
-var _ = Describe("Migration", Ordered, func() {
+// The clone chain runs in order on one pair: the re-clone needs the target the
+// fresh clone populated, and the filter spec cleans up after the re-clone.
+// Every other Migration scenario stands alone in the container below, so a
+// failure here skips three specs, not the whole set. In a parallel run the
+// longest units carry a SpecPriority so they start first and none of them
+// starts last; the chain is the longest of all.
+var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 	// Ginkgo randomizes top-level container order per seed, so another
 	// container may have populated the target or may still be dropping its
 	// replication state; restore the clean slate the specs assume.
@@ -186,6 +188,22 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(psql(targetCluster, "SELECT count(*) FROM customers")).To(Equal(fmt.Sprint(scaled(50000))))
 		Expect(psql(targetCluster, "SELECT count(*) FROM orders")).To(Equal(fmt.Sprint(scaled(200000))))
 	})
+})
+
+// Same text as the chain above, so the spec names do not change. Each spec
+// here runs on whichever process is free, against that process's own pair,
+// in any order: the BeforeEach gives it the clean slate it needs.
+var _ = Describe("Migration", func() {
+	BeforeEach(func() {
+		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication slot left on the source by an earlier spec")
+		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+			"pgcopydb replication origin left on the target by an earlier spec")
+		resetTargetObjects()
+		// The rights specs restore what they revoke; this makes sure a missed
+		// restore cannot fail an unrelated follow spec on the same pair.
+		ensureFollowPrivileges()
+	})
 
 	// Labelled flaky, not skipped: it fails about three runs in four at
 	// E2E_SCALE=0.1 (see issue 88), which is often enough to stop every
@@ -235,7 +253,12 @@ var _ = Describe("Migration", Ordered, func() {
 			copySecret(nsX, ref.Name, ref.Key, appPassword(cluster))
 		}
 
-		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{DropIfExists: true}))
+		// One plain table is enough: the subject is reaching the databases
+		// from another namespace, and the fresh clone already covers the data.
+		create(newMigration("e2e-xns", nsX, v1beta1.CloneOptions{
+			DropIfExists: true,
+			Filters:      &v1beta1.Filters{IncludeOnlyTables: []string{"public.customers"}},
+		}))
 		waitCompleted("e2e-xns", nsX)
 	})
 
@@ -406,9 +429,9 @@ var _ = Describe("Migration", Ordered, func() {
 		}
 	})
 
-	// The follow scenarios run strictly after each other: each asserts the
-	// source is free of pgcopydb replication slots when it finishes, and the
-	// next one relies on that clean slate for its own slot counting.
+	// Each follow scenario asserts the source is free of pgcopydb replication
+	// slots when it finishes, and the next one on the same pair relies on that
+	// clean slate for its own slot counting.
 	It("streams live writes and completes a Manual cutover", func() {
 		const name = "e2e-follow-manual"
 		mig := newFollowMigration(name, v1beta1.CutoverManual)
@@ -501,8 +524,7 @@ var _ = Describe("Migration", Ordered, func() {
 
 		By("writing to the source continuously, starting before the base copy")
 		w := startLiveWriter(marker)
-		// The fixture is shared and these specs are Ordered, so a writer that
-		// outlives this spec corrupts every spec after it.
+		// A writer that outlives this spec corrupts every later spec on this pair.
 		DeferCleanup(func() {
 			_, _ = w.stop()
 			if CurrentSpecReport().Failed() {
@@ -562,7 +584,11 @@ var _ = Describe("Migration", Ordered, func() {
 
 	It("drops the replication slot when a streaming Migration is deleted", func() {
 		const name = "e2e-follow-del"
-		create(newFollowMigration(name, v1beta1.CutoverManual))
+		// Slot cleanup does not depend on how much the base copy moved, and
+		// one table reaches Streaming sooner at larger E2E_SCALE values.
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		mig.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyTables: []string{"public.customers"}}
+		create(mig)
 
 		By("waiting for streaming so the slot exists on the source")
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
@@ -665,12 +691,11 @@ var _ = Describe("Migration", Ordered, func() {
 		psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-susp-%'")
 	})
 
-	// The rights-manipulation specs close the ordered container: each one
-	// breaks a prerequisite on purpose and restores it (via DeferCleanup or,
-	// for the remediation scenario, through the operator itself), and running
-	// them after every live scenario keeps a missed restore from poisoning
-	// anything downstream. The asserted hints are substrings of the message
-	// constants in internal/controller/resources.go (preflightScript).
+	// The rights-manipulation specs each break a prerequisite on purpose and
+	// restore it (via DeferCleanup or, for the remediation scenario, through
+	// the operator itself); the BeforeEach re-grants in case a restore was
+	// missed. The asserted hints are substrings of the message constants in
+	// internal/controller/resources.go (preflightScript).
 	It("fails preflight when the migration role lacks REPLICATION", func() {
 		const name = "e2e-norepl"
 		DeferCleanup(func() {
@@ -948,7 +973,7 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(failed.Status.Attempts).To(Equal(int32(1)), "the classifier must stop after the first attempt")
 		Expect(failureMessage(failed)).To(ContainSubstring("permission denied"))
 
-		By("checking the budget stays unspent: no second attempt within a full poll interval")
+		By("checking the budget stays unspent: no second attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
@@ -957,7 +982,7 @@ var _ = Describe("Migration", Ordered, func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
 				"a second attempt Job appeared despite the permission classification")
-		}, 45*time.Second, 5*time.Second).Should(Succeed())
+		}, 20*time.Second, 2*time.Second).Should(Succeed())
 	})
 
 	It("exhausts the retry budget on a failure the classifier does not know", func() {
@@ -987,7 +1012,7 @@ var _ = Describe("Migration", Ordered, func() {
 		Expect(failureMessage(failed)).NotTo(ContainSubstring("permission denied"),
 			"the budget carrier must fail on a class the classifier ignores")
 
-		By("checking Failed is absorbing: no third attempt within a full poll interval")
+		By("checking Failed is absorbing: no third attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
@@ -996,7 +1021,7 @@ var _ = Describe("Migration", Ordered, func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-3"}, &batchv1.Job{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
 				"a third attempt Job appeared in the absorbing Failed state")
-		}, 45*time.Second, 5*time.Second).Should(Succeed())
+		}, 20*time.Second, 2*time.Second).Should(Succeed())
 	})
 })
 
@@ -1165,7 +1190,7 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 		sc := fixtureStorageClass
 		wv.StorageClassName = &sc
 	}
-	return &v1beta1.Migration{
+	m := &v1beta1.Migration{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: v1beta1.MigrationSpec{
 			Source:     e2eConn(sourceCluster),
@@ -1182,6 +1207,12 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 			},
 		},
 	}
+	// Except in a parallel run: a default-sized runner per pair next to the
+	// fixtures does not fit the cluster, so it pins a smaller request.
+	if _, _, runner := suiteRequests(parallelProcs()); runner.cpu != "" {
+		m.Spec.Runner.Resources = workerResources(runner.cpu, runner.memory)
+	}
+	return m
 }
 
 func create(m *v1beta1.Migration) {
@@ -1227,7 +1258,7 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.Migration
 		}
 		g.Expect(want).To(ContainElement(m.Status.Phase),
 			"migration %s/%s at phase %q, attempts %d", ns, name, m.Status.Phase, m.Status.Attempts)
-	}, timeout, 2*time.Second).Should(Succeed())
+	}, timeout, time.Second).Should(Succeed())
 	return m
 }
 
@@ -1413,7 +1444,7 @@ func waitFollowStreaming(name string) {
 		g.Expect(*rep.LagBytes).To(BeNumerically("<=", want),
 			"%s: lag stuck at %d bytes, threshold %d (maxCatchupLag); CaughtUp cannot go True and no cutover will start",
 			name, *rep.LagBytes, want)
-	}, lagConvergeTimeout, 5*time.Second).Should(Succeed())
+	}, lagConvergeTimeout, time.Second).Should(Succeed())
 }
 
 // expectSingleAttempt asserts the Migration finished on its first worker

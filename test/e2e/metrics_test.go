@@ -223,8 +223,8 @@ const (
 // emptyOK lists the panels that are legitimately empty for a healthy,
 // completed migration; every other panel must return data.
 var emptyOK = map[panelKey]bool{
-	// The sweep runs once every spec migration is Completed, so the sum over
-	// the in-flight phases has no series left to add up.
+	// In a one-process run the sweep runs once every spec migration is
+	// Completed, so the in-flight sum has nothing to add up.
 	{uid: uidFleet, title: "Active", ref: "A"}: true,
 	// A Failed series would have failed its own spec first; none is the point.
 	{uid: uidFleet, title: "Failed", ref: "A"}: true,
@@ -271,7 +271,7 @@ func panelFailure(title, expr string, mayBeEmpty bool) string {
 // series after cutover, every dashboard panel query, and series removal on
 // deletion. They need a Prometheus that scrapes the suite's operator install
 // (the chart's ServiceMonitor, which BeforeSuite enables).
-var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
+var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(1), func() {
 	BeforeAll(func() {
 		urlEnv := os.Getenv("E2E_PROMETHEUS_URL")
 		pfEnv := os.Getenv("E2E_PROMETHEUS_PORT_FORWARD")
@@ -316,7 +316,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		expr := fmt.Sprintf("max(up{job=%q, namespace=%q})", metricsJob(), nsOperator)
 		Eventually(func(g Gomega) {
 			g.Expect(promValue(g, expr)).To(Equal(1.0), "operator scrape target down")
-		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 
 	It("exports live series while streaming", func() {
@@ -333,7 +333,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 		By("asserting exactly one phase series is active")
 		Eventually(func(g Gomega) {
 			g.Expect(promVector(g, e2eSeries("pgcopydb_migration_phase")+" == 1")).To(HaveLen(1))
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 		By("asserting plausible sampled database sizes")
 		Eventually(func(g Gomega) {
@@ -345,7 +345,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 				g.Expect(v).To(BeNumerically(">", 1<<20), "%s implausibly small", m)
 				g.Expect(v).To(BeNumerically("<", 1<<40), "%s implausibly large", m)
 			}
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 		// These counters come from psql against the source and target. Their
 		// presence is the live-progress contract and does not imply that the
@@ -365,7 +365,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(planned).To(BeNumerically(">", 0))
 			g.Expect(done).To(BeNumerically(">", 0))
 			g.Expect(done).To(BeNumerically("<=", total))
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 		By("asserting the LSN gauges and the derived lags")
 		Eventually(func(g Gomega) {
@@ -384,7 +384,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_source_lsn_bytes")+" - "+
 				e2eSeries("pgcopydb_migration_write_lsn_bytes"))).
 				To(BeNumerically(">=", 0), "negative receive lag")
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 	})
 
 	It("records the terminal series after cutover", func() {
@@ -404,7 +404,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(promValue(g, info)).To(Equal(1.0))
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_verified"))).To(Equal(1.0))
 			g.Expect(promValue(g, e2eSeries("pgcopydb_migration_attempts"))).To(BeNumerically(">=", 1))
-		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 
 		By("asserting the clone counters arrived with the drain verification")
 		Eventually(func(g Gomega) {
@@ -421,7 +421,7 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			total := promValue(g, e2eSeries(mTablesTotal))
 			g.Expect(total).To(BeNumerically(">", 0))
 			g.Expect(done).To(BeNumerically("<=", total))
-		}, 5*time.Minute, 5*time.Second).Should(Succeed())
+		}, 5*time.Minute, 2*time.Second).Should(Succeed())
 
 		By("cross-checking the progress poll landed in status, without Prometheus")
 		m := &v1beta1.Migration{}
@@ -502,6 +502,6 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 			g.Expect(code).To(Equal(http.StatusOK))
 			g.Expect(pr.Status).To(Equal("success"))
 			g.Expect(pr.Data.Result).To(BeEmpty(), "phase series outlived the Migration")
-		}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 })

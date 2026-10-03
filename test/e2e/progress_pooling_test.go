@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -58,7 +59,7 @@ current_setting('statement_timeout'), current_user, current_database()
 FROM pg_stat_activity WHERE pid=pg_backend_pid();`
 )
 
-var _ = Describe("Progress sampler transaction pooling", func() {
+var _ = Describe("Progress sampler transaction pooling", SpecPriority(1), func() {
 	It("restores pooled backends after sampling and cancellation, then permits long COPY and indexes", func() {
 		requireCNPGFixtures()
 		sharedClusters := []string{sourceCluster, targetCluster}
@@ -74,15 +75,14 @@ var _ = Describe("Progress sampler transaction pooling", func() {
 			}
 		}
 		DeferCleanup(assertSharedCatalogs)
-		poolSource := createProgressPoolCluster(conn.Source, pgSource)
-		poolTarget := createProgressPoolCluster(conn.Target, pgTarget)
-		clusters := []string{poolSource.GetName(), poolTarget.GetName()}
+		pool := createProgressPoolClusters()
+		clusters := []string{pool[0].GetName(), pool[1].GetName()}
 		cfg, err := config.GetConfig()
 		Expect(err).NotTo(HaveOccurred())
 		remote, err := podexec.New(cfg)
 		Expect(err).NotTo(HaveOccurred())
 		poller := progress.NewFromExec(remote, nil)
-		job := createProgressPoolRunner([2]*unstructured.Unstructured{poolSource, poolTarget})
+		job := createProgressPoolRunner(pool)
 		var pod string
 		Eventually(func(g Gomega) {
 			var lookupErr error
@@ -231,8 +231,17 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
 		}
 
 		By("running server-delayed COPY TO, COPY FROM, and CREATE INDEX on the same pooled backends")
+		// Both sides at once: they share no server. pooledSQL makes no Gomega
+		// calls, so the goroutines need no GinkgoRecover.
+		outs := make([]string, len(sides))
+		errs := make([]error, len(sides))
+		var wg sync.WaitGroup
 		for i, side := range sides {
-			out, queryErr := pooledSQL(side, progressPoolLongWorkSQL(), time.Minute)
+			wg.Go(func() { outs[i], errs[i] = pooledSQL(side, progressPoolLongWorkSQL(), time.Minute) })
+		}
+		wg.Wait()
+		for i, side := range sides {
+			out, queryErr := outs[i], errs[i]
 			Expect(queryErr).NotTo(HaveOccurred(), "%s long COPY and index workload failed", side)
 			work := strings.Split(out, "\n")
 			Expect(work).To(HaveLen(6), "%s long SQL results must all be present", side)
@@ -275,22 +284,40 @@ WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
 	return out
 }
 
-func createProgressPoolCluster(side conn.Side, major int) *unstructured.Unstructured {
+// createProgressPoolClusters creates the source and target clusters before it
+// waits for either, and one cleanup deletes both, so their start and stop overlap.
+func createProgressPoolClusters() [2]*unstructured.Unstructured {
 	GinkgoHelper()
-	cluster := cnpgCluster("", progressPoolStorageSize, major)
-	cluster.SetGenerateName("e2e-pool-" + string(side) + "-")
-	Expect(unstructured.SetNestedField(cluster.Object, int64(1), "spec", "instances")).To(Succeed())
-	// The pooling workload holds one row; bulk-seed resource and cache sizing is unnecessary.
-	Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
-		"cpu": "100m", "memory": "256Mi",
-	}, "spec", "resources", "requests")).To(Succeed())
-	Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
-		"max_wal_size": walMaxSize(progressPoolStorageSize),
-	}, "spec", "postgresql", "parameters")).To(Succeed())
-	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-	DeferCleanup(func() { deleteProgressPoolCluster(cluster) })
-	Expect(cluster.GetUID()).NotTo(BeEmpty())
-	Expect(cluster.GetName()).NotTo(BeElementOf(sourceCluster, targetCluster))
+	var clusters [2]*unstructured.Unstructured
+	DeferCleanup(func() { deleteProgressPoolClusters(clusters) })
+	for i, side := range []conn.Side{conn.Source, conn.Target} {
+		major := pgSource
+		if side == conn.Target {
+			major = pgTarget
+		}
+		cluster := cnpgCluster("", progressPoolStorageSize, major)
+		cluster.SetGenerateName("e2e-pool-" + string(side) + "-")
+		Expect(unstructured.SetNestedField(cluster.Object, int64(1), "spec", "instances")).To(Succeed())
+		// The pooling workload holds one row; bulk-seed resource and cache sizing is unnecessary.
+		Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
+			"cpu": "100m", "memory": "256Mi",
+		}, "spec", "resources", "requests")).To(Succeed())
+		Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
+			"max_wal_size": walMaxSize(progressPoolStorageSize),
+		}, "spec", "postgresql", "parameters")).To(Succeed())
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		clusters[i] = cluster
+		Expect(cluster.GetUID()).NotTo(BeEmpty())
+		Expect(cluster.GetName()).NotTo(BeElementOf(sourceCluster, targetCluster))
+	}
+	for _, cluster := range clusters {
+		waitProgressPoolCluster(cluster)
+	}
+	return clusters
+}
+
+func waitProgressPoolCluster(cluster *unstructured.Unstructured) {
+	GinkgoHelper()
 	waitClusterReady(cluster.GetName())
 	Eventually(func(g Gomega) {
 		pods := &corev1.PodList{}
@@ -308,18 +335,34 @@ func createProgressPoolCluster(side conn.Side, major int) *unstructured.Unstruct
 		g.Expect(metav1.IsControlledBy(&pvcs.Items[0], cluster)).To(BeTrue())
 		g.Expect(pvcStorageReady(&pvcs.Items[0], resource.MustParse(progressPoolStorageSize))).To(Succeed())
 	}, clusterReadyTimeout, time.Second).Should(Succeed())
-	return cluster
 }
 
-func deleteProgressPoolCluster(cluster *unstructured.Unstructured) {
+// deleteProgressPoolClusters deletes every cluster before it waits for any.
+// A nil entry is a cluster whose create never ran.
+func deleteProgressPoolClusters(clusters [2]*unstructured.Unstructured) {
 	GinkgoHelper()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), clusterReadyTimeout+time.Minute)
 	defer cancel()
-	uid := cluster.GetUID()
-	Expect(uid).NotTo(BeEmpty())
-	err := k8sClient.Delete(cleanupCtx, cluster, client.Preconditions{UID: &uid},
-		client.PropagationPolicy(metav1.DeletePropagationBackground))
-	Expect(client.IgnoreNotFound(err)).To(Succeed())
+	for _, cluster := range clusters {
+		if cluster == nil {
+			continue
+		}
+		uid := cluster.GetUID()
+		Expect(uid).NotTo(BeEmpty())
+		err := k8sClient.Delete(cleanupCtx, cluster, client.Preconditions{UID: &uid},
+			client.PropagationPolicy(metav1.DeletePropagationBackground))
+		Expect(client.IgnoreNotFound(err)).To(Succeed())
+	}
+	for _, cluster := range clusters {
+		if cluster == nil {
+			continue
+		}
+		waitProgressPoolClusterGone(cleanupCtx, cluster)
+	}
+}
+
+func waitProgressPoolClusterGone(cleanupCtx context.Context, cluster *unstructured.Unstructured) {
+	GinkgoHelper()
 	Eventually(func(g Gomega) {
 		current := &unstructured.Unstructured{}
 		current.SetGroupVersionKind(cnpgGVK)
@@ -370,6 +413,8 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				RestartPolicy:                corev1.RestartPolicyNever,
 				AutomountServiceAccountToken: ptr.To(false),
+				// sleep as PID 1 ignores SIGTERM, and nothing here needs draining.
+				TerminationGracePeriodSeconds: ptr.To(int64(0)),
 				SecurityContext: &corev1.PodSecurityContext{
 					RunAsNonRoot: ptr.To(true), RunAsUser: ptr.To(int64(65532)), RunAsGroup: ptr.To(int64(65532)),
 					FSGroup:        ptr.To(int64(65532)),
@@ -398,6 +443,7 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		},
 	}
 	passfiles := make([]conn.Passfile, 0, 2)
+	poolersReady := make([]func(), 0, len(clusters))
 	for i, ownedCluster := range clusters {
 		clusterName := ownedCluster.GetName()
 		cluster := &unstructured.Unstructured{}
@@ -443,53 +489,56 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		Expect(k8sClient.Create(ctx, pooler)).To(Succeed())
 		podLabels := map[string]string{"cnpg.io/poolerName": pooler.GetName()}
 		cleanupProgressPoolObject(pooler, podLabels)
-		Eventually(func(g Gomega) {
-			current := &unstructured.Unstructured{}
-			current.SetGroupVersionKind(pooler.GroupVersionKind())
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), current)).To(Succeed())
-			g.Expect(current.GetUID()).To(Equal(pooler.GetUID()))
-			g.Expect(current.GetOwnerReferences()).To(ContainElement(owner))
-			name, clusterRefFound, err := unstructured.NestedString(current.Object, "spec", "cluster", "name")
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(clusterRefFound).To(BeTrue())
-			g.Expect(name).To(Equal(clusterName), "Pooler must reference its dedicated cluster")
-			deployment := &appsv1.Deployment{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), deployment)).To(Succeed())
-			g.Expect(deployment.UID).NotTo(BeEmpty())
-			g.Expect(metav1.IsControlledBy(deployment, pooler)).To(BeTrue(), "Pooler must own its Deployment")
-			g.Expect(deployment.DeletionTimestamp).To(BeNil())
-			g.Expect(deployment.Spec.Selector).NotTo(BeNil())
-			g.Expect(deployment.Spec.Selector.MatchLabels).To(HaveKeyWithValue("cnpg.io/poolerName", pooler.GetName()))
-			replicaSets := &appsv1.ReplicaSetList{}
-			g.Expect(k8sClient.List(ctx, replicaSets, client.InNamespace(nsE2E),
-				client.MatchingLabels(podLabels))).To(Succeed())
-			g.Expect(replicaSets.Items).NotTo(BeEmpty(), "Pooler selector must identify its ReplicaSets")
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
-				client.MatchingLabels(podLabels))).To(Succeed())
-			found := len(pods.Items)
-			g.Expect(found).To(Equal(1), "%s Pooler selector must identify one pod", clusterName)
-			poolPod := &pods.Items[0]
-			podOwned := false
-			for j := range replicaSets.Items {
-				replicaSet := &replicaSets.Items[j]
-				g.Expect(replicaSet.UID).NotTo(BeEmpty())
-				g.Expect(metav1.IsControlledBy(replicaSet, deployment)).To(BeTrue(), "Deployment must own its ReplicaSets")
-				if metav1.IsControlledBy(poolPod, replicaSet) {
-					podOwned = true
+		// Wait only after both Poolers exist, so their rollouts overlap.
+		poolersReady = append(poolersReady, func() {
+			Eventually(func(g Gomega) {
+				current := &unstructured.Unstructured{}
+				current.SetGroupVersionKind(pooler.GroupVersionKind())
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), current)).To(Succeed())
+				g.Expect(current.GetUID()).To(Equal(pooler.GetUID()))
+				g.Expect(current.GetOwnerReferences()).To(ContainElement(owner))
+				name, clusterRefFound, err := unstructured.NestedString(current.Object, "spec", "cluster", "name")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(clusterRefFound).To(BeTrue())
+				g.Expect(name).To(Equal(clusterName), "Pooler must reference its dedicated cluster")
+				deployment := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), deployment)).To(Succeed())
+				g.Expect(deployment.UID).NotTo(BeEmpty())
+				g.Expect(metav1.IsControlledBy(deployment, pooler)).To(BeTrue(), "Pooler must own its Deployment")
+				g.Expect(deployment.DeletionTimestamp).To(BeNil())
+				g.Expect(deployment.Spec.Selector).NotTo(BeNil())
+				g.Expect(deployment.Spec.Selector.MatchLabels).To(HaveKeyWithValue("cnpg.io/poolerName", pooler.GetName()))
+				replicaSets := &appsv1.ReplicaSetList{}
+				g.Expect(k8sClient.List(ctx, replicaSets, client.InNamespace(nsE2E),
+					client.MatchingLabels(podLabels))).To(Succeed())
+				g.Expect(replicaSets.Items).NotTo(BeEmpty(), "Pooler selector must identify its ReplicaSets")
+				pods := &corev1.PodList{}
+				g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+					client.MatchingLabels(podLabels))).To(Succeed())
+				found := len(pods.Items)
+				g.Expect(found).To(Equal(1), "%s Pooler selector must identify one pod", clusterName)
+				poolPod := &pods.Items[0]
+				podOwned := false
+				for j := range replicaSets.Items {
+					replicaSet := &replicaSets.Items[j]
+					g.Expect(replicaSet.UID).NotTo(BeEmpty())
+					g.Expect(metav1.IsControlledBy(replicaSet, deployment)).To(BeTrue(), "Deployment must own its ReplicaSets")
+					if metav1.IsControlledBy(poolPod, replicaSet) {
+						podOwned = true
+					}
 				}
-			}
-			g.Expect(podOwned).To(BeTrue(), "Pooler pod must belong to a matching ReplicaSet")
-			g.Expect(poolPod.DeletionTimestamp).To(BeNil())
-			g.Expect(poolPod.Status.Phase).To(Equal(corev1.PodRunning))
-			ready := false
-			for _, condition := range poolPod.Status.Conditions {
-				if condition.Type == corev1.PodReady {
-					ready = condition.Status == corev1.ConditionTrue
+				g.Expect(podOwned).To(BeTrue(), "Pooler pod must belong to a matching ReplicaSet")
+				g.Expect(poolPod.DeletionTimestamp).To(BeNil())
+				g.Expect(poolPod.Status.Phase).To(Equal(corev1.PodRunning))
+				ready := false
+				for _, condition := range poolPod.Status.Conditions {
+					if condition.Type == corev1.PodReady {
+						ready = condition.Status == corev1.ConditionTrue
+					}
 				}
-			}
-			g.Expect(ready).To(BeTrue(), "%s Pooler pod must be Ready", clusterName)
-		}, 3*time.Minute, time.Second).Should(Succeed())
+				g.Expect(ready).To(BeTrue(), "%s Pooler pod must be Ready", clusterName)
+			}, 3*time.Minute, time.Second).Should(Succeed())
+		})
 		if i == 0 {
 			job.OwnerReferences = []metav1.OwnerReference{owner}
 		}
@@ -507,6 +556,9 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, materialized.Volumes...)
 		Expect(materialized.Passfile).NotTo(BeNil())
 		passfiles = append(passfiles, *materialized.Passfile)
+	}
+	for _, wait := range poolersReady {
+		wait()
 	}
 	// This pod hosts real sampler execs, not a migration with session-bound snapshot/apply state.
 	job.Spec.Template.Spec.Containers[0].Command = []string{

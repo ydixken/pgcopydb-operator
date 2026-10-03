@@ -119,7 +119,8 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
-The suite installs a throwaway operator, creates a shared source/target CNPG pair with one instance each by default, and seeds the source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
+The suite installs a throwaway operator and creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
+It seeds each source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
 With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mode instead: it uses an existing database pair, creates no CNPG clusters, and seeds the source through the same Job (see [Running the E2E suite against your databases](docs/operations/e2e-external.md)).
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
@@ -226,7 +227,9 @@ Every suite-created pod also declares CPU and memory requests.
 A pod that requests nothing counts the same on every node, so the least-allocated node wins every scheduling decision, its allocation never rises, and an entire run piles onto one node.
 All placement rules are preferred, so a smaller cluster can co-locate the pods and still pass.
 
-Shared fixture servers get 2 CPUs and 4Gi, and the seed Job and migration runner Jobs the same.
+Shared fixture servers get 2 CPUs and 4Gi and the seed Job the same, while migration runner Jobs keep the operator's default request.
+A parallel run (more than one Ginkgo process) lowers these requests, so that one pair per process fits the cluster.
+Each fixture server then requests 1 CPU and 2Gi, each seed Job 100m and 128Mi, and each runner 250m and 512Mi.
 Requests only, so nothing is throttled.
 The caches are set by hand alongside them (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `wal_buffers`, `max_wal_size`, `checkpoint_timeout`), because CNPG does not derive `shared_buffers` from the memory request: raising the request on its own would leave PostgreSQL on its 128MB default and the clone would spend its time reading pages back off the volume, measuring the storage instead of the operator.
 
@@ -246,9 +249,35 @@ A spec that only runs SQL needs no gate: `psql` and the helpers built on `psqlAr
 
 `release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
 `E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
-It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
+It calls the ginkgo CLI directly, not `task e2e`.
+That target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
 `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
 The published-release workflow `e2e.yml` defines its scale independently, defaulting to `0.25`.
+
+### How does a parallel run work?
+
+`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value, which is 4.
+`go test` cannot run Ginkgo in parallel, so they use the ginkgo CLI at the version that `go.mod` pins.
+Local tasks such as `task e2e` run one process.
+
+Each Ginkgo process gets its own pair in `pgcopydb-e2e`.
+Process 1 uses `e2e-source`, `e2e-target` and the seed Job `e2e-seed`, and process N adds `-N` to each name.
+Process 1 alone checks the CRD, prepares the storage, installs the operator, purges old Migrations and applies the seed ConfigMap.
+Then every process creates and seeds its own pair, at the same time as the others.
+After the specs, process 1 waits for the other processes to stop.
+Then it deletes every CNPG cluster and seed Job in `pgcopydb-e2e`, also those that an earlier run with more processes left behind.
+The Longhorn capacity check counts one pair and one work volume for each process.
+External mode and protected feature runs have one pair only, so they refuse more than one process before any setup or teardown runs.
+
+> [!important]
+> A spec runs on any free process, in any order, against the pair of that process.
+> Only the specs in an `Ordered` container keep their order and their process.
+> A new spec MUST NOT depend on what another spec left behind: it resets what it needs before it starts.
+
+Two decorators control the schedule.
+A spec that blocks a resource which all processes share MUST be `Serial`, so that Ginkgo runs it on process 1 after the parallel specs.
+The operator's single reconcile worker is such a resource: the progress-sampler bounds spec blocks it on purpose and is `Serial` for that reason.
+A container or spec that runs for more than about three minutes SHOULD have `SpecPriority(1)`, so that it starts early and not last.
 
 ### Cluster coverage
 
@@ -259,7 +288,7 @@ Recovery after unlocking has a separate 12-minute backlog drain budget shared by
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
-CI runs the cutover, publication-retry, live-writer, psql-channel, e2e name, and external-mode helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`, `TestPSQL*`, `TestE2ENames*`, `TestExternal*`) with `-race -v` without starting the cluster suite.
+CI runs the cutover, publication-retry, live-writer, psql-channel, e2e name, external-mode, and parallel-run helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`, `TestPSQL*`, `TestE2ENames*`, `TestExternal*`, `TestParallel*`) with `-race -v` without starting the cluster suite.
 A new helper family goes into both that step's `-run` selector in `.github/workflows/ci.yml` and the family list in `test/buildconfig/buildconfig_test.go`, which rejects a selector that matches anything else.
 Verbose output makes actual test selection and the expected parent-only subprocess-helper skip visible; it does not waive any meaningful regression.
 The `TestLiveWriterHelper` subprocess entry point skips in the parent process; the lifecycle tests invoke it as a child.
