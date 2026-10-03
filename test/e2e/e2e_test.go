@@ -117,7 +117,7 @@ var _ = Describe("Fixture placement", func() {
 
 // The clone chain runs in order on one pair: the filter spec re-clones with
 // dropIfExists onto the target the fresh clone populated.
-// Every other Migration scenario stands alone in the container below, so a
+// Every other Migration scenario stands alone in the containers below, so a
 // failure here skips two specs, not the whole set. In a parallel run the
 // longest units carry a SpecPriority so they start first and none of them
 // starts last; the chain cannot be split, so its tier covers its whole length.
@@ -185,27 +185,31 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 	})
 })
 
-// Same text as the chain above, so the spec names do not change. Each spec
-// here runs on whichever process is free, against that process's own pair,
-// in any order: the BeforeEach gives it the clean slate it needs.
-var _ = Describe("Migration", func() {
-	BeforeEach(func() {
-		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
-			"pgcopydb replication slot left on the source by an earlier spec")
-		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
-			"pgcopydb replication origin left on the target by an earlier spec")
-		resetTargetObjects()
-		// The rights specs restore what they revoke; this makes sure a missed
-		// restore cannot fail an unrelated follow spec on the same pair.
-		ensureFollowPrivileges()
-	})
+// resetMigrationPair gives a Migration spec the clean slate it needs on the
+// process's own pair.
+func resetMigrationPair() {
+	Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+		"pgcopydb replication slot left on the source by an earlier spec")
+	Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"),
+		"pgcopydb replication origin left on the target by an earlier spec")
+	resetTargetObjects()
+	// The rights specs restore what they revoke; this makes sure a missed
+	// restore cannot fail an unrelated follow spec on the same pair.
+	ensureFollowPrivileges()
+}
+
+// The two longest Migration specs get their own container, because a
+// container's highest SpecPriority moves every spec in it. Same text as the
+// containers around it, so the spec names do not change.
+var _ = Describe("Migration", SpecPriority(3), func() {
+	BeforeEach(resetMigrationPair)
 
 	// Each follow scenario asserts the source is free of pgcopydb replication
 	// slots when it finishes, and the next one on the same pair relies on that
 	// clean slate for its own slot counting.
-	It("holds early Manual approval until a paused backlog catches up", SpecPriority(3), earlyManualCutover)
+	It("holds early Manual approval until a paused backlog catches up", earlyManualCutover)
 
-	It("loses no committed transaction when the source is written throughout", SpecPriority(3), func() {
+	It("loses no committed transaction when the source is written throughout", func() {
 		const name = "e2e-follow-load"
 		const marker = "live-load"
 
@@ -297,6 +301,13 @@ var _ = Describe("Migration", func() {
 		psql(sourceCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
 		psql(targetCluster, fmt.Sprintf("DELETE FROM orders WHERE note LIKE '%s-%%'", marker))
 	})
+})
+
+// Same text as the chain above, so the spec names do not change. Each spec
+// here runs on whichever process is free, against that process's own pair,
+// in any order: the BeforeEach gives it the clean slate it needs.
+var _ = Describe("Migration", func() {
+	BeforeEach(resetMigrationPair)
 
 	// Labelled flaky, not skipped: it fails about three runs in four at
 	// E2E_SCALE=0.1 (see issue 88), which is often enough to stop every
