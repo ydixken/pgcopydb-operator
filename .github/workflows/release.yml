@@ -241,6 +241,8 @@ jobs:
     if: >-
       !cancelled()
       && needs.chart.result == 'success'
+    # A hung API call would otherwise hold the job for the 6 h default.
+    timeout-minutes: 15
     permissions:
       contents: write  # the workflow default is read-only
     steps:
@@ -359,6 +361,8 @@ jobs:
     # a chart job that failed before e2e ever ran.
     if: failure() && needs.e2e.result == 'failure'
     runs-on: github-runner-pgcopydb-operator
+    # Three 60 s attempts fit with room to spare; see the step below.
+    timeout-minutes: 5
     permissions:
       issues: write  # the workflow default is read-only
     steps:
@@ -369,7 +373,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh issue create --title "e2e failed for $GITHUB_REF_NAME" --body-file - <<EOF
+          body=$(cat <<EOF
           The candidate \`$GITHUB_REF_NAME\` did not pass e2e and was not promoted.
 
           Run: $RUN_URL
@@ -379,3 +383,13 @@ jobs:
           release. Fix forward on main: the next run cuts the following
           candidate.
           EOF
+          )
+          # GitHub has accepted the TCP connection and then never answered, so
+          # each attempt is bounded and retried rather than waited on.
+          for attempt in 1 2 3; do
+            printf '%s\n' "$body" | timeout 60 gh issue create \
+              --title "e2e failed for $GITHUB_REF_NAME" --body-file - && exit 0
+            echo "::warning::attempt $attempt to open the issue failed"
+            sleep 5
+          done
+          exit 1
