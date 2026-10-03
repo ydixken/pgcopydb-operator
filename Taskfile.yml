@@ -75,7 +75,9 @@ tasks:
   e2e:
     desc: >-
       Run e2e tests against the CURRENT kubectl context (a real cluster).
-      This task is local only; release candidate CI invokes the same specs directly.
+      This task is local only and runs one Ginkgo process with one fixture
+      pair; release candidate CI runs the same specs through the ginkgo CLI
+      with E2E_PROCS processes, one pair each.
       Confirms the context before running.
       E2E_SCALE (default 1, ~12GB seeded data) sizes the fixtures and their
       volumes, which are provisioned once per CNPG instance (one per cluster

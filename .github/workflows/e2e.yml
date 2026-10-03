@@ -76,8 +76,7 @@ jobs:
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
         run: test -n "$E2E_PROMETHEUS_URL"
       - name: Run the suite against ${{ inputs.tag || github.ref_name }}
-        # -v and -ginkgo.v stream the output; without them go test buffers the
-        # whole package and a run that hits the timeout prints nothing at all.
+        # The same ginkgo CLI call as release.yml, which explains the flags.
         # poll-progress-after is 15m because a clone at the default scale runs
         # for minutes on end: at 5m it fired on every healthy spec.
         env:
@@ -87,10 +86,12 @@ jobs:
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
+          # Ginkgo processes, each with its own CNPG source/target pair.
+          E2E_PROCS: "4"
         run: |
-          go test ./test/e2e/... -v -timeout 4h \
-            -ginkgo.v -ginkgo.timeout=4h -ginkgo.poll-progress-after=15m \
-            -ginkgo.label-filter='!chaos && !flaky'
+          go run github.com/onsi/ginkgo/v2/ginkgo --procs="$E2E_PROCS" -v \
+            --timeout=4h --poll-progress-after=15m \
+            --label-filter='!chaos && !flaky' ./test/e2e -- -test.run='^TestE2E$'
       - name: Empty the e2e namespaces
         # The namespaces are GitOps owned and the CI identity cannot delete
         # them, so clean the contents. Migrations first, while the operator
