@@ -23,6 +23,8 @@ concurrency:
 jobs:
   candidate:
     runs-on: github-runner-pgcopydb-operator
+    # A hung API or git call would otherwise hold the job for the 6 h default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
