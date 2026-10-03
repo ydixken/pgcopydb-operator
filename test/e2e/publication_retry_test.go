@@ -54,7 +54,7 @@ func publicationRetryInsert() string {
 }
 
 var _ = Describe("Automatic publication retries", SpecPriority(1), func() {
-	It("preserves an established publication through a deliberate suspend and resume", func() {
+	It("preserves an established publication through a deliberate suspend and resume", SpecPriority(2), func() {
 		mig, table, slot := publicationRetryFixture("e2e-publication-established")
 		create(mig)
 		waitFollowStreaming(mig.Name)

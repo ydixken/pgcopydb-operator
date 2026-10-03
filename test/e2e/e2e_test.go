@@ -120,7 +120,7 @@ var _ = Describe("Fixture placement", func() {
 // Every other Migration scenario stands alone in the container below, so a
 // failure here skips two specs, not the whole set. In a parallel run the
 // longest units carry a SpecPriority so they start first and none of them
-// starts last; the chain cannot be split, so it goes first of all.
+// starts last; the chain cannot be split, so its tier covers its whole length.
 var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 	// Ginkgo randomizes top-level container order per seed, so another
 	// container may have populated the target or may still be dropping its
@@ -421,7 +421,7 @@ var _ = Describe("Migration", func() {
 	// Each follow scenario asserts the source is free of pgcopydb replication
 	// slots when it finishes, and the next one on the same pair relies on that
 	// clean slate for its own slot counting.
-	It("holds early Manual approval until a paused backlog catches up", earlyManualCutover)
+	It("holds early Manual approval until a paused backlog catches up", SpecPriority(3), earlyManualCutover)
 
 	It("runs an Automatic cutover to completion unattended", func() {
 		const name = "e2e-follow-auto"
@@ -449,7 +449,7 @@ var _ = Describe("Migration", func() {
 		Expect(targetOriginCount()).To(Equal("0"), "pgcopydb replication origin left behind on the target after cleanup")
 	})
 
-	It("loses no committed transaction when the source is written throughout", func() {
+	It("loses no committed transaction when the source is written throughout", SpecPriority(3), func() {
 		const name = "e2e-follow-load"
 		const marker = "live-load"
 
@@ -742,7 +742,7 @@ var _ = Describe("Migration", func() {
 			"a failed target right without a superuser ref must hint at the field")
 	})
 
-	It("remediates follow rights through superuserSecretRef and completes", func() {
+	It("remediates follow rights through superuserSecretRef and completes", SpecPriority(1), func() {
 		const name = "e2e-remediate"
 		DeferCleanup(func() {
 			deleteMigration(name)
@@ -945,7 +945,7 @@ var _ = Describe("Migration", func() {
 		}, 20*time.Second, 2*time.Second).Should(Succeed())
 	})
 
-	It("exhausts the retry budget on a failure the classifier does not know", func() {
+	It("exhausts the retry budget on a failure the classifier does not know", SpecPriority(1), func() {
 		const name = "e2e-backoff"
 		DeferCleanup(func() {
 			deleteMigration(name)

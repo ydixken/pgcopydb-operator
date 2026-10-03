@@ -68,7 +68,7 @@ var _ = Describe("Ownership after restore", func() {
 				", current_database(), 'CREATE')")).To(Equal("t"))
 	})
 
-	It("hands the restored objects to the target role", func() {
+	It("hands the restored objects to the target role", SpecPriority(3), func() {
 		const name = "e2e-owner-after-restore"
 		DeferCleanup(func() { deleteMigration(name) })
 
@@ -91,7 +91,7 @@ var _ = Describe("Ownership after restore", func() {
 		expectHandoverApplied()
 	})
 
-	It("hands over before it announces the cutover", func() {
+	It("hands over before it announces the cutover", SpecPriority(1), func() {
 		const name = "e2e-owner-after-restore-follow"
 		DeferCleanup(func() { deleteMigration(name) })
 
