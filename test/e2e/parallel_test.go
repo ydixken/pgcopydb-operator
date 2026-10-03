@@ -19,6 +19,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"reflect"
 	"regexp"
 	"strconv"
 	"testing"
@@ -27,11 +28,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -44,6 +48,33 @@ func pairNames(proc int) (source, target, seedJob string) {
 		suffix = "-" + strconv.Itoa(proc)
 	}
 	return "e2e-source" + suffix, "e2e-target" + suffix, "e2e-seed" + suffix
+}
+
+// fixtureNodes are the usable nodes, sorted, that fixtureNode picks from.
+// Empty when this identity may not list nodes: the fixtures then float.
+var fixtureNodes []string
+
+// pairNodes gives process proc's source and target a node each, round robin.
+// The target takes the next node, so the two differ when there are several.
+func pairNodes(nodes []string, proc int) (source, target string) {
+	if len(nodes) == 0 {
+		return "", ""
+	}
+	return nodes[(proc-1)%len(nodes)], nodes[proc%len(nodes)]
+}
+
+// fixtureNode is the node a one-instance fixture prefers, so CNPG's initdb pod
+// and the instance after it share one node and the volume never detaches.
+// Several instances spread by design (see cnpgCluster), so they get none.
+func fixtureNode(cluster string) string {
+	if cnpgInstances != 1 {
+		return ""
+	}
+	source, target := pairNodes(fixtureNodes, GinkgoParallelProcess())
+	if cluster == targetCluster {
+		return target
+	}
+	return source
 }
 
 // seedJobPattern matches the seed Job of any process number pairNames gives.
@@ -242,5 +273,130 @@ func TestParallelDeleteFixturesRemovesEveryPair(t *testing.T) {
 	}
 	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other); err != nil {
 		t.Errorf("teardown deleted a Job that is not a seed Job: %v", err)
+	}
+}
+
+// nodeA, nodeB and nodeC stand in for node names, which this public repository never records.
+const nodeA, nodeB, nodeC = "node-a", "node-b", "node-c"
+
+func TestParallelPairNodes(t *testing.T) {
+	three := []string{nodeA, nodeB, nodeC}
+	tests := []struct {
+		nodes          []string
+		proc           int
+		source, target string
+	}{
+		{nodes: nil, proc: 1},
+		{nodes: []string{nodeA}, proc: 1, source: nodeA, target: nodeA},
+		{nodes: []string{nodeA}, proc: 4, source: nodeA, target: nodeA},
+		{nodes: three, proc: 1, source: nodeA, target: nodeB},
+		{nodes: three, proc: 2, source: nodeB, target: nodeC},
+		{nodes: three, proc: 3, source: nodeC, target: nodeA},
+		{nodes: three, proc: 4, source: nodeA, target: nodeB},
+		{nodes: three, proc: 6, source: nodeC, target: nodeA},
+	}
+	for _, tc := range tests {
+		source, target := pairNodes(tc.nodes, tc.proc)
+		if source != tc.source || target != tc.target {
+			t.Errorf("pairNodes(%v, %d) = %q, %q; want %q, %q",
+				tc.nodes, tc.proc, source, target, tc.source, tc.target)
+		}
+	}
+}
+
+// Under go test this is process 1, so the source takes the first node and the
+// target the second.
+func TestParallelFixtureNodeAffinity(t *testing.T) {
+	if GinkgoParallelProcess() != 1 {
+		t.Skip("only meaningful under go test, not as one of several ginkgo processes")
+	}
+	oldNodes, oldInstances := fixtureNodes, cnpgInstances
+	t.Cleanup(func() { fixtureNodes, cnpgInstances = oldNodes, oldInstances })
+	// The typed round trip proves CNPG gets a valid NodeAffinity, not just a map.
+	preferred := func(cluster string) *corev1.NodeAffinity {
+		raw, found, err := unstructured.NestedMap(cnpgCluster(cluster, "1Gi", 17).Object,
+			"spec", "affinity", "nodeAffinity")
+		if err != nil || !found {
+			return nil
+		}
+		typed := &corev1.NodeAffinity{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, typed); err != nil {
+			t.Fatal(err)
+		}
+		return typed
+	}
+	prefers := func(node string) *corev1.NodeAffinity {
+		return &corev1.NodeAffinity{PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{
+			Weight: 100,
+			Preference: corev1.NodeSelectorTerm{MatchFields: []corev1.NodeSelectorRequirement{{
+				Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{node},
+			}}},
+		}}}
+	}
+
+	fixtureNodes, cnpgInstances = nil, 1
+	if got := preferred(sourceCluster); got != nil {
+		t.Errorf("without a node list the source prefers %v, want nothing", got)
+	}
+
+	fixtureNodes = []string{nodeA, nodeB}
+	for cluster, want := range map[string]string{sourceCluster: nodeA, targetCluster: nodeB, "": nodeA} {
+		if got := preferred(cluster); !reflect.DeepEqual(got, prefers(want)) {
+			t.Errorf("cluster %q prefers %v, want %s", cluster, got, want)
+		}
+	}
+	// The target keeps its anti-affinity to the source next to the node term.
+	if _, found, _ := unstructured.NestedMap(cnpgCluster(targetCluster, "1Gi", 17).Object,
+		"spec", "affinity", "additionalPodAntiAffinity"); !found {
+		t.Error("the node preference dropped the target's anti-affinity to the source")
+	}
+
+	cnpgInstances = 3
+	if got := preferred(sourceCluster); got != nil {
+		t.Errorf("a three-instance source prefers %v, want its instances spread", got)
+	}
+}
+
+func TestParallelUsableNodeNames(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	node := func(name string, ready corev1.ConditionStatus, mutate func(*corev1.Node)) client.Object {
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}, Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready}},
+		}}
+		if mutate != nil {
+			mutate(n)
+		}
+		return n
+	}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(
+		node(nodeC, corev1.ConditionTrue, nil),
+		node(nodeA, corev1.ConditionTrue, func(n *corev1.Node) {
+			// A PreferNoSchedule taint does not keep a fixture off the node.
+			n.Spec.Taints = []corev1.Taint{{Key: "soft", Effect: corev1.TaintEffectPreferNoSchedule}}
+		}),
+		node(nodeB, corev1.ConditionFalse, nil),
+		node("node-d", corev1.ConditionTrue, func(n *corev1.Node) { n.Spec.Unschedulable = true }),
+		node("node-e", corev1.ConditionTrue, func(n *corev1.Node) {
+			n.Spec.Taints = []corev1.Taint{{Key: "hard", Effect: corev1.TaintEffectNoSchedule}}
+		}),
+	).Build()
+	RegisterTestingT(t)
+	var names []string
+	if err := InterceptGomegaFailure(func() { names = usableNodeNames() }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{nodeA, nodeC}; !reflect.DeepEqual(names, want) {
+		t.Errorf("usable nodes %v, want %v", names, want)
+	}
+
+	k8sClient = clientfake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return apierrors.NewForbidden(corev1.Resource("nodes"), "", errors.New("confined"))
+		},
+	}).Build()
+	if err := InterceptGomegaFailure(func() { names = usableNodeNames() }); err != nil || names != nil {
+		t.Errorf("a confined identity got %v, %v; want no nodes and no failure", names, err)
 	}
 }

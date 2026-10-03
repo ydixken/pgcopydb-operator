@@ -1361,6 +1361,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	sourceCluster, targetCluster, seedJobName = pairNames(GinkgoParallelProcess())
 
 	if external == nil {
+		fixtureNodes = usableNodeNames()
 		By(fmt.Sprintf("creating or adopting the CNPG source %s (PG %d) and target %s (PG %d)",
 			sourceCluster, pgSource, targetCluster, pgTarget))
 		ensureClusterShape(sourceCluster, pgSource)
@@ -1627,6 +1628,16 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 						"matchLabels": map[string]any{labelCNPGInstance: sourceCluster + "-1"},
 					},
 				},
+			}},
+		}
+	}
+	if node := fixtureNode(name); node != "" {
+		affinity["nodeAffinity"] = map[string]any{
+			"preferredDuringSchedulingIgnoredDuringExecution": []any{map[string]any{
+				"weight": int64(100),
+				"preference": map[string]any{"matchFields": []any{map[string]any{
+					"key": metav1.ObjectNameField, "operator": string(corev1.NodeSelectorOpIn), "values": []any{node},
+				}}},
 			}},
 		}
 	}
@@ -2612,20 +2623,30 @@ func instanceNodes(cluster string) []string {
 // satisfy an assertion would trade a real security boundary for a test.
 func schedulableNodes() int {
 	GinkgoHelper()
+	return len(usableNodeNames())
+}
+
+// usableNodeNames lists the nodes usableNode accepts, sorted by name, or none
+// when this identity may not list nodes (see schedulableNodes).
+func usableNodeNames() []string {
+	GinkgoHelper()
 	nodes := &corev1.NodeList{}
 	err := k8sClient.List(ctx, nodes)
 	if apierrors.IsForbidden(err) {
-		return 0
+		return nil
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to list nodes")
-	n := 0
+	var names []string
 	for i := range nodes.Items {
 		if usableNode(&nodes.Items[i]) {
-			n++
+			names = append(names, nodes.Items[i].Name)
 		}
 	}
-	Expect(n).To(BeNumerically(">", 0), "no schedulable node in this cluster")
-	return n
+	// The count, never the slice: CI logs are public (see primaryPod).
+	found := len(names)
+	Expect(found).To(BeNumerically(">", 0), "no schedulable node in this cluster")
+	slices.Sort(names)
+	return names
 }
 
 // usableNode reports whether a pod with no tolerations can be scheduled on a

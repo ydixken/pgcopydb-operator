@@ -128,6 +128,16 @@ spec:
 For live migrations the volume also buffers the change stream.
 Budget the clone's needs plus write rate times the expected migration window.
 
+### Which node the Jobs prefer
+
+A Migration runs its Jobs one after another, and each Job mounts the work volume.
+A ReadWriteOnce volume attaches to one node at a time.
+A Job pod on a different node must wait until the volume detaches from the previous node.
+To prevent this wait, the operator writes the node of the newest Job pod to the Migration annotation `pgcopydb-operator.io/work-volume-node`.
+Each Job that it creates after that has a preferred node affinity to that node.
+The operator adds this preference to `spec.runner.affinity` and keeps `nodeSelector` and `tolerations` as you set them.
+The preference is not a requirement: if that node is full or not available, the scheduler uses a different node.
+
 ## Runner image
 
 The worker Jobs run the operator-wide runner image from the chart value `runner.image`: pgcopydb 0.18 with PostgreSQL 18 client tools.
