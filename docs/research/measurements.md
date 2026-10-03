@@ -19,7 +19,7 @@ Bytes come from `pg_table_size`, because its neighbours add the indexes or drop 
 Such a table counts the bytes its own copy has streamed, which a target before PostgreSQL 14 cannot report, so it counts none there.
 This worker's backends are those named `pgcopydb...` from the sampler's own client address, so another migration's copy into the same database is not mistaken for this one's.
 Among them, a copy worker is one named a copy worker or whose last statement was a COPY, so the sample waits out an index worker's short ALTER on a copied table.
-Unlike `finalizingScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
+Unlike `stageScript`, it does not require the backend to be active, because a backend idle in its transaction after a COPY still holds the copy's lock.
 A failed side prints an empty row and parses to no sample, never to zero.
 
 ### Storage cannot tell an empty table from a copied one
@@ -99,13 +99,31 @@ A table is one COPY stream unless pgcopydb splits it, so splitting is what adds 
 
 ## Clone-stage probe
 
-Where `finalizingScript` in `internal/progress/progress.go` counts pgcopydb's own backends on the target to tell a running copy from its vacuum tail.
+Where `stageScript` in `internal/progress/progress.go`, the first query of every sample, counts pgcopydb's own backends on the target to tell a running copy from its vacuum tail.
 Copy workers count by connection, the tail only while active.
+Index and vacuum workers count by connection too, as proof that the copy started: pgcopydb restores the schema before it starts any of them (`STEP 3` in its `cli_clone_follow.c`).
 
 ### A copy worker's connection outlives the statement it is running
 
 Sampled across a whole base copy on a live worker 2026-08-30.
 Four copy workers connected in every sample, zero the instant it ended, while the active count dipped to zero mid-copy and read as the tail.
+
+## Sampling cadence
+
+Where `copyPollInterval` and `recordSizes` in `internal/controller/sampler.go` decide how often a copy is sampled and when its target size counts.
+
+### One sample costs under a second
+
+Measured during the release-candidate e2e behind issue #200: one psql query took 70 to 90 ms, and the exec round trip around the script took about 480 ms.
+A sample is one exec running three psql calls, so about 0.7 s.
+At a 5-second interval that fills a seventh of each gap; at 2 seconds it would fill a third, and its own jitter would show in the spacing.
+
+### The first size sample of a copy read the target before pgcopydb cleaned it
+
+Measured on the v0.17.0 post-release e2e, with the target size read off the target primary every 2.3 seconds as ground truth.
+A follow migration cloned into a database an earlier spec had filled.
+Its first point, scraped four seconds after the target had dropped to 151 MB and started refilling, still read 3.03 GB.
+A point that old can only come from a sample taken before pgcopydb dropped and restored the schema.
 
 ## Shell portability of the progress gate
 

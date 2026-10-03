@@ -53,21 +53,14 @@ type fakeProgress struct {
 	sizeCalls    int
 	allDatabases bool
 
-	copying, finalizing bool
-	stageCalls          int
+	// started alone stands for index or vacuum workers with no copy worker left.
+	copying, finalizing, started bool
 }
 
 // GateScript stands in for the poller's version gate. Specs assert on this
 // text reaching the verify Job, not on a real allowlist.
 func (f *fakeProgress) GateScript() string {
 	return "pgcopydb list progress --json --dir /work/pgcopydb\n"
-}
-
-func (f *fakeProgress) CloneStage(context.Context, string, string) (bool, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.stageCalls++
-	return f.copying, f.finalizing
 }
 
 // setRelations changes what the next Sample answers, so a spec can prove a
@@ -89,7 +82,8 @@ func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool)
 	if f.nilSample {
 		return nil, nil
 	}
-	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations}, nil
+	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations,
+		Copying: f.copying, Finalizing: f.finalizing, CopyStarted: f.copying || f.started}, nil
 }
 
 // counts returns the size samples seen so far.
@@ -97,6 +91,11 @@ func (f *fakeProgress) counts() (sizes int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sizeCalls
+}
+
+// migLabels selects one test Migration's series.
+func migLabels(name string) map[string]string {
+	return map[string]string{"namespace": testNS, "name": name}
 }
 
 // gaugeValue reads one series from the controller-runtime registry, the same
@@ -129,9 +128,6 @@ var _ = Describe("Migration Controller progress sampling", func() {
 	ctx := context.Background()
 
 	int64p := func(n int64) *int64 { return &n }
-	migLabels := func(name string) map[string]string {
-		return map[string]string{"namespace": testNS, "name": name}
-	}
 	// The catalog poll runs mid-attempt only on a follow migration past
 	// CloneCompleted, which the operator reads off the worker log, so these
 	// specs wire a log reader that has already logged the end of the copy.
@@ -165,7 +161,8 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-progress-sample"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{src: int64p(5000), tgt: int64p(400)}
+		// Copying: a target size counts from the copy on (see the stale-size spec).
+		fake := &fakeProgress{src: int64p(5000), tgt: int64p(400), copying: true}
 		logs := &fakeLogs{}
 		r := newReconciler()
 		r.Progress, r.Logs = fake, logs

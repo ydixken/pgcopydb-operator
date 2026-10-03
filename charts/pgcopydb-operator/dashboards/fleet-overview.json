@@ -425,7 +425,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[20s]))",
+          "expr": "sum(deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -470,7 +470,7 @@
         "percentChangeColorMode": "standard",
         "showPercentChange": false
       },
-      "interval": "10s"
+      "interval": "5s"
     },
     {
       "id": 8,
@@ -839,7 +839,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[20s])",
+          "expr": "deriv(pgcopydb_migration_target_database_size_bytes{namespace=~\"$namespace\"}[$__rate_interval])",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -882,7 +882,7 @@
           "sort": "desc"
         }
       },
-      "interval": "10s"
+      "interval": "5s"
     },
     {
       "id": 13,

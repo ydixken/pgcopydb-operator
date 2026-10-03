@@ -221,7 +221,7 @@ Its account of the damage: 0.18 died of this twice in one e2e run, mid-copy in a
 The two sites are the ones traced above, which date the index-worker death to 2026-08-09 and the sequence resets to 2026-08-30; the run accounting differs between the two records and nobody has reconciled them.
 
 "Almost never" is not a property, so a live worker gets psql and nothing else.
-All three pollers use it: the follow watch queries the two databases, the clone-stage probe counts pgcopydb's own backends on the target, and the size sample reads `pg_database_size`.
+Both pollers use it: the follow watch queries the two databases, and the progress sample reads `pg_database_size` and counts pgcopydb's own backends on the target.
 The copy counters are read from a Job of their own, its own pod, with no worker in it.
 The one remaining exec into a live worker is `sentinel set endpos`, which is how a cutover is asked for and has no other route.
 

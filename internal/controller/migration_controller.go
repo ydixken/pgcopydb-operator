@@ -102,10 +102,9 @@ type LogReader interface {
 // injects a fake). Best effort throughout: a nil sample keeps the previous
 // value and an error never fails the pass.
 type ProgressOps interface {
-	// Sample reads both databases in one exec. Safe on a pass with a live
-	// worker, which is what makes the progress fields move during a copy.
+	// Sample reads both databases and the clone stage in one exec. Safe with a
+	// live worker, which is what makes the progress fields move during a copy.
 	Sample(ctx context.Context, namespace, jobName string, allDatabases bool) (*progress.Sample, error)
-	CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool)
 	// GateScript renders the version-gated `list progress` the verify Job
 	// carries: the allowlist lives here, so both callers share one gate.
 	GateScript() string
@@ -131,6 +130,10 @@ type MigrationReconciler struct {
 
 	// Progress samples clone progress and database sizes; nil disables it.
 	Progress ProgressOps
+
+	// Sampler runs Progress on its own timer; nil, or not yet started, makes
+	// each pass sample for itself.
+	Sampler *Sampler
 
 	// now is overridden only by controlled-clock tests.
 	now func() time.Time
@@ -161,12 +164,21 @@ func (r *MigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	reconcileStart := r.currentTime()
+	// Only a pass that observes a running worker keeps its sampler: deletion,
+	// suspend, a finished or missing Job and a terminal state all stop it.
+	observing := false
+	defer func() {
+		if !observing {
+			r.stopSampling(req.NamespacedName)
+		}
+	}()
 
 	m := &v1beta1.Migration{}
 	if err := r.Get(ctx, req.NamespacedName, m); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Clone-only Migrations skip reconcileDeletion (no finalizer), so
-			// this is where their series must die.
+			// this is where their series must die, after the sampler that writes them.
+			r.stopSampling(req.NamespacedName)
 			metrics.Forget(req.Namespace, req.Name)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -174,6 +186,7 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// base is the object as fetched; every status write patches against it.
 	base := m.DeepCopy()
 	if !m.DeletionTimestamp.IsZero() {
+		r.stopSampling(req.NamespacedName)
 		// Live migrations route through slot cleanup (finalizer); everything
 		// else goes with the CR via garbage collection.
 		return r.reconcileDeletion(ctx, m)
@@ -254,7 +267,14 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 		return r.handleFailedJob(ctx, m, base, job)
 	}
 
+	observing = true
 	return r.observeRunningJob(ctx, m, base, job, reconcileStart)
+}
+
+func (r *MigrationReconciler) stopSampling(key types.NamespacedName) {
+	if r.Sampler != nil {
+		r.Sampler.Stop(key)
+	}
 }
 
 // completeDryRun ends a dry run once its preflight passed; the terminal check
@@ -435,40 +455,24 @@ func (r *MigrationReconciler) observeRunningJob(
 	timings := []any{"scope", "active_worker_observation"}
 	outcome := "normal"
 	defer func() {
-		timings = append(timings, "outcome", outcome, "total", r.currentTime().Sub(observationStart))
-		logf.FromContext(ctx).V(1).Info("active worker observation", timings...)
+		total := r.currentTime().Sub(observationStart)
+		timings = append(timings, "outcome", outcome, "total", total)
+		log := logf.FromContext(ctx).V(1)
+		if total > pollInterval {
+			// Over budget is the case worth seeing without debug logging.
+			log = logf.FromContext(ctx)
+		}
+		log.Info("active worker observation", timings...)
 	}()
 	record := func(name string, started time.Time) {
 		timings = append(timings, name, r.currentTime().Sub(started))
-	}
-
-	// The tail (index builds, a vacuum on the largest table) stops the target
-	// growing, so a size estimate reads as finished; reporting it apart tells a
-	// slow tail from a stall. Finalizing needs the copy seen first, or a sample
-	// catching every worker between statements reports the tail mid-copy.
-	started := r.currentTime()
-	if r.Progress != nil {
-		copying, finalizing := r.Progress.CloneStage(ctx, m.Namespace, job.Name)
-		switch {
-		case copying:
-			m.Status.Phase = v1beta1.PhaseCloning
-			// A refused marker outranks the probe: its latch is the only
-			// memory of the marker once that scrolls out of the log tail.
-			if meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
-				r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
-					"base copy running, copy workers connected to the target")
-			}
-		case finalizing && copySeen(m):
-			m.Status.Phase = v1beta1.PhaseFinalizing
-		}
-		record("clone_stage", started)
 	}
 	follow := followEnabled(m)
 
 	// One log fetch per pass serves both the clone-done and the zombie check.
 	// Unreadable logs degrade to an empty tail; the next poll retries.
 	var logTail []byte
-	started = r.currentTime()
+	started := r.currentTime()
 	if follow && r.Logs != nil {
 		raw, err := r.Logs.JobLogsTimestamps(ctx, m.Namespace, job.Name, zombieLogTail)
 		if err != nil {
@@ -479,15 +483,27 @@ func (r *MigrationReconciler) observeRunningJob(
 		record("follow_log_fetch", started)
 	}
 
-	// After the log fetch and before the marker is read: the sample is the
-	// evidence the marker is checked against, so it must have seen every copy
-	// transaction the marker follows commit.
-	started = r.currentTime()
-	counts := r.sampleProgress(ctx, m, job.Name)
-	record("progress_sample", started)
-
+	// The clone-done marker is checked against a sample, which must have seen every
+	// copy transaction the marker follows commit: one taken now, after the log fetch,
+	// not the sampler's last.
 	cloneDone := meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
-	if follow && !cloneDone && (pgcopydb.CloneDone(logTail) || tablesEmptySeen(m)) {
+	judge := follow && !cloneDone && (pgcopydb.CloneDone(logTail) || tablesEmptySeen(m))
+	started = r.currentTime()
+	got := r.progressSample(ctx, m, job.Name, judge)
+	record("progress_sample", started)
+	if got.err != nil {
+		logf.FromContext(ctx).V(1).Info("database sample failed", "job", job.Name, "error", got.err)
+	}
+	var counts *progress.RelationCounts
+	if s := got.sample; s != nil {
+		r.applyStage(m, s, got.copySeen)
+		if s.Counts != nil {
+			applyCounts(m, s.Counts, got.at)
+			counts = s.Counts
+		}
+	}
+
+	if judge {
 		cloneDone = r.confirmBaseCopy(m, counts)
 	}
 	if follow {
@@ -516,8 +532,7 @@ func (r *MigrationReconciler) observeRunningJob(
 		return res, err
 	}
 	record("zombie_reap", started)
-	// One cadence throughout: the size sample is the only live view of a
-	// running copy, and the throughput panel is its slope.
+	// The pass keeps pollInterval for status; the sampler times the size gauges.
 	delay := r.activePollDelay(reconcileStart)
 	timings = append(timings, "next_delay", delay)
 	return ctrl.Result{RequeueAfter: delay}, nil
@@ -570,34 +585,64 @@ func (r *MigrationReconciler) confirmBaseCopy(m *v1beta1.Migration, counts *prog
 	return true
 }
 
-// sampleProgress feeds the size gauges and the progress counters while the
-// worker runs, returning the counts this pass read or nil. It uses psql and
-// nothing else, per the invariant on observeRunningJob, and is best effort:
-// an error never flips a condition or fails the pass.
-func (r *MigrationReconciler) sampleProgress(ctx context.Context, m *v1beta1.Migration, jobName string) *progress.RelationCounts {
+// progressSample returns the sampler's latest sample, or one taken now when now is
+// set or no sampler runs. It uses psql and nothing else, per the invariant on
+// observeRunningJob, and is best effort: an error never fails the pass.
+func (r *MigrationReconciler) progressSample(ctx context.Context, m *v1beta1.Migration, jobName string, now bool) sampled {
 	if r.Progress == nil {
-		return nil
+		return sampled{}
 	}
+	key := client.ObjectKeyFromObject(m)
+	hint := hintFor(m)
+	if r.Sampler != nil {
+		got, ok := r.Sampler.Observe(key, jobName, m.Spec.Clone.AllDatabases, hint)
+		switch {
+		case ok && now:
+			// The run owns the size gauges and orders this sample against its own.
+			return r.Sampler.SampleNow(ctx, key, jobName, m.Spec.Clone.AllDatabases)
+		case ok:
+			return got
+		}
+	}
+	at := r.currentTime()
 	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
-	if err != nil {
-		logf.FromContext(ctx).V(1).Info("database sample failed", "job", jobName, "error", err)
-		return nil
-	}
-	if s == nil {
-		return nil
-	}
-	// Metrics only: sizes are observability, not state.
-	metrics.RecordDatabaseSizes(m.Namespace, m.Name, s.SourceSize, s.TargetSize)
-	if s.Counts != nil {
-		applyCounts(m, s.Counts, r.currentTime())
-	}
-	return s.Counts
+	got := sampled{sample: s, err: err, at: at, copySeen: s != nil && s.CopyStarted}
+	recordSizes(m.Namespace, m.Name, s, hint.copyStarted || got.copySeen)
+	return got
 }
 
-// applyCounts writes the newest estimate, stamped with now, over whatever is
-// there: keeping an earlier reading froze the tiles at the clone's first sample.
+// hintFor reads the copy's progress off status, the memory that survives a restart.
+func hintFor(m *v1beta1.Migration) samplerHint {
+	across := meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted) || tablesEmptySeen(m)
+	switch m.Status.Phase {
+	case v1beta1.PhaseFinalizing, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending, v1beta1.PhaseCuttingOver:
+		across = true
+	}
+	return samplerHint{copyStarted: across || copySeen(m), dataAcross: across}
+}
+
+// applyStage reports the tail (index builds, a vacuum on the largest table) apart
+// from the copy, which tells a slow tail from a stall. Finalizing needs the copy seen
+// first, or a sample catching every worker between statements reports the tail mid-copy.
+func (r *MigrationReconciler) applyStage(m *v1beta1.Migration, s *progress.Sample, started bool) {
+	// A refused marker outranks the probe: its latch is the only
+	// memory of the marker once that scrolls out of the log tail.
+	if started && meta.IsStatusConditionFalse(m.Status.Conditions, v1beta1.ConditionCloneCompleted) && !tablesEmptySeen(m) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCopyingData,
+			"base copy started, pgcopydb's copy workers reached the target")
+	}
+	switch {
+	case s.Copying:
+		m.Status.Phase = v1beta1.PhaseCloning
+	case s.Finalizing && copySeen(m):
+		m.Status.Phase = v1beta1.PhaseFinalizing
+	}
+}
+
+// applyCounts writes the newest estimate, stamped with when it was sampled, over whatever
+// is there: keeping an earlier reading froze the tiles at the clone's first sample.
 // pgcopydb's own catalog overwrites the field (see recordCloneProgress).
-func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts, now time.Time) {
+func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts, at time.Time) {
 	if m.Status.Progress == nil {
 		m.Status.Progress = &v1beta1.CloneProgress{}
 	}
@@ -606,7 +651,7 @@ func applyCounts(m *v1beta1.Migration, c *progress.RelationCounts, now time.Time
 	p.IndexesTotal, p.IndexesDone = c.IndexesTotal, c.IndexesDone
 	p.BytesTotal = resource.NewQuantity(c.BytesTotal, resource.BinarySI)
 	p.BytesDone = resource.NewQuantity(c.BytesDone, resource.BinarySI)
-	p.ObservedAt = &metav1.Time{Time: now}
+	p.ObservedAt = &metav1.Time{Time: at}
 }
 
 // reapZombieWorker deletes a worker pod pgcopydb 0.18 leaves alive: the

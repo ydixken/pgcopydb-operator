@@ -75,6 +75,8 @@ type Panel struct {
 	Panels      []Panel      `json:"panels"`
 	FieldConfig FieldConfig  `json:"fieldConfig"`
 	Options     PanelOptions `json:"options"`
+	// Interval is the panel's min step, the finest a query re-steps a series to.
+	Interval string `json:"interval"`
 }
 
 // PanelOptions carries the per-type options a test asserts on. ColorMode

@@ -48,7 +48,6 @@ import (
 )
 
 const (
-	timingCloneStage     = "clone_stage"
 	timingFollowControl  = "follow_control"
 	timingNextDelay      = "next_delay"
 	timingFollowLogFetch = "follow_log_fetch"
@@ -323,26 +322,26 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 	}{
 		{
 			name: "clone normal return", wantResult: time.Nanosecond, outcome: "normal",
-			want: []string{timingCloneStage, timingProgressSample, timingStatusPatch, timingZombieReap, timingNextDelay},
+			want: []string{timingProgressSample, timingStatusPatch, timingZombieReap, timingNextDelay},
 			omit: []string{timingFollowLogFetch, timingFollowControl},
 		},
 		{
 			name: "follow normal return", follow: true, wantResult: time.Nanosecond, outcome: "normal",
-			want: []string{timingCloneStage, timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap, timingNextDelay},
+			want: []string{timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap, timingNextDelay},
 		},
 		{
 			name: "status patch error", patchError: errBoom, wantErr: errBoom, outcome: "status_patch_error",
-			want: []string{timingCloneStage, timingProgressSample, timingStatusPatch},
+			want: []string{timingProgressSample, timingStatusPatch},
 			omit: []string{timingFollowLogFetch, timingFollowControl, timingZombieReap, timingNextDelay},
 		},
 		{
 			name: "zombie handled", follow: true, zombie: true, wantResult: pollInterval, outcome: "zombie_reap_handled",
-			want: []string{timingCloneStage, timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
+			want: []string{timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
 			omit: []string{timingNextDelay},
 		},
 		{
 			name: "zombie reap error", follow: true, zombie: true, deleteError: errBoom, wantErr: errBoom, outcome: "zombie_reap_error",
-			want: []string{timingCloneStage, timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
+			want: []string{timingFollowLogFetch, timingFollowControl, timingProgressSample, timingStatusPatch, timingZombieReap},
 			omit: []string{timingNextDelay},
 		},
 	}
@@ -416,8 +415,17 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 			if fields["scope"] != "active_worker_observation" || fields["outcome"] != tc.outcome {
 				t.Fatalf("timing identity = %#v", fields)
 			}
-			if _, ok := fields["total"]; !ok {
+			total, ok := fields["total"].(time.Duration)
+			if !ok {
 				t.Fatalf("timing has no total: %#v", fields)
+			}
+			// A pass over its poll interval logs without debug, so the slow step is on record.
+			wantLevel := zapcore.DebugLevel
+			if total > pollInterval {
+				wantLevel = zapcore.InfoLevel
+			}
+			if entries[0].Level != wantLevel {
+				t.Errorf("timing logged at %s for a %s pass, want %s", entries[0].Level, total, wantLevel)
 			}
 			for _, name := range tc.want {
 				if _, ok := fields[name]; !ok {

@@ -14,15 +14,24 @@ kube-prometheus-stack already grants that to its Prometheus, and the 401, 403, a
 
 The ServiceMonitor sets `honorLabels: true`.
 The `namespace` and `name` labels on migration metrics therefore stay the Migration's own, and the scrape does not rename them to `exported_namespace`.
-The chart scrapes every 10 seconds, the same as the nominal poll interval of an active worker.
-Gauges change when the controller sees the worker, so a slower scrape can miss samples between two changes.
+The chart scrapes every 5 seconds, the interval at which the operator samples database sizes during a copy.
+Gauges change when the operator samples the worker, so a slower scrape can miss samples between two changes.
 Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by what you set.
 `metrics.serviceMonitor.additionalLabels` labels the monitor for a Prometheus that selects by label; `scrapeTimeout`, `relabelings`, and `metricRelabelings` tune the rest.
 
 ## Controller timing
 
-The normal path for an active worker asks for its next poll 10 seconds from the start of the reconcile pass.
-The chart's 10-second scrape matches that interval, but slow operations, controller queue delays, and other phase or retry paths can push a sample later.
+A background sampler reads each running worker on its own timer, so a slow reconcile pass does not delay the size gauges.
+It takes its first sample as soon as a pass sees the worker Job, then samples every 5 seconds until the data is across and every 10 seconds after that, which covers the index and vacuum tail, streaming, and cutover.
+Only the elected leader samples, and a worker that ends, a suspend, or a deletion stops its sampler.
+
+A reconcile pass for an active worker still asks for the next pass 10 seconds after it started.
+It copies the latest sample's relation counts and clone stage into status, and it is the only writer of status.
+The size gauges therefore move every 5 seconds during a copy, while the relation counters, `status.progress`, and the phase move every 10.
+Controller queue delays and other phase or retry paths can push a pass later; they do not move the sampler.
+
+A pass that takes longer than 10 seconds logs `active worker observation` at the info level, with the time each step took.
+A sample that outruns its own interval logs `progress sample took longer than its interval`.
 
 ## Metric reference
 
@@ -56,6 +65,9 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **once sampled**: the sizes are live samples from the worker pod, so they appear during an attempt.
   They keep their last value after the pod ends.
+  The target size starts once a sample sees this attempt's copy, index or vacuum workers, because pgcopydb starts them only after it has cleaned the target.
+  Before that the target still holds whatever was there before the copy.
+  A retry resumes into the same target, so its target size keeps the previous attempt's last value until a sample sees the retry's workers.
 - **once sampled** for single-database counters too, but they have two sources and the second is more exact.
   While the copy runs, the psql sample that reads the sizes also counts relations on both databases.
   It weighs tables that hold rows on the target, and their table bytes, against the tables the target was given and their size on the source.
@@ -100,7 +112,7 @@ The reason is the server's error or the failed connection's host and port.
 Any other psql message is withheld, because libpq echoes a connection URI it cannot parse, password included.
 A failed sample never completes or fails a migration.
 
-`status.progress.observedAt` is when a sample last wrote the relation counts into status.
+`status.progress.observedAt` is when the sample behind the relation counts in status was taken.
 A sample that loses either side writes nothing, so the timestamp stops with the counts and its age is how long they have stood still.
 Read it next to the log: an `observedAt` minutes old after a `progress sample lost a side` line, with no `progress sample side answers again` since, means status is showing old figures, and the worker log tells whether the copy itself still moves.
 It is absent before the first counted sample and in all-databases mode, and pgcopydb's own count drops it when it replaces the estimate.
@@ -140,8 +152,11 @@ The chart ships three dashboards, linked to each other through their shared `pgc
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
-All three refresh every 10 seconds, the same as the nominal poll and scrape intervals.
-A slow controller pass, a queued reconcile, or a late scrape can delay what reaches the screen.
+All three refresh every 10 seconds, the same as the reconcile poll.
+Database Size and both Copy Throughput panels step at 5 seconds, the chart's scrape, so each refresh draws two new size points.
+Their slopes use `deriv` over `$__rate_interval`, which Grafana sizes from that step: 20 seconds on a short range, or four samples.
+The Clone Copy series and WAL Generation read gauges the reconcile pass moves, so they step at 10 seconds and average over 40.
+A queued reconcile or a late scrape can still delay what reaches the screen.
 Grafana's refresh picker overrides the saved value for your session.
 
 ![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)
@@ -209,7 +224,7 @@ The tiles read as follows:
 
 - **Phase** is the state the operator is in.
   **Current Work** is the activity inside that state: `Validating` reads as Preflight Checks, `Finalizing` as Vacuum And Index Builds, and `Streaming` as Following WAL.
-  Vacuum And Index Builds appears only after the operator has seen the copy workers start and then stop.
+  Vacuum And Index Builds appears only after a sample has seen this attempt's copy, index or vacuum workers, and only once no copy worker is left.
 - **Elapsed** is how long the run has taken, and it stops when the run completes.
   **Completed At** reads Still Running until the run ends.
 - **Percent** is target size over source size, clamped at 100.
@@ -340,6 +355,6 @@ It replays the lag and LSN panels over the whole run, because their series are g
   It can step up or down when a table copied whole commits, and once when pgcopydb's own count replaces the estimate.
 - A custom stock 0.18 runner with psql and GNU `timeout` still feeds these series, because the sample needs no pgcopydb command.
   That runner gives up the exact count that replaces the estimate at the end.
-- `Finalizing` needs the phase probe to have seen this attempt's copy workers at least once.
-  The probe runs on every poll, about every 10 seconds, so only a copy that ends almost at once keeps `Cloning` through its tail.
+- `Finalizing` needs the phase probe to have seen this attempt's copy, index or vacuum workers at least once.
+  The probe runs with every sample, and the sampler remembers a sighting for the pass that reads the latest sample, so only a copy whose workers all come and go between two samples keeps `Cloning` through its tail.
   The stalled-clone alert still needs an hour of flat target size, which a copy that short does not produce.
