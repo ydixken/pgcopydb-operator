@@ -584,7 +584,11 @@ var _ = Describe("Migration", func() {
 
 	It("drops the replication slot when a streaming Migration is deleted", func() {
 		const name = "e2e-follow-del"
-		create(newFollowMigration(name, v1beta1.CutoverManual))
+		// Slot cleanup does not depend on how much the base copy moved, and
+		// one table reaches Streaming sooner at larger E2E_SCALE values.
+		mig := newFollowMigration(name, v1beta1.CutoverManual)
+		mig.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyTables: []string{"public.customers"}}
+		create(mig)
 
 		By("waiting for streaming so the slot exists on the source")
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
