@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -230,8 +231,17 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
 		}
 
 		By("running server-delayed COPY TO, COPY FROM, and CREATE INDEX on the same pooled backends")
+		// Both sides at once: they share no server. pooledSQL makes no Gomega
+		// calls, so the goroutines need no GinkgoRecover.
+		outs := make([]string, len(sides))
+		errs := make([]error, len(sides))
+		var wg sync.WaitGroup
 		for i, side := range sides {
-			out, queryErr := pooledSQL(side, progressPoolLongWorkSQL(), time.Minute)
+			wg.Go(func() { outs[i], errs[i] = pooledSQL(side, progressPoolLongWorkSQL(), time.Minute) })
+		}
+		wg.Wait()
+		for i, side := range sides {
+			out, queryErr := outs[i], errs[i]
 			Expect(queryErr).NotTo(HaveOccurred(), "%s long COPY and index workload failed", side)
 			work := strings.Split(out, "\n")
 			Expect(work).To(HaveLen(6), "%s long SQL results must all be present", side)
