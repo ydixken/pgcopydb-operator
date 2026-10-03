@@ -415,8 +415,17 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 			if fields["scope"] != "active_worker_observation" || fields["outcome"] != tc.outcome {
 				t.Fatalf("timing identity = %#v", fields)
 			}
-			if _, ok := fields["total"]; !ok {
+			total, ok := fields["total"].(time.Duration)
+			if !ok {
 				t.Fatalf("timing has no total: %#v", fields)
+			}
+			// A pass over its poll interval logs without debug, so the slow step is on record.
+			wantLevel := zapcore.DebugLevel
+			if total > pollInterval {
+				wantLevel = zapcore.InfoLevel
+			}
+			if entries[0].Level != wantLevel {
+				t.Errorf("timing logged at %s for a %s pass, want %s", entries[0].Level, total, wantLevel)
 			}
 			for _, name := range tc.want {
 				if _, ok := fields[name]; !ok {

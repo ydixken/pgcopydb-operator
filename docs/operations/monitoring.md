@@ -21,8 +21,17 @@ Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, a
 
 ## Controller timing
 
-The normal path for an active worker asks for its next poll 10 seconds from the start of the reconcile pass.
-The chart's 10-second scrape matches that interval, but slow operations, controller queue delays, and other phase or retry paths can push a sample later.
+A background sampler reads each running worker on its own timer, so a slow reconcile pass does not delay the size gauges.
+It takes its first sample as soon as a pass sees the worker Job, then samples every 5 seconds until the data is across and every 10 seconds after that, which covers the index and vacuum tail, streaming, and cutover.
+Only the elected leader samples, and a worker that ends, a suspend, or a deletion stops its sampler.
+
+A reconcile pass for an active worker still asks for the next pass 10 seconds after it started.
+It copies the latest sample's relation counts and clone stage into status, and it is the only writer of status.
+The size gauges therefore move every 5 seconds during a copy, while the relation counters, `status.progress`, and the phase move every 10.
+Controller queue delays and other phase or retry paths can push a pass later; they do not move the sampler.
+
+A pass that takes longer than 10 seconds logs `active worker observation` at the info level, with the time each step took.
+A sample that outruns its own interval logs `progress sample took longer than its interval`.
 
 ## Metric reference
 
@@ -56,6 +65,7 @@ The "Exists" column is the contract for when a series is present:
 - **always**: from the first reconcile of the Migration until its deletion removes every series.
 - **once sampled**: the sizes are live samples from the worker pod, so they appear during an attempt.
   They keep their last value after the pod ends.
+  The target size starts once a sample has seen this attempt's copy workers, because before that the target still holds whatever an earlier run left there.
 - **once sampled** for single-database counters too, but they have two sources and the second is more exact.
   While the copy runs, the psql sample that reads the sizes also counts relations on both databases.
   It weighs tables that hold rows on the target, and their table bytes, against the tables the target was given and their size on the source.
@@ -100,7 +110,7 @@ The reason is the server's error or the failed connection's host and port.
 Any other psql message is withheld, because libpq echoes a connection URI it cannot parse, password included.
 A failed sample never completes or fails a migration.
 
-`status.progress.observedAt` is when a sample last wrote the relation counts into status.
+`status.progress.observedAt` is when the sample behind the relation counts in status was taken.
 A sample that loses either side writes nothing, so the timestamp stops with the counts and its age is how long they have stood still.
 Read it next to the log: an `observedAt` minutes old after a `progress sample lost a side` line, with no `progress sample side answers again` since, means status is showing old figures, and the worker log tells whether the copy itself still moves.
 It is absent before the first counted sample and in all-databases mode, and pgcopydb's own count drops it when it replaces the estimate.
@@ -341,5 +351,5 @@ It replays the lag and LSN panels over the whole run, because their series are g
 - A custom stock 0.18 runner with psql and GNU `timeout` still feeds these series, because the sample needs no pgcopydb command.
   That runner gives up the exact count that replaces the estimate at the end.
 - `Finalizing` needs the phase probe to have seen this attempt's copy workers at least once.
-  The probe runs on every poll, about every 10 seconds, so only a copy that ends almost at once keeps `Cloning` through its tail.
+  The probe runs with every sample, and each pass, about every 10 seconds, reads the latest one, so only a copy that ends within one pass keeps `Cloning` through its tail.
   The stalled-clone alert still needs an hour of flat target size, which a copy that short does not produce.

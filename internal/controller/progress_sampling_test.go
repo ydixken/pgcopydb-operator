@@ -92,6 +92,11 @@ func (f *fakeProgress) counts() (sizes int) {
 	return f.sizeCalls
 }
 
+// migLabels selects one test Migration's series.
+func migLabels(name string) map[string]string {
+	return map[string]string{"namespace": testNS, "name": name}
+}
+
 // gaugeValue reads one series from the controller-runtime registry, the same
 // surface Prometheus scrapes.
 func gaugeValue(metric string, labels map[string]string) (float64, bool) {
@@ -122,9 +127,6 @@ var _ = Describe("Migration Controller progress sampling", func() {
 	ctx := context.Background()
 
 	int64p := func(n int64) *int64 { return &n }
-	migLabels := func(name string) map[string]string {
-		return map[string]string{"namespace": testNS, "name": name}
-	}
 	// The catalog poll runs mid-attempt only on a follow migration past
 	// CloneCompleted, which the operator reads off the worker log, so these
 	// specs wire a log reader that has already logged the end of the copy.
@@ -158,7 +160,8 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		const name = "mig-progress-sample"
 		defer removeMigration(ctx, name)
 		defer metrics.Forget(testNS, name)
-		fake := &fakeProgress{src: int64p(5000), tgt: int64p(400)}
+		// Copying: a target size counts from the copy on (see the stale-size spec).
+		fake := &fakeProgress{src: int64p(5000), tgt: int64p(400), copying: true}
 		logs := &fakeLogs{}
 		r := newReconciler()
 		r.Progress, r.Logs = fake, logs
