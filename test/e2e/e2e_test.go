@@ -346,8 +346,22 @@ var _ = Describe("Migration", func() {
 			},
 			SSLMode: tgt.SSLMode,
 		}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		create(m)
-		waitCompleted(name, nsE2E)
+
+		// The data compare re-reads every table on both sides, so this
+		// scenario gets the follow budget, not the clone one.
+		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+		expectConditionTrue(m, v1beta1.ConditionVerified)
+
+		By("checking both compare Jobs succeeded")
+		for _, check := range []string{"schema", "data"} {
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx,
+				client.ObjectKey{Namespace: nsE2E, Name: name + "-compare-" + check}, job)).To(Succeed())
+			Expect(job.Status.Succeeded).To(BeNumerically(">=", 1),
+				"compare %s Job did not succeed", check)
+		}
 
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 	})
@@ -402,26 +416,6 @@ var _ = Describe("Migration", func() {
 			g.Expect(c.Message).To(ContainSubstring("CreateContainerConfigError"),
 				"the kubelet's reason for the stuck pod must reach the condition")
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
-	})
-
-	It("verifies a clone with pgcopydb compare and sets Verified", func() {
-		m := newMigration("e2e-verified", nsE2E, v1beta1.CloneOptions{DropIfExists: true})
-		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-		create(m)
-
-		// The data compare re-reads every table on both sides, so this
-		// scenario gets the follow budget, not the clone one.
-		m = waitPhase("e2e-verified", nsE2E, followTimeout, v1beta1.PhaseCompleted)
-		expectConditionTrue(m, v1beta1.ConditionVerified)
-
-		By("checking both compare Jobs succeeded")
-		for _, check := range []string{"schema", "data"} {
-			job := &batchv1.Job{}
-			Expect(k8sClient.Get(ctx,
-				client.ObjectKey{Namespace: nsE2E, Name: "e2e-verified-compare-" + check}, job)).To(Succeed())
-			Expect(job.Status.Succeeded).To(BeNumerically(">=", 1),
-				"compare %s Job did not succeed", check)
-		}
 	})
 
 	// Each follow scenario asserts the source is free of pgcopydb replication

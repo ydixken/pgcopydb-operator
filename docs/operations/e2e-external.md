@@ -140,6 +140,7 @@ Every spec runs except these, each of which skips with its reason in the report:
 - Chaos source-kill and target-kill: they delete the primary pod.
 - Chaos fan-out: it creates and drops a second database on the target server.
 - Connection details from a single Secret, when an app role or database name holds anything but letters, digits, `-`, `.`, `_`, or `~`: the operator's secretRef form rejects the percent-encoded user such a name needs.
+  This spec also carries the schema and data compare after a plain clone, so that compare is skipped with it.
   The other specs, including extension ownership, run with names that need quoting.
 
 These skips are runtime checks rather than labels, so a run started without the task's label filter skips them too.
