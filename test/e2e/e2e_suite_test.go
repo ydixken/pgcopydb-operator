@@ -1221,6 +1221,11 @@ var (
 )
 
 func TestE2E(t *testing.T) {
+	// Refuse before RunSpecs: Ginkgo runs the AfterSuite teardown for any
+	// attempted BeforeSuite, and that teardown would hit a concurrent run.
+	if err := parallelRefusal(parallelProcs(), external != nil, featureE2ERunValue != ""); err != nil {
+		t.Fatal(err)
+	}
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "pgcopydb-operator e2e suite")
 }
@@ -1251,7 +1256,6 @@ func connectSuite() {
 // and seeds its own source/target pair, concurrently with the others.
 var _ = SynchronizedBeforeSuite(func() []byte {
 	connectSuite()
-	Expect(parallelRefusal(parallelProcs(), external != nil, featureE2ERunValue != "")).To(Succeed())
 
 	By("checking the Migration CRD exists (the suite does not manage it)")
 	const crdName = "migrations.pgcopydb-operator.io"

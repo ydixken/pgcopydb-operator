@@ -266,7 +266,7 @@ Process 1 alone checks the CRD, prepares the storage, installs the operator, pur
 Then every process creates and seeds its own pair, at the same time as the others.
 After the specs, process 1 waits for the other processes to stop and then deletes all pairs.
 The Longhorn capacity check counts one pair and one work volume for each process.
-External mode and protected feature runs have one pair only, so they refuse more than one process.
+External mode and protected feature runs have one pair only, so they refuse more than one process before any setup or teardown runs.
 
 > [!important]
 > A spec runs on any free process, in any order, against the pair of that process.
