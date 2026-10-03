@@ -285,7 +285,8 @@ A container or spec that runs for two minutes or more SHOULD carry a `SpecPriori
 Ginkgo starts the higher value first, so the tiers order the longest specs first: `SpecPriority(3)` for about 230 seconds and up, `SpecPriority(2)` for 180 to 229 seconds, and `SpecPriority(1)` for 120 to 179 seconds.
 An Ordered container carries its priority on the container.
 Ginkgo orders top-level containers by the highest priority of any spec inside them, and keeps file order within a container.
-Place the longest specs first in a container that is not Ordered: the decorator moves the container, and the position in the file orders the specs inside it.
+A long spec in a large container therefore goes in its own top-level container, because the container's highest priority moves every spec in it, short ones included.
+Inside a container that is not Ordered, place the longer specs first, since file order decides the order among them.
 
 ### Cluster coverage
 
