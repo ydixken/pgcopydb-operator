@@ -17,12 +17,21 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"errors"
+	"regexp"
 	"strconv"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -36,6 +45,9 @@ func pairNames(proc int) (source, target, seedJob string) {
 	}
 	return "e2e-source" + suffix, "e2e-target" + suffix, "e2e-seed" + suffix
 }
+
+// seedJobPattern matches the seed Job of any process number pairNames gives.
+var seedJobPattern = regexp.MustCompile(`^e2e-seed(-[0-9]+)?$`)
 
 // parallelProcs is the run's Ginkgo process count, one fixture pair each.
 func parallelProcs() int {
@@ -166,5 +178,39 @@ func TestParallelRequestsLeaveOneProcessUnchanged(t *testing.T) {
 		"spec", "resources", "requests")
 	if fixture["cpu"] != fixtureCPU || fixture["memory"] != fixtureMemory {
 		t.Errorf("a one-process fixture requests %v, want %s CPU and %s", fixture, fixtureCPU, fixtureMemory)
+	}
+}
+
+// A one-process teardown must also remove pairs a wider run left behind, or
+// their clusters hold volumes that the PVC wait expects gone.
+func TestParallelDeleteFixturesRemovesEveryPair(t *testing.T) {
+	oldCtx, oldClient := ctx, k8sClient
+	t.Cleanup(func() { ctx, k8sClient = oldCtx, oldClient })
+	ctx = context.Background()
+	var objs []client.Object
+	for proc := 1; proc <= 4; proc++ {
+		source, target, seed := pairNames(proc)
+		for _, name := range []string{source, target} {
+			c := &unstructured.Unstructured{}
+			c.SetGroupVersionKind(cnpgGVK)
+			c.SetNamespace(nsE2E)
+			c.SetName(name)
+			objs = append(objs, c)
+		}
+		objs = append(objs, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seed}})
+	}
+	other := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "e2e-seeder"}}
+	k8sClient = clientfake.NewClientBuilder().WithObjects(append(objs, other)...).Build()
+	RegisterTestingT(t)
+	if err := InterceptGomegaFailure(func() { deleteFixtures(time.Second) }); err != nil {
+		t.Fatalf("deleteFixtures failed: %v", err)
+	}
+	for _, obj := range objs {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); !apierrors.IsNotFound(err) {
+			t.Errorf("%s survived the teardown: %v", obj.GetName(), err)
+		}
+	}
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(other), other); err != nil {
+		t.Errorf("teardown deleted a Job that is not a seed Job: %v", err)
 	}
 }

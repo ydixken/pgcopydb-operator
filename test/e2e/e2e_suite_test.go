@@ -1464,15 +1464,26 @@ func teardownFixtures() {
 }
 
 // deleteFixtures empties the fixture namespaces instead of deleting them, for
-// runs that do not own them. Migrations are gone by here; explicit PVC cleanup
-// also handles retained or orphaned fixture volumes after cluster deletion.
+// runs that do not own them. It removes every Cluster, not only this run's
+// pairs: a leftover pair would otherwise hold a volume the PVC wait expects gone.
 func deleteFixtures(timeout time.Duration) {
 	GinkgoHelper()
-	for proc := 1; proc <= parallelProcs(); proc++ {
-		source, target, _ := pairNames(proc)
-		deleteCluster(source)
-		deleteCluster(target)
+	listClusters := func(g Gomega) []unstructured.Unstructured {
+		clusters := &unstructured.UnstructuredList{}
+		clusters.SetGroupVersionKind(cnpgGVK.GroupVersion().WithKind(cnpgGVK.Kind + "List"))
+		g.Expect(k8sClient.List(ctx, clusters, client.InNamespace(nsE2E))).
+			To(Succeed(), "failed to list the CNPG clusters in %s", nsE2E)
+		return clusters.Items
 	}
+	clusters := listClusters(Default)
+	for i := range clusters {
+		if err := k8sClient.Delete(ctx, &clusters[i]); err != nil && !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred(), "failed to delete CNPG cluster %s", clusters[i].GetName())
+		}
+	}
+	Eventually(func(g Gomega) {
+		g.Expect(listClusters(g)).To(BeEmpty(), "CNPG clusters still terminating in %s", nsE2E)
+	}, timeout, 5*time.Second).Should(Succeed())
 	deleteSuiteObjects(seedObjects()...)
 	for _, ns := range []string{nsE2E, nsX} {
 		Expect(k8sClient.DeleteAllOf(ctx, &corev1.PersistentVolumeClaim{}, client.InNamespace(ns))).
@@ -1489,13 +1500,17 @@ func deleteFixtures(timeout time.Duration) {
 	}, timeout, 5*time.Second).Should(Succeed())
 }
 
-// seedObjects are every pair's seed Job and their ConfigMap, which outlive
-// the run whenever the fixture namespaces do.
+// seedObjects are the seed ConfigMap and every seed Job present, whatever
+// process count created them; both outlive the run with the namespaces.
 func seedObjects() []client.Object {
+	GinkgoHelper()
 	objs := []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: seedConfigMap}}}
-	for proc := 1; proc <= parallelProcs(); proc++ {
-		_, _, job := pairNames(proc)
-		objs = append(objs, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: job}})
+	jobs := &batchv1.JobList{}
+	Expect(k8sClient.List(ctx, jobs, client.InNamespace(nsE2E))).To(Succeed(), "failed to list Jobs in %s", nsE2E)
+	for i := range jobs.Items {
+		if seedJobPattern.MatchString(jobs.Items[i].Name) {
+			objs = append(objs, &jobs.Items[i])
+		}
 	}
 	return objs
 }

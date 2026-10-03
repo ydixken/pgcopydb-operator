@@ -264,7 +264,8 @@ Each Ginkgo process gets its own pair in `pgcopydb-e2e`.
 Process 1 uses `e2e-source`, `e2e-target` and the seed Job `e2e-seed`, and process N adds `-N` to each name.
 Process 1 alone checks the CRD, prepares the storage, installs the operator, purges old Migrations and applies the seed ConfigMap.
 Then every process creates and seeds its own pair, at the same time as the others.
-After the specs, process 1 waits for the other processes to stop and then deletes all pairs.
+After the specs, process 1 waits for the other processes to stop.
+Then it deletes every CNPG cluster and seed Job in `pgcopydb-e2e`, also those that an earlier run with more processes left behind.
 The Longhorn capacity check counts one pair and one work volume for each process.
 External mode and protected feature runs have one pair only, so they refuse more than one process before any setup or teardown runs.
 
