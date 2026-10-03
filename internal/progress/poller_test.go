@@ -17,13 +17,18 @@ limitations under the License.
 package progress
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
@@ -206,6 +211,7 @@ func TestSample(t *testing.T) {
 		out        string
 		src, tgt   *int64
 		wantCounts *RelationCounts
+		lost       map[string]string
 	}{
 		"mid copy": {
 			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\nowed=public.a, public.b\n",
@@ -271,18 +277,26 @@ func TestSample(t *testing.T) {
 		// One side unreadable: its size goes too, and counts need both, so a
 		// name on the owed line has no count to ride with.
 		"source failed": {
-			out: "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
-			tgt: ptr(536870912),
+			out:  "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
+			tgt:  ptr(536870912),
+			lost: map[string]string{sourceSide: ""},
 		},
 		"target failed": {
-			out: "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
-			src: ptr(1073741824),
+			out:  "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
+			src:  ptr(1073741824),
+			lost: map[string]string{targetSide: ""},
+		},
+		// The script names what psql said, so the log can carry it.
+		"target timed out": {
+			out:  "target_error=ERROR:  canceling statement due to statement timeout \nsource=1073741824 0 0 0 0 0\ntarget=\nowed=\n",
+			src:  ptr(1073741824),
+			lost: map[string]string{targetSide: "ERROR:  canceling statement due to statement timeout"},
 		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
-		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
-		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1)},
-		"no output":           {out: ""},
+		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"no output":           {out: "", lost: map[string]string{sourceSide: "", targetSide: ""}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeExec{pod: "p", out: []byte(tc.out)}
@@ -304,7 +318,47 @@ func TestSample(t *testing.T) {
 			case tc.wantCounts != nil && *got.Counts != *tc.wantCounts:
 				t.Errorf("counts = %+v, want %+v", got.Counts, tc.wantCounts)
 			}
+			if !maps.Equal(got.Lost, tc.lost) {
+				t.Errorf("lost = %q, want %q", got.Lost, tc.lost)
+			}
 		})
+	}
+}
+
+// A lost side logs once when it stops answering and once when it answers
+// again, not on every pass: the sampler runs every ten seconds.
+func TestSample_LogsLostSidesOnTransition(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := logf.IntoContext(context.Background(), zap.New(zap.WriteTo(&buf)))
+	f := &fakeExec{pod: "p"}
+	p := NewFromExec(f, nil)
+	healthy := "source=1 1 1 0 8 0\ntarget=1 1 1 0 8\nowed=\n"
+	timedOut := "target_error=ERROR:  canceling statement due to statement timeout\nsource=1 0 0 0 0 0\ntarget=\nowed=\n"
+	for i, step := range []struct {
+		out  string
+		want []string
+	}{
+		{healthy, nil},
+		{timedOut, []string{`"msg":"progress sample lost a side; status keeps its last progress until it answers again","job":"ns/job","side":"target","reason":"ERROR:  canceling statement due to statement timeout"`}},
+		{timedOut, nil},
+		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"target"`}},
+		{healthy, nil},
+		{"", []string{`"side":"source","reason":""`, `"side":"target","reason":""`}},
+	} {
+		buf.Reset()
+		f.out = []byte(step.out)
+		if _, err := p.Sample(ctx, "ns", "job", false); err != nil {
+			t.Fatal(err)
+		}
+		logs := strings.FieldsFunc(buf.String(), func(r rune) bool { return r == '\n' })
+		if len(logs) != len(step.want) {
+			t.Fatalf("step %d logged %q, want %d lines", i, logs, len(step.want))
+		}
+		for j, want := range step.want {
+			if !strings.Contains(logs[j], want) {
+				t.Errorf("step %d line %d = %s, want it to contain %s", i, j, logs[j], want)
+			}
+		}
 	}
 }
 
@@ -468,7 +522,7 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 // filtered migration then shows a denominator it can never reach.
 func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 	// query returns the SQL one side is sent: from its progress_sql call to
-	// the `") || ` that ends every such call in the script.
+	// the stderr redirect that ends every such call in the script.
 	query := func(side string) string {
 		t.Helper()
 		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI"`)
@@ -476,7 +530,7 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 			t.Fatalf("sampleScript never asks the %s", side)
 		}
 		rest := sampleScript[start:]
-		return rest[:strings.Index(rest, `") || `)]
+		return rest[:strings.Index(rest, `" 2>"$err") ||`)]
 	}
 	// The list is built on the target, quoted, and the source joins it in
 	// place of reading its own catalog unscoped.

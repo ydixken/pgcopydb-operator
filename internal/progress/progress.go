@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -58,12 +59,17 @@ type Poller struct {
 
 	// allowed gates the `list progress` exec; empty keeps it shut for good.
 	allowed []string
+
+	// lost holds the job sides whose last sample failed, so an outage logs as it starts and as it ends.
+	// ponytail: a job that ends mid-outage keeps its key; prune on pod exit if that ever matters.
+	mu   sync.Mutex
+	lost map[string]bool
 }
 
 // NewFromExec shares an existing exec transport. Versions that could break
 // out of the gate script are dropped with a warning, never rendered.
 func NewFromExec(exec execer, allowedVersions []string) *Poller {
-	p := &Poller{exec: exec}
+	p := &Poller{exec: exec, lost: map[string]bool{}}
 	for _, v := range allowedVersions {
 		if !versionPattern.MatchString(v) {
 			logf.Log.WithName("progress").Info(
@@ -113,7 +119,7 @@ esac
 // would wait on a whole-table copy's AccessExclusiveLock, so that copy's own
 // byte count stands in. A failed side prints empty and parses to no sample,
 // never to zero.
-const sampleScript = progressSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
+const sampleScript = sampleSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 present="case when t.copying then false else $populated end"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
@@ -138,7 +144,8 @@ t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with copying as (select x.relid, sum(
   t as (select c.oid, n.nspname, c.relname, k.relid is not null as copying,
       case when k.exclusive then k.bytes else pg_table_size(c.oid) end as bytes $tables
     left join copying k on k.relid = c.oid $user_tables)
-  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)") || t=
+  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)" 2>"$err") ||
+  { t=; printf 'target_error=%s\n' "$(why)"; }
 case $t in
   *\|?*) landed="values ${t#*|}" ;;
   *) landed="select null::text, false where false" ;;
@@ -147,7 +154,9 @@ t=${t%%|*}
 s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
     join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
   select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
-    from t where not t.populated and $populated)") || s=
+    from t where not t.populated and $populated)" 2>"$err") ||
+  { s=; printf 'source_error=%s\n' "$(why)"; }
+rm -f "$err"
 printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
 `
 
@@ -155,10 +164,11 @@ printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
 // row format without reporting progress. The FROM lives apart from the select
 // list so the source's sixth figure appends to the list: appended to the whole
 // query it lands on the WHERE clause, which then fails to parse (issue #277).
-const allDatabasesSampleScript = progressSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
+const allDatabasesSampleScript = sampleSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
 dbs="from pg_database where datname not in ('template0', 'template1')"
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs") || s=
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs") || t=
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs" 2>"$err") || { s=; printf 'source_error=%s\n' "$(why)"; }
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs" 2>"$err") || { t=; printf 'target_error=%s\n' "$(why)"; }
+rm -f "$err"
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
@@ -170,12 +180,25 @@ const progressSQL = `progress_sql() {
 }
 `
 
+// A failed side names its cause on a <side>_error= line; psql's stderr goes to
+// a file so that a connection warning on success cannot corrupt the row.
+const sampleSQL = progressSQL + `err=/tmp/pgm-progress-$$
+why() { tr '\n' ' ' < "$err" | cut -c 1-300; }
+`
+
+// The sides a sample reads, as the script names them on its output lines.
+const sourceSide, targetSide = "source", "target"
+
 // Sample is one poll of both databases: their sizes, and the relation counts
 // when the target has a schema to count.
 type Sample struct {
 	SourceSize *int64
 	TargetSize *int64
 	Counts     *RelationCounts
+
+	// Lost maps each side that returned no row to psql's error, empty when
+	// the script captured none.
+	Lost map[string]string
 }
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
@@ -214,16 +237,39 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string, allDatab
 		}
 		return nil, err
 	}
-	return parseSample(out), nil
+	s := parseSample(out)
+	p.logLost(ctx, namespace+"/"+jobName, s.Lost)
+	return s, nil
+}
+
+// logLost reports a side that stops answering and the sample that answers
+// again, and nothing in between: the sampler runs every pass.
+func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, side := range []string{sourceSide, targetSide} {
+		reason, failed := lost[side]
+		key := job + "/" + side
+		switch {
+		case failed && !p.lost[key]:
+			p.lost[key] = true
+			logf.FromContext(ctx).Info("progress sample lost a side; status keeps its last progress until it answers again",
+				"job", job, "side", side, "reason", reason)
+		case !failed && p.lost[key]:
+			delete(p.lost, key)
+			logf.FromContext(ctx).Info("progress sample side answers again", "job", job, "side", side)
+		}
+	}
 }
 
 // parseSample reads the source= and target= lines, six integers for the source
-// and five for the target, and the owed= line naming the tables the sixth
-// figure counted. A side that is missing, short or not numeric contributes
-// nothing rather than zero.
+// and five for the target, the owed= line naming the tables the sixth figure
+// counted, and a <side>_error= line per failed side. A side that is missing,
+// short or not numeric contributes nothing rather than zero, and is lost.
 func parseSample(out []byte) *Sample {
 	var src, tgt []int64
 	var owed string
+	reasons := map[string]string{}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		if v, ok := strings.CutPrefix(line, "source="); ok {
 			src = parseFields(v)
@@ -231,14 +277,20 @@ func parseSample(out []byte) *Sample {
 			tgt = parseFields(v)
 		} else if v, ok := strings.CutPrefix(line, "owed="); ok {
 			owed = strings.TrimSpace(v)
+		} else if side, v, ok := strings.Cut(line, "_error="); ok {
+			reasons[side] = strings.TrimSpace(v)
 		}
 	}
-	sample := &Sample{}
+	sample := &Sample{Lost: map[string]string{}}
 	if len(src) == 6 {
 		sample.SourceSize = &src[0]
+	} else {
+		sample.Lost[sourceSide] = reasons[sourceSide]
 	}
 	if len(tgt) == 5 {
 		sample.TargetSize = &tgt[0]
+	} else {
+		sample.Lost[targetSide] = reasons[targetSide]
 	}
 	// Counts need both sides, and a target with no tables has no schema yet:
 	// 0 of 0 is an absent sample, not progress.

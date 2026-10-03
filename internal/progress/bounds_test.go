@@ -96,10 +96,10 @@ func TestProgressProcessBounds(t *testing.T) {
 		want          string
 	}{
 		{"success", 0, false, false, "source=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
-		{"target count", 1, false, false, "source=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
-		{"source count", 2, false, false, "source=\ntarget=100 2 1 3 80\nowed=\n"},
+		{"target count", 1, false, false, "target_error=\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"source count", 2, false, false, "source_error=\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
 		{"stage", 1, true, false, "\n"},
-		{"term-resistant", 1, false, true, "source=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"term-resistant", 1, false, true, "target_error=\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
