@@ -964,7 +964,7 @@ var _ = Describe("Migration", func() {
 		Expect(failed.Status.Attempts).To(Equal(int32(1)), "the classifier must stop after the first attempt")
 		Expect(failureMessage(failed)).To(ContainSubstring("permission denied"))
 
-		By("checking the budget stays unspent: no second attempt within a full poll interval")
+		By("checking the budget stays unspent: no second attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
@@ -973,7 +973,7 @@ var _ = Describe("Migration", func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
 				"a second attempt Job appeared despite the permission classification")
-		}, 45*time.Second, 5*time.Second).Should(Succeed())
+		}, 20*time.Second, 2*time.Second).Should(Succeed())
 	})
 
 	It("exhausts the retry budget on a failure the classifier does not know", func() {
@@ -1003,7 +1003,7 @@ var _ = Describe("Migration", func() {
 		Expect(failureMessage(failed)).NotTo(ContainSubstring("permission denied"),
 			"the budget carrier must fail on a class the classifier ignores")
 
-		By("checking Failed is absorbing: no third attempt within a full poll interval")
+		By("checking Failed is absorbing: no third attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
@@ -1012,7 +1012,7 @@ var _ = Describe("Migration", func() {
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-3"}, &batchv1.Job{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
 				"a third attempt Job appeared in the absorbing Failed state")
-		}, 45*time.Second, 5*time.Second).Should(Succeed())
+		}, 20*time.Second, 2*time.Second).Should(Succeed())
 	})
 })
 
