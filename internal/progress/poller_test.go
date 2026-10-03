@@ -308,6 +308,12 @@ func TestSample(t *testing.T) {
 			src:  ptr(1),
 			lost: map[string]string{targetSide: withheldReason},
 		},
+		// dash reports a SIGKILLed child on stderr; that is not a server error.
+		"target killed": {
+			out:  "target_error=Killed \nsource=1 0 0 0 0 0\ntarget=\n",
+			src:  ptr(1),
+			lost: map[string]string{targetSide: withheldReason},
+		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
 		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
@@ -528,7 +534,7 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 // filtered migration then shows a denominator it can never reach.
 func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 	// query returns the SQL one side is sent: from its progress_sql call to
-	// the stderr redirect that ends every such call in the script.
+	// the quote and paren that end every such call in the script.
 	query := func(side string) string {
 		t.Helper()
 		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI"`)
@@ -536,7 +542,7 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 			t.Fatalf("sampleScript never asks the %s", side)
 		}
 		rest := sampleScript[start:]
-		return rest[:strings.Index(rest, `" 2>"$err") ||`)]
+		return rest[:strings.Index(rest, `") ||`)]
 	}
 	// The list is built on the target, quoted, and the source joins it in
 	// place of reading its own catalog unscoped.

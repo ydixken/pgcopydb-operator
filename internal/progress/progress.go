@@ -131,7 +131,7 @@ t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "with mine as (select pid, application
       case when e.relation is not null then coalesce(k.bytes, 0) else pg_table_size(c.oid) end as bytes $tables
     left join copying k on k.relid = c.oid
     left join exclusive e on e.relation = c.oid $user_tables)
-  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)" 2>"$err") ||
+  select $row, (select coalesce(string_agg('(' || quote_literal(t.nspname || '.' || t.relname) || ',' || ($present)::text || ')', ','), '') from t)") ||
   { t=; printf 'target_error=%s\n' "$(why)"; }
 case $t in
   *\|?*) landed="values ${t#*|}" ;;
@@ -141,7 +141,7 @@ t=${t%%|*}
 s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "with t as (select c.oid, n.nspname, c.relname, landed.populated, false as copying, pg_table_size(c.oid) as bytes $tables
     join ($landed) as landed(name, populated) on landed.name = n.nspname || '.' || c.relname $user_tables)
   select $row || ' ' || (select count(*) || '|' || coalesce(string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname), '')
-    from t where not t.populated and $populated)" 2>"$err") ||
+    from t where not t.populated and $populated)") ||
   { s=; printf 'source_error=%s\n' "$(why)"; }
 rm -f "$err"
 printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
@@ -153,17 +153,19 @@ printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
 // query it lands on the WHERE clause, which then fails to parse (issue #277).
 const allDatabasesSampleScript = sampleSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
 dbs="from pg_database where datname not in ('template0', 'template1')"
-s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs" 2>"$err") || { s=; printf 'source_error=%s\n' "$(why)"; }
-t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs" 2>"$err") || { t=; printf 'target_error=%s\n' "$(why)"; }
+s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs") || { s=; printf 'source_error=%s\n' "$(why)"; }
+t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs") || { t=; printf 'target_error=%s\n' "$(why)"; }
 rm -f "$err"
 printf 'source=%s\ntarget=%s\n' "$s" "$t"
 `
 
 // One transaction pins the pooled queries to the backend that SET LOCAL bounds,
 // and the outer timeout catches a connection hang after the exec stream closes.
+// The subshell keeps dash's "Killed" notice for a SIGKILLed timeout on the exec
+// stderr: a redirect on the call itself would still be open when dash prints it.
 const progressSQL = `progress_sql() {
-  timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA --single-transaction -v ON_ERROR_STOP=1 \
-    -c 'SET LOCAL statement_timeout = 5000' -c "$2"
+  ( timeout --signal=TERM --kill-after=1s 6s psql "$1" -XqtA --single-transaction -v ON_ERROR_STOP=1 \
+    -c 'SET LOCAL statement_timeout = 5000' -c "$2" 2>"${err:-/dev/stderr}" )
 }
 `
 
