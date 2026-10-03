@@ -28,6 +28,7 @@ That shows the operator works with your servers, network, and roles; it says not
   Managed-service admin roles that are not superusers, such as members of `rds_superuser`, `cloudsqlsuperuser`, or `azure_pg_admin`, lack some of these rights, and the run fails partway.
 - On the source, `wal_level=logical` and room for one more replication slot and WAL sender.
   The suite runs one follow migration at a time.
+  External mode runs as one Ginkgo process and refuses `ginkgo --procs` above 1, because it has one database pair.
 - A target on PostgreSQL 15 or later, not older than the source; the source may be 14 or later.
 - The `citext` and `hstore` extensions available on both servers (PostgreSQL contrib).
 - An `sslmode` of `disable`, `allow`, `prefer`, or `require`.

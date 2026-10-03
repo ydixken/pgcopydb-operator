@@ -119,7 +119,8 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
-The suite installs a throwaway operator, creates a shared source/target CNPG pair with one instance each by default, and seeds the source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
+The suite installs a throwaway operator and creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
+It seeds each source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.
 With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mode instead: it uses an existing database pair, creates no CNPG clusters, and seeds the source through the same Job (see [Running the E2E suite against your databases](docs/operations/e2e-external.md)).
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
@@ -248,9 +249,34 @@ A spec that only runs SQL needs no gate: `psql` and the helpers built on `psqlAr
 
 `release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
 `E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
-It calls `go test` directly, not `task e2e`: that target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
+It calls the ginkgo CLI directly, not `task e2e`.
+That target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
 `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.
 The published-release workflow `e2e.yml` defines its scale independently, defaulting to `0.25`.
+
+### How does a parallel run work?
+
+`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value, which is 4.
+`go test` cannot run Ginkgo in parallel, so they use the ginkgo CLI at the version that `go.mod` pins.
+Local tasks such as `task e2e` run one process.
+
+Each Ginkgo process gets its own pair in `pgcopydb-e2e`.
+Process 1 uses `e2e-source`, `e2e-target` and the seed Job `e2e-seed`, and process N adds `-N` to each name.
+Process 1 alone checks the CRD, prepares the storage, installs the operator, purges old Migrations and applies the seed ConfigMap.
+Then every process creates and seeds its own pair, at the same time as the others.
+After the specs, process 1 waits for the other processes to stop and then deletes all pairs.
+The Longhorn capacity check counts one pair and one work volume for each process.
+External mode and protected feature runs have one pair only, so they refuse more than one process.
+
+> [!important]
+> A spec runs on any free process, in any order, against the pair of that process.
+> Only the specs in an `Ordered` container keep their order and their process.
+> A new spec MUST NOT depend on what another spec left behind: it resets what it needs before it starts.
+
+Two decorators control the schedule.
+A spec that blocks a resource which all processes share MUST be `Serial`, so that Ginkgo runs it on process 1 after the parallel specs.
+The operator's single reconcile worker is such a resource: the progress-sampler bounds spec blocks it on purpose and is `Serial` for that reason.
+A container or spec that runs for more than about three minutes SHOULD have `SpecPriority(1)`, so that it starts early and not last.
 
 ### Cluster coverage
 
