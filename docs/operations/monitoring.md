@@ -43,7 +43,7 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size, summed over the instance with `allDatabases` | once sampled |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied and tables planned | once sampled |
 | `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built and indexes planned | once sampled |
-| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Table data on the target and on the source (see [below](#why-does-the-target-show-fewer-bytes-than-the-source)) | once sampled |
+| `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Table data on the target and on the source, then pgcopydb's counts after the copy (see [below](#why-does-the-target-show-fewer-bytes-than-the-source)) | once sampled |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source write-ahead log (WAL) head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The walsender's `write_lsn` on the source, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
@@ -217,7 +217,7 @@ The tiles read as follows:
 - **Tables**, **Indexes**, and **Bytes** are six tiles, one per side: a `(Source)` total beside the `(Target)` figure measured against it.
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
   **Bytes** compares table data on both sides (see [Why does the target show fewer bytes than the source?](#why-does-the-target-show-fewer-bytes-than-the-source)).
-  The one exception is a table a copy worker holds under an exclusive lock, such as one pgcopydb copies whole.
+  While the copy runs, one exception is a table a copy worker holds under an exclusive lock, such as one pgcopydb copies whole.
   Until that copy commits, the target counts the bytes the copy has streamed into it, which a target before PostgreSQL 14 cannot report and counts as zero.
 - **Schema Verification** and **Data Verification** are one tile per compare check.
   Each reads Pending until its Job produces a result, then PASS or FAIL.
@@ -236,23 +236,32 @@ They read the range end first, so a live Migration wins: a wide range can also h
 
 **Bytes (Source)** is the size of the table data on the source: the tables in scope with their TOAST, without indexes.
 While the worker runs, **Bytes (Target)** measures the target in the same way.
-After the copy, pgcopydb's own count can replace both figures, and **Bytes (Target)** then shows the bytes that the copy sent.
+With the default runner and settings, pgcopydb's own count replaces both figures after the copy (see [Metric reference](#metric-reference)).
+**Bytes (Source)** then shows the source table size from pgcopydb's catalog, and **Bytes (Target)** shows the bytes that the copy sent.
 
+The bytes that the copy sent are not a size on disk, so they can be lower or higher than **Bytes (Source)**:
+
+- They do not include dead rows.
+- They do not include page headers, row headers, or free space.
+- They carry TOAST values without compression.
+
+In one of our test runs, they were 1.19 times **Bytes (Source)**.
+
+While the worker runs, both figures are sizes on disk.
 The copy writes every row again into new pages, so the target is often a little smaller than the source.
 Updates and deletes leave dead rows and free space in the source tables, and the copy does not carry that space.
-A plain `VACUUM` does not return it to the disk.
-The bytes that the copy sent have no page or row headers and no free space, but they carry TOAST values without compression.
-
-Two settings can also make the target larger:
+In our test, a plain `VACUUM` did not make the source table smaller.
+Two settings can also change the size of the target on disk:
 
 - A column without its own compression method takes the `default_toast_compression` of the target.
   In our tests, a change between `pglz` and `lz4` made a table of documents 25% smaller or 33% larger.
-- A `fillfactor` that you set after you loaded the source table applies only to the copy.
-  In our test, the copy was twice as large.
+- A `fillfactor` that you set after you loaded the source table applies to every copied row.
+  It does not apply to the rows that the source table already has.
+  In our test, a fillfactor of 50 made the copy twice as large.
 
-In our tests, a table without dead rows copied to within 1% of its size.
-A table with every row updated once and half of the rows deleted copied to a quarter of its size.
-**Percent** compares whole database sizes, so it can stop short of 100 for the same reasons.
+In our tests, a table without dead rows copied to within 1% of its size on disk.
+A table with every row updated once and half of the rows deleted copied to a quarter of its size on disk.
+**Database Size** and **Percent** use whole database sizes on disk, so the same reasons apply, and **Percent** can stop short of 100.
 
 > [!important]
 > Do not use the byte tiles to decide that the copy is complete.
@@ -291,8 +300,8 @@ Static checks and promtool unit tests gate every panel query and alert rule, and
 - The gauges are process state in the manager, so an operator restart clears them and the next reconcile of each Migration restores them.
   A scrape gap around a restart is normal.
 - A finished migration has no worker pod, so the two size series do not come back after an operator restart, though its other series do.
-- `rate()` and `delta()` over the size gauges misread a database that shrinks as a counter reset.
-  The throughput panels note that, and the stalled-clone alert uses `delta()`.
+- `rate()` over the size gauges misreads a database that shrinks as a counter reset.
+  The dashboard panels use `deriv()` instead, and the stalled-clone alert uses `delta()`.
 - The tables, indexes, and clone-byte series step once when pgcopydb's own count replaces the psql estimate.
   The estimate counts a table once it holds a committed row and, on a PostgreSQL 14 or later target, no copy into it is open.
   A table copied in parts can therefore count between two of its parts, and during them on an older target.
