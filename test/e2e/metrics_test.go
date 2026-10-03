@@ -233,8 +233,11 @@ var emptyOK = map[panelKey]bool{
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
 	{uid: uidOperator, title: "Leader Elected", ref: "A"}: true,
-	// The lag and LSN series leave with the stream, so a Completed migration
-	// has none at the sweep's instant. The streaming spec checks them live.
+}
+
+// streamPanels read the lag and LSN series, which leave with the stream, so
+// the sweep replays them over the run instead of at its own instant.
+var streamPanels = map[panelKey]bool{
 	{uid: uidFleet, title: "Total Lag", ref: "A"}:                    true,
 	{uid: uidFleet, title: "All Migrations", ref: "E"}:               true,
 	{uid: uidFleet, title: "Replication Lag By Migration", ref: "A"}: true,
@@ -250,14 +253,14 @@ var emptyOK = map[panelKey]bool{
 
 // panelFailure replays one panel target and describes what is wrong with the
 // answer, or returns "" when the panel passes.
-func panelFailure(d *dashboards.Dashboard, title, ref, expr string) string {
+func panelFailure(title, expr string, mayBeEmpty bool) string {
 	code, pr, err := promQuery(expr)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("%q: %v", title, err)
 	case code != http.StatusOK || pr.Status != "success":
 		return fmt.Sprintf("%q: HTTP %d, status %q: %s (%s)", title, code, pr.Status, promErr(pr), expr)
-	case len(pr.Data.Result) == 0 && !emptyOK[panelKey{uid: d.UID, title: title, ref: ref}]:
+	case len(pr.Data.Result) == 0 && !mayBeEmpty:
 		return fmt.Sprintf("%q: empty result (%s)", title, expr)
 	}
 	return ""
@@ -450,7 +453,18 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 				"emptyOK names %q target %s on dashboard %q, which has no such target; a rename left it stale",
 				k.title, k.ref, k.uid)
 		}
+		for k := range streamPanels {
+			Expect(titles).To(HaveKey(k),
+				"streamPanels names %q target %s on dashboard %q, which has no such target; a rename left it stale",
+				k.title, k.ref, k.uid)
+		}
 		vars := map[string]string{"namespace": nsE2E, "name": metricsMigration, "job": metricsJob()}
+		// A subquery over the run, as Grafana's range query reads it. The 5s
+		// step is below the chart's 10s scrape, so it cannot step over a sample.
+		m := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}, m)).To(Succeed())
+		Expect(m.Status.StartedAt).NotTo(BeNil(), "status.startedAt absent")
+		run := fmt.Sprintf("[%ds:5s]", int(time.Since(m.Status.StartedAt.Time).Seconds())+60)
 		// One Eventually around the whole sweep: each pass reports every
 		// failing panel, so one run shows the full damage instead of the
 		// first broken panel per attempt.
@@ -463,7 +477,12 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), func() {
 						if t.Expr == "" {
 							continue
 						}
-						if msg := panelFailure(d, p.Title, t.RefID, dashboards.Substitute(t.Expr, vars)); msg != "" {
+						k := panelKey{uid: d.UID, title: p.Title, ref: t.RefID}
+						expr := dashboards.Substitute(t.Expr, vars)
+						if streamPanels[k] {
+							expr = "last_over_time((" + expr + ")" + run + ")"
+						}
+						if msg := panelFailure(p.Title, expr, emptyOK[k]); msg != "" {
 							failures = append(failures, file+" "+msg)
 						}
 					}
