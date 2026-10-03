@@ -505,13 +505,13 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
 		`present="case when t.copying then false else $populated end"`, // a table in flight owes the copy unprobed
 		"(select count(*) from t where $present)",
-		"|| ',' || ($present)::text || ')'",                                             // the target's row carries the flag per table
-		"join ($landed) as landed(name, populated)",                                     // and the source joins it
-		"from t where not t.populated and $populated)",                                  // owed: rows on the source, none on the target
-		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)", // named, for the condition message
-		`*\|?*) landed="values ${t#*|}"`,                                                // the list rides the row as a second column
-		`*) landed="select null::text, false where false"`,                              // and a target that did not answer joins nothing
-		`printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"`,            // the names leave the source row for a line of their own
+		"|| ',' || ($present)::text || ')'",                                                 // the target's row carries the flag per table
+		"join ($landed) as landed(name, populated)",                                         // and the source joins it
+		"from t where not t.populated and $populated)",                                      // owed: rows on the source, none on the target
+		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)",     // named, for the condition message
+		`*\|?*) landed="values ${t#*|}"`,                                                    // the list rides the row as a second column
+		`*) landed="select null::text, false where false"`,                                  // and a target that did not answer joins nothing
+		`printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}"`, // the names leave the source row for a line of their own
 	} {
 		if !strings.Contains(sampleScript, want) {
 			t.Errorf("sampleScript is missing %q", want)
@@ -533,11 +533,11 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 // indexes and bytes for tables this migration was told to leave behind, and a
 // filtered migration then shows a denominator it can never reach.
 func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
-	// query returns the SQL one side is sent: from its progress_sql call to
-	// the quote and paren that end every such call in the script.
+	// query returns the SQL one side is sent: from its marked progress_sql call
+	// to the quote and paren that end every such call in the script.
 	query := func(side string) string {
 		t.Helper()
-		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI"`)
+		start := strings.Index(sampleScript, `progress_sql "$PGCOPYDB_`+side+`_PGURI" "`+SamplerMarker)
 		if start < 0 {
 			t.Fatalf("sampleScript never asks the %s", side)
 		}
@@ -560,67 +560,69 @@ func TestRelationCountsScript_ScopesTheSourceToTheTarget(t *testing.T) {
 	}
 }
 
-// CloneStage decides a user-visible phase, so every way the probe can fail has
+// The stage decides a user-visible phase, so every way the probe can fail has
 // to land on "unknown" rather than on a confident wrong answer. Unknown is
 // both flags false, which leaves the caller reporting Cloning.
-
-func TestCloneStage(t *testing.T) {
+func TestSampleStage(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		exec                *fakeExec
-		copying, finalizing bool
+		name, out                    string
+		copying, finalizing, started bool
 	}{
-		{
-			name:    "copy workers busy",
-			exec:    &fakeExec{pod: "w", out: []byte("4 0\n")},
-			copying: true,
-		},
-		{
-			name:       "only the tail left",
-			exec:       &fakeExec{pod: "w", out: []byte("0 1\n")},
-			finalizing: true,
-		},
-		{
-			// Both counts zero is a worker that holds no backend the query
-			// counts: not connected yet, or already gone. Neither state.
-			name: "no counted backends",
-			exec: &fakeExec{pod: "w", out: []byte("0 0\n")},
-		},
-		{
-			// The copy is winding down while the tail has started. Still
-			// copying, because data is still moving.
-			name:    "both kinds active",
-			exec:    &fakeExec{pod: "w", out: []byte("2 3\n")},
-			copying: true,
-		},
-		{name: "no running pod", exec: &fakeExec{}},
-		{name: "pod lookup failed", exec: &fakeExec{podErr: errors.New("boom")}},
-		{name: "exec failed", exec: &fakeExec{pod: "w", execErr: errors.New("boom")}},
-		{name: "unparseable output", exec: &fakeExec{pod: "w", out: []byte("ERROR: nope\n")}},
-		{name: "empty output", exec: &fakeExec{pod: "w", out: nil}},
+		{name: "copy workers busy", out: "stage=4 0 0\n", copying: true, started: true},
+		{name: "only the tail left", out: "stage=0 1 1\n", finalizing: true, started: true},
+		// Active pgcopydb backends but no worker: the schema restore, which
+		// runs before pgcopydb cleans the target, so the copy has not started.
+		{name: "schema restore", out: "stage=0 1 0\n", finalizing: true},
+		// Both counts zero is a worker that holds no backend the query
+		// counts: not connected yet, or already gone. Neither state.
+		{name: "no counted backends", out: "stage=0 0 0\n"},
+		// Index or vacuum workers idle between statements: the copy is over.
+		{name: "tail workers idle", out: "stage=0 0 2\n", started: true},
+		// The copy is winding down while the tail has started. Still
+		// copying, because data is still moving.
+		{name: "both kinds active", out: "stage=2 3 1\n", copying: true, started: true},
+		{name: "two counts", out: "stage=4 0\n"},
+		{name: "stage query failed", out: "stage=\nsource=1 1 1 1 1 0\n"},
+		{name: "unparseable output", out: "stage=ERROR: nope\n"},
+		{name: "no stage line", out: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewFromExec(tc.exec, nil)
-			copying, finalizing := p.CloneStage(context.Background(), "ns", "job")
-			if copying != tc.copying || finalizing != tc.finalizing {
-				t.Errorf("copying=%v finalizing=%v, want copying=%v finalizing=%v",
-					copying, finalizing, tc.copying, tc.finalizing)
+			s := parseSample([]byte(tc.out))
+			if s.Copying != tc.copying || s.Finalizing != tc.finalizing || s.CopyStarted != tc.started {
+				t.Errorf("copying=%v finalizing=%v started=%v, want copying=%v finalizing=%v started=%v",
+					s.Copying, s.Finalizing, s.CopyStarted, tc.copying, tc.finalizing, tc.started)
 			}
 		})
 	}
+}
+
+// stageQuery returns the stage probe's SQL as the sample exec sends it.
+func stageQuery(t *testing.T) string {
+	t.Helper()
+	f := &fakeExec{pod: "w", out: []byte("stage=0 1 0\n")}
+	if _, err := NewFromExec(f, nil).Sample(context.Background(), "ns", "job", false); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(f.argv, " ")
+	_, rest, ok := strings.Cut(joined, `g=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "`)
+	if !ok {
+		t.Fatalf("sample exec carries no stage probe: %s", joined)
+	}
+	query, _, ok := strings.Cut(rest, `") || g=`)
+	if !ok {
+		t.Fatalf("cannot find the end of the stage probe: %s", rest)
+	}
+	return query
 }
 
 // The probe must never open pgcopydb's SQLite catalog: doing that during a
 // copy is what killed workers and made the poll conditional in the first
 // place. It must also only count this worker's own backends, or another
 // migration's compare workers read as this clone's tail.
-func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
-	f := &fakeExec{pod: "w", out: []byte("0 1\n")}
-	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
-
-	joined := strings.Join(f.argv, " ")
-	for _, forbidden := range []string{"pgcopydb", "--dir", "list progress"} {
-		if strings.Contains(joined, forbidden) && forbidden != "pgcopydb" {
+func TestStageQueryIsCatalogFreeAndScoped(t *testing.T) {
+	joined := stageQuery(t)
+	for _, forbidden := range []string{"--dir", "list progress"} {
+		if strings.Contains(joined, forbidden) {
 			t.Errorf("probe runs %q; it must not touch the pgcopydb catalog: %s", forbidden, joined)
 		}
 	}
@@ -643,30 +645,18 @@ func TestCloneStageQueryIsCatalogFreeAndScoped(t *testing.T) {
 // and the row filter may not name it at all. The edit this guards against is
 // a likely one: anyone acting on a copy worker that lingers connected after
 // its queue drains reaches for exactly such a conjunction.
-func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
-	f := &fakeExec{pod: "w", out: []byte("4 1\n")}
-	NewFromExec(f, nil).CloneStage(context.Background(), "ns", "job")
+func TestStageCountsCopyWorkersByConnection(t *testing.T) {
 	// Case folded: SQL is case insensitive, so a narrowing spelled STATE has
 	// to fail these checks the same way a lowercase one does.
-	flat := strings.ToLower(strings.Join(strings.Fields(strings.Join(f.argv, " ")), " "))
-	_, flat, foundSQL := strings.Cut(flat, `"select `)
-	if !foundSQL {
-		t.Fatal("probe SQL is missing")
-	}
+	flat := strings.ToLower(strings.Join(strings.Fields(stageQuery(t)), " "))
 
 	copyCount, rest, ok := strings.Cut(flat, "|| ' ' ||")
 	if !ok {
 		t.Fatalf("probe no longer asks for two counts: %s", flat)
 	}
-	tailCount, afterFrom, ok := strings.Cut(rest, "from pg_stat_activity")
+	tailCount, where, ok := strings.Cut(rest, "from pg_stat_activity")
 	if !ok {
 		t.Fatalf("probe no longer reads pg_stat_activity: %s", flat)
-	}
-	// The SQL ends at the psql argument's closing quote; the URI prelude's
-	// own quotes are all behind us by here.
-	where, _, ok := strings.Cut(afterFrom, `"`)
-	if !ok {
-		t.Fatalf("cannot find the end of the probe query: %s", flat)
 	}
 
 	// A copy worker counts while it is connected, so the first arm of the
@@ -690,6 +680,10 @@ func TestCloneStageCountsCopyWorkersByConnection(t *testing.T) {
 	if strings.Contains(where, "state") {
 		t.Errorf("the row filter narrows by state, which is the bug this fixed: %s", where)
 	}
+	// Index and vacuum workers idle between statements, and still prove the copy started.
+	if _, workers, ok := strings.Cut(tailCount, "|| ' ' ||"); !ok || strings.Contains(workers, "state") {
+		t.Errorf("index and vacuum workers are not counted by connection: %s", tailCount)
+	}
 }
 
 // The e2e lock specs find the sampler's backend by SamplerMarker as a LIKE prefix, and
@@ -712,10 +706,11 @@ err=` + filepath.Join(t.TempDir(), "err") + "\n"
 		t.Fatalf("sampleScript failed: %v\n%s", err, sent.String())
 	}
 	queries := strings.Split(strings.TrimSuffix(sent.String(), "\036"), "\036")
-	if len(queries) != 2 {
-		t.Fatalf("sampleScript sent %d queries, want the target's and the source's", len(queries))
+	if len(queries) != 3 {
+		t.Fatalf("sampleScript sent %d queries, want the stage probe's, the target's and the source's", len(queries))
 	}
-	for i, query := range queries {
+	// The stage probe takes no relation lock, so the specs have no reason to find it.
+	for i, query := range queries[1:] {
 		if seen := query[:min(len(query), 1023)]; !strings.HasPrefix(seen, SamplerMarker+" ") {
 			t.Errorf("the %s query does not open with %q, so the e2e specs cannot find its backend:\n%s",
 				[]string{targetSide, sourceSide}[i], SamplerMarker, seen)

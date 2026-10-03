@@ -214,6 +214,11 @@ func setupRunnables(mgr ctrl.Manager, f *flags) error {
 	if err != nil {
 		return fmt.Errorf("create pod exec transport: %w", err)
 	}
+	poller := progress.NewFromExec(podExec, splitList(f.progressPollVersions))
+	sampler := controller.NewSampler(poller)
+	if err := mgr.Add(sampler); err != nil {
+		return fmt.Errorf("add progress sampler: %w", err)
+	}
 	if err := (&controller.MigrationReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
@@ -221,7 +226,8 @@ func setupRunnables(mgr ctrl.Manager, f *flags) error {
 		RunnerImage: f.runnerImage,
 		Sentinel:    sentinel.New(podExec),
 		Logs:        podExec,
-		Progress:    progress.NewFromExec(podExec, splitList(f.progressPollVersions)),
+		Progress:    poller,
+		Sampler:     sampler,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create migration controller: %w", err)
 	}

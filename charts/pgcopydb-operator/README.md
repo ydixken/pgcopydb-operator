@@ -36,7 +36,7 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `metrics.enabled` | `true` | Serve HTTPS metrics on :8443 and create the Service; see [Metrics](#metrics). |
 | `metrics.serviceMonitor.enabled` | `false` | Create a ServiceMonitor; needs the Prometheus Operator CRDs. |
 | `metrics.serviceMonitor.additionalLabels` | `{}` | Extra ServiceMonitor labels, for a Prometheus that selects monitors by label. |
-| `metrics.serviceMonitor.interval` | `"10s"` | Scrape interval, matched to the operator's reconcile poll so no gauge sample is scraped over. |
+| `metrics.serviceMonitor.interval` | `"5s"` | Scrape interval, matched to the operator's size sampling during a copy so no sample is scraped over. |
 | `metrics.serviceMonitor.scrapeTimeout` | `""` | Scrape timeout; empty leaves the Prometheus default, which Prometheus clamps to the interval. |
 | `metrics.serviceMonitor.relabelings` | `[]` | Target relabelings, verbatim ServiceMonitor syntax. |
 | `metrics.serviceMonitor.metricRelabelings` | `[]` | Sample relabelings applied before ingestion. |

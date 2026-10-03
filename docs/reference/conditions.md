@@ -56,7 +56,7 @@ So a clone routinely ends with one `VACUUM ANALYZE` still running while every ot
 
 The phase comes from a `pg_stat_activity` query on the target that touches no pgcopydb catalog.
 If a client reads that catalog while the copy writes it, the workers die.
-The query counts copy workers and other workers separately.
+The query counts copy workers, other active pgcopydb backends, and index or vacuum workers separately.
 Zero on both counts is the unknown answer, not the tail, so the phase stays where the last answered sample left it.
 
 ## Condition types
@@ -88,7 +88,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
 | `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability or ownership, a target clone privilege, an all-databases superuser or database-listing probe, or a follow prerequisite failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
-| `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
+| `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy, index or vacuum workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
 | `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged the base copy finished, but the pass's own sample found tables holding rows on the source and none on the target, which a `--resume` after killed attempts can produce. The message names them. The marker is not trusted, the stream is reported but not driven, and the reason stands until a sample finds a row in each of them. |
 | `CloneCompleted` | `False` | `CloneIncomplete` | Clone-only migration: the worker exited 0, but pgcopydb's own catalog, read by a Job that mounts the same work dir once the worker is gone, counts tables not done. The Migration fails with the same reason. |

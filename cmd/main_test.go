@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 const (
@@ -266,7 +267,14 @@ func testManager(t *testing.T, cfg *rest.Config) ctrl.Manager {
 // before it starts.
 type checkFailer struct {
 	ctrl.Manager
-	healthzErr, readyzErr error
+	healthzErr, readyzErr, addErr error
+}
+
+func (m checkFailer) Add(r manager.Runnable) error {
+	if m.addErr != nil {
+		return m.addErr
+	}
+	return m.Manager.Add(r)
 }
 
 func (m checkFailer) AddHealthzCheck(name string, check healthz.Checker) error {
@@ -299,6 +307,13 @@ func TestSetupRunnablesErrors(t *testing.T) {
 		err := setupRunnables(checkFailer{Manager: testManager(t, cfg), readyzErr: boom}, f)
 		if err == nil || !strings.Contains(err.Error(), "ready check") {
 			t.Errorf("err = %v, want ready check error", err)
+		}
+	})
+
+	t.Run("progress sampler registration fails", func(t *testing.T) {
+		err := setupRunnables(checkFailer{Manager: testManager(t, cfg), addErr: boom}, f)
+		if err == nil || !strings.Contains(err.Error(), "progress sampler") {
+			t.Errorf("err = %v, want progress sampler error", err)
 		}
 	})
 

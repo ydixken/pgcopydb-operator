@@ -39,14 +39,9 @@ func requireTimeout(t *testing.T) {
 	}
 }
 
-func progressCommand(stage, allDatabases bool) []string {
+func progressCommand(allDatabases bool) []string {
 	f := &fakeExec{pod: "runner"}
-	p := NewFromExec(f, nil)
-	if stage {
-		p.CloneStage(context.Background(), "test", "job")
-	} else {
-		_, _ = p.Sample(context.Background(), "test", "job", allDatabases)
-	}
+	_, _ = NewFromExec(f, nil).Sample(context.Background(), "test", "job", allDatabases)
 	return f.argv
 }
 
@@ -89,17 +84,18 @@ func waitFor(t *testing.T, budget time.Duration, description string, check func(
 // Removing any remote bound leaves the observed stub alive after its budget.
 func TestProgressProcessBounds(t *testing.T) {
 	requireTimeout(t)
+	// psql runs three times: the stage probe, then the target, then the source.
 	for _, tc := range []struct {
-		name          string
-		hang          int
-		stage, resist bool
-		want          string
+		name   string
+		hang   int
+		resist bool
+		want   string
 	}{
-		{"success", 0, false, false, "source=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
-		{"target count", 1, false, false, "target_error=\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
-		{"source count", 2, false, false, "source_error=\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
-		{"stage", 1, true, false, "\n"},
-		{"term-resistant", 1, false, true, "target_error=\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"success", 0, false, "stage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
+		{"stage", 1, false, "stage=\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
+		{"target count", 2, false, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"source count", 3, false, "source_error=\nstage=4 0 0\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
+		{"term-resistant", 2, true, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -118,14 +114,14 @@ for arg do query=$arg; done
 case "$query" in
   *quote_literal*) echo "100 2 1 3 80|('public.items',false),('public.other',true)" ;;
   *"not t.populated"*) echo "100 2 2 3 80 1|public.items" ;;
-  *pg_stat_activity*) echo '4 0' ;;
+  *pg_stat_activity*) echo '4 0 0' ;;
   *) echo '100 2 2 3 80' ;;
 esac
 `
 			if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			argv := progressCommand(tc.stage, false)
+			argv := progressCommand(false)
 			cmd := exec.Command(argv[0], argv[1:]...)
 			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "PID_FILE="+pidFile,
 				"CHILD_FILE="+filepath.Join(dir, "children"), fmt.Sprintf("HANG=%d", tc.hang), fmt.Sprintf("RESIST=%t", tc.resist))
@@ -213,34 +209,37 @@ func (e *detachedExec) InPod(ctx context.Context, _, _ string, argv []string) ([
 }
 
 // Kubernetes stream cancellation does not signal the remote process.
+// The stage probe's connection hangs; the listener then closes, so the target
+// and source calls behind it are refused at once and only the first stalls.
 func TestProgressConnectionHangOutlivesCanceledStream(t *testing.T) {
 	requireTimeout(t)
 	if _, err := exec.LookPath("psql"); err != nil {
 		t.Fatal("connection regression requires psql")
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = listener.Close() }()
 	for range 3 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
 		accepted := make(chan net.Conn, 1)
 		go func() {
 			c, err := listener.Accept()
+			_ = listener.Close()
 			if err == nil {
 				accepted <- c
 			}
 		}()
+		uri := "postgresql://test@" + listener.Addr().String() + "/test?sslmode=disable"
 		remote := &detachedExec{
-			env:     append(os.Environ(), "PGCOPYDB_TARGET_PGURI=postgresql://test@"+listener.Addr().String()+"/test?sslmode=disable"),
+			env:     append(os.Environ(), "PGCOPYDB_TARGET_PGURI="+uri, "PGCOPYDB_SOURCE_PGURI="+uri),
 			started: make(chan struct{}), done: make(chan error, 1),
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		stage := make(chan [2]bool, 1)
+		stage := make(chan *Sample, 1)
 		go func() {
-			copying, finalizing := NewFromExec(remote, nil).CloneStage(ctx, "test", "job")
-			stage <- [2]bool{copying, finalizing}
+			s, _ := NewFromExec(remote, nil).Sample(ctx, "test", "job", false)
+			stage <- s
 		}()
 		select {
 		case <-remote.started:
@@ -259,8 +258,8 @@ func TestProgressConnectionHangOutlivesCanceledStream(t *testing.T) {
 			t.Fatal("sampler did not open a connection")
 		}
 		cancel()
-		if got := <-stage; got != [2]bool{} {
-			t.Fatal("canceled stage probe must remain unknown")
+		if got := <-stage; got != nil {
+			t.Fatal("canceled sample must yield no reading")
 		}
 		if !processAlive(cmd.Process.Pid) {
 			t.Fatal("remote shell ended before the local stream cancellation")
@@ -269,7 +268,7 @@ func TestProgressConnectionHangOutlivesCanceledStream(t *testing.T) {
 		select {
 		case err := <-done:
 			if err != nil {
-				t.Errorf("stage probe failed: %v", err)
+				t.Errorf("sample script failed: %v", err)
 			}
 		case <-time.After(8 * time.Second):
 			_ = cmd.Process.Kill()

@@ -105,9 +105,9 @@ esac
 // pg_stat_activity keeps only the first track_activity_query_size bytes (1kB by default).
 const SamplerMarker = "/* pgcopydb-operator progress sample */"
 
-// sampleScript prints six source figures, five target figures and the tables still owed;
-// a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
-const sampleScript = sampleSQL + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
+// sampleScript prints the clone stage, six source figures, five target figures and the
+// tables still owed; a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
+const sampleScript = sampleSQL + stageScript + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 present="case when t.copying then false else $populated end"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
@@ -148,19 +148,19 @@ s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "` + SamplerMarker + ` with t as (sele
     from t where not t.populated and $populated)") ||
   { s=; printf 'source_error=%s\n' "$(why)"; }
 rm -f "$err"
-printf 'source=%s\ntarget=%s\nowed=%s\n' "${s%%|*}" "$t" "${s#*|}"
+printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}"
 `
 
 // Instance catalogs have no relation counters; zero counts preserve the sample
 // row format without reporting progress. The FROM lives apart from the select
 // list so the source's sixth figure appends to the list: appended to the whole
 // query it lands on the WHERE clause, which then fails to parse (issue #277).
-const allDatabasesSampleScript = sampleSQL + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
+const allDatabasesSampleScript = sampleSQL + stageScript + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
 dbs="from pg_database where datname not in ('template0', 'template1')"
 s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs") || { s=; printf 'source_error=%s\n' "$(why)"; }
 t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs") || { t=; printf 'target_error=%s\n' "$(why)"; }
 rm -f "$err"
-printf 'source=%s\ntarget=%s\n' "$s" "$t"
+printf 'stage=%s\nsource=%s\ntarget=%s\n' "$g" "$s" "$t"
 `
 
 // One transaction pins the pooled queries to the backend that SET LOCAL bounds,
@@ -197,12 +197,18 @@ func serverReason(msg string) string {
 	return withheldReason
 }
 
-// Sample is one poll of both databases: their sizes, and the relation counts
-// when the target has a schema to count.
+// Sample is one poll of both databases: their sizes, the relation counts
+// when the target has a schema to count, and the clone stage.
 type Sample struct {
 	SourceSize *int64
 	TargetSize *int64
 	Counts     *RelationCounts
+
+	// Copying and Finalizing are the clone stage; both false is unknown.
+	Copying, Finalizing bool
+	// CopyStarted: a copy, index or vacuum worker is connected. pgcopydb starts them after
+	// restoring the schema, so the target no longer holds what an earlier run left.
+	CopyStarted bool
 
 	// Lost maps each side that returned no row to psql's error, empty when
 	// the script captured none, withheld when no server wrote it.
@@ -270,13 +276,14 @@ func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string
 	}
 }
 
-// parseSample reads the source= and target= lines, six integers for the source
+// parseSample reads the stage= line, the source= and target= lines, six integers for the source
 // and five for the target, the owed= line naming the tables the sixth figure
 // counted, and a <side>_error= line per failed side. A side that is missing,
 // short or not numeric contributes nothing rather than zero, and is lost.
 func parseSample(out []byte) *Sample {
 	var src, tgt []int64
 	var owed string
+	var copying, finalizing, started bool
 	reasons := map[string]string{}
 	for line := range strings.SplitSeq(string(out), "\n") {
 		if v, ok := strings.CutPrefix(line, "source="); ok {
@@ -285,11 +292,13 @@ func parseSample(out []byte) *Sample {
 			tgt = parseFields(v)
 		} else if v, ok := strings.CutPrefix(line, "owed="); ok {
 			owed = strings.TrimSpace(v)
+		} else if v, ok := strings.CutPrefix(line, "stage="); ok {
+			copying, finalizing, started = parseStage(v)
 		} else if side, v, ok := strings.Cut(line, "_error="); ok {
 			reasons[side] = serverReason(strings.TrimSpace(v))
 		}
 	}
-	sample := &Sample{Lost: map[string]string{}}
+	sample := &Sample{Lost: map[string]string{}, Copying: copying, Finalizing: finalizing, CopyStarted: started}
 	if len(src) == 6 {
 		sample.SourceSize = &src[0]
 	} else {
@@ -333,44 +342,34 @@ func parseFields(s string) []int64 {
 	return out
 }
 
-// finalizingScript counts pgcopydb's own backends on the target. Both tests
+// stageScript counts pgcopydb's own backends on the target, ahead of the sizes, so a
+// sample that sees the copy reads the target after pgcopydb has cleaned it. The tests
 // are case insensitive because pgcopydb emits the copy statement lowercase,
 // and copy workers count by connection while the tail counts only active ones
 // (see docs/research/measurements.md#a-copy-workers-connection-outlives-the-statement-it-is-running).
 // client_addr scopes the count to this worker's pod, so another migration's
 // compare worker on a shared target cannot read as this clone's tail.
-const finalizingScript = progressSQL + `progress_sql "$PGCOPYDB_TARGET_PGURI" "select
+const stageScript = `g=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "select
   count(*) filter (where application_name ilike '%copy worker%'
                       or (state = 'active' and query ilike 'copy %')) || ' ' ||
   count(*) filter (where state = 'active'
                      and application_name not ilike '%copy worker%'
-                     and query not ilike 'copy %')
+                     and query not ilike 'copy %') || ' ' ||
+  count(*) filter (where application_name ilike '%index worker%'
+                      or application_name ilike '%vacuum worker%')
 from pg_stat_activity
-where application_name like 'pgcopydb%' and client_addr = inet_client_addr()" || echo
+where application_name like 'pgcopydb%' and client_addr = inet_client_addr()") || g=
 `
 
-// CloneStage reports whether the worker is still copying data or has moved on
-// to the tail: index builds, constraints and vacuum. Both false is unknown,
-// since no pod, a failed query and no matching backend must not read as either
-// state.
-func (p *Poller) CloneStage(ctx context.Context, namespace, jobName string) (copying, finalizing bool) {
-	pod, err := p.exec.RunningPod(ctx, namespace, jobName)
-	if err != nil || pod == "" {
-		return false, false
+// parseStage reads the stage= line: copying while any copy worker is left, finalizing
+// once only the tail is active, started while a copy, index or vacuum worker is connected.
+// All false is unknown, since a failed query must not read as any state.
+func parseStage(v string) (copying, finalizing, started bool) {
+	var nCopy, nOther, nWorkers int
+	if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d %d %d", &nCopy, &nOther, &nWorkers); err != nil {
+		return false, false, false
 	}
-	out, err := p.exec.InPod(ctx, namespace, pod, []string{"sh", "-c", conn.URIRecover() + finalizingScript})
-	if err != nil {
-		return false, false
-	}
-	var nCopy, nOther int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &nCopy, &nOther); err != nil {
-		return false, false
-	}
-	logf.FromContext(ctx).V(1).Info("clone stage sample",
-		"job", jobName, "copyBackends", nCopy, "otherBackends", nOther)
-	// Only once no copy worker is left is the data across. A single remaining
-	// backend is the normal shape of the tail, not a sign of trouble.
-	return nCopy > 0, nCopy == 0 && nOther > 0
+	return nCopy > 0, nCopy == 0 && nOther > 0, nCopy > 0 || nWorkers > 0
 }
 
 // listProgress mirrors the documented shape of `pgcopydb list progress --json`
