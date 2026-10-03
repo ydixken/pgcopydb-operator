@@ -37,10 +37,9 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
-// The follow worker keeps real observation traffic running between held locks.
-// Serial: the blocked samplers hold the operator's single reconcile worker on
-// purpose, which would stall every other process's Migrations meanwhile.
-var _ = Describe("Progress sampler bounds", Serial, func() {
+// The follow worker keeps observation traffic running between held locks. The
+// locks stall only the background sampler, not the reconcile worker, so it is not Serial.
+var _ = Describe("Progress sampler bounds", SpecPriority(1), func() {
 	It("releases blocked source and target samplers across repeated polls and recovers", func() {
 		const name = "e2e-progress-bounds"
 		const table = progressProbeTable

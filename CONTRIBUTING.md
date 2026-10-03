@@ -276,7 +276,8 @@ External mode and protected feature runs have one pair only, so they refuse more
 
 Two decorators control the schedule.
 A spec that blocks a resource which all processes share MUST be `Serial`, so that Ginkgo runs it on process 1 after the parallel specs.
-The operator's single reconcile worker is such a resource: the progress-sampler bounds spec blocks it on purpose and is `Serial` for that reason.
+The operator's single reconcile worker is such a resource.
+The progress-sampler bounds spec is not `Serial`: its locks stall only the background sampler, which runs outside the reconcile pass.
 A container or spec that runs for more than about three minutes SHOULD have `SpecPriority(1)`, so that it starts early and not last.
 
 ### Cluster coverage
