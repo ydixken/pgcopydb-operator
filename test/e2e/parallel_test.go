@@ -55,10 +55,11 @@ func parallelProcs() int {
 	return cfg.ParallelTotal
 }
 
-// Requests for a parallel run, from the peaks of a scale 0.25 run: a fixture
-// near 1.5GiB with its buffers, a runner under 200MiB, a seed Job about 25MiB.
+// Requests for a parallel run, from the peaks of a scale 0.25 run: a runner
+// under 200MiB, a seed Job about 25MiB. The fixture request is 1Gi because six
+// pairs must fit, so its caches shrink with it (see suiteCaches).
 const (
-	parallelFixtureCPU, parallelFixtureMemory = "1", "2Gi"
+	parallelFixtureCPU, parallelFixtureMemory = "1", "1Gi"
 	parallelSeedCPU, parallelSeedMemory       = "100m", "128Mi"
 	parallelRunnerCPU, parallelRunnerMemory   = "250m", "512Mi"
 )
@@ -75,6 +76,23 @@ func suiteRequests(procs int) (fixture, seed, runner requests) {
 	}
 	// No runner request: one process exercises the operator's own default.
 	return requests{fixtureCPU, fixtureMemory}, requests{workerCPU, workerMemory}, requests{}
+}
+
+const (
+	fixtureMaintenanceWorkMem = "512MB"
+	parallelSharedBuffers     = "512MB"
+)
+
+// pgCaches are the fixture PostgreSQL memory parameters that follow the request.
+type pgCaches struct{ sharedBuffers, effectiveCacheSize, maintenanceWorkMem, walBuffers string }
+
+// suiteCaches halves every cache of the one-process set in a parallel run, so a
+// fixture stays near its 1Gi request instead of the 1.2-1.65GiB it used at 2Gi.
+func suiteCaches(procs int) pgCaches {
+	if procs > 1 {
+		return pgCaches{parallelSharedBuffers, "1536MB", "256MB", "32MB"}
+	}
+	return pgCaches{fixtureSharedBuffers, fixtureCacheSize, fixtureMaintenanceWorkMem, "64MB"}
 }
 
 // parallelRefusal says why a run cannot spread over procs processes. External
@@ -159,6 +177,18 @@ func TestParallelRequests(t *testing.T) {
 		seed != (requests{parallelSeedCPU, parallelSeedMemory}) ||
 		runner != (requests{parallelRunnerCPU, parallelRunnerMemory}) {
 		t.Errorf("four processes request %v, %v, %v; want the parallel sizes", fixture, seed, runner)
+	}
+	if fixture != (requests{"1", "1Gi"}) {
+		t.Errorf("parallel fixture requests %v, want 1 CPU and 1Gi", fixture)
+	}
+}
+
+func TestParallelCaches(t *testing.T) {
+	if got, want := suiteCaches(1), (pgCaches{"1GB", "3GB", fixtureMaintenanceWorkMem, "64MB"}); got != want {
+		t.Errorf("one process caches %v, want %v", got, want)
+	}
+	if got, want := suiteCaches(6), (pgCaches{parallelSharedBuffers, "1536MB", "256MB", "32MB"}); got != want {
+		t.Errorf("six processes caches %v, want %v", got, want)
 	}
 }
 

@@ -1582,6 +1582,7 @@ func ensureNamespace(name string) {
 // Unstructured avoids importing the CNPG API just for test fixtures.
 func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 	fixture, _, _ := suiteRequests(parallelProcs())
+	caches := suiteCaches(parallelProcs())
 	storage := map[string]any{"size": size}
 	if fixtureStorageClass != "" {
 		storage["storageClass"] = fixtureStorageClass
@@ -1653,16 +1654,16 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 					// Left at 128MB of shared_buffers the fixtures spend the
 					// clone reading their own pages back off Longhorn, which
 					// measures the storage rather than the operator.
-					"shared_buffers":       fixtureSharedBuffers,
-					"effective_cache_size": fixtureCacheSize,
+					"shared_buffers":       caches.sharedBuffers,
+					"effective_cache_size": caches.effectiveCacheSize,
 					// Index builds during pg_restore, and the sort memory the
 					// seed's generate_series passes through.
-					"maintenance_work_mem": "512MB",
+					"maintenance_work_mem": caches.maintenanceWorkMem,
 					// At the 16MB default a seeding backend was flushing
 					// WAL itself in ~70KB chunks: wal_buffers_full 133,611
 					// against wal_write 135,705 across one seed. The
 					// concurrent load stages make that tighter still.
-					"wal_buffers": "64MB",
+					"wal_buffers": caches.walBuffers,
 					// Bulk load checkpoints on volume, not on time. Small
 					// max_wal_size means a checkpoint every few seconds and a
 					// full-page write storm behind it. Proportional, because
