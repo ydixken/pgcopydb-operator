@@ -477,13 +477,14 @@ For the grantable target rights, set `superuserSecretRef`.
 
 ### Status updates lag behind the worker
 
-The worker makes progress, but `status` and the metrics update later than the 10-second poll interval.
+The worker makes progress, but `status` updates later than the 10-second poll interval, or the size gauges later than their 5-second sample interval during a copy.
 
-Set `--zap-log-level=debug` on the manager to expose the controller's timing messages.
-The controller emits a sanitized duration summary at verbosity `V(1)` for the operations it reaches during a reconcile pass.
+A reconcile pass that runs longer than the poll interval logs `active worker observation` at the info level, a sanitized duration summary of the operations it reached.
+Set `--zap-log-level=debug` on the manager to see the same summary for every pass.
 The summary records timing only: no credentials, no SQL, and no raw command output.
 It shows where a slow pass spent its time.
 It does not establish the cause of a past delay, and it does not guarantee a wall-clock poll interval.
+The size gauges come from a sampler that does not wait for the pass; a sample that outruns its own interval logs `progress sample took longer than its interval`.
 
 ## Metrics and dashboards
 

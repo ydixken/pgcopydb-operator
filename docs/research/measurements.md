@@ -107,6 +107,23 @@ Copy workers count by connection, the tail only while active.
 Sampled across a whole base copy on a live worker 2026-08-30.
 Four copy workers connected in every sample, zero the instant it ended, while the active count dipped to zero mid-copy and read as the tail.
 
+## Sampling cadence
+
+Where `copyPollInterval` and `recordSizes` in `internal/controller/sampler.go` decide how often a copy is sampled and when its target size counts.
+
+### One sample costs under a second
+
+Measured during the release-candidate e2e behind issue #200: one psql query took 70 to 90 ms, and the exec round trip around the script took about 480 ms.
+A sample is one exec running three psql calls, so about 0.7 s.
+At a 5-second interval that fills a seventh of each gap; at 2 seconds it would fill a third, and its own jitter would show in the spacing.
+
+### The first size sample of a copy read the target before pgcopydb cleaned it
+
+Measured on the v0.17.0 post-release e2e, with the target size read off the target primary every 2.3 seconds as ground truth.
+A follow migration cloned into a database an earlier spec had filled.
+Its first point, scraped four seconds after the target had dropped to 151 MB and started refilling, still read 3.03 GB.
+A point that old can only come from a sample taken before pgcopydb dropped and restored the schema.
+
 ## Shell portability of the progress gate
 
 Where `GateScript` in `internal/progress/progress.go` renders a `case` statement that the verify Job embeds inside `$( )`.
