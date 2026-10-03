@@ -74,15 +74,14 @@ var _ = Describe("Progress sampler transaction pooling", SpecPriority(1), func()
 			}
 		}
 		DeferCleanup(assertSharedCatalogs)
-		poolSource := createProgressPoolCluster(conn.Source, pgSource)
-		poolTarget := createProgressPoolCluster(conn.Target, pgTarget)
-		clusters := []string{poolSource.GetName(), poolTarget.GetName()}
+		pool := createProgressPoolClusters()
+		clusters := []string{pool[0].GetName(), pool[1].GetName()}
 		cfg, err := config.GetConfig()
 		Expect(err).NotTo(HaveOccurred())
 		remote, err := podexec.New(cfg)
 		Expect(err).NotTo(HaveOccurred())
 		poller := progress.NewFromExec(remote, nil)
-		job := createProgressPoolRunner([2]*unstructured.Unstructured{poolSource, poolTarget})
+		job := createProgressPoolRunner(pool)
 		var pod string
 		Eventually(func(g Gomega) {
 			var lookupErr error
@@ -275,22 +274,40 @@ WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
 	return out
 }
 
-func createProgressPoolCluster(side conn.Side, major int) *unstructured.Unstructured {
+// createProgressPoolClusters creates the source and target clusters before it
+// waits for either, and one cleanup deletes both, so their start and stop overlap.
+func createProgressPoolClusters() [2]*unstructured.Unstructured {
 	GinkgoHelper()
-	cluster := cnpgCluster("", progressPoolStorageSize, major)
-	cluster.SetGenerateName("e2e-pool-" + string(side) + "-")
-	Expect(unstructured.SetNestedField(cluster.Object, int64(1), "spec", "instances")).To(Succeed())
-	// The pooling workload holds one row; bulk-seed resource and cache sizing is unnecessary.
-	Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
-		"cpu": "100m", "memory": "256Mi",
-	}, "spec", "resources", "requests")).To(Succeed())
-	Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
-		"max_wal_size": walMaxSize(progressPoolStorageSize),
-	}, "spec", "postgresql", "parameters")).To(Succeed())
-	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-	DeferCleanup(func() { deleteProgressPoolCluster(cluster) })
-	Expect(cluster.GetUID()).NotTo(BeEmpty())
-	Expect(cluster.GetName()).NotTo(BeElementOf(sourceCluster, targetCluster))
+	var clusters [2]*unstructured.Unstructured
+	DeferCleanup(func() { deleteProgressPoolClusters(clusters) })
+	for i, side := range []conn.Side{conn.Source, conn.Target} {
+		major := pgSource
+		if side == conn.Target {
+			major = pgTarget
+		}
+		cluster := cnpgCluster("", progressPoolStorageSize, major)
+		cluster.SetGenerateName("e2e-pool-" + string(side) + "-")
+		Expect(unstructured.SetNestedField(cluster.Object, int64(1), "spec", "instances")).To(Succeed())
+		// The pooling workload holds one row; bulk-seed resource and cache sizing is unnecessary.
+		Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
+			"cpu": "100m", "memory": "256Mi",
+		}, "spec", "resources", "requests")).To(Succeed())
+		Expect(unstructured.SetNestedStringMap(cluster.Object, map[string]string{
+			"max_wal_size": walMaxSize(progressPoolStorageSize),
+		}, "spec", "postgresql", "parameters")).To(Succeed())
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		clusters[i] = cluster
+		Expect(cluster.GetUID()).NotTo(BeEmpty())
+		Expect(cluster.GetName()).NotTo(BeElementOf(sourceCluster, targetCluster))
+	}
+	for _, cluster := range clusters {
+		waitProgressPoolCluster(cluster)
+	}
+	return clusters
+}
+
+func waitProgressPoolCluster(cluster *unstructured.Unstructured) {
+	GinkgoHelper()
 	waitClusterReady(cluster.GetName())
 	Eventually(func(g Gomega) {
 		pods := &corev1.PodList{}
@@ -308,18 +325,34 @@ func createProgressPoolCluster(side conn.Side, major int) *unstructured.Unstruct
 		g.Expect(metav1.IsControlledBy(&pvcs.Items[0], cluster)).To(BeTrue())
 		g.Expect(pvcStorageReady(&pvcs.Items[0], resource.MustParse(progressPoolStorageSize))).To(Succeed())
 	}, clusterReadyTimeout, time.Second).Should(Succeed())
-	return cluster
 }
 
-func deleteProgressPoolCluster(cluster *unstructured.Unstructured) {
+// deleteProgressPoolClusters deletes every cluster before it waits for any.
+// A nil entry is a cluster whose create never ran.
+func deleteProgressPoolClusters(clusters [2]*unstructured.Unstructured) {
 	GinkgoHelper()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), clusterReadyTimeout+time.Minute)
 	defer cancel()
-	uid := cluster.GetUID()
-	Expect(uid).NotTo(BeEmpty())
-	err := k8sClient.Delete(cleanupCtx, cluster, client.Preconditions{UID: &uid},
-		client.PropagationPolicy(metav1.DeletePropagationBackground))
-	Expect(client.IgnoreNotFound(err)).To(Succeed())
+	for _, cluster := range clusters {
+		if cluster == nil {
+			continue
+		}
+		uid := cluster.GetUID()
+		Expect(uid).NotTo(BeEmpty())
+		err := k8sClient.Delete(cleanupCtx, cluster, client.Preconditions{UID: &uid},
+			client.PropagationPolicy(metav1.DeletePropagationBackground))
+		Expect(client.IgnoreNotFound(err)).To(Succeed())
+	}
+	for _, cluster := range clusters {
+		if cluster == nil {
+			continue
+		}
+		waitProgressPoolClusterGone(cleanupCtx, cluster)
+	}
+}
+
+func waitProgressPoolClusterGone(cleanupCtx context.Context, cluster *unstructured.Unstructured) {
+	GinkgoHelper()
 	Eventually(func(g Gomega) {
 		current := &unstructured.Unstructured{}
 		current.SetGroupVersionKind(cnpgGVK)
