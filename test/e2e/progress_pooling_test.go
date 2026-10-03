@@ -433,6 +433,7 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		},
 	}
 	passfiles := make([]conn.Passfile, 0, 2)
+	poolersReady := make([]func(), 0, len(clusters))
 	for i, ownedCluster := range clusters {
 		clusterName := ownedCluster.GetName()
 		cluster := &unstructured.Unstructured{}
@@ -478,53 +479,56 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		Expect(k8sClient.Create(ctx, pooler)).To(Succeed())
 		podLabels := map[string]string{"cnpg.io/poolerName": pooler.GetName()}
 		cleanupProgressPoolObject(pooler, podLabels)
-		Eventually(func(g Gomega) {
-			current := &unstructured.Unstructured{}
-			current.SetGroupVersionKind(pooler.GroupVersionKind())
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), current)).To(Succeed())
-			g.Expect(current.GetUID()).To(Equal(pooler.GetUID()))
-			g.Expect(current.GetOwnerReferences()).To(ContainElement(owner))
-			name, clusterRefFound, err := unstructured.NestedString(current.Object, "spec", "cluster", "name")
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(clusterRefFound).To(BeTrue())
-			g.Expect(name).To(Equal(clusterName), "Pooler must reference its dedicated cluster")
-			deployment := &appsv1.Deployment{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), deployment)).To(Succeed())
-			g.Expect(deployment.UID).NotTo(BeEmpty())
-			g.Expect(metav1.IsControlledBy(deployment, pooler)).To(BeTrue(), "Pooler must own its Deployment")
-			g.Expect(deployment.DeletionTimestamp).To(BeNil())
-			g.Expect(deployment.Spec.Selector).NotTo(BeNil())
-			g.Expect(deployment.Spec.Selector.MatchLabels).To(HaveKeyWithValue("cnpg.io/poolerName", pooler.GetName()))
-			replicaSets := &appsv1.ReplicaSetList{}
-			g.Expect(k8sClient.List(ctx, replicaSets, client.InNamespace(nsE2E),
-				client.MatchingLabels(podLabels))).To(Succeed())
-			g.Expect(replicaSets.Items).NotTo(BeEmpty(), "Pooler selector must identify its ReplicaSets")
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
-				client.MatchingLabels(podLabels))).To(Succeed())
-			found := len(pods.Items)
-			g.Expect(found).To(Equal(1), "%s Pooler selector must identify one pod", clusterName)
-			poolPod := &pods.Items[0]
-			podOwned := false
-			for j := range replicaSets.Items {
-				replicaSet := &replicaSets.Items[j]
-				g.Expect(replicaSet.UID).NotTo(BeEmpty())
-				g.Expect(metav1.IsControlledBy(replicaSet, deployment)).To(BeTrue(), "Deployment must own its ReplicaSets")
-				if metav1.IsControlledBy(poolPod, replicaSet) {
-					podOwned = true
+		// Wait only after both Poolers exist, so their rollouts overlap.
+		poolersReady = append(poolersReady, func() {
+			Eventually(func(g Gomega) {
+				current := &unstructured.Unstructured{}
+				current.SetGroupVersionKind(pooler.GroupVersionKind())
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), current)).To(Succeed())
+				g.Expect(current.GetUID()).To(Equal(pooler.GetUID()))
+				g.Expect(current.GetOwnerReferences()).To(ContainElement(owner))
+				name, clusterRefFound, err := unstructured.NestedString(current.Object, "spec", "cluster", "name")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(clusterRefFound).To(BeTrue())
+				g.Expect(name).To(Equal(clusterName), "Pooler must reference its dedicated cluster")
+				deployment := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pooler), deployment)).To(Succeed())
+				g.Expect(deployment.UID).NotTo(BeEmpty())
+				g.Expect(metav1.IsControlledBy(deployment, pooler)).To(BeTrue(), "Pooler must own its Deployment")
+				g.Expect(deployment.DeletionTimestamp).To(BeNil())
+				g.Expect(deployment.Spec.Selector).NotTo(BeNil())
+				g.Expect(deployment.Spec.Selector.MatchLabels).To(HaveKeyWithValue("cnpg.io/poolerName", pooler.GetName()))
+				replicaSets := &appsv1.ReplicaSetList{}
+				g.Expect(k8sClient.List(ctx, replicaSets, client.InNamespace(nsE2E),
+					client.MatchingLabels(podLabels))).To(Succeed())
+				g.Expect(replicaSets.Items).NotTo(BeEmpty(), "Pooler selector must identify its ReplicaSets")
+				pods := &corev1.PodList{}
+				g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+					client.MatchingLabels(podLabels))).To(Succeed())
+				found := len(pods.Items)
+				g.Expect(found).To(Equal(1), "%s Pooler selector must identify one pod", clusterName)
+				poolPod := &pods.Items[0]
+				podOwned := false
+				for j := range replicaSets.Items {
+					replicaSet := &replicaSets.Items[j]
+					g.Expect(replicaSet.UID).NotTo(BeEmpty())
+					g.Expect(metav1.IsControlledBy(replicaSet, deployment)).To(BeTrue(), "Deployment must own its ReplicaSets")
+					if metav1.IsControlledBy(poolPod, replicaSet) {
+						podOwned = true
+					}
 				}
-			}
-			g.Expect(podOwned).To(BeTrue(), "Pooler pod must belong to a matching ReplicaSet")
-			g.Expect(poolPod.DeletionTimestamp).To(BeNil())
-			g.Expect(poolPod.Status.Phase).To(Equal(corev1.PodRunning))
-			ready := false
-			for _, condition := range poolPod.Status.Conditions {
-				if condition.Type == corev1.PodReady {
-					ready = condition.Status == corev1.ConditionTrue
+				g.Expect(podOwned).To(BeTrue(), "Pooler pod must belong to a matching ReplicaSet")
+				g.Expect(poolPod.DeletionTimestamp).To(BeNil())
+				g.Expect(poolPod.Status.Phase).To(Equal(corev1.PodRunning))
+				ready := false
+				for _, condition := range poolPod.Status.Conditions {
+					if condition.Type == corev1.PodReady {
+						ready = condition.Status == corev1.ConditionTrue
+					}
 				}
-			}
-			g.Expect(ready).To(BeTrue(), "%s Pooler pod must be Ready", clusterName)
-		}, 3*time.Minute, time.Second).Should(Succeed())
+				g.Expect(ready).To(BeTrue(), "%s Pooler pod must be Ready", clusterName)
+			}, 3*time.Minute, time.Second).Should(Succeed())
+		})
 		if i == 0 {
 			job.OwnerReferences = []metav1.OwnerReference{owner}
 		}
@@ -542,6 +546,9 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, materialized.Volumes...)
 		Expect(materialized.Passfile).NotTo(BeNil())
 		passfiles = append(passfiles, *materialized.Passfile)
+	}
+	for _, wait := range poolersReady {
+		wait()
 	}
 	// This pod hosts real sampler execs, not a migration with session-bound snapshot/apply state.
 	job.Spec.Template.Spec.Containers[0].Command = []string{
