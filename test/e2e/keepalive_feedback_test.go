@@ -33,7 +33,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
-var _ = Describe("Keepalive feedback", SpecPriority(1), func() {
+var _ = Describe("Keepalive feedback", SpecPriority(2), func() {
 	DescribeTable("cuts over idle published tables after filtered WAL",
 		keepaliveFeedbackCutover,
 		Entry("Manual", v1beta1.CutoverManual),

@@ -271,7 +271,7 @@ func panelFailure(title, expr string, mayBeEmpty bool) string {
 // series after cutover, every dashboard panel query, and series removal on
 // deletion. They need a Prometheus that scrapes the suite's operator install
 // (the chart's ServiceMonitor, which BeforeSuite enables).
-var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(1), func() {
+var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(2), func() {
 	BeforeAll(func() {
 		urlEnv := os.Getenv("E2E_PROMETHEUS_URL")
 		pfEnv := os.Getenv("E2E_PROMETHEUS_PORT_FORWARD")
