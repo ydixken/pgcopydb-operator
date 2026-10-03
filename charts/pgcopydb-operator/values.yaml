@@ -67,11 +67,11 @@ metrics:
     enabled: false
     # Extra metadata labels, for a Prometheus that selects monitors by label.
     additionalLabels: {}
-    # The operator refreshes its gauges once per reconcile poll, so a scrape
-    # slower than that throws away samples that already exist; 10s matches the
-    # poll. Timeout stays empty on purpose: Prometheus clamps an inherited
-    # global timeout down to the interval, so it cannot exceed it here.
-    interval: "10s"
+    # The operator samples database sizes every 5s while a copy runs, so a
+    # slower scrape throws away samples that already exist. Timeout stays empty
+    # on purpose: Prometheus clamps an inherited global timeout down to the
+    # interval, so it cannot exceed it here.
+    interval: "5s"
     scrapeTimeout: ""
     # Verbatim ServiceMonitor syntax: relabelings rewrite the target before
     # the scrape, metricRelabelings rewrite samples before ingestion.

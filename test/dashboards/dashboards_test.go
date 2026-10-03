@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -33,6 +34,7 @@ import (
 const (
 	dashboardsDir = "../../charts/pgcopydb-operator/dashboards"
 	rulesFile     = "../../charts/pgcopydb-operator/rules/migrations.yaml"
+	valuesFile    = "../../charts/pgcopydb-operator/values.yaml"
 	phaseMetric   = "pgcopydb_migration_phase"
 	statPanel     = "stat"
 	// textModeName is a stat tile that shows a label, not a reading.
@@ -102,9 +104,9 @@ func TestDashboardIdentity(t *testing.T) {
 		}
 		// The browser is the last of three intervals standing between a gauge
 		// moving and a human seeing it, and the only one shipped per file.
-		// All three are 10s; a dashboard left slower hides a live operator.
+		// It matches the 10s poll; a dashboard left slower hides a live operator.
 		if d.Refresh != "10s" {
-			t.Errorf("%s: refresh %q, want 10s to match the poll and the scrape", file, d.Refresh)
+			t.Errorf("%s: refresh %q, want 10s to match the poll", file, d.Refresh)
 		}
 		if !strings.HasPrefix(d.Title, "pgcopydb / ") {
 			t.Errorf("%s: title %q lacks the pgcopydb / prefix", file, d.Title)
@@ -177,6 +179,53 @@ func TestEveryMetricTokenIsKnown(t *testing.T) {
 //
 // This exists because an ETA panel using rate() over a fixed 15m window read
 // 46 minutes on a clone that had 8 minutes left, and every test here passed.
+// chartScrapeSeconds reads the ServiceMonitor interval the chart ships.
+func chartScrapeSeconds(t *testing.T) int {
+	t.Helper()
+	raw, err := os.ReadFile(valuesFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", valuesFile, err)
+	}
+	m := regexp.MustCompile(`(?m)^    interval: "(\d+)s"$`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("%s: no metrics.serviceMonitor.interval in whole seconds", valuesFile)
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The operator samples the sizes every 5s during a copy. A panel whose min step
+// is coarser re-steps that series, and a fixed deriv window sized for one scrape
+// interval holds two or three points at another, which draws a sawtooth (#200).
+func TestSizePanelsKeepTheSampleResolution(t *testing.T) {
+	scrape := chartScrapeSeconds(t)
+	fixedWindow := regexp.MustCompile(`deriv\([^\[]*\[\d+[smh]\]`)
+	var found bool
+	for file, d := range load(t) {
+		for _, p := range d.AllPanels() {
+			for _, tgt := range p.Targets {
+				if fixedWindow.MatchString(tgt.Expr) {
+					t.Errorf("%s: %q derives over a fixed window; use $__rate_interval:\n  %s", file, p.Title, tgt.Expr)
+				}
+				if p.Type != "timeseries" || !strings.Contains(tgt.Expr, "_database_size_bytes") {
+					continue
+				}
+				found = true
+				step, err := time.ParseDuration(p.Interval)
+				if err != nil || step > time.Duration(scrape)*time.Second {
+					t.Errorf("%s: %q steps at %q, want %ds or finer to keep every size sample", file, p.Title, p.Interval, scrape)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("no time series panel reads a database size")
+	}
+}
+
 func TestNoCounterFunctionsOnGauges(t *testing.T) {
 	counterFn := regexp.MustCompile(`\b(rate|irate|increase|resets)\(\s*(pgcopydb_[a-z_]+)`)
 	for name, d := range load(t) {
@@ -250,8 +299,7 @@ func TestVerificationTilesMapEveryState(t *testing.T) {
 // At [$__range:1m] the timeline returned five of seven phases for a completed
 // e2e-follow-auto, dropping Finalizing and Verifying outright.
 func TestPhaseTimelineStepsAtTheScrape(t *testing.T) {
-	// The scrape, matching the poll and the browser refresh, in seconds.
-	const scrape = 10
+	scrape := chartScrapeSeconds(t)
 	units := map[string]int{"s": 1, "m": 60, "h": 3600}
 	step := regexp.MustCompile(`\[\$__range:(\d+)([smh])\]`)
 	var found bool

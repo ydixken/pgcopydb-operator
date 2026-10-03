@@ -14,8 +14,8 @@ kube-prometheus-stack already grants that to its Prometheus, and the 401, 403, a
 
 The ServiceMonitor sets `honorLabels: true`.
 The `namespace` and `name` labels on migration metrics therefore stay the Migration's own, and the scrape does not rename them to `exported_namespace`.
-The chart scrapes every 10 seconds, the same as the nominal poll interval of an active worker.
-Gauges change when the controller sees the worker, so a slower scrape can miss samples between two changes.
+The chart scrapes every 5 seconds, the interval at which the operator samples database sizes during a copy.
+Gauges change when the operator samples the worker, so a slower scrape can miss samples between two changes.
 Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by what you set.
 `metrics.serviceMonitor.additionalLabels` labels the monitor for a Prometheus that selects by label; `scrapeTimeout`, `relabelings`, and `metricRelabelings` tune the rest.
 
@@ -147,8 +147,11 @@ The chart ships three dashboards, linked to each other through their shared `pgc
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
-All three refresh every 10 seconds, the same as the nominal poll and scrape intervals.
-A slow controller pass, a queued reconcile, or a late scrape can delay what reaches the screen.
+All three refresh every 10 seconds, the same as the reconcile poll.
+Database Size and both Copy Throughput panels step at 5 seconds, the chart's scrape, so each refresh draws two new size points.
+Their slopes use `deriv` over `$__rate_interval`, which Grafana sizes from that step: 20 seconds on a short range, or four samples.
+The Clone Copy series and WAL Generation read gauges the reconcile pass moves, so they step at 10 seconds and average over 40.
+A queued reconcile or a late scrape can still delay what reaches the screen.
 Grafana's refresh picker overrides the saved value for your session.
 
 ![Migration Detail, on a follow migration a minute after its cutover, with both compare checks passed](../assets/migration-detail-dashboard.png)
