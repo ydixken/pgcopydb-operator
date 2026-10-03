@@ -19,6 +19,7 @@ stage() {
     psql -v ON_ERROR_STOP=1 -v "scale=$SEED_SCALE" -v "profile=$SEED_PROFILE" \
         -v "extra_tables=${SEED_EXTRA_TABLES:-0}" -v "extra_mb=${SEED_EXTRA_MB:-0}" \
         -v "extra_shards=${SEED_EXTRA_JOBS:-4}" -v "extra_shard=${2:-0}" \
+        -v "extra_skew=${SEED_EXTRA_SKEW:-0}" \
         -f "$1.sql" 2>&1 | sed "s|^|[$1${2:+ $2}] |"
     return "${PIPESTATUS[0]}"
 }

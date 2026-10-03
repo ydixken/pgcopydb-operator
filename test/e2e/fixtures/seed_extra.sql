@@ -1,17 +1,11 @@
--- Fixture seed stage: a production-shaped spread of extra tables (optional).
---
--- The base fixture is deliberately lopsided: one table carries 73% of the bytes,
--- which is the worst case for table-level parallelism and the reason a clone
--- of it cannot use more than a couple of COPY streams. Real databases are not
--- shaped like that, so this stage adds many tables whose sizes are drawn from
--- a normal distribution and normalised to a requested total.
---
--- Off unless e2e.extra_tables is set. Sizes are deterministic: the generator
--- seeds the RNG, so the same request produces the same layout on every run and
--- two runs remain comparable.
+-- Fixture seed stage (optional): many extra tables on top of the base fixture,
+-- whose one table holding 73% of the bytes is the worst case for table-level
+-- parallelism. Sizes are normal, or lognormal under a positive e2e.extra_skew
+-- so a few giants dominate, normalised to e2e.extra_mb. The RNG is seeded, so
+-- a request gives the same layout on every run. Off unless e2e.extra_tables.
 \ir prelude.sql
 
-\echo extra tables (gaussian sizes)
+\echo extra tables
 
 DO $$
 DECLARE
@@ -20,6 +14,8 @@ DECLARE
     -- Every session derives the full layout, then builds its shard.
     shards    int    := current_setting('e2e.extra_shards', true)::int;
     shard     int    := current_setting('e2e.extra_shard', true)::int;
+    -- NULL or 0 keeps the normal spread every earlier fixture was built with.
+    skew      numeric := current_setting('e2e.extra_skew', true)::numeric;
     -- Rows of roughly 600 bytes, stored inline, so this stage costs bytes
     -- rather than TOAST round trips: the point here is the table count and
     -- size spread, which seed_documents already covers for TOAST.
@@ -53,6 +49,9 @@ BEGIN
     IF shards < 1 OR shard < 0 OR shard >= shards THEN
         RAISE EXCEPTION 'invalid extra shard % of %', shard, shards;
     END IF;
+    IF skew < 0 THEN
+        RAISE EXCEPTION 'e2e.extra_skew must not be negative';
+    END IF;
 
     remaining_mb := total_mb - n_tables;
 
@@ -70,7 +69,11 @@ BEGIN
         u1 := greatest(random(), 1e-9);
         u2 := random();
         z  := sqrt(-2 * ln(u1)) * cos(2 * pi() * u2);
-        w  := greatest(mean_mb + z * sigma, mean_mb * 0.1);
+        IF skew > 0 THEN
+            w := mean_mb * exp(skew * z);
+        ELSE
+            w := greatest(mean_mb + z * sigma, mean_mb * 0.1);
+        END IF;
         weights := weights || w;
         total_w := total_w + w;
     END LOOP;

@@ -256,6 +256,7 @@ var (
 	extraTables         int
 	extraSizeMB         int
 	extraJobs           = 4
+	extraSkew           float64 // 0 keeps the normal size spread
 	srcStorageSize      string
 	tgtStorageSize      string
 	workVolumeSize      string
@@ -589,6 +590,27 @@ func init() {
 		}
 		cnpgInstances = n
 	}
+	initExtraTables()
+	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
+	// so a branch's controller can be exercised against real servers before it
+	// merges. The runner follows unless E2E_RUNNER_TAG below moves it alone.
+	if v := os.Getenv("E2E_OPERATOR_TAG"); v != "" {
+		operatorTag, runnerTag = v, v
+	}
+	// E2E_RUNNER_TAG points the worker Jobs at a runner image other than the
+	// pinned release, so a change to images/runner can be exercised against
+	// real servers before it merges. Without it the suite would install the
+	// published runner and report green regardless of what the branch does to
+	// that image.
+	if v := os.Getenv("E2E_RUNNER_TAG"); v != "" {
+		runnerTag = v
+	}
+	initMajors()
+}
+
+// initExtraTables reads the E2E_EXTRA_* knobs and grows the fixture volumes
+// to hold them, so it runs after the tier and scale have sized those.
+func initExtraTables() {
 	// E2E_EXTRA_TABLES and E2E_EXTRA_SIZE_GB add a production-shaped spread of
 	// tables on top of the base fixture: many tables whose sizes are drawn from
 	// a normal distribution and normalised to the requested total. The base
@@ -627,6 +649,19 @@ func init() {
 		srcStorageSize = addGi(srcStorageSize, extraGi)
 		tgtStorageSize = addGi(tgtStorageSize, extraGi)
 	}
+	// E2E_EXTRA_SKEW draws the extra-table sizes from a lognormal instead, so
+	// a few giants carry most of the bytes. The cap keeps exp() in range and is
+	// already far past the point where one table takes everything.
+	if v := os.Getenv("E2E_EXTRA_SKEW"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0 && f <= 10) {
+			panic("E2E_EXTRA_SKEW must be a number above 0 and at most 10, got " + strconv.Quote(v))
+		}
+		if extraTables == 0 {
+			panic("E2E_EXTRA_SKEW requires E2E_EXTRA_TABLES")
+		}
+		extraSkew = f
+	}
 	// E2E_EXTRA_JOBS is how many sessions build the extra tables at once. One
 	// session writes at a fraction of what the server absorbs from several,
 	// so this is the knob that decides how long seeding takes.
@@ -637,21 +672,6 @@ func init() {
 		}
 		extraJobs = n
 	}
-	// E2E_OPERATOR_TAG installs a manager image other than the pinned release,
-	// so a branch's controller can be exercised against real servers before it
-	// merges. The runner follows unless E2E_RUNNER_TAG below moves it alone.
-	if v := os.Getenv("E2E_OPERATOR_TAG"); v != "" {
-		operatorTag, runnerTag = v, v
-	}
-	// E2E_RUNNER_TAG points the worker Jobs at a runner image other than the
-	// pinned release, so a change to images/runner can be exercised against
-	// real servers before it merges. Without it the suite would install the
-	// published runner and report green regardless of what the branch does to
-	// that image.
-	if v := os.Getenv("E2E_RUNNER_TAG"); v != "" {
-		runnerTag = v
-	}
-	initMajors()
 }
 
 // initMajors reads the CNPG majors; external mode reads them off the servers
@@ -740,7 +760,15 @@ func seedProfile() string {
 	if extraTables == 0 {
 		return baseSeedProfile
 	}
-	return fmt.Sprintf("%s+x%dx%dMB", baseSeedProfile, extraTables, extraSizeMB)
+	p := fmt.Sprintf("%s+x%dx%dMB", baseSeedProfile, extraTables, extraSizeMB)
+	if extraSkew > 0 {
+		p += "+skew" + skewArg()
+	}
+	return p
+}
+
+func skewArg() string {
+	return strconv.FormatFloat(extraSkew, 'g', -1, 64)
 }
 
 func TestExtraFixtureVolumesGrowFromEnvironment(t *testing.T) {
@@ -884,6 +912,69 @@ func TestExtraFixtureRejectsJobCountAbovePostgresInt(t *testing.T) {
 		t.Fatal("E2E_EXTRA_JOBS accepted a value above the PostgreSQL int maximum")
 	}
 	if !strings.Contains(string(out), "E2E_EXTRA_JOBS must be a positive PostgreSQL int") {
+		t.Fatalf("unexpected rejection: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureAcceptsSkew(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "skew" {
+		if extraSkew != 1.5 || seedProfile() != "v4+x30x30720MB+skew1.5" {
+			t.Errorf("extraSkew = %v, seedProfile() = %q", extraSkew, seedProfile())
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureAcceptsSkew$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=skew",
+		"E2E_EXTRA_TABLES=30",
+		"E2E_EXTRA_SIZE_GB=30",
+		"E2E_EXTRA_SKEW=1.5",
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("E2E_EXTRA_SKEW=1.5 was rejected: %v\n%s", err, out)
+	}
+}
+
+func TestExtraFixtureRejectsUnsafeSkew(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "unsafe-skew" {
+		return
+	}
+
+	for _, skew := range []string{"0", "-1", "NaN", "+Inf", "10.5", "lots"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsUnsafeSkew$")
+		cmd.Env = []string{
+			"E2E_TEST_CHILD=unsafe-skew",
+			"E2E_EXTRA_TABLES=30",
+			"E2E_EXTRA_SIZE_GB=30",
+			"E2E_EXTRA_SKEW=" + skew,
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Errorf("E2E_EXTRA_SKEW=%s was accepted", skew)
+			continue
+		}
+		if !strings.Contains(string(out), "E2E_EXTRA_SKEW must be a number above 0 and at most 10") {
+			t.Errorf("E2E_EXTRA_SKEW=%s: unexpected rejection: %v\n%s", skew, err, out)
+		}
+	}
+}
+
+func TestExtraFixtureRejectsSkewWithoutTables(t *testing.T) {
+	if os.Getenv("E2E_TEST_CHILD") == "skew-without-tables" {
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExtraFixtureRejectsSkewWithoutTables$")
+	cmd.Env = []string{
+		"E2E_TEST_CHILD=skew-without-tables",
+		"E2E_EXTRA_SKEW=1.5",
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("E2E_EXTRA_SKEW was accepted without extra tables")
+	}
+	if !strings.Contains(string(out), "E2E_EXTRA_SKEW requires E2E_EXTRA_TABLES") {
 		t.Fatalf("unexpected rejection: %v\n%s", err, out)
 	}
 }
@@ -1959,6 +2050,7 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_EXTRA_TABLES", Value: strconv.Itoa(extraTables)},
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
+							{Name: "SEED_EXTRA_SKEW", Value: skewArg()},
 						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
 					}},

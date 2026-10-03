@@ -197,13 +197,16 @@ jobs:
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: make test
-      - name: Cutover, publication-retry, live-writer, psql-channel, name, and external-mode helper regressions (no cluster)
+      # The selector is one quoted regex inside a folded scalar, so it cannot wrap.
+      # yamllint disable rule:line-length
+      - name: Helper regressions in test/e2e that need no cluster
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: >-
           go test ./test/e2e
-          -run '^(TestCutoverDiagnostic|TestPublicationRetry|TestLiveWriter|TestPSQL|TestE2ENames|TestExternal)'
+          -run '^(TestCutoverDiagnostic|TestPublicationRetry|TestLiveWriter|TestPSQL|TestE2ENames|TestExternal|TestExtraFixture|TestSeedProfile)'
           -count=1 -race -v
+      # yamllint enable rule:line-length
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
       # Codecov requires a token even for a public repo: a tokenless upload is

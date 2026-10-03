@@ -159,6 +159,9 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_EXTRA_SIZE_GB` (unset) is the total size of the extra tables.
   Both fixture volumes grow by twice this, because the bytes are written once by the seed and again by WAL.
   Changing either value changes the seed marker, so a kept fixture is rebuilt rather than reused at the old shape.
+- `E2E_EXTRA_SKEW` (unset) draws the extra-table sizes from a lognormal distribution instead, so a few large tables carry most of the bytes.
+  It takes a number above 0 and at most 10, and requires `E2E_EXTRA_TABLES`; larger values concentrate more of the total in fewer tables.
+  It is part of the seed marker, so changing it rebuilds a kept fixture.
 - `E2E_EXTRA_JOBS` (`4`) sets the concurrent psql sessions that seed the extra tables.
   Each session derives the same deterministic layout and builds its assigned tables.
 - `E2E_STRESS` (unset) selects the stress tier when `true`: scale 10 (~120GB), 200/150/50Gi volumes per instance, longer budgets.
