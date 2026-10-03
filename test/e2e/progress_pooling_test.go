@@ -370,6 +370,8 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				RestartPolicy:                corev1.RestartPolicyNever,
 				AutomountServiceAccountToken: ptr.To(false),
+				// sleep as PID 1 ignores SIGTERM, and nothing here needs draining.
+				TerminationGracePeriodSeconds: ptr.To(int64(0)),
 				SecurityContext: &corev1.PodSecurityContext{
 					RunAsNonRoot: ptr.To(true), RunAsUser: ptr.To(int64(65532)), RunAsGroup: ptr.To(int64(65532)),
 					FSGroup:        ptr.To(int64(65532)),
