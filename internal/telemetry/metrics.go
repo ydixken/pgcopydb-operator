@@ -53,7 +53,7 @@ func NewMetrics(ctx context.Context, cfg Config, version string, gatherer promet
 		return nil, fmt.Errorf("build the OpenTelemetry resource: %w", err)
 	}
 	var exp sdkmetric.Exporter
-	if cfg.Protocol == "http/protobuf" {
+	if cfg.Protocol == protocolHTTP {
 		exp, err = otlpmetrichttp.New(ctx)
 	} else {
 		exp, err = otlpmetricgrpc.New(ctx)
