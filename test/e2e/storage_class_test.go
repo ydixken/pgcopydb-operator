@@ -54,7 +54,7 @@ func sc(name, provisioner string, params map[string]string) storagev1.StorageCla
 // pods sat unschedulable. It has to follow whatever the cluster's own Longhorn
 // classes ask for.
 func TestEphemeralParamsFollowsTheClusterDataEngine(t *testing.T) {
-	base := map[string]string{paramReplicas: "1", "staleReplicaTimeout": "30"}
+	base := map[string]string{paramReplicas: "1", paramDataLocality: "best-effort", "staleReplicaTimeout": "30"}
 	with := func(engine string) map[string]string {
 		p := maps.Clone(base)
 		p[paramDataEngine] = engine
