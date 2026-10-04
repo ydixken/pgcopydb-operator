@@ -21,6 +21,11 @@ import (
 	"testing"
 )
 
+const (
+	httpProtobuf = "http/protobuf"
+	grpcProto    = "grpc"
+)
+
 func TestConfigFromEnv(t *testing.T) {
 	const (
 		otelMetricsExporter          = "OTEL_METRICS_EXPORTER"
@@ -28,7 +33,6 @@ func TestConfigFromEnv(t *testing.T) {
 		otelExporterOTLPMetricsProto = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
 		otelSDKDisabled              = "OTEL_SDK_DISABLED"
 		otlp                         = "otlp"
-		httpProtobuf                 = "http/protobuf"
 	)
 	tests := []struct {
 		name    string
@@ -39,11 +43,11 @@ func TestConfigFromEnv(t *testing.T) {
 		{name: "unset is off", env: map[string]string{}, want: Config{}},
 		{name: "none is off", env: map[string]string{otelMetricsExporter: "none"}, want: Config{}},
 		{name: "otlp defaults to grpc", env: map[string]string{otelMetricsExporter: otlp},
-			want: Config{Metrics: true, Protocol: "grpc"}},
+			want: Config{Metrics: true, Protocol: grpcProto}},
 		{name: "general protocol", env: map[string]string{otelMetricsExporter: otlp,
 			otelExporterOTLPProtocol: httpProtobuf}, want: Config{Metrics: true, Protocol: httpProtobuf}},
 		{name: "signal protocol wins", env: map[string]string{otelMetricsExporter: otlp,
-			otelExporterOTLPProtocol: "grpc", otelExporterOTLPMetricsProto: httpProtobuf},
+			otelExporterOTLPProtocol: grpcProto, otelExporterOTLPMetricsProto: httpProtobuf},
 			want: Config{Metrics: true, Protocol: httpProtobuf}},
 		{name: "sdk disabled wins", env: map[string]string{otelSDKDisabled: "true",
 			otelMetricsExporter: otlp}, want: Config{}},
