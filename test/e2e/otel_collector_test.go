@@ -38,7 +38,7 @@ import (
 const (
 	otelCollectorName = "otel-collector"
 	// Pinned: a floating tag would change the debug exporter's output format under the spec.
-	otelCollectorImage = "otel/opentelemetry-collector:0.162.0"
+	otelCollectorImage = "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.162.0"
 	otelCollectorPort  = 4318
 	// The debug exporter prints every datapoint, so the log is read by window, not whole.
 	otelLogWindow = "60s"

@@ -34,6 +34,7 @@ var _ = Describe("OpenTelemetry export", func() {
 		mig := newMigration(name, nsE2E, v1beta1.CloneOptions{})
 		mig.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlyTables: []string{otelTable}}
 		DeferCleanup(func() { deleteMigration(name) })
+		resetTargetObjects()
 		create(mig)
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCompleted)
 
