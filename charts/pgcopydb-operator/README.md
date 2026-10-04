@@ -49,12 +49,12 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `grafana.dashboards.additionalAnnotations` | `{}` | Extra annotations on the dashboard ConfigMaps. |
 | `networkPolicy.enabled` | `false` | Reserved for a manager NetworkPolicy; no policy template ships, and the exec-based control plane opens no inbound port. |
 | `otel.enabled` | `false` | Export metrics over OTLP, see [OpenTelemetry](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/operations/opentelemetry.md). |
-| `otel.endpoint` | `""` | OTLP endpoint. Required when enabled. |
+| `otel.endpoint` | `""` | OTLP endpoint, e.g. `http://otel-collector.observability:4317` without TLS. Required when enabled. |
 | `otel.protocol` | `grpc` | `grpc` or `http/protobuf`. |
 | `otel.signals.metrics` | `true` | Export metrics. |
 | `otel.metricsIntervalSeconds` | `30` | Seconds between metric pushes. |
 | `otel.resourceAttributes` | `""` | Extra `key=value,key2=value2` resource attributes. |
-| `otel.tls.insecure` | `false` | Skip TLS on a scheme-less grpc endpoint. |
+| `otel.tls.insecure` | `false` | Turn TLS off, for a scheme-less grpc endpoint. Also overrides `https://`. |
 | `otel.tls.caSecret.name` | `""` | Secret with the collector CA bundle. |
 | `otel.tls.caSecret.key` | `ca.crt` | Key of the CA bundle in that Secret. |
 | `otel.tls.clientCertSecret.name` | `""` | `kubernetes.io/tls` Secret for mutual TLS. |
