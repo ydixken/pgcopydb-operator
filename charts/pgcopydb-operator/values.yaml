@@ -122,7 +122,8 @@ otel:
   # Extra resource attributes, as OTEL_RESOURCE_ATTRIBUTES: "key=value,key2=value2".
   resourceAttributes: ""
   tls:
-    # Skip TLS for a grpc endpoint without a scheme.
+    # Turn TLS off. Meant for a grpc endpoint without a scheme, but it also
+    # turns TLS off for an https:// endpoint.
     insecure: false
     # Secret with the CA bundle that signs the collector certificate.
     caSecret:
