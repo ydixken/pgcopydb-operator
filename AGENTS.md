@@ -36,6 +36,7 @@ These skills are vendored in this repo and are always-on, not optional, not per-
   Its short form is the [solution ladder](#the-solution-ladder-ponytail) below.
 - **humanizer** ([`.claude/skills/humanizer/SKILL.md`](.claude/skills/humanizer/SKILL.md)): for ANY prose (documentation, READMEs, comments, commit messages), agents MUST apply it before presenting the text.
   No AI slop in writing.
+- **asd-ste100** ([`.claude/skills/asd-ste100/SKILL.md`](.claude/skills/asd-ste100/SKILL.md)): for user-facing documentation pages that the change names as Simplified Technical English (currently `docs/operations/opentelemetry.md`), agents MUST write to ASD-STE100 and run `python3 .claude/skills/asd-ste100/scripts/ste-lint.py <file>` until it reports 0 hard violations.
 - **brainstorming** ([`.claude/skills/brainstorming/SKILL.md`](.claude/skills/brainstorming/SKILL.md)): before ANY creative work (new features, components, functionality, or behavior changes), agents MUST invoke it to explore intent, requirements, and design before implementing.
 
 ## Writing conventions
