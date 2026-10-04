@@ -65,15 +65,22 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// The delegating sink honours only the first SetLogger in a process, so every
+// run shares one sink and reads only what it wrote.
+var (
+	operatorLog      = &syncBuffer{}
+	fulfilLoggerOnce sync.Once
+)
+
 func TestSDKDiagnosticsReachTheOperatorLog(t *testing.T) {
-	out := &syncBuffer{}
-	logf.SetLogger(crzap.New(crzap.WriteTo(out)))
+	fulfilLoggerOnce.Do(func() { logf.SetLogger(crzap.New(crzap.WriteTo(operatorLog))) })
 	setErrorHandler()
+	offset := len(operatorLog.String())
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", "30s") // the SDK wants milliseconds and logs the rest
 	if _, err := otlpmetrichttp.New(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); !strings.Contains(got, "parse duration") || !strings.Contains(got, `"logger":"telemetry"`) {
+	if got := operatorLog.String()[offset:]; !strings.Contains(got, "parse duration") || !strings.Contains(got, `"logger":"telemetry"`) {
 		t.Fatalf("SDK diagnostic did not reach the operator log, got %q", got)
 	}
 }
