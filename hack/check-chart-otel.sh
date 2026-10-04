@@ -41,4 +41,18 @@ has 'name: OTEL_EXPORTER_OTLP_INSECURE'; has 'value: "true"'
 label='extraEnv only'; out=$(render --set 'extraEnv[0].name=FOO' --set 'extraEnv[0].value=bar')
 has 'name: FOO'; lacks 'OTEL_'
 
+# helm upgrade --reuse-values from a pre-otel release renders with that release's
+# values, which have no otel or extraEnv key at all.
+label='values without otel or extraEnv'
+old=$(mktemp -d); trap 'rm -rf "$old"' EXIT
+cp -R "$chart" "$old/"
+awk '/^[^ #]/ { skip = ($0 ~ /^(otel|extraEnv):/) } !skip' "$chart/values.yaml" >"$old/pgcopydb-operator/values.yaml"
+if grep -Eq '^(otel|extraEnv):' "$old/pgcopydb-operator/values.yaml"; then echo "strip left otel or extraEnv for: $label" >&2; fail=1; fi
+if out=$(chart="$old/pgcopydb-operator" render); then
+  lacks 'env:'; lacks 'OTEL_'
+  [ "$out" = "$(render)" ] || { echo "differs from the default render for: $label" >&2; fail=1; }
+else
+  echo "render failed for: $label" >&2; fail=1
+fi
+
 exit "$fail"
