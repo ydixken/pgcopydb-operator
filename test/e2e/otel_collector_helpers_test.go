@@ -18,10 +18,16 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOTelCollectorLogsReadsTheCollectorWindow(t *testing.T) {
@@ -66,5 +72,26 @@ func TestOTelCollectorLogsKeepsKubectlErrorText(t *testing.T) {
 	got := otelCollectorLogsWith(context.Background(), command, psqlExecTestTimeout)
 	if !strings.Contains(got, "kubectl logs failed") || !strings.Contains(got, stderr) {
 		t.Fatalf("otelCollectorLogsWith() = %q, want kubectl's error text", got)
+	}
+}
+
+// helm does not own the collector, so a failed uninstall must not leave it in the shared namespace.
+func TestOperatorTeardownDeletesTheCollectorAfterAFailedUninstall(t *testing.T) {
+	oldCtx, oldClient, oldManage := ctx, k8sClient, manageNamespaces
+	t.Cleanup(func() { ctx, k8sClient, manageNamespaces = oldCtx, oldClient, oldManage })
+	cm, dep, svc := otelCollectorObjects()
+	ctx, manageNamespaces = context.Background(), false
+	k8sClient = clientfake.NewClientBuilder().WithObjects(cm, dep, svc).Build()
+	RegisterTestingT(t)
+	err := runEach(operatorTeardownSteps(func() {
+		Expect(errors.New("helm uninstall failed")).NotTo(HaveOccurred())
+	})...)
+	if err == nil || !strings.Contains(err.Error(), "helm uninstall failed") {
+		t.Errorf("runEach() = %v, want the uninstall failure reported", err)
+	}
+	for _, o := range []client.Object{cm, dep, svc} {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(o), o); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s survived a teardown whose uninstall failed: %v", o, o.GetName(), err)
+		}
 	}
 }
