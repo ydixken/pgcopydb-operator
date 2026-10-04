@@ -278,6 +278,38 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 	})
 
+	It("puts the major version gate in the preflight Job when requested", func() {
+		const name = "mig-same-major"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.Preflight = &v1beta1.PreflightOptions{RequireSameMajorVersion: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		reconcileAndGet(ctx, newReconciler(), name)
+		reconcileAndGet(ctx, newReconciler(), name)
+		c := fetchJob(ctx, name+"-preflight").Spec.Template.Spec.Containers[0]
+		script := strings.Join(append(append([]string{}, c.Command...), c.Args...), "\n")
+		Expect(script).To(ContainSubstring("spec.preflight.requireSameMajorVersion"))
+	})
+
+	It("fails a major version mismatch with the gate's line in the condition", func() {
+		const name = "mig-same-major-fail"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.Preflight = &v1beta1.PreflightOptions{RequireSameMajorVersion: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: "preflight failed:\npreflight: source major 16 differs from target major 17 (spec.preflight.requireSameMajorVersion)\n"}
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
+		Expect(validated).NotTo(BeNil())
+		Expect(validated.Reason).To(Equal("PreflightFailed"))
+		Expect(validated.Message).To(ContainSubstring("source major 16 differs from target major 17"))
+	})
+
 	It("ends a passed dry run at the preflight without a worker Job", func() {
 		const name = "mig-dry-run"
 		defer removeMigration(ctx, name)

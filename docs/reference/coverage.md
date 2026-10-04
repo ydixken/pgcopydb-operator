@@ -58,7 +58,7 @@ The standalone `follow` command exposes a subset of the clone options with ident
 The operator never runs standalone `follow`: it always runs `clone --follow`.
 The base copy and the replication slot then share one snapshot, which keeps the result consistent.
 
-`spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.dryRun`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
+`spec.follow.maxCatchupLag`, `spec.cutover`, `spec.suspend`, `spec.dryRun`, `spec.preflight`, `spec.backoffLimit`, `spec.ttlSecondsAfterFinished`, and the per-side `superuserSecretRef` are operator-level controls with no pgcopydb flag behind them.
 
 ## `pgcopydb compare`
 

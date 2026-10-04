@@ -36,7 +36,7 @@ Individual checks appear as `ok:` log lines.
    The API validates the filters, but preflight does not check the declared scope against your intent.
 2. Partial.
    Preflight checks the selected extensions and their target ownership.
-   It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality, or wider source-to-target compatibility.
+   It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality (unless `spec.preflight.requireSameMajorVersion` is set, which compares major versions only), or wider source-to-target compatibility.
 3. Partial outside preflight.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.
 4. Partial.

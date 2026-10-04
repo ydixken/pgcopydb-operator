@@ -323,6 +323,28 @@ connect_retry "$PGCOPYDB_TARGET_PGURI" target "preflight: cannot connect to the 
 echo "ok: connectivity target"
 `
 
+// majorVersionBlock compares majors from server_version_num, because the
+// server_version text carries vendor suffixes. An unreadable side fails closed.
+const majorVersionBlock = `src_major=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('server_version_num')::int / 10000")
+tgt_major=$(check "$PGCOPYDB_TARGET_PGURI" "select current_setting('server_version_num')::int / 10000")
+if [ -z "$src_major" ] || [ -z "$tgt_major" ]; then
+  note "preflight: cannot read the source and target major versions (spec.preflight.requireSameMajorVersion)"
+elif [ "$src_major" != "$tgt_major" ]; then
+  note "preflight: source major $src_major differs from target major $tgt_major (spec.preflight.requireSameMajorVersion)"
+else
+  echo "ok: major version source $src_major target $tgt_major"
+fi
+`
+
+// preflightPrelude is the header plus the opt-in gates that run on every path.
+// A major mismatch stops the script, so no later probe buries it.
+func preflightPrelude(m *v1beta1.Migration) string {
+	if m.Spec.Preflight != nil && m.Spec.Preflight.RequireSameMajorVersion {
+		return preflightHeader + majorVersionBlock + preflightStopOnFailure
+	}
+	return preflightHeader
+}
+
 // superVerifyBlock probes a configured superuser connection. rolsuper=false
 // only warns: managed admin roles (rds_superuser and friends) can run the
 // grants without the attribute, and a real lack of rights still fails by name.
@@ -991,7 +1013,7 @@ fi
 // Follow-only prerequisites remain outside the clone path.
 func preflightScriptFor(m *v1beta1.Migration) string {
 	var b strings.Builder
-	b.WriteString(preflightHeader)
+	b.WriteString(preflightPrelude(m))
 	if m.Spec.Clone.AllDatabases {
 		b.WriteString(allDatabasesPreflightBlock())
 		if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {

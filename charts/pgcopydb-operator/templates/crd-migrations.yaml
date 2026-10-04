@@ -379,6 +379,17 @@ spec:
                     the field'
                   rule: '!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString)
                     || (has(self.plugin) && self.plugin == ''wal2json'')'
+              preflight:
+                description: preflight tunes optional preflight gates.
+                properties:
+                  requireSameMajorVersion:
+                    description: |-
+                      requireSameMajorVersion fails preflight when the source and target
+                      PostgreSQL major versions differ. Minor versions are ignored. Off by
+                      default because a cross-major upgrade is a main use of pgcopydb.
+                      Each server is asked for server_version_num, not the spec or image tag.
+                    type: boolean
+                type: object
               runner:
                 description: runner configures the worker pod.
                 properties:
@@ -2583,6 +2594,17 @@ spec:
                     the field'
                   rule: '!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString)
                     || (has(self.plugin) && self.plugin == ''wal2json'')'
+              preflight:
+                description: preflight tunes optional preflight gates.
+                properties:
+                  requireSameMajorVersion:
+                    description: |-
+                      requireSameMajorVersion fails preflight when the source and target
+                      PostgreSQL major versions differ. Minor versions are ignored. Off by
+                      default because a cross-major upgrade is a main use of pgcopydb.
+                      Each server is asked for server_version_num, not the spec or image tag.
+                    type: boolean
+                type: object
               runner:
                 description: runner configures the worker pod.
                 properties:
