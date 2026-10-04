@@ -88,6 +88,7 @@ var _ = Describe("Progress sampler bounds", SpecPriority(2), func() {
 			release := holdProgressLock([]string{sourceKey, targetKey}[side], cluster, table)
 			func() {
 				defer release()
+				var held *v1beta1.CloneProgress
 				for range 3 {
 					var backend string
 					Eventually(func() string {
@@ -123,10 +124,19 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 					Expect(current).NotTo(BeNil())
 					Expect(current.ObservedAt).NotTo(BeNil())
 					Expect(current.ObservedAt.IsZero()).To(BeFalse())
-					// A completed sample can publish after this lock was acquired.
-					// Controlled controller tests cover failed-sample timestamp retention.
 					current.ObservedAt = nil
-					Expect(current).To(Equal(baseline))
+					// A sample that finished before the lock can still publish newer bytes. Once
+					// the first blocked sample has failed, it is the newest, so status must hold.
+					if held == nil {
+						Expect([]int64{current.TablesTotal, current.TablesDone, current.IndexesTotal, current.IndexesDone}).
+							To(Equal([]int64{baseline.TablesTotal, baseline.TablesDone, baseline.IndexesTotal, baseline.IndexesDone}))
+						Expect(current.BytesTotal).NotTo(BeNil())
+						Expect(current.BytesDone).NotTo(BeNil())
+						Expect(current.BytesTotal.Value()).To(BeNumerically(">", 0))
+						Expect(current.BytesDone.Value()).To(BeNumerically(">", 0))
+						held = current
+					}
+					Expect(current).To(Equal(held))
 					Expect(m.Status.Attempts).To(Equal(int32(1)))
 					Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 				}
