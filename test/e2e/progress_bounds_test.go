@@ -84,11 +84,11 @@ var _ = Describe("Progress sampler bounds", SpecPriority(2), func() {
 			Expect(baseline.BytesDone).NotTo(BeNil())
 			Expect(baseline.BytesTotal.Value()).To(BeNumerically(">", 0))
 			Expect(baseline.BytesDone.Value()).To(BeNumerically(">", 0))
-			baseline.ObservedAt = nil
 			release := holdProgressLock([]string{sourceKey, targetKey}[side], cluster, table)
 			func() {
 				defer release()
-				for range 3 {
+				var held *v1beta1.CloneProgress
+				for poll := range 4 {
 					var backend string
 					Eventually(func() string {
 						backend = psql(cluster, fmt.Sprintf(`SELECT a.pid::text FROM pg_stat_activity a
@@ -123,10 +123,24 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 					Expect(current).NotTo(BeNil())
 					Expect(current.ObservedAt).NotTo(BeNil())
 					Expect(current.ObservedAt.IsZero()).To(BeFalse())
-					// A completed sample can publish after this lock was acquired.
-					// Controlled controller tests cover failed-sample timestamp retention.
-					current.ObservedAt = nil
-					Expect(current).To(Equal(baseline))
+					Expect(current.BytesTotal).NotTo(BeNil())
+					Expect(current.BytesDone).NotTo(BeNil())
+					// A sample taken before the lock can publish after the baseline read, so
+					// sizes may drift a little and only the counts must match exactly.
+					Expect(current.BytesTotal.Value()).To(BeNumerically("~", baseline.BytesTotal.Value(), progressSizeDrift))
+					Expect(current.BytesDone.Value()).To(BeNumerically("~", baseline.BytesDone.Value(), progressSizeDrift))
+					counts, baseCounts := *current, *baseline
+					counts.ObservedAt, counts.BytesTotal, counts.BytesDone = nil, nil, nil
+					baseCounts.ObservedAt, baseCounts.BytesTotal, baseCounts.BytesDone = nil, nil, nil
+					Expect(counts).To(Equal(baseCounts))
+					// Poll 0 can still trail a pass that read the last good sample. By poll 1 the
+					// blocked sample is the sampler's newest and has no counts, so status must hold.
+					if poll == 1 {
+						held = current
+					}
+					if poll > 1 {
+						Expect(current).To(Equal(held))
+					}
 					Expect(m.Status.Attempts).To(Equal(int32(1)))
 					Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 				}
@@ -184,6 +198,9 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 })
 
 const progressProbeTable = "public.progress_lock_probe"
+
+// Bytes a sample from just before the lock may add over the baseline; v0.19.1's run drifted 8 KiB.
+const progressSizeDrift = 1 << 20
 
 func progressProbeSetupSQL(role string) string {
 	return "SET ROLE " + role + "; CREATE TABLE " + progressProbeTable + " (id integer PRIMARY KEY, payload text); " +
