@@ -805,44 +805,50 @@ func TestDependencyReviewPolicy(t *testing.T) {
 	}
 }
 
-// A selector matching only one test of a family passed that family's presence
-// check while leaving its other tests unrun, so this instead requires the
-// selector to agree with every declared helper's own family, test by test.
-func TestCIDiagnosticStepSelectsHelperFamiliesWithoutACluster(t *testing.T) {
+// A -skip regex wider than the cluster entry point would drop tests unnoticed,
+// and a -run allowlist did exactly that for 22 of them.
+func TestCIRunsEveryClusterFreeE2ETest(t *testing.T) {
 	test, ok := mustParse(t, ciWorkflow).Jobs["test"]
 	if !ok {
 		t.Fatal("ci.yml has no test job")
 	}
 
-	const namePrefix = "go test ./test/e2e -run '"
-	var selector string
+	const namePrefix = "go test ./test/e2e -skip '"
+	var skip string
 	steps := 0
 	for _, step := range test.Steps {
-		start := strings.Index(step.Run, namePrefix)
-		if start < 0 {
+		if !strings.Contains(step.Run, "go test ./test/e2e") {
 			continue
 		}
 		steps++
+		start := strings.Index(step.Run, namePrefix)
+		if start < 0 {
+			t.Errorf("e2e step must select tests with -skip, not -run: %q", step.Run)
+			continue
+		}
 		rest := step.Run[start+len(namePrefix):]
 		end := strings.IndexByte(rest, '\'')
 		if end < 0 {
-			t.Fatalf("diagnostic step run has no closing quote after the selector: %q", step.Run)
+			t.Fatalf("e2e step run has no closing quote after the -skip regex: %q", step.Run)
 		}
-		selector = rest[:end]
+		skip = rest[:end]
 		flags := strings.Fields(rest[end+1:])
 		for _, flag := range []string{"-race", "-v"} {
 			if !slices.Contains(flags, flag) {
-				t.Errorf("diagnostic step must include %s: %q", flag, step.Run)
+				t.Errorf("e2e step must include %s: %q", flag, step.Run)
 			}
 		}
 	}
 	if steps != 1 {
-		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e -run` steps, want 1", steps)
+		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e` steps, want 1", steps)
 	}
 
-	re, err := regexp.Compile(selector)
+	if skip == "" {
+		t.FailNow()
+	}
+	re, err := regexp.Compile(skip)
 	if err != nil {
-		t.Fatalf("diagnostic step selector %q does not compile: %v", selector, err)
+		t.Fatalf("e2e -skip regex %q does not compile: %v", skip, err)
 	}
 
 	entries, err := os.ReadDir("../e2e")
@@ -850,40 +856,19 @@ func TestCIDiagnosticStepSelectsHelperFamiliesWithoutACluster(t *testing.T) {
 		t.Fatalf("read test/e2e: %v", err)
 	}
 	funcRe := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
-	families := []string{
-		"TestCutoverDiagnostic", "TestPublicationRetry", "TestLiveWriter", "TestPSQL", "TestE2ENames", "TestExternal",
-		"TestExtraFixture", "TestSeedProfile", "TestTimeoutOverride", "TestParallel",
-	}
-	found := make(map[string]bool, len(families))
+	skipped := []string{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
 		}
 		for _, m := range funcRe.FindAllStringSubmatch(read(t, filepath.Join("../e2e", entry.Name())), -1) {
-			name := m[1]
-			family := ""
-			for _, prefix := range families {
-				if strings.HasPrefix(name, prefix) {
-					family = prefix
-					break
-				}
-			}
-			selected := re.MatchString(name)
-			switch {
-			case family == "" && selected:
-				t.Errorf("diagnostic step selector %q matches %s, outside the helper families %v", selector, name, families)
-			case family != "" && !selected:
-				t.Errorf("diagnostic step selector %q does not match %s; it would ship "+
-					"untested by any pull request", selector, name)
-			case family != "":
-				found[family] = true
+			if re.MatchString(m[1]) {
+				skipped = append(skipped, m[1])
 			}
 		}
 	}
-	for _, prefix := range families {
-		if !found[prefix] {
-			t.Errorf("no declared %s* test found to require selection", prefix)
-		}
+	if !slices.Equal(skipped, []string{"TestE2E"}) {
+		t.Errorf("e2e -skip regex %q skips %v, want only [TestE2E], the cluster entry point", skip, skipped)
 	}
 }
 
