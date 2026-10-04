@@ -1,0 +1,57 @@
+package telemetry
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestConfigFromEnv(t *testing.T) {
+	const (
+		otelMetricsExporter          = "OTEL_METRICS_EXPORTER"
+		otelExporterOTLPProtocol     = "OTEL_EXPORTER_OTLP_PROTOCOL"
+		otelExporterOTLPMetricsProto = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+		otelSDKDisabled              = "OTEL_SDK_DISABLED"
+		otlp                         = "otlp"
+		httpProtobuf                 = "http/protobuf"
+	)
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    Config
+		wantErr string
+	}{
+		{name: "unset is off", env: map[string]string{}, want: Config{}},
+		{name: "none is off", env: map[string]string{otelMetricsExporter: "none"}, want: Config{}},
+		{name: "otlp defaults to grpc", env: map[string]string{otelMetricsExporter: otlp},
+			want: Config{Metrics: true, Protocol: "grpc"}},
+		{name: "general protocol", env: map[string]string{otelMetricsExporter: otlp,
+			otelExporterOTLPProtocol: httpProtobuf}, want: Config{Metrics: true, Protocol: httpProtobuf}},
+		{name: "signal protocol wins", env: map[string]string{otelMetricsExporter: otlp,
+			otelExporterOTLPProtocol: "grpc", otelExporterOTLPMetricsProto: httpProtobuf},
+			want: Config{Metrics: true, Protocol: httpProtobuf}},
+		{name: "sdk disabled wins", env: map[string]string{otelSDKDisabled: "true",
+			otelMetricsExporter: otlp}, want: Config{}},
+		{name: "unsupported exporter", env: map[string]string{otelMetricsExporter: "prometheus"},
+			wantErr: "OTEL_METRICS_EXPORTER"},
+		{name: "unsupported protocol", env: map[string]string{otelMetricsExporter: otlp,
+			otelExporterOTLPProtocol: "http/json"}, wantErr: "OTEL_EXPORTER_OTLP_PROTOCOL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{otelSDKDisabled, otelMetricsExporter,
+				otelExporterOTLPProtocol, otelExporterOTLPMetricsProto} {
+				t.Setenv(k, tc.env[k])
+			}
+			got, err := ConfigFromEnv()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want one naming %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ConfigFromEnv() = %+v, %v; want %+v", got, err, tc.want)
+			}
+		})
+	}
+}
