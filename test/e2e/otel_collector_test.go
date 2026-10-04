@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -167,10 +168,21 @@ func deleteOTelCollector() {
 // otelCollectorLogs returns the last minute of the collector log, kubectl's error text
 // included, so an Eventually on it reports why a read failed.
 func otelCollectorLogs() string {
-	out, err := exec.CommandContext(context.Background(), "kubectl", "logs", "-n", nsOperator,
-		"deploy/"+otelCollectorName, "--since="+otelLogWindow).CombinedOutput()
+	return otelCollectorLogsWith(ctx, exec.CommandContext, e2eCommandTimeout)
+}
+
+// otelCollectorLogsWith bounds the read: Eventually cannot interrupt a poll that never returns.
+func otelCollectorLogsWith(parent context.Context, command commandFactory, timeout time.Duration) string {
+	logCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	out, err := commandOutput(logCtx, command, "kubectl", "logs", "-n", nsOperator,
+		"deploy/"+otelCollectorName, "--since="+otelLogWindow)
 	if err != nil {
-		return fmt.Sprintf("kubectl logs failed: %v: %s", err, out)
+		var stderr []byte
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+			stderr = exit.Stderr
+		}
+		return fmt.Sprintf("kubectl logs failed: %v: %s", err, stderr)
 	}
 	return string(out)
 }
