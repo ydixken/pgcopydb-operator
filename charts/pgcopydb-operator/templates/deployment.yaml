@@ -44,6 +44,60 @@ spec:
             - --health-probe-bind-address=:8081
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if or .Values.otel.enabled .Values.extraEnv }}
+          env:
+            {{- if .Values.otel.enabled }}
+            {{- $otel := .Values.otel }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ required "otel.endpoint is required when otel.enabled is true" $otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ $otel.protocol | quote }}
+            - name: OTEL_METRICS_EXPORTER
+              value: {{ ternary "otlp" "none" $otel.signals.metrics | quote }}
+            - name: OTEL_TRACES_EXPORTER
+              value: "none"
+            - name: OTEL_LOGS_EXPORTER
+              value: "none"
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ mul $otel.metricsIntervalSeconds 1000 | quote }}
+            {{- with $otel.resourceAttributes }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if $otel.tls.insecure }}
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if $otel.tls.caSecret.name }}
+            - name: OTEL_EXPORTER_OTLP_CERTIFICATE
+              value: /etc/otel/ca/{{ $otel.tls.caSecret.key }}
+            {{- end }}
+            {{- if $otel.tls.clientCertSecret.name }}
+            - name: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE
+              value: /etc/otel/client/tls.crt
+            - name: OTEL_EXPORTER_OTLP_CLIENT_KEY
+              value: /etc/otel/client/tls.key
+            {{- end }}
+            {{- if $otel.headersSecret.name }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $otel.headersSecret.name }}
+                  key: {{ $otel.headersSecret.key }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
           ports:
             - containerPort: 8081
               name: health
@@ -73,7 +127,33 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if and .Values.otel.enabled (or .Values.otel.tls.caSecret.name .Values.otel.tls.clientCertSecret.name) }}
+          volumeMounts:
+            {{- if .Values.otel.tls.caSecret.name }}
+            - name: otel-ca
+              mountPath: /etc/otel/ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.otel.tls.clientCertSecret.name }}
+            - name: otel-client
+              mountPath: /etc/otel/client
+              readOnly: true
+            {{- end }}
+          {{- end }}
       terminationGracePeriodSeconds: 10
+      {{- if and .Values.otel.enabled (or .Values.otel.tls.caSecret.name .Values.otel.tls.clientCertSecret.name) }}
+      volumes:
+        {{- if .Values.otel.tls.caSecret.name }}
+        - name: otel-ca
+          secret:
+            secretName: {{ .Values.otel.tls.caSecret.name }}
+        {{- end }}
+        {{- if .Values.otel.tls.clientCertSecret.name }}
+        - name: otel-client
+          secret:
+            secretName: {{ .Values.otel.tls.clientCertSecret.name }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

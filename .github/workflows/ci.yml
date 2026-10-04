@@ -125,6 +125,8 @@ jobs:
         run: ./hack/check-chart-rbac.sh
       - name: Chart monitoring renders as expected
         run: ./hack/check-chart-monitoring.sh
+      - name: Chart OTel settings render as expected
+        run: ./hack/check-chart-otel.sh
       - name: promtool checks and unit-tests the alert rules and panel queries
         run: |
           ./hack/ensure-promtool.sh
