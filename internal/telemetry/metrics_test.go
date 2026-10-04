@@ -18,11 +18,13 @@ package telemetry
 
 import (
 	"context"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +36,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const testPod = "op-0"
+const (
+	testPod       = "op-0"
+	resourceAttrs = "OTEL_RESOURCE_ATTRIBUTES"
+)
 
 // fakeCollector records the metric names and resource attributes it receives.
 type fakeCollector struct {
@@ -200,12 +205,12 @@ func TestNewResource(t *testing.T) {
 		{name: "hostname without a pod name", wantInstance: host},
 		{name: "env overrides the instance", podName: testPod, attrs: "service.instance.id=custom",
 			wantInstance: "custom"},
-		{name: "malformed attributes", attrs: "a=b,c", wantErr: "OTEL_RESOURCE_ATTRIBUTES"},
+		{name: "malformed attributes", attrs: "a=b,c", wantErr: resourceAttrs},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("POD_NAME", tc.podName)
-			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.attrs)
+			t.Setenv(resourceAttrs, tc.attrs)
 			res, err := newResource(context.Background(), "v1")
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -218,6 +223,37 @@ func TestNewResource(t *testing.T) {
 			}
 			if got, _ := res.Set().Value(attribute.Key("service.instance.id")); got.AsString() != tc.wantInstance {
 				t.Fatalf("service.instance.id = %q, want %q", got.AsString(), tc.wantInstance)
+			}
+		})
+	}
+}
+
+func TestNewMetricsErrors(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	srv.Close()
+	ca := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"malformed resource attributes", map[string]string{resourceAttrs: "a=b,c"}, resourceAttrs},
+		{"plain http endpoint with a CA", map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT":    "http://127.0.0.1:1",
+			"OTEL_EXPORTER_OTLP_CERTIFICATE": ca,
+		}, "create the OTLP metrics exporter"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			r, err := NewMetrics(context.Background(), Config{Metrics: true, Protocol: protocolHTTP}, "v1", testRegistry())
+			if err == nil || r != nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("NewMetrics = %v, %v; want an error containing %q", r, err, tc.want)
 			}
 		})
 	}
