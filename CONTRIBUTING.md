@@ -298,8 +298,8 @@ Recovery after unlocking has a separate 12-minute backlog drain budget shared by
 
 The early-cutover spec emits a snapshot roughly every 30 seconds from sender resume until cutover starts or the same 12-minute backlog drain budget expires.
 See [Follow diagnostics](docs/design/follow-diagnostics.md) for the byte positions, missing-sample counts, and limits on stage attribution.
-CI runs the cutover, publication-retry, live-writer, psql-channel, e2e name, external-mode, and parallel-run helper regressions (`TestCutoverDiagnostic*`, `TestPublicationRetry*`, `TestLiveWriter*`, `TestPSQL*`, `TestE2ENames*`, `TestExternal*`, `TestParallel*`) with `-race -v` without starting the cluster suite.
-A new helper family goes into both that step's `-run` selector in `.github/workflows/ci.yml` and the family list in `test/buildconfig/buildconfig_test.go`, which rejects a selector that matches anything else.
+CI runs every test in `test/e2e` except the cluster entry point `TestE2E`, with `-race -v` (`go test ./test/e2e -skip '^TestE2E$'`).
+A new test is picked up without touching the workflow, and `TestCIRunsEveryClusterFreeE2ETest` in `test/buildconfig/buildconfig_test.go` rejects a `-skip` regex that matches anything else.
 Verbose output makes actual test selection and the expected parent-only subprocess-helper skip visible; it does not waive any meaningful regression.
 The `TestLiveWriterHelper` subprocess entry point skips in the parent process; the lifecycle tests invoke it as a child.
 `TestPSQLExecHelper` is the psql-channel tests' child entry point and returns at once in the parent process.
