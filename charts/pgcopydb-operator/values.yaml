@@ -109,8 +109,9 @@ networkPolicy:
 # unaffected either way. See docs/operations/opentelemetry.md.
 otel:
   enabled: false
-  # OTLP endpoint, e.g. http://otel-collector.observability:4318 for
-  # http/protobuf or otel-collector.observability:4317 for grpc. Required when enabled.
+  # Required when enabled. grpc: http://otel-collector.observability:4317 for a
+  # plaintext collector, https:// for TLS. A host:port without a scheme uses TLS
+  # unless tls.insecure is true. http/protobuf: http://otel-collector.observability:4318.
   endpoint: ""
   # grpc or http/protobuf.
   protocol: grpc
