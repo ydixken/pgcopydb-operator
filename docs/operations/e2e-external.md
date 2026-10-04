@@ -3,6 +3,8 @@
 The E2E suite normally creates its own CloudNativePG source and target.
 In external mode it runs against a database pair you already have, from your own Kubernetes cluster.
 It seeds its fixtures into your source, migrates them with an operator it installs, and checks the result on your target.
+It also deploys an OpenTelemetry Collector in the operator namespace, and the operator exports its metrics to it.
+The collector image comes from `ghcr.io`.
 That shows the operator works with your servers, network, and roles; it says nothing about your own data.
 
 > [!caution]
