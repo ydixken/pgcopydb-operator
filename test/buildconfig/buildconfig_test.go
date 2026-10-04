@@ -59,7 +59,7 @@ const (
 )
 
 const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
-	"LicenseRef-scancode-google-patent-license-golang"
+	"LicenseRef-scancode-google-patent-license-golang, LicenseRef-bad-apache-2.0-bsd-3-clause"
 
 func read(t *testing.T, path string) string {
 	t.Helper()

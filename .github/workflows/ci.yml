@@ -47,7 +47,9 @@ jobs:
         with:
           fail-on-severity: moderate
           fail-on-scopes: runtime, development, unknown
-          allow-licenses: Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, LicenseRef-scancode-google-patent-license-golang
+          allow-licenses: >-
+            Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT,
+            LicenseRef-scancode-google-patent-license-golang, LicenseRef-bad-apache-2.0-bsd-3-clause
       # The cache volume: see the header.
       - name: Point the Go and lint caches at the shared volume
         run: |
