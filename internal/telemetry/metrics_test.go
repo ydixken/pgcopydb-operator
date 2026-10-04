@@ -22,14 +22,19 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
 	collectormetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+const testPod = "op-0"
 
 // fakeCollector records the metric names and resource attributes it receives.
 type fakeCollector struct {
@@ -71,7 +76,7 @@ func httpExportEnv(t *testing.T, endpoint string) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
 	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "100")
 	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
-	t.Setenv("POD_NAME", "op-0")
+	t.Setenv("POD_NAME", testPod)
 	t.Setenv("POD_NAMESPACE", "op-ns")
 }
 
@@ -131,7 +136,7 @@ func TestMetricsExporterSendsRegistry(t *testing.T) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	for k, want := range map[string]string{"service.name": "pgcopydb-operator", "service.version": "v1.2.3",
-		"k8s.pod.name": "op-0", "k8s.namespace.name": "op-ns"} {
+		"k8s.pod.name": testPod, "k8s.namespace.name": "op-ns", "service.instance.id": testPod} {
 		if got := fc.resource[k]; got != want {
 			t.Errorf("resource %s = %q, want %q", k, got, want)
 		}
@@ -181,4 +186,39 @@ func TestNewMetricsGRPCConstructsWithoutDialing(t *testing.T) {
 		t.Fatalf("NewMetrics(grpc) = %v, %v", r, err)
 	}
 	run(t, r)()
+}
+
+func TestNewResource(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, podName, attrs, wantInstance, wantErr string
+	}{
+		{name: "pod name is the instance", podName: testPod, wantInstance: testPod},
+		{name: "hostname without a pod name", wantInstance: host},
+		{name: "env overrides the instance", podName: testPod, attrs: "service.instance.id=custom",
+			wantInstance: "custom"},
+		{name: "malformed attributes", attrs: "a=b,c", wantErr: "OTEL_RESOURCE_ATTRIBUTES"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("POD_NAME", tc.podName)
+			t.Setenv("OTEL_RESOURCE_ATTRIBUTES", tc.attrs)
+			res, err := newResource(context.Background(), "v1")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want one naming %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := res.Set().Value(attribute.Key("service.instance.id")); got.AsString() != tc.wantInstance {
+				t.Fatalf("service.instance.id = %q, want %q", got.AsString(), tc.wantInstance)
+			}
+		})
+	}
 }

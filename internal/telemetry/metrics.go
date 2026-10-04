@@ -83,7 +83,8 @@ func (e *metricsExporter) Start(ctx context.Context) error {
 func (e *metricsExporter) NeedLeaderElection() bool { return false }
 
 // newResource lets OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME override the
-// defaults, because WithFromEnv comes after WithAttributes.
+// defaults, because WithFromEnv comes after WithAttributes. Prometheus-style
+// backends build the instance label from service.instance.id.
 func newResource(ctx context.Context, version string) (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", serviceName),
@@ -92,8 +93,19 @@ func newResource(ctx context.Context, version string) (*resource.Resource, error
 	if v := os.Getenv("POD_NAMESPACE"); v != "" {
 		attrs = append(attrs, attribute.String("k8s.namespace.name", v))
 	}
-	if v := os.Getenv("POD_NAME"); v != "" {
-		attrs = append(attrs, attribute.String("k8s.pod.name", v))
+	instance := os.Getenv("POD_NAME")
+	if instance != "" {
+		attrs = append(attrs, attribute.String("k8s.pod.name", instance))
+	} else {
+		instance, _ = os.Hostname()
 	}
-	return resource.New(ctx, resource.WithAttributes(attrs...), resource.WithFromEnv(), resource.WithTelemetrySDK())
+	if instance != "" {
+		attrs = append(attrs, attribute.String("service.instance.id", instance))
+	}
+	res, err := resource.New(ctx, resource.WithAttributes(attrs...), resource.WithFromEnv(), resource.WithTelemetrySDK())
+	if err != nil {
+		// Only the env detector can fail here.
+		return nil, fmt.Errorf("OTEL_RESOURCE_ATTRIBUTES is not valid: %w", err)
+	}
+	return res, nil
 }
