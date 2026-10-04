@@ -26,9 +26,7 @@ import (
 	"testing"
 )
 
-// Reports as pgcopydb compare data --json renders them, trimmed to the keys
-// the wrapper reads. The rowcount pair is the live finding that exposed the
-// blind gate: 338 rows on the source, 333 on the target, exit code 0.
+// Keep report fixtures small so the wrapper contract is visible.
 const (
 	reportMatching = `[{"schema":"public","name":"orders",` +
 		`"source":{"rowcount":338,"checksum":"a1"},"target":{"rowcount":338,"checksum":"a1"}}]`
@@ -107,12 +105,8 @@ func runCompareScript(t *testing.T, report string, env ...string) (string, int) 
 	}
 }
 
-// TestCompareDataScript_Verdict is the regression test for a gate that could
-// not fail: pgcopydb compare data logs a row-count or checksum difference and
-// exits 0 regardless, so every caller that read the exit code (the Verified
-// condition and the drain verification alike) reported a match over a target
-// missing rows. The wrapper must now decide on the report, and must refuse
-// whenever it has no report it could trust.
+// Successful process exit alone cannot prove a match: older comparators can
+// exit 0 on differences, and empty or incomplete reports remain invalid.
 func TestCompareDataScript_Verdict(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

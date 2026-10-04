@@ -41,8 +41,10 @@ import (
 )
 
 const (
-	sourceKey = "source"
-	targetKey = "target"
+	sourceKey          = "source"
+	targetKey          = "target"
+	compareSchemaCheck = "schema"
+	compareDataCheck   = "data"
 )
 
 // Placement is configuration, and configuration that stops working fails
@@ -464,7 +466,7 @@ var _ = Describe("Migration", func() {
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 
 		By("checking both compare Jobs succeeded")
-		for _, check := range []string{"schema", "data"} {
+		for _, check := range []string{compareSchemaCheck, compareDataCheck} {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx,
 				client.ObjectKey{Namespace: nsE2E, Name: name + "-compare-" + check}, job)).To(Succeed())

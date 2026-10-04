@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/ea2dc96a47c2f7676d71a4967d044a1e469e4110) for all-databases behavior.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/22e29c357ef82e8097d19f7306824c350e7a7c86) for all-databases behavior and partition comparison.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -39,13 +39,11 @@ The runner image bundles pgcopydb and the PostgreSQL client tools.
 The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools.
 For a newer target major, set `spec.runner.image` to an image with client tools for that major version.
 
-At pgcopydb 0.18 and above, `status.replication.lagBytes` reflects what the target has applied.
-Below it, the same figure reflects what the target has received.
-That reading is optimistic: a migration can look caught up while the apply is still behind.
+See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports four pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.15.gea2dc96`, has [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures).
+The progress poll supports five pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.22.g22e29c3`, adds [partition comparison](../operations/verification.md#partitioned-tables) and retains [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.

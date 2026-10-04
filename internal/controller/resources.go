@@ -224,20 +224,9 @@ fi
 // drain-complete, --resume short-circuits and exits 0 anyway.
 func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
 	origin := effectiveSlotName(m)
-	// The gate has a fast path and a content path, because no LSN distance
-	// proves the drain on its own: unapplied commits and publication-filtered
-	// WAL measure alike from here, and a guessed byte tolerance once blessed a
-	// cutover that had lost commits
-	// (see docs/research/measurements.md#cutover-verification).
-	// Fast path: origin progress exactly equal to endpos, excluding the null
-	// LSN, which an empty sentinel and a target that applied nothing both read.
-	// Content path: every other reading, so nearly every cutover; the
-	// whole-database compare is the normal cost of a verdict, not an
-	// idle-source exception. compare_data_strict, because the bare command
-	// logs a difference and still exits 0.
-	// replay_lsn is printed, never compared: pgcopydb advances it past records
-	// it never applies, so it reads normal even where nothing was applied. In
-	// the log it separates a stream that never arrived from one not applied.
+	// WAL filtering and skipped records make gap/replay_lsn unsafe tolerances.
+	// Require exact nonzero endpos or validated content, including report checks.
+	// See docs/research/measurements.md#cutover-verification.
 	script := `set -eu
 ` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)

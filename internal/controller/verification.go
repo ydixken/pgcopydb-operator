@@ -65,10 +65,9 @@ select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)
     or t->'source'->>'checksum' is null;
 `
 
-// pgcopydb compare data logs a row-count or checksum difference and still
-// exits 0, so compare_data_strict re-derives the verdict from the --json
-// report. psql parses it because the runner image ships no jq or python, and
-// a report that could not be produced or read counts as a mismatch.
+// Validate the report even after exit 0: empty or incomplete output proves
+// no match, and some runner overrides exit 0 on content differences.
+// psql parses JSON because the runner image ships no jq or python.
 var compareDataStrict = `compare_data_strict() {
   if ! pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + compareReportPath + `; then
     echo "compare data could not run; refusing to read that as a match"

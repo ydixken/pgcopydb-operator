@@ -121,9 +121,8 @@ var _ = Describe("Migration Controller verification", func() {
 		finishJob(ctx, name+"-compare-schema", true)
 		m = reconcileAndGet(ctx, newReconciler(), name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
-		// The data check ships as the wrapper script, not as bare argv:
-		// pgcopydb compare data exits 0 on a difference, so a Job running it
-		// directly can never report one (see compareDataStrict).
+		// Keep report validation in the Job: a successful comparator process
+		// can still produce an empty or incomplete report.
 		dataJob := fetchJob(ctx, name+"-compare-data")
 		Expect(dataJob.Spec.Template.Spec.Containers[0].Args).
 			To(Equal([]string{"-c", compareDataScript}))

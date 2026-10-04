@@ -62,3 +62,5 @@
 - Reviewer recommendations do not override the CI-only functional-test rule; unknown race-instrumented timing belongs to exact-head CI, not a new local gate.
 - Publish a diagnostic result and its validity together; an interim failure label can mislead concurrent readers even when every field is locked.
 - Redact known DNS/transport error phrases as whole lines: private hostnames can appear without a URI or IP address.
+- Treat investigation as a milestone when asked to work through a ticket; carry a confirmed gap through the agreed implementation, integration, and verification before ending the task.
+- Keep dependency fixes scoped to our fork; create no issue or pull request in the original upstream repository unless the user explicitly asks.

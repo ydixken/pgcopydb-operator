@@ -1180,3 +1180,281 @@ Record the PR URL, commit SHA, CI URLs, test selection, and timings in the PR ra
 - [ ] Verify `lint`, `test`, and `docs` on the exact published head, plus Codecov when present.
   Record helper-step build/startup time, every meaningful `TestLiveWriter` parent result, stderr flood, atomic-query and concurrency coverage, and the parent-only subprocess-helper skip.
   Stop on any failure with its exact head and logs; report a bounded checkpoint if CI exceeds 20 minutes.
+
+## Issue #249: partitioned-table verification investigation
+
+We investigate whether the existing comparison path verifies partitioned tables and what additional coverage or behavior would be needed.
+Keep implementation separate until the user approves a design.
+
+- [x] Audit the operator verification path, pinned pgcopydb sources, and existing partition coverage.
+- [x] Probe partition comparison with the exact pgcopydb version in a disposable environment and record the scope and limits of the evidence.
+- [x] Obtain an independent review of the findings and proposed acceptance criteria.
+- [x] Update [issue #249](https://github.com/ydixken/pgcopydb-operator/issues/249) as findings emerge and record the remaining work and acceptance criteria.
+
+Behavior changes require an approved design before implementation, regression tests, or user documentation changes.
+
+### Review
+
+The disposable probe exercised 11 RANGE partition cases with `pgcopydb 0.18.15.gea2dc96`.
+Matching leaves passed; a payload mutation and missing leaves failed.
+Detached leaves, incorrect bounds, an incorrect partition key, extra leaves, and a missing zero-leaf parent alongside a sentinel table falsely passed.
+A parent-only empty report failed the operator's data wrapper.
+An independent live check confirmed that both comparison checks passed with three source rows and four target rows after adding an extra target leaf.
+The investigation used probe artifacts outside git and changed no application code.
+The [final findings and acceptance criteria](https://github.com/ydixken/pgcopydb-operator/issues/249#issuecomment-5975347335) complete this investigation.
+The implementation plan below carries the remaining partition verification work.
+`git diff --check` and `task lint` both exited 0; Go lint reported `0 issues.`.
+
+## Issue #249: partition verification implementation plan
+
+> **For agentic workers:** Use focused implementation agents and independent verification agents under the team leader.
+> Execute the approved design task by task, and report evidence before marking a gate complete.
+
+**Goal:** Reject partition topology mismatches in both bundled pgcopydb comparison commands and prove that operator verification reports them.
+
+**Architecture:** We fix comparison in the pgcopydb fork, because both operator verification Jobs already delegate to its comparison commands.
+Comparison reads current source and target partition catalogs, compares the selected source families symmetrically, and then keeps the existing leaf checksum/report path.
+The operator change integrates the verified binary and adds E2E coverage without changing the API or controller behavior.
+
+**Tech stack:** Existing PostgreSQL catalog SQL, libpq and C in the fork; existing Go, controller-runtime, Ginkgo and image workflows in the operator.
+
+**Spec:** [Issue #249](https://github.com/ydixken/pgcopydb-operator/issues/249) and its [investigation acceptance criteria](https://github.com/ydixken/pgcopydb-operator/issues/249#issuecomment-5975347335), with the comparator-first design approved by the user's instruction to work through the ticket.
+This implementation plan supersedes the investigation's implementation restriction above.
+
+### Constraints and review focus
+
+- Use normal branch `fix/249-partition-verification` in both primary checkouts; preserve existing dirty investigation notes and untracked fork task files.
+- Add no dependency, controller API, copy-table catalog storage, or checksum report format.
+- Reuse existing namespace and exact/regex table filters, including persisted clone filters in the same work directory.
+- Preserve strict table-name selection: an exact/regex include-only table or leaf admits matching leaves and required ancestor metadata, while nonmatching extra siblings stay outside scope.
+- Schema inclusion admits all eligible family members, so an extra target member in an included schema MUST fail; explicit table exclusions still apply.
+- Parent-only table inclusion checks parent metadata without expanding copied or checksummed leaves; an empty data report remains fail closed.
+- Keep `exclude-table-data` relations structurally eligible and preserve existing checksum selection behavior; fixing data-skip behavior is outside this ticket.
+- Query current topology even when clone discovery already populated the work catalog.
+- Run formatting and lint locally only; dispatch functional, build and documentation verification in CI.
+- Keep private infrastructure facts and secret values out of commands, logs and public evidence.
+- Review target extras inside a selected family, including empty and nested leaves, while tolerating unrelated target tables.
+- Review selected leaf ancestors, detached or reparented identities, and schema-only verification of a selected parent with zero leaves.
+- Review quoting and canonical partition expressions under different source/target `search_path`, time zone and date formatting settings.
+- Review selected foreign partitions: fail closed when selected, retain existing exclusion semantics when excluded.
+- Review error and cleanup paths: no successful comparison on query/parse/allocation failure, and no E2E fixture Job substituted for a production comparison Job.
+
+### Task 1: Establish failing comparator regressions
+
+**Files:** Create fork `tests/unit/script/9-compare-partitions.sh` and `tests/unit/expected/9-compare-partitions.out`.
+The existing `tests/unit/copydb.sh` discovers scripts and golden files automatically.
+
+- [x] Create dedicated tiny source/target databases and independent work directories inside the existing regression container, isolating these cases from unrelated unit fixtures.
+  Use `ON_ERROR_STOP`, bounded command execution, traps and explicit exit-status assertions.
+- [x] Assert schema and data success for matching RANGE, DEFAULT, empty-leaf, LIST, HASH, nested and quoted-name families.
+- [x] Assert schema and data exit code `12` plus the stable `Partition topology mismatch` diagnostic for missing parents/leaves, detached/reparented leaves, changed partition strategy/key/bounds, and extra target empty/populated/default/nested partitions.
+- [x] Keep payload mutation as a data-failure case with schema success, and prove that unrelated target tables are tolerated.
+- [x] Reproduce the exact source-three/target-four false-success case and require both comparison commands to fail.
+- [x] Create filtered catalogs through native clone or data copy, reuse that work directory, and exercise exact and regex include/exclude selections, excluded descendants, and selected-leaf ancestors.
+- [ ] With exact/regex table or leaf includes, assert nonmatching extra siblings remain outside scope and matching extra members fail; assert required ancestor metadata drift still fails.
+- [x] With schema inclusion, assert extra family members fail; with explicit table exclusion, assert excluded siblings remain ignored.
+- [x] With parent-only inclusion, assert parent metadata is checked without adding leaves to copy/checksum selection and retain empty data-report rejection.
+- [ ] With `exclude-table-data`, assert structural topology remains checked without changing or promising to fix existing checksum-skip behavior.
+- [x] Assert selected foreign-partition failure without broadening excluded-family selection; test zero-leaf parent schema success and preserve operator data empty-report rejection.
+- [x] Test canonical key/bound output with different session defaults and quoted identifiers; exercise a sufficiently long expression to reject fixed-size truncation.
+- [x] Publish only the regression baseline through the fork integration worker and dispatch `run-tests.yml` on its exact head before implementation.
+  Record the run URL, SHA and intentional mismatch assertion failure; arbitrary nonzero exits, setup failures and compile failures do not establish the baseline.
+
+### Task 2: Produce a filtered current partition inventory
+
+**Files:** Modify fork `src/bin/pgcopydb/schema.c`, `schema.h`, `sql/list_source_tables.sql`, `sql_queries.c` and `sql_queries.h`; create `sql/list_compare_partitions.sql`; regenerate `sql/sql_queries_data.inc`.
+Paths in this task are relative to `src/bin/pgcopydb/` unless fully qualified.
+
+**Interface:** The inventory producer owns its `schema.h` declarations and sends the finalized names, fields, ownership rules and error contract to the comparator consumer before that consumer starts.
+The inventory carries qualified relation identity, relation kind, immediate qualified parent, strategy, dynamically allocated key/bound text, and existing-filter eligibility.
+
+- [x] Extract the existing `schema_list_ordinary_tables` query argument assembly privately in `schema.c`; keep one filter implementation for namespace and exact/regex include/exclude matching.
+- [x] Parameterize allowed relation kinds in `list_source_tables.sql`: ordinary discovery remains `r,m`, while partition comparison eligibility uses `r,p,f`.
+  Keep partition parents out of `s_table` and the row-copy queue.
+- [x] Build source family anchors from eligible relations and their ancestors, then inspect corresponding target identities and eligible children under those anchors.
+  Detect missing, detached and incorrectly parented identities as well as target additions without comparing unrelated target families.
+  Evaluate extra target members with the same existing selection predicates: nonmatching exact/regex include-only siblings are outside scope, schema-included members are in scope, and explicitly excluded members stay excluded.
+  Required ancestors supply metadata only; selecting a parent MUST NOT expand copied or checksummed leaves.
+- [x] Read current `pg_class`, `pg_inherits` and partition metadata through the new registered SQL query, instead of treating a persisted clone inventory as current topology.
+- [x] Read canonical expressions with `search_path=pg_catalog`, UTC time zone and ISO date formatting; allocate key/bound text dynamically and free every allocated field on success and failure.
+- [x] Reject unsupported selected foreign partitions and malformed/query-failed inventory reads explicitly; keep excluded foreign partitions excluded.
+- [x] Register the query and regenerate its owned output with `make -C src/bin/pgcopydb gen-sql`; do not hand-edit the generated include.
+- [x] Send the finalized public header contract to the comparator worker and obtain an independent review of selection symmetry, cleanup and row-copy isolation.
+
+### Task 3: Guard schema and data comparison
+
+**Files:** Modify fork `src/bin/pgcopydb/compare.c` and `docs/ref/pgcopydb_compare.rst`.
+Consume Task 2's finalized header contract rather than introducing a second inventory representation.
+
+- [x] Extract the target half of `compare_fetch_schemas` so data comparison can reuse its correct source-type target catalog setup.
+- [x] Add one shared topology guard to schema and data comparison before checksum workers start; compare identity, kind, immediate parent, strategy, key and bound.
+- [x] Return exit code `12` for topology differences with the stable `Partition topology mismatch` diagnostic and focused details identifying the difference; fail closed for selected unsupported foreign partitions.
+  Preserve source storage, leaf checksums, report shape and existing empty-report behavior.
+- [x] Document partition scope, current-catalog reads, filters and unsupported selected foreign partitions in the comparator reference.
+- [x] Review all early exits and both command callers independently; reconcile the regression cases with the actual guard behavior.
+- [x] Format with the fork's canonical formatter and run its banned-API/style checks locally through the fork integration worker.
+- [x] Dispatch exact-head `run-tests.yml` for PG16/18 and `nightly.yml` for PG16/17/18; require the new regression suite and existing filtering, partition and CDC suites to pass.
+- [x] Open and merge the reviewed fork PR into `v0.18-fixes` only after recording both workflow results and matching their head SHAs.
+  Retain the feature branch and report the merged fork commit's `git describe` version for Task 5.
+
+### Task 4: Prove operator partition verification
+
+**Files:** Create operator `test/e2e/partition_verification_test.go`; reuse helpers in `test/e2e/e2e_suite_test.go` and existing verification lifecycle conventions.
+
+- [x] Add a tiny fixture in a unique owned schema using the existing source/target pair and `IncludeOnlySchemas`; create source objects under the migration role.
+- [x] Add a happy clone case requiring true schema/data results, production comparison Jobs with `JobComplete`, `Verified=True`, and completed migration state.
+- [x] Add a mismatch case by creating the Migration suspended, then creating its owned suspended schema-comparison Job as a barrier before resuming the actual clone.
+  Wait for clone completion and `Verifying` before modifying the target.
+- [x] Add one extra target partition and row, prove source count three and target count four, then delete the barrier with its UID precondition.
+  Never unsuspend the barrier; wait for a different UID on the real replacement Job.
+  Prove original leaf payloads remain identical, so the asserted failure isolates the extra target member.
+- [x] Assert both production comparison Jobs fail, both recorded results are false, `Verified=False` has `SchemaMismatch`, and `Complete=True` retains `PhaseCompleted`.
+  Require the `VerificationMismatch` warning event to reference the Migration UID.
+- [x] Require both real production Job logs to contain `Partition topology mismatch`; permission, connection, image or arbitrary Job failures cannot satisfy this regression.
+- [x] Register cleanup immediately after fixture ownership is established, delete only owned Migration/Jobs, and prove all owned Pods are terminated or deleted before dropping only this fixture's schemas.
+- [x] Review barrier sequencing, UID ownership, migration-role setup, status assertions and failure cleanup independently; format touched Go files.
+  CI compiles the test now; Task 7 verifies its cluster behavior on the release candidate carrying the fixed binary.
+
+### Task 5: Integrate the verified binary and artifact pins
+
+**Files:** Modify operator `images/pgcopydb-builder/Dockerfile`, `images/runner/Dockerfile`, `.github/workflows/release.yml`, `cmd/main.go`, `cmd/main_test.go`, `charts/pgcopydb-operator/values.yaml`, `charts/pgcopydb-operator/README.md`, `internal/progress/poller_test.go`, `internal/controller/resources_test.go` and `test/buildconfig/buildconfig_test.go`.
+
+- [x] Resolve the exact fork merge SHA and its version from Task 3; update builder SHA/version together and inspect existing pin-consistency assertions.
+- [x] Dispatch `.github/workflows/pgcopydb-builder.yml` on the operator feature branch and verify both published architectures and their multiarch manifest digest for that exact fork SHA.
+- [x] Update runner builder tag/digest and binary version canary together, then update the release smoke version assertion.
+  Do not merge an intermediate builder-only operator change.
+- [x] Add the new exact version to CLI/chart progress allowlists and corresponding progress/controller fixtures; retain all currently allowed older versions.
+- [x] Update build-configuration pin contracts to require consistent SHA/version/digest references while retaining the legitimate older `ea2dc96` allowlist entry.
+- [ ] Obtain independent review of artifact provenance and allowlist compatibility, then require CI to build and verify the final matching pins.
+
+### Task 6: Update affected operator documentation
+
+**Files:** Modify `images/runner/README.md`, `docs/reference/prerequisites.md`, `docs/design/follow-diagnostics.md`, `docs/operations/monitoring.md`, `docs/operations/live-migration.md`, `docs/operations/performance.md` and `docs/operations/verification.md`.
+Update stale comparison claims in `internal/controller/verification.go`, `internal/controller/resources.go`, their affected tests, and `internal/pgcopydb/compare.go` or `compare_test.go` only where present.
+
+- [x] Document the bundled version, partition family checks, supported strategies, preserved filters and selected foreign-partition limitation.
+- [x] Correct statements that the pinned comparator always returns zero for data mismatches; preserve the operator report wrapper's reason and empty-report failure behavior.
+- [x] Update version-specific runtime examples and prerequisites where they describe the shipped binary; keep immutable historical provenance links valid.
+- [x] Apply humanizer, semantic line breaks and the repository comment limits; avoid repeating comparator implementation details across user guides.
+- [ ] Run local `task lint` after formatting and check the scoped diff for generated-file drift, stale claims and private infrastructure facts.
+
+### Task 7: Review, deliver and verify the release candidate
+
+- [ ] Obtain one independent whole-change review against the approved issue criteria, including fork regression evidence, public header ownership, E2E barriers, artifact pins and docs.
+- [ ] Resolve review findings through the owning workers, format touched files, run `git diff --check` and `task lint`, and record actual results.
+- [ ] Commit only reviewed issue files in conventional, lint-clean commits; push normally and open the operator PR against `main` under standing authorization.
+- [ ] Require operator `lint`, `test` and `docs` on the exact final PR head, then recheck head and reviewed scope before merging.
+- [ ] Verify merged `main` and post-merge checks; follow the next candidate produced by `auto-release.yml` and its tag-triggered `release.yml`.
+- [ ] Verify candidate artifact identities and full release-candidate E2E at `E2E_SCALE=0.1`, including the new partition verification specs and owned-resource cleanup.
+  Do not run current-context local E2E or bypass its human prompt; do not deploy to production or mutate a published release.
+- [ ] Update issue #249 at the baseline, comparator, integration and candidate milestones with concrete changes, exact SHAs and workflow URLs.
+  Close the ticket only after the integrated candidate proves the required behavior and cleanup; a PR merge alone does not close the verification gate.
+- [ ] Add the final review and verification evidence to this task record without overwriting the investigation history.
+
+### Implementation coordination
+
+The team leader reviewed and approved this plan.
+Tests-only comparator commit `03157899003193c65237acbbd415c6e330d83511` passed the intentional failing-baseline gate in [Run Tests 37170199269](https://github.com/ydixken/pgcopydb/actions/runs/37170199269).
+Both PostgreSQL 16 and 18 unit jobs failed with `extra empty target leaf: schema expected exit 12, got 0`, after fixture cloning and matching schema/data comparisons succeeded.
+The other 38 jobs passed, including image builds, migration suites, documentation, C style and banned-API checks.
+This evidence opened production comparator implementation; fixed behavior still requires both workflows on the exact reviewed head.
+
+- [x] Confirm the baseline failure isolates an extra target partition rather than fixture setup, compilation or connectivity.
+- [x] Record the baseline SHA and workflow result in [issue #249](https://github.com/ydixken/pgcopydb-operator/issues/249#issuecomment-5975941604).
+- [x] Review the initial producer, consumer and persisted-filter implementation independently.
+- [x] Review the corrections for source detachment, current cached relation identity and canonical metadata settings.
+- [x] Review persisted-filter regex validation and exact include/exclude conflict handling, with focused regressions.
+- [x] Format the integrated comparator and require Run Tests plus the PostgreSQL 16/17/18 Nightly Tests matrix on its exact head.
+- [ ] Integrate the resulting dependency SHA/version and published builder digest into the operator.
+- [ ] Verify the operator CI and release-candidate E2E gates before closing the ticket.
+
+We retain selected identities when either endpoint is partitioned, so source detachment cannot erase the comparison scope.
+We validate cached names against current source-local relation OIDs before accepting checksum coverage.
+We normalize float precision, identifier quoting and string literal settings along with time zone, date style and search path.
+We restore separately owned filters before discovery and reject malformed values, invalid regexes and exact include/exclude conflicts.
+Operator E2E coverage and affected documentation follow the same approved scope.
+
+
+### Comparator integration publication
+
+The reviewed comparator is published in [fork PR #12](https://github.com/ydixken/pgcopydb/pull/12) at `6d2c3580e9e7e21724b5ec6b99a99b8a0b7c5d49`.
+The canonical style check passed all 89 C/header files; banned-API, Bash syntax, ShellCheck, generated SQL comparison and whitespace checks exited zero.
+[Run Tests 37172849960](https://github.com/ydixken/pgcopydb/actions/runs/37172849960) and [Nightly Tests 37172849891](https://github.com/ydixken/pgcopydb/actions/runs/37172849891) both check that exact feature SHA.
+The merge requires both workflows to pass and the team leader to review their results.
+Operator artifact publication and release-candidate E2E remain pending.
+
+
+### Comparator CI setup correction
+
+[Run Tests 37172849960](https://github.com/ydixken/pgcopydb/actions/runs/37172849960) completed at `6d2c3580e9e7e21724b5ec6b99a99b8a0b7c5d49` with 34 successful jobs and six failures.
+The pagila and unit failures exposed comparison setup rejecting clone COPY split settings; the all-database failures exposed schema workers retaining their parent's catalog paths.
+The obsolete Nightly run was cancelled after the same failures were captured.
+[Corrective commit `7f963d3dfd99d8d9746c2e8a5794f209cdb5120b`](https://github.com/ydixken/pgcopydb/commit/7f963d3dfd99d8d9746c2e8a5794f209cdb5120b) preserves database identity checks, avoids COPY option validation during filter adoption, and rebinds per-database schema catalogs.
+Independent review and local canonical style, banned-API, Bash syntax, ShellCheck and whitespace checks passed.
+[Run Tests 37173364611](https://github.com/ydixken/pgcopydb/actions/runs/37173364611) and [Nightly Tests 37173364526](https://github.com/ydixken/pgcopydb/actions/runs/37173364526) both check that exact corrective head.
+The original failed runs cannot satisfy any passing gate.
+
+
+### Cached-name regression contract
+
+The corrected catalog setup passed pagila and all-database jobs on PostgreSQL 16, 17 and 18 at `7f963d3dfd99d8d9746c2e8a5794f209cdb5120b`.
+All five unit jobs observed the required exit 12 for the malformed cached name, but rejected the stable missing-checksum topology diagnostic because the test expected a query-error message.
+Independent review confirmed PostgreSQL's soft NULL result and the existing coverage guard.
+[Test-only commit `5401d5dcf63d302a3ff831b0fd134146ea4db470`](https://github.com/ydixken/pgcopydb/commit/5401d5dcf63d302a3ff831b0fd134146ea4db470) changes only that diagnostic regex.
+Bash syntax, ShellCheck, banned-API and whitespace checks passed locally; production C and golden output remain unchanged.
+The obsolete corrective runs were cancelled after their failing assertions and passing catalog jobs were recorded.
+[Run Tests 37174153699](https://github.com/ydixken/pgcopydb/actions/runs/37174153699) and [Nightly Tests 37174153877](https://github.com/ydixken/pgcopydb/actions/runs/37174153877) both check this exact head and must pass before merge.
+
+
+### Filtered clone fixture correction
+
+The final `5401d5dcf63d302a3ff831b0fd134146ea4db470` Run Tests completed with 38 successful jobs and two unit fixture setup failures.
+Nightly reproduced the same setup failure on PostgreSQL 16, 17 and 18; 81 jobs passed before its two obsolete keepalive jobs were cancelled.
+The native dump's exact schema arguments omitted a regex-selected quoted ancestor, independently of the comparator's discovery selection.
+[Commit `e950707c90b4986e25915fd6522526e6e41c287b`](https://github.com/ydixken/pgcopydb/commit/e950707c90b4986e25915fd6522526e6e41c287b) prepares empty quoted schema DDL before the affected filtered clones and requires one included row and zero excluded rows.
+The actual clone filters remain unchanged; ordinary inheritance coverage moves to the final unfiltered clone.
+The commit also removes stale regex-expansion comments without changing C behavior.
+Independent fixture/prose reviews and local style, banned-API, Bash syntax, ShellCheck, generated SQL and whitespace checks passed.
+[Run Tests 37175500801](https://github.com/ydixken/pgcopydb/actions/runs/37175500801) and [Nightly Tests 37175500974](https://github.com/ydixken/pgcopydb/actions/runs/37175500974) both check this exact head.
+Complete passing workflows and independent unit regression continuation proof remain required before merge.
+
+
+### Native filtered data-copy coverage
+
+`e950707c90b4986e25915fd6522526e6e41c287b` Run Tests completed with 38 successful jobs and two strict table-filter clone setup failures.
+Nightly reproduced that fixture setup failure on all three PostgreSQL versions, with 82 successful jobs before its last obsolete keepalive job was cancelled.
+[Commit `4f7271c93495a042bec351ec4cd2efe2dca99a06`](https://github.com/ydixken/pgcopydb/commit/4f7271c93495a042bec351ec4cd2efe2dca99a06) isolates comparison scope from existing filtered schema-restore limitations.
+Strict table, exclusion and parent-only cases prepare complete empty DDL, then use supported native `pgcopydb copy data` with genuine original INI rules and persisted catalogs.
+The cases retain selected counts, parent attachment, direct excluded zero-count checks and the empty parent-only report assertion.
+The passing schema inclusion full clone and late inheritance/foreign full clone remain unchanged.
+Independent actual-diff review and Bash syntax, ShellCheck and whitespace checks passed; no production C behavior changed.
+[Run Tests 37176686201](https://github.com/ydixken/pgcopydb/actions/runs/37176686201) and [Nightly Tests 37176686297](https://github.com/ydixken/pgcopydb/actions/runs/37176686297) both check this exact head.
+Full success and independent unit golden-diff/continuation proof remain merge gates.
+
+
+### Comparator regression proof
+
+[Run Tests 37176686201](https://github.com/ydixken/pgcopydb/actions/runs/37176686201) completed successfully with all 40 jobs at `4f7271c93495a042bec351ec4cd2efe2dca99a06`.
+All five PostgreSQL 16/17/18 unit jobs across the two workflows passed.
+Independent review of each actual log confirmed script 9, both golden comparisons, and continuation through the binary-tsvector regression.
+The existing all-database and pagila comparisons also passed on all five matrix entries.
+[Native fork PR #12](https://github.com/ydixken/pgcopydb/pull/12) remains gated on complete success of [Nightly Tests 37176686297](https://github.com/ydixken/pgcopydb/actions/runs/37176686297) and the team leader's merge review.
+Operator artifact integration and release-candidate E2E remain separate gates; issue #249 stays open.
+
+
+### Fork comparator merge
+
+[Fork PR #12](https://github.com/ydixken/pgcopydb/pull/12) merged into `v0.18-fixes` at `22e29c357ef82e8097d19f7306824c350e7a7c86`.
+Its tree `08af915b138ffd97cf141183adbd172580ab5da4` exactly matches reviewed feature head `4f7271c93495a042bec351ec4cd2efe2dca99a06`.
+That feature head passed all 40 Run Tests jobs and all 86 Nightly jobs, with independent actual-log review of all five partition unit suites and existing comparison regressions.
+Explicit `git describe --match 'v[0-9]*'` on the canonical merge returns `v0.18-22-g22e29c3`, so the dependency version is `0.18.22.g22e29c3`.
+Canonical-head [Run Tests 37177374540](https://github.com/ydixken/pgcopydb/actions/runs/37177374540) and [Nightly Tests 37177376486](https://github.com/ydixken/pgcopydb/actions/runs/37177376486) both target the merge SHA; their passing results remain required.
+The operator pin worker received this canonical identity for builder integration.
+The ticket stays open until operator CI, artifact identity and release-candidate E2E prove the integrated behavior and cleanup.
+
+
+### Canonical fork CI
+
+The canonical dependency merge `22e29c357ef82e8097d19f7306824c350e7a7c86` passed all 40 jobs in [Run Tests 37177374540](https://github.com/ydixken/pgcopydb/actions/runs/37177374540) and all 86 jobs in [Nightly Tests 37177376486](https://github.com/ydixken/pgcopydb/actions/runs/37177376486).
+All five canonical unit logs show script 9, both golden comparisons and continuation through the binary-tsvector regression.
+The dependency version remains `0.18.22.g22e29c3`; no source changes occurred after the reviewed fork merge.
