@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -45,6 +47,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
+	"github.com/ydixken/pgcopydb-operator/internal/telemetry"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -204,6 +207,19 @@ func managerOptions(f *flags) ctrl.Options {
 // setupRunnables registers the health checks and the Migration controller on
 // a freshly built manager.
 func setupRunnables(mgr ctrl.Manager, f *flags) error {
+	tcfg, err := telemetry.ConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("read the OpenTelemetry settings: %w", err)
+	}
+	exporter, err := telemetry.NewMetrics(context.Background(), tcfg, version, crmetrics.Registry)
+	if err != nil {
+		return fmt.Errorf("set up OTLP metrics: %w", err)
+	}
+	if exporter != nil {
+		if err := mgr.Add(exporter); err != nil {
+			return fmt.Errorf("add OTLP metrics exporter: %w", err)
+		}
+	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("set up health check: %w", err)
 	}
