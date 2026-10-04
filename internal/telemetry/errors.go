@@ -45,9 +45,12 @@ func (h *rateLimitedHandler) Handle(err error) {
 
 var installErrorHandler sync.Once
 
+// setErrorHandler also routes the SDK's own diagnostics through the operator's
+// structured log; ConfigFromEnv keeps header values out of them.
 func setErrorHandler() {
 	installErrorHandler.Do(func() {
 		log := logf.Log.WithName("telemetry")
+		otel.SetLogger(log)
 		otel.SetErrorHandler(&rateLimitedHandler{every: time.Minute, now: time.Now,
 			log: func(err error) {
 				log.Error(err, "OpenTelemetry export failed; further errors are suppressed for a minute")
