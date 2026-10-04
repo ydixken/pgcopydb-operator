@@ -78,10 +78,13 @@ var _ = Describe("Progress sampler bounds", SpecPriority(2), func() {
 			waitPhase(name, nsE2E, lagConvergeTimeout, v1beta1.PhaseCutoverPending)
 			baseline := readMigration().Status.Progress.DeepCopy()
 			Expect(baseline).NotTo(BeNil())
+			Expect(baseline.ObservedAt).NotTo(BeNil())
+			Expect(baseline.ObservedAt.IsZero()).To(BeFalse())
 			Expect(baseline.BytesTotal).NotTo(BeNil())
 			Expect(baseline.BytesDone).NotTo(BeNil())
 			Expect(baseline.BytesTotal.Value()).To(BeNumerically(">", 0))
 			Expect(baseline.BytesDone.Value()).To(BeNumerically(">", 0))
+			baseline.ObservedAt = nil
 			release := holdProgressLock([]string{sourceKey, targetKey}[side], cluster, table)
 			func() {
 				defer release()
@@ -116,7 +119,14 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 					Expect(runnerProgressProcesses(runner, false)).To(ContainElements(workers),
 						"sampling cancellation must preserve the worker processes")
 					m := readMigration()
-					Expect(m.Status.Progress).To(Equal(baseline))
+					current := m.Status.Progress.DeepCopy()
+					Expect(current).NotTo(BeNil())
+					Expect(current.ObservedAt).NotTo(BeNil())
+					Expect(current.ObservedAt.IsZero()).To(BeFalse())
+					// A completed sample can publish after this lock was acquired.
+					// Controlled controller tests cover failed-sample timestamp retention.
+					current.ObservedAt = nil
+					Expect(current).To(Equal(baseline))
 					Expect(m.Status.Attempts).To(Equal(int32(1)))
 					Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 				}

@@ -285,13 +285,13 @@ var _ = Describe("Migration Controller background sampler", func() {
 			return r, s
 		}
 
-		It("lands the background sample in status on the next pass", func() {
+		It("publishes later cached samples even when their counts are unchanged", func() {
 			const name = "sampler-status"
 			defer removeMigration(ctx, name)
 			defer metrics.Forget(testNS, name)
 			p := &pacedProgress{fake: &fakeProgress{src: int64p(9000), tgt: int64p(700), copying: true,
 				relations: &progress.RelationCounts{TablesTotal: 4, TablesDone: 1, BytesTotal: 9000, BytesDone: 700}}}
-			r, _ := runningClone(name, p, 10*time.Millisecond)
+			r, s := runningClone(name, p, time.Hour)
 			Eventually(func() *v1beta1.CloneProgress {
 				return reconcileAndGet(ctx, r, name).Status.Progress
 			}).ShouldNot(BeNil())
@@ -299,6 +299,22 @@ var _ = Describe("Migration Controller background sampler", func() {
 			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 			Expect(m.Status.Progress.TablesDone).To(Equal(int64(1)))
 			Expect(copySeen(m)).To(BeTrue())
+			Expect(m.Status.Progress.ObservedAt).NotTo(BeNil())
+			expected := m.Status.Progress.DeepCopy()
+			expected.ObservedAt.Time = expected.ObservedAt.Add(10 * time.Second)
+			r.now = func() time.Time { return expected.ObservedAt.Time }
+			cached, ok := s.Observe(key(name), m.Status.JobName, m.Spec.Clone.AllDatabases, hintFor(m))
+			Expect(ok).To(BeTrue())
+			Expect(cached.sample).NotTo(BeNil())
+			Expect(cached.sample.Counts).NotTo(BeNil())
+			calls := p.fake.counts()
+			cached.at = expected.ObservedAt.Time
+			s.mu.Lock()
+			s.keepLocked(key(name), s.runs[key(name)], cached)
+			s.mu.Unlock()
+			m = reconcileAndGet(ctx, r, name)
+			Expect(m.Status.Progress).To(Equal(expected))
+			Expect(p.fake.counts()).To(Equal(calls), "the pass must publish the cached sample")
 		})
 
 		It("latches a copy that a newer sample replaced before any pass read it", func() {

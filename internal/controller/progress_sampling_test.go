@@ -588,12 +588,14 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		for _, tc := range []struct {
 			src, tgt               *int64
 			err                    error
+			nilSample              bool
 			wantSource, wantTarget float64
 		}{
-			{nil, nil, context.DeadlineExceeded, 5000, 1000},
-			{nil, int64p(1200), nil, 5000, 1200},
-			{int64p(5500), nil, nil, 5500, 1200},
-			{nil, nil, nil, 5500, 1200},
+			{nil, nil, context.DeadlineExceeded, false, 5000, 1000},
+			{nil, int64p(1200), nil, false, 5000, 1200},
+			{int64p(5500), nil, nil, false, 5500, 1200},
+			{nil, nil, nil, false, 5500, 1200},
+			{nil, nil, nil, true, 5500, 1200},
 		} {
 			// The clock moves, so a lost sample that stamped observedAt would no
 			// longer equal the baseline.
@@ -601,6 +603,7 @@ var _ = Describe("Migration Controller progress sampling", func() {
 			fake.mu.Lock()
 			fake.src, fake.tgt, fake.sizesErr = tc.src, tc.tgt, tc.err
 			fake.relations, fake.copying = nil, false
+			fake.nilSample = tc.nilSample
 			fake.mu.Unlock()
 			m := reconcileAndGet(ctx, r, name)
 			Expect(m.Status.Progress).To(Equal(baseline.Status.Progress))
