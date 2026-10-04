@@ -3,6 +3,8 @@
 The E2E suite normally creates its own CloudNativePG source and target.
 In external mode it runs against a database pair you already have, from your own Kubernetes cluster.
 It seeds its fixtures into your source, migrates them with an operator it installs, and checks the result on your target.
+It also deploys an OpenTelemetry Collector in the operator namespace, and the operator exports its metrics to it.
+The collector image comes from `ghcr.io`.
 That shows the operator works with your servers, network, and roles; it says nothing about your own data.
 
 > [!caution]
@@ -18,7 +20,7 @@ That shows the operator works with your servers, network, and roles; it says not
   The suite installs the chart with `crds.install=false` and fails naming every field the served CRD lacks.
 - Rights to create the namespaces `pgcopydb-e2e`, `pgcopydb-e2e-x`, and `pgcopydb-e2e-system`, or `E2E_MANAGE_NAMESPACES=false` with those namespaces and the manager ServiceAccount provided by their owner (see the [contributor guide](https://github.com/ydixken/pgcopydb-operator/blob/main/CONTRIBUTING.md#e2e-tests)).
 - Network access from pods in those namespaces to both servers.
-- Image pulls from `ghcr.io` in the cluster: the operator and runner images under `ghcr.io/ydixken/pgcopydb-operator`, and `ghcr.io/cloudnative-pg/postgresql:18`, which the client pod and the seed Job run.
+- Image pulls from `ghcr.io` in the cluster: the operator and runner images under `ghcr.io/ydixken/pgcopydb-operator`, `ghcr.io/cloudnative-pg/postgresql:18` for the client pod and the seed Job, and `ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.162.0` for the collector.
 - One database on each server, holding no user objects on the first run.
 - On each side, an app role that can log in, owns its database, and is not a superuser.
   The migrations run as this role, and the seed creates schemas and the `citext` extension as it.

@@ -317,6 +317,35 @@ func TestSetupRunnablesErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("unsupported OTel exporter fails start", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXPORTER", "prometheus")
+		err := setupRunnables(testManager(t, cfg), f)
+		if err == nil || !strings.Contains(err.Error(), "OTEL_METRICS_EXPORTER") {
+			t.Errorf("err = %v, want an error naming OTEL_METRICS_EXPORTER", err)
+		}
+	})
+
+	t.Run("malformed OTEL_RESOURCE_ATTRIBUTES fails start", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+		t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "a=b,c")
+		err := setupRunnables(testManager(t, cfg), f)
+		if err == nil || !strings.Contains(err.Error(), "OTEL_RESOURCE_ATTRIBUTES") {
+			t.Errorf("err = %v, want an error naming OTEL_RESOURCE_ATTRIBUTES", err)
+		}
+	})
+
+	t.Run("OTLP metrics exporter registration fails", func(t *testing.T) {
+		// The exporter is the first runnable added, so addErr hitting it
+		// proves the exporter is registered when the environment asks.
+		t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+		t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+		err := setupRunnables(checkFailer{Manager: testManager(t, cfg), addErr: boom}, f)
+		if err == nil || !strings.Contains(err.Error(), "OTLP metrics exporter") {
+			t.Errorf("err = %v, want OTLP metrics exporter error", err)
+		}
+	})
+
 	t.Run("pod exec transport rejects the config", func(t *testing.T) {
 		// QPS without Burst passes manager construction but fails the
 		// clientset that podexec builds from the same config.

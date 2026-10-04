@@ -29,7 +29,8 @@ tasks:
       # value combinations that decide what the chart grants.
       - cmd: |-
           if command -v helm >/dev/null; then
-            helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh && ./hack/check-chart-monitoring.sh
+            helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh \
+              && ./hack/check-chart-monitoring.sh && ./hack/check-chart-otel.sh
           else
             echo "lint: no helm, skipping chart lint"
           fi

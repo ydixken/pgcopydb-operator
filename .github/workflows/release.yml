@@ -347,6 +347,9 @@ jobs:
             kubectl delete migrations.pgcopydb-operator.io --all -n "$ns" --ignore-not-found --timeout=5m
           done
           helm uninstall pgcopydb-e2e -n pgcopydb-e2e-system --ignore-not-found --wait
+          # The suite applies the collector itself, so helm uninstall leaves it.
+          kubectl delete deployment/otel-collector service/otel-collector configmap/otel-collector \
+            -n pgcopydb-e2e-system --ignore-not-found --timeout=2m
           for ns in pgcopydb-e2e pgcopydb-e2e-x pgcopydb-e2e-system; do
             kubectl delete clusters.postgresql.cnpg.io,jobs,pvc --all -n "$ns" --ignore-not-found --timeout=5m
           done

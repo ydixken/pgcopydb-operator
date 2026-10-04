@@ -19,6 +19,12 @@ Gauges change when the operator samples the worker, so a slower scrape can miss 
 Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, and expect the dashboards to lag by what you set.
 `metrics.serviceMonitor.additionalLabels` labels the monitor for a Prometheus that selects by label; `scrapeTimeout`, `relabelings`, and `metricRelabelings` tune the rest.
 
+## Prometheus or OTLP?
+
+Both work at the same time, and Prometheus scraping stays the default.
+Use OTLP when your stack collects metrics through an OpenTelemetry Collector.
+See the [OpenTelemetry guide](opentelemetry.md).
+
 ## Controller timing
 
 A background sampler reads each running worker on its own timer, so a slow reconcile pass does not delay the size gauges.

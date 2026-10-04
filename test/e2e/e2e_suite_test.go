@@ -1313,6 +1313,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	if featureE2ERunValue == "" {
 		helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
 	}
+	deployOTelCollector()
 	values := []string{
 		"crds.install=false",
 		"image.tag=" + operatorTag,
@@ -1324,6 +1325,10 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		// PrometheusRule and the dashboard ConfigMaps stay off: real alert
 		// config on a shared cluster, and no sidecar watches this namespace.
 		"metrics.serviceMonitor.enabled=true",
+		"otel.enabled=true",
+		"otel.protocol=http/protobuf",
+		"otel.endpoint=http://" + otelCollectorName + "." + nsOperator + ":4318",
+		"otel.metricsIntervalSeconds=5",
 	}
 	args := []string{"install", helmRelease, chartPath, "-n", nsOperator, "--wait"}
 	if manageNamespaces {
@@ -1429,12 +1434,10 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 		},
 		func() {
 			// The throwaway operator always goes away, keep-fixtures or not.
-			By("uninstalling the suite's operator")
-			helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
-			if manageNamespaces {
-				By("deleting " + nsOperator)
-				deleteNamespaces(2*time.Minute, nsOperator)
-			}
+			Expect(runEach(operatorTeardownSteps(func() {
+				By("uninstalling the suite's operator")
+				helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+			})...)).To(Succeed())
 		},
 		func() {
 			// By lives here, not in teardownFixtures: a unit test calls that helper outside a Ginkgo run.
@@ -1446,6 +1449,21 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 	)).To(Succeed(),
 		"the suite's teardown left state behind; after an external run see docs/operations/e2e-external.md#cleanup")
 })
+
+// operatorTeardownSteps removes the operator, its namespace when the suite owns it, and the
+// collector helm does not own. The collector is its own step, so no failure on either side skips the other.
+func operatorTeardownSteps(uninstall func()) []func() {
+	return []func(){
+		func() {
+			uninstall()
+			if manageNamespaces {
+				By("deleting " + nsOperator)
+				deleteNamespaces(2*time.Minute, nsOperator)
+			}
+		},
+		deleteOTelCollector,
+	}
+}
 
 // runEach runs every step even after one fails and returns their failures,
 // so the replication cleanup and the password Secret sweep always run.

@@ -119,7 +119,8 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
-The suite installs a throwaway operator and creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
+The suite installs an OpenTelemetry Collector in the operator namespace and a throwaway operator that exports its metrics to it over OTLP.
+It creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
 If the suite can list nodes, each one-instance cluster prefers one node, so CNPG's initdb pod and the instance pod use the same volume attachment.
 Pair N's source prefers usable node N in name order, and its target prefers the next node.
 It seeds each source through a Kubernetes Job running `test/e2e/fixtures/run.sh`.

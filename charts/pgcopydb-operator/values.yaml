@@ -105,6 +105,41 @@ networkPolicy:
   # plane opens no inbound port, leaving nothing to restrict.
   enabled: false
 
+# OpenTelemetry export over OTLP. Off by default; Prometheus scraping is
+# unaffected either way. See docs/operations/opentelemetry.md.
+otel:
+  enabled: false
+  # Required when enabled. grpc: http://otel-collector.observability:4317 for a
+  # plaintext collector, https:// for TLS. A host:port without a scheme uses TLS
+  # unless tls.insecure is true. http/protobuf: http://otel-collector.observability:4318.
+  endpoint: ""
+  # grpc or http/protobuf.
+  protocol: grpc
+  signals:
+    metrics: true
+  # How often metrics are pushed, in seconds.
+  metricsIntervalSeconds: 30
+  # Extra resource attributes, as OTEL_RESOURCE_ATTRIBUTES: "key=value,key2=value2".
+  resourceAttributes: ""
+  tls:
+    # Turn TLS off. Meant for a grpc endpoint without a scheme, but it also
+    # turns TLS off for an https:// endpoint.
+    insecure: false
+    # Secret with the CA bundle that signs the collector certificate.
+    caSecret:
+      name: ""
+      key: ca.crt
+    # kubernetes.io/tls Secret for mutual TLS (tls.crt, tls.key).
+    clientCertSecret:
+      name: ""
+  # Secret key holding OTEL_EXPORTER_OTLP_HEADERS, e.g. "authorization=Bearer <token>".
+  headersSecret:
+    name: ""
+    key: headers
+
+# Extra environment variables for the manager container, e.g. raw OTEL_* settings.
+extraEnv: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
