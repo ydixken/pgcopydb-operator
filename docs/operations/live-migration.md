@@ -98,9 +98,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.15.gea2dc96`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.22.g22e29c3`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/ea2dc96a47c2f7676d71a4967d044a1e469e4110/src/bin/pgcopydb/ld_stream.c#L1521-L1546) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/22e29c357ef82e8097d19f7306824c350e7a7c86/src/bin/pgcopydb/ld_stream.c#L1521-L1546) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
@@ -162,7 +162,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
     The fast path passes only when the target's replication origin sits exactly on the cutover LSN.
     Any remaining distance is decided by content, never by its size.
     Nearly every cutover takes the compare path.
-    Size the write-downtime window for a `compare data` over the whole database.
+    Size the write-downtime window for `compare data` over the selected storage tables.
     Treat the exact-LSN pass as the exception.
 
     The Job runs `pgcopydb compare data` and validates the report `--json` prints, instead of the exit status alone.
@@ -170,7 +170,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
     A compare that could not run, and a report the Job cannot read, refuse rather than pass.
 
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin.
-    Then `Complete` goes True and the phase is `Completed`.
+    After any requested [post-transfer verification](verification.md), `Complete` goes True and the phase is `Completed`.
 
 7. Point the application at the target.
 

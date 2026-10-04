@@ -7,10 +7,10 @@ It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles pos
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`ea2dc96a47c2f7676d71a4967d044a1e469e4110`](https://github.com/ydixken/pgcopydb/commit/ea2dc96a47c2f7676d71a4967d044a1e469e4110).
-The version string is `0.18.15.gea2dc96`, derived from `git describe` (`v0.18-15-gea2dc96`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is fifteen commits, including merge commits, not an upstream release named v0.18.15.
-The runner pins the builder's multi-platform index `sha256:1145d382fc74bb35c1b8a19a42ed9469639b66d405b560ad9777a7111c9d3b33`, published by [builder run `35152785053`](https://github.com/ydixken/pgcopydb-operator/actions/runs/35152785053).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`22e29c357ef82e8097d19f7306824c350e7a7c86`](https://github.com/ydixken/pgcopydb/commit/22e29c357ef82e8097d19f7306824c350e7a7c86).
+The version string is `0.18.22.g22e29c3`, derived from `git describe` (`v0.18-22-g22e29c3`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is twenty-two commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:ded7d7176a0b7e0cba353fbb9df0e6bbe8495e0c5ac618dbe0440c4415b14750`, published by [builder run `37177583274`](https://github.com/ydixken/pgcopydb-operator/actions/runs/37177583274).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -39,13 +39,17 @@ A retained slot without valid sentinel state, or a catalog SQL error, fails clos
 The merged tree matches feature `5d10b14`, tested by [Run Tests `35150666775`](https://github.com/ydixken/pgcopydb/actions/runs/35150666775) and [Nightly Tests `35150664335`](https://github.com/ydixken/pgcopydb/actions/runs/35150664335).
 This bootstrap recovery does not repair interrupted index builds, eviction damage, lost established-stream CDC files, or arbitrary corrupt metadata.
 
+[Fork PR #12](https://github.com/ydixken/pgcopydb/pull/12), merged as `22e29c3`, adds partition topology checks to schema and data comparison.
+Data comparison scans each selected storage leaf once; see [Partitioned tables](../../docs/operations/verification.md#partitioned-tables) for supported topologies and filter scope.
+The merged commit passed [Run Tests `37177374540`](https://github.com/ydixken/pgcopydb/actions/runs/37177374540) and [Nightly Tests `37177376486`](https://github.com/ydixken/pgcopydb/actions/runs/37177376486).
+
 > [!warning]
 > Each source transaction waits for target WAL durability before apply progress advances.
 > This may raise latency for workloads with many small transactions; that cost is unmeasured.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all three older versions so upgrading the operator does not suppress counters for existing workers.
+The manager and chart allow `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all four older versions so upgrading the operator does not suppress counters for existing workers.
 Version `0.18.13.g4873c18` provides certified idle keepalive feedback but not the missing-sentinel bootstrap recovery.
 Neither `0.18.10.gaadc4bf` nor `0.18.5.ge37d2bd` provides certified idle keepalive feedback.
 This allowlist does not select or upgrade worker images.
