@@ -127,6 +127,7 @@ func fullMigration() *Migration {
 			},
 			Suspend:                 true,
 			DryRun:                  true,
+			Preflight:               &PreflightOptions{RequireSameMajorVersion: true},
 			BackoffLimit:            2,
 			TTLSecondsAfterFinished: &ttl,
 		},

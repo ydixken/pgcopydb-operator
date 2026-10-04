@@ -397,6 +397,17 @@ type FollowOptions struct {
 	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
 }
 
+// PreflightOptions enables preflight gates that are off by default. Mutable
+// until the preflight Job is created.
+type PreflightOptions struct {
+	// requireSameMajorVersion fails preflight when the source and target
+	// PostgreSQL major versions differ. Minor versions are ignored. Off by
+	// default because a cross-major upgrade is a main use of pgcopydb.
+	// Each server is asked for server_version_num, not the spec or image tag.
+	// +optional
+	RequireSameMajorVersion bool `json:"requireSameMajorVersion,omitempty"`
+}
+
 // VerificationOptions selects post-migration pgcopydb compare checks, both off
 // by default because both are expensive. Results are information, not a gate: a
 // mismatch sets Verified to False and emits a warning event, but the Migration
@@ -527,6 +538,10 @@ type MigrationSpec struct {
 	// Immutable: the real run is a separate Migration.
 	// +optional
 	DryRun bool `json:"dryRun,omitempty"`
+
+	// preflight tunes optional preflight gates.
+	// +optional
+	Preflight *PreflightOptions `json:"preflight,omitempty"`
 
 	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
 	// Job (backoffLimit 0) that resumes via the pgcopydb work directory.

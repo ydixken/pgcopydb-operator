@@ -274,6 +274,7 @@ _Appears in:_
 | `runner` _[RunnerSpec](#runnerspec)_ | runner configures the worker pod. |  | Optional: \{\} <br /> |
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
 | `dryRun` _boolean_ | dryRun runs the preflight checks and stops: no worker Job, no data<br />written, no replication slot, publication, or origin. A passed dry run<br />ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef<br />would apply are reported, not applied. Unrelated to kubectl --dry-run.<br />Immutable: the real run is a separate Migration. |  | Optional: \{\} <br /> |
+| `preflight` _[PreflightOptions](#preflightoptions)_ | preflight tunes optional preflight gates. |  | Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0) that resumes via the pgcopydb work directory. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished deletes owned Jobs this long after completion. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
@@ -329,6 +330,23 @@ _Appears in:_
 | `uriSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | uriSecretRef selects a full libpq connection URI/DSN (with credentials).<br />Mutually exclusive with the inline fields; useful for DBaaS sources. |  | Optional: \{\} <br /> |
 | `secretRef` _[ConnectionSecret](#connectionsecret)_ | secretRef references one Secret carrying the connection details as<br />individual keys, the way platform provisioners hand them out.<br />Mutually exclusive with the inline fields and uriSecretRef. |  | Optional: \{\} <br /> |
 | `superuserSecretRef` _[ConnectionSecret](#connectionsecret)_ | superuserSecretRef names a superuser on this same endpoint, in the same<br />Secret convention (USER/PW; URL keys, when present, must match this<br />connection). The preflight uses it to verify and apply missing grants;<br />applied statements are logged and kept, never reverted. |  | Optional: \{\} <br /> |
+
+
+#### PreflightOptions
+
+
+
+PreflightOptions enables preflight gates that are off by default. Mutable
+until the preflight Job is created.
+
+
+
+_Appears in:_
+- [MigrationSpec](#migrationspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `requireSameMajorVersion` _boolean_ | requireSameMajorVersion fails preflight when the source and target<br />PostgreSQL major versions differ. Minor versions are ignored. Off by<br />default because a cross-major upgrade is a main use of pgcopydb.<br />Each server is asked for server_version_num, not the spec or image tag. |  | Optional: \{\} <br /> |
 
 
 #### ReplicationStatus

@@ -57,6 +57,7 @@ Its first check is connectivity: `select 1` against both endpoints, with each re
 The probe retries up to six times, 10 seconds apart.
 Two consecutive permanent errors, such as a failed password authentication, an unknown role, or an unknown database, end the retries early.
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt runs.
+With `spec.preflight.requireSameMajorVersion: true`, the [major version gate](#major-version-gate) runs right after connectivity.
 Selected installed source extensions must be installed on the target or have a non-null default version in `pg_available_extensions`.
 With `clone.dropIfExists: true` or `clone.allDatabases: true`, an installed extension also needs a target default version.
 Restore may recreate the extension, or create it in a new database.
@@ -172,6 +173,25 @@ It follows its table, as array types, row types and multirange types follow the 
 > The handover covers every schema, relation, routine and type in the target database that the migration role owns, not only the ones this restore created.
 > Nothing in the catalog records which objects a restore created.
 > Use a migration role dedicated to the migration when the target database also holds objects that role owns.
+
+### Major version gate
+
+`spec.preflight.requireSameMajorVersion: true` fails preflight when the source and target PostgreSQL major versions differ.
+Minor versions are ignored.
+It is off by default, because a cross-major upgrade is a main use of pgcopydb.
+The gate runs on the plain and the all-databases path, and under `spec.dryRun` it reports like any other failed check.
+
+Preflight asks each live server over the Migration's own source and target connections: `current_setting('server_version_num')`, divided by 10000.
+It does not trust the spec, the image tag, or the `server_version` text, because managed services decorate that text (Debian or Aurora suffixes).
+Through PgBouncer the query runs on the real backend, so it reports the server's version, not the one PgBouncer advertises at connect.
+A side that cannot be read fails the gate rather than passing it.
+A failed gate stops preflight, so no later check runs and the version line is the one reported.
+
+```yaml
+spec:
+  preflight:
+    requireSameMajorVersion: true
+```
 
 ## All databases
 

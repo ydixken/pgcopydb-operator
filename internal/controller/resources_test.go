@@ -898,6 +898,85 @@ func TestPreflightScriptFor_Structure(t *testing.T) {
 	})
 }
 
+func sameMajorMigration(allDatabases bool) *v1beta1.Migration {
+	m := passwordMigration()
+	m.Spec.Clone.AllDatabases = allDatabases
+	m.Spec.Preflight = &v1beta1.PreflightOptions{RequireSameMajorVersion: true}
+	return m
+}
+
+// TestPreflightScriptFor_SameMajor pins the opt-in: no flag leaves the script
+// without the block, the flag adds it right after the connectivity header.
+func TestPreflightScriptFor_SameMajor(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		plain := passwordMigration()
+		plain.Spec.Clone.AllDatabases = all
+		off := preflightScriptFor(plain)
+		plain.Spec.Preflight = &v1beta1.PreflightOptions{}
+		if got := preflightScriptFor(plain); got != off || strings.Contains(off, "server_version_num") {
+			t.Fatalf("allDatabases=%v: unset or false flag must leave the script unchanged", all)
+		}
+		on := preflightScriptFor(sameMajorMigration(all))
+		if !strings.Contains(on, majorVersionBlock) {
+			t.Fatalf("allDatabases=%v: gate missing:\n%s", all, on)
+		}
+		mustPrecede(t, on, `echo "ok: connectivity target"`, "server_version_num")
+		if strings.ReplaceAll(on, majorVersionBlock+preflightStopOnFailure, "") != off {
+			t.Fatalf("allDatabases=%v: the gate must be the only difference", all)
+		}
+	}
+}
+
+func TestPreflightScript_SameMajor(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(sameMajorMigration(false))
+	const mismatch = "preflight: source major 16 differs from target major 17 (spec.preflight.requireSameMajorVersion)"
+	t.Run("match passes", func(t *testing.T) {
+		out, code, _ := run(t, script, "")
+		if code != 0 || !strings.Contains(out, "ok: major version source 16 target 16") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("mismatch fails by name", func(t *testing.T) {
+		out, code, _ := run(t, script, "", "TGT_MAJOR=17")
+		if code != 1 || !strings.Contains(out, mismatch) || strings.Contains(out, "all checks passed") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("a mismatch stops before any later probe and keeps the footer", func(t *testing.T) {
+		// Extensions are enabled in this script: that probe exits silently after an earlier failure.
+		out, code, _ := run(t, script, "", "TGT_MAJOR=17")
+		if code != 1 || !strings.Contains(out, "preflight failed:\n"+mismatch) || strings.Contains(out, "selected extension") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("an unreadable side fails closed", func(t *testing.T) {
+		out, code, _ := run(t, script, "", "SRC_MAJOR=")
+		if code != 1 || strings.Contains(out, "ok: major version") || !strings.Contains(out, "cannot read the source and target major versions") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+}
+
+// TestPreflightScript_SameMajorLive runs the gate through a real psql; CI
+// supplies PGCOPYDB_TEST_PGURI. One server answers for both sides, so only the
+// matching case is reachable here.
+func TestPreflightScript_SameMajorLive(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to a reachable Postgres to run the major version gate")
+	}
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Fatalf("PGCOPYDB_TEST_PGURI is set but psql is missing: %v", err)
+	}
+	cmd := exec.Command(shellPath, "-c", preflightHeader+majorVersionBlock)
+	cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uri, "PGCOPYDB_TARGET_PGURI="+uri)
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "ok: major version source ") {
+		t.Fatalf("err=%v out:\n%s", err, out)
+	}
+}
+
 func TestPreflightScriptFor_AllDatabases(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Clone.AllDatabases = true
@@ -1148,6 +1227,7 @@ apply() {
   exit 0
 }
 case "$q" in
+  *server_version_num*) case "$uri" in src*) echo "${SRC_MAJOR-16}" ;; *) echo "${TGT_MAJOR-16}" ;; esac ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
   *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
   *pg_available_extensions*) printf '%s' "${PSQL_EXTENSION_TARGET-[]}" ;;
