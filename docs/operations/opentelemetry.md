@@ -2,7 +2,15 @@
 
 The operator can send its metrics over OTLP (the OpenTelemetry protocol) to an OpenTelemetry Collector or a compatible backend.
 This release exports metrics only.
-Prometheus scraping does not change, and both paths can run at the same time.
+The export does not change the Prometheus scrape endpoint.
+
+> [!warning]
+> Send the metrics to a Prometheus by one path only.
+> When the collector sends the OTLP metrics to the Prometheus that scrapes the operator, each series occurs two times.
+> Then the rule of the `PgcopydbMigrationCutoverStalled` alert fails with an error, and that alert does not fire.
+> The other alerts fire two times, and the dashboards show each Migration two times.
+> For this configuration, stop the scrape: set `metrics.serviceMonitor.enabled=false`.
+> The "Scrape Targets Up" panel of the Operator Health dashboard then shows no data, because only a scrape makes the `up` series.
 
 ## Turn on the export
 

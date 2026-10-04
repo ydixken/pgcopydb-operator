@@ -21,9 +21,11 @@ Raise `metrics.serviceMonitor.interval` if that is more traffic than you want, a
 
 ## Prometheus or OTLP?
 
-Both work at the same time, and Prometheus scraping stays the default.
+Prometheus scraping stays the default.
 Use OTLP when your stack collects metrics through an OpenTelemetry Collector.
-See the [OpenTelemetry guide](opentelemetry.md).
+Pick one path per Prometheus.
+If the collector forwards OTLP into a Prometheus that also scrapes the operator, every series arrives twice: `PgcopydbMigrationCutoverStalled` fails to evaluate, and the other alerts fire twice.
+The [OpenTelemetry guide](opentelemetry.md) covers turning the scrape off.
 
 ## Controller timing
 
