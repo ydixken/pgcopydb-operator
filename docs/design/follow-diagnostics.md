@@ -106,5 +106,5 @@ The [receive batching fix](../operations/performance.md#follow-receive-and-apply
 We retain the 12-minute budget until measurements with the bundled runner justify a smaller one; the trade-off is slower reporting of a genuine failure.
 
 > [!important]
-> This budget is environmental accommodation, not a resolution of the throughput investigation in [#260](https://github.com/ydixken/pgcopydb-operator/issues/260).
+> This budget is environmental accommodation: the receive batching fix closed [#260](https://github.com/ydixken/pgcopydb-operator/issues/260), but no bundled-runner measurement has yet justified a smaller budget.
 > The A/B/A experiment did not exercise the progress-bounds spec, so its fresh-seed behavior remains unproven.
