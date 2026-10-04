@@ -34,6 +34,12 @@ label='tls'; out=$(render --set otel.enabled=true --set otel.endpoint=https://c:
   --set otel.tls.caSecret.name=otlp-ca --set otel.tls.clientCertSecret.name=otlp-client)
 has 'OTEL_EXPORTER_OTLP_CERTIFICATE'; has '/etc/otel/ca/ca.crt'; has 'OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE'
 has '/etc/otel/client/tls.crt'; has '/etc/otel/client/tls.key'; has 'secretName: otlp-ca'; has 'secretName: otlp-client'
+has 'mountPath: /etc/otel/ca'; has 'mountPath: /etc/otel/client'
+
+label='custom secret keys'; out=$(render --set otel.enabled=true --set otel.endpoint=https://c:4317 \
+  --set otel.tls.caSecret.name=otlp-ca --set otel.tls.caSecret.key=bundle.pem \
+  --set otel.headersSecret.name=otlp-auth --set otel.headersSecret.key=otlp-headers)
+has '/etc/otel/ca/bundle.pem'; has 'key: otlp-headers'
 
 label='insecure'; out=$(render --set otel.enabled=true --set otel.endpoint=c:4317 --set otel.tls.insecure=true)
 has 'name: OTEL_EXPORTER_OTLP_INSECURE'; has 'value: "true"'
