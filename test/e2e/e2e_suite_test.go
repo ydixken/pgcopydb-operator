@@ -1313,6 +1313,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	if featureE2ERunValue == "" {
 		helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
 	}
+	deployOTelCollector()
 	values := []string{
 		"crds.install=false",
 		"image.tag=" + operatorTag,
@@ -1324,6 +1325,10 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		// PrometheusRule and the dashboard ConfigMaps stay off: real alert
 		// config on a shared cluster, and no sidecar watches this namespace.
 		"metrics.serviceMonitor.enabled=true",
+		"otel.enabled=true",
+		"otel.protocol=http/protobuf",
+		"otel.endpoint=http://" + otelCollectorName + "." + nsOperator + ":4318",
+		"otel.metricsIntervalSeconds=5",
 	}
 	args := []string{"install", helmRelease, chartPath, "-n", nsOperator, "--wait"}
 	if manageNamespaces {
@@ -1431,6 +1436,7 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 			// The throwaway operator always goes away, keep-fixtures or not.
 			By("uninstalling the suite's operator")
 			helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+			deleteOTelCollector()
 			if manageNamespaces {
 				By("deleting " + nsOperator)
 				deleteNamespaces(2*time.Minute, nsOperator)
