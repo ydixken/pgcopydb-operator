@@ -219,3 +219,16 @@ For single-database migrations, preflight checks that Secret and applies the gra
 Each `PreflightRemediated` event lists the statements that one tier applied.
 A [dry run](operations/lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 See [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) for the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) for the example.
+
+### Connection keepalives
+
+The operator adds TCP keepalive settings to every connection URI it composes, which covers the inline and `secretRef` forms:
+`keepalives=1`, `keepalives_idle=10`, `keepalives_interval=10`, and `keepalives_count=6`.
+Without them libpq falls back to the kernel's two-hour default.
+A server that disappears without closing its connections, such as a replaced pod or a torn-down network path, then leaves the pgcopydb copy workers waiting on a dead socket for hours.
+With them, the read fails after about 70 seconds and the attempt ends with a connection error.
+A `DB` URI in a `secretRef` Secret keeps any of these keys it already sets, and the operator fills in only the missing ones.
+
+> [!note]
+> The operator does not rewrite a `uriSecretRef` value.
+> Add the keepalive parameters to that URI yourself.

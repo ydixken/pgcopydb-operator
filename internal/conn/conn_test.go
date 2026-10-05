@@ -47,8 +47,20 @@ func TestComposeURI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "postgresql://migrator@db.example.com:5432/shop?sslmode=require"
+	want := "postgresql://migrator@db.example.com:5432/shop?sslmode=require&" + tKeep
 	if uri != want {
+		t.Fatalf("got %q want %q", uri, want)
+	}
+}
+
+func TestComposeURI_KeepalivesWithoutSSLMode(t *testing.T) {
+	c := inlineConn()
+	c.SSLMode = ""
+	uri, err := ComposeURI(Source, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "postgresql://migrator@db.example.com:5432/shop?" + tKeep; uri != want {
 		t.Fatalf("got %q want %q", uri, want)
 	}
 }
@@ -409,6 +421,7 @@ const (
 	envSrcHost = "PGM_SOURCE_HOST"
 	tPwPath    = "/etc/pgcopydb/creds/source-mnt/source-password"
 	tURI6432   = "postgresql://" + tUser + "@" + tHost + ":6432/" + tDB
+	tKeep      = "keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=6"
 )
 
 func secretConn() *v1beta1.PostgresConnection {
@@ -634,14 +647,14 @@ func TestSecretRefPrelude(t *testing.T) {
 			name:     "uri with port is authoritative",
 			env:      map[string]string{envSrcDB: tURI6432},
 			password: tPass,
-			wantURI:  tURI6432,
+			wantURI:  tURI6432 + "?" + tKeep,
 			wantLine: tLine,
 		},
 		{
 			name:     "uri without port",
 			env:      map[string]string{envSrcDB: "postgres://alice@db.example.com/app"},
 			password: tPass,
-			wantURI:  "postgres://alice@db.example.com/app",
+			wantURI:  "postgres://alice@db.example.com/app?" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -649,7 +662,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			sslMode:  tRequire,
 			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=x"},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com/app?application_name=x&sslmode=require",
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=x&sslmode=require&" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -657,14 +670,14 @@ func TestSecretRefPrelude(t *testing.T) {
 			sslMode:  tRequire,
 			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?sslmode=disable"},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com/app?sslmode=disable",
+			wantURI:  "postgresql://alice@db.example.com/app?sslmode=disable&" + tKeep,
 			wantLine: tLine,
 		},
 		{
 			name:     "userless uri takes the username key",
 			env:      map[string]string{envSrcDB: "postgresql://db.example.com:5432/app", envSrcUser: tUser},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com:5432/app",
+			wantURI:  "postgresql://alice@db.example.com:5432/app?" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -676,7 +689,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			name:     "bare name with host:port",
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: "db.example.com:6432", envSrcUser: tUser},
 			password: tPass,
-			wantURI:  tURI6432,
+			wantURI:  tURI6432 + "?" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -684,7 +697,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			sslMode:  tRequire,
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com:5432/app?sslmode=require",
+			wantURI:  "postgresql://alice@db.example.com:5432/app?sslmode=require&" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -701,7 +714,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			name:     "password escaping survives the passfile",
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
 			password: `p:a\ss:`,
-			wantURI:  "postgresql://alice@db.example.com:5432/app",
+			wantURI:  "postgresql://alice@db.example.com:5432/app?" + tKeep,
 			wantLine: `db.example.com:*:*:alice:p\:a\\ss\:`,
 		},
 		{
@@ -710,7 +723,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			tls:      true,
 			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?sslmode=verify-full"},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt",
+			wantURI:  "postgresql://alice@db.example.com/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt&" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -719,7 +732,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			tls:      true,
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com:5432/app?sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt&sslmode=require",
+			wantURI:  "postgresql://alice@db.example.com:5432/app?sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt&sslmode=require&" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -727,7 +740,58 @@ func TestSecretRefPrelude(t *testing.T) {
 			sslMode:  tRequire,
 			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=fake_sslmode=1"},
 			password: tPass,
-			wantURI:  "postgresql://alice@db.example.com/app?application_name=fake_sslmode=1&sslmode=require",
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=fake_sslmode=1&sslmode=require&" + tKeep,
+			wantLine: tLine,
+		},
+		{
+			name:     "uri keeps a user-set keepalives",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?keepalives=0"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?keepalives=0&keepalives_idle=10&keepalives_interval=10&keepalives_count=6",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri keeps a user-set keepalives_idle",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?keepalives_idle=300"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?keepalives_idle=300&keepalives=1&keepalives_interval=10&keepalives_count=6",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri keeps a user-set keepalives_interval",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?keepalives_interval=30"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?keepalives_interval=30&keepalives=1&keepalives_idle=10&keepalives_count=6",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri keeps a user-set keepalives_count",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?keepalives_count=2"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?keepalives_count=2&keepalives=1&keepalives_idle=10&keepalives_interval=10",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri with every keepalive set gains none",
+			sslMode:  tRequire,
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?keepalives_count=3&keepalives=1&keepalives_interval=5&keepalives_idle=60&sslmode=disable"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?keepalives_count=3&keepalives=1&keepalives_interval=5&keepalives_idle=60&sslmode=disable",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri mixing user keepalives and other params fills only the gaps",
+			sslMode:  tRequire,
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=x&keepalives_idle=30&keepalives_count=3"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=x&keepalives_idle=30&keepalives_count=3&sslmode=require&keepalives=1&keepalives_interval=10",
+			wantLine: tLine,
+		},
+		{
+			name:     "uri value merely containing keepalives text still gains it",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=x_keepalives_idle=1"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=x_keepalives_idle=1&" + tKeep,
 			wantLine: tLine,
 		},
 		{
@@ -976,14 +1040,14 @@ func TestSuperPrelude(t *testing.T) {
 			name:      "secretRef primary with DB as URI",
 			secretRef: true,
 			env:       map[string]string{envSrcDB: tURI6432},
-			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB + "?" + tKeep,
 			wantLines: []string{tLine, tHost + ":*:*:" + tSuperUser + ":" + tSuperPass},
 		},
 		{
 			name:      "secretRef primary with bare name",
 			secretRef: true,
 			env:       map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
-			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":5432/" + tDB,
+			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":5432/" + tDB + "?" + tKeep,
 			wantLines: []string{tLine, tSuperLine},
 		},
 		{
