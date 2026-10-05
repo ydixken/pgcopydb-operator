@@ -111,7 +111,7 @@ func registerFlags(fs *flag.FlagSet) *flags {
 	fs.StringVar(&f.watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to watch; empty watches the whole cluster.")
 	fs.StringVar(&f.progressPollVersions,
-		"progress-poll-versions", "0.18.22.g22e29c3,0.18.15.gea2dc96,0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd",
+		"progress-poll-versions", "0.18.34.g7fddd6f,0.18.22.g22e29c3,0.18.15.gea2dc96,0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd", //nolint:lll // test/buildconfig matches the list whole
 		"Comma-separated exact pgcopydb versions allowed to run the in-pod progress poll; "+
 			"empty disables the poll (database sizes are sampled regardless).")
 	fs.BoolVar(&f.enableLeaderElection, "leader-elect", false,

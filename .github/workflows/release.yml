@@ -193,7 +193,7 @@ jobs:
         # fork-built pgcopydb. The pull is a native amd64 one, so only that
         # half of the manifest is exercised here.
         run: |
-          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.22.g22e29c3'
+          docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pgcopydb --version | grep -F '0.18.34.g7fddd6f'
           docker run --rm "$IMAGE/runner:$GITHUB_REF_NAME" pg_dump --version
 
   chart:
