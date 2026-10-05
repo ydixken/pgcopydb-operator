@@ -178,14 +178,21 @@ func TestStampedSchemasSQLIsAtomic(t *testing.T) {
 	t.Cleanup(func() {
 		testQuery(t, run, "DROP SCHEMA IF EXISTS "+sqlIdent(first)+", "+sqlIdent(second))
 	})
-	role := testQuery(t, run, "SELECT current_user")
+	// A superuser would make SET ROLE a no-op and the owner check vacuous.
+	role := testCaseOwner
+	onDatabase := func(sql string) string {
+		return "DO $g$ BEGIN EXECUTE format(" + sqlLiteral(sql) + ", current_database(), " + sqlLiteral(role) + "); END $g$"
+	}
+	testQuery(t, run, onDatabase("GRANT CREATE ON DATABASE %I TO %I"))
+	t.Cleanup(func() { testQuery(t, run, onDatabase("REVOKE CREATE ON DATABASE %I FROM %I")) })
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := run(ctx, stampedSchemasSQL(role, []string{first, taken}, "stamp:"+id)); err == nil {
 		t.Fatal("creating an existing schema succeeded")
 	}
-	found := "SELECT coalesce(string_agg(nspname || ' ' || pg_get_userbyid(nspowner) || ' ' ||" +
-		" obj_description(oid, 'pg_namespace'), ',' ORDER BY nspname), '') FROM pg_namespace" +
+	// format renders a missing stamp as empty, where || would hide the whole row.
+	found := "SELECT coalesce(string_agg(format('%s %s %s', nspname, pg_get_userbyid(nspowner)," +
+		" obj_description(oid, 'pg_namespace')), ',' ORDER BY nspname), '') FROM pg_namespace" +
 		" WHERE nspname IN (" + sqlLiteral(first) + ", " + sqlLiteral(second) + ")"
 	if got := testQuery(t, run, found); got != "" {
 		t.Fatalf("a failed create left %q behind", got)
