@@ -342,7 +342,7 @@ A contributor with a cluster SHOULD run the new specs locally with `task e2e:foc
 
 ### How do you add a feature coverage case?
 
-The feature coverage spec in `test/e2e/coverage_test.go` runs the SQL cases under `test/e2e/coverage/`, and the [coverage reference](docs/reference/coverage.md#postgresql-feature-coverage) lists every one of them.
+The feature coverage specs in `test/e2e/coverage_test.go` (clone group) and `test/e2e/coverage_follow_test.go` (follow group) run the SQL cases under `test/e2e/coverage/`, and the [coverage reference](docs/reference/coverage.md#postgresql-feature-coverage) lists every one of them.
 A case that comes out identical needs one file and no Go change.
 
 1. Write `test/e2e/coverage/<area>/<case>.sql`.

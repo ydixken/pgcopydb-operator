@@ -65,19 +65,10 @@ var _ = Describe("Feature coverage", SpecPriority(1), func() {
 			Filters: &v1beta1.Filters{IncludeOnlySchemas: schemas},
 		})
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-		for _, cluster := range []string{sourceCluster, targetCluster} {
-			psql(cluster, ensureCoverageReaderSQL)
-		}
-		createStampedSchemas(m, identity, "pgcopydb-e2e-coverage:"+identity, schemas, func(cluster, schema string) {
-			psql(cluster, "SET ROLE "+sqlIdent(appRole(cluster))+"; "+unlinkCoverageLargeObjectsSQL(schema))
-		})
+		createCoverageSchemas(m, identity, schemas)
 		for _, c := range cases {
 			By("setting up " + c.path)
-			setupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			err := applyCoverageCase(setupCtx, clusterPSQL(sourceCluster), c, c.setup, asSourceAppRole(),
-				c.schemaNames(identity))
-			cancel()
-			Expect(err).NotTo(HaveOccurred())
+			applyCoverageSection(c, c.setup, identity)
 		}
 
 		captured := map[string]comparePodLog{}
@@ -93,6 +84,27 @@ var _ = Describe("Feature coverage", SpecPriority(1), func() {
 		Expect(diffs).To(BeEmpty(), "the target differs from the source")
 	})
 })
+
+// createCoverageSchemas creates cov_reader on both servers and the stamped
+// schemas, whose cleanup unlinks the large objects each schema lists.
+func createCoverageSchemas(m *v1beta1.Migration, identity string, schemas []string) {
+	GinkgoHelper()
+	for _, cluster := range []string{sourceCluster, targetCluster} {
+		psql(cluster, ensureCoverageReaderSQL)
+	}
+	createStampedSchemas(m, identity, "pgcopydb-e2e-coverage:"+identity, schemas, func(cluster, schema string) {
+		psql(cluster, "SET ROLE "+sqlIdent(appRole(cluster))+"; "+unlinkCoverageLargeObjectsSQL(schema))
+	})
+}
+
+// applyCoverageSection runs one section of c on the source as the app role.
+func applyCoverageSection(c coverageCase, section, identity string) {
+	GinkgoHelper()
+	sectionCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	Expect(applyCoverageCase(sectionCtx, clusterPSQL(sourceCluster), c, section, asSourceAppRole(),
+		c.schemaNames(identity))).To(Succeed())
+}
 
 // coverageGroup is the group's embedded cases the source major can run. A
 // group without cases fails, so it cannot pass by running nothing.

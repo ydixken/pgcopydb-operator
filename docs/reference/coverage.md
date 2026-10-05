@@ -81,8 +81,13 @@ Each case is one SQL file under [`test/e2e/coverage/`](https://github.com/ydixke
 
 The clone group creates each clone case in its own schema on the source and clones all of them in one Migration filtered to those schemas, with `spec.verification.schema` and `spec.verification.data` set.
 A case passes when `Verified` is `True` and a fingerprint read on both sides matches.
-The fingerprint covers row data per table and per partition leaf, relation and partition layout, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
+The fingerprint covers row data per table and per partition leaf, relation and partition layout, replica identity with its index, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
 Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` still copies every large object in the database, with its OID and owner.
+
+The follow group sets up each follow case the same way and starts one follow Migration over those schemas with a Manual cutover.
+Once the Migration waits at `CutoverPending` with its lag converged, the spec runs every case's `@follow` statements on the source, then writes a marker row and waits until the target has it.
+It approves the cutover and, after `Completed`, requires `Verified` `True` and a matching fingerprint, as the clone group does.
+The fingerprint is read after the cutover, because the target's sequences keep their base-copy values until pgcopydb re-syncs them at the cutover.
 
 > [!note]
 > When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
