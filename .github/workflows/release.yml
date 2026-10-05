@@ -319,6 +319,9 @@ jobs:
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
           # Ginkgo processes, each with its own CNPG source/target pair.
           E2E_PROCS: "6"
+          # The context the runner's kubeconfig must be on. TestE2E skips
+          # without it, so the run step refuses an empty one.
+          E2E_CONTEXT: ${{ secrets.E2E_EXPECT_CONTEXT }}
         # go test cannot run Ginkgo in parallel, so go run builds the CLI at
         # the version go.mod pins. With several processes -v prints each spec
         # when it ends, not live; poll-progress-after still turns a spec that
@@ -329,6 +332,7 @@ jobs:
         # 15m, not 5m: the threshold has to sit above the runtime of a healthy
         # spec, and a clone at this scale runs for minutes on end.
         run: |
+          : "${E2E_CONTEXT:?the e2e-cluster environment has no E2E_EXPECT_CONTEXT secret}"
           go run github.com/onsi/ginkgo/v2/ginkgo --procs="$E2E_PROCS" -v \
             --timeout=4h --poll-progress-after=15m \
             --label-filter='!chaos && !flaky' ./test/e2e -- -test.run='^TestE2E$'

@@ -92,6 +92,10 @@ tasks:
     preconditions:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    # TestE2E skips without E2E_CONTEXT and fails when it names another context,
+    # so a plain `go test` cannot reach whatever kubectl points at.
+    env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
     cmds:
       # -ginkgo.timeout must match -timeout: Ginkgo's own suite timeout
       # defaults to 1h and would abort long tiers mid-run otherwise.
@@ -120,7 +124,8 @@ tasks:
             task e2e:focus FOCUS='loses no committed transaction'
     cmds:
       - task: e2e:focus:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}',
+               KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:focus:unattended:
     desc: >-
@@ -144,11 +149,14 @@ tasks:
             EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
     cmds:
       - task: e2e:focus:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}',
+               KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:focus:run:
     internal: true
+    requires: {vars: [KUBE_CONTEXT]}
     env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
       E2E_SCALE: '{{.SCALE | default "0.1"}}'
       E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
       E2E_MANAGE_NAMESPACES: '{{.MANAGE_NS | default "false"}}'
@@ -188,7 +196,7 @@ tasks:
             E2E_TARGET_URI E2E_TARGET_PASSWORD E2E_TARGET_ADMIN_URI E2E_TARGET_ADMIN_PASSWORD
     cmds:
       - task: e2e:external:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:external:unattended:
     desc: >-
@@ -207,11 +215,13 @@ tasks:
             EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
     cmds:
       - task: e2e:external:run
-        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}'}
+        vars: {FOCUS: '{{.FOCUS}}', SCALE: '{{.SCALE}}', KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:external:run:
     internal: true
+    requires: {vars: [KUBE_CONTEXT]}
     env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
       E2E_SCALE: '{{.SCALE | default "0.1"}}'
     # -run keeps the CNPG-pinned unit tests out; only the Ginkgo suite runs.
     cmds:
@@ -237,7 +247,8 @@ tasks:
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
       - task: e2e:chaos:run
-        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}',
+               KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:chaos:unattended:
     desc: >-
@@ -255,11 +266,14 @@ tasks:
             EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
     cmds:
       - task: e2e:chaos:run
-        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}',
+               KUBE_CONTEXT: '{{.KUBE_CONTEXT}}'}
 
   e2e:chaos:run:
     internal: true
+    requires: {vars: [KUBE_CONTEXT]}
     env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
       E2E_SCALE: '{{.SCALE | default "0.1"}}'
       E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
       E2E_MANAGE_NAMESPACES: '{{.MANAGE_NS | default "false"}}'
@@ -284,6 +298,8 @@ tasks:
     preconditions:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
     cmds:
       - ./hack/e2e-matrix.sh
 
@@ -303,5 +319,7 @@ tasks:
     preconditions:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
+    env:
+      E2E_CONTEXT: '{{.KUBE_CONTEXT}}'
     cmds:
       - E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v -ginkgo.timeout=8h -ginkgo.label-filter='!chaos'
