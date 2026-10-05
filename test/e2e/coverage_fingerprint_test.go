@@ -377,6 +377,46 @@ func TestCoverageFingerprintDetectsEveryAspect(t *testing.T) {
 	}
 }
 
+// replicaIdentityFixture uses a replica identity index that is not the key,
+// the shape pgcopydb used to reset to the default.
+const replicaIdentityFixture = `
+CREATE TABLE ${schema}.t (id integer PRIMARY KEY, code text NOT NULL);
+CREATE UNIQUE INDEX t_code_key ON ${schema}.t (code);
+ALTER TABLE ${schema}.t REPLICA IDENTITY USING INDEX t_code_key;
+`
+
+// TestCoverageFingerprintNamesReplicaIdentityIndex proves the relation aspect
+// alone sees a lost or moved replica identity index: a cross-major pair skips
+// the index aspect.
+func TestCoverageFingerprintNamesReplicaIdentityIndex(t *testing.T) {
+	run := testPSQL(t)
+	identity := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fixture := func(schema string) map[fingerprintKey]string {
+		testCoverageSchemas(t, run, schema)
+		testQuery(t, run, "SET ROLE "+testCaseOwner+";\n"+strings.ReplaceAll(replicaIdentityFixture, coverageSchema, schema))
+		return testFingerprint(t, run, schema)
+	}
+	relation := fingerprintKey{"relation", coverageSchema + " t"}
+	base := fixture("cov_ri_base_" + identity)
+	if got := base[relation]; !strings.Contains(got, " identity=i:t_code_key ") {
+		t.Fatalf("relation t = %q, want the replica identity index named", got)
+	}
+	for name, mutation := range map[string]string{
+		"default":     "ALTER TABLE ${schema}.t REPLICA IDENTITY DEFAULT",
+		"other index": "ALTER TABLE ${schema}.t REPLICA IDENTITY USING INDEX t_pkey",
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := "cov_ri_" + strings.ReplaceAll(name, " ", "_") + "_" + identity
+			fixture(schema)
+			testQuery(t, run, strings.ReplaceAll(mutation, coverageSchema, schema))
+			diffs := diffFingerprint(base, testFingerprint(t, run, schema), deparsedAspects)
+			if len(diffs) != 1 || diffs[0].aspect != relation.aspect || diffs[0].key != relation.key {
+				t.Fatalf("diffs without the deparsed aspects = %v, want one on relation t", diffs)
+			}
+		})
+	}
+}
+
 func TestDiffFingerprintReportsAbsentSides(t *testing.T) {
 	source := map[fingerprintKey]string{{"a", "same"}: "1", {"b", "gone"}: "2"}
 	target := map[fingerprintKey]string{{"a", "same"}: "1", {"c", "new"}: "3"}

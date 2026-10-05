@@ -76,7 +76,10 @@ WITH nsp AS (
     CASE WHEN relkind = 'p' THEN pg_get_partkeydef(oid) END,
     pg_get_expr(relpartbound, oid),
     (SELECT string_agg(inhparent::regclass::text, ',' ORDER BY inhseqno) FROM pg_inherits WHERE inhrelid = rel.oid),
-    relreplident, relrowsecurity, relforcerowsecurity, reloptions)
+    -- The index name here too: a cross-major pair skips the index aspect.
+    relreplident::text || coalesce(':' || (SELECT ic.relname FROM pg_index x JOIN pg_class ic ON ic.oid = x.indexrelid
+      WHERE x.indrelid = rel.oid AND x.indisreplident), ''),
+    relrowsecurity, relforcerowsecurity, reloptions)
   FROM rel WHERE relkind NOT IN ('i', 'I')
   UNION ALL
   SELECT r.nspname, 'column', r.relname || '.' || a.attname, format(
