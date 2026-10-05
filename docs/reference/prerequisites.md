@@ -143,7 +143,7 @@ This audit and the follow audit for [unlogged tables](#live-migration-specfollow
 Each audit applies the include filters the way pgcopydb applies them to its own step.
 The copy keeps a table only when it passes both lists: its own schema is in `includeOnlySchemas`, if set, and its own name is in `includeOnlyTables`, if set.
 So naming a partitioned table in `includeOnlyTables` copies none of its partitions, and a partition in another schema stays out of an `includeOnlySchemas` scope.
-The follow publication takes a table when either list names it or its partition root, because `FOR TABLE` on a partitioned table covers its partitions.
+The follow publication takes a table when either list names it or any partition ancestor, because `FOR TABLE` on a partitioned table covers its partitions.
 An entry the audits cannot match exactly (a `~` pattern, a quoted name, a table name without a schema, or an uppercase schema name) widens them instead: it voids its include list and the publication's, and drops out of an exclude list.
 
 ### Ownership after restore (`clone.ownerAfterRestore`)

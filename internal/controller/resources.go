@@ -821,11 +821,10 @@ fi`
 // tableScopeEnv carries clone.filters into the table audits as tableScope JSON.
 const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
 
-// tableScopeQuery lists user tables by exact name that pass include and the
-// excludes; join may add relations include refers to.
-func tableScopeQuery(join, include string) string {
+// tableScopeQuery lists user tables by exact name that pass include and the excludes.
+func tableScopeQuery(include string) string {
 	return `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
-from pg_class c join pg_namespace n on n.oid = c.relnamespace` + join + `,
+from pg_class c join pg_namespace n on n.oid = c.relnamespace,
 (select :'list'::jsonb as f) s
 where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
 and ` + include + `
@@ -838,25 +837,24 @@ and `
 const copyScope = `(jsonb_array_length(s.f->'schemas') = 0 or exists (select 1 from jsonb_array_elements(s.f->'schemas') e(v) where v->>0 = n.nspname))
 and (jsonb_array_length(s.f->'tables') = 0 or exists (select 1 from jsonb_array_elements(s.f->'tables') e(v) where v->>0 = n.nspname and v->>1 = c.relname))`
 
-// The publication ORs its entries, and FOR TABLE on a parent covers its leaves.
-const publishJoin = `
-join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
-join pg_namespace rn on rn.oid = rc.relnamespace`
-
-const publishScope = `(jsonb_array_length(s.f->'publish') = 0 or exists (select 1 from jsonb_array_elements(s.f->'publish') e(v)
-  where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))`
+// The publication ORs its entries, and FOR TABLE on any partitioned ancestor
+// covers its leaves; pg_partition_ancestors is empty for a plain table.
+const publishScope = `(jsonb_array_length(s.f->'publish') = 0 or exists (select 1
+  from (select c.oid as relid union select relid from pg_partition_ancestors(c.oid)) a
+  join pg_class ac on ac.oid = a.relid join pg_namespace an on an.oid = ac.relnamespace,
+  jsonb_array_elements(s.f->'publish') e(v) where v->>0 = an.nspname and coalesce(v->>1, ac.relname) = ac.relname))`
 
 // rlsAuditQuery lists tables whose policies would filter the migration role's
 // COPY and compare alike (check_enable_rls). pgcopydb's table copy reads leaves,
 // which apply only their own policies, and skips extension members and skipped data.
-var rlsAuditQuery = tableScopeQuery("", copyScope) + `c.relkind = 'r' and c.relrowsecurity
+var rlsAuditQuery = tableScopeQuery(copyScope) + `c.relkind = 'r' and c.relrowsecurity
 and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
 and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
 
 // unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
-var unloggedAuditQuery = tableScopeQuery(publishJoin, publishScope) + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
+var unloggedAuditQuery = tableScopeQuery(publishScope) + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
 
 const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
 

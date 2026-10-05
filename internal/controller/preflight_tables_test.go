@@ -277,6 +277,26 @@ END $do$;
 			t.Fatalf("got %q", got)
 		}
 	})
+	// pgcopydb publishes from pg_tables, so an intermediate parent can carry a leaf.
+	subParted := `CREATE TABLE pf_rls.root (k int, j int) PARTITION BY LIST (k);
+CREATE TABLE pf_other.mid PARTITION OF pf_rls.root FOR VALUES IN (1) PARTITION BY LIST (j);
+CREATE UNLOGGED TABLE pf_leaf.leaf PARTITION OF pf_other.mid FOR VALUES IN (1);
+`
+	for _, tc := range []struct {
+		name, want string
+		f          *v1beta1.Filters
+	}{
+		{"the publication reaches a leaf through an intermediate parent", "pf_leaf.leaf",
+			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.mid"}}},
+		{"a schema include reaches a leaf through an intermediate parent", "pf_leaf.leaf, " + pfOtherCache,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfOther}, IncludeOnlyTables: []string{pfPlain}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := auditQuery(t, uri, fixture+subParted, unloggedAuditQuery, tableScope(tc.f)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
 	t.Run("no filters audit every user table", func(t *testing.T) {
 		got := auditQuery(t, uri, fixture+"SET ROLE pf_reader;\n", rlsAuditQuery, tableScope(nil))
 		for _, want := range []string{pfOtherForced, "pf_rls.forced", "pf_leaf.part1"} {
