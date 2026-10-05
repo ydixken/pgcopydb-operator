@@ -222,6 +222,10 @@ tasks:
     desc: >-
       Chaos e2e (pod kills, disk pressure, concurrent migrations; the specs
       labeled "chaos") against the CURRENT kubectl context. Local only.
+      Defaults match e2e:focus for the same reasons: scale 0.1, kept
+      fixtures, namespaces left alone. Override with SCALE=, KEEP=,
+      MANAGE_NS=, and TIMEOUT= (default 3h). Set E2E_CNPG_INSTANCES=3 for
+      failover coverage.
     vars:
       KUBE_CONTEXT:
         sh: kubectl config current-context
@@ -232,7 +236,36 @@ tasks:
       - sh: test -d test/e2e
         msg: "No e2e tests yet. They arrive with the kubebuilder scaffold under test/e2e/."
     cmds:
-      - go test ./test/e2e/... -v -timeout 3h -ginkgo.v -ginkgo.timeout=3h -ginkgo.label-filter='chaos'
+      - task: e2e:chaos:run
+        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+
+  e2e:chaos:unattended:
+    desc: >-
+      e2e:chaos without the confirmation prompt, for an agent or a script that
+      cannot answer one. EXPECT_CONTEXT is required and must name the current
+      kubectl context, as for e2e:focus:unattended.
+    vars:
+      KUBE_CONTEXT:
+        sh: kubectl config current-context
+    preconditions:
+      - sh: test '{{.EXPECT_CONTEXT}}' = '{{.KUBE_CONTEXT}}'
+        msg: |
+          EXPECT_CONTEXT must name the context this will run against.
+            current context: {{.KUBE_CONTEXT}}
+            EXPECT_CONTEXT : {{.EXPECT_CONTEXT | default "(unset)"}}
+    cmds:
+      - task: e2e:chaos:run
+        vars: {SCALE: '{{.SCALE}}', KEEP: '{{.KEEP}}', MANAGE_NS: '{{.MANAGE_NS}}', TIMEOUT: '{{.TIMEOUT}}'}
+
+  e2e:chaos:run:
+    internal: true
+    env:
+      E2E_SCALE: '{{.SCALE | default "0.1"}}'
+      E2E_KEEP_FIXTURES: '{{.KEEP | default "true"}}'
+      E2E_MANAGE_NAMESPACES: '{{.MANAGE_NS | default "false"}}'
+    cmds:
+      - go test ./test/e2e/... -v -timeout '{{.TIMEOUT | default "3h"}}' -ginkgo.v
+        -ginkgo.timeout='{{.TIMEOUT | default "3h"}}' -ginkgo.label-filter='chaos'
 
   e2e:matrix:
     desc: >-
