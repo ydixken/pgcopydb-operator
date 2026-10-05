@@ -120,7 +120,9 @@ WITH nsp AS (
     pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid))
   FROM pg_policy p JOIN rel r ON r.oid = p.polrelid
   UNION ALL
-  SELECT n.nspname, 'statistics', s.stxname::text, pg_get_statisticsobjdef(s.oid)
+  -- pg_get_statisticsobjdef leaves out the target that ALTER STATISTICS ... SET STATISTICS sets.
+  SELECT n.nspname, 'statistics', s.stxname::text,
+    pg_get_statisticsobjdef(s.oid) || ' target=' || coalesce(s.stxstattarget::text, 'default')
   FROM pg_statistic_ext s JOIN nsp n ON n.oid = s.stxnamespace
   UNION ALL
   SELECT nspname, 'type', typname::text, CASE typtype
@@ -128,8 +130,9 @@ WITH nsp AS (
                               FROM pg_enum WHERE enumtypid = typ.oid)
     WHEN 'd' THEN format('domain %s notnull=%s default=%s collation=%s', format_type(typbasetype, typtypmod),
                          typnotnull, typdefault, CASE WHEN typcollation <> 0 THEN typcollation::regcollation::text END)
-    WHEN 'r' THEN (SELECT format('range %s collation=%s', format_type(rngsubtype, NULL),
-                                CASE WHEN rngcollation <> 0 THEN rngcollation::regcollation::text END)
+    WHEN 'r' THEN (SELECT format('range %s collation=%s subdiff=%s canonical=%s', format_type(rngsubtype, NULL),
+                                CASE WHEN rngcollation <> 0 THEN rngcollation::regcollation::text END,
+                                rngsubdiff::regproc, rngcanonical::regproc)
                    FROM pg_range WHERE rngtypid = typ.oid)
     ELSE 'composite'
   END

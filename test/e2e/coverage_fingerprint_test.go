@@ -301,7 +301,7 @@ var fingerprintMutations = map[string]string{
 	"policy":      "ALTER POLICY items_read ON ${schema}.items USING (qty > 1)",
 	"relation":    "ALTER TABLE ${schema}.items FORCE ROW LEVEL SECURITY",
 	"sequence":    "SELECT nextval('${schema}.counter')",
-	"statistics":  "DROP STATISTICS ${schema}.items_stats",
+	"statistics":  "ALTER STATISTICS ${schema}.items_stats SET STATISTICS 7",
 	"trigger":     "ALTER TABLE ${schema}.items DISABLE TRIGGER items_touch",
 	"type":        "ALTER TYPE ${schema}.mood ADD VALUE 'meh'",
 	"view":        "CREATE OR REPLACE VIEW ${schema}.item_names AS SELECT name FROM ${schema}.items WHERE id > 0",
