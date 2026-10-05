@@ -22,6 +22,8 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 | CREATE on the database plus table ownership (publication) | source | follow         |
 | EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
 | Primary key or replica identity on replicated tables    | source | follow           |
+| No row-level security that filters the migration role  | source | single-database migrations |
+| No unlogged tables in scope                             | source | follow           |
 
 ## Kubernetes
 
@@ -116,6 +118,33 @@ Superuser is needed only for:
 - `clone.allDatabases: true` on both sides, even when role passwords are omitted.
 - `clone.roles: true` without `clone.noRolePasswords: true` (reads passwords from `pg_authid`).
 - Extensions: most C extensions on the target, and any database whose superuser-installed extensions have configuration tables (a `pg_dump` limitation that filters cannot exclude).
+
+### Row-level security
+
+Row-level security that applies to the source migration role MUST NOT cover a table in scope.
+pgcopydb reads with `row_security` on, so the policies filter its COPY and its `compare data` alike.
+The target gets only the rows the role can see, and verification still passes.
+Policies apply to the role when the table has row-level security enabled and the role does not own it (directly or through an inherited membership), or when the table also has `FORCE ROW LEVEL SECURITY`.
+Row-level security without any policy hides every row from such a role.
+Superusers and roles with `BYPASSRLS` are exempt.
+pgcopydb reads each partition directly, and a query on a partition applies only that partition's own policies, so the audit checks plain tables and partitions and ignores policies on a partitioned parent.
+It also skips tables that belong to an extension, such as `cron.job` from `pg_cron`, because pgcopydb leaves them out of its table copy.
+
+Every single-database Migration's preflight fails when such a table is in scope, and names the tables.
+Fix it in one of three ways:
+
+- Give the source migration role `BYPASSRLS` (`ALTER ROLE <role> BYPASSRLS`, which takes a superuser).
+- Disable row-level security on those tables for the migration.
+- Leave them out with `clone.filters`: `excludeTables`, `excludeSchemas`, or `excludeTableData`.
+
+All-databases clones skip the check, because their migration role is a superuser.
+
+This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps, matched by exact `schema.table` name.
+Each audit applies the include filters the way pgcopydb applies them to its own step.
+The copy keeps a table only when it passes both lists: its own schema is in `includeOnlySchemas`, if set, and its own name is in `includeOnlyTables`, if set.
+So naming a partitioned table in `includeOnlyTables` copies none of its partitions, and a partition in another schema stays out of an `includeOnlySchemas` scope.
+The follow publication takes a table when either list names it or any partition ancestor, because `FOR TABLE` on a partitioned table covers its partitions.
+An entry the audits cannot match exactly (a `~` pattern, a quoted name, a table name without a schema, or an uppercase schema name) widens them instead: it voids its include list and the publication's, and drops out of an exclude list.
 
 ### Ownership after restore (`clone.ownerAfterRestore`)
 
@@ -229,6 +258,7 @@ Before the first attempt, and after the connectivity probes, the preflight Job a
 - EXECUTE on the origin functions.
 - The `session_replication_role` SET privilege.
 - An audit of every user table for a usable replica identity.
+- An audit of the tables in scope for unlogged tables.
 
 A failed check fails the Migration before any data moves, with the exact missing GRANT, setting, or table list in the `Validated` condition message.
 When the failing side has no `superuserSecretRef`, the message adds a hint that names that field.
@@ -301,6 +331,15 @@ Schema and workload contract:
   It ignores `clone.filters`, because a filtered table can still take writes.
   Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
+- Unlogged tables MUST NOT be in scope.
+  They write no WAL, so logical decoding never sees their changes.
+  With the automatic publication, pgcopydb's `CREATE PUBLICATION ... FOR TABLE` refuses them and the first attempt fails before any copy.
+  With `spec.follow.publication` or `wal2json`, their changes during the window are lost, and only `spec.verification.data` notices.
+  The preflight fails on unlogged tables in scope, scoped as described under [Row-level security](#row-level-security).
+  One difference: pgcopydb's publication honours `includeOnlySchemas` only next to `includeOnlyTables`, so `includeOnlySchemas` alone still publishes every table outside the exclusions, and the audit checks all of them.
+  Run `ALTER TABLE ... SET LOGGED` on the source, or leave them out with `excludeTables` or `excludeSchemas`.
+  Next to `includeOnlySchemas`, use `excludeTables`, because `excludeSchemas` cannot be combined with it.
+  `excludeTableData` does not help, because pgcopydb still publishes those tables.
 - Large-object changes during the window are not replicated (base copy only).
   Sequences need no action: pgcopydb re-syncs them automatically after cutover.
 

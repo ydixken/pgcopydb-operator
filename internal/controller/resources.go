@@ -818,6 +818,115 @@ else
   echo "ok: replica identity audit"
 fi`
 
+// tableScopeEnv carries clone.filters into the table audits as tableScope JSON.
+const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
+
+// tableScopeQuery lists user tables by exact name that pass include and the excludes.
+func tableScopeQuery(include string) string {
+	return `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+from pg_class c join pg_namespace n on n.oid = c.relnamespace,
+(select :'list'::jsonb as f) s
+where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
+and ` + include + `
+and not exists (select 1 from jsonb_array_elements(s.f->'exclude') e(v) where v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname)
+and `
+}
+
+// copyScope intersects schema and table includes on each relation's own name,
+// as pgcopydb's table listing does (list_source_tables.sql).
+const copyScope = `(jsonb_array_length(s.f->'schemas') = 0 or exists (select 1 from jsonb_array_elements(s.f->'schemas') e(v) where v->>0 = n.nspname))
+and (jsonb_array_length(s.f->'tables') = 0 or exists (select 1 from jsonb_array_elements(s.f->'tables') e(v) where v->>0 = n.nspname and v->>1 = c.relname))`
+
+// The publication ORs its entries, and FOR TABLE on any partitioned ancestor
+// covers its leaves; pg_partition_ancestors is empty for a plain table.
+const publishScope = `(jsonb_array_length(s.f->'publish') = 0 or exists (select 1
+  from (select c.oid as relid union select relid from pg_partition_ancestors(c.oid)) a
+  join pg_class ac on ac.oid = a.relid join pg_namespace an on an.oid = ac.relnamespace,
+  jsonb_array_elements(s.f->'publish') e(v) where v->>0 = an.nspname and coalesce(v->>1, ac.relname) = ac.relname))`
+
+// rlsAuditQuery lists tables whose policies would filter the migration role's
+// COPY and compare alike (check_enable_rls). pgcopydb's table copy reads leaves,
+// which apply only their own policies, and skips extension members and skipped data.
+var rlsAuditQuery = tableScopeQuery(copyScope) + `c.relkind = 'r' and c.relrowsecurity
+and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
+and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
+and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
+and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
+
+// unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
+var unloggedAuditQuery = tableScopeQuery(publishScope) + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
+
+const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
+
+var rlsAuditBlock = remAggBlock(remAggregate{
+	query:   fmt.Sprintf(tableAuditCmd, rlsAuditQuery),
+	ok:      "row-level security audit",
+	missing: `preflight: row-level security hides rows of these tables from the source migration role, so the copy and its verification would both miss them: $agg; grant the role BYPASSRLS, disable row-level security on them for the migration, or leave them out with clone.filters`,
+	onProbe: `preflight: probing row-level security on the source tables failed`,
+})
+
+var unloggedAuditBlock = remAggBlock(remAggregate{
+	query:   fmt.Sprintf(tableAuditCmd, unloggedAuditQuery),
+	ok:      "unlogged table audit",
+	missing: `preflight: follow cannot replicate unlogged tables, whose changes never reach the WAL: $agg; run ALTER TABLE ... SET LOGGED on the source, or leave them out with clone.filters excludeTables or excludeSchemas`,
+	onProbe: `preflight: probing the source for unlogged tables failed`,
+})
+
+// tableScope renders clone.filters for tableScopeQuery. An entry it cannot
+// match exactly (a ~ pattern, a quoted, unqualified, or uppercase schema name) widens the scope:
+// it voids its include list (both, for the ORed publish list) and drops out
+// of an exclude list, failing closed.
+func tableScope(f *v1beta1.Filters) string {
+	scope := struct {
+		Schemas  [][]any `json:"schemas"`
+		Tables   [][]any `json:"tables"`
+		Publish  [][]any `json:"publish"`
+		Exclude  [][]any `json:"exclude"`
+		SkipData [][]any `json:"skipData"`
+	}{[][]any{}, [][]any{}, [][]any{}, [][]any{}, [][]any{}}
+	if f != nil {
+		schemas, okS := scopeEntries(f.IncludeOnlySchemas, false)
+		tables, okT := scopeEntries(f.IncludeOnlyTables, true)
+		if okS {
+			scope.Schemas = schemas
+		}
+		if okT {
+			scope.Tables = tables
+		}
+		// pgcopydb's publication honours schema includes only beside a table
+		// include (filtering.c sets INCL); alone they publish every table.
+		if okS && okT && len(tables) > 0 {
+			scope.Publish = append(schemas, tables...)
+		}
+		schemas, _ = scopeEntries(f.ExcludeSchemas, false)
+		tables, _ = scopeEntries(f.ExcludeTables, true)
+		scope.Exclude = append(schemas, tables...)
+		scope.SkipData, _ = scopeEntries(f.ExcludeTableData, true)
+	}
+	// Strings and nils only, which json.Marshal cannot reject.
+	b, _ := json.Marshal(scope)
+	return string(b)
+}
+
+// scopeEntries maps filter entries to [schema, table] pairs, table nil for a
+// whole schema; ok is false when any entry could not be mapped.
+func scopeEntries(entries []string, qualified bool) ([][]any, bool) {
+	out, ok := [][]any{}, true
+	for _, e := range entries {
+		s, t, dot := strings.Cut(e, ".")
+		switch {
+		// pgcopydb folds an unquoted schema name to lower case (to_regnamespace).
+		case strings.ContainsAny(e, `~"`), qualified && !dot, !qualified && e != strings.ToLower(e):
+			ok = false
+		case qualified:
+			out = append(out, []any{s, t})
+		default:
+			out = append(out, []any{e, nil})
+		}
+	}
+	return out, ok
+}
+
 // preflightScriptFooter re-prints failures in tail-survival order, audit first
 // and hints last: the Failed condition carries only the log tail.
 const preflightScriptFooter = `
@@ -1032,12 +1141,14 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(ownerAfterRestoreBlock(superTgt, dry))
 	}
 	b.WriteString(cloneRightsBlock(superTgt, dbProps, dry))
+	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
 		b.WriteString(slotHeadroomBlock)
 		b.WriteString(replicationAttrBlock(superSrc, dry))
 		b.WriteString(originGrantsBlock(superTgt, dry))
 		b.WriteString(srrBlock(superTgt, dry))
+		b.WriteString(unloggedAuditBlock)
 		b.WriteString(riAuditBlock)
 		if m.Spec.Follow.Plugin == v1beta1.PluginWal2json {
 			b.WriteString(preflightWal2jsonNote)
@@ -1093,6 +1204,10 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	if reownRequested(m) {
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
+	}
+	if !m.Spec.Clone.AllDatabases {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: tableScopeEnv, Value: tableScope(m.Spec.Clone.Filters)})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
 	// surface via PreflightRunning long before 30 minutes, and the deadline
