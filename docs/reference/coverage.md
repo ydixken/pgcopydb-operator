@@ -73,3 +73,61 @@ The wrapper reads the report back through `psql`, the only JSON parser in the ru
 It fails the Job when a table differs on row count or checksum.
 A compare that could not run, or a report that could not be read, fails the Job too.
 The wrapper prints the report it evaluates, so the Job log keeps the per-table detail.
+
+## PostgreSQL feature coverage
+
+Every release candidate migrates a catalog of PostgreSQL features and holds the target to the source.
+Each case is one SQL file under [`test/e2e/coverage/`](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e/coverage), named `<area>/<case>` below.
+
+The clone group creates each clone case in its own schema on the source and clones all of them in one Migration filtered to those schemas, with `spec.verification.schema` and `spec.verification.data` set.
+A case passes when `Verified` is `True` and a fingerprint read on both sides matches.
+The fingerprint covers row data per table and per partition leaf, relation and partition layout, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
+Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` still copies every large object in the database, with its OID and owner.
+
+> [!note]
+> When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
+> Each server prints those definitions itself, and identical objects print differently across majors.
+> pgcopydb's schema compare still checks indexes and the constraints an index backs (primary key, unique, exclusion).
+> Check and foreign key constraints, triggers, functions, views, policies, and statistics objects go unchecked on such a pair.
+
+The last column is the oldest source major the case runs on.
+
+| Case | Group | Verdict | Source |
+|---|---|---|---|
+| `objects/check_constraint` | clone | identical | 14 |
+| `objects/comments` | clone | identical | 14 |
+| `objects/cycle_sequence` | clone | identical | 14 |
+| `objects/deferrable_fk` | clone | identical | 14 |
+| `objects/exclusion_constraint` | clone | identical | 14 |
+| `objects/functions` | clone | identical | 14 |
+| `objects/grants` | clone | identical | 14 |
+| `objects/identity_by_default` | clone | identical | 14 |
+| `objects/large_objects` | clone | identical | 14 |
+| `objects/no_primary_key` | clone | identical | 14 |
+| `objects/plain_view` | clone | identical | 14 |
+| `objects/security_barrier_view` | clone | identical | 14 |
+| `objects/statistics` | clone | identical | 14 |
+| `objects/trigger` | clone | identical | 14 |
+| `objects/unlogged_sequence` | clone | identical | 15 |
+| `objects/unlogged_table` | clone | identical | 14 |
+| `partitioning/cross_schema_leaf` | clone | identical | 14 |
+| `partitioning/hash_mod4` | clone | identical | 14 |
+| `partitioning/list_default_null` | clone | identical | 14 |
+| `partitioning/range_expr` | clone | identical | 14 |
+| `partitioning/range_multicol` | clone | identical | 14 |
+| `partitioning/two_level` | clone | identical | 14 |
+| `types/bit_varbit` | clone | identical | 14 |
+| `types/collation_c_posix` | clone | identical | 14 |
+| `types/composite_array` | clone | identical | 14 |
+| `types/domain_array` | clone | identical | 14 |
+| `types/enum_added_value` | clone | identical | 14 |
+| `types/interval` | clone | identical | 14 |
+| `types/money` | clone | identical | 14 |
+| `types/network` | clone | identical | 14 |
+| `types/numeric_special` | clone | identical | 14 |
+| `types/range_multirange` | clone | identical | 14 |
+| `types/timestamp_infinity` | clone | identical | 14 |
+| `types/toasted_jsonb` | clone | identical | 14 |
+| `types/tsvector` | clone | identical | 14 |
+| `types/uuid` | clone | identical | 14 |
+| `types/xml` | clone | identical | 14 |
