@@ -825,6 +825,22 @@ func TestSecretRefPrelude(t *testing.T) {
 			wantLine: tLine,
 		},
 		{
+			name:     "uri with a trailing question mark drops it before appending",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?" + tSrcKeep,
+			wantLine: tLine,
+		},
+		{
+			name:     "uri with a trailing ampersand drops it before appending",
+			sslMode:  tRequire,
+			tls:      true,
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=a&"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=a&sslrootcert=%2Fetc%2Fpgcopydb%2Ftls%2Fsource%2Fca.crt&sslmode=require&" + tSrcKeep,
+			wantLine: tLine,
+		},
+		{
 			name:    "password-bearing uri fails",
 			env:     map[string]string{envSrcDB: "postgresql://alice:s3cret@db.example.com/app"},
 			wantErr: "must be password-free",

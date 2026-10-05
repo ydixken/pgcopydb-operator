@@ -463,6 +463,9 @@ host=${hostport%%:*}
 		"@SIDE@", string(s),
 		"@PWKEY@", pwKey,
 	).Replace(template)
+	// libpq rejects the empty param an append after a trailing ? or & would leave.
+	b += `case "$uri" in *[?\&]) uri=${uri%?} ;; esac
+`
 	if tls != "" {
 		// The mounted cert paths come from the spec, never the Secret, so
 		// they always apply.
