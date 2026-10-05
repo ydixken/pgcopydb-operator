@@ -430,14 +430,14 @@ func TestEmbeddedCoverageCasesParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clone := 0
+	groups := map[string]int{}
 	for _, c := range cases {
-		if c.group == coverageGroupClone {
-			clone++
-		}
+		groups[c.group]++
 	}
-	if clone == 0 {
-		t.Fatal("no clone cases embedded")
+	for _, group := range []string{coverageGroupClone, coverageGroupFollow} {
+		if groups[group] == 0 {
+			t.Fatalf("no %s cases embedded", group)
+		}
 	}
 }
 
