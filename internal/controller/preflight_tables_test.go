@@ -172,6 +172,7 @@ func TestPreflightTableAuditQueries(t *testing.T) {
 CREATE ROLE pf_member IN ROLE pf_owner;
 CREATE ROLE pf_reader;
 CREATE ROLE pf_bypass BYPASSRLS;
+CREATE ROLE pf_super SUPERUSER NOBYPASSRLS;
 CREATE SCHEMA pf_rls; CREATE SCHEMA pf_leaf; CREATE SCHEMA pf_other;
 CREATE TABLE pf_rls.forced (id int);
 ALTER TABLE pf_rls.forced ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
@@ -211,7 +212,7 @@ END $do$;
 		{"non-owner: every RLS table, policies or not", pfReader, rlsAuditQuery, inRLS,
 			"pf_leaf.part1, pf_rls.forced, pf_rls.nopolicy, pf_rls.plain"},
 		{"BYPASSRLS is exempt", "pf_bypass", rlsAuditQuery, inRLS, ""},
-		{"superuser is exempt", "", rlsAuditQuery, inRLS, ""},
+		{"superuser is exempt", "pf_super", rlsAuditQuery, inRLS, ""},
 		{"include scopes to its schema", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, pfOtherForced},
 		{"include tables scope to those tables", pfReader, rlsAuditQuery,
