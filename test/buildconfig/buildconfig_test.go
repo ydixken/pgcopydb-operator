@@ -570,6 +570,55 @@ func TestE2ESuiteDoesNotPrintTheRawKubeContext(t *testing.T) {
 	}
 }
 
+// TestE2EContextGate covers the decision, not the call, so a refactor could drop
+// the gate from TestE2E with every unit test green.
+func TestE2ECallsTheContextGateBeforeRunSpecs(t *testing.T) {
+	const head = "func TestE2E(t *testing.T) {"
+	src := read(t, e2eSuite)
+	start := strings.Index(src, head)
+	if start < 0 {
+		t.Fatalf("%s has no %q", e2eSuite, head)
+	}
+	body, _, _ := strings.Cut(src[start:], "\n}\n")
+	gate := strings.Index(body, `e2eContextGate(os.Getenv("E2E_CONTEXT"), kubeCurrentContext)`)
+	run := strings.Index(body, "RunSpecs(")
+	if gate < 0 || run < 0 || gate > run {
+		t.Error("TestE2E must call e2eContextGate before RunSpecs, or a plain go test reaches the current context")
+	}
+}
+
+// A task that loses E2E_CONTEXT skips TestE2E, and the skip exits 0, so the
+// target reports green after running no specs.
+func TestE2ETasksNameTheirContext(t *testing.T) {
+	var tf struct {
+		Tasks map[string]struct {
+			Env  map[string]string `json:"env"`
+			Cmds []any             `json:"cmds"`
+		} `json:"tasks"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, "../../Taskfile.yml")), &tf); err != nil {
+		t.Fatalf("parse Taskfile.yml: %v", err)
+	}
+	var runners []string
+	for name, task := range tf.Tasks {
+		if !slices.ContainsFunc(task.Cmds, func(c any) bool {
+			s := fmt.Sprint(c)
+			return strings.Contains(s, "go test ./test/e2e") || strings.Contains(s, "./hack/e2e-matrix.sh")
+		}) {
+			continue
+		}
+		runners = append(runners, name)
+		if got := task.Env["E2E_CONTEXT"]; got != "{{.KUBE_CONTEXT}}" {
+			t.Errorf("task %s runs the e2e suite with E2E_CONTEXT %q, want %q", name, got, "{{.KUBE_CONTEXT}}")
+		}
+	}
+	for _, want := range []string{"e2e", "e2e:matrix", "e2e:stress"} {
+		if !slices.Contains(runners, want) {
+			t.Errorf("task %s no longer runs the e2e suite; update this test's command patterns", want)
+		}
+	}
+}
+
 // TestE2E skips without E2E_CONTEXT, and a skipped suite reports success, so a
 // workflow that lost the variable would pass the release gate without a spec.
 func TestE2EWorkflowsNameTheirContext(t *testing.T) {
