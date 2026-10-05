@@ -588,12 +588,13 @@ func TestE2ECallsTheContextGateBeforeRunSpecs(t *testing.T) {
 }
 
 // A task that loses E2E_CONTEXT skips TestE2E, and the skip exits 0, so the
-// target reports green after running no specs.
+// target reports green after running no specs. Task's env: block loses to an
+// exported value, so only an assignment in the command binds the confirmed context.
 func TestE2ETasksNameTheirContext(t *testing.T) {
+	const prefix = "E2E_CONTEXT='{{.KUBE_CONTEXT}}' "
 	var tf struct {
 		Tasks map[string]struct {
-			Env  map[string]string `json:"env"`
-			Cmds []any             `json:"cmds"`
+			Cmds []any `json:"cmds"`
 		} `json:"tasks"`
 	}
 	if err := yaml.Unmarshal([]byte(read(t, "../../Taskfile.yml")), &tf); err != nil {
@@ -601,15 +602,15 @@ func TestE2ETasksNameTheirContext(t *testing.T) {
 	}
 	var runners []string
 	for name, task := range tf.Tasks {
-		if !slices.ContainsFunc(task.Cmds, func(c any) bool {
+		for _, c := range task.Cmds {
 			s := fmt.Sprint(c)
-			return strings.Contains(s, "go test ./test/e2e") || strings.Contains(s, "./hack/e2e-matrix.sh")
-		}) {
-			continue
-		}
-		runners = append(runners, name)
-		if got := task.Env["E2E_CONTEXT"]; got != "{{.KUBE_CONTEXT}}" {
-			t.Errorf("task %s runs the e2e suite with E2E_CONTEXT %q, want %q", name, got, "{{.KUBE_CONTEXT}}")
+			if !strings.Contains(s, "go test ./test/e2e") && !strings.Contains(s, "./hack/e2e-matrix.sh") {
+				continue
+			}
+			runners = append(runners, name)
+			if !strings.HasPrefix(s, prefix) {
+				t.Errorf("task %s runs the e2e suite with %q, want it to start with %q", name, s, prefix)
+			}
 		}
 	}
 	for _, want := range []string{"e2e", "e2e:matrix", "e2e:stress"} {

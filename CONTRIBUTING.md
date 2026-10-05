@@ -119,7 +119,7 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
-Every e2e Task target then passes the context it confirmed to the suite as `E2E_CONTEXT`.
+Every e2e Task target then passes the context it confirmed to the suite as `E2E_CONTEXT`, assigned in the command itself because Task lets an exported variable override a Taskfile `env:` value.
 The cluster entry point `TestE2E` skips when `E2E_CONTEXT` is unset, and fails before any cluster call when it names a context other than `kubectl config current-context`.
 We make the context an explicit input because the suite's teardown deletes the fixture namespaces, so a plain `go test ./test/e2e` or `go test ./...` must never reach a cluster that nobody named.
 The suite installs an OpenTelemetry Collector in the operator namespace and a throwaway operator that exports its metrics to it over OTLP.
