@@ -282,6 +282,7 @@ type workflowJob struct {
 	Uses        string              `json:"uses"`
 	Steps       []workflowStep      `json:"steps"`
 	Concurrency workflowConcurrency `json:"concurrency"`
+	Environment json.RawMessage     `json:"environment"`
 }
 
 type workflow struct {
@@ -560,15 +561,93 @@ func TestProtectedE2EWorkflowsQueueWithExpectedCandidateScale(t *testing.T) {
 	}
 }
 
+// The suite reads the current context to compare it with E2E_CONTEXT, so the
+// guard against printing it is TestE2EContextGate in test/e2e; this one keeps
+// the old banner out.
 func TestE2ESuiteDoesNotPrintTheRawKubeContext(t *testing.T) {
+	if strings.Contains(read(t, e2eSuite), "e2e running against kubectl context") {
+		t.Error("e2e suite prints the kube context, and CI logs are public")
+	}
+}
+
+// TestE2EContextGate covers the decision, not the call, so a refactor could drop
+// the gate from TestE2E with every unit test green.
+func TestE2ECallsTheContextGateBeforeRunSpecs(t *testing.T) {
+	const head = "func TestE2E(t *testing.T) {"
 	src := read(t, e2eSuite)
-	for _, banned := range []string{
-		"clientcmd.NewDefaultClientConfigLoadingRules",
-		"raw.CurrentContext",
-		"e2e running against kubectl context",
-	} {
-		if strings.Contains(src, banned) {
-			t.Errorf("e2e suite still exposes the kube context through %q", banned)
+	start := strings.Index(src, head)
+	if start < 0 {
+		t.Fatalf("%s has no %q", e2eSuite, head)
+	}
+	body, _, _ := strings.Cut(src[start:], "\n}\n")
+	gate := strings.Index(body, `e2eContextGate(os.Getenv("E2E_CONTEXT"), kubeCurrentContext)`)
+	run := strings.Index(body, "RunSpecs(")
+	if gate < 0 || run < 0 || gate > run {
+		t.Error("TestE2E must call e2eContextGate before RunSpecs, or a plain go test reaches the current context")
+	}
+}
+
+// A task that loses E2E_CONTEXT skips TestE2E, and the skip exits 0, so the
+// target reports green after running no specs. Task's env: block loses to an
+// exported value, so only an assignment in the command binds the confirmed context.
+func TestE2ETasksNameTheirContext(t *testing.T) {
+	const prefix = "E2E_CONTEXT='{{.KUBE_CONTEXT}}' "
+	var tf struct {
+		Tasks map[string]struct {
+			Cmds []any `json:"cmds"`
+		} `json:"tasks"`
+	}
+	if err := yaml.Unmarshal([]byte(read(t, "../../Taskfile.yml")), &tf); err != nil {
+		t.Fatalf("parse Taskfile.yml: %v", err)
+	}
+	var runners []string
+	for name, task := range tf.Tasks {
+		for _, c := range task.Cmds {
+			s := fmt.Sprint(c)
+			if !strings.Contains(s, "go test ./test/e2e") && !strings.Contains(s, "./hack/e2e-matrix.sh") {
+				continue
+			}
+			runners = append(runners, name)
+			if !strings.HasPrefix(s, prefix) {
+				t.Errorf("task %s runs the e2e suite with %q, want it to start with %q", name, s, prefix)
+			}
+		}
+	}
+	for _, want := range []string{"e2e", "e2e:matrix", "e2e:stress"} {
+		if !slices.Contains(runners, want) {
+			t.Errorf("task %s no longer runs the e2e suite; update this test's command patterns", want)
+		}
+	}
+}
+
+// TestE2E skips without E2E_CONTEXT, and a skipped suite reports success, so a
+// workflow that lost the variable would pass the release gate without a spec.
+func TestE2EWorkflowsNameTheirContext(t *testing.T) {
+	const jobName = "e2e"
+	for _, path := range []string{releaseWorkflow, e2eWorkflow} {
+		job, ok := mustParse(t, path).Jobs[jobName]
+		if !ok {
+			t.Fatalf("%s has no %s job", path, jobName)
+		}
+		// The secret is scoped to this environment; elsewhere it resolves empty.
+		if got := string(job.Environment); got != `"e2e-cluster"` {
+			t.Errorf("%s %s job environment = %s, want e2e-cluster", path, jobName, got)
+		}
+		suites := 0
+		for _, step := range job.Steps {
+			if !strings.Contains(step.Run, "ginkgo") {
+				continue
+			}
+			suites++
+			if got, want := step.Env["E2E_CONTEXT"], "${{ secrets.E2E_EXPECT_CONTEXT }}"; got != want {
+				t.Errorf("%s step %q E2E_CONTEXT = %q, want %q", path, step.Name, got, want)
+			}
+			if !strings.HasPrefix(step.Run, `: "${E2E_CONTEXT:?`) {
+				t.Errorf("%s step %q must refuse an empty E2E_CONTEXT before it runs ginkgo", path, step.Name)
+			}
+		}
+		if suites != 1 {
+			t.Errorf("%s %s job has %d ginkgo steps, want 1", path, jobName, suites)
 		}
 	}
 }

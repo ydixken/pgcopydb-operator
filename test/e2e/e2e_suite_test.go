@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package e2e exercises the operator on the cluster behind the current
-// kubectl context. The suite brings its own operator: helm installs a
+// kubectl context, once E2E_CONTEXT names that context. The suite brings its own operator: helm installs a
 // throwaway instance into E2E_OPERATOR_NAMESPACE, which defaults to
 // pgcopydb-e2e-system and watches only the fixture namespaces. AfterSuite
 // removes it unless a protected feature workflow owns ordered teardown.
@@ -1223,6 +1223,12 @@ var (
 func TestE2E(t *testing.T) {
 	// Refuse before RunSpecs: Ginkgo runs the AfterSuite teardown for any
 	// attempted BeforeSuite, and that teardown would hit a concurrent run.
+	if run, err := e2eContextGate(os.Getenv("E2E_CONTEXT"), kubeCurrentContext); err != nil {
+		t.Fatal(err)
+	} else if !run {
+		t.Skip("TestE2E reaches a real cluster, so it runs only when E2E_CONTEXT names the current kubectl" +
+			" context; use the e2e Task targets (task --list-all), which set it after confirming the context")
+	}
 	if err := parallelRefusal(parallelProcs(), external != nil, featureE2ERunValue != ""); err != nil {
 		t.Fatal(err)
 	}
