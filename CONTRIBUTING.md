@@ -175,7 +175,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_SEED_TIMEOUT` (`30m`, `3h` under stress) bounds the seed Job, as a Go duration such as `4h`.
   Set it for a fixture larger than the tier was sized for, for example a large `E2E_EXTRA_SIZE_GB`.
 - `E2E_MIGRATION_TIMEOUT` (`30m`, `2h` under stress) bounds each wait for a Migration to reach a phase, as a Go duration.
-  The run's own `go test` timeout still has to cover the seed and the migrations; `task e2e:focus` and `task e2e:focus:unattended` take it as `TIMEOUT=` (default `1h`).
+  The run's own `go test` timeout still has to cover the seed and the migrations; `task e2e:focus` and `task e2e:focus:unattended` take it as `TIMEOUT=` (default `1h`), and the two chaos tasks take it the same way (default `3h`).
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
   The pooling pair is always removed.
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
@@ -244,6 +244,14 @@ The first is the one that binds: CloudNativePG defaults to a preferred hostname 
 
 Chaos scenarios live in `test/e2e/chaos_test.go` behind the Ginkgo label `chaos`: they kill fixture pods (CNPG primaries, the runner mid-drain), overflow a follow migration's change spool on a deliberately tiny work volume, and fan two concurrent follow migrations out of one source.
 `task e2e` and `task e2e:stress` exclude them (`-ginkgo.label-filter='!chaos'`); `task e2e:chaos` runs exactly them, with the same context echo and confirmation prompt.
+It takes the `task e2e:focus` defaults (scale 0.1, kept fixtures, namespaces left alone) and the same `SCALE=`, `KEEP=`, and `MANAGE_NS=` overrides.
+`task e2e:chaos:unattended` drops the prompt and requires `EXPECT_CONTEXT` to name the current context, as `task e2e:focus:unattended` does.
+Set `E2E_CNPG_INSTANCES=3` so the primary-kill specs have a replica to fail over to:
+
+```sh
+E2E_CNPG_INSTANCES=3 task e2e:chaos:unattended EXPECT_CONTEXT=my-cluster
+```
+
 Each chaos spec creates its own Migration and restores what it disturbed, so the set runs standalone against kept fixtures.
 The source-kill spec times its kill off `pg_stat_progress_copy` on the target and Skips below `E2E_SCALE` 0.05, where the documents COPY gets too short to hit reliably.
 

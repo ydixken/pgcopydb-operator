@@ -22,8 +22,8 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 - For human-operated local E2E, `task e2e` targets the current `kubectl` context and requires its confirmation prompt.
   Never bypass that prompt with `task --yes`.
   The dev cluster is shared, so keep E2E resources in the `pgcopydb-e2e` namespace and clean up.
-- A human or script that cannot answer a prompt uses `task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=<context>`.
-  It requires `EXPECT_CONTEXT` to name the current context, so a run cannot reach an unintended cluster.
+- A human or script that cannot answer a prompt uses `task e2e:focus:unattended FOCUS='...' EXPECT_CONTEXT=<context>`, or `task e2e:chaos:unattended EXPECT_CONTEXT=<context>` for the chaos specs.
+  Each requires `EXPECT_CONTEXT` to name the current context, so a run cannot reach an unintended cluster.
   `task --yes` remains forbidden because it could answer any prompt silently.
 - CI runs the same specs unattended when [release.yml](.github/workflows/release.yml) verifies a release candidate.
   That runner has one cluster and no prompt to answer.
