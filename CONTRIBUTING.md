@@ -157,6 +157,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 
 - `E2E_CONTEXT` (unset) MUST name the current kubectl context, or be `in-cluster` when no kubeconfig sets one, for `TestE2E` to run.
   The Task targets set it; set it yourself only when you call `go test` or the ginkgo CLI directly.
+  Point the suite at another kubeconfig with `KUBECONFIG`: `TestE2E` refuses the `-kubeconfig` flag, because the suite's `kubectl` and `helm` calls would not follow it.
 - `E2E_SCALE` (`1`) multiplies the fixture and volume sizes.
   Scale 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.
 - `E2E_CNPG_INSTANCES` (`1`) sets the instances per shared source/target CNPG cluster.

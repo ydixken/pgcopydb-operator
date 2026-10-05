@@ -18,11 +18,14 @@ package e2e
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 // inClusterContext is what E2E_CONTEXT says for a pod's ServiceAccount, where no
@@ -51,8 +54,13 @@ func e2eContextGate(want string, current func() (string, error)) (bool, error) {
 }
 
 // kubeCurrentContext reads the context kubectl and helm would use, since the
-// suite drives both as well as its own client.
+// suite drives both as well as its own client. It refuses -kubeconfig, which
+// steers only the client, so the check would miss one side either way.
 func kubeCurrentContext() (string, error) {
+	if f := flag.Lookup(config.KubeconfigFlagName); f != nil && f.Value.String() != "" {
+		return "", errors.New("the suite's kubectl and helm calls ignore -" + config.KubeconfigFlagName +
+			"; set KUBECONFIG instead")
+	}
 	raw, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	if err != nil {
 		return "", err
@@ -96,5 +104,22 @@ func TestE2EContextGate(t *testing.T) {
 				t.Errorf("refusal %q names a context", err)
 			}
 		})
+	}
+}
+
+// config.GetConfig prefers -kubeconfig while the suite's kubectl and helm calls
+// cannot see it, so no single file would describe every client the gate admits.
+func TestKubeCurrentContextRefusesTheKubeconfigFlag(t *testing.T) {
+	f := flag.Lookup(config.KubeconfigFlagName)
+	if f == nil {
+		t.Fatalf("controller-runtime no longer registers -%s; revisit kubeCurrentContext", config.KubeconfigFlagName)
+	}
+	prev := f.Value.String()
+	t.Cleanup(func() { _ = f.Value.Set(prev) })
+	if err := f.Value.Set(filepath.Join(t.TempDir(), "other")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := kubeCurrentContext(); err == nil {
+		t.Errorf("kubeCurrentContext() with -%s set = %q, nil; want an error", config.KubeconfigFlagName, got)
 	}
 }
