@@ -127,6 +127,7 @@ The target gets only the rows the role can see, and verification still passes.
 Policies apply to the role when the table has row-level security enabled and the role does not own it (directly or through an inherited membership), or when the table also has `FORCE ROW LEVEL SECURITY`.
 Row-level security without any policy hides every row from such a role.
 Superusers and roles with `BYPASSRLS` are exempt.
+pgcopydb reads each partition directly, and a query on a partition applies only that partition's own policies, so the audit checks plain tables and partitions and ignores policies on a partitioned parent.
 
 Every single-database Migration's preflight fails when such a table is in scope, and names the tables.
 Fix it in one of three ways:
@@ -137,7 +138,7 @@ Fix it in one of three ways:
 
 All-databases clones skip the check, because their migration role is a superuser.
 
-This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps: user tables and partitioned tables, matched by exact `schema.table` name, the way pgcopydb builds its publication.
+This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps, matched by exact `schema.table` name, the way pgcopydb builds its publication.
 A partition counts as included when an include filter names its root.
 An entry the audits cannot match exactly (a `~` pattern, a quoted name, or a table name without a schema) widens them instead: it voids its include list and drops out of an exclude list.
 

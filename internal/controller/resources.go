@@ -828,21 +828,22 @@ from pg_class c join pg_namespace n on n.oid = c.relnamespace
 join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
 join pg_namespace rn on rn.oid = rc.relnamespace,
 (select :'list'::jsonb as f) s
-where c.relkind in ('r', 'p') and n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
+where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
 and (jsonb_array_length(s.f->'include') = 0 or exists (select 1 from jsonb_array_elements(s.f->'include') e(v)
   where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))
 and not exists (select 1 from jsonb_array_elements(s.f->'exclude') e(v) where v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname)
 and `
 
 // rlsAuditQuery lists tables whose policies would filter the migration role's
-// COPY and compare alike (check_enable_rls); skipped data copies no rows.
-const rlsAuditQuery = tableScopeQuery + `c.relrowsecurity
+// COPY and compare alike (check_enable_rls). pgcopydb reads leaves, which apply
+// only their own policies; skipped data copies no rows.
+const rlsAuditQuery = tableScopeQuery + `c.relkind = 'r' and c.relrowsecurity
 and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
 
 // unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
-const unloggedAuditQuery = tableScopeQuery + `c.relpersistence = 'u'`
+const unloggedAuditQuery = tableScopeQuery + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
 
 const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
 

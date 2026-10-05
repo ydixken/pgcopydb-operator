@@ -180,6 +180,10 @@ CREATE TABLE pf_rls.open (id int);
 CREATE TABLE pf_rls.parted (k int) PARTITION BY LIST (k);
 CREATE TABLE pf_leaf.part1 PARTITION OF pf_rls.parted FOR VALUES IN (1);
 ALTER TABLE pf_leaf.part1 ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+CREATE TABLE pf_other.guarded (k int) PARTITION BY LIST (k);
+ALTER TABLE pf_other.guarded ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON pf_other.guarded FOR SELECT USING (k < 10);
+CREATE TABLE pf_other.guarded1 PARTITION OF pf_other.guarded FOR VALUES IN (1);
 CREATE TABLE pf_other.forced (id int);
 ALTER TABLE pf_other.forced ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 CREATE UNLOGGED TABLE pf_rls.cache (id int);
@@ -210,6 +214,8 @@ END $do$;
 			IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{"pf_rls.forced", "pf_leaf.part1"},
 			ExcludeTableData: []string{"pf_rls.plain"},
 		}, "pf_rls.nopolicy"},
+		{"RLS and policy on the partitioned parent only, leaves open: quiet", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.guarded"}}, ""},
 		{"unlogged tables in scope", "", unloggedAuditQuery, inRLS, pfCache},
 		{"unlogged tables out of scope", "", unloggedAuditQuery,
 			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, ""},
