@@ -821,34 +821,42 @@ fi`
 // tableScopeEnv carries clone.filters into the table audits as tableScope JSON.
 const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
 
-// tableScopeQuery matches exact names as pgcopydb does, include entries ORed,
-// plus partitions whose root an include names. include is the scope key to
-// apply: "include" for the copy, "publish" for the follow publication.
-func tableScopeQuery(include string) string {
-	inc := "s.f->'" + include + "'"
+// tableScopeQuery lists user tables by exact name that pass include and the
+// excludes; join may add relations include refers to.
+func tableScopeQuery(join, include string) string {
 	return `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
-from pg_class c join pg_namespace n on n.oid = c.relnamespace
-join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
-join pg_namespace rn on rn.oid = rc.relnamespace,
+from pg_class c join pg_namespace n on n.oid = c.relnamespace` + join + `,
 (select :'list'::jsonb as f) s
 where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
-and (jsonb_array_length(` + inc + `) = 0 or exists (select 1 from jsonb_array_elements(` + inc + `) e(v)
-  where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))
+and ` + include + `
 and not exists (select 1 from jsonb_array_elements(s.f->'exclude') e(v) where v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname)
 and `
 }
 
+// copyScope intersects schema and table includes on each relation's own name,
+// as pgcopydb's table listing does (list_source_tables.sql).
+const copyScope = `(jsonb_array_length(s.f->'schemas') = 0 or exists (select 1 from jsonb_array_elements(s.f->'schemas') e(v) where v->>0 = n.nspname))
+and (jsonb_array_length(s.f->'tables') = 0 or exists (select 1 from jsonb_array_elements(s.f->'tables') e(v) where v->>0 = n.nspname and v->>1 = c.relname))`
+
+// The publication ORs its entries, and FOR TABLE on a parent covers its leaves.
+const publishJoin = `
+join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
+join pg_namespace rn on rn.oid = rc.relnamespace`
+
+const publishScope = `(jsonb_array_length(s.f->'publish') = 0 or exists (select 1 from jsonb_array_elements(s.f->'publish') e(v)
+  where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))`
+
 // rlsAuditQuery lists tables whose policies would filter the migration role's
 // COPY and compare alike (check_enable_rls). pgcopydb's table copy reads leaves,
 // which apply only their own policies, and skips extension members and skipped data.
-var rlsAuditQuery = tableScopeQuery("include") + `c.relkind = 'r' and c.relrowsecurity
+var rlsAuditQuery = tableScopeQuery("", copyScope) + `c.relkind = 'r' and c.relrowsecurity
 and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
 and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
 
 // unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
-var unloggedAuditQuery = tableScopeQuery("publish") + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
+var unloggedAuditQuery = tableScopeQuery(publishJoin, publishScope) + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
 
 const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
 
@@ -868,24 +876,29 @@ var unloggedAuditBlock = remAggBlock(remAggregate{
 
 // tableScope renders clone.filters for tableScopeQuery. An entry it cannot
 // match exactly (a ~ pattern, a quoted, unqualified, or uppercase schema name) widens the scope:
-// it voids its include list and drops out of an exclude list, failing closed.
+// it voids its include list (both, for the ORed publish list) and drops out
+// of an exclude list, failing closed.
 func tableScope(f *v1beta1.Filters) string {
 	scope := struct {
-		Include  [][]any `json:"include"`
+		Schemas  [][]any `json:"schemas"`
+		Tables   [][]any `json:"tables"`
 		Publish  [][]any `json:"publish"`
 		Exclude  [][]any `json:"exclude"`
 		SkipData [][]any `json:"skipData"`
-	}{[][]any{}, [][]any{}, [][]any{}, [][]any{}}
+	}{[][]any{}, [][]any{}, [][]any{}, [][]any{}, [][]any{}}
 	if f != nil {
 		schemas, okS := scopeEntries(f.IncludeOnlySchemas, false)
 		tables, okT := scopeEntries(f.IncludeOnlyTables, true)
-		if okS && okT {
-			scope.Include = append(schemas, tables...)
+		if okS {
+			scope.Schemas = schemas
+		}
+		if okT {
+			scope.Tables = tables
 		}
 		// pgcopydb's publication honours schema includes only beside a table
 		// include (filtering.c sets INCL); alone they publish every table.
-		if len(f.IncludeOnlyTables) > 0 {
-			scope.Publish = scope.Include
+		if okS && okT && len(tables) > 0 {
+			scope.Publish = append(schemas, tables...)
 		}
 		schemas, _ = scopeEntries(f.ExcludeSchemas, false)
 		tables, _ = scopeEntries(f.ExcludeTables, true)

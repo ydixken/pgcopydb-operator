@@ -30,13 +30,16 @@ const (
 	okUnloggedAudit = "ok: unlogged table audit"
 	rlsProbe        = "relrowsecurity"
 	unloggedProbe   = "relpersistence = 'u'"
-	emptyScope      = `{"include":[],"publish":[],"exclude":[],"skipData":[]}`
+	emptyScope      = `{"schemas":[],"tables":[],"publish":[],"exclude":[],"skipData":[]}`
 	pfRLS           = "pf_rls"
 	pfReader        = "pf_reader"
 	pfOtherForced   = "pf_other.forced"
 	pfCache         = "pf_rls.cache"
 	pfOtherCache    = "pf_other.cache"
 	pfPlain         = "pf_rls.plain"
+	pfForced        = "pf_rls.forced"
+	pfOther         = "pf_other"
+	appOrders       = "app.orders"
 	bothCaches      = pfOtherCache + ", " + pfCache
 )
 
@@ -48,13 +51,16 @@ func TestTableScope(t *testing.T) {
 	}{
 		{"no filters", nil, emptyScope},
 		{"include schemas and tables", &v1beta1.Filters{
-			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{"app.orders"},
-		}, `{"include":[["sales",null],["app","orders"]],"publish":[["sales",null],["app","orders"]],"exclude":[],"skipData":[]}`},
+			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{appOrders},
+		}, `{"schemas":[["sales",null]],"tables":[["app","orders"]],"publish":[["sales",null],["app","orders"]],"exclude":[],"skipData":[]}`},
 		{"schema includes alone leave the publication whole", &v1beta1.Filters{IncludeOnlySchemas: []string{testSchemaInc}},
-			`{"include":[["sales",null]],"publish":[],"exclude":[],"skipData":[]}`},
-		{"a pattern include widens to everything", &v1beta1.Filters{
-			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{"app.orders", "~/^x/.t"},
-		}, emptyScope},
+			`{"schemas":[["sales",null]],"tables":[],"publish":[],"exclude":[],"skipData":[]}`},
+		{"a pattern table include voids the table includes and the publication", &v1beta1.Filters{
+			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{appOrders, "~/^x/.t"},
+		}, `{"schemas":[["sales",null]],"tables":[],"publish":[],"exclude":[],"skipData":[]}`},
+		{"an unmatchable schema include voids the schema includes and the publication", &v1beta1.Filters{
+			IncludeOnlySchemas: []string{testSchemaInc, "~/^x/"}, IncludeOnlyTables: []string{appOrders},
+		}, `{"schemas":[],"tables":[["app","orders"]],"publish":[],"exclude":[],"skipData":[]}`},
 		{"a quoted include widens", &v1beta1.Filters{IncludeOnlyTables: []string{`"App".orders`}},
 			emptyScope},
 		{"an unqualified include widens", &v1beta1.Filters{IncludeOnlyTables: []string{"orders"}},
@@ -65,9 +71,9 @@ func TestTableScope(t *testing.T) {
 		{"unresolvable excludes are ignored", &v1beta1.Filters{
 			ExcludeSchemas: []string{"scratch", "~/tmp_/"},
 			ExcludeTables:  []string{"app.audit", `"App".x`, "~/a/.b", "bare"},
-		}, `{"include":[],"publish":[],"exclude":[["scratch",null],["app","audit"]],"skipData":[]}`},
+		}, `{"schemas":[],"tables":[],"publish":[],"exclude":[["scratch",null],["app","audit"]],"skipData":[]}`},
 		{"table data exclusions", &v1beta1.Filters{ExcludeTableData: []string{"app.blobs", "~/x/.y"}},
-			`{"include":[],"publish":[],"exclude":[],"skipData":[["app","blobs"]]}`},
+			`{"schemas":[],"tables":[],"publish":[],"exclude":[],"skipData":[["app","blobs"]]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tableScope(tc.f); got != tc.want {
@@ -215,32 +221,38 @@ END $do$;
 		f                 *v1beta1.Filters
 		want              string
 	}{
-		{"owner: FORCE only, a leaf through its root", "pf_owner", rlsAuditQuery, inRLS, "pf_leaf.part1, pf_rls.forced"},
-		{"inherited owner membership counts as owner", "pf_member", rlsAuditQuery, inRLS, "pf_leaf.part1, pf_rls.forced"},
+		{"owner: FORCE only", "pf_owner", rlsAuditQuery, inRLS, pfForced},
+		{"inherited owner membership counts as owner", "pf_member", rlsAuditQuery, inRLS, pfForced},
 		{"non-owner: every RLS table, policies or not", pfReader, rlsAuditQuery, inRLS,
-			"pf_leaf.part1, pf_rls.forced, pf_rls.nopolicy, pf_rls.plain"},
+			"pf_rls.forced, pf_rls.nopolicy, pf_rls.plain"},
+		{"a leaf counts by its own schema, not its root's", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_leaf"}}, "pf_leaf.part1"},
+		{"naming a partitioned parent copies none of its leaves", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_rls.parted"}}, ""},
+		{"schema and table includes intersect", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, IncludeOnlyTables: []string{pfPlain, pfOtherForced}}, pfPlain},
 		{"BYPASSRLS is exempt", "pf_bypass", rlsAuditQuery, inRLS, ""},
 		{"superuser is exempt", "pf_super", rlsAuditQuery, inRLS, ""},
 		{"include scopes to its schema", pfReader, rlsAuditQuery,
-			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, pfOtherForced},
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfOther}}, pfOtherForced},
 		{"an uppercase schema include widens to every table", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlySchemas: []string{"PF_Other"}},
 			"pf_leaf.part1, pf_other.forced, pf_rls.forced, pf_rls.nopolicy, pf_rls.plain"},
 		{"include tables scope to those tables", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{pfPlain, pfOtherForced}}, "pf_other.forced, pf_rls.plain"},
 		{"excluded tables and skipped data leave the scope", pfReader, rlsAuditQuery, &v1beta1.Filters{
-			IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{"pf_rls.forced", "pf_leaf.part1"},
+			IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{pfForced},
 			ExcludeTableData: []string{pfPlain},
 		}, "pf_rls.nopolicy"},
 		{"RLS and policy on the partitioned parent only, leaves open: quiet", pfReader, rlsAuditQuery,
-			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.guarded"}}, ""},
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfOther}, ExcludeTables: []string{pfOtherForced}}, ""},
 		{"extension members are not copied", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.ext_job"}}, ""},
 		{"unlogged tables in scope", "", unloggedAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{pfCache}}, pfCache},
 		{"schema includes alone do not narrow the publication", "", unloggedAuditQuery, inRLS, bothCaches},
 		{"schema includes count beside a table include", "", unloggedAuditQuery,
-			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}, IncludeOnlyTables: []string{pfPlain}}, pfOtherCache},
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfOther}, IncludeOnlyTables: []string{pfPlain}}, pfOtherCache},
 		{"unlogged tables out of scope", "", unloggedAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{pfPlain}}, ""},
 		{"excluded unlogged tables", "", unloggedAuditQuery,
@@ -258,6 +270,13 @@ END $do$;
 			}
 		})
 	}
+	t.Run("the publication reaches a leaf through its root", func(t *testing.T) {
+		leaf := "CREATE UNLOGGED TABLE pf_leaf.part2 PARTITION OF pf_rls.parted FOR VALUES IN (2);\n"
+		f := &v1beta1.Filters{IncludeOnlyTables: []string{"pf_rls.parted"}}
+		if got := auditQuery(t, uri, fixture+leaf, unloggedAuditQuery, tableScope(f)); got != "pf_leaf.part2" {
+			t.Fatalf("got %q", got)
+		}
+	})
 	t.Run("no filters audit every user table", func(t *testing.T) {
 		got := auditQuery(t, uri, fixture+"SET ROLE pf_reader;\n", rlsAuditQuery, tableScope(nil))
 		for _, want := range []string{pfOtherForced, "pf_rls.forced", "pf_leaf.part1"} {
