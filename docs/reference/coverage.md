@@ -87,7 +87,8 @@ Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` s
 > [!note]
 > When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
 > Each server prints those definitions itself, and identical objects print differently across majors.
-> pgcopydb's own schema compare still covers them.
+> pgcopydb's schema compare still checks indexes and the constraints an index backs (primary key, unique, exclusion).
+> Check and foreign key constraints, triggers, functions, views, policies, and statistics objects go unchecked on such a pair.
 
 The last column is the oldest source major the case runs on.
 
