@@ -839,9 +839,10 @@ and `
 }
 
 // rlsAuditQuery lists tables whose policies would filter the migration role's
-// COPY and compare alike (check_enable_rls). pgcopydb reads leaves, which apply
-// only their own policies; skipped data copies no rows.
+// COPY and compare alike (check_enable_rls). pgcopydb's table copy reads leaves,
+// which apply only their own policies, and skips extension members and skipped data.
 var rlsAuditQuery = tableScopeQuery("include") + `c.relkind = 'r' and c.relrowsecurity
+and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
 and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`

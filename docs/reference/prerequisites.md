@@ -128,6 +128,7 @@ Policies apply to the role when the table has row-level security enabled and the
 Row-level security without any policy hides every row from such a role.
 Superusers and roles with `BYPASSRLS` are exempt.
 pgcopydb reads each partition directly, and a query on a partition applies only that partition's own policies, so the audit checks plain tables and partitions and ignores policies on a partitioned parent.
+It also skips tables that belong to an extension, such as `cron.job` from `pg_cron`, because pgcopydb leaves them out of its table copy.
 
 Every single-database Migration's preflight fails when such a table is in scope, and names the tables.
 Fix it in one of three ways:

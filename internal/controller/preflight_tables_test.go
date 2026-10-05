@@ -194,6 +194,11 @@ CREATE TABLE pf_other.forced (id int);
 ALTER TABLE pf_other.forced ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 CREATE UNLOGGED TABLE pf_rls.cache (id int);
 CREATE UNLOGGED TABLE pf_other.cache (id int);
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE TABLE pf_other.ext_job (id int);
+ALTER TABLE pf_other.ext_job ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON pf_other.ext_job USING (id < 10);
+ALTER EXTENSION citext ADD TABLE pf_other.ext_job;
 DO $do$ DECLARE r regclass; BEGIN
   FOR r IN SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname IN ('pf_rls', 'pf_leaf', 'pf_other') AND c.relkind IN ('r', 'p') LOOP
@@ -223,6 +228,8 @@ END $do$;
 		}, "pf_rls.nopolicy"},
 		{"RLS and policy on the partitioned parent only, leaves open: quiet", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.guarded"}}, ""},
+		{"extension members are not copied", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.ext_job"}}, ""},
 		{"unlogged tables in scope", "", unloggedAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{pfCache}}, pfCache},
 		{"schema includes alone do not narrow the publication", "", unloggedAuditQuery, inRLS, bothCaches},
