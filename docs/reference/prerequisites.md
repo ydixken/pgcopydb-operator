@@ -22,6 +22,7 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 | CREATE on the database plus table ownership (publication) | source | follow         |
 | EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
 | Primary key or replica identity on replicated tables    | source | follow           |
+| No row-level security that filters the migration role  | source | every migration  |
 
 ## Kubernetes
 
@@ -116,6 +117,28 @@ Superuser is needed only for:
 - `clone.allDatabases: true` on both sides, even when role passwords are omitted.
 - `clone.roles: true` without `clone.noRolePasswords: true` (reads passwords from `pg_authid`).
 - Extensions: most C extensions on the target, and any database whose superuser-installed extensions have configuration tables (a `pg_dump` limitation that filters cannot exclude).
+
+### Row-level security
+
+Row-level security that applies to the source migration role MUST NOT cover a table in scope.
+pgcopydb reads with `row_security` on, so the policies filter its COPY and its `compare data` alike.
+The target gets only the rows the role can see, and verification still passes.
+Policies apply to the role when the table has row-level security enabled and the role does not own it (directly or through an inherited membership), or when the table also has `FORCE ROW LEVEL SECURITY`.
+Row-level security without any policy hides every row from such a role.
+Superusers and roles with `BYPASSRLS` are exempt.
+
+Every single-database Migration's preflight fails when such a table is in scope, and names the tables.
+Fix it in one of three ways:
+
+- Give the source migration role `BYPASSRLS` (`ALTER ROLE <role> BYPASSRLS`, which takes a superuser).
+- Disable row-level security on those tables for the migration.
+- Leave them out with `clone.filters`: `excludeTables`, `excludeSchemas`, or `excludeTableData`.
+
+All-databases clones skip the check, because their migration role is a superuser.
+
+The audit covers the tables `clone.filters` keeps: user tables and partitioned tables, matched by exact `schema.table` name, the way pgcopydb builds its publication.
+A partition counts as included when an include filter names its root.
+An entry the audit cannot match exactly (a `~` pattern, a quoted name, or a table name without a schema) widens it instead: it voids its include list and drops out of an exclude list.
 
 ### Ownership after restore (`clone.ownerAfterRestore`)
 

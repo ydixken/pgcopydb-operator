@@ -818,6 +818,81 @@ else
   echo "ok: replica identity audit"
 fi`
 
+// tableScopeEnv carries clone.filters into the table audits as tableScope JSON.
+const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
+
+// tableScopeQuery matches tables as pgcopydb's publication query does (exact
+// names, include entries ORed), plus partitions whose root an include names.
+const tableScopeQuery = `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
+join pg_namespace rn on rn.oid = rc.relnamespace,
+(select :'list'::jsonb as f) s
+where c.relkind in ('r', 'p') and n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
+and (jsonb_array_length(s.f->'include') = 0 or exists (select 1 from jsonb_array_elements(s.f->'include') e(v)
+  where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))
+and not exists (select 1 from jsonb_array_elements(s.f->'exclude') e(v) where v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname)
+and `
+
+// rlsAuditQuery lists tables whose policies would filter the migration role's
+// COPY and compare alike (check_enable_rls); skipped data copies no rows.
+const rlsAuditQuery = tableScopeQuery + `c.relrowsecurity
+and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
+and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
+and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
+
+const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
+
+var rlsAuditBlock = remAggBlock(remAggregate{
+	query:   fmt.Sprintf(tableAuditCmd, rlsAuditQuery),
+	ok:      "row-level security audit",
+	missing: `preflight: row-level security hides rows of these tables from the source migration role, so the copy and its verification would both miss them: $agg; grant the role BYPASSRLS, disable row-level security on them for the migration, or leave them out with clone.filters`,
+	onProbe: `preflight: probing row-level security on the source tables failed`,
+})
+
+// tableScope renders clone.filters for tableScopeQuery. An entry it cannot
+// match exactly (a ~ pattern, a quoted or unqualified name) widens the scope:
+// it voids its include list and drops out of an exclude list, failing closed.
+func tableScope(f *v1beta1.Filters) string {
+	scope := struct {
+		Include  [][]any `json:"include"`
+		Exclude  [][]any `json:"exclude"`
+		SkipData [][]any `json:"skipData"`
+	}{[][]any{}, [][]any{}, [][]any{}}
+	if f != nil {
+		schemas, okS := scopeEntries(f.IncludeOnlySchemas, false)
+		tables, okT := scopeEntries(f.IncludeOnlyTables, true)
+		if okS && okT {
+			scope.Include = append(schemas, tables...)
+		}
+		schemas, _ = scopeEntries(f.ExcludeSchemas, false)
+		tables, _ = scopeEntries(f.ExcludeTables, true)
+		scope.Exclude = append(schemas, tables...)
+		scope.SkipData, _ = scopeEntries(f.ExcludeTableData, true)
+	}
+	// Strings and nils only, which json.Marshal cannot reject.
+	b, _ := json.Marshal(scope)
+	return string(b)
+}
+
+// scopeEntries maps filter entries to [schema, table] pairs, table nil for a
+// whole schema; ok is false when any entry could not be mapped.
+func scopeEntries(entries []string, qualified bool) ([][]any, bool) {
+	out, ok := [][]any{}, true
+	for _, e := range entries {
+		s, t, dot := strings.Cut(e, ".")
+		switch {
+		case strings.ContainsAny(e, `~"`), qualified && !dot:
+			ok = false
+		case qualified:
+			out = append(out, []any{s, t})
+		default:
+			out = append(out, []any{e, nil})
+		}
+	}
+	return out, ok
+}
+
 // preflightScriptFooter re-prints failures in tail-survival order, audit first
 // and hints last: the Failed condition carries only the log tail.
 const preflightScriptFooter = `
@@ -1032,6 +1107,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(ownerAfterRestoreBlock(superTgt, dry))
 	}
 	b.WriteString(cloneRightsBlock(superTgt, dbProps, dry))
+	b.WriteString(rlsAuditBlock)
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
 		b.WriteString(slotHeadroomBlock)
@@ -1093,6 +1169,10 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	if reownRequested(m) {
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
+	}
+	if !m.Spec.Clone.AllDatabases {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: tableScopeEnv, Value: tableScope(m.Spec.Clone.Filters)})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
 	// surface via PreflightRunning long before 30 minutes, and the deadline
