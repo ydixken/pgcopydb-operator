@@ -59,6 +59,9 @@ func TestTableScope(t *testing.T) {
 			emptyScope},
 		{"an unqualified include widens", &v1beta1.Filters{IncludeOnlyTables: []string{"orders"}},
 			emptyScope},
+		// pgcopydb folds an unquoted schema name to lower case (to_regnamespace).
+		{"an uppercase schema include widens", &v1beta1.Filters{IncludeOnlySchemas: []string{"Sales"}},
+			emptyScope},
 		{"unresolvable excludes are ignored", &v1beta1.Filters{
 			ExcludeSchemas: []string{"scratch", "~/tmp_/"},
 			ExcludeTables:  []string{"app.audit", `"App".x`, "~/a/.b", "bare"},
@@ -220,6 +223,9 @@ END $do$;
 		{"superuser is exempt", "pf_super", rlsAuditQuery, inRLS, ""},
 		{"include scopes to its schema", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, pfOtherForced},
+		{"an uppercase schema include widens to every table", pfReader, rlsAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{"PF_Other"}},
+			"pf_leaf.part1, pf_other.forced, pf_rls.forced, pf_rls.nopolicy, pf_rls.plain"},
 		{"include tables scope to those tables", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{pfPlain, pfOtherForced}}, "pf_other.forced, pf_rls.plain"},
 		{"excluded tables and skipped data leave the scope", pfReader, rlsAuditQuery, &v1beta1.Filters{

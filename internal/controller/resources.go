@@ -867,7 +867,7 @@ var unloggedAuditBlock = remAggBlock(remAggregate{
 })
 
 // tableScope renders clone.filters for tableScopeQuery. An entry it cannot
-// match exactly (a ~ pattern, a quoted or unqualified name) widens the scope:
+// match exactly (a ~ pattern, a quoted, unqualified, or uppercase schema name) widens the scope:
 // it voids its include list and drops out of an exclude list, failing closed.
 func tableScope(f *v1beta1.Filters) string {
 	scope := struct {
@@ -904,7 +904,8 @@ func scopeEntries(entries []string, qualified bool) ([][]any, bool) {
 	for _, e := range entries {
 		s, t, dot := strings.Cut(e, ".")
 		switch {
-		case strings.ContainsAny(e, `~"`), qualified && !dot:
+		// pgcopydb folds an unquoted schema name to lower case (to_regnamespace).
+		case strings.ContainsAny(e, `~"`), qualified && !dot, !qualified && e != strings.ToLower(e):
 			ok = false
 		case qualified:
 			out = append(out, []any{s, t})
