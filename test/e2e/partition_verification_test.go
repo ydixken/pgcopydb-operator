@@ -18,7 +18,6 @@ package e2e
 
 import (
 	"fmt"
-	"reflect"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,14 +25,11 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
-
-const partitionFixtureAnnotation = "pgcopydb-operator.io/partition-verification-fixture"
 
 var _ = Describe("Partition verification", func() {
 	It("verifies a cloned range parent with populated, empty and default leaves", func() {
@@ -166,91 +162,8 @@ func newPartitionVerificationMigration() (*v1beta1.Migration, string) {
 		Filters:       &v1beta1.Filters{IncludeOnlySchemas: []string{schema}},
 		UseCopyBinary: &useCopyBinary,
 	})
-	// Explicit API defaults keep identity checks valid after an uncertain Create response.
-	for _, connection := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
-		if connection.Port == 0 {
-			connection.Port = defaultPGPort
-		}
-		if connection.SSLMode == "" {
-			connection.SSLMode = "prefer"
-		}
-	}
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	m.Annotations = map[string]string{partitionFixtureAnnotation: identity}
-	for _, cluster := range []string{sourceCluster, targetCluster} {
-		Expect(psql(cluster, "SELECT count(*) FROM pg_namespace WHERE nspname = "+sqlLiteral(schema))).To(Equal("0"))
-	}
-	stamp := "pgcopydb-e2e-partition:" + identity
-	// Commit the ownership marker with the schema, including when the client loses the response.
-	_, createErr := psqlDBErr(sourceCluster, appDatabase(sourceCluster), "BEGIN; "+asSourceAppRole()+
-		"CREATE SCHEMA "+sqlIdent(schema)+"; COMMENT ON SCHEMA "+sqlIdent(schema)+" IS "+sqlLiteral(stamp)+"; COMMIT")
-	ownerQuery := "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = " + sqlLiteral(schema)
-	stampQuery := "SELECT obj_description(oid, 'pg_namespace') FROM pg_namespace WHERE nspname = " + sqlLiteral(schema)
-	DeferCleanup(func() {
-		current := &v1beta1.Migration{}
-		key := client.ObjectKeyFromObject(m)
-		err := k8sClient.Get(ctx, key, current)
-		if err != nil {
-			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "cannot prove whether the fixture Migration exists")
-		} else {
-			Expect(current.Annotations[partitionFixtureAnnotation]).To(Equal(identity),
-				"refusing to delete a Migration with another fixture identity")
-			sameConfig := reflect.DeepEqual(current.Spec.Source, m.Spec.Source) &&
-				reflect.DeepEqual(current.Spec.Target, m.Spec.Target) &&
-				reflect.DeepEqual(current.Spec.Clone, m.Spec.Clone) &&
-				reflect.DeepEqual(current.Spec.Verification, m.Spec.Verification)
-			Expect(sameConfig).To(BeTrue(), "refusing to delete a Migration with another fixture configuration")
-			Expect(requireFeatureMigrationOwnership(current)).To(Succeed())
-			if m.UID != "" {
-				Expect(current.UID).To(Equal(m.UID), "refusing to delete a replacement Migration")
-			}
-			Expect(current.UID).NotTo(BeEmpty())
-			m.UID = current.UID
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, current,
-				client.Preconditions{UID: &m.UID}))).To(Succeed())
-			Eventually(func(g Gomega) {
-				remaining := &v1beta1.Migration{}
-				lookupErr := k8sClient.Get(ctx, key, remaining)
-				if lookupErr == nil {
-					g.Expect(remaining.UID).To(Equal(m.UID), "refusing to stop a replacement Migration")
-				}
-				g.Expect(apierrors.IsNotFound(lookupErr)).To(BeTrue(), "fixture Migration is still terminating")
-			}, 5*time.Minute, time.Second).Should(Succeed())
-		}
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &v1beta1.Migration{}))).To(BeTrue(),
-			"fixture Migration must be absent before its schemas are dropped")
-		Eventually(func(g Gomega) {
-			jobs := &batchv1.JobList{}
-			g.Expect(k8sClient.List(ctx, jobs, client.InNamespace(nsE2E),
-				client.MatchingLabels{migrationLabel: m.Name})).To(Succeed())
-			for _, job := range jobs.Items {
-				g.Expect(m.UID).NotTo(BeEmpty(), "cannot establish ownership of a remaining fixture Job")
-				g.Expect(metav1.IsControlledBy(&job, m)).To(BeTrue(), "refusing to delete a replaced Job")
-				g.Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &job, client.Preconditions{UID: &job.UID},
-					client.PropagationPolicy(metav1.DeletePropagationForeground)))).To(Succeed())
-			}
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
-				client.MatchingLabels{migrationLabel: m.Name})).To(Succeed())
-			for _, pod := range pods.Items {
-				g.Expect(pod.Status.Phase).To(BeElementOf(corev1.PodSucceeded, corev1.PodFailed),
-					"Migration pod must stop before its fixture is dropped")
-			}
-			jobCount := len(jobs.Items)
-			g.Expect(jobCount).To(BeZero(), "owned Migration Jobs must be removed before dropping the fixture")
-		}, 5*time.Minute, time.Second).Should(Succeed())
-		for _, cluster := range []string{sourceCluster, targetCluster} {
-			if psql(cluster, "SELECT count(*) FROM pg_namespace WHERE nspname = "+sqlLiteral(schema)) == "0" {
-				continue
-			}
-			Expect(psql(cluster, ownerQuery)).To(Equal(appRole(cluster)), "refusing to drop a schema with another owner")
-			Expect(psql(cluster, stampQuery)).To(Equal(stamp), "refusing to drop a schema without this fixture marker")
-			psql(cluster, "SET ROLE "+sqlIdent(appRole(cluster))+"; DROP SCHEMA "+sqlIdent(schema)+" CASCADE")
-		}
-	})
-	Expect(createErr).NotTo(HaveOccurred(), "failed to create the stamped partition fixture")
-	Expect(psql(sourceCluster, ownerQuery)).To(Equal(appRole(sourceCluster)))
-	Expect(psql(sourceCluster, stampQuery)).To(Equal(stamp))
+	createStampedSchemas(m, identity, "pgcopydb-e2e-partition:"+identity, []string{schema}, nil)
 
 	qualified := sqlIdent(schema) + "."
 	psql(sourceCluster, asSourceAppRole()+
