@@ -1228,6 +1228,7 @@ apply() {
 }
 case "$q" in
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
+  *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *server_version_num*) case "$uri" in src*) echo "${SRC_MAJOR-16}" ;; *) echo "${TGT_MAJOR-16}" ;; esac ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]') echo 1 ;; *) echo -1 ;; esac ;;
   *source_extension*) printf '%s' "${PSQL_EXTENSION_SOURCE-[]}" ;;
@@ -2200,6 +2201,7 @@ case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
+  *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;
   *source_extension*)
     case "$list" in

@@ -841,6 +841,9 @@ and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE')
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
 
+// unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
+const unloggedAuditQuery = tableScopeQuery + `c.relpersistence = 'u'`
+
 const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
 
 var rlsAuditBlock = remAggBlock(remAggregate{
@@ -848,6 +851,13 @@ var rlsAuditBlock = remAggBlock(remAggregate{
 	ok:      "row-level security audit",
 	missing: `preflight: row-level security hides rows of these tables from the source migration role, so the copy and its verification would both miss them: $agg; grant the role BYPASSRLS, disable row-level security on them for the migration, or leave them out with clone.filters`,
 	onProbe: `preflight: probing row-level security on the source tables failed`,
+})
+
+var unloggedAuditBlock = remAggBlock(remAggregate{
+	query:   fmt.Sprintf(tableAuditCmd, unloggedAuditQuery),
+	ok:      "unlogged table audit",
+	missing: `preflight: follow cannot replicate unlogged tables, whose changes never reach the WAL: $agg; run ALTER TABLE ... SET LOGGED on the source, or leave them out with clone.filters excludeTables or excludeSchemas`,
+	onProbe: `preflight: probing the source for unlogged tables failed`,
 })
 
 // tableScope renders clone.filters for tableScopeQuery. An entry it cannot
@@ -1114,6 +1124,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(replicationAttrBlock(superSrc, dry))
 		b.WriteString(originGrantsBlock(superTgt, dry))
 		b.WriteString(srrBlock(superTgt, dry))
+		b.WriteString(unloggedAuditBlock)
 		b.WriteString(riAuditBlock)
 		if m.Spec.Follow.Plugin == v1beta1.PluginWal2json {
 			b.WriteString(preflightWal2jsonNote)

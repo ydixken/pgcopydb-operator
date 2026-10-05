@@ -18,6 +18,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`PreflightFailed` with `still lacks ... after remediation`](#a-grant-is-still-missing-after-remediation) | Preflight failures |
 | [`no replica identity usable for UPDATE/DELETE`](#no-replica-identity-usable-for-updatedelete) | Preflight failures |
 | [`row-level security hides rows of these tables`](#row-level-security-hides-rows) | Preflight failures |
+| [`follow cannot replicate unlogged tables`](#follow-cannot-replicate-unlogged-tables) | Preflight failures |
 | [`must be owner of extension ...`, or `target extension ownership required`](#extension-ownership-failures) | Extension ownership failures |
 | [Slot creation fails with `could not access file "wal2json"`](#wal2json-is-not-installed-on-the-source) | Replication and follow |
 | [Slot creation fails with `may not be used as an output plugin`](#wal2json-is-not-trusted-by-the-source) | Replication and follow |
@@ -152,6 +153,14 @@ pgcopydb would copy only the rows that role can see, and its comparison would ag
 Give the role `BYPASSRLS`, disable row-level security on those tables for the migration, or leave them out with `clone.filters`.
 Then create a new Migration.
 See [Row-level security](reference/prerequisites.md#row-level-security) for when policies apply and how the audit scopes tables.
+
+### Follow cannot replicate unlogged tables
+
+`PreflightFailed` with `follow cannot replicate unlogged tables` names unlogged tables in a follow Migration's scope.
+Their changes never reach the WAL, so pgcopydb cannot decode them, and its publication refuses them.
+
+Run `ALTER TABLE ... SET LOGGED` on the source, or leave the tables out with `excludeTables` or `excludeSchemas`.
+Then create a new Migration.
 
 ## Extension ownership failures
 

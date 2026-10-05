@@ -26,12 +26,15 @@ import (
 )
 
 const (
-	okRLSAudit    = "ok: row-level security audit"
-	rlsProbe      = "relrowsecurity"
-	emptyScope    = `{"include":[],"exclude":[],"skipData":[]}`
-	pfRLS         = "pf_rls"
-	pfReader      = "pf_reader"
-	pfOtherForced = "pf_other.forced"
+	okRLSAudit      = "ok: row-level security audit"
+	okUnloggedAudit = "ok: unlogged table audit"
+	rlsProbe        = "relrowsecurity"
+	unloggedProbe   = "relpersistence = 'u'"
+	emptyScope      = `{"include":[],"exclude":[],"skipData":[]}`
+	pfRLS           = "pf_rls"
+	pfReader        = "pf_reader"
+	pfOtherForced   = "pf_other.forced"
+	pfCache         = "pf_rls.cache"
 )
 
 func TestTableScope(t *testing.T) {
@@ -66,22 +69,28 @@ func TestTableScope(t *testing.T) {
 	}
 }
 
-// TestPreflightScriptFor_TableAudits pins which Migrations get the audit:
-// every single-database Migration, never all-databases (both sides are superusers there).
+// TestPreflightScriptFor_TableAudits pins which Migrations get which audit:
+// row-level security on every single-database Migration, unlogged tables on
+// follow only, and neither on all-databases (both sides are superusers there).
 func TestPreflightScriptFor_TableAudits(t *testing.T) {
-	for _, m := range []*v1beta1.Migration{passwordMigration(), superMigration()} {
-		if s := preflightScriptFor(m); !strings.Contains(s, rlsProbe) {
-			t.Fatalf("script must audit RLS:\n%s", s)
-		}
+	clone := preflightScriptFor(passwordMigration())
+	if !strings.Contains(clone, rlsProbe) || strings.Contains(clone, unloggedProbe) {
+		t.Fatalf("clone-only script must audit RLS and not unlogged tables:\n%s", clone)
+	}
+	follow := preflightScriptFor(superMigration())
+	if !strings.Contains(follow, rlsProbe) || !strings.Contains(follow, unloggedProbe) {
+		t.Fatalf("follow script must audit both:\n%s", follow)
 	}
 	all := passwordMigration()
 	all.Spec.Clone.AllDatabases = true
-	if s := preflightScriptFor(all); strings.Contains(s, rlsProbe) {
-		t.Fatalf("all-databases script must not audit RLS:\n%s", s)
+	if s := preflightScriptFor(all); strings.Contains(s, rlsProbe) || strings.Contains(s, unloggedProbe) {
+		t.Fatalf("all-databases script must audit neither:\n%s", s)
 	}
 	// The queries ride inside a double-quoted shell word.
-	if strings.ContainsAny(rlsAuditQuery, "\"$`\\") {
-		t.Fatalf("query carries a shell-active character: %s", rlsAuditQuery)
+	for _, q := range []string{rlsAuditQuery, unloggedAuditQuery} {
+		if strings.ContainsAny(q, "\"$`\\") {
+			t.Fatalf("query carries a shell-active character: %s", q)
+		}
 	}
 	m := passwordMigration()
 	m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeTables: []string{"app.audit"}}
@@ -122,6 +131,28 @@ func TestPreflightScript_RowLevelSecurityAudit(t *testing.T) {
 	})
 }
 
+func TestPreflightScript_UnloggedAudit(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(superMigration())
+	t.Run("passes without unlogged tables", func(t *testing.T) {
+		out, code, _ := run(t, script, "")
+		if code != 0 || !strings.Contains(out, okUnloggedAudit) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	t.Run("fails naming the tables and the remedies", func(t *testing.T) {
+		out, code, _ := run(t, script, "", "PSQL_UNLOGGED_TABLES=app.cache")
+		if code != 1 || strings.Contains(out, okUnloggedAudit) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		for _, want := range []string{"app.cache", "SET LOGGED", "clone.filters"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q:\n%s", want, out)
+			}
+		}
+	})
+}
+
 // TestPreflightTableAuditQueries runs the shipped queries against a live server
 // with the scope JSON tableScope renders, as each role the audit distinguishes.
 func TestPreflightTableAuditQueries(t *testing.T) {
@@ -151,6 +182,7 @@ CREATE TABLE pf_leaf.part1 PARTITION OF pf_rls.parted FOR VALUES IN (1);
 ALTER TABLE pf_leaf.part1 ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 CREATE TABLE pf_other.forced (id int);
 ALTER TABLE pf_other.forced ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+CREATE UNLOGGED TABLE pf_rls.cache (id int);
 DO $do$ DECLARE r regclass; BEGIN
   FOR r IN SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname IN ('pf_rls', 'pf_leaf', 'pf_other') AND c.relkind IN ('r', 'p') LOOP
@@ -178,6 +210,13 @@ END $do$;
 			IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{"pf_rls.forced", "pf_leaf.part1"},
 			ExcludeTableData: []string{"pf_rls.plain"},
 		}, "pf_rls.nopolicy"},
+		{"unlogged tables in scope", "", unloggedAuditQuery, inRLS, pfCache},
+		{"unlogged tables out of scope", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, ""},
+		{"an excluded unlogged table", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{pfCache}}, ""},
+		{"skipped data still reaches the publication", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, ExcludeTableData: []string{pfCache}}, pfCache},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setRole := ""
@@ -195,6 +234,10 @@ END $do$;
 			if !strings.Contains(got, want) {
 				t.Fatalf("unfiltered audit missed %s: %q", want, got)
 			}
+		}
+		got = auditQuery(t, uri, fixture, unloggedAuditQuery, tableScope(nil))
+		if !strings.Contains(got, pfCache) || strings.Contains(got, "pf_rls.open") {
+			t.Fatalf("unfiltered unlogged audit = %q", got)
 		}
 	})
 }

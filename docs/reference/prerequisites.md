@@ -23,6 +23,7 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 | EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
 | Primary key or replica identity on replicated tables    | source | follow           |
 | No row-level security that filters the migration role  | source | every migration  |
+| No unlogged tables in scope                             | source | follow           |
 
 ## Kubernetes
 
@@ -136,9 +137,9 @@ Fix it in one of three ways:
 
 All-databases clones skip the check, because their migration role is a superuser.
 
-The audit covers the tables `clone.filters` keeps: user tables and partitioned tables, matched by exact `schema.table` name, the way pgcopydb builds its publication.
+This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps: user tables and partitioned tables, matched by exact `schema.table` name, the way pgcopydb builds its publication.
 A partition counts as included when an include filter names its root.
-An entry the audit cannot match exactly (a `~` pattern, a quoted name, or a table name without a schema) widens it instead: it voids its include list and drops out of an exclude list.
+An entry the audits cannot match exactly (a `~` pattern, a quoted name, or a table name without a schema) widens them instead: it voids its include list and drops out of an exclude list.
 
 ### Ownership after restore (`clone.ownerAfterRestore`)
 
@@ -252,6 +253,7 @@ Before the first attempt, and after the connectivity probes, the preflight Job a
 - EXECUTE on the origin functions.
 - The `session_replication_role` SET privilege.
 - An audit of every user table for a usable replica identity.
+- An audit of the tables in scope for unlogged tables.
 
 A failed check fails the Migration before any data moves, with the exact missing GRANT, setting, or table list in the `Validated` condition message.
 When the failing side has no `superuserSecretRef`, the message adds a hint that names that field.
@@ -324,6 +326,13 @@ Schema and workload contract:
   It ignores `clone.filters`, because a filtered table can still take writes.
   Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
+- Unlogged tables MUST NOT be in scope.
+  They write no WAL, so logical decoding never sees their changes.
+  With the automatic publication, pgcopydb's `CREATE PUBLICATION ... FOR TABLE` refuses them and the first attempt fails before any copy.
+  With `spec.follow.publication` or `wal2json`, their changes during the window are lost, and only `spec.verification.data` notices.
+  The preflight fails on unlogged tables in scope, scoped as described under [Row-level security](#row-level-security).
+  Run `ALTER TABLE ... SET LOGGED` on the source, or leave them out with `excludeTables` or `excludeSchemas`.
+  `excludeTableData` does not help, because pgcopydb still publishes those tables.
 - Large-object changes during the window are not replicated (base copy only).
   Sequences need no action: pgcopydb re-syncs them automatically after cutover.
 
