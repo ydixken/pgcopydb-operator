@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/22e29c357ef82e8097d19f7306824c350e7a7c86) for all-databases behavior and partition comparison.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/7fddd6fddadbb5fed1dd0143efc446eca3287753) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -44,8 +44,10 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports five pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.22.g22e29c3`, adds [partition comparison](../operations/verification.md#partitioned-tables) and retains [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
+The progress poll supports six pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.34.g7fddd6f`, adds three fixes listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+It retains [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
+`0.18.22.g22e29c3` lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.
@@ -122,8 +124,9 @@ Superuser is needed only for:
 ### Row-level security
 
 Row-level security that applies to the source migration role MUST NOT cover a table in scope.
-pgcopydb reads with `row_security` on, so the policies filter its COPY and its `compare data` alike.
-The target gets only the rows the role can see, and verification still passes.
+The bundled runner reads with `row_security` off, as pg_dump does, so such a table fails the copy with SQLSTATE 42501.
+Runners before `0.18.34.g7fddd6f` read with it on: the policies filter their COPY and their `compare data` alike, the target gets only the rows the role can see, and verification still passes.
+The bundled runner also applies follow changes on the target with `row_security` off, so a target policy that would hide a row from an UPDATE or DELETE fails the apply instead of skipping the row.
 Policies apply to the role when the table has row-level security enabled and the role does not own it (directly or through an inherited membership), or when the table also has `FORCE ROW LEVEL SECURITY`.
 Row-level security without any policy hides every row from such a role.
 Superusers and roles with `BYPASSRLS` are exempt.
@@ -330,6 +333,10 @@ Schema and workload contract:
   The preflight audits all user tables for this and fails on offenders.
   It ignores `clone.filters`, because a filtered table can still take writes.
   Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
+- A table with `REPLICA IDENTITY FULL` and no key SHOULD NOT hold rows that are equal except where one of them is NULL when the plugin is `test_decoding`.
+  The bundled runner changes one matching row per UPDATE or DELETE, but `test_decoding` leaves NULL columns out of the old row, so the change can land on the wrong row.
+  `pgoutput` and `wal2json` send the NULLs and are not affected.
+  On a Citus-distributed target, that one-row form fails the apply with an error.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
 - Unlogged tables MUST NOT be in scope.
   They write no WAL, so logical decoding never sees their changes.

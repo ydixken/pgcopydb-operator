@@ -1153,7 +1153,9 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 	}
 
 	// Upgrading the manager must retain counters for workers on all previous pins.
-	for _, version := range []string{want, "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"} {
+	for _, version := range []string{
+		want, "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd",
+	} {
 		if !slices.Contains(versions, version) {
 			t.Errorf("runner.progressPollVersions is %v, which does not allow %s; "+
 				"the in-pod progress poll would fail closed and status.progress would go dark",
