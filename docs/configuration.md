@@ -227,8 +227,16 @@ The operator adds TCP keepalive settings to every connection URI it composes, wh
 Without them libpq falls back to the kernel's two-hour default.
 A server that disappears without closing its connections, such as a replaced pod or a torn-down network path, then leaves the pgcopydb copy workers waiting on a dead socket for hours.
 With them, the read fails after about 70 seconds and the attempt ends with a connection error.
+
+Keepalives only probe an idle socket.
+When the source vanishes while a request to it is still unacknowledged, such as the `COMMIT` that closes pgcopydb's snapshot, the kernel retransmits for about 15 minutes instead.
+Source URIs therefore also get `tcp_user_timeout=60000`, which fails that connection after 60 seconds of unacknowledged data.
+Target URIs deliberately do not get it.
+The timeout also counts the time queued data waits on a zero receive window, so a live target that stops reading COPY data for a minute, during a storage stall for example, would fail the attempt.
+`tcp_user_timeout` needs libpq 12 or newer; the runner image ships libpq 18.
+
 A `DB` URI in a `secretRef` Secret keeps any of these keys it already sets, and the operator fills in only the missing ones.
 
 > [!note]
 > The operator does not rewrite a `uriSecretRef` value.
-> Add the keepalive parameters to that URI yourself.
+> Add the keepalive parameters, and `tcp_user_timeout` on the source, to that URI yourself.

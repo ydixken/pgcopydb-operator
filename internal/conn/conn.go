@@ -377,10 +377,22 @@ func tlsParams(s Side, c *v1beta1.PostgresConnection) string {
 // then fails the read after about 70 s (10 + 6 x 10) instead of the kernel's 2 h.
 const keepaliveParams = "keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=6"
 
+// sourceTimeout bounds unacknowledged sends, where keepalives never fire. Source
+// only: a live target that stops reading COPY data would be cut after 60 s too.
+const sourceTimeout = "tcp_user_timeout=60000"
+
+// defaultParams are the connection defaults one side's URI gains.
+func defaultParams(s Side) string {
+	if s == Source {
+		return keepaliveParams + "&" + sourceTimeout
+	}
+	return keepaliveParams
+}
+
 // querySuffix joins the spec-side query params for the inline form's URI;
 // url.Values.Encode keeps the result shell-single-quote safe.
 func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
-	q := keepaliveParams
+	q := defaultParams(s)
 	if tls := tlsParams(s, c); tls != "" {
 		q = tls + "&" + q
 	}
@@ -457,11 +469,11 @@ host=${hostport%%:*}
 		b += `case "$uri" in *\?*) uri="$uri&` + tls + `" ;; *) uri="$uri?` + tls + `" ;; esac
 `
 	}
-	// The DB URI keeps its own sslmode and keepalives; ours only fill gaps.
+	// The DB URI keeps its own sslmode and defaults; ours only fill gaps.
 	if sslmode != "" {
 		b += fillParams(sslmode)
 	}
-	b += fillParams(keepaliveParams)
+	b += fillParams(defaultParams(s))
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
 [ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }
