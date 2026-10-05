@@ -333,6 +333,65 @@ The check polls for up to five minutes to cover a candidate tagged straight afte
 A behavior pull request MUST ship its E2E specs in the same change, so the candidate exercises them.
 A contributor with a cluster SHOULD run the new specs locally with `task e2e:focus` before merging.
 
+### How do you add a feature coverage case?
+
+The feature coverage spec in `test/e2e/coverage_test.go` runs the SQL cases under `test/e2e/coverage/`, and the [coverage reference](docs/reference/coverage.md#postgresql-feature-coverage) lists every one of them.
+A case that comes out identical needs one file and no Go change.
+
+1. Write `test/e2e/coverage/<area>/<case>.sql`.
+   The first line is the header, `-- @setup` starts the SQL that builds the case on the source, and `${schema}` names the case's own schema:
+
+   ```sql
+   -- coverage: group=clone  expect=identical  schemas=1  min_pg=14
+   -- @setup
+   CREATE TABLE ${schema}.t (id int PRIMARY KEY, v text);
+   INSERT INTO ${schema}.t SELECT g, md5(g::text) FROM generate_series(1, 20) g;
+   ```
+
+2. Start a throwaway PostgreSQL, the image CI uses, and wait until it accepts connections:
+
+   ```sh
+   podman run -d --name coverage-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 \
+     --health-cmd 'pg_isready -U postgres -h 127.0.0.1' --health-interval 1s docker.io/library/postgres:16-alpine
+   podman wait --condition=healthy coverage-pg
+   ```
+
+3. Run the cluster-free coverage tests.
+   They apply every case as a role without superuser rights, fail a case that creates or alters anything outside its own schemas, and read its fingerprint:
+
+   ```sh
+   PGCOPYDB_TEST_PGURI=postgres://postgres:postgres@127.0.0.1:5432/postgres go test ./test/e2e -run Coverage -count=1
+   ```
+
+4. Remove the throwaway server:
+
+   ```sh
+   podman rm -f coverage-pg
+   ```
+
+5. Add the case's row to the matrix in `docs/reference/coverage.md`.
+   `TestCoverageMatrixListsEveryCase` fails until the row matches the header.
+
+6. Run the group on a cluster, with the confirmation prompt described in [AGENTS.md](AGENTS.md):
+
+   ```sh
+   task e2e:focus FOCUS='Feature coverage'
+   ```
+
+The parser rejects a file that breaks these rules, so a typo cannot drop a case silently:
+
+- The header sets `group`, `expect`, `schemas` (1 or 2) and `min_pg` (14 or later), and nothing else.
+- `group=clone` and `group=follow` cases expect `identical`; a `group=own` case names an outcome registered in Go.
+- `-- @follow` holds what a follow case runs while replication streams; a clone case has none.
+- `${schema2}` exists only with `schemas=2`, and such a case must use it; any other `${...}` is an error.
+- The file name is the case name: lowercase letters, digits and underscores, at most 37 bytes, unique across areas.
+
+Three conventions keep a case within what the spec cleans up:
+
+- Each statement commits on its own and runs as the source app role, so a case may use an enum value it added earlier, and pgcopydb owns what it copies.
+- Grants and policies go to `cov_reader`, which the spec creates on both servers.
+- A case that creates large objects lists them in `${schema}.cov_large_objects (name text, lo oid)`: the fingerprint compares their contents, and cleanup unlinks them, because dropping a schema leaves large objects behind.
+
 ## Releasing
 
 Every Monday at 08:00 UTC, `auto-release.yml` reads what landed since the last stable tag and pushes a release candidate: `vX.Y.Z-rc.1`, a patch bump unless a `feat:` commit is in the range, in which case a minor one.

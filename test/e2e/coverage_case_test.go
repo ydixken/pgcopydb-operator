@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"regexp"
 	"slices"
@@ -437,5 +438,36 @@ func TestEmbeddedCoverageCasesParse(t *testing.T) {
 	}
 	if clone == 0 {
 		t.Fatal("no clone cases embedded")
+	}
+}
+
+// coverageMatrixRow is one row of the matrix in docs/reference/coverage.md.
+var coverageMatrixRow = regexp.MustCompile("^\\| `([a-z_]+/[a-z0-9_]+)` \\| ([a-z]+) \\| ([a-z_]+) \\| ([0-9]+) \\|$")
+
+// TestCoverageMatrixListsEveryCase keeps the documented matrix equal to the
+// embedded cases, so a case cannot ship or change verdict undocumented.
+func TestCoverageMatrixListsEveryCase(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/reference/coverage.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documented []string
+	for line := range strings.Lines(string(doc)) {
+		if m := coverageMatrixRow.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			documented = append(documented, strings.Join(m[1:], " "))
+		}
+	}
+	cases, err := loadCoverageCases(coverageFS, coverageOutcomes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded := make([]string, 0, len(cases))
+	for _, c := range cases {
+		row := strings.TrimSuffix(strings.TrimPrefix(c.path, "coverage/"), ".sql")
+		embedded = append(embedded, fmt.Sprintf("%s %s %s %d", row, c.group, c.expect, c.minPG))
+	}
+	if !slices.Equal(documented, embedded) {
+		t.Fatalf("docs/reference/coverage.md lists\n%s\nthe embedded cases are\n%s",
+			strings.Join(documented, "\n"), strings.Join(embedded, "\n"))
 	}
 }
