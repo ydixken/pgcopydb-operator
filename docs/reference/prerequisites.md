@@ -22,7 +22,7 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 | CREATE on the database plus table ownership (publication) | source | follow         |
 | EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
 | Primary key or replica identity on replicated tables    | source | follow           |
-| No row-level security that filters the migration role  | source | every migration  |
+| No row-level security that filters the migration role  | source | single-database migrations |
 | No unlogged tables in scope                             | source | follow           |
 
 ## Kubernetes
