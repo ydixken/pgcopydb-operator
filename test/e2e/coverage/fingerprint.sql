@@ -141,9 +141,15 @@ WITH nsp AS (
     pg_temp.cov_seq(r.oid))
   FROM pg_sequence s JOIN rel r ON r.oid = s.seqrelid
   UNION ALL
-  SELECT coalesce(o.schema, o.identity), 'comment', o.type || ' ' || o.identity, d.description
-  FROM pg_description d, pg_identify_object(d.classoid, d.objoid, d.objsubid) o
-  WHERE coalesce(o.schema, CASE WHEN o.type = 'schema' THEN o.identity END) = ANY (${schemas})
+  -- pg_identify_object gives triggers, policies and rules no schema, so take their table's.
+  SELECT s.nspname, 'comment', o.type || ' ' || o.identity, d.description
+  FROM pg_description d, pg_identify_object(d.classoid, d.objoid, d.objsubid) o,
+    LATERAL (SELECT coalesce(o.schema, CASE WHEN o.type = 'schema' THEN o.identity END,
+      (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = CASE d.classoid
+        WHEN 'pg_trigger'::regclass THEN (SELECT tgrelid FROM pg_trigger WHERE oid = d.objoid)
+        WHEN 'pg_policy'::regclass THEN (SELECT polrelid FROM pg_policy WHERE oid = d.objoid)
+        WHEN 'pg_rewrite'::regclass THEN (SELECT ev_class FROM pg_rewrite WHERE oid = d.objoid) END)) AS nspname) s
+  WHERE s.nspname = ANY (${schemas})
   UNION ALL
   SELECT nspname, 'owner', 'schema', pg_get_userbyid(nspowner) FROM nsp
   UNION ALL

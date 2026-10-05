@@ -99,6 +99,7 @@ type fingerprintKey struct{ aspect, key string }
 
 // caseFingerprint keeps the rows of the schemas in names and writes each name
 // as its placeholder, so two schemas on one server compare like one on two.
+// Keys lead with the placeholder: most fingerprint.sql keys omit the schema.
 func caseFingerprint(rows []fingerprintRow, names map[string]string) map[fingerprintKey]string {
 	// Longest first, so no name replaces part of a longer one.
 	order := slices.SortedFunc(maps.Keys(names), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
@@ -109,8 +110,8 @@ func caseFingerprint(rows []fingerprintRow, names map[string]string) map[fingerp
 	normalize := strings.NewReplacer(pairs...)
 	out := map[fingerprintKey]string{}
 	for _, row := range rows {
-		if _, ok := names[row.Schema]; ok {
-			out[fingerprintKey{row.Aspect, normalize.Replace(row.Key)}] = normalize.Replace(row.Value)
+		if placeholder, ok := names[row.Schema]; ok {
+			out[fingerprintKey{row.Aspect, placeholder + " " + normalize.Replace(row.Key)}] = normalize.Replace(row.Value)
 		}
 	}
 	return out
@@ -273,6 +274,9 @@ CREATE VIEW ${schema}.item_names AS SELECT name FROM ${schema}.items;
 ALTER TABLE ${schema}.items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY items_read ON ${schema}.items FOR SELECT TO cov_reader USING (qty > 0);
 COMMENT ON TABLE ${schema}.items IS 'items';
+COMMENT ON TRIGGER items_touch ON ${schema}.items IS 'trigger';
+COMMENT ON POLICY items_read ON ${schema}.items IS 'policy';
+COMMENT ON RULE "_RETURN" ON ${schema}.item_names IS 'rule';
 GRANT SELECT ON ${schema}.items TO cov_reader;
 CREATE TABLE ${schema}.parts (id integer NOT NULL, region integer NOT NULL) PARTITION BY LIST (region);
 CREATE TABLE ${schema}.parts_one PARTITION OF ${schema}.parts FOR VALUES IN (1);
@@ -315,7 +319,7 @@ func testFingerprint(t *testing.T, run psqlScript, schema string) map[fingerprin
 		t.Fatal(err)
 	}
 	fp := caseFingerprint(rows, map[string]string{schema: coverageSchema})
-	delete(fp, fingerprintKey{"data", "cov_large_objects"})
+	delete(fp, fingerprintKey{"data", coverageSchema + " cov_large_objects"})
 	return fp
 }
 
@@ -338,8 +342,19 @@ func TestCoverageFingerprintDetectsEveryAspect(t *testing.T) {
 		t.Fatalf("fixture reports aspects %v, mutations cover %v", aspects, mutated)
 	}
 	// The owner's own entries are left out: PostgreSQL 17 added MAINTAIN to them.
-	if got, want := base[fingerprintKey{"acl", "relation items"}], testCaseOwner+">cov_reader:SELECT"; got != want {
+	itemsACL := base[fingerprintKey{"acl", coverageSchema + " relation items"}]
+	if got, want := itemsACL, testCaseOwner+">cov_reader:SELECT"; got != want {
 		t.Fatalf("items acl = %q, want %q", got, want)
+	}
+	// pg_identify_object gives these no schema; fingerprint.sql takes their table's.
+	for key, want := range map[string]string{
+		"${schema} trigger items_touch on ${schema}.items": "trigger",
+		"${schema} policy items_read on ${schema}.items":   "policy",
+		`${schema} rule "_RETURN" on ${schema}.item_names`: "rule",
+	} {
+		if got := base[fingerprintKey{"comment", key}]; got != want {
+			t.Fatalf("comment %s = %q, want %q", key, got, want)
+		}
 	}
 	if diffs := diffFingerprint(base, fixture("cov_fp_same_"+identity), nil); len(diffs) > 0 {
 		t.Fatalf("identical schemas differ: %v", diffs)
@@ -376,15 +391,21 @@ func TestDiffFingerprintReportsAbsentSides(t *testing.T) {
 }
 
 func TestCaseFingerprintNormalizesSchemaNames(t *testing.T) {
+	const one, two = "cov_x_1", "cov2_x_1"
 	rows := []fingerprintRow{
-		{Schema: "cov_x_1", Aspect: "a", Key: "leaf", Value: "parents=cov_x_1.parent"},
-		{Schema: "cov2_x_1", Aspect: "a", Key: "cov2_x_1.leaf2", Value: "parents=cov_x_1.parent"},
+		{Schema: one, Aspect: "a", Key: "leaf", Value: "parents=cov_x_1.parent"},
+		{Schema: two, Aspect: "a", Key: "cov2_x_1.leaf2", Value: "parents=cov_x_1.parent"},
+		// Most keys omit the schema; neither schema's row may hide the other's.
+		{Schema: two, Aspect: "a", Key: "t", Value: "2 rows"},
+		{Schema: one, Aspect: "a", Key: "t", Value: "0 rows"},
 		{Schema: "cov_y_1", Aspect: "a", Key: "other", Value: "x"},
 	}
-	got := caseFingerprint(rows, map[string]string{"cov_x_1": coverageSchema, "cov2_x_1": coverageSchema2})
+	got := caseFingerprint(rows, map[string]string{one: coverageSchema, two: coverageSchema2})
 	want := map[fingerprintKey]string{
-		{"a", "leaf"}:             "parents=${schema}.parent",
-		{"a", "${schema2}.leaf2"}: "parents=${schema}.parent",
+		{"a", "${schema} leaf"}:              "parents=${schema}.parent",
+		{"a", "${schema2} ${schema2}.leaf2"}: "parents=${schema}.parent",
+		{"a", "${schema2} t"}:                "2 rows",
+		{"a", "${schema} t"}:                 "0 rows",
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("caseFingerprint = %v, want %v", got, want)
