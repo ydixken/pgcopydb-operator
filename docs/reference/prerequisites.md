@@ -138,7 +138,7 @@ Fix it in one of three ways:
 
 All-databases clones skip the check, because their migration role is a superuser.
 
-This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps, matched by exact `schema.table` name, the way pgcopydb builds its publication.
+This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps, matched by exact `schema.table` name, the way pgcopydb matches them.
 A partition counts as included when an include filter names its root.
 An entry the audits cannot match exactly (a `~` pattern, a quoted name, or a table name without a schema) widens them instead: it voids its include list and drops out of an exclude list.
 
@@ -332,7 +332,9 @@ Schema and workload contract:
   With the automatic publication, pgcopydb's `CREATE PUBLICATION ... FOR TABLE` refuses them and the first attempt fails before any copy.
   With `spec.follow.publication` or `wal2json`, their changes during the window are lost, and only `spec.verification.data` notices.
   The preflight fails on unlogged tables in scope, scoped as described under [Row-level security](#row-level-security).
+  One difference: pgcopydb's publication honours `includeOnlySchemas` only next to `includeOnlyTables`, so `includeOnlySchemas` alone still publishes every table outside the exclusions, and the audit checks all of them.
   Run `ALTER TABLE ... SET LOGGED` on the source, or leave them out with `excludeTables` or `excludeSchemas`.
+  Next to `includeOnlySchemas`, use `excludeTables`, because `excludeSchemas` cannot be combined with it.
   `excludeTableData` does not help, because pgcopydb still publishes those tables.
 - Large-object changes during the window are not replicated (base copy only).
   Sequences need no action: pgcopydb re-syncs them automatically after cutover.

@@ -821,29 +821,33 @@ fi`
 // tableScopeEnv carries clone.filters into the table audits as tableScope JSON.
 const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
 
-// tableScopeQuery matches tables as pgcopydb's publication query does (exact
-// names, include entries ORed), plus partitions whose root an include names.
-const tableScopeQuery = `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+// tableScopeQuery matches exact names as pgcopydb does, include entries ORed,
+// plus partitions whose root an include names. include is the scope key to
+// apply: "include" for the copy, "publish" for the follow publication.
+func tableScopeQuery(include string) string {
+	inc := "s.f->'" + include + "'"
+	return `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
 join pg_class rc on rc.oid = coalesce(pg_partition_root(c.oid), c.oid)
 join pg_namespace rn on rn.oid = rc.relnamespace,
 (select :'list'::jsonb as f) s
 where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
-and (jsonb_array_length(s.f->'include') = 0 or exists (select 1 from jsonb_array_elements(s.f->'include') e(v)
+and (jsonb_array_length(` + inc + `) = 0 or exists (select 1 from jsonb_array_elements(` + inc + `) e(v)
   where (v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname) or (v->>0 = rn.nspname and coalesce(v->>1, rc.relname) = rc.relname)))
 and not exists (select 1 from jsonb_array_elements(s.f->'exclude') e(v) where v->>0 = n.nspname and coalesce(v->>1, c.relname) = c.relname)
 and `
+}
 
 // rlsAuditQuery lists tables whose policies would filter the migration role's
 // COPY and compare alike (check_enable_rls). pgcopydb reads leaves, which apply
 // only their own policies; skipped data copies no rows.
-const rlsAuditQuery = tableScopeQuery + `c.relkind = 'r' and c.relrowsecurity
+var rlsAuditQuery = tableScopeQuery("include") + `c.relkind = 'r' and c.relrowsecurity
 and (c.relforcerowsecurity or not pg_has_role(current_user, c.relowner, 'USAGE'))
 and not (select rolsuper or rolbypassrls from pg_roles where rolname = current_user)
 and not exists (select 1 from jsonb_array_elements(s.f->'skipData') e(v) where v->>0 = n.nspname and v->>1 = c.relname)`
 
 // unloggedAuditQuery ignores skipData: pgcopydb's publication still lists those tables.
-const unloggedAuditQuery = tableScopeQuery + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
+var unloggedAuditQuery = tableScopeQuery("publish") + `c.relkind in ('r', 'p') and c.relpersistence = 'u'`
 
 const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv + `:-}"`
 
@@ -867,14 +871,20 @@ var unloggedAuditBlock = remAggBlock(remAggregate{
 func tableScope(f *v1beta1.Filters) string {
 	scope := struct {
 		Include  [][]any `json:"include"`
+		Publish  [][]any `json:"publish"`
 		Exclude  [][]any `json:"exclude"`
 		SkipData [][]any `json:"skipData"`
-	}{[][]any{}, [][]any{}, [][]any{}}
+	}{[][]any{}, [][]any{}, [][]any{}, [][]any{}}
 	if f != nil {
 		schemas, okS := scopeEntries(f.IncludeOnlySchemas, false)
 		tables, okT := scopeEntries(f.IncludeOnlyTables, true)
 		if okS && okT {
 			scope.Include = append(schemas, tables...)
+		}
+		// pgcopydb's publication honours schema includes only beside a table
+		// include (filtering.c sets INCL); alone they publish every table.
+		if len(f.IncludeOnlyTables) > 0 {
+			scope.Publish = scope.Include
 		}
 		schemas, _ = scopeEntries(f.ExcludeSchemas, false)
 		tables, _ = scopeEntries(f.ExcludeTables, true)

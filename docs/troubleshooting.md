@@ -160,6 +160,7 @@ See [Row-level security](reference/prerequisites.md#row-level-security) for when
 Their changes never reach the WAL, so pgcopydb cannot decode them, and its publication refuses them.
 
 Run `ALTER TABLE ... SET LOGGED` on the source, or leave the tables out with `excludeTables` or `excludeSchemas`.
+The list can name tables outside `includeOnlySchemas`: without `includeOnlyTables`, pgcopydb still publishes them, so leave them out with `excludeTables`.
 Then create a new Migration.
 
 ## Extension ownership failures

@@ -30,11 +30,14 @@ const (
 	okUnloggedAudit = "ok: unlogged table audit"
 	rlsProbe        = "relrowsecurity"
 	unloggedProbe   = "relpersistence = 'u'"
-	emptyScope      = `{"include":[],"exclude":[],"skipData":[]}`
+	emptyScope      = `{"include":[],"publish":[],"exclude":[],"skipData":[]}`
 	pfRLS           = "pf_rls"
 	pfReader        = "pf_reader"
 	pfOtherForced   = "pf_other.forced"
 	pfCache         = "pf_rls.cache"
+	pfOtherCache    = "pf_other.cache"
+	pfPlain         = "pf_rls.plain"
+	bothCaches      = pfOtherCache + ", " + pfCache
 )
 
 func TestTableScope(t *testing.T) {
@@ -46,7 +49,9 @@ func TestTableScope(t *testing.T) {
 		{"no filters", nil, emptyScope},
 		{"include schemas and tables", &v1beta1.Filters{
 			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{"app.orders"},
-		}, `{"include":[["sales",null],["app","orders"]],"exclude":[],"skipData":[]}`},
+		}, `{"include":[["sales",null],["app","orders"]],"publish":[["sales",null],["app","orders"]],"exclude":[],"skipData":[]}`},
+		{"schema includes alone leave the publication whole", &v1beta1.Filters{IncludeOnlySchemas: []string{testSchemaInc}},
+			`{"include":[["sales",null]],"publish":[],"exclude":[],"skipData":[]}`},
 		{"a pattern include widens to everything", &v1beta1.Filters{
 			IncludeOnlySchemas: []string{testSchemaInc}, IncludeOnlyTables: []string{"app.orders", "~/^x/.t"},
 		}, emptyScope},
@@ -57,9 +62,9 @@ func TestTableScope(t *testing.T) {
 		{"unresolvable excludes are ignored", &v1beta1.Filters{
 			ExcludeSchemas: []string{"scratch", "~/tmp_/"},
 			ExcludeTables:  []string{"app.audit", `"App".x`, "~/a/.b", "bare"},
-		}, `{"include":[],"exclude":[["scratch",null],["app","audit"]],"skipData":[]}`},
+		}, `{"include":[],"publish":[],"exclude":[["scratch",null],["app","audit"]],"skipData":[]}`},
 		{"table data exclusions", &v1beta1.Filters{ExcludeTableData: []string{"app.blobs", "~/x/.y"}},
-			`{"include":[],"exclude":[],"skipData":[["app","blobs"]]}`},
+			`{"include":[],"publish":[],"exclude":[],"skipData":[["app","blobs"]]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tableScope(tc.f); got != tc.want {
@@ -187,6 +192,7 @@ CREATE TABLE pf_other.guarded1 PARTITION OF pf_other.guarded FOR VALUES IN (1);
 CREATE TABLE pf_other.forced (id int);
 ALTER TABLE pf_other.forced ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 CREATE UNLOGGED TABLE pf_rls.cache (id int);
+CREATE UNLOGGED TABLE pf_other.cache (id int);
 DO $do$ DECLARE r regclass; BEGIN
   FOR r IN SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname IN ('pf_rls', 'pf_leaf', 'pf_other') AND c.relkind IN ('r', 'p') LOOP
@@ -209,20 +215,24 @@ END $do$;
 		{"include scopes to its schema", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, pfOtherForced},
 		{"include tables scope to those tables", pfReader, rlsAuditQuery,
-			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_rls.plain", pfOtherForced}}, "pf_other.forced, pf_rls.plain"},
+			&v1beta1.Filters{IncludeOnlyTables: []string{pfPlain, pfOtherForced}}, "pf_other.forced, pf_rls.plain"},
 		{"excluded tables and skipped data leave the scope", pfReader, rlsAuditQuery, &v1beta1.Filters{
 			IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{"pf_rls.forced", "pf_leaf.part1"},
-			ExcludeTableData: []string{"pf_rls.plain"},
+			ExcludeTableData: []string{pfPlain},
 		}, "pf_rls.nopolicy"},
 		{"RLS and policy on the partitioned parent only, leaves open: quiet", pfReader, rlsAuditQuery,
 			&v1beta1.Filters{IncludeOnlyTables: []string{"pf_other.guarded"}}, ""},
-		{"unlogged tables in scope", "", unloggedAuditQuery, inRLS, pfCache},
+		{"unlogged tables in scope", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlyTables: []string{pfCache}}, pfCache},
+		{"schema includes alone do not narrow the publication", "", unloggedAuditQuery, inRLS, bothCaches},
+		{"schema includes count beside a table include", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}, IncludeOnlyTables: []string{pfPlain}}, pfOtherCache},
 		{"unlogged tables out of scope", "", unloggedAuditQuery,
-			&v1beta1.Filters{IncludeOnlySchemas: []string{"pf_other"}}, ""},
-		{"an excluded unlogged table", "", unloggedAuditQuery,
-			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{pfCache}}, ""},
+			&v1beta1.Filters{IncludeOnlyTables: []string{pfPlain}}, ""},
+		{"excluded unlogged tables", "", unloggedAuditQuery,
+			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, ExcludeTables: []string{pfCache, pfOtherCache}}, ""},
 		{"skipped data still reaches the publication", "", unloggedAuditQuery,
-			&v1beta1.Filters{IncludeOnlySchemas: []string{pfRLS}, ExcludeTableData: []string{pfCache}}, pfCache},
+			&v1beta1.Filters{ExcludeTables: []string{pfOtherCache}, ExcludeTableData: []string{pfCache}}, pfCache},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setRole := ""
