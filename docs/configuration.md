@@ -219,3 +219,26 @@ For single-database migrations, preflight checks that Secret and applies the gra
 Each `PreflightRemediated` event lists the statements that one tier applied.
 A [dry run](operations/lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 See [prerequisites](reference/prerequisites.md#superuser-remediation-superusersecretref) for the contract and [06-live-superuser.yaml](examples/06-live-superuser.yaml) for the example.
+
+### Connection keepalives
+
+The operator adds TCP keepalive settings to every connection URI it composes, which covers the inline and `secretRef` forms:
+`keepalives=1`, `keepalives_idle=10`, `keepalives_interval=10`, and `keepalives_count=6`.
+Without them libpq falls back to the kernel's two-hour default.
+A server that disappears without closing its connections, such as a replaced pod or a torn-down network path, then leaves the pgcopydb copy workers waiting on a dead socket for hours.
+With them, the read fails after about 70 seconds and the attempt ends with a connection error.
+A source outage longer than about 60 to 70 seconds, even a temporary network partition, therefore fails the attempt, and the operator's [retry](operations/lifecycle.md#retries-and-resume) resumes it from the work volume.
+
+Keepalives only probe an idle socket.
+When the source vanishes while a request to it is still unacknowledged, such as the `COMMIT` that closes pgcopydb's snapshot, the kernel keeps retransmitting up to its default limit instead (`tcp_retries2=15`, about 924 seconds).
+Source URIs therefore also get `tcp_user_timeout=60000`, which fails that connection after 60 seconds of unacknowledged data.
+Target URIs deliberately do not get it.
+The timeout also counts the time queued data waits on a zero receive window, so a live target that stops reading COPY data for a minute, during a storage stall for example, would fail the attempt.
+`tcp_user_timeout` needs libpq 12 or newer; the runner image ships libpq 18.
+
+Inline connections and `secretRef` connections whose `DB` key is a bare name always get these defaults.
+Only a `DB` URI or a `uriSecretRef` value lets you change them: a `DB` URI keeps any of these keys it already sets, and the operator fills in only the missing ones.
+
+> [!note]
+> The operator does not rewrite a `uriSecretRef` value.
+> Add the keepalive parameters, and `tcp_user_timeout` on the source, to that connection string yourself.

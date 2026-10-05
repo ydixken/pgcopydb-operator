@@ -119,6 +119,9 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).
+Every e2e Task target then passes the context it confirmed to the suite as `E2E_CONTEXT`, assigned in the command itself because Task lets an exported variable override a Taskfile `env:` value.
+The cluster entry point `TestE2E` skips when `E2E_CONTEXT` is unset, and fails before any cluster call when it names a context other than `kubectl config current-context`.
+We make the context an explicit input because the suite's teardown deletes the fixture namespaces, so a plain `go test ./test/e2e` or `go test ./...` must never reach a cluster that nobody named.
 The suite installs an OpenTelemetry Collector in the operator namespace and a throwaway operator that exports its metrics to it over OTLP.
 It creates a source/target CNPG pair for each Ginkgo process, with one instance per cluster by default.
 If the suite can list nodes, each one-instance cluster prefers one node, so CNPG's initdb pod and the instance pod use the same volume attachment.
@@ -152,6 +155,9 @@ The [chart's RBAC and ServiceAccount values](charts/pgcopydb-operator/README.md#
 
 The suite has two tiers, default and stress, and a run reads these environment variables, each shown with the default it takes when unset:
 
+- `E2E_CONTEXT` (unset) MUST name the current kubectl context, or be `in-cluster` when no kubeconfig sets one, for `TestE2E` to run.
+  The Task targets set it; set it yourself only when you call `go test` or the ginkgo CLI directly.
+  Point the suite at another kubeconfig with `KUBECONFIG`: `TestE2E` refuses the `-kubeconfig` flag, because the suite's `kubectl` and `helm` calls would not follow it.
 - `E2E_SCALE` (`1`) multiplies the fixture and volume sizes.
   Scale 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.
 - `E2E_CNPG_INSTANCES` (`1`) sets the instances per shared source/target CNPG cluster.
@@ -262,6 +268,7 @@ A spec that only runs SQL needs no gate: `psql` and the helpers built on `psqlAr
 
 `release.yml` runs this suite against a release candidate at `E2E_SCALE=0.1`, with the label filter `!chaos && !flaky`.
 `E2E_OPERATOR_TAG` selects the candidate's published images, and `E2E_MANAGE_NAMESPACES=false` keeps the GitOps-owned namespaces intact.
+`E2E_CONTEXT` comes from the `E2E_EXPECT_CONTEXT` secret of the `e2e-cluster` environment, and the run step fails when it is empty, because a skipped `TestE2E` would otherwise pass the gate without running a spec.
 It calls the ginkgo CLI directly, not `task e2e`.
 That target's confirmation prompt exists for a developer who could be pointed at any cluster, and answering it with `task --yes` is forbidden.
 `E2E_PROMETHEUS_URL` comes from a repository variable, and a guard step fails the job when the variable is unset, so the metrics gate can never shrink to a silent Skip; `e2e.yml` guards the same way.

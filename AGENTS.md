@@ -19,6 +19,9 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 - Agents run formatting and `task lint` locally only.
 - CI runs lint, unit, envtest, integration, and documentation checks on every pull request.
   Release-candidate E2E runs in [release.yml](.github/workflows/release.yml) after a tag is cut.
+- `TestE2E` runs only when `E2E_CONTEXT` names the current `kubectl` context; without it, `go test` skips the cluster suite.
+  Only the e2e Task targets and the E2E workflows set it.
+  Agents MUST NOT set it by hand; they use the Task targets, which confirm the context first.
 - For human-operated local E2E, `task e2e` targets the current `kubectl` context and requires its confirmation prompt.
   Never bypass that prompt with `task --yes`.
   The dev cluster is shared, so keep E2E resources in the `pgcopydb-e2e` namespace and clean up.

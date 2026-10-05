@@ -373,18 +373,46 @@ func tlsParams(s Side, c *v1beta1.PostgresConnection) string {
 	return q.Encode()
 }
 
+// keepaliveParams make libpq probe idle sockets: a peer gone without a FIN
+// then fails the read after about 70 s (10 + 6 x 10) instead of the kernel's 2 h.
+const keepaliveParams = "keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=6"
+
+// sourceTimeout bounds unacknowledged sends, where keepalives never fire. Source
+// only: a live target that stops reading COPY data would be cut after 60 s too.
+const sourceTimeout = "tcp_user_timeout=60000"
+
+// defaultParams are the connection defaults one side's URI gains.
+func defaultParams(s Side) string {
+	if s == Source {
+		return keepaliveParams + "&" + sourceTimeout
+	}
+	return keepaliveParams
+}
+
 // querySuffix joins the spec-side query params for the inline form's URI;
 // url.Values.Encode keeps the result shell-single-quote safe.
 func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
-	ssl, tls := sslParam(c), tlsParams(s, c)
-	switch {
-	case ssl == "":
-		return tls
-	case tls == "":
-		return ssl
-	default:
-		return ssl + "&" + tls
+	q := defaultParams(s)
+	if tls := tlsParams(s, c); tls != "" {
+		q = tls + "&" + q
 	}
+	if ssl := sslParam(c); ssl != "" {
+		q = ssl + "&" + q
+	}
+	return q
+}
+
+// fillParams renders shell that appends each param of query q to $uri unless
+// the URI already sets its key. Anchored to ? or & so a value merely
+// containing the text does not suppress the append.
+func fillParams(q string) string {
+	var b strings.Builder
+	for kv := range strings.SplitSeq(q, "&") {
+		key, _, _ := strings.Cut(kv, "=")
+		b.WriteString(`case "$uri" in *"?` + key + `="*|*"&` + key + `="*) ;; *\?*) uri="$uri&` + kv + `" ;; *) uri="$uri?` + kv + `" ;; esac
+`)
+	}
+	return b.String()
 }
 
 // secretRefPrelude renders the shell that composes one side's PGCOPYDB_*_PGURI
@@ -435,19 +463,20 @@ host=${hostport%%:*}
 		"@SIDE@", string(s),
 		"@PWKEY@", pwKey,
 	).Replace(template)
+	// libpq rejects the empty param an append after a trailing ? or & would leave.
+	b += `case "$uri" in *[?\&]) uri=${uri%?} ;; esac
+`
 	if tls != "" {
 		// The mounted cert paths come from the spec, never the Secret, so
 		// they always apply.
 		b += `case "$uri" in *\?*) uri="$uri&` + tls + `" ;; *) uri="$uri?` + tls + `" ;; esac
 `
 	}
+	// The DB URI keeps its own sslmode and defaults; ours only fill gaps.
 	if sslmode != "" {
-		// The DB URI keeps its own sslmode; the spec's only fills the gap.
-		// Anchored to ? or & so a value merely containing the text does not
-		// suppress the append.
-		b += `case "$uri" in *"?sslmode="*|*"&sslmode="*) ;; *\?*) uri="$uri&` + sslmode + `" ;; *) uri="$uri?` + sslmode + `" ;; esac
-`
+		b += fillParams(sslmode)
 	}
+	b += fillParams(defaultParams(s))
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
 [ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }

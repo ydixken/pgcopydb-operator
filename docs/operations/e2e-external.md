@@ -93,6 +93,7 @@ The suite reads the server majors from the servers, so it rejects `E2E_PG_SOURCE
     ```
 
 The `e2e:external` tasks run only the Ginkgo suite, not the unit tests that pin the CloudNativePG fixtures.
+They pass the confirmed context to the suite as `E2E_CONTEXT`; a `go test` run without it skips the suite instead of reaching a cluster.
 
 Check out these **examples**:
 
