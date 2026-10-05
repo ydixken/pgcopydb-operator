@@ -50,8 +50,15 @@ const (
 	coverageMaxName = 37
 )
 
-// coverageOutcomes names the outcome assertions an own case may expect.
-var coverageOutcomes = map[string]bool{}
+// coverageOutcomes names the outcomes an own case may expect, one per entry
+// of coverageOwnOutcomes.
+var coverageOutcomes = func() map[string]bool {
+	names := map[string]bool{}
+	for name := range coverageOwnOutcomes {
+		names[name] = true
+	}
+	return names
+}()
 
 // coverageCase is one parsed case file. Its sections keep their placeholders
 // until render.
