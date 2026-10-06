@@ -124,8 +124,8 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		}, migrationTimeout, time.Second).Should(Succeed())
 
-		// Attempt 1 is terminal: a --resume on the full volume fails reading
-		// its own catalogs and would report that instead of the full disk.
+		// Attempt 1 is terminal: a --resume on the full volume cannot free
+		// space and may report an unrelated error instead.
 		failed := waitFailed(name, "DiskFull")
 		Expect(failed.Status.Attempts).To(Equal(int32(1)))
 		Expect(failureMessage(failed)).To(MatchRegexp(`database or disk is full|No space left on device`),

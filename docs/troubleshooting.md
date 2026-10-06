@@ -482,7 +482,9 @@ Set `spec.workVolume.storageClassName`, or fix the cluster default.
 
 Phase `Failed` with "retry budget exhausted" means every attempt failed on a cause the operator cannot classify as deterministic.
 The first attempt's logs almost always name it.
-A permission error mostly stops early as `PermissionDenied`, but one too deep in the log tail for the classifier lands here.
+A permission error mostly stops early as `PermissionDenied`, and a full work volume as `DiskFull`.
+One that sits outside the last 40 log lines the classifier reads lands here.
+A work volume that filled up then shows `database or disk is full` or `No space left on device` in the first attempt's logs.
 
 Fix the cause, then create a new Migration.
 A terminal state is absorbing, so this Migration cannot resume.
@@ -499,14 +501,16 @@ For the grantable target rights, set `superuserSecretRef`.
 
 ### Phase `Failed` with reason `DiskFull`
 
-Phase `Failed` with reason `DiskFull` after a single attempt means the worker ran out of disk space.
+Phase `Failed` with reason `DiskFull` after a single attempt means the work volume is full.
 The condition message carries the matched line.
-`database or disk is full` comes from pgcopydb's SQLite catalogs on the work volume.
-`No space left on device` comes from a file write on the work volume, or from the target server when it quotes `could not extend file`.
+`database or disk is full` comes from pgcopydb's SQLite catalogs, and `No space left on device` from a file pgcopydb or pg_dump writes under the work directory.
 
-On a live migration the change spool grows with source writes until cutover, so size `spec.workVolume.size` for the write volume the migration has to carry.
-For a target-side error, free or add space on the target.
-Then create a new Migration.
+Enlarge `spec.workVolume.size`, then create a new Migration.
+A terminal state is absorbing (see [Retries and resume](operations/lifecycle.md#retries-and-resume)), so this Migration cannot resume.
+On a live migration the change spool grows with source writes until cutover, so size it for the writes the migration has to carry.
+
+A target that runs out of disk (`could not extend file`) or shared memory (`could not resize shared memory segment`) is not `DiskFull`.
+Those attempts keep normal retries, because space or load on the target can change between attempts.
 
 ### Status updates lag behind the worker
 

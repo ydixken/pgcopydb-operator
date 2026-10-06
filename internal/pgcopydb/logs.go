@@ -131,14 +131,23 @@ func PermissionDeniedLine(raw []byte) string {
 	})
 }
 
-// DiskFullLine returns a log line showing the attempt died out of disk space,
-// on the work volume (SQLite's wording) or the target (strerror's), or "".
-// A retry cannot free space, and its resume on the full volume fails reading
-// its own catalogs, which hides this cause behind an unrelated message.
+// DiskFullLine returns a log line showing pgcopydb filled its work volume, or "".
+// A retry cannot free that space and may die on an unrelated error. Server-side
+// ENOSPC (a full target, exhausted shared memory) can clear, so it keeps retrying.
 func DiskFullLine(raw []byte) string {
 	return recentSevereLine(raw, func(msg string) bool {
+		if serverErrorLine(msg) || strings.Contains(msg, "shared memory segment") {
+			return false
+		}
 		return strings.Contains(msg, "No space left on device") || strings.Contains(msg, "database or disk is full")
 	})
+}
+
+// serverErrorLine: pgcopydb tags PostgreSQL errors "[SOURCE pid]" or "[TARGET pid]",
+// and libpq-relayed ones (pg_restore, the stream) keep the server's "ERROR:  ".
+func serverErrorLine(msg string) bool {
+	return strings.HasPrefix(msg, "[SOURCE ") || strings.HasPrefix(msg, "[TARGET ") ||
+		strings.Contains(msg, "ERROR:  ") || strings.Contains(msg, "FATAL:  ")
 }
 
 // recentSevereLine returns the first severe line in the terminal window that

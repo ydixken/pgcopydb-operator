@@ -421,9 +421,32 @@ func TestDiskFullLine(t *testing.T) {
 			want: `Failed to write file "/work/pgcopydb/cdc/x.json": No space left on device`,
 		},
 		{
+			name: "pg_dump cannot write its dump to the work dir",
+			raw:  `{"error_severity":"ERROR","message":"pg_dump: error: could not write to output file: No space left on device"}`,
+			want: "pg_dump: error: could not write to output file: No space left on device",
+		},
+		// A full target or exhausted shared memory can clear between
+		// attempts, so those keep their retries.
+		{
 			name: "the target runs out of disk",
-			raw:  `{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  could not extend file \"base/16384/16390\": No space left on device"}`,
-			want: `pg_restore: error: could not execute query: ERROR:  could not extend file "base/16384/16390": No space left on device`,
+			raw:  `{"error_severity":"ERROR","message":"[TARGET 4242] [53100] ERROR:  could not extend file \"base\/16384\/16390\": No space left on device"}`,
+			want: "",
+		},
+		{
+			name: "pg_restore relays a full target",
+			raw:  `{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  could not write to file \"base\/pgsql_tmp\/pgsql_tmp77.0\": No space left on device"}`,
+			want: "",
+		},
+		{
+			name: "target shared memory runs out",
+			raw:  `{"error_severity":"ERROR","message":"[TARGET 4242] [53100] ERROR:  could not resize shared memory segment \"\/PostgreSQL.2050732070\" to 8388608 bytes: No space left on device"}`,
+			want: "",
+		},
+		{
+			// Guards the explicit exclusion should a relay drop the server tag.
+			name: "shared memory exhaustion without a server tag",
+			raw:  `{"error_severity":"ERROR","message":"could not resize shared memory segment \"\/PostgreSQL.2050732070\" to 8388608 bytes: No space left on device"}`,
+			want: "",
 		},
 		{
 			name: "a mild line quoting the text does not classify",
