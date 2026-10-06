@@ -153,8 +153,8 @@ func TestCoverageMissingColumnFailure(t *testing.T) {
 	// A worker log line, as PGCOPYDB_LOG_JSON=on writes it.
 	logLine := func(msg string) string { return `{"error_severity":"ERROR","message":"[TARGET 67] ` + msg + `"}` }
 	failedApply := logLine(`[42703] ERROR:  column \"extra\" of relation \"t\" does not exist`)
-	const drift = "attempt 1 failed on a column the target lacks retries cannot fix:" +
-		` [TARGET 67] [42703] ERROR:  column "extra" of relation "t" does not exist; DDL ran on the source`
+	const drift = "attempt 1 failed on a missing target column retries cannot fix:" +
+		` [TARGET 67] [42703] ERROR:  column "extra" of relation "t" does not exist; DDL is not replicated`
 	const exhausted = "attempt 2 failed: Job has reached the specified backoff limit;" +
 		" last error: follow process 4 has terminated [12]"
 	const notMissingColumn = "attempt 1's log shows no missing column (42703)"

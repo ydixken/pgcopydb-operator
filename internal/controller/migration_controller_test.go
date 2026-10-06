@@ -534,8 +534,8 @@ var _ = Describe("Migration Controller", func() {
 		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("SchemaDrift"))
-		Expect(failed.Message).To(SatisfyAll(ContainSubstring("attempt 1"), ContainSubstring(drift),
-			ContainSubstring("same DDL on the target"), ContainSubstring("new Migration")))
+		Expect(failed.Message).To(SatisfyAll(ContainSubstring("attempt 1 failed on a missing target column"),
+			ContainSubstring(drift), ContainSubstring("create a new Migration, which copies the schema from the source again")))
 		Expect(final.Status.Attempts).To(Equal(int32(1)))
 		Expect(errors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())

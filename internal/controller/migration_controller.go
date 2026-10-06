@@ -882,19 +882,17 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		reason += "; last error: " + detail
 	}
 
-	// A retry replays the same statements as the same role and refuses
-	// identically, so the budget would only delay the verdict. This catches
-	// what the preflight cannot probe: rights revoked mid-run, source SELECT.
-	// A full work volume stays full, and the retry may bury it (see DiskFullLine).
-	// A change naming a column the target lacks stops every retry at the same change.
+	// Each cause below fails every retry alike, so the budget only delays the verdict:
+	// a right revoked mid-run or a source SELECT the preflight cannot probe, a full
+	// work volume a retry may bury (see DiskFullLine), or a missing target column.
 	var remedy string
 	terminal, what, line := "PermissionDenied", "a permission error", pgcopydb.PermissionDeniedLine([]byte(tail))
 	if line == "" {
 		terminal, what, line = "DiskFull", "a full work volume", pgcopydb.DiskFullLine([]byte(tail))
 	}
 	if line == "" {
-		terminal, what, line = "SchemaDrift", "a column the target lacks", pgcopydb.SchemaDriftLine([]byte(tail))
-		remedy = "; DDL ran on the source: run the same DDL on the target, then create a new Migration," +
+		terminal, what, line = "SchemaDrift", "a missing target column", pgcopydb.SchemaDriftLine([]byte(tail))
+		remedy = "; DDL is not replicated: create a new Migration, which copies the schema from the source again," +
 			" and run no DDL during the migration window"
 	}
 	if line != "" {

@@ -530,12 +530,13 @@ Those attempts keep normal retries, because space or load on the target can chan
 ### Phase `Failed` with reason `SchemaDrift`
 
 Phase `Failed` with reason `SchemaDrift` after a single attempt means the apply hit a change that names a column the target lacks.
-DDL ran on the source during the migration window, and DDL is not replicated.
+Usually DDL ran on the source during the migration window, and DDL is not replicated.
+A `DROP COLUMN` or `RENAME COLUMN` on the target gives the same error.
 The condition message carries the matched line, `[TARGET <pid>] [42703] ERROR:  column ... does not exist`.
 
-Run the same DDL on the target, then create a new Migration.
+Create a new Migration: it copies the schema from the source again, so the target needs no manual DDL.
 A terminal state is absorbing (see [Retries and resume](operations/lifecycle.md#retries-and-resume)), so this Migration cannot resume.
-Run no DDL on the source until the cutover, as the [live migration prerequisites](reference/prerequisites.md#live-migration-specfollowenabled-true) require.
+Run no DDL on either side until the cutover, as the [live migration prerequisites](reference/prerequisites.md#live-migration-specfollowenabled-true) require.
 
 The operator classifies only SQLSTATE 42703 on the apply's target connection.
 A missing table (42P01) or any other schema error keeps normal retries and ends as `BackoffLimitExceeded`.
