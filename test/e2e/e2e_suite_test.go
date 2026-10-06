@@ -296,6 +296,9 @@ var (
 	liveWriteInterval = 200 * time.Millisecond
 	// e2eCommandTimeout bounds one subprocess attempt or shutdown wait.
 	e2eCommandTimeout = 30 * time.Second
+	// A 2000-row INSERT and a ~16MiB TOAST UPDATE each outran 30s at
+	// E2E_SCALE=0.1 on v0.19.5-rc.1; 5m is headroom, not a measurement.
+	bulkWriteTimeout = 5 * time.Minute
 )
 
 // operatorTag pins the manager and runner images for the throwaway install and
@@ -2729,12 +2732,25 @@ func psql(cluster, sql string) string {
 	return psqlDB(cluster, appDatabase(cluster), sql)
 }
 
+// psqlBulk is psql for a bulk data write, bounded by bulkWriteTimeout.
+// A write that times out is not re-run, since it may have committed.
+func psqlBulk(cluster, sql string) {
+	GinkgoHelper()
+	psqlDBWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
+}
+
 // psqlDB runs one statement as the in-pod postgres user on the current primary,
 // or in external mode as the admin role from the client pod, and returns
 // trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for spec goroutines.
 func psqlDB(cluster, db, sql string) string {
 	GinkgoHelper()
-	out, err := psqlDBErr(cluster, db, sql)
+	return psqlDBWithin(cluster, db, sql, e2eCommandTimeout)
+}
+
+// psqlDBWithin is psqlDB with each attempt bounded by timeout.
+func psqlDBWithin(cluster, db, sql string, timeout time.Duration) string {
+	GinkgoHelper()
+	out, err := psqlDBErrWithin(cluster, db, sql, timeout)
 	if f, ok := errors.AsType[*psqlFailure](err); ok {
 		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
 	}
@@ -2781,6 +2797,12 @@ func (f *psqlFailure) Unwrap() error {
 // PostgreSQL. Each retry re-resolves the primary; connected failures stop
 // because the statement may have run and callers need not be idempotent.
 func psqlDBErr(cluster, db, sql string) (string, error) {
+	GinkgoHelper()
+	return psqlDBErrWithin(cluster, db, sql, e2eCommandTimeout)
+}
+
+// psqlDBErrWithin is psqlDBErr with each attempt bounded by timeout.
+func psqlDBErrWithin(cluster, db, sql string, timeout time.Duration) (string, error) {
 	// Here for primaryPod's Eventually, not for an assertion of its own:
 	// without it a primary timeout is reported here, not at the calling spec.
 	GinkgoHelper()
@@ -2791,7 +2813,7 @@ func psqlDBErr(cluster, db, sql string) (string, error) {
 		primaryPod,
 		time.Sleep,
 		exec.CommandContext,
-		e2eCommandTimeout,
+		timeout,
 	)
 }
 

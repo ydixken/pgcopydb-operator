@@ -118,7 +118,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
 			if cur.Status.Phase != v1beta1.PhaseFailed {
 				batch++
-				psql(sourceCluster, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
+				psqlBulk(sourceCluster, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
 					" WHERE id <= 1000", batch))
 			}
 			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
@@ -228,7 +228,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			if m.Status.Phase != v1beta1.PhaseCuttingOver {
 				batch++
-				psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
+				psqlBulk(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
 					" SELECT (g %% %d) + 1, (g %% 90)::numeric / 3, 'live-drain-%d-' || g"+
 					" FROM generate_series(1, 2000) g", scaled(50000), batch))
 			}
@@ -268,7 +268,7 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		const liveCountSQL = "SELECT count(*) FILTER (WHERE note LIKE 'live-tgt-%'), " +
 			"count(*) FILTER (WHERE note LIKE 'live-tgt2-%') FROM orders"
 		insertLive := func(marker string) {
-			psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+			psqlBulk(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
 				" (g %% 90)::numeric / 3, '%s' || g FROM generate_series(1, 2000) g", scaled(50000), marker))
 		}
 		DeferCleanup(func() {

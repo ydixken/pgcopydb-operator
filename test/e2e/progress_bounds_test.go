@@ -145,7 +145,7 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, progressSamplerMatch))
 					Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCutoverPending))
 				}
 			}()
-			psql(sourceCluster, fmt.Sprintf("INSERT INTO %s SELECT i, repeat(md5(i::text), 100) "+
+			psqlBulk(sourceCluster, fmt.Sprintf("INSERT INTO %s SELECT i, repeat(md5(i::text), 100) "+
 				"FROM generate_series(%d,%d) i", table, side*1000+1, (side+1)*1000))
 			for _, database := range []string{sourceCluster, targetCluster} {
 				psql(database, fmt.Sprintf("CREATE INDEX progress_lock_recovery_%d ON %s (id)", side, table))
