@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -61,6 +62,9 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the condition
 	// message. 60, not 20: the fix lines sit behind a re-printed audit list.
 	preflightLogTail = 60
+	// preflightLogGrace is how long after the preflight Job fails a log read
+	// error is retried: the verdict exists only in that log.
+	preflightLogGrace = 2 * time.Minute
 	// preflightOkLogTail is the whole preflight log, a number only because the
 	// API wants one: a missed remediated: line loses a grant's audit event.
 	preflightOkLogTail = 10000
@@ -1029,15 +1033,24 @@ func jobFinished(job *batchv1.Job) (bool, bool) {
 // when logs are unreadable (no reader wired, pod already gone, RBAC): callers
 // degrade to the information they already have.
 func (r *MigrationReconciler) jobLogTail(ctx context.Context, namespace, jobName string, lines int64) string {
+	tail, err := r.readJobLog(ctx, namespace, jobName, lines)
+	if err != nil {
+		logf.FromContext(ctx).V(1).Info("pod log fetch failed", "job", jobName, "error", err)
+	}
+	return tail
+}
+
+// readJobLog is jobLogTail keeping the read error, for a caller that must
+// tell an unreadable log from an empty one.
+func (r *MigrationReconciler) readJobLog(ctx context.Context, namespace, jobName string, lines int64) (string, error) {
 	if r.Logs == nil {
-		return ""
+		return "", errors.New("no pod log reader is configured")
 	}
 	raw, err := r.Logs.JobLogs(ctx, namespace, jobName, lines)
 	if err != nil {
-		logf.FromContext(ctx).V(1).Info("pod log fetch failed", "job", jobName, "error", err)
-		return ""
+		return "", err
 	}
-	return strings.TrimSpace(string(raw))
+	return strings.TrimSpace(string(raw)), nil
 }
 
 // truncate caps s for contexts with server-side size limits (event notes).
