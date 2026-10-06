@@ -32,7 +32,8 @@ import (
 // The preflight refusals, copied from the audits in internal/controller/resources.go.
 const (
 	rlsRefusal = "preflight: row-level security hides rows of these tables from the source migration role," +
-		" so the copy and its verification would both miss them"
+		" so the copy would fail on them with the bundled runner," +
+		" or copy and verify only the rows the role sees with a runner before 0.18.34.g7fddd6f"
 	unloggedRefusal = "preflight: follow cannot replicate unlogged tables, whose changes never reach the WAL"
 )
 

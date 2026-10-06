@@ -861,7 +861,7 @@ const tableAuditCmd = `checkv "$PGCOPYDB_SOURCE_PGURI" "%s" "${` + tableScopeEnv
 var rlsAuditBlock = remAggBlock(remAggregate{
 	query:   fmt.Sprintf(tableAuditCmd, rlsAuditQuery),
 	ok:      "row-level security audit",
-	missing: `preflight: row-level security hides rows of these tables from the source migration role, so the copy and its verification would both miss them: $agg; grant the role BYPASSRLS, disable row-level security on them for the migration, or leave them out with clone.filters`,
+	missing: `preflight: row-level security hides rows of these tables from the source migration role, so the copy would fail on them with the bundled runner, or copy and verify only the rows the role sees with a runner before 0.18.34.g7fddd6f: $agg; grant the role BYPASSRLS, disable row-level security on them for the migration, or leave them out with clone.filters`,
 	onProbe: `preflight: probing row-level security on the source tables failed`,
 })
 
