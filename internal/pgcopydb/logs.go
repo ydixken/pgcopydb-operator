@@ -150,9 +150,41 @@ func serverErrorLine(msg string) bool {
 		strings.Contains(msg, "ERROR:  ") || strings.Contains(msg, "FATAL:  ")
 }
 
+// SchemaDriftLine returns the apply error showing the target lacks a column the
+// source has (SQLSTATE 42703), or "". Only the apply sends through a pipeline, so
+// the pipeline-sync context on the same target connection rules out the clone.
+func SchemaDriftLine(raw []byte) string {
+	var line, conn string
+	for _, msg := range recentSevereMessages(raw) {
+		tag, rest, ok := strings.Cut(msg, "] ")
+		if !ok || !strings.HasPrefix(tag, "[TARGET ") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(rest, "[42703] "):
+			line, conn = msg, tag
+		case tag == conn && rest == "Context: Failed to receive pipeline sync":
+			return line
+		}
+	}
+	return ""
+}
+
 // recentSevereLine returns the first severe line in the terminal window that
 // match accepts, or "".
 func recentSevereLine(raw []byte, match func(string) bool) string {
+	for _, msg := range recentSevereMessages(raw) {
+		if match(msg) {
+			return msg
+		}
+	}
+	return ""
+}
+
+// recentSevereMessages returns the severe lines of the terminal window, a JSON
+// line as its message.
+func recentSevereMessages(raw []byte) []string {
+	var severeMsgs []string
 	for _, msg := range recentLogLines(raw) {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
 		if e, ok := parseLogLine(msg); ok {
@@ -162,14 +194,11 @@ func recentSevereLine(raw []byte, match func(string) bool) string {
 			msg = e.Message
 			severe = isErrorSeverity(e.Severity) || strings.Contains(msg, "FATAL:")
 		}
-		if !severe {
-			continue
-		}
-		if match(msg) {
-			return msg
+		if severe {
+			severeMsgs = append(severeMsgs, msg)
 		}
 	}
-	return ""
+	return severeMsgs
 }
 
 // Clone-done markers for clone --follow, both logged by copydb_clone_database

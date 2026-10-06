@@ -89,10 +89,12 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
 - A full work volume ends the Migration as `DiskFull` the same way.
   A retry cannot free space on it, and its resume may fail on an unrelated error that hides the cause.
   A target out of disk space or shared memory keeps normal retries, because space or load can change between attempts.
+- A change the apply cannot replay because the target lacks its column ends the Migration as `SchemaDrift` the same way.
+  DDL ran on the source, and every retry would stop at the same change.
 
 When worker logs are readable, the `AttemptFailed` event names the pgcopydb error after each failed attempt.
 The terminal `Failed` condition keeps that error when the budget drains.
-When the log read fails, the operator retries it for two minutes after the Job fails, so a short API server outage does not cost the `PermissionDenied` or `DiskFull` check.
+When the log read fails, the operator retries it for two minutes after the Job fails, so a short API server outage does not cost the `PermissionDenied`, `DiskFull`, or `SchemaDrift` check.
 Past that, the attempt retries without the check, and the event and the condition carry the read error instead.
 The log tail can contain a pg_restore database error before generic shutdown messages.
 In that case, retry events and the terminal `Failed` condition keep it, with the affected relation.

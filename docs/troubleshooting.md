@@ -45,6 +45,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [Phase `Failed`, "retry budget exhausted"](#phase-failed-with-retry-budget-exhausted) | Workers and cluster objects |
 | [Phase `Failed`, reason `PermissionDenied`, after one attempt](#phase-failed-with-reason-permissiondenied) | Workers and cluster objects |
 | [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
+| [Phase `Failed`, reason `SchemaDrift`, after one attempt](#phase-failed-with-reason-schemadrift) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -493,7 +494,7 @@ Set `spec.workVolume.storageClassName`, or fix the cluster default.
 
 Phase `Failed` with "retry budget exhausted" means every attempt failed on a cause the operator cannot classify as deterministic.
 The first attempt's logs almost always name it.
-A permission error mostly stops early as `PermissionDenied`, and a full work volume as `DiskFull`.
+A permission error mostly stops early as `PermissionDenied`, a full work volume as `DiskFull`, and a change naming a column the target lacks as `SchemaDrift`.
 One that sits outside the last 40 log lines the classifier reads lands here.
 A work volume that filled up then shows `database or disk is full` or `No space left on device` in the first attempt's logs.
 `the pod log was not readable (...)` in the message means the operator could not read the worker log for two minutes after the Job failed, so it could not classify the cause.
@@ -525,6 +526,19 @@ On a live migration the change spool grows with source writes until cutover, so 
 
 A target that runs out of disk (`could not extend file`) or shared memory (`could not resize shared memory segment`) is not `DiskFull`.
 Those attempts keep normal retries, because space or load on the target can change between attempts.
+
+### Phase `Failed` with reason `SchemaDrift`
+
+Phase `Failed` with reason `SchemaDrift` after a single attempt means the apply hit a change that names a column the target lacks.
+DDL ran on the source during the migration window, and DDL is not replicated.
+The condition message carries the matched line, `[TARGET <pid>] [42703] ERROR:  column ... does not exist`.
+
+Run the same DDL on the target, then create a new Migration.
+A terminal state is absorbing (see [Retries and resume](operations/lifecycle.md#retries-and-resume)), so this Migration cannot resume.
+Run no DDL on the source until the cutover, as the [live migration prerequisites](reference/prerequisites.md#live-migration-specfollowenabled-true) require.
+
+The operator classifies only SQLSTATE 42703 on the apply's target connection.
+A missing table (42P01) or any other schema error keeps normal retries and ends as `BackoffLimitExceeded`.
 
 ### Status updates lag behind the worker
 

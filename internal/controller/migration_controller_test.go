@@ -513,6 +513,35 @@ var _ = Describe("Migration Controller", func() {
 		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("DiskFull")))
 	})
 
+	It("fails fast when the apply names a column the target lacks", func() {
+		const name = "mig-schema-drift"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 3 // budget must stay unspent
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		const drift = `[TARGET 60] [42703] ERROR:  column "extra" of relation "t" does not exist`
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: `{"error_severity":"ERROR","message":"[TARGET 60] [42703] ERROR:  column \"extra\" of relation \"t\" does not exist"}` + "\n" +
+			`{"error_severity":"ERROR","message":"[TARGET 60] Context: Failed to receive pipeline sync"}` + "\n" +
+			`{"error_severity":"ERROR","message":"follow process 4 has terminated [12]"}` + "\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+
+		passGate(ctx, r, name) // run-1
+		finishJob(ctx, name+"-run-1", false)
+		final := reconcileAndGet(ctx, r, name)
+
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("SchemaDrift"))
+		Expect(failed.Message).To(SatisfyAll(ContainSubstring("attempt 1"), ContainSubstring(drift),
+			ContainSubstring("same DDL on the target"), ContainSubstring("new Migration")))
+		Expect(final.Status.Attempts).To(Equal(int32(1)))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("SchemaDrift")))
+	})
+
 	It("classifies a disk-full line read after a failed worker log read", func() {
 		const name = "mig-disk-full-log-blip"
 		defer removeMigration(ctx, name)

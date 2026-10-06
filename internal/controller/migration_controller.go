@@ -886,15 +886,22 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 	// identically, so the budget would only delay the verdict. This catches
 	// what the preflight cannot probe: rights revoked mid-run, source SELECT.
 	// A full work volume stays full, and the retry may bury it (see DiskFullLine).
+	// A change naming a column the target lacks stops every retry at the same change.
+	var remedy string
 	terminal, what, line := "PermissionDenied", "a permission error", pgcopydb.PermissionDeniedLine([]byte(tail))
 	if line == "" {
 		terminal, what, line = "DiskFull", "a full work volume", pgcopydb.DiskFullLine([]byte(tail))
 	}
+	if line == "" {
+		terminal, what, line = "SchemaDrift", "a column the target lacks", pgcopydb.SchemaDriftLine([]byte(tail))
+		remedy = "; DDL ran on the source: run the same DDL on the target, then create a new Migration," +
+			" and run no DDL during the migration window"
+	}
 	if line != "" {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
 		r.fail(m, terminal, "Fail", fmt.Sprintf(
-			"attempt %d failed on %s retries cannot fix: %s",
-			m.Status.Attempts, what, truncate(line, maxDetailLen)))
+			"attempt %d failed on %s retries cannot fix: %s%s",
+			m.Status.Attempts, what, truncate(line, maxDetailLen), remedy))
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 

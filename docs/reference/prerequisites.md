@@ -343,7 +343,8 @@ Schema and workload contract:
   `pgoutput` and `wal2json` send the NULLs and are not affected.
   On a Citus-distributed target, that one-row form fails the apply with an error.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
-  A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`), every retry stops at the same change, and the Migration fails with `BackoffLimitExceeded`.
+  A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`).
+  Every retry would stop at the same change, so the Migration fails with `SchemaDrift` on that attempt.
   The [`limitations/ddl_add_column`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Unlogged tables MUST NOT be in scope.
   They write no WAL, so logical decoding never sees their changes.
@@ -400,7 +401,7 @@ Finished tables are skipped, and interrupted tables are re-copied from scratch.
 Each table's COPY is a single transaction, so a killed attempt leaves no partial rows.
 `--not-consistent` is needed here: the first attempt's exported snapshot dies with its session.
 A plain `--resume` fails before it touches any data ("snapshot ... does not exist").
-A permission error or a full work volume stops the `--resume` retry: the Migration ends as `PermissionDenied` or `DiskFull` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
+A permission error, a full work volume, or a change naming a column the target lacks stops the `--resume` retry: the Migration ends as `PermissionDenied`, `DiskFull`, or `SchemaDrift` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
 
 The trade-off: re-copied tables read a fresh snapshot.
 A retried clone of a source that still takes writes is therefore not one single point in time across tables.
