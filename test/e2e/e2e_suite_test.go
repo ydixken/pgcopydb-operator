@@ -2739,6 +2739,31 @@ func psqlBulk(cluster, sql string) {
 	psqlDBWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
 }
 
+// psqlBulkTolerant is psqlBulk for a loop that keeps writing until the
+// operator reacts, so a lost batch is only recorded under its marker, the
+// prefix its rows carry. An error PostgreSQL reports still fails the spec.
+func psqlBulkTolerant(cluster, sql, marker string) {
+	GinkgoHelper()
+	_, err := psqlDBErrWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
+	if bulkWriteLost(err) {
+		AddReportEntry("lost bulk write", fmt.Sprintf("%s: %v", marker, err))
+		return
+	}
+	expectPsqlOK(sql, err)
+}
+
+// psqlServerError matches the lines psql prints when PostgreSQL rejected the
+// statement or the connection, or its backend went away; kubectl never does.
+var psqlServerError = regexp.MustCompile(`(?m)^(?:(?:ERROR|FATAL|PANIC): |psql: error: |` +
+	`server closed the connection unexpectedly|connection to server was lost)`)
+
+// bulkWriteLost reports whether err left the write's outcome to the kubectl
+// transport (a hung exec or a dropped stream) rather than to PostgreSQL.
+func bulkWriteLost(err error) bool {
+	f, ok := errors.AsType[*psqlFailure](err)
+	return ok && !psqlServerError.MatchString(f.stderr)
+}
+
 // psqlDB runs one statement as the in-pod postgres user on the current primary,
 // or in external mode as the admin role from the client pod, and returns
 // trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for spec goroutines.
@@ -2751,13 +2776,19 @@ func psqlDB(cluster, db, sql string) string {
 func psqlDBWithin(cluster, db, sql string, timeout time.Duration) string {
 	GinkgoHelper()
 	out, err := psqlDBErrWithin(cluster, db, sql, timeout)
+	expectPsqlOK(sql, err)
+	return out
+}
+
+// expectPsqlOK fails the spec on a psqlDBErr error, naming the pod and stderr.
+func expectPsqlOK(sql string, err error) {
+	GinkgoHelper()
 	if f, ok := errors.AsType[*psqlFailure](err); ok {
 		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
 	}
 	// psqlDBErr today only ever returns nil or *psqlFailure, but any other
 	// non-nil error must still fail here rather than read back as "".
 	Expect(err).NotTo(HaveOccurred(), "psql %q failed: %s", sql, err)
-	return out
 }
 
 type commandFactory func(context.Context, string, ...string) *exec.Cmd
@@ -2794,8 +2825,8 @@ func (f *psqlFailure) Unwrap() error {
 }
 
 // psqlDBErr retries transient connection failures before a statement reaches
-// PostgreSQL. Each retry re-resolves the primary; connected failures stop
-// because the statement may have run and callers need not be idempotent.
+// PostgreSQL, and timeouts of a provable read. Each retry re-resolves the
+// primary; other failures stop because a write may have run.
 func psqlDBErr(cluster, db, sql string) (string, error) {
 	GinkgoHelper()
 	return psqlDBErrWithin(cluster, db, sql, e2eCommandTimeout)
@@ -2837,17 +2868,18 @@ func psqlDBErrWith(
 		}
 		lastErr = err
 		lastStderr = ""
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			lastStderr = string(ee.Stderr)
+		}
+		retry := transientExecError(lastStderr)
 		if errors.Is(err, context.DeadlineExceeded) {
 			lastErr = fmt.Errorf(
 				"psql %q for cluster %s on pod %s timed out after %s: %w",
 				sql, cluster, pod, timeout, err,
 			)
-			break
+			retry = readOnlySQL(sql)
 		}
-		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-			lastStderr = string(ee.Stderr)
-		}
-		if !transientExecError(lastStderr) {
+		if !retry {
 			break
 		}
 		if attempt < 3 {
@@ -2855,6 +2887,52 @@ func psqlDBErrWith(
 		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
+}
+
+var (
+	// PostgreSQL treats \v as whitespace and Go's \s does not, so anything
+	// outside printable ASCII is left unparsed.
+	sqlUnparsed = regexp.MustCompile(`\$|--|/\*|\b[eE]'|[^\x20-\x7e\t\n\r]`)
+	sqlQuoted   = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"`)
+	sqlNotRead  = regexp.MustCompile(`[;'"]|\b(?:into|for)\b`)
+	sqlCall     = regexp.MustCompile(`([a-z_][a-z0-9_]*)\s*\(`)
+	// readOnlyCalls lists the functions and keywords a "(" may follow in a
+	// retryable read. Anything else, including any unknown function, is a write.
+	readOnlyCalls = map[string]bool{
+		"and": true, "any": true, "bool_and": true, "char_length": true, "coalesce": true,
+		"count": true, "current_database": true, "current_setting": true, "exists": true,
+		"filter": true, "from": true, "in": true, "max": true, "min": true, "not": true,
+		"or": true, "pg_current_wal_lsn": true, "pg_database_size": true, "pg_get_userbyid": true,
+		"pg_wal_lsn_diff": true, "string_agg": true, "sum": true, "to_regclass": true, "where": true,
+	}
+)
+
+// readOnlySQL reports whether sql is provably a single read: a SHOW, or a
+// SELECT with no locking clause, no INTO and only allowlisted calls. Doubt
+// counts as a write, since a write that may have committed must not re-run.
+func readOnlySQL(sql string) bool {
+	// Checked before ToLower and TrimSpace, which fold or drop non-ASCII.
+	if sqlUnparsed.MatchString(sql) {
+		return false
+	}
+	s := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(sql)), ";")
+	s = sqlQuoted.ReplaceAllString(s, "q")
+	words := strings.Fields(s)
+	if len(words) == 0 || sqlNotRead.MatchString(s) {
+		return false
+	}
+	if words[0] == "show" {
+		return true
+	}
+	if words[0] != "select" {
+		return false
+	}
+	for _, call := range sqlCall.FindAllStringSubmatch(s, -1) {
+		if !readOnlyCalls[call[1]] {
+			return false
+		}
+	}
+	return true
 }
 
 const (

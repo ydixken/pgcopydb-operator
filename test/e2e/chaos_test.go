@@ -118,8 +118,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
 			if cur.Status.Phase != v1beta1.PhaseFailed {
 				batch++
-				psqlBulk(sourceCluster, fmt.Sprintf("UPDATE documents SET body = repeat(md5('spool-%d-' || id), 500)"+
-					" WHERE id <= 1000", batch))
+				marker := fmt.Sprintf("spool-%d-", batch)
+				psqlBulkTolerant(sourceCluster, "UPDATE documents SET body = repeat(md5('"+marker+"' || id), 500)"+
+					" WHERE id <= 1000", marker)
 			}
 			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		}, migrationTimeout, time.Second).Should(Succeed())
@@ -219,21 +220,25 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 
 		By("approving the cutover and writing a backlog until endpos is set")
 		approveCutover(name)
-		// Keep the apply side busy so the drain window after endpos has real
-		// work: insert batches until the operator reports CuttingOver, which
-		// it sets in the same status write that records the endpos.
+		// Insert until CuttingOver, set in the same status write as endpos, so
+		// the drain has work. The checks compare live-drain rows across both
+		// sides, so a lost batch is skipped as long as one batch committed.
 		batch := 0
 		Eventually(func(g Gomega) {
 			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			if m.Status.Phase != v1beta1.PhaseCuttingOver {
 				batch++
-				psqlBulk(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
-					" SELECT (g %% %d) + 1, (g %% 90)::numeric / 3, 'live-drain-%d-' || g"+
-					" FROM generate_series(1, 2000) g", scaled(50000), batch))
+				marker := fmt.Sprintf("live-drain-%d-", batch)
+				psqlBulkTolerant(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note)"+
+					" SELECT (g %% %d) + 1, (g %% 90)::numeric / 3, '%s' || g"+
+					" FROM generate_series(1, 2000) g", scaled(50000), marker), marker)
 			}
 			g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		}, migrationTimeout, time.Second).Should(Succeed())
+		Expect(psql(sourceCluster, "SELECT count(*) > 0 FROM orders WHERE note LIKE 'live-drain-%'")).To(Equal("t"),
+			"no live-drain batch committed on the source before endpos (%d attempted, see the lost bulk write"+
+				" entries), so the drain window had no backlog and the invariant would compare 0 with 0", batch)
 
 		By("killing the runner pod inside the drain window")
 		deletePod(client.MatchingLabels{"pgcopydb-operator.io/migration": name})

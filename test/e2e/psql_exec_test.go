@@ -462,3 +462,177 @@ func TestPSQLArgvKeepsCNPGCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestBulkWriteLostSparesOnlyStatementErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []psqlExecResult
+		want    bool
+	}{
+		{name: "success", results: []psqlExecResult{{stdout: "UPDATE 1000"}}},
+		{name: "hung exec", results: []psqlExecResult{{block: true}}, want: true},
+		{
+			name: "three TLS timeouts",
+			results: []psqlExecResult{
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+			},
+			want: true,
+		},
+		{
+			name:    "stream EOF",
+			results: []psqlExecResult{{stderr: "error: error sending request: EOF\n", exitCode: 1}},
+			want:    true,
+		},
+		{
+			name:    "statement error",
+			results: []psqlExecResult{{stderr: "ERROR:  relation \"documents\" does not exist\n", exitCode: 1}},
+		},
+		{
+			name: "statement error after a notice",
+			results: []psqlExecResult{{
+				stderr: "NOTICE:  a notice\nERROR:  permission denied for table documents\n", exitCode: 1,
+			}},
+		},
+		{
+			name: "backend terminated",
+			results: []psqlExecResult{{
+				stderr: "FATAL:  terminating connection due to administrator command\n" +
+					"server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n" +
+					"command terminated with exit code 2\n",
+				exitCode: 1,
+			}},
+		},
+		{
+			name:    "server panic",
+			results: []psqlExecResult{{stderr: "PANIC:  could not write to file\n", exitCode: 1}},
+		},
+		{
+			name: "server crashed",
+			results: []psqlExecResult{{
+				stderr: "server closed the connection unexpectedly\n" +
+					"\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n",
+				exitCode: 1,
+			}},
+		},
+		{
+			name:    "connection lost",
+			results: []psqlExecResult{{stderr: "connection to server was lost\n", exitCode: 1}},
+		},
+		{
+			name: "connection refused by the server",
+			results: []psqlExecResult{{
+				stderr: "psql: error: connection to server on socket \"/run/postgresql/.s.PGSQL.5432\" failed: " +
+					"FATAL:  database \"app\" does not exist\n",
+				exitCode: 1,
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, _ := newPSQLExecCommand(t, tt.results...)
+			_, err := psqlDBErrWith(
+				"source-cluster",
+				psqlExecTestDatabase,
+				"UPDATE documents SET body = body",
+				func(string) string { return psqlExecTestPod },
+				func(time.Duration) {},
+				command,
+				psqlExecTestTimeout,
+			)
+			if got := bulkWriteLost(err); got != tt.want {
+				t.Fatalf("bulkWriteLost(%v) = %v, want %v", err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadOnlySQL(t *testing.T) {
+	reads := []string{
+		"SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'",
+		"SELECT count(*) FROM pg_replication_origin WHERE (roname LIKE 'pgcopydb\\_e2e\\_%' OR roname LIKE 'x%')",
+		"  select coalesce(sum(tuples_processed), 0) > 0 FROM pg_stat_progress_copy" +
+			" WHERE relid = to_regclass('public.documents');",
+		"SELECT count(*) FILTER (WHERE note LIKE 'a;b(') FROM orders",
+		"SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')",
+		"SHOW wal_level",
+	}
+	writes := []string{
+		"UPDATE documents SET body = 'x'",
+		"INSERT INTO orders SELECT 1",
+		"WITH d AS (DELETE FROM orders RETURNING 1) SELECT count(*) FROM d",
+		"WITH s AS (SELECT 1) SELECT * FROM s",
+		"SELECT 1; DELETE FROM orders",
+		"SHOW wal_level; DROP TABLE orders",
+		"SELECT id FROM orders FOR UPDATE",
+		"SELECT * INTO orders_copy FROM orders",
+		"SELECT nextval('orders_id_seq')",
+		"SELECT pg_catalog.setval('orders_id_seq', 1)",
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity",
+		"SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots",
+		"SELECT pg_logical_emit_message(true, 'p', 'x')",
+		"SELECT count(*) FROM pg_logical_slot_get_changes('s', NULL, NULL)",
+		`SELECT "nextval"('orders_id_seq')`,
+		"SELECT E'\\'' || nextval('s')",
+		"SELECT e'x'",
+		"SELECT E'x'",
+		"SELECT $$x$$",
+		"SELECT 1 -- comment",
+		"SELECT 'unterminated",
+		"SELECT nextval\v('orders_id_seq')",
+		"SELECT nextval\f('orders_id_seq')",
+		"SELECT ne\u0301xtval('orders_id_seq')",
+		"SELECT count(*) FROM pg_replication_slots\u00a0",
+		"SELECT \u212aEY FROM t",
+		"",
+	}
+	for _, sql := range reads {
+		if !readOnlySQL(sql) {
+			t.Errorf("readOnlySQL(%q) = false, want true", sql)
+		}
+	}
+	for _, sql := range writes {
+		if readOnlySQL(sql) {
+			t.Errorf("readOnlySQL(%q) = true, want false", sql)
+		}
+	}
+}
+
+func TestPSQLDBErrRetriesOnlyReadsAfterATimeout(t *testing.T) {
+	for _, tt := range []struct {
+		sql       string
+		wantCalls int
+	}{
+		{sql: "SELECT count(*) FROM pg_replication_slots", wantCalls: 2},
+		{sql: "UPDATE documents SET body = body", wantCalls: 1},
+	} {
+		t.Run(tt.sql, func(t *testing.T) {
+			command, state := newPSQLExecCommand(t, psqlExecResult{block: true}, psqlExecResult{stdout: "0\n"})
+			var waits []time.Duration
+			out, err := psqlDBErrWith(
+				"source-cluster",
+				psqlExecTestDatabase,
+				tt.sql,
+				func(string) string { return psqlExecTestPod },
+				func(delay time.Duration) { waits = append(waits, delay) },
+				command,
+				psqlExecTestTimeout,
+			)
+			calls, _, commands := state.snapshot()
+			if len(calls) != tt.wantCalls {
+				t.Fatalf("calls=%d, want %d", len(calls), tt.wantCalls)
+			}
+			requirePSQLCommandsReaped(t, commands)
+			if tt.wantCalls == 1 {
+				if !errors.Is(err, context.DeadlineExceeded) || len(waits) != 0 {
+					t.Fatalf("err=%v waits=%v, want a deadline and no wait", err, waits)
+				}
+				return
+			}
+			if err != nil || out != "0" || fmt.Sprint(waits) != "[5s]" {
+				t.Fatalf("out=%q err=%v waits=%v, want 0 after one 5s wait", out, err, waits)
+			}
+		})
+	}
+}
