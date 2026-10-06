@@ -12,7 +12,7 @@
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
 # renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:7fddd6fddadbb5fed1dd0143efc446eca3287753@sha256:8859727400fe9e3ce9b25731b4415bda67155d3fceaa039b7ff5ebb95f09c156 AS pgcopydb
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:972e22152c1bd64ddb73cc8eef0d98d1187b5f9f@sha256:d1b29a8ab45087e4266d58ce5501a19741a1913e2f13ca29a58b153dd3f17c58 AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
@@ -72,7 +72,7 @@ ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 # Run the worker, credential escaping, and sampler timeout after purging so
 # a missing runtime capability fails the image build.
 RUN set -eux; \
-    pgcopydb --version | grep -qF '0.18.34.g7fddd6f'; \
+    pgcopydb --version | grep -qF '0.18.36.g972e221'; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \

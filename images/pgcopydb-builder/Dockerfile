@@ -9,15 +9,15 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#15 reads with row_security off, #16 restores REPLICA IDENTITY
-# USING INDEX, #14 applies keyless REPLICA IDENTITY FULL changes to one row.
-# Keeps #12's partition comparison, #11's slot bootstrap and #9's feedback.
+# ydixken/pgcopydb#17 reports an unreadable catalog on --resume as such.
+# Keeps #15's row_security off, #16's USING INDEX identity, #14's keyless FULL
+# apply, #12's partition comparison, #11's slot bootstrap and #9's feedback.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-34-g7fddd6f, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-36-g972e221, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=7fddd6fddadbb5fed1dd0143efc446eca3287753
-ARG PGCOPYDB_VERSION=0.18.34.g7fddd6f
+ARG PGCOPYDB_SHA=972e22152c1bd64ddb73cc8eef0d98d1187b5f9f
+ARG PGCOPYDB_VERSION=0.18.36.g972e221
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.
