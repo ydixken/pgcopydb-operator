@@ -68,7 +68,7 @@ var _ = Describe("Feature coverage", SpecPriority(2), func() {
 			resetMigrationPair()
 			identity := fmt.Sprint(time.Now().UnixNano())
 			m, captured := prepareCoverageFollow("e2e-cov-own-"+identity, []coverageCase{c}, identity)
-			// A failing apply fails the same way on every retry; one retry shows it.
+			// An outcome the operator misses then costs one retry, not the default budget.
 			m.Spec.BackoffLimit = 1
 			create(m)
 			coverageOwnOutcomes[c.expect](coverageOwnRun{c: c, m: m, identity: identity, captured: captured})
@@ -89,16 +89,12 @@ func expectPreflightRefusal(r coverageOwnRun, refusal string) {
 }
 
 // expectApplyFailsOnDDL runs @follow, whose DDL the target never gets, and
-// requires every attempt to fail on the column the target lacks.
+// requires the first attempt to fail for good on the column the target lacks.
 func expectApplyFailsOnDDL(r coverageOwnRun) {
 	GinkgoHelper()
 	runCoverageFollow(r.m, []coverageCase{r.c}, r.identity)
-	failed := waitFailed(r.m.Name, reasonBackoffLimitExceeded)
-	logs := make([]string, failed.Status.Attempts)
-	for i := range logs {
-		logs[i] = jobLogs(fmt.Sprintf("%s-run-%d", r.m.Name, i+1), attemptLogTail)
-	}
-	Expect(checkMissingColumnFailure(failed, logs)).To(Succeed())
+	failed := waitFailed(r.m.Name, reasonSchemaDrift)
+	Expect(checkMissingColumnFailure(failed, jobLogs(r.m.Name+"-run-1", attemptLogTail))).To(Succeed())
 }
 
 // expectLargeObjectsNotReplicated cuts over after @follow changed large

@@ -93,7 +93,7 @@ An own case pins a documented limitation instead of identity.
 It runs alone in a follow Migration of its own, set up like the follow group's, with `spec.backoffLimit: 1`, and its verdict names the outcome the spec requires:
 
 - `preflight_refuses_rls`, `preflight_refuses_unlogged`: the Migration fails with `PreflightFailed` before any attempt, and the refusal names exactly the case's table.
-- `apply_fails_on_ddl`: after `@follow` adds a column on the source, both attempts fail on the first change that uses it (SQLSTATE 42703), and the Migration fails with `BackoffLimitExceeded`.
+- `apply_fails_on_ddl`: after `@follow` adds a column on the source, the first attempt fails on the first change that uses it (SQLSTATE 42703), and the Migration fails with `SchemaDrift` without a retry.
 - `large_objects_not_replicated`: the Migration completes with `Verified` `True`, and the fingerprint differs only in the large objects `@follow` patched, unlinked or created, each still in its base-copy state on the target.
 
 [Prerequisites](prerequisites.md) states each of these limitations where it applies.
