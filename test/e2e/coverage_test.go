@@ -122,10 +122,24 @@ func coverageGroup(group string) []coverageCase {
 	return cases
 }
 
-// coverageDiffs fingerprints both sides once and returns every differing
-// aspect per case, or "" when they match. A cross-major pair skips the
-// aspects each server deparses itself.
+// coverageDiffs reports every differing aspect per case, or "" when the
+// sides match.
 func coverageDiffs(cases []coverageCase, identity string) string {
+	GinkgoHelper()
+	byCase := coverageCaseDiffs(cases, identity)
+	var report strings.Builder
+	for _, c := range cases {
+		for _, d := range byCase[c.path] {
+			fmt.Fprintf(&report, "%s: %s\n", c.path, d)
+		}
+	}
+	return report.String()
+}
+
+// coverageCaseDiffs fingerprints both sides once and returns the differing
+// aspects by case path. A cross-major pair skips the aspects each server
+// deparses itself.
+func coverageCaseDiffs(cases []coverageCase, identity string) map[string][]fingerprintDiff {
 	GinkgoHelper()
 	schemas := coverageSchemaNames(cases, identity)
 	read := func(cluster string) []fingerprintRow {
@@ -140,14 +154,12 @@ func coverageDiffs(cases []coverageCase, identity string) string {
 	if pgSource != pgTarget {
 		skip = deparsedAspects
 	}
-	var report strings.Builder
+	byCase := map[string][]fingerprintDiff{}
 	for _, c := range cases {
 		names := c.placeholders(identity)
-		for _, d := range diffFingerprint(caseFingerprint(source, names), caseFingerprint(target, names), skip) {
-			fmt.Fprintf(&report, "%s: %s\n", c.path, d)
-		}
+		byCase[c.path] = diffFingerprint(caseFingerprint(source, names), caseFingerprint(target, names), skip)
 	}
-	return report.String()
+	return byCase
 }
 
 // coverageSchemaNames lists every schema of cases for one run.

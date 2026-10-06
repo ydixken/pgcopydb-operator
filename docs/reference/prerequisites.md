@@ -141,6 +141,7 @@ Fix it in one of three ways:
 - Leave them out with `clone.filters`: `excludeTables`, `excludeSchemas`, or `excludeTableData`.
 
 All-databases clones skip the check, because their migration role is a superuser.
+The [`objects/rls_force`](coverage.md#postgresql-feature-coverage) coverage case pins the refusal for a table with `FORCE ROW LEVEL SECURITY`.
 
 This audit and the follow audit for [unlogged tables](#live-migration-specfollowenabled-true) cover the tables `clone.filters` keeps, matched by exact `schema.table` name.
 Each audit applies the include filters the way pgcopydb applies them to its own step.
@@ -341,6 +342,8 @@ Schema and workload contract:
   `pgoutput` and `wal2json` send the NULLs and are not affected.
   On a Citus-distributed target, that one-row form fails the apply with an error.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
+  A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`), every retry stops at the same change, and the Migration fails with `BackoffLimitExceeded`.
+  The [`limitations/ddl_add_column`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Unlogged tables MUST NOT be in scope.
   They write no WAL, so logical decoding never sees their changes.
   With the automatic publication, pgcopydb's `CREATE PUBLICATION ... FOR TABLE` refuses them and the first attempt fails before any copy.
@@ -350,8 +353,12 @@ Schema and workload contract:
   Run `ALTER TABLE ... SET LOGGED` on the source, or leave them out with `excludeTables` or `excludeSchemas`.
   Next to `includeOnlySchemas`, use `excludeTables`, because `excludeSchemas` cannot be combined with it.
   `excludeTableData` does not help, because pgcopydb still publishes those tables.
+  The [`limitations/unlogged_writes`](coverage.md#postgresql-feature-coverage) coverage case pins the refusal.
 - Large-object changes during the window are not replicated (base copy only).
-  Sequences need no action: pgcopydb re-syncs them automatically after cutover.
+  A large object written or unlinked during the window keeps its base-copy content on the target, and one created during the window does not exist there, even when a replicated row references it.
+  Verification cannot see this: `compare data` covers tables, not `pg_largeobject`, so `Verified` stays `True`.
+  The [`limitations/large_object_change`](coverage.md#postgresql-feature-coverage) coverage case pins this.
+- Sequences need no action: pgcopydb re-syncs them automatically after cutover.
 
 ## Superuser remediation (`superuserSecretRef`)
 

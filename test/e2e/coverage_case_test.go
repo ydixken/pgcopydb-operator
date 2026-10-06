@@ -50,8 +50,15 @@ const (
 	coverageMaxName = 37
 )
 
-// coverageOutcomes names the outcome assertions an own case may expect.
-var coverageOutcomes = map[string]bool{}
+// coverageOutcomes names the outcomes an own case may expect, one per entry
+// of coverageOwnOutcomes.
+var coverageOutcomes = func() map[string]bool {
+	names := map[string]bool{}
+	for name := range coverageOwnOutcomes {
+		names[name] = true
+	}
+	return names
+}()
 
 // coverageCase is one parsed case file. Its sections keep their placeholders
 // until render.
@@ -439,13 +446,20 @@ func TestEmbeddedCoverageCasesParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	groups := map[string]int{}
+	groups, expected := map[string]int{}, map[string]bool{}
 	for _, c := range cases {
 		groups[c.group]++
+		expected[c.expect] = true
 	}
-	for _, group := range []string{coverageGroupClone, coverageGroupFollow} {
+	for _, group := range []string{coverageGroupClone, coverageGroupFollow, coverageGroupOwn} {
 		if groups[group] == 0 {
 			t.Fatalf("no %s cases embedded", group)
+		}
+	}
+	// An outcome no case expects is an assertion nothing runs.
+	for outcome := range coverageOutcomes {
+		if !expected[outcome] {
+			t.Errorf("no own case expects %s", outcome)
 		}
 	}
 }

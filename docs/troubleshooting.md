@@ -149,7 +149,7 @@ The value `["*"]` acknowledges all of them.
 
 `PreflightFailed` with `row-level security hides rows of these tables` names tables whose policies apply to the source migration role.
 The bundled runner would fail the copy on them with SQLSTATE 42501.
-An older runner would copy only the rows that role can see, and its comparison would agree, so the loss would go unnoticed.
+A runner before `0.18.34.g7fddd6f` would copy only the rows that role can see, and its comparison would agree, so the loss would go unnoticed.
 
 Give the role `BYPASSRLS`, disable row-level security on those tables for the migration, or leave them out with `clone.filters`.
 Then create a new Migration.
