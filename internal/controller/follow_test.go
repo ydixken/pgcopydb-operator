@@ -896,7 +896,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		reconcileAndGet(ctx, r, name)
 		reconcileAndGet(ctx, r, name)
 		finishJob(ctx, name+"-preflight", false)
-		r.now = func() time.Time { return time.Now().Add(preflightLogGrace + time.Second) }
+		r.now = func() time.Time { return time.Now().Add(failedLogGrace + time.Second) }
 		m := reconcileAndGet(ctx, r, name)
 
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
