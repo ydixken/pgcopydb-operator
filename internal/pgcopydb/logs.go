@@ -125,6 +125,25 @@ func recentLogLines(raw []byte) []string {
 // carry it. A miss only costs the caller its normal retry, so extend the class
 // only for errors known to be deterministic and terminal.
 func PermissionDeniedLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		return strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") ||
+			strings.Contains(msg, "must be owner of extension")
+	})
+}
+
+// DiskFullLine returns a log line showing the attempt died out of disk space,
+// on the work volume (SQLite's wording) or the target (strerror's), or "".
+// A retry cannot free space, and its resume on the full volume fails reading
+// its own catalogs, which hides this cause behind an unrelated message.
+func DiskFullLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		return strings.Contains(msg, "No space left on device") || strings.Contains(msg, "database or disk is full")
+	})
+}
+
+// recentSevereLine returns the first severe line in the terminal window that
+// match accepts, or "".
+func recentSevereLine(raw []byte, match func(string) bool) string {
 	for _, msg := range recentLogLines(raw) {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
 		if e, ok := parseLogLine(msg); ok {
@@ -137,8 +156,7 @@ func PermissionDeniedLine(raw []byte) string {
 		if !severe {
 			continue
 		}
-		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") ||
-			strings.Contains(msg, "must be owner of extension") {
+		if match(msg) {
 			return msg
 		}
 	}

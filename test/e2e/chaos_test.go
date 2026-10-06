@@ -85,9 +85,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 	// Disk pressure needs follow mode: a clone's work dir holds catalogs and
 	// schema dumps only, a few MB that never fill the volume (the first live
 	// run completed on 200Mi with room to spare). Follow mode spools every
-	// decoded change under the work dir as JSON plus transformed SQL and does
-	// not prune the files while the migration runs, so sustained source
-	// writes grow the spool without bound.
+	// decoded change under the work dir in SQLite, once decoded and once as
+	// transformed SQL, and does not prune it while the migration runs, so
+	// sustained source writes grow the spool without bound.
 	It("fails a follow migration when the change spool fills the work volume", func() {
 		const name = "e2e-chaos-diskfull"
 		DeferCleanup(func() {
@@ -100,10 +100,6 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		// 200Mi carries the clone-phase catalogs comfortably (proven live)
 		// and leaves a handful of burst batches as spool headroom.
 		m.Spec.WorkVolume.Size = resource.MustParse("200Mi")
-		// ENOSPC persists on a full volume, so the --resume attempt fails
-		// the same way; backoffLimit 1 keeps that to one extra attempt
-		// before the absorbing Failed.
-		m.Spec.BackoffLimit = 1
 		create(m)
 
 		By("waiting for the base copy to finish and streaming to start")
@@ -111,11 +107,11 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 
 		By("bursting TOAST rewrites until the spool overflows the work volume")
 		// documents carries the chunkiest rows the fixture has: each touched
-		// row re-logs a ~16KiB body, which lands on the spool twice (JSON
-		// and SQL), roughly 30MiB per 1000-row batch. The value changes per
-		// batch because logical decoding skips unchanged TOAST datums, and
-		// the loop keeps writing until the operator reports Failed, so a
-		// scale too small for 1000 distinct ids just needs more batches.
+		// row re-logs a ~16KiB body, which lands on the spool twice, roughly
+		// 30MiB per 1000-row batch. The value changes per batch because
+		// logical decoding skips unchanged TOAST datums, and the loop keeps
+		// writing until the operator reports Failed, so a scale too small
+		// for 1000 distinct ids just needs more batches.
 		batch := 0
 		Eventually(func(g Gomega) {
 			cur := &v1beta1.Migration{}
@@ -128,13 +124,11 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 			g.Expect(cur.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		}, migrationTimeout, time.Second).Should(Succeed())
 
-		failed := waitFailed(name, "BackoffLimitExceeded")
-		// The controller has no disk-specific wording; the failure surfaces
-		// through the generic Job-failure path (handleFailedJob), which
-		// appends the worker's last pgcopydb error line ("No space left on
-		// device") to the Failed condition message. That line is what
-		// carries "space".
-		Expect(failureMessage(failed)).To(ContainSubstring("space"),
+		// Attempt 1 is terminal: a --resume on the full volume fails reading
+		// its own catalogs and would report that instead of the full disk.
+		failed := waitFailed(name, "DiskFull")
+		Expect(failed.Status.Attempts).To(Equal(int32(1)))
+		Expect(failureMessage(failed)).To(MatchRegexp(`database or disk is full|No space left on device`),
 			"Failed message does not surface the out-of-space error")
 	})
 

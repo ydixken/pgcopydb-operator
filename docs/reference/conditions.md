@@ -114,6 +114,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. |
+| `Failed` | `True` | `DiskFull` | An attempt ran out of disk space, on the work volume or the target; classified like `PermissionDenied`, and the message carries the matched log line. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. |
 | `Failed` | `True` | `OwnershipFailed` | The ownership handover failed; the data is on the target. |

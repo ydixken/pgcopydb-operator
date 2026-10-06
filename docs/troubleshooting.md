@@ -43,6 +43,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [No worker pod, PVC `Pending`](#no-worker-pod-and-the-pvc-stays-pending) | Workers and cluster objects |
 | [Phase `Failed`, "retry budget exhausted"](#phase-failed-with-retry-budget-exhausted) | Workers and cluster objects |
 | [Phase `Failed`, reason `PermissionDenied`, after one attempt](#phase-failed-with-reason-permissiondenied) | Workers and cluster objects |
+| [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -495,6 +496,17 @@ The condition message carries the matched line.
 Grant what the message names, then create a new Migration.
 A missing source-side SELECT or USAGE is the usual cause, because preflight covers the target CREATE rights.
 For the grantable target rights, set `superuserSecretRef`.
+
+### Phase `Failed` with reason `DiskFull`
+
+Phase `Failed` with reason `DiskFull` after a single attempt means the worker ran out of disk space.
+The condition message carries the matched line.
+`database or disk is full` comes from pgcopydb's SQLite catalogs on the work volume.
+`No space left on device` comes from a file write on the work volume, or from the target server when it quotes `could not extend file`.
+
+On a live migration the change spool grows with source writes until cutover, so size `spec.workVolume.size` for the write volume the migration has to carry.
+For a target-side error, free or add space on the target.
+Then create a new Migration.
 
 ### Status updates lag behind the worker
 

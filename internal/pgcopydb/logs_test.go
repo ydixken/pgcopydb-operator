@@ -395,3 +395,63 @@ func TestPermissionDeniedLineExtensionOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestDiskFullLine(t *testing.T) {
+	const sqliteFull = "[SQLite 13: database or disk is full]: database or disk is full"
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// Abridged from a clone --follow run whose change spool filled a
+			// 200M ext4 work volume (runner v0.19.4-rc.1).
+			name: "spool fills the work volume",
+			raw: `{"timestamp":"2026-10-06 02:25:50.043","pid":11,"error_level":7,"error_severity":"ERROR","file_name":"catalog.c","file_line_num":11205,"message":"[SQLite 13: database or disk is full]: database or disk is full"}
+{"timestamp":"2026-10-06 02:25:50.043","pid":11,"error_level":7,"error_severity":"ERROR","file_name":"catalog.c","file_line_num":11162,"message":"Failed to execute SQLite query, see above for details"}
+{"timestamp":"2026-10-06 02:25:50.043","pid":11,"error_level":7,"error_severity":"ERROR","file_name":"pgsql.c","file_line_num":4643,"message":"Failed to consume from the stream at pos 0\/1FA4C10"}
+{"timestamp":"2026-10-06 02:25:50.318","pid":12,"error_level":5,"error_severity":"INFO","file_name":"follow.c","file_line_num":797,"message":"Apply process has terminated"}
+{"timestamp":"2026-10-06 02:25:50.401","pid":10,"error_level":7,"error_severity":"ERROR","file_name":"follow.c","file_line_num":1057,"message":"Process receive has exited with error code 12, terminating other processes"}
+{"timestamp":"2026-10-06 02:25:50.512","pid":7,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"follow process 10 has terminated [12]"}`,
+			want: sqliteFull,
+		},
+		{
+			name: "a file write hits ENOSPC",
+			raw:  `{"error_severity":"ERROR","message":"Failed to write file \"/work/pgcopydb/cdc/x.json\": No space left on device"}`,
+			want: `Failed to write file "/work/pgcopydb/cdc/x.json": No space left on device`,
+		},
+		{
+			name: "the target runs out of disk",
+			raw:  `{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  could not extend file \"base/16384/16390\": No space left on device"}`,
+			want: `pg_restore: error: could not execute query: ERROR:  could not extend file "base/16384/16390": No space left on device`,
+		},
+		{
+			name: "a mild line quoting the text does not classify",
+			raw:  `{"error_severity":"INFO","message":"retrying after No space left on device"}`,
+			want: "",
+		},
+		{
+			// What a --resume attempt on the full volume logs when SQLite
+			// cannot rebuild its shared-memory file: not a disk-full verdict.
+			name: "resume catalog read I/O error does not classify",
+			raw: `{"error_severity":"ERROR","message":"[SQLite] disk I\/O error"}
+{"error_severity":"FATAL","message":"Option --resume requires option --not-consistent"}`,
+			want: "",
+		},
+		{
+			name: "a line outside the terminal window does not classify",
+			raw: `{"error_severity":"ERROR","message":"` + sqliteFull + `"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow) +
+				`{"error_severity":"ERROR","message":"worker was killed: out of memory"}`,
+			want: "",
+		},
+		{name: "no input at all", raw: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DiskFullLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("DiskFullLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
