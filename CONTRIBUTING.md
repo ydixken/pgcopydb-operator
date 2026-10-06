@@ -343,7 +343,7 @@ A contributor with a cluster SHOULD run the new specs locally with `task e2e:foc
 
 ### How do you add a feature coverage case?
 
-The feature coverage specs in `test/e2e/coverage_test.go` (clone group) and `test/e2e/coverage_follow_test.go` (follow group) run the SQL cases under `test/e2e/coverage/`, and the [coverage reference](docs/reference/coverage.md#postgresql-feature-coverage) lists every one of them.
+The feature coverage specs in `test/e2e/coverage_test.go` (clone group), `test/e2e/coverage_follow_test.go` (follow group) and `test/e2e/coverage_own_test.go` (own cases) run the SQL cases under `test/e2e/coverage/`, and the [coverage reference](docs/reference/coverage.md#postgresql-feature-coverage) lists every one of them.
 A case that comes out identical needs one file and no Go change.
 
 1. Write `test/e2e/coverage/<area>/<case>.sql`.
@@ -408,6 +408,11 @@ Three conventions keep a case within what the spec cleans up:
 - Each statement commits on its own and runs as the source app role, so a case may use an enum value it added earlier, and pgcopydb owns what it copies.
 - Grants and policies go to `cov_reader`, which the spec creates on both servers.
 - A case that creates large objects lists them in `${schema}.cov_large_objects (name text, lo oid)`: the fingerprint compares their contents, and cleanup unlinks them, because dropping a schema leaves large objects behind.
+
+An own case (`group=own`) pins a documented limitation instead of identity.
+Its `expect` names an entry of `coverageOwnOutcomes` in `test/e2e/coverage_own_test.go`, which drives the case's Migration from creation to that outcome.
+A new outcome adds that entry, a check with its table test in `test/e2e/coverage_outcome_test.go`, a line in the coverage reference, and the limitation's statement in [prerequisites](docs/reference/prerequisites.md).
+`TestEmbeddedCoverageCasesParse` fails while an outcome has no case.
 
 ## Releasing
 

@@ -89,6 +89,15 @@ Once the Migration waits at `CutoverPending` with its lag converged, the spec ru
 It approves the cutover and, after `Completed`, requires `Verified` `True` and a matching fingerprint, as the clone group does.
 The fingerprint is read after the cutover, because the target's sequences keep their base-copy values until pgcopydb re-syncs them at the cutover.
 
+An own case pins a documented limitation instead of identity.
+It runs alone in a follow Migration of its own, set up like the follow group's, with `spec.backoffLimit: 1`, and its verdict names the outcome the spec requires:
+
+- `preflight_refuses_rls`, `preflight_refuses_unlogged`: the Migration fails with `PreflightFailed` before any attempt, and the refusal names exactly the case's table.
+- `apply_fails_on_ddl`: after `@follow` adds a column on the source, both attempts fail on the first change that uses it (SQLSTATE 42703), and the Migration fails with `BackoffLimitExceeded`.
+- `large_objects_not_replicated`: the Migration completes with `Verified` `True`, and the fingerprint differs only in the large objects `@follow` patched, unlinked or created, each still in its base-copy state on the target.
+
+[Prerequisites](prerequisites.md) states each of these limitations where it applies.
+
 > [!note]
 > When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
 > Each server prints those definitions itself, and identical objects print differently across majors.
