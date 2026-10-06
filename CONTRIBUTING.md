@@ -388,6 +388,13 @@ A case that comes out identical needs one file and no Go change.
    task e2e:focus FOCUS='Feature coverage'
    ```
 
+   That focus runs the follow group too, which adds 4 to 5 minutes.
+   For clone-only work, focus on the clone spec:
+
+   ```sh
+   task e2e:focus FOCUS='clones every clone-group case'
+   ```
+
 The parser rejects a file that breaks these rules, so a typo cannot drop a case silently:
 
 - The header sets `group`, `expect`, `schemas` (1 or 2) and `min_pg` (14 or later), and nothing else.
