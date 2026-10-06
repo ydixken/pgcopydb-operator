@@ -496,6 +496,9 @@ The first attempt's logs almost always name it.
 A permission error mostly stops early as `PermissionDenied`, and a full work volume as `DiskFull`.
 One that sits outside the last 40 log lines the classifier reads lands here.
 A work volume that filled up then shows `database or disk is full` or `No space left on device` in the first attempt's logs.
+`the pod log was not readable (...)` in the message means the operator could not read the worker log for two minutes after the Job failed, so it could not classify the cause.
+The text in parentheses is the read error.
+Read the cause with `kubectl logs job/<name>-run-<attempt>` while the Job still exists.
 
 Fix the cause, then create a new Migration.
 A terminal state is absorbing, so this Migration cannot resume.
