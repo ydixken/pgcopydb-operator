@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/972e22152c1bd64ddb73cc8eef0d98d1187b5f9f) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/93eda1dd9b3864e46e6b5913a65e1e7e8a400783) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -44,11 +44,12 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports seven pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.36.g972e221`, reports a retry that cannot read the previous run's catalog as that read failure, where older runners asked for `--not-consistent`.
-It retains three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
-It also retains [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
-`0.18.34.g7fddd6f` lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
+The progress poll supports eight pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.39.g93eda1d`, matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL; see the [live migration workload contract](#live-migration-specfollowenabled-true).
+`0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
+Both retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+They also retain [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
+`0.18.36.g972e221` lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.
@@ -338,10 +339,11 @@ Schema and workload contract:
   The bundled runner keeps `REPLICA IDENTITY USING INDEX` and `REPLICA IDENTITY FULL` on the target as the source has them.
   Stock pgcopydb falls back to the default identity where the source uses `USING INDEX`.
 - `TRUNCATE` is replicated: the target is truncated at the same point in the change stream.
-- A table with `REPLICA IDENTITY FULL` and no key SHOULD NOT hold rows that are equal except where one of them is NULL when the plugin is `test_decoding`.
-  The bundled runner changes one matching row per UPDATE or DELETE, but `test_decoding` leaves NULL columns out of the old row, so the change can land on the wrong row.
-  `pgoutput` and `wal2json` send the NULLs and are not affected.
-  On a Citus-distributed target, that one-row form fails the apply with an error.
+- On a table with `REPLICA IDENTITY FULL` and no key, the bundled runner changes one matching row per UPDATE or DELETE and matches each NULL column of the old row with `IS NULL`, under every plugin.
+  That covers the NULL columns `test_decoding` leaves out of the old row, and an old row whose columns are all NULL.
+  A runner older than `0.18.39.g93eda1d` SHOULD NOT be used with `test_decoding` on such a table if it holds rows that are equal except where one of them is NULL: it matches only the columns `test_decoding` sends, so the change can land on the wrong row.
+  Those runners also skip an UPDATE or DELETE whose old row is all NULL, under every plugin, and the target keeps the row.
+  On a Citus-distributed target, the one-row form fails the apply with an error.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
   A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`).
   Every retry would stop at the same change, so the Migration fails with `SchemaDrift` on that attempt.
