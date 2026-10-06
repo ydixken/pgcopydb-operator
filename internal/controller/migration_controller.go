@@ -62,9 +62,9 @@ const (
 	// preflightLogTail bounds the preflight verdict carried into the condition
 	// message. 60, not 20: the fix lines sit behind a re-printed audit list.
 	preflightLogTail = 60
-	// preflightLogGrace is how long after the preflight Job fails a log read
-	// error is retried: the verdict exists only in that log.
-	preflightLogGrace = 2 * time.Minute
+	// failedLogGrace is how long after a preflight or worker Job fails a log
+	// read error is retried: the verdict or terminal cause is only in that log.
+	failedLogGrace = 2 * time.Minute
 	// preflightOkLogTail is the whole preflight log, a number only because the
 	// API wants one: a missed remediated: line loses a grant's audit event.
 	preflightOkLogTail = 10000
@@ -869,7 +869,15 @@ func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 // the pgcopydb ERROR behind it is appended from the pod log when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
-	tail := r.jobLogTail(ctx, m.Namespace, job.Name, workerLogTail)
+	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, workerLogTail)
+	switch {
+	case err == nil || r.Logs == nil:
+	case r.currentTime().Before(jobFailedAt(job).Add(failedLogGrace)):
+		// Classifying without the log would spend a retry on a terminal cause.
+		return ctrl.Result{}, fmt.Errorf("reading the log of worker Job %s: %w", job.Name, err)
+	default:
+		reason += "; the pod log was not readable (" + truncate(err.Error(), maxDetailLen) + ")"
+	}
 	if detail := truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen); detail != "" {
 		reason += "; last error: " + detail
 	}

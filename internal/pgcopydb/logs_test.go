@@ -437,6 +437,28 @@ func TestDiskFullLine(t *testing.T) {
 			raw:  `{"error_severity":"ERROR","message":"pg_restore: error: could not execute query: ERROR:  could not write to file \"base\/pgsql_tmp\/pgsql_tmp77.0\": No space left on device"}`,
 			want: "",
 		},
+		// One row per serverErrorLine guard: each line carries no other marker.
+		{
+			name: "a source line without the server ERROR prefix",
+			raw:  `{"error_severity":"ERROR","message":"[SOURCE 77] could not write to file \"pg_replslot\/pgcopydb\/xid-1234.spill\": No space left on device"}`,
+			want: "",
+		},
+		{
+			name: "a target line without the server ERROR prefix",
+			raw:  `{"error_severity":"ERROR","message":"[TARGET 12] could not write to file \"base\/pgsql_tmp\/pgsql_tmp77.0\": No space left on device"}`,
+			want: "",
+		},
+		{
+			name: "pg_dump relays a server FATAL",
+			raw:  `{"error_severity":"ERROR","message":"pg_dump: error: query failed: FATAL:  could not write to file \"pg_wal\/xlogtemp.123\": No space left on device"}`,
+			want: "",
+		},
+		{
+			// The server pads its severity with two spaces; one is not a relay.
+			name: "a local ERROR: with one space still classifies",
+			raw:  `{"error_severity":"ERROR","message":"pg_dump: ERROR: could not write to output file: No space left on device"}`,
+			want: "pg_dump: ERROR: could not write to output file: No space left on device",
+		},
 		{
 			name: "target shared memory runs out",
 			raw:  `{"error_severity":"ERROR","message":"[TARGET 4242] [53100] ERROR:  could not resize shared memory segment \"\/PostgreSQL.2050732070\" to 8388608 bytes: No space left on device"}`,

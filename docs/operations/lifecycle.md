@@ -92,6 +92,8 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
 
 When worker logs are readable, the `AttemptFailed` event names the pgcopydb error after each failed attempt.
 The terminal `Failed` condition keeps that error when the budget drains.
+When the log read fails, the operator retries it for two minutes after the Job fails, so a short API server outage does not cost the `PermissionDenied` or `DiskFull` check.
+Past that, the attempt retries without the check, and the event and the condition carry the read error instead.
 The log tail can contain a pg_restore database error before generic shutdown messages.
 In that case, retry events and the terminal `Failed` condition keep it, with the affected relation.
 

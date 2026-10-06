@@ -362,7 +362,7 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 	msg := "preflight failed"
 	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, preflightLogTail)
 	switch {
-	case err != nil && r.Logs != nil && r.currentTime().Before(jobFailedAt(job).Add(preflightLogGrace)):
+	case err != nil && r.Logs != nil && r.currentTime().Before(jobFailedAt(job).Add(failedLogGrace)):
 		// The verdict is only in that log, so a blip in the API server must
 		// not end the Migration without it.
 		return false, "", fmt.Errorf("reading the log of preflight Job %s: %w", job.Name, err)

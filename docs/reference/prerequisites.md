@@ -399,6 +399,7 @@ Finished tables are skipped, and interrupted tables are re-copied from scratch.
 Each table's COPY is a single transaction, so a killed attempt leaves no partial rows.
 `--not-consistent` is needed here: the first attempt's exported snapshot dies with its session.
 A plain `--resume` fails before it touches any data ("snapshot ... does not exist").
+A permission error or a full work volume stops the `--resume` retry: the Migration ends as `PermissionDenied` or `DiskFull` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
 
 The trade-off: re-copied tables read a fresh snapshot.
 A retried clone of a source that still takes writes is therefore not one single point in time across tables.

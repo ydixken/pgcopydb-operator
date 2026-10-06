@@ -541,6 +541,33 @@ func TestHandleFailedJob_RetryStatusPatchFailure(t *testing.T) {
 	}
 }
 
+// TestHandleFailedJob_NoFailedTimeNoLogGrace: a Failed condition without a
+// transition time opens no window, so an unreadable log retries at once.
+func TestHandleFailedJob_NoFailedTimeNoLogGrace(t *testing.T) {
+	m := passwordMigration()
+	m.Spec.BackoffLimit = 2
+	m.Status.Attempts = 1
+	m.Status.JobName = workerJob
+	failed := namedJob(workerJob, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		Reason: batchv1.JobReasonBackoffLimitExceeded})
+	r := failingReconciler(t, interceptor.Funcs{}, m)
+	r.Logs = &fakeLogs{err: errBoom}
+	if _, err := r.handleFailedJob(context.Background(), m, m.DeepCopy(), failed); err != nil {
+		t.Fatalf("a Job without a Failed time must not wait for its log, got %v", err)
+	}
+	if m.Status.JobName != "" {
+		t.Fatalf("the next attempt must be scheduled, jobName = %q", m.Status.JobName)
+	}
+	select {
+	case ev := <-r.Recorder.(*events.FakeRecorder).Events:
+		if !strings.Contains(ev, "the pod log was not readable (boom)") {
+			t.Fatalf("the retry event must carry the read error, got %q", ev)
+		}
+	default:
+		t.Fatal("no AttemptFailed event was recorded")
+	}
+}
+
 // TestEnsureOwned_OwnerRefFailure: a scheme that cannot resolve the owner's
 // GVK fails the PVC's owner reference, and the pass with it.
 func TestEnsureOwned_OwnerRefFailure(t *testing.T) {

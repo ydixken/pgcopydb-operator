@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -512,25 +513,62 @@ var _ = Describe("Migration Controller", func() {
 		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("DiskFull")))
 	})
 
-	It("keeps the Job's failure message when worker logs are unreadable", func() {
+	It("classifies a disk-full line read after a failed worker log read", func() {
+		const name = "mig-disk-full-log-blip"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 3 // budget must stay unspent
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		r := newReconciler()
+		passGate(ctx, r, name) // run-1
+		finishJob(ctx, name+"-run-1", false)
+		logs := &fakeLogs{err: fmt.Errorf("net/http: TLS handshake timeout")}
+		r.Logs = logs
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}})
+		Expect(err).To(MatchError(ContainSubstring("TLS handshake timeout")))
+		m = getMigration(name)
+		Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed), "%v", m.Status.Conditions)
+		Expect(m.Status.JobName).To(Equal(name+"-run-1"), "the failed attempt must not be retried yet")
+
+		const full = "[SQLite 13: database or disk is full]: database or disk is full"
+		logs.err, logs.out = nil, `{"error_severity":"ERROR","message":"`+full+`"}`+"\n"
+		final := reconcileAndGet(ctx, r, name)
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("DiskFull"))
+		Expect(failed.Message).To(SatisfyAll(ContainSubstring("attempt 1"), ContainSubstring(full)))
+		Expect(final.Status.Attempts).To(Equal(int32(1)))
+	})
+
+	It("retries with the read error once worker logs stay unreadable", func() {
 		const name = "mig-error-nologs"
 		defer removeMigration(ctx, name)
 		m := validMigration(name)
 		m.Spec.BackoffLimit = 1 // CRD defaulting forbids 0 via omitempty
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 
+		const unreadable = `the pod log was not readable (pods "gone" not found)`
 		r := newReconciler()
 		r.Logs = &fakeLogs{err: fmt.Errorf("pods \"gone\" not found")}
+		rec := r.Recorder.(*events.FakeRecorder)
 		passGate(ctx, r, name) // run-1
 		finishJob(ctx, name+"-run-1", false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}})
+		Expect(err).To(MatchError(ContainSubstring(`pods "gone" not found`)), "inside the window the read is retried")
+
+		r.now = func() time.Time { return time.Now().Add(failedLogGrace + time.Second) }
 		reconcileAndGet(ctx, r, name) // retry scheduled
+		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
+			ContainSubstring("AttemptFailed"), ContainSubstring(unreadable))))
 		reconcileAndGet(ctx, r, name) // run-2
 		finishJob(ctx, name+"-run-2", false)
 		// Budget spent.
 		final := reconcileAndGet(ctx, r, name)
 		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
-		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
+		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
+		Expect(failed.Message).To(SatisfyAll(ContainSubstring(jobFailedMsg), ContainSubstring(unreadable)))
 		Expect(failed.Message).NotTo(ContainSubstring("last error"))
 	})
 
