@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -358,12 +360,31 @@ func (r *MigrationReconciler) ensurePreflight(ctx context.Context, m *v1beta1.Mi
 		return true, "", nil
 	}
 	msg := "preflight failed"
-	if tail := r.jobLogTail(ctx, m.Namespace, job.Name, preflightLogTail); tail != "" {
+	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, preflightLogTail)
+	switch {
+	case err != nil && r.Logs != nil && r.currentTime().Before(jobFailedAt(job).Add(preflightLogGrace)):
+		// The verdict is only in that log, so a blip in the API server must
+		// not end the Migration without it.
+		return false, "", fmt.Errorf("reading the log of preflight Job %s: %w", job.Name, err)
+	case err != nil:
+		msg += "; the check output was not readable (" + truncate(err.Error(), maxDetailLen) +
+			"), inspect the logs of Job " + job.Name
+	case tail == "":
+		msg += "; Job " + job.Name + " printed no check output"
+	default:
 		msg += ":\n" + tail
-	} else {
-		msg += "; the check output was not readable, inspect the logs of Job " + job.Name
 	}
 	return false, msg, nil
+}
+
+// jobFailedAt is when the Job's Failed condition was set, zero when unset.
+func jobFailedAt(job *batchv1.Job) time.Time {
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return time.Time{}
 }
 
 // ensureVerify creates and observes the drain-verification Job. Returns

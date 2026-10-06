@@ -78,7 +78,7 @@ func finishJob(ctx context.Context, name string, succeeded bool) {
 		j.Status.Conditions = append(j.Status.Conditions,
 			batchv1.JobCondition{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue,
 				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg},
-			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now,
 				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg})
 	}
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, j)).To(Succeed())
@@ -860,6 +860,88 @@ var _ = Describe("Migration Controller follow mode", func() {
 		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("PreflightFailed"))
 		Expect(failed.Message).To(ContainSubstring("inspect the logs of Job " + name + "-preflight"))
+	})
+
+	It("retries a failed preflight log read instead of failing without the verdict", func() {
+		const name = "mig-preflight-log-blip"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		logs := &fakeLogs{err: fmt.Errorf("net/http: TLS handshake timeout")}
+		r.Logs = logs
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}})
+		m := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, m)).To(Succeed())
+		Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed), "%v", m.Status.Conditions)
+		Expect(err).To(MatchError(ContainSubstring("TLS handshake timeout")))
+
+		logs.err, logs.out = nil, "preflight: target extension ownership required for DROP EXTENSION\n"
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("target extension ownership required for DROP EXTENSION"))
+	})
+
+	It("fails with the read error once the preflight log stays unreadable", func() {
+		const name = "mig-preflight-log-gone"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		r.Logs = &fakeLogs{err: fmt.Errorf("no pods found for Job %s-preflight", name)}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		r.now = func() time.Time { return time.Now().Add(preflightLogGrace + time.Second) }
+		m := reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("not readable (no pods found for Job " + name + "-preflight)"))
+	})
+
+	It("fails at once on an unreadable preflight log when the Job carries no failure time", func() {
+		const name = "mig-preflight-log-untimed"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		r.Logs = &fakeLogs{err: fmt.Errorf("net/http: TLS handshake timeout")}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		j := fetchJob(ctx, name+"-preflight")
+		for i := range j.Status.Conditions {
+			j.Status.Conditions[i].LastTransitionTime = metav1.Time{}
+		}
+		Expect(k8sClient.Status().Update(ctx, j)).To(Succeed())
+		m := reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("not readable (net/http: TLS handshake timeout)"))
+	})
+
+	It("says an empty preflight log printed nothing rather than calling it unreadable", func() {
+		const name = "mig-preflight-log-empty"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		r.Logs = &fakeLogs{out: ""}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		m := reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("Job " + name + "-preflight printed no check output"))
+		Expect(failed.Message).NotTo(ContainSubstring("not readable"))
 	})
 
 	It("surfaces why the preflight pod cannot start", func() {
