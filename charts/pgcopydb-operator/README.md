@@ -20,7 +20,7 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `image.pullPolicy` | `IfNotPresent` | Manager pull policy. |
 | `runner.image.repository` | `ghcr.io/ydixken/pgcopydb-operator/runner` | Worker Job image, passed as `--runner-image`. |
 | `runner.image.tag` | `""` | Runner tag; empty uses the chart appVersion. |
-| `runner.progressPollVersions` | `["0.18.36.g972e221", ...]` | The seven pgcopydb builds allowed to run the progress poll; `[]` disables it. |
+| `runner.progressPollVersions` | `["0.18.39.g93eda1d", ...]` | The eight pgcopydb builds allowed to run the progress poll; `[]` disables it. |
 | `imagePullSecrets` | `[]` | Pull secrets for the manager pod. |
 | `nameOverride` | `""` | Overrides the chart name in resource names. |
 | `fullnameOverride` | `""` | Overrides the full resource name. |
