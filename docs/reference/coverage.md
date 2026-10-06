@@ -97,7 +97,7 @@ The fingerprint is read after the cutover, because the target's sequences keep t
 
 The last column is the oldest source major the case runs on.
 A release candidate uses a PostgreSQL 17 source, so it skips the cases that need 18.
-CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster run with `E2E_PG_SOURCE=18` streams them.
+CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster run with `E2E_PG_SOURCE=18 E2E_PG_TARGET=18` streams them.
 
 | Case | Group | Verdict | Source |
 |---|---|---|---|
