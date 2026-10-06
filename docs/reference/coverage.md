@@ -81,8 +81,13 @@ Each case is one SQL file under [`test/e2e/coverage/`](https://github.com/ydixke
 
 The clone group creates each clone case in its own schema on the source and clones all of them in one Migration filtered to those schemas, with `spec.verification.schema` and `spec.verification.data` set.
 A case passes when `Verified` is `True` and a fingerprint read on both sides matches.
-The fingerprint covers row data per table and per partition leaf, relation and partition layout, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
+The fingerprint covers row data per table and per partition leaf, relation and partition layout, replica identity with its index, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
 Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` still copies every large object in the database, with its OID and owner.
+
+The follow group sets up each follow case the same way and starts one follow Migration over those schemas with a Manual cutover.
+Once the Migration waits at `CutoverPending` with its lag converged, the spec runs every case's `@follow` statements on the source, then writes a marker row and waits until the target has it.
+It approves the cutover and, after `Completed`, requires `Verified` `True` and a matching fingerprint, as the clone group does.
+The fingerprint is read after the cutover, because the target's sequences keep their base-copy values until pgcopydb re-syncs them at the cutover.
 
 > [!note]
 > When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
@@ -91,6 +96,8 @@ Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` s
 > Check and foreign key constraints, triggers, functions, views, policies, and statistics objects go unchecked on such a pair.
 
 The last column is the oldest source major the case runs on.
+A release candidate uses a PostgreSQL 17 source, so it skips the cases that need 18.
+CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster run with `E2E_PG_SOURCE=18 E2E_PG_TARGET=18` streams them.
 
 | Case | Group | Verdict | Source |
 |---|---|---|---|
@@ -110,7 +117,18 @@ The last column is the oldest source major the case runs on.
 | `objects/trigger` | clone | identical | 14 |
 | `objects/unlogged_sequence` | clone | identical | 15 |
 | `objects/unlogged_table` | clone | identical | 14 |
+| `operations/array_composite_updates` | follow | identical | 14 |
+| `operations/crud_keyed` | follow | identical | 14 |
+| `operations/generated_stored` | follow | identical | 14 |
+| `operations/generated_virtual` | follow | identical | 18 |
+| `operations/nextval` | follow | identical | 14 |
+| `operations/replica_identity_full` | follow | identical | 14 |
+| `operations/replica_identity_index` | follow | identical | 14 |
+| `operations/sequence_cutover` | follow | identical | 14 |
+| `operations/toast_unchanged` | follow | identical | 14 |
+| `operations/truncate` | follow | identical | 14 |
 | `partitioning/cross_schema_leaf` | clone | identical | 14 |
+| `partitioning/follow_routing` | follow | identical | 14 |
 | `partitioning/hash_mod4` | clone | identical | 14 |
 | `partitioning/list_default_null` | clone | identical | 14 |
 | `partitioning/range_expr` | clone | identical | 14 |

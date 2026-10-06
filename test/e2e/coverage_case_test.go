@@ -248,6 +248,15 @@ func (c coverageCase) schemaNames(identity string) []string {
 	return names
 }
 
+// placeholders maps the case's schemas for one run to their placeholders.
+func (c coverageCase) placeholders(identity string) map[string]string {
+	names := map[string]string{}
+	for i, schema := range c.schemaNames(identity) {
+		names[schema] = []string{coverageSchema, coverageSchema2}[i]
+	}
+	return names
+}
+
 // render replaces the placeholders in sql. The names are plain identifiers,
 // so they need no quoting and also work inside string literals.
 func (c coverageCase) render(sql string, schemas []string) string {
@@ -430,14 +439,14 @@ func TestEmbeddedCoverageCasesParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clone := 0
+	groups := map[string]int{}
 	for _, c := range cases {
-		if c.group == coverageGroupClone {
-			clone++
-		}
+		groups[c.group]++
 	}
-	if clone == 0 {
-		t.Fatal("no clone cases embedded")
+	for _, group := range []string{coverageGroupClone, coverageGroupFollow} {
+		if groups[group] == 0 {
+			t.Fatalf("no %s cases embedded", group)
+		}
 	}
 }
 

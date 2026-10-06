@@ -156,6 +156,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      # Coverage cases with min_pg=18 run nowhere else: release candidates
+      # use a version-17 source.
+      postgres18:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
       # The cache volume: see the header.
@@ -206,6 +219,10 @@ jobs:
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: go test ./test/e2e -skip '^TestE2E$' -count=1 -race -v
+      - name: Coverage cases on PostgreSQL 18
+        env:
+          PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5433/postgres
+        run: go test ./test/e2e -skip '^TestE2E$' -run 'Coverage|StampedSchemas' -count=1 -race -v
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"
       # Codecov requires a token even for a public repo: a tokenless upload is

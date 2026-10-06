@@ -885,7 +885,8 @@ func TestDependencyReviewPolicy(t *testing.T) {
 }
 
 // A -skip regex wider than the cluster entry point would drop tests unnoticed,
-// and a -run allowlist did exactly that for 22 of them.
+// and a -run allowlist did exactly that for 22 of them. A -run step is only
+// an extra run, against another server, beside the one that runs everything.
 func TestCIRunsEveryClusterFreeE2ETest(t *testing.T) {
 	test, ok := mustParse(t, ciWorkflow).Jobs["test"]
 	if !ok {
@@ -899,7 +900,6 @@ func TestCIRunsEveryClusterFreeE2ETest(t *testing.T) {
 		if !strings.Contains(step.Run, "go test ./test/e2e") {
 			continue
 		}
-		steps++
 		start := strings.Index(step.Run, namePrefix)
 		if start < 0 {
 			t.Errorf("e2e step must select tests with -skip, not -run: %q", step.Run)
@@ -910,16 +910,20 @@ func TestCIRunsEveryClusterFreeE2ETest(t *testing.T) {
 		if end < 0 {
 			t.Fatalf("e2e step run has no closing quote after the -skip regex: %q", step.Run)
 		}
-		skip = rest[:end]
 		flags := strings.Fields(rest[end+1:])
 		for _, flag := range []string{"-race", "-v"} {
 			if !slices.Contains(flags, flag) {
 				t.Errorf("e2e step must include %s: %q", flag, step.Run)
 			}
 		}
+		if slices.Contains(flags, "-run") {
+			continue
+		}
+		steps++
+		skip = rest[:end]
 	}
 	if steps != 1 {
-		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e` steps, want 1", steps)
+		t.Fatalf("ci.yml test job contains %d `go test ./test/e2e` steps without -run, want 1", steps)
 	}
 
 	if skip == "" {

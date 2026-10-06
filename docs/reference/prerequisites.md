@@ -333,6 +333,9 @@ Schema and workload contract:
   The preflight audits all user tables for this and fails on offenders.
   It ignores `clone.filters`, because a filtered table can still take writes.
   Tables that are read-only or insert-only during the window MAY be acknowledged in `spec.follow.allowMissingReplicaIdentity` (schema-qualified names exactly as the preflight prints them; `["*"]` acknowledges every offender), which downgrades them to a warning.
+  The bundled runner keeps `REPLICA IDENTITY USING INDEX` and `REPLICA IDENTITY FULL` on the target as the source has them.
+  Stock pgcopydb falls back to the default identity where the source uses `USING INDEX`.
+- `TRUNCATE` is replicated: the target is truncated at the same point in the change stream.
 - A table with `REPLICA IDENTITY FULL` and no key SHOULD NOT hold rows that are equal except where one of them is NULL when the plugin is `test_decoding`.
   The bundled runner changes one matching row per UPDATE or DELETE, but `test_decoding` leaves NULL columns out of the old row, so the change can land on the wrong row.
   `pgoutput` and `wal2json` send the NULLs and are not affected.

@@ -377,6 +377,46 @@ func TestCoverageFingerprintDetectsEveryAspect(t *testing.T) {
 	}
 }
 
+// replicaIdentityFixture uses a replica identity index that is not the key,
+// the shape pgcopydb used to reset to the default.
+const replicaIdentityFixture = `
+CREATE TABLE ${schema}.t (id integer PRIMARY KEY, code text NOT NULL);
+CREATE UNIQUE INDEX t_code_key ON ${schema}.t (code);
+ALTER TABLE ${schema}.t REPLICA IDENTITY USING INDEX t_code_key;
+`
+
+// TestCoverageFingerprintNamesReplicaIdentityIndex proves the relation aspect
+// alone sees a lost or moved replica identity index: a cross-major pair skips
+// the index aspect.
+func TestCoverageFingerprintNamesReplicaIdentityIndex(t *testing.T) {
+	run := testPSQL(t)
+	identity := strconv.FormatInt(time.Now().UnixNano(), 10)
+	fixture := func(schema string) map[fingerprintKey]string {
+		testCoverageSchemas(t, run, schema)
+		testQuery(t, run, "SET ROLE "+testCaseOwner+";\n"+strings.ReplaceAll(replicaIdentityFixture, coverageSchema, schema))
+		return testFingerprint(t, run, schema)
+	}
+	relation := fingerprintKey{"relation", coverageSchema + " t"}
+	base := fixture("cov_ri_base_" + identity)
+	if got := base[relation]; !strings.Contains(got, " identity=i:t_code_key ") {
+		t.Fatalf("relation t = %q, want the replica identity index named", got)
+	}
+	for name, mutation := range map[string]string{
+		"default":     "ALTER TABLE ${schema}.t REPLICA IDENTITY DEFAULT",
+		"other index": "ALTER TABLE ${schema}.t REPLICA IDENTITY USING INDEX t_pkey",
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := "cov_ri_" + strings.ReplaceAll(name, " ", "_") + "_" + identity
+			fixture(schema)
+			testQuery(t, run, strings.ReplaceAll(mutation, coverageSchema, schema))
+			diffs := diffFingerprint(base, testFingerprint(t, run, schema), deparsedAspects)
+			if len(diffs) != 1 || diffs[0].aspect != relation.aspect || diffs[0].key != relation.key {
+				t.Fatalf("diffs without the deparsed aspects = %v, want one on relation t", diffs)
+			}
+		})
+	}
+}
+
 func TestDiffFingerprintReportsAbsentSides(t *testing.T) {
 	source := map[fingerprintKey]string{{"a", "same"}: "1", {"b", "gone"}: "2"}
 	target := map[fingerprintKey]string{{"a", "same"}: "1", {"c", "new"}: "3"}
@@ -414,7 +454,7 @@ func TestCaseFingerprintNormalizesSchemaNames(t *testing.T) {
 
 // TestCoverageCasesApply runs every embedded case against a real server, so
 // a syntax error or a stray schema reference fails CI instead of a release
-// candidate, and the fingerprint is proven to read what each case creates.
+// candidate, and the fingerprint is proven to read what each section changes.
 func TestCoverageCasesApply(t *testing.T) {
 	run := testPSQL(t)
 	cases, err := loadCoverageCases(coverageFS, coverageOutcomes)
@@ -435,22 +475,32 @@ func TestCoverageCasesApply(t *testing.T) {
 			testCoverageSchemas(t, run, schemas...)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
+			read := func() []fingerprintRow {
+				rows, err := readFingerprint(ctx, run, schemas)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rows
+			}
 			prefix := "SET ROLE " + testCaseOwner + ";\n"
 			if err := applyCoverageCase(ctx, run, c, c.setup, prefix, schemas); err != nil {
 				t.Fatal(err)
 			}
-			if c.follow != "" {
-				if err := applyCoverageCase(ctx, run, c, c.follow, prefix, schemas); err != nil {
-					t.Fatal(err)
-				}
-			}
-			rows, err := readFingerprint(ctx, run, schemas)
-			if err != nil {
-				t.Fatal(err)
-			}
+			rows := read()
 			// Every schema has owner and acl rows; anything else is what the case made.
 			if !slices.ContainsFunc(rows, func(r fingerprintRow) bool { return r.Key != "schema" }) {
 				t.Fatalf("fingerprint saw nothing the case created: %v", rows)
+			}
+			if c.follow == "" {
+				return
+			}
+			if err := applyCoverageCase(ctx, run, c, c.follow, prefix, schemas); err != nil {
+				t.Fatal(err)
+			}
+			// A @follow the fingerprint cannot see would pass on a target that never applied it.
+			names := c.placeholders(identity)
+			if diffs := diffFingerprint(caseFingerprint(rows, names), caseFingerprint(read(), names), nil); len(diffs) == 0 {
+				t.Fatal("the fingerprint after @follow equals the one after @setup")
 			}
 		})
 	}
