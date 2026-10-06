@@ -264,16 +264,23 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		}
 	})
 
-	// pgcopydb's apply never reconnects: a dead target fails its next commit,
-	// and the retry resumes from the origin progress on the new primary. An
-	// apply with nothing left to commit never notices and stays on attempt 1.
+	// pgcopydb's apply never reconnects: a write over the dead connection fails
+	// the attempt, and the retry resumes from the origin progress on the new
+	// primary. Rows written after the kill reach the target only on that retry.
 	It("resumes the stream without duplicates after the target primary dies mid-apply", func() {
 		requireCNPGFixtures()
 		const name = "e2e-chaos-tgtkill"
+		// live-tgt- is written before the kill, live-tgt2- after it.
+		const liveCountSQL = "SELECT count(*) FILTER (WHERE note LIKE 'live-tgt-%'), " +
+			"count(*) FILTER (WHERE note LIKE 'live-tgt2-%') FROM orders"
+		insertLive := func(marker string) {
+			psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
+				" (g %% 90)::numeric / 3, '%s' || g FROM generate_series(1, 2000) g", scaled(50000), marker))
+		}
 		DeferCleanup(func() {
 			deleteMigration(name)
 			waitClusterReady(targetCluster)
-			psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-tgt-%'")
+			psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-tgt-%' OR note LIKE 'live-tgt2-%'")
 			Eventually(sourceSlotCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
 				"replication slot left on the source after cleanup")
 			Eventually(targetOriginCount, 3*time.Minute, 2*time.Second).Should(Equal("0"),
@@ -284,24 +291,24 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 
 		By("writing live rows and killing the target primary mid-apply")
-		psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) SELECT (g %% %d) + 1,"+
-			" (g %% 90)::numeric / 3, 'live-tgt-' || g FROM generate_series(1, 2000) g", scaled(50000)))
+		insertLive("live-tgt-")
 		deletePod(client.MatchingLabels{labelCNPGCluster: targetCluster, labelCNPGRole: rolePrimary})
 		waitClusterReady(targetCluster)
 
-		By("waiting for the stream to recover and every live row to reach the target")
+		By("writing rows after the kill and waiting for the recovered stream to deliver both batches")
+		insertLive("live-tgt2-")
 		var attempts int32
 		Eventually(func(g Gomega) {
 			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			attempts = m.Status.Attempts
-			g.Expect([]v1beta1.MigrationPhase{v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending}).
-				To(ContainElement(m.Status.Phase), "phase %q on attempt %d after the target kill",
-					m.Status.Phase, attempts)
-			rows, err := psqlDBErr(targetCluster, appDatabase(targetCluster),
-				"SELECT count(*) FROM orders WHERE note LIKE 'live-tgt-%'")
+			if m.Status.Phase == v1beta1.PhaseFailed {
+				StopTrying("migration failed after the target kill: " + failureMessage(m)).Now()
+			}
+			rows, err := psqlDBErr(targetCluster, appDatabase(targetCluster), liveCountSQL)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(rows).To(Equal("2000"), "live rows on the target on attempt %d", attempts)
+			g.Expect(rows).To(Equal("2000|2000"), "live rows (before|after the kill) on the target on attempt %d",
+				attempts)
 		}, migrationTimeout, 2*time.Second).Should(Succeed())
 		AddReportEntry("attempts after the target kill", attempts)
 
@@ -313,8 +320,9 @@ var _ = Describe("Migration chaos", Label("chaos"), func() {
 		expectCleanupSucceeded(name)
 
 		By("checking origin dedup: every live row arrived exactly once")
-		Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE 'live-tgt-%'")).To(Equal("2000"),
-			"more than 2000 means origin dedup replayed rows twice, fewer means loss (attempt %d)", m.Status.Attempts)
+		Expect(psql(targetCluster, liveCountSQL)).To(Equal("2000|2000"),
+			"more than 2000 in a batch means origin dedup replayed rows twice, fewer means loss (attempt %d)",
+			m.Status.Attempts)
 		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
 		Expect(sourceSlotCount()).To(Equal("0"))
 		Expect(targetOriginCount()).To(Equal("0"))
