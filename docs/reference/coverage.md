@@ -101,6 +101,9 @@ CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster 
 
 | Case | Group | Verdict | Source |
 |---|---|---|---|
+| `limitations/ddl_add_column` | own | apply_fails_on_ddl | 14 |
+| `limitations/large_object_change` | own | large_objects_not_replicated | 14 |
+| `limitations/unlogged_writes` | own | preflight_refuses_unlogged | 14 |
 | `objects/check_constraint` | clone | identical | 14 |
 | `objects/comments` | clone | identical | 14 |
 | `objects/cycle_sequence` | clone | identical | 14 |
@@ -112,6 +115,7 @@ CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster 
 | `objects/large_objects` | clone | identical | 14 |
 | `objects/no_primary_key` | clone | identical | 14 |
 | `objects/plain_view` | clone | identical | 14 |
+| `objects/rls_force` | own | preflight_refuses_rls | 14 |
 | `objects/security_barrier_view` | clone | identical | 14 |
 | `objects/statistics` | clone | identical | 14 |
 | `objects/trigger` | clone | identical | 14 |
