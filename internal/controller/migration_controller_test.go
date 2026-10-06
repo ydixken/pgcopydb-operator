@@ -484,6 +484,34 @@ var _ = Describe("Migration Controller", func() {
 		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("PermissionDenied")))
 	})
 
+	It("fails fast when the worker runs out of disk space", func() {
+		const name = "mig-disk-full"
+		defer removeMigration(ctx, name)
+		m := validMigration(name)
+		m.Spec.BackoffLimit = 3 // budget must stay unspent
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+
+		const full = "[SQLite 13: database or disk is full]: database or disk is full"
+		r := newReconciler()
+		r.Logs = &fakeLogs{out: `{"error_severity":"ERROR","message":"` + full + `"}` + "\n" +
+			`{"error_severity":"ERROR","message":"Failed to execute SQLite query, see above for details"}` + "\n" +
+			`{"error_severity":"ERROR","message":"follow process 10 has terminated [12]"}` + "\n"}
+		rec := r.Recorder.(*events.FakeRecorder)
+
+		passGate(ctx, r, name) // run-1
+		finishJob(ctx, name+"-run-1", false)
+		final := reconcileAndGet(ctx, r, name)
+
+		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("DiskFull"))
+		Expect(failed.Message).To(SatisfyAll(ContainSubstring("attempt 1"), ContainSubstring(full)))
+		Expect(final.Status.Attempts).To(Equal(int32(1)))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-2", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("DiskFull")))
+	})
+
 	It("keeps the Job's failure message when worker logs are unreadable", func() {
 		const name = "mig-error-nologs"
 		defer removeMigration(ctx, name)

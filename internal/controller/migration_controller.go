@@ -873,11 +873,16 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 	// A retry replays the same statements as the same role and refuses
 	// identically, so the budget would only delay the verdict. This catches
 	// what the preflight cannot probe: rights revoked mid-run, source SELECT.
-	if line := pgcopydb.PermissionDeniedLine([]byte(tail)); line != "" {
+	// A full work volume stays full, and the retry may bury it (see DiskFullLine).
+	terminal, what, line := "PermissionDenied", "a permission error", pgcopydb.PermissionDeniedLine([]byte(tail))
+	if line == "" {
+		terminal, what, line = "DiskFull", "a full work volume", pgcopydb.DiskFullLine([]byte(tail))
+	}
+	if line != "" {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
-		r.fail(m, "PermissionDenied", "Fail", fmt.Sprintf(
-			"attempt %d failed on a permission error retries cannot fix: %s",
-			m.Status.Attempts, truncate(line, maxDetailLen)))
+		r.fail(m, terminal, "Fail", fmt.Sprintf(
+			"attempt %d failed on %s retries cannot fix: %s",
+			m.Status.Attempts, what, truncate(line, maxDetailLen)))
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 

@@ -86,6 +86,9 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   It checks connectivity, credentials, and target clone privileges on every migration, and the follow prerequisites on live ones.
 - Permission errors end the Migration as `PermissionDenied`, on the attempt whose log tail shows one as the terminal cause.
   Permission matching is best-effort, so a missed match keeps normal retries.
+- A full work volume ends the Migration as `DiskFull` the same way.
+  A retry cannot free space on it, and its resume may fail on an unrelated error that hides the cause.
+  A target out of disk space or shared memory keeps normal retries, because space or load can change between attempts.
 
 When worker logs are readable, the `AttemptFailed` event names the pgcopydb error after each failed attempt.
 The terminal `Failed` condition keeps that error when the budget drains.

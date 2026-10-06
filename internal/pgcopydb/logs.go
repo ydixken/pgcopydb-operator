@@ -125,6 +125,34 @@ func recentLogLines(raw []byte) []string {
 // carry it. A miss only costs the caller its normal retry, so extend the class
 // only for errors known to be deterministic and terminal.
 func PermissionDeniedLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		return strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") ||
+			strings.Contains(msg, "must be owner of extension")
+	})
+}
+
+// DiskFullLine returns a log line showing pgcopydb filled its work volume, or "".
+// A retry cannot free that space and may die on an unrelated error. Server-side
+// ENOSPC (a full target, exhausted shared memory) can clear, so it keeps retrying.
+func DiskFullLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		if serverErrorLine(msg) || strings.Contains(msg, "shared memory segment") {
+			return false
+		}
+		return strings.Contains(msg, "No space left on device") || strings.Contains(msg, "database or disk is full")
+	})
+}
+
+// serverErrorLine: pgcopydb tags PostgreSQL errors "[SOURCE pid]" or "[TARGET pid]",
+// and libpq-relayed ones (pg_restore, the stream) keep the server's "ERROR:  ".
+func serverErrorLine(msg string) bool {
+	return strings.HasPrefix(msg, "[SOURCE ") || strings.HasPrefix(msg, "[TARGET ") ||
+		strings.Contains(msg, "ERROR:  ") || strings.Contains(msg, "FATAL:  ")
+}
+
+// recentSevereLine returns the first severe line in the terminal window that
+// match accepts, or "".
+func recentSevereLine(raw []byte, match func(string) bool) string {
 	for _, msg := range recentLogLines(raw) {
 		severe := strings.Contains(msg, "ERROR:") || strings.Contains(msg, "FATAL:")
 		if e, ok := parseLogLine(msg); ok {
@@ -137,8 +165,7 @@ func PermissionDeniedLine(raw []byte) string {
 		if !severe {
 			continue
 		}
-		if strings.Contains(msg, "permission denied") || strings.Contains(msg, "SQLSTATE 42501") ||
-			strings.Contains(msg, "must be owner of extension") {
+		if match(msg) {
 			return msg
 		}
 	}
