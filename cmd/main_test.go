@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	defaultPollVersions = "0.18.34.g7fddd6f,0.18.22.g22e29c3,0.18.15.gea2dc96,0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd" //nolint:lll // test/buildconfig matches the list whole
+	defaultPollVersions = "0.18.36.g972e221,0.18.34.g7fddd6f,0.18.22.g22e29c3,0.18.15.gea2dc96,0.18.13.g4873c18,0.18.10.gaadc4bf,0.18.5.ge37d2bd" //nolint:lll // test/buildconfig matches the list whole
 	testCertDir         = "/certs"
 	testCertName        = "m.crt"
 	testCertKey         = "m.key"
@@ -60,7 +60,7 @@ func TestSplitList(t *testing.T) {
 		{"", nil},
 		{" , ,", nil},
 		{defaultPollVersions, []string{
-			"0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96",
+			"0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96",
 			"0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd",
 		}},
 		{"a, b ,c", []string{"a", "b", "c"}},

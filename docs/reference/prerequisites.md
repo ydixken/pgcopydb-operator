@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/7fddd6fddadbb5fed1dd0143efc446eca3287753) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/972e22152c1bd64ddb73cc8eef0d98d1187b5f9f) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -44,10 +44,11 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports six pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.34.g7fddd6f`, adds three fixes listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
-It retains [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
-`0.18.22.g22e29c3` lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
+The progress poll supports seven pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.36.g972e221`, reports a retry that cannot read the previous run's catalog as that read failure, where older runners asked for `--not-consistent`.
+It retains three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+It also retains [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
+`0.18.34.g7fddd6f` lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.

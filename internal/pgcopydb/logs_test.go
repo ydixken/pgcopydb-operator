@@ -456,9 +456,15 @@ func TestDiskFullLine(t *testing.T) {
 		{
 			// What a --resume attempt on the full volume logs when SQLite
 			// cannot rebuild its shared-memory file: not a disk-full verdict.
-			name: "resume catalog read I/O error does not classify",
+			name: "resume catalog read I/O error before 0.18.36 does not classify",
 			raw: `{"error_severity":"ERROR","message":"[SQLite] disk I\/O error"}
 {"error_severity":"FATAL","message":"Option --resume requires option --not-consistent"}`,
+			want: "",
+		},
+		{
+			name: "resume catalog read I/O error on the bundled runner does not classify",
+			raw: `{"error_severity":"ERROR","message":"[SQLite] disk I\/O error"}
+{"error_severity":"FATAL","message":"Failed to check options against the previous run, see above for details"}`,
 			want: "",
 		},
 		{
