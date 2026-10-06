@@ -70,6 +70,8 @@ A black-holed endpoint fails rather than hangs.
 `PGCONNECT_TIMEOUT` sets that connect timeout on every operator control Job, never on the pgcopydb worker, whose data path must not race a connect cap.
 
 Preflight failure is terminal: these are configuration errors on the databases, so retrying the Migration cannot fix them.
+The failure message carries the end of the preflight log.
+When the operator cannot read that log, it retries for two minutes after the Job fails, so a short API server outage does not cost the verdict.
 Fix the endpoint.
 Then create a new Migration.
 The preflight does not check the workload contract: no DDL during the migration, no large-object changes, wal2json presence.

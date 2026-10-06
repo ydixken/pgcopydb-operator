@@ -14,6 +14,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`PreflightFailed` names unavailable selected extensions](#unavailable-selected-extensions) | Preflight failures |
 | [`Validated` is `Unknown` with reason `PreflightRunning`](#preflight-pod-cannot-start) | Preflight failures |
 | [`PreflightFailed` and the Job shows `DeadlineExceeded`](#preflight-deadline-exceeded) | Preflight failures |
+| [`PreflightFailed` with `the check output was not readable`](#preflight-output-not-readable) | Preflight failures |
 | [`applying ... via superuserSecretRef failed`](#superusersecretref-cannot-apply-the-grants) | Preflight failures |
 | [`PreflightFailed` with `still lacks ... after remediation`](#a-grant-is-still-missing-after-remediation) | Preflight failures |
 | [`no replica identity usable for UPDATE/DELETE`](#no-replica-identity-usable-for-updatedelete) | Preflight failures |
@@ -118,6 +119,16 @@ The condition carries the server's line for a permanent error, such as a wrong p
 Read the condition message and the preflight Job logs for the last check that ran.
 Fix the endpoint or the object it names.
 Then create a new Migration.
+
+### Preflight output not readable
+
+`PreflightFailed` with `the check output was not readable (...)` means the operator could not read the preflight pod's log.
+The text in parentheses is the read error, such as an API server timeout or a pod that no longer exists.
+The operator retries the read for two minutes after the Job fails, and the Migration stays in `Validating` until then.
+`Job <name>-preflight printed no check output` is different: the read worked and the log was empty, so check the pod's events.
+
+Read the verdict with `kubectl logs job/<name>-preflight`.
+Fix what it names, then create a new Migration.
 
 ### `superuserSecretRef` cannot apply the grants
 
