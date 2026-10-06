@@ -57,12 +57,15 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	sourceFrom := " FROM pg_replication_slots s JOIN pg_stat_replication r ON r.pid=s.active_pid " +
 		"WHERE s.slot_name='" + slot + "' AND s.database=current_database() " +
 		"AND s.slot_type='logical' AND s.active AND r.state='streaming'"
-	query := func(g Gomega, cluster, sql string) string {
-		out, err := psqlDBErr(cluster, appDatabase(cluster), sql)
+	queryWithin := func(g Gomega, timeout time.Duration, cluster, sql string) string {
+		out, err := psqlDBErrWithin(cluster, appDatabase(cluster), sql, timeout)
 		// The helper's raw error can contain pod names and remote stderr.
 		queried := err == nil
 		g.Expect(queried).To(BeTrue(), "keepalive SQL probe failed on %s", cluster)
 		return out
+	}
+	query := func(g Gomega, cluster, sql string) string {
+		return queryWithin(g, e2eCommandTimeout, cluster, sql)
 	}
 	lsn := func(raw string) uint64 {
 		position, err := sentinel.ParseLSN(raw)
@@ -133,7 +136,7 @@ func keepaliveFeedbackCutover(mode v1beta1.CutoverMode) {
 	generateFilteredWAL := func(batch int) string {
 		before := lsn(query(Default, sourceCluster, "SELECT pg_current_wal_lsn()::text"))
 		// EXTERNAL prevents compression from shrinking this below maxCatchupLag.
-		query(Default, sourceCluster, asSourceAppRole()+fmt.Sprintf("SET synchronous_commit=on; "+
+		queryWithin(Default, bulkWriteTimeout, sourceCluster, asSourceAppRole()+fmt.Sprintf("SET synchronous_commit=on; "+
 			"INSERT INTO %s SELECT g, repeat(md5(g::text), 64) FROM generate_series(%d, %d) g",
 			noiseTable, (batch-1)*noiseRows+1, batch*noiseRows))
 		boundary := query(Default, sourceCluster, "SELECT pg_current_wal_lsn()::text")

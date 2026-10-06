@@ -150,7 +150,7 @@ func earlyManualCutover() {
 		"the walsender must be paused before clone completion")
 
 	By("committing a bounded backlog while only this migration's sender is paused")
-	psql(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) "+
+	psqlBulk(sourceCluster, fmt.Sprintf("INSERT INTO orders (customer_id, amount, note) "+
 		"SELECT (g %% %d) + 1, 1, '%s' || g || repeat(md5(g::text), 32) "+
 		"FROM generate_series(1, %d) g", scaled(50000), marker, backlogRows))
 	var cutoverRetries int32

@@ -321,6 +321,9 @@ Verbose output makes actual test selection and the expected parent-only subproce
 The `TestLiveWriterHelper` subprocess entry point skips in the parent process; the lifecycle tests invoke it as a child.
 `TestPSQLExecHelper` is the psql-channel tests' child entry point and returns at once in the parent process.
 
+A spec that writes bulk data through psql calls `psqlBulk`, which gives the statement five minutes instead of the 30-second command timeout.
+Like `psql`, it never re-runs a statement that timed out, because the statement may have committed.
+
 The live-load spec emits a writer report only on failure, after stopping the writer.
 It records failure-time timestamps, submitted marker and byte counts, the child exit or signal, and final-query execution, parsing, and marker availability separately from the first returned error.
 Submitted bytes and markers are not committed-row counts; a valid zero marker differs from an unavailable query result.
