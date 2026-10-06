@@ -2794,8 +2794,8 @@ func (f *psqlFailure) Unwrap() error {
 }
 
 // psqlDBErr retries transient connection failures before a statement reaches
-// PostgreSQL. Each retry re-resolves the primary; connected failures stop
-// because the statement may have run and callers need not be idempotent.
+// PostgreSQL, and timeouts of a provable read. Each retry re-resolves the
+// primary; other failures stop because a write may have run.
 func psqlDBErr(cluster, db, sql string) (string, error) {
 	GinkgoHelper()
 	return psqlDBErrWithin(cluster, db, sql, e2eCommandTimeout)
@@ -2837,17 +2837,18 @@ func psqlDBErrWith(
 		}
 		lastErr = err
 		lastStderr = ""
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			lastStderr = string(ee.Stderr)
+		}
+		retry := transientExecError(lastStderr)
 		if errors.Is(err, context.DeadlineExceeded) {
 			lastErr = fmt.Errorf(
 				"psql %q for cluster %s on pod %s timed out after %s: %w",
 				sql, cluster, pod, timeout, err,
 			)
-			break
+			retry = readOnlySQL(sql)
 		}
-		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-			lastStderr = string(ee.Stderr)
-		}
-		if !transientExecError(lastStderr) {
+		if !retry {
 			break
 		}
 		if attempt < 3 {
@@ -2855,6 +2856,49 @@ func psqlDBErrWith(
 		}
 	}
 	return "", &psqlFailure{pod: pod, stderr: lastStderr, err: lastErr}
+}
+
+var (
+	sqlUnparsed = regexp.MustCompile(`\$|--|/\*|\be'`)
+	sqlQuoted   = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"`)
+	sqlNotRead  = regexp.MustCompile(`[;'"]|\b(?:into|for)\b`)
+	sqlCall     = regexp.MustCompile(`([a-z_][a-z0-9_]*)\s*\(`)
+	// readOnlyCalls lists the functions and keywords a "(" may follow in a
+	// retryable read. Anything else, including any unknown function, is a write.
+	readOnlyCalls = map[string]bool{
+		"and": true, "any": true, "bool_and": true, "char_length": true, "coalesce": true,
+		"count": true, "current_database": true, "current_setting": true, "exists": true,
+		"filter": true, "from": true, "in": true, "max": true, "min": true, "not": true,
+		"or": true, "pg_current_wal_lsn": true, "pg_database_size": true, "pg_get_userbyid": true,
+		"pg_wal_lsn_diff": true, "string_agg": true, "sum": true, "to_regclass": true, "where": true,
+	}
+)
+
+// readOnlySQL reports whether sql is provably a single read: a SHOW, or a
+// SELECT with no locking clause, no INTO and only allowlisted calls. Doubt
+// counts as a write, since a write that may have committed must not re-run.
+func readOnlySQL(sql string) bool {
+	s := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(sql)), ";")
+	if sqlUnparsed.MatchString(s) {
+		return false
+	}
+	s = sqlQuoted.ReplaceAllString(s, "q")
+	words := strings.Fields(s)
+	if len(words) == 0 || sqlNotRead.MatchString(s) {
+		return false
+	}
+	if words[0] == "show" {
+		return true
+	}
+	if words[0] != "select" {
+		return false
+	}
+	for _, call := range sqlCall.FindAllStringSubmatch(s, -1) {
+		if !readOnlyCalls[call[1]] {
+			return false
+		}
+	}
+	return true
 }
 
 const (
