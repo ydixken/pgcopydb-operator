@@ -463,6 +463,58 @@ func TestPSQLArgvKeepsCNPGCommands(t *testing.T) {
 	}
 }
 
+func TestBulkWriteLostSparesOnlyStatementErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []psqlExecResult
+		want    bool
+	}{
+		{name: "success", results: []psqlExecResult{{stdout: "UPDATE 1000"}}},
+		{name: "hung exec", results: []psqlExecResult{{block: true}}, want: true},
+		{
+			name: "three TLS timeouts",
+			results: []psqlExecResult{
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+				{stderr: safeExecErrorCases[0].stderr, exitCode: 1},
+			},
+			want: true,
+		},
+		{
+			name:    "stream EOF",
+			results: []psqlExecResult{{stderr: "error: error sending request: EOF\n", exitCode: 1}},
+			want:    true,
+		},
+		{
+			name:    "statement error",
+			results: []psqlExecResult{{stderr: "ERROR:  relation \"documents\" does not exist\n", exitCode: 1}},
+		},
+		{
+			name: "statement error after a notice",
+			results: []psqlExecResult{{
+				stderr: "NOTICE:  a notice\nERROR:  permission denied for table documents\n", exitCode: 1,
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command, _ := newPSQLExecCommand(t, tt.results...)
+			_, err := psqlDBErrWith(
+				"source-cluster",
+				psqlExecTestDatabase,
+				"UPDATE documents SET body = body",
+				func(string) string { return psqlExecTestPod },
+				func(time.Duration) {},
+				command,
+				psqlExecTestTimeout,
+			)
+			if got := bulkWriteLost(err); got != tt.want {
+				t.Fatalf("bulkWriteLost(%v) = %v, want %v", err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReadOnlySQL(t *testing.T) {
 	reads := []string{
 		"SELECT count(*) FROM pg_replication_slots WHERE slot_name LIKE 'pgcopydb%'",

@@ -2739,6 +2739,30 @@ func psqlBulk(cluster, sql string) {
 	psqlDBWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
 }
 
+// psqlBulkTolerant is psqlBulk for a loop that keeps writing until the
+// operator reacts, so a lost batch only needs to be recorded. A statement
+// error PostgreSQL reports still fails the spec.
+func psqlBulkTolerant(cluster, sql string, batch int) {
+	GinkgoHelper()
+	_, err := psqlDBErrWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
+	if bulkWriteLost(err) {
+		AddReportEntry("lost bulk write", fmt.Sprintf("batch %d: %v", batch, err))
+		return
+	}
+	expectPsqlOK(sql, err)
+}
+
+// psqlStatementError matches the line psql -c prints when the server rejects
+// the statement; a kubectl-side failure never carries it.
+var psqlStatementError = regexp.MustCompile(`(?m)^ERROR: `)
+
+// bulkWriteLost reports whether err left the write's outcome to the kubectl
+// transport (a hung exec or a dropped stream) rather than to PostgreSQL.
+func bulkWriteLost(err error) bool {
+	f, ok := errors.AsType[*psqlFailure](err)
+	return ok && !psqlStatementError.MatchString(f.stderr)
+}
+
 // psqlDB runs one statement as the in-pod postgres user on the current primary,
 // or in external mode as the admin role from the client pod, and returns
 // trimmed stdout. It wraps psqlDBErr with Ginkgo assertions for spec goroutines.
@@ -2751,13 +2775,19 @@ func psqlDB(cluster, db, sql string) string {
 func psqlDBWithin(cluster, db, sql string, timeout time.Duration) string {
 	GinkgoHelper()
 	out, err := psqlDBErrWithin(cluster, db, sql, timeout)
+	expectPsqlOK(sql, err)
+	return out
+}
+
+// expectPsqlOK fails the spec on a psqlDBErr error, naming the pod and stderr.
+func expectPsqlOK(sql string, err error) {
+	GinkgoHelper()
 	if f, ok := errors.AsType[*psqlFailure](err); ok {
 		Expect(f.err).NotTo(HaveOccurred(), "psql %q on %s failed: %s", sql, f.pod, f.stderr)
 	}
 	// psqlDBErr today only ever returns nil or *psqlFailure, but any other
 	// non-nil error must still fail here rather than read back as "".
 	Expect(err).NotTo(HaveOccurred(), "psql %q failed: %s", sql, err)
-	return out
 }
 
 type commandFactory func(context.Context, string, ...string) *exec.Cmd
