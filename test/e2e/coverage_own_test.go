@@ -94,8 +94,11 @@ func expectApplyFailsOnDDL(r coverageOwnRun) {
 	GinkgoHelper()
 	runCoverageFollow(r.m, []coverageCase{r.c}, r.identity)
 	failed := waitFailed(r.m.Name, reasonBackoffLimitExceeded)
-	lastAttempt := fmt.Sprintf("%s-run-%d", r.m.Name, failed.Status.Attempts)
-	Expect(checkMissingColumnFailure(failed, jobLogs(lastAttempt, attemptLogTail))).To(Succeed())
+	logs := make([]string, failed.Status.Attempts)
+	for i := range logs {
+		logs[i] = jobLogs(fmt.Sprintf("%s-run-%d", r.m.Name, i+1), attemptLogTail)
+	}
+	Expect(checkMissingColumnFailure(failed, logs)).To(Succeed())
 }
 
 // expectLargeObjectsNotReplicated cuts over after @follow changed large

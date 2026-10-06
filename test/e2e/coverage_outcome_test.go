@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"cmp"
+	"crypto/md5"
 	"fmt"
 	"os"
 	"strings"
@@ -61,36 +62,45 @@ func checkPreflightRefusal(m *v1beta1.Migration, refusal, tables string) error {
 }
 
 // checkMissingColumnFailure reports why m did not spend its whole retry
-// budget on an apply that hits a column the target lacks (SQLSTATE 42703).
-func checkMissingColumnFailure(m *v1beta1.Migration, workerLog string) error {
+// budget on an apply that hits a column the target lacks (SQLSTATE 42703),
+// given each attempt's worker log in order.
+func checkMissingColumnFailure(m *v1beta1.Migration, attemptLogs []string) error {
 	failed := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 	switch {
 	case failed == nil || failed.Reason != reasonBackoffLimitExceeded:
 		return fmt.Errorf("want Failed reason %s, got %+v", reasonBackoffLimitExceeded, failed)
 	case m.Status.Attempts != m.Spec.BackoffLimit+1:
 		return fmt.Errorf("want %d attempts, got %d", m.Spec.BackoffLimit+1, m.Status.Attempts)
-	case !strings.Contains(workerLog, "[42703]") || !strings.Contains(workerLog, "does not exist"):
-		return fmt.Errorf("the last attempt's log shows no missing column (42703):\n%s", workerLog)
+	case len(attemptLogs) != int(m.Status.Attempts):
+		return fmt.Errorf("want a log per attempt, got %d for %d attempts", len(attemptLogs), m.Status.Attempts)
+	}
+	for i, log := range attemptLogs {
+		if !strings.Contains(log, "[42703]") || !strings.Contains(log, "does not exist") {
+			return fmt.Errorf("attempt %d's log shows no missing column (42703):\n%s", i+1, log)
+		}
 	}
 	return nil
 }
 
 // checkLargeObjectsNotReplicated reports why diffs are not exactly the
-// large-object changes made during follow, each missing from the target.
+// large-object changes limitations/large_object_change.sql makes during follow,
+// with each object's base-copy content on the target.
 func checkLargeObjectsNotReplicated(diffs []fingerprintDiff) error {
-	// Per object: whether the source, then the target, lacks it.
-	want := map[string][2]bool{
-		coverageSchema + " blob1": {false, false}, // patched on the source only
-		coverageSchema + " blob2": {true, false},  // unlinked on the source only
-		coverageSchema + " live":  {false, true},  // created during follow
+	contentHash := func(content string) string { return fmt.Sprintf("%x", md5.Sum([]byte(content))) }
+	// Per object: the content hash on the source, then on the target.
+	want := map[string][2]string{
+		coverageSchema + " blob1": {contentHash("PATCHED" + strings.Repeat("x", 93)), contentHash(strings.Repeat("x", 100))},
+		coverageSchema + " blob2": {fingerprintMissingObject, contentHash(strings.Repeat("x", 200))},
+		coverageSchema + " live":  {contentHash("created during follow"), fingerprintMissingObject},
 	}
 	if len(diffs) != len(want) {
 		return fmt.Errorf("want %d large object differences, got %d: %v", len(want), len(diffs), diffs)
 	}
 	for _, d := range diffs {
-		missing, ok := want[d.key]
-		if d.aspect != largeObjectAspect || !ok ||
-			(d.source == fingerprintMissingObject) != missing[0] || (d.target == fingerprintMissingObject) != missing[1] {
+		hashes, ok := want[d.key]
+		source, _, _ := strings.Cut(d.source, " ")
+		target, _, _ := strings.Cut(d.target, " ")
+		if d.aspect != largeObjectAspect || !ok || source != hashes[0] || target != hashes[1] {
 			return fmt.Errorf("unexpected difference %s", d)
 		}
 	}
@@ -143,30 +153,42 @@ func TestCoveragePreflightRefusal(t *testing.T) {
 }
 
 func TestCoverageMissingColumnFailure(t *testing.T) {
-	// The probe's worker log line, as PGCOPYDB_LOG_JSON=on writes it.
-	const failedApply = `{"error_severity":"ERROR",` +
-		`"message":"[TARGET 67] [42703] ERROR:  column \"extra\" of relation \"t\" does not exist"}`
+	// A worker log line, as PGCOPYDB_LOG_JSON=on writes it.
+	logLine := func(msg string) string { return `{"error_severity":"ERROR","message":"[TARGET 67] ` + msg + `"}` }
+	failedApply := logLine(`[42703] ERROR:  column \"extra\" of relation \"t\" does not exist`)
 	const exhausted = "attempt 2 failed: Job has reached the specified backoff limit;" +
 		" last error: follow process 4 has terminated [12]"
+	both := []string{failedApply, failedApply}
+	const secondNotMissingColumn = "attempt 2's log shows no missing column (42703)"
 	for _, tc := range []struct {
 		name    string
 		m       *v1beta1.Migration
-		log     string
+		logs    []string
 		wantErr string
 	}{
-		{name: "exhausted", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2), log: failedApply},
+		{name: "exhausted", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2), logs: both},
 		{name: "refused at preflight", m: failedOwnMigration(reasonPreflightFailed, "preflight failed", 0),
-			log: failedApply, wantErr: "want Failed reason BackoffLimitExceeded"},
-		{name: "budget left", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 1), log: failedApply,
+			logs: both, wantErr: "want Failed reason BackoffLimitExceeded"},
+		{name: "budget left", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 1), logs: both[:1],
 			wantErr: "want 2 attempts, got 1"},
 		{name: "other error", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			log:     `{"error_severity":"ERROR","message":"[TARGET 67] [57014] ERROR:  canceling statement"}`,
-			wantErr: "no missing column (42703)"},
+			logs:    []string{failedApply, logLine(`[57014] ERROR:  canceling statement`)},
+			wantErr: secondNotMissingColumn},
+		{name: "other relation missing", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
+			logs:    []string{failedApply, logLine(`[42P01] ERROR:  relation \"t\" does not exist`)},
+			wantErr: secondNotMissingColumn},
+		{name: "42703 not a missing column", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
+			logs:    []string{failedApply, logLine(`[42703] ERROR:  column \"extra\" is unknown`)},
+			wantErr: secondNotMissingColumn},
+		{name: "first attempt failed otherwise", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
+			logs: []string{"", failedApply}, wantErr: "attempt 1's log shows no missing column (42703)"},
+		{name: "first attempt's log missing", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
+			logs: both[1:], wantErr: "want a log per attempt"},
 		{name: "no log", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			wantErr: "no missing column (42703)"},
+			wantErr: "want a log per attempt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkMissingColumnFailure(tc.m, tc.log)
+			err := checkMissingColumnFailure(tc.m, tc.logs)
 			if tc.wantErr == "" && err != nil {
 				t.Fatal(err)
 			}
@@ -181,10 +203,15 @@ func TestCoverageLargeObjectsNotReplicated(t *testing.T) {
 	lo := func(key, source, target string) fingerprintDiff {
 		return fingerprintDiff{aspect: largeObjectAspect, key: coverageSchema + " " + key, source: source, target: target}
 	}
+	// fingerprint.sql's value: the content's md5, then owner and grants.
+	value := func(content string) string { return fmt.Sprintf("%x owner=app acl=", md5.Sum([]byte(content))) }
+	setup1, setup2 := value(strings.Repeat("x", 100)), value(strings.Repeat("x", 200))
+	patched, live := value("PATCHED"+strings.Repeat("x", 93)), value("created during follow")
+	const missing = fingerprintMissingObject
 	pinned := []fingerprintDiff{
-		lo("blob1", "9b19 owner=app acl=", "aed5 owner=app acl="),
-		lo("blob2", fingerprintMissingObject, "bc4b owner=app acl="),
-		lo("live", "0c3a owner=app acl=", fingerprintMissingObject),
+		lo("blob1", patched, setup1),
+		lo("blob2", missing, setup2),
+		lo("live", live, missing),
 	}
 	if err := checkLargeObjectsNotReplicated(pinned); err != nil {
 		t.Fatal(err)
@@ -193,9 +220,15 @@ func TestCoverageLargeObjectsNotReplicated(t *testing.T) {
 		"replicated":        nil,
 		"patch replicated":  pinned[1:],
 		"unlink replicated": {pinned[0], pinned[2]},
-		"row lost":          {pinned[0], pinned[1], lo("live", "0c3a owner=app acl=", fingerprintAbsent)},
-		"created on target": {pinned[0], pinned[1], lo("live", "0c3a owner=app acl=", "0c3a owner=app acl=x")},
-		"untouched changed": {pinned[0], pinned[1], pinned[2], lo("blob3", "f1d3 owner=app acl=", "0000 owner=app acl=")},
+		"row lost":          {pinned[0], pinned[1], lo("live", live, fingerprintAbsent)},
+		"created on target": {pinned[0], pinned[1], lo("live", live, live+"x")},
+		"untouched changed": {pinned[0], pinned[1], pinned[2], lo("blob3", value("y"), value("z"))},
+		"target content":    {lo("blob1", patched, setup2), pinned[1], pinned[2]},
+		"patch not applied": {lo("blob1", setup2, setup1), pinned[1], pinned[2]},
+		"not unlinked":      {pinned[0], lo("blob2", setup1, setup2), pinned[2]},
+		"another aspect":    {pinned[0], pinned[1], {aspect: "rows", key: pinned[2].key, source: live, target: missing}},
+		// fingerprint.sql writes a NULL value as '', which a key's zero hashes would match.
+		"another object": {pinned[0], pinned[1], lo("blob3", "", "")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := checkLargeObjectsNotReplicated(diffs); err == nil {
