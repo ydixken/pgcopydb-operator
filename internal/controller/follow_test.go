@@ -904,6 +904,46 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(failed.Message).To(ContainSubstring("not readable (no pods found for Job " + name + "-preflight)"))
 	})
 
+	It("fails at once on an unreadable preflight log when the Job carries no failure time", func() {
+		const name = "mig-preflight-log-untimed"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		r.Logs = &fakeLogs{err: fmt.Errorf("net/http: TLS handshake timeout")}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		j := fetchJob(ctx, name+"-preflight")
+		for i := range j.Status.Conditions {
+			j.Status.Conditions[i].LastTransitionTime = metav1.Time{}
+		}
+		Expect(k8sClient.Status().Update(ctx, j)).To(Succeed())
+		m := reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("not readable (net/http: TLS handshake timeout)"))
+	})
+
+	It("says an empty preflight log printed nothing rather than calling it unreadable", func() {
+		const name = "mig-preflight-log-empty"
+		defer removeMigration(ctx, name)
+		r := followReconciler(&fakeSentinel{})
+		r.Logs = &fakeLogs{out: ""}
+		Expect(k8sClient.Create(ctx, followMigration(name, v1beta1.CutoverManual))).To(Succeed())
+
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", false)
+		m := reconcileAndGet(ctx, r, name)
+
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Message).To(ContainSubstring("Job " + name + "-preflight printed no check output"))
+		Expect(failed.Message).NotTo(ContainSubstring("not readable"))
+	})
+
 	It("surfaces why the preflight pod cannot start", func() {
 		const name = "mig-preflight-stuck"
 		defer removeMigration(ctx, name)

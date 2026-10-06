@@ -19,11 +19,13 @@ package controller
 import (
 	"strings"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -111,6 +113,37 @@ func TestFailureReason(t *testing.T) {
 	for _, tc := range cases {
 		if got := failureReason(tc.job); got != tc.want {
 			t.Errorf("%s: failureReason = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The preflight log retry is measured from the Failed condition alone: a
+// FailureTarget or the Job's creation would start the window at the wrong time.
+func TestJobFailedAt(t *testing.T) {
+	created := time.Date(2026, 10, 6, 2, 0, 0, 0, time.UTC)
+	failedAt := created.Add(time.Hour)
+	cases := []struct {
+		name string
+		cond []batchv1.JobCondition
+		want time.Time
+	}{
+		{"failed", []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(created.Add(time.Minute))},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(failedAt)},
+		}, failedAt},
+		{"failure target only", []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(failedAt)},
+		}, time.Time{}},
+		{"failed false", []batchv1.JobCondition{
+			{Type: batchv1.JobFailed, Status: corev1.ConditionFalse, LastTransitionTime: metav1.NewTime(failedAt)},
+		}, time.Time{}},
+		{"no conditions", nil, time.Time{}},
+	}
+	for _, tc := range cases {
+		job := jobWithConditions(tc.cond...)
+		job.CreationTimestamp = metav1.NewTime(created)
+		if got := jobFailedAt(job); !got.Equal(tc.want) {
+			t.Errorf("%s: jobFailedAt = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
