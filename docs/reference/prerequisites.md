@@ -342,7 +342,7 @@ Schema and workload contract:
   `pgoutput` and `wal2json` send the NULLs and are not affected.
   On a Citus-distributed target, that one-row form fails the apply with an error.
 - DDL is not replicated and MUST NOT run during the migration window; pre-create upcoming partitions before starting.
-  A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR: column ... does not exist`, every retry stops at the same change, and the Migration fails with `BackoffLimitExceeded`.
+  A change that uses a column the target lacks stops the apply: the worker log shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`), every retry stops at the same change, and the Migration fails with `BackoffLimitExceeded`.
   The [`limitations/ddl_add_column`](coverage.md#postgresql-feature-coverage) coverage case pins this.
 - Unlogged tables MUST NOT be in scope.
   They write no WAL, so logical decoding never sees their changes.

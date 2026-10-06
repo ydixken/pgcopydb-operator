@@ -400,6 +400,7 @@ The parser rejects a file that breaks these rules, so a typo cannot drop a case 
 - The header sets `group`, `expect`, `schemas` (1 or 2) and `min_pg` (14 or later), and nothing else.
 - `group=clone` and `group=follow` cases expect `identical`; a `group=own` case names an outcome registered in Go.
 - `-- @follow` holds what a follow case runs while replication streams; a clone case has none.
+  An own case needs one too, even when its outcome stops the Migration before it runs, because the cluster-free test still applies it.
 - `${schema2}` exists only with `schemas=2`, and such a case must use it; any other `${...}` is an error.
 - The file name is the case name: lowercase letters, digits and underscores, at most 37 bytes, unique across areas.
 
