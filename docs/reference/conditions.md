@@ -115,6 +115,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. An unreadable worker log is read again for two minutes after the Job fails; past that the attempt retries unclassified, with the read error in its message. |
 | `Failed` | `True` | `DiskFull` | An attempt filled the work volume; classified like `PermissionDenied`, and the message carries the matched log line. A full target retries. |
+| `Failed` | `True` | `SchemaDrift` | The apply hit a change naming a column the target lacks (SQLSTATE 42703), usually because DDL ran on the source; classified like `PermissionDenied`. The message carries the matched log line and the remedy. Other schema errors retry. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. |
 | `Failed` | `True` | `OwnershipFailed` | The ownership handover failed; the data is on the target. |

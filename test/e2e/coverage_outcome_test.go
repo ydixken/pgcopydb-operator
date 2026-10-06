@@ -41,6 +41,7 @@ const (
 const (
 	reasonPreflightFailed      = "PreflightFailed"
 	reasonBackoffLimitExceeded = "BackoffLimitExceeded"
+	reasonSchemaDrift          = "SchemaDrift"
 	largeObjectAspect          = "largeobject"
 	// fingerprintMissingObject is fingerprint.sql's value for a listed large object the server lacks.
 	fingerprintMissingObject = "missing"
@@ -61,23 +62,19 @@ func checkPreflightRefusal(m *v1beta1.Migration, refusal, tables string) error {
 	return nil
 }
 
-// checkMissingColumnFailure reports why m did not spend its whole retry
-// budget on an apply that hits a column the target lacks (SQLSTATE 42703),
-// given each attempt's worker log in order.
-func checkMissingColumnFailure(m *v1beta1.Migration, attemptLogs []string) error {
+// checkMissingColumnFailure reports why m did not fail as SchemaDrift on its
+// first attempt, on the column the target lacks (42703) that attemptLog shows.
+func checkMissingColumnFailure(m *v1beta1.Migration, attemptLog string) error {
 	failed := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 	switch {
-	case failed == nil || failed.Reason != reasonBackoffLimitExceeded:
-		return fmt.Errorf("want Failed reason %s, got %+v", reasonBackoffLimitExceeded, failed)
-	case m.Status.Attempts != m.Spec.BackoffLimit+1:
-		return fmt.Errorf("want %d attempts, got %d", m.Spec.BackoffLimit+1, m.Status.Attempts)
-	case len(attemptLogs) != int(m.Status.Attempts):
-		return fmt.Errorf("want a log per attempt, got %d for %d attempts", len(attemptLogs), m.Status.Attempts)
-	}
-	for i, log := range attemptLogs {
-		if !strings.Contains(log, "[42703]") || !strings.Contains(log, "does not exist") {
-			return fmt.Errorf("attempt %d's log shows no missing column (42703):\n%s", i+1, log)
-		}
+	case failed == nil || failed.Reason != reasonSchemaDrift:
+		return fmt.Errorf("want Failed reason %s, got %+v", reasonSchemaDrift, failed)
+	case m.Status.Attempts != 1:
+		return fmt.Errorf("want the first attempt to fail for good, got %d attempts", m.Status.Attempts)
+	case !strings.Contains(failed.Message, "[42703]"):
+		return fmt.Errorf("message does not quote the missing column (42703):\n%s", failed.Message)
+	case !strings.Contains(attemptLog, "[42703]") || !strings.Contains(attemptLog, "does not exist"):
+		return fmt.Errorf("attempt 1's log shows no missing column (42703):\n%s", attemptLog)
 	}
 	return nil
 }
@@ -156,39 +153,35 @@ func TestCoverageMissingColumnFailure(t *testing.T) {
 	// A worker log line, as PGCOPYDB_LOG_JSON=on writes it.
 	logLine := func(msg string) string { return `{"error_severity":"ERROR","message":"[TARGET 67] ` + msg + `"}` }
 	failedApply := logLine(`[42703] ERROR:  column \"extra\" of relation \"t\" does not exist`)
+	const drift = "attempt 1 failed on a missing target column retries cannot fix:" +
+		` [TARGET 67] [42703] ERROR:  column "extra" of relation "t" does not exist; DDL is not replicated`
 	const exhausted = "attempt 2 failed: Job has reached the specified backoff limit;" +
 		" last error: follow process 4 has terminated [12]"
-	both := []string{failedApply, failedApply}
-	const secondNotMissingColumn = "attempt 2's log shows no missing column (42703)"
+	const notMissingColumn = "attempt 1's log shows no missing column (42703)"
 	for _, tc := range []struct {
 		name    string
 		m       *v1beta1.Migration
-		logs    []string
+		log     string
 		wantErr string
 	}{
-		{name: "exhausted", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2), logs: both},
-		{name: "refused at preflight", m: failedOwnMigration(reasonPreflightFailed, "preflight failed", 0),
-			logs: both, wantErr: "want Failed reason BackoffLimitExceeded"},
-		{name: "budget left", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 1), logs: both[:1],
-			wantErr: "want 2 attempts, got 1"},
-		{name: "other error", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			logs:    []string{failedApply, logLine(`[57014] ERROR:  canceling statement`)},
-			wantErr: secondNotMissingColumn},
-		{name: "other relation missing", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			logs:    []string{failedApply, logLine(`[42P01] ERROR:  relation \"t\" does not exist`)},
-			wantErr: secondNotMissingColumn},
-		{name: "42703 not a missing column", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			logs:    []string{failedApply, logLine(`[42703] ERROR:  column \"extra\" is unknown`)},
-			wantErr: secondNotMissingColumn},
-		{name: "first attempt failed otherwise", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			logs: []string{"", failedApply}, wantErr: "attempt 1's log shows no missing column (42703)"},
-		{name: "first attempt's log missing", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			logs: both[1:], wantErr: "want a log per attempt"},
-		{name: "no log", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2),
-			wantErr: "want a log per attempt"},
+		{name: "schema drift", m: failedOwnMigration(reasonSchemaDrift, drift, 1), log: failedApply},
+		{name: "budget spent", m: failedOwnMigration(reasonBackoffLimitExceeded, exhausted, 2), log: failedApply,
+			wantErr: "want Failed reason SchemaDrift"},
+		{name: "not failed", m: &v1beta1.Migration{}, log: failedApply, wantErr: "want Failed reason SchemaDrift"},
+		{name: "after a retry", m: failedOwnMigration(reasonSchemaDrift, drift, 2), log: failedApply,
+			wantErr: "got 2 attempts"},
+		{name: "message without the line", m: failedOwnMigration(reasonSchemaDrift, "attempt 1 failed", 1),
+			log: failedApply, wantErr: "message does not quote the missing column"},
+		{name: "other error", m: failedOwnMigration(reasonSchemaDrift, drift, 1),
+			log: logLine(`[57014] ERROR:  canceling statement`), wantErr: notMissingColumn},
+		{name: "other relation missing", m: failedOwnMigration(reasonSchemaDrift, drift, 1),
+			log: logLine(`[42P01] ERROR:  relation \"t\" does not exist`), wantErr: notMissingColumn},
+		{name: "42703 not a missing column", m: failedOwnMigration(reasonSchemaDrift, drift, 1),
+			log: logLine(`[42703] ERROR:  column \"extra\" is unknown`), wantErr: notMissingColumn},
+		{name: "no log", m: failedOwnMigration(reasonSchemaDrift, drift, 1), wantErr: notMissingColumn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkMissingColumnFailure(tc.m, tc.logs)
+			err := checkMissingColumnFailure(tc.m, tc.log)
 			if tc.wantErr == "" && err != nil {
 				t.Fatal(err)
 			}

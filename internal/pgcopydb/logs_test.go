@@ -506,3 +506,79 @@ func TestDiskFullLine(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaDriftLine(t *testing.T) {
+	const drift = `[TARGET 60] [42703] ERROR:  column \"extra\" of relation \"t\" does not exist`
+	severe := func(msg string) string { return `{"error_severity":"ERROR","message":"` + msg + `"}` + "\n" }
+	pipeline := func(conn string) string { return severe(conn + " Context: Failed to receive pipeline sync") }
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// Abridged from an own-case probe of limitations/ddl_add_column, in
+			// the PGCOPYDB_LOG_JSON=on form the worker writes.
+			name: "apply replays a change naming a column the target lacks",
+			raw: `{"timestamp":"2026-10-05 19:58:38.506","pid":6,"error_level":5,"error_severity":"INFO","file_name":"ld_apply.c","file_line_num":212,"message":"Applying CDC changes from replayDB \"\/work\/pgcopydb\/cdc\/00000001-00000000-01BF8B20-replay.db\" after LSN 0\/1BF8B20"}
+{"timestamp":"2026-10-05 19:58:46.323","pid":6,"error_level":7,"error_severity":"ERROR","file_name":"pgsql.c","file_line_num":3313,"message":"` + drift + `"}
+{"timestamp":"2026-10-05 19:58:46.323","pid":6,"error_level":7,"error_severity":"ERROR","file_name":"pgsql.c","file_line_num":3321,"message":"[TARGET 60] LINE 1: ...T INTO \"cov_ddl_add_column_o7\".\"t\" (\"id\", \"name\", \"extra\") o..."}
+{"timestamp":"2026-10-05 19:58:46.323","pid":6,"error_level":7,"error_severity":"ERROR","file_name":"pgsql.c","file_line_num":3328,"message":"[TARGET 60] Context: Failed to receive pipeline sync"}
+{"timestamp":"2026-10-05 19:58:46.325","pid":6,"error_level":5,"error_severity":"INFO","file_name":"sentinel.c","file_line_num":856,"message":"pipeline_state_end: apply error at 0\/1BF8B20"}
+{"timestamp":"2026-10-05 19:58:46.371","pid":4,"error_level":7,"error_severity":"ERROR","file_name":"follow.c","file_line_num":1057,"message":"Process apply has exited with error code 12, terminating other processes"}
+{"timestamp":"2026-10-05 19:58:46.540","pid":1,"error_level":7,"error_severity":"ERROR","file_name":"cli_clone_follow.c","file_line_num":1202,"message":"follow process 4 has terminated [12]"}`,
+			want: `[TARGET 60] [42703] ERROR:  column "extra" of relation "t" does not exist`,
+		},
+		// Only apply sends through a pipeline; every other 42703 keeps its retries.
+		{
+			name: "a source connection",
+			raw:  severe(`[SOURCE 77] [42703] ERROR:  column \"extra\" does not exist`) + pipeline("[SOURCE 77]"),
+			want: "",
+		},
+		{
+			name: "a clone COPY into the target",
+			raw: severe(`[TARGET 61] [42703] ERROR:  column \"extra\" of relation \"t\" does not exist`) +
+				severe("[TARGET 61] Context: Failed to copy data to target"),
+			want: "",
+		},
+		{
+			name: "a catalog query on the target logs no SQLSTATE",
+			raw:  severe(`[TARGET 61] ERROR:  column c.relispartition does not exist`) + pipeline("[TARGET 61]"),
+			want: "",
+		},
+		{
+			name: "another SQLSTATE on the apply connection",
+			raw:  severe(`[TARGET 60] [42P01] ERROR:  relation \"t\" does not exist`) + pipeline("[TARGET 60]"),
+			want: "",
+		},
+		{
+			name: "the pipeline context belongs to another connection",
+			raw:  severe(drift) + pipeline("[TARGET 61]"),
+			want: "",
+		},
+		{
+			name: "no pipeline context follows",
+			raw:  severe(drift) + severe("follow process 4 has terminated [12]"),
+			want: "",
+		},
+		{
+			name: "mild lines do not classify",
+			raw: `{"error_severity":"INFO","message":"` + drift + `"}` + "\n" +
+				`{"error_severity":"INFO","message":"[TARGET 60] Context: Failed to receive pipeline sync"}`,
+			want: "",
+		},
+		{
+			name: "a line outside the terminal window does not classify",
+			raw: severe(drift) + pipeline("[TARGET 60]") +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow),
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SchemaDriftLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("SchemaDriftLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
