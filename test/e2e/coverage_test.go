@@ -142,10 +142,7 @@ func coverageDiffs(cases []coverageCase, identity string) string {
 	}
 	var report strings.Builder
 	for _, c := range cases {
-		names := map[string]string{}
-		for i, schema := range c.schemaNames(identity) {
-			names[schema] = []string{coverageSchema, coverageSchema2}[i]
-		}
+		names := c.placeholders(identity)
 		for _, d := range diffFingerprint(caseFingerprint(source, names), caseFingerprint(target, names), skip) {
 			fmt.Fprintf(&report, "%s: %s\n", c.path, d)
 		}

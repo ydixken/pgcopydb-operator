@@ -454,7 +454,7 @@ func TestCaseFingerprintNormalizesSchemaNames(t *testing.T) {
 
 // TestCoverageCasesApply runs every embedded case against a real server, so
 // a syntax error or a stray schema reference fails CI instead of a release
-// candidate, and the fingerprint is proven to read what each case creates.
+// candidate, and the fingerprint is proven to read what each section changes.
 func TestCoverageCasesApply(t *testing.T) {
 	run := testPSQL(t)
 	cases, err := loadCoverageCases(coverageFS, coverageOutcomes)
@@ -475,22 +475,32 @@ func TestCoverageCasesApply(t *testing.T) {
 			testCoverageSchemas(t, run, schemas...)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
+			read := func() []fingerprintRow {
+				rows, err := readFingerprint(ctx, run, schemas)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rows
+			}
 			prefix := "SET ROLE " + testCaseOwner + ";\n"
 			if err := applyCoverageCase(ctx, run, c, c.setup, prefix, schemas); err != nil {
 				t.Fatal(err)
 			}
-			if c.follow != "" {
-				if err := applyCoverageCase(ctx, run, c, c.follow, prefix, schemas); err != nil {
-					t.Fatal(err)
-				}
-			}
-			rows, err := readFingerprint(ctx, run, schemas)
-			if err != nil {
-				t.Fatal(err)
-			}
+			rows := read()
 			// Every schema has owner and acl rows; anything else is what the case made.
 			if !slices.ContainsFunc(rows, func(r fingerprintRow) bool { return r.Key != "schema" }) {
 				t.Fatalf("fingerprint saw nothing the case created: %v", rows)
+			}
+			if c.follow == "" {
+				return
+			}
+			if err := applyCoverageCase(ctx, run, c, c.follow, prefix, schemas); err != nil {
+				t.Fatal(err)
+			}
+			// A @follow the fingerprint cannot see would pass on a target that never applied it.
+			names := c.placeholders(identity)
+			if diffs := diffFingerprint(caseFingerprint(rows, names), caseFingerprint(read(), names), nil); len(diffs) == 0 {
+				t.Fatal("the fingerprint after @follow equals the one after @setup")
 			}
 		})
 	}

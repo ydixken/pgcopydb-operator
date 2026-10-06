@@ -364,7 +364,7 @@ A case that comes out identical needs one file and no Go change.
    ```
 
 3. Run the cluster-free coverage tests.
-   They apply every case as a role without superuser rights, fail a case that creates or alters anything outside its own schemas, and read its fingerprint:
+   They apply every case as a role without superuser rights, fail a case that creates or alters anything outside its own schemas, read its fingerprint, and fail a `@follow` that leaves the fingerprint unchanged:
 
    ```sh
    PGCOPYDB_TEST_PGURI=postgres://postgres:postgres@127.0.0.1:5432/postgres go test ./test/e2e -run Coverage -count=1
