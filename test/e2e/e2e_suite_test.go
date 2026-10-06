@@ -2740,27 +2740,28 @@ func psqlBulk(cluster, sql string) {
 }
 
 // psqlBulkTolerant is psqlBulk for a loop that keeps writing until the
-// operator reacts, so a lost batch only needs to be recorded. A statement
-// error PostgreSQL reports still fails the spec.
-func psqlBulkTolerant(cluster, sql string, batch int) {
+// operator reacts, so a lost batch is only recorded under its marker, the
+// prefix its rows carry. An error PostgreSQL reports still fails the spec.
+func psqlBulkTolerant(cluster, sql, marker string) {
 	GinkgoHelper()
 	_, err := psqlDBErrWithin(cluster, appDatabase(cluster), sql, bulkWriteTimeout)
 	if bulkWriteLost(err) {
-		AddReportEntry("lost bulk write", fmt.Sprintf("batch %d: %v", batch, err))
+		AddReportEntry("lost bulk write", fmt.Sprintf("%s: %v", marker, err))
 		return
 	}
 	expectPsqlOK(sql, err)
 }
 
-// psqlStatementError matches the line psql -c prints when the server rejects
-// the statement; a kubectl-side failure never carries it.
-var psqlStatementError = regexp.MustCompile(`(?m)^ERROR: `)
+// psqlServerError matches the lines psql prints when PostgreSQL rejected the
+// statement or the connection, or its backend went away; kubectl never does.
+var psqlServerError = regexp.MustCompile(`(?m)^(?:(?:ERROR|FATAL|PANIC): |psql: error: |` +
+	`server closed the connection unexpectedly|connection to server was lost)`)
 
 // bulkWriteLost reports whether err left the write's outcome to the kubectl
 // transport (a hung exec or a dropped stream) rather than to PostgreSQL.
 func bulkWriteLost(err error) bool {
 	f, ok := errors.AsType[*psqlFailure](err)
-	return ok && !psqlStatementError.MatchString(f.stderr)
+	return ok && !psqlServerError.MatchString(f.stderr)
 }
 
 // psqlDB runs one statement as the in-pod postgres user on the current primary,
@@ -2889,7 +2890,9 @@ func psqlDBErrWith(
 }
 
 var (
-	sqlUnparsed = regexp.MustCompile(`\$|--|/\*|\be'`)
+	// PostgreSQL treats \v as whitespace and Go's \s does not, so anything
+	// outside printable ASCII is left unparsed.
+	sqlUnparsed = regexp.MustCompile(`\$|--|/\*|\b[eE]'|[^\x20-\x7e\t\n\r]`)
 	sqlQuoted   = regexp.MustCompile(`'(?:[^']|'')*'|"(?:[^"]|"")*"`)
 	sqlNotRead  = regexp.MustCompile(`[;'"]|\b(?:into|for)\b`)
 	sqlCall     = regexp.MustCompile(`([a-z_][a-z0-9_]*)\s*\(`)
@@ -2908,10 +2911,11 @@ var (
 // SELECT with no locking clause, no INTO and only allowlisted calls. Doubt
 // counts as a write, since a write that may have committed must not re-run.
 func readOnlySQL(sql string) bool {
-	s := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(sql)), ";")
-	if sqlUnparsed.MatchString(s) {
+	// Checked before ToLower and TrimSpace, which fold or drop non-ASCII.
+	if sqlUnparsed.MatchString(sql) {
 		return false
 	}
+	s := strings.TrimSuffix(strings.TrimSpace(strings.ToLower(sql)), ";")
 	s = sqlQuoted.ReplaceAllString(s, "q")
 	words := strings.Fields(s)
 	if len(words) == 0 || sqlNotRead.MatchString(s) {

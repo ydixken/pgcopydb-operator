@@ -495,6 +495,39 @@ func TestBulkWriteLostSparesOnlyStatementErrors(t *testing.T) {
 				stderr: "NOTICE:  a notice\nERROR:  permission denied for table documents\n", exitCode: 1,
 			}},
 		},
+		{
+			name: "backend terminated",
+			results: []psqlExecResult{{
+				stderr: "FATAL:  terminating connection due to administrator command\n" +
+					"server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n" +
+					"command terminated with exit code 2\n",
+				exitCode: 1,
+			}},
+		},
+		{
+			name:    "server panic",
+			results: []psqlExecResult{{stderr: "PANIC:  could not write to file\n", exitCode: 1}},
+		},
+		{
+			name: "server crashed",
+			results: []psqlExecResult{{
+				stderr: "server closed the connection unexpectedly\n" +
+					"\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n",
+				exitCode: 1,
+			}},
+		},
+		{
+			name:    "connection lost",
+			results: []psqlExecResult{{stderr: "connection to server was lost\n", exitCode: 1}},
+		},
+		{
+			name: "connection refused by the server",
+			results: []psqlExecResult{{
+				stderr: "psql: error: connection to server on socket \"/run/postgresql/.s.PGSQL.5432\" failed: " +
+					"FATAL:  database \"app\" does not exist\n",
+				exitCode: 1,
+			}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -542,9 +575,16 @@ func TestReadOnlySQL(t *testing.T) {
 		"SELECT count(*) FROM pg_logical_slot_get_changes('s', NULL, NULL)",
 		`SELECT "nextval"('orders_id_seq')`,
 		"SELECT E'\\'' || nextval('s')",
+		"SELECT e'x'",
+		"SELECT E'x'",
 		"SELECT $$x$$",
 		"SELECT 1 -- comment",
 		"SELECT 'unterminated",
+		"SELECT nextval\v('orders_id_seq')",
+		"SELECT nextval\f('orders_id_seq')",
+		"SELECT ne\u0301xtval('orders_id_seq')",
+		"SELECT count(*) FROM pg_replication_slots\u00a0",
+		"SELECT \u212aEY FROM t",
 		"",
 	}
 	for _, sql := range reads {
