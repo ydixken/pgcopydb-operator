@@ -192,7 +192,7 @@ Where [Performance](../operations/performance.md) bounds how fast one apply conn
 
 ### One durable COMMIT per transaction caps a single connection near 800 per second
 
-Measured with the pgbench runs of the WAL catch-up study, against a PostgreSQL 18 target on single-replica network block storage whose fdatasync takes about 1 ms.
+Measured on 2026-10-08 with pgbench while investigating follow catch-up for issues #356 to #359, against a PostgreSQL 18 target on single-replica network block storage whose fdatasync takes about 1 ms.
 One pgbench client over a local socket stood in for the single apply connection, committing one single-row INSERT per transaction.
 With `synchronous_commit=on`, two runs reached 824 and 787 tps at 1.21 and 1.27 ms latency.
 With `synchronous_commit=off`, they reached 13656 and 13605 tps at 0.073 ms.
