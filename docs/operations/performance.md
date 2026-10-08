@@ -26,8 +26,8 @@ Before values cover the row-only receive window; after values include the SQLite
 
 Apply confirms each target COMMIT before publishing data progress and uses `synchronous_commit=on` for each source transaction.
 Each transaction takes two round trips to the target: a pipeline sync before the COMMIT, then the COMMIT sent in one query with its origin update ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
-On our test target, the one apply connection measured about 1.2 ms per source transaction with `synchronous_commit=on`.
-A backlog of single-row transactions therefore drains at no more than roughly 800 transactions per second, whatever the target's capacity.
+One apply connection therefore commits at most about 1 / (target commit latency) source transactions per second.
+On the [measured target](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#one-durable-commit-per-transaction-caps-a-single-connection-near-800-per-second), that was roughly 800 per second.
 Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
 A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
 
