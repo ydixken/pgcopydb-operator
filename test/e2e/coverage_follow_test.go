@@ -23,8 +23,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
@@ -43,15 +41,21 @@ var _ = Describe("Feature coverage", SpecPriority(3), func() {
 		create(m)
 		runCoverageFollow(m, cases, identity)
 		completed := cutOverCoverageFollow(m, identity, captured)
-
-		diffs := coverageDiffs(cases, identity)
-		if diffs != "" {
-			AddReportEntry("coverage fingerprint differences", diffs, ReportEntryVisibilityFailureOrVerbose)
-		}
-		expectVerification(completed, true)
-		Expect(diffs).To(BeEmpty(), "the target differs from the source")
+		expectCoverageIdentical(cases, identity, completed)
 	})
 })
+
+// expectCoverageIdentical requires passed verification on completed and the
+// same fingerprint on both sides for every case, reporting each difference.
+func expectCoverageIdentical(cases []coverageCase, identity string, completed *v1beta1.Migration) {
+	GinkgoHelper()
+	diffs := coverageDiffs(cases, identity)
+	if diffs != "" {
+		AddReportEntry("coverage fingerprint differences", diffs, ReportEntryVisibilityFailureOrVerbose)
+	}
+	expectVerification(completed, true)
+	Expect(diffs).To(BeEmpty(), "the target differs from the source")
+}
 
 // coverageMarkerSchema holds the row that proves the stream reached the
 // target. No case schema can take this name: they start with cov_ or cov2_.
@@ -102,16 +106,7 @@ func cutOverCoverageFollow(
 	GinkgoHelper()
 	table := sqlIdent(coverageMarkerSchema(identity)) + ".marker"
 	psql(sourceCluster, asSourceAppRole()+"INSERT INTO "+table+" VALUES (1)")
-	Eventually(func(g Gomega) {
-		current := &v1beta1.Migration{}
-		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), current)).To(Succeed())
-		if current.Status.Phase == v1beta1.PhaseFailed {
-			StopTrying("migration failed before the marker arrived: " + failureMessage(current)).Now()
-		}
-		rows, err := psqlDBErr(targetCluster, appDatabase(targetCluster), "SELECT count(*) FROM "+table)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(rows).To(Equal("1"), "the marker has not reached the target")
-	}, lagConvergeTimeout, time.Second).Should(Succeed())
+	waitOnTarget(m, "SELECT count(*) FROM "+table, "1")
 	approveCutover(m.Name)
 	completed := waitCompletedCapturing(m, captured)
 	expectConditionTrue(completed, v1beta1.ConditionCutoverComplete)
