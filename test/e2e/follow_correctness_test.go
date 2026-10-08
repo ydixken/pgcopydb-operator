@@ -167,6 +167,8 @@ func failedCommitRetried() {
 		"CREATE CONSTRAINT TRIGGER reject_once AFTER INSERT ON "+schema+".t DEFERRABLE INITIALLY DEFERRED"+
 		" FOR EACH ROW EXECUTE FUNCTION "+schema+".reject_once(); "+
 		"ALTER TABLE "+schema+".t ENABLE ALWAYS TRIGGER reject_once")
+	before := &v1beta1.Migration{}
+	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), before)).To(Succeed())
 	psql(sourceCluster, asSourceAppRole()+"INSERT INTO "+schema+".t VALUES (2, 'refused once')")
 	Eventually(func(g Gomega) {
 		current := &v1beta1.Migration{}
@@ -176,7 +178,8 @@ func failedCommitRetried() {
 		}
 		g.Expect(psql(targetCluster, "SELECT is_called FROM "+schema+".reject_once")).To(Equal("t"),
 			"the target has not refused a COMMIT yet")
-		g.Expect(current.Status.Attempts).To(BeNumerically(">=", 2), "the attempt whose COMMIT failed has not ended")
+		g.Expect(current.Status.Attempts).To(BeNumerically(">=", before.Status.Attempts+1),
+			"the attempt whose COMMIT failed has not ended")
 	}, migrationTimeout, time.Second).Should(Succeed())
 
 	By("dropping the target-only objects and cutting over")
