@@ -131,6 +131,7 @@ CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster 
 | `objects/unlogged_sequence` | clone | identical | 15 |
 | `objects/unlogged_table` | clone | identical | 14 |
 | `operations/array_composite_updates` | follow | identical | 14 |
+| `operations/copy_multi_insert` | follow | identical | 14 |
 | `operations/crud_keyed` | follow | identical | 14 |
 | `operations/generated_stored` | follow | identical | 14 |
 | `operations/generated_virtual` | follow | identical | 18 |
@@ -140,6 +141,7 @@ CI applies their SQL against PostgreSQL 18 on every pull request, and a cluster 
 | `operations/sequence_cutover` | follow | identical | 14 |
 | `operations/toast_unchanged` | follow | identical | 14 |
 | `operations/truncate` | follow | identical | 14 |
+| `operations/truncate_multi` | follow | identical | 14 |
 | `partitioning/cross_schema_leaf` | clone | identical | 14 |
 | `partitioning/follow_routing` | follow | identical | 14 |
 | `partitioning/hash_mod4` | clone | identical | 14 |

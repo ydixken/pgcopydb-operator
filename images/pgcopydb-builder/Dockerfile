@@ -9,16 +9,16 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#18 matches the NULL columns test_decoding leaves out of a
-# keyless FULL old row, and applies all-NULL keyless changes. Keeps #17's
-# resume error, #15's row_security off, #16's USING INDEX identity, #14's
-# keyless FULL apply, #12's partitions, #11's slot bootstrap, #9's feedback.
+# ydixken/pgcopydb#19 applies in commit order, #20 replays multi-table
+# TRUNCATE, #21 keeps every multi-insert row, #23 keeps the origin on a failed
+# COMMIT. Keeps #18's keyless NULL match, #17's resume error, #15, #16, #14,
+# #12's partitions, #11's slot bootstrap and #9's feedback.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-39-g93eda1d, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-70-gbb8dbfc, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=93eda1dd9b3864e46e6b5913a65e1e7e8a400783
-ARG PGCOPYDB_VERSION=0.18.39.g93eda1d
+ARG PGCOPYDB_SHA=bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b
+ARG PGCOPYDB_VERSION=0.18.70.gbb8dbfc
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.

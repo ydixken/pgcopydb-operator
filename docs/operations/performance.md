@@ -7,7 +7,7 @@ In follow mode, source decoding, receive-spool writes, inline transformation, an
 
 ## Follow receive and apply
 
-The bundled pgcopydb `0.18.39.g93eda1d` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
+The bundled pgcopydb `0.18.70.gbb8dbfc` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
 It applies each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement, so a burst of them on such a table applies more slowly than on a keyed table; that cost is unmeasured.
 [Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch and these measurements, for one source transaction containing 20,000 four-column rows.
 These measurements predate the [certified keepalive feedback](../design/follow-diagnostics.md) in `0.18.13.g4873c18` and the bootstrap recovery in `0.18.15.gea2dc96`; they measure neither version.
@@ -25,7 +25,9 @@ Before values cover the row-only receive window; after values include the SQLite
 > These individual bursts do not establish sustained throughput or measure target WAL durability waits.
 
 Apply confirms each target COMMIT before publishing data progress and uses `synchronous_commit=on` for each source transaction.
-That durability wait may raise latency for workloads with many small transactions; its cost is unmeasured.
+Each transaction takes two round trips to the target: a pipeline sync before the COMMIT, then the COMMIT sent in one query with its origin update ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
+One apply connection therefore commits at most about 1 / (target commit latency) source transactions per second.
+On the [measured target](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#one-durable-commit-per-transaction-caps-a-single-connection-near-800-per-second), that was roughly 800 per second.
 Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
 A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
 

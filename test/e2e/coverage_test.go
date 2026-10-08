@@ -75,13 +75,7 @@ var _ = Describe("Feature coverage", SpecPriority(1), func() {
 		reportVerificationOnFailure(m, captured)
 		create(m)
 		completed := waitCompletedCapturing(m, captured)
-
-		diffs := coverageDiffs(cases, identity)
-		if diffs != "" {
-			AddReportEntry("coverage fingerprint differences", diffs, ReportEntryVisibilityFailureOrVerbose)
-		}
-		expectVerification(completed, true)
-		Expect(diffs).To(BeEmpty(), "the target differs from the source")
+		expectCoverageIdentical(cases, identity, completed)
 	})
 })
 
