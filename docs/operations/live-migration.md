@@ -111,11 +111,13 @@ The drain verification after cutover proves that the target replication origin r
 When the origin sits exactly on endpos, that proof rests on the runner's origin bookkeeping alone.
 
 > [!warning]
-> Runners older than `0.18.70.gbb8dbfc` can lose committed source changes without an error, and the drain verification passes anyway.
+> Runners older than `0.18.70.gbb8dbfc` can lose committed source changes during follow without an error.
 > They skip a transaction that began before another one committed ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)), keep one row per heap page of a source `COPY` ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)), and truncate only the first table of a multi-table `TRUNCATE` under `pgoutput` ([#358](https://github.com/ydixken/pgcopydb-operator/issues/358)).
 > After an apply crash or a failed `COMMIT` on a PostgreSQL 16 or newer target, the next run can skip the transaction that did not commit ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
-> In each case the origin reaches endpos, so the drain passes on the exact-LSN path without a content compare.
-> With such a runner, set [`spec.verification.data`](verification.md) so the content is compared after cutover.
+> In each case the origin moves past the lost change.
+> At cutover the drain verification then passes without a content compare only when the origin lands exactly on endpos.
+> Otherwise the compare refuses the cutover as [`DrainIncomplete`](../troubleshooting.md#phase-failed-with-reason-drainincomplete).
+> With such a runner, set [`spec.verification.data`](verification.md) so the content is compared after cutover even when the origin lands on endpos.
 
 `lagBytes` is the distance from the source's current WAL head.
 The `CaughtUp` condition goes True once two consecutive samples put the lag at or below `follow.maxCatchupLag`, 16Mi by default.

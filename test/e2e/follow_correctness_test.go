@@ -31,8 +31,8 @@ import (
 )
 
 // Each spec here orders source and target sessions in a way plain SQL cannot,
-// then holds the target to the source's fingerprint after cutover. The origin
-// still reaches endpos in every failure they pin, so the drain gate alone passes.
+// then holds the target to the source's fingerprint after cutover, because the
+// drain gate skips its content compare when the origin lands exactly on endpos.
 var _ = Describe("Follow correctness", SpecPriority(1), func() {
 	BeforeEach(func() {
 		// The coverage helpers need cov_reader, and the walsender signal needs a CNPG pod.
