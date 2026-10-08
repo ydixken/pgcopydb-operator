@@ -7,10 +7,10 @@ It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles pos
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`93eda1dd9b3864e46e6b5913a65e1e7e8a400783`](https://github.com/ydixken/pgcopydb/commit/93eda1dd9b3864e46e6b5913a65e1e7e8a400783).
-The version string is `0.18.39.g93eda1d`, derived from `git describe` (`v0.18-39-g93eda1d`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is thirty-nine commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:879e29e1e6474f0dcbf3f477fd8b74b9d5ef3f4f86a9f0f49223dbeaa1ef95f6`, published by [builder run `37477131403`](https://github.com/ydixken/pgcopydb-operator/actions/runs/37477131403).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b`](https://github.com/ydixken/pgcopydb/commit/bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b).
+The version string is `0.18.70.gbb8dbfc`, derived from `git describe` (`v0.18-70-gbb8dbfc`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is seventy commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:513a6915a7cedc08b6a5fc6d6c6aabc376f6a393c826d410331c1ca6654c8547`, published by [builder run `37854730708`](https://github.com/ydixken/pgcopydb-operator/actions/runs/37854730708).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -81,14 +81,15 @@ Four fork PRs on top of `93eda1d` fix follow cases where the target lost committ
    A target backend terminated between the two statements of that query can still leave the origin advanced.
 
 [Fork PR #22](https://github.com/ydixken/pgcopydb/pull/22) changes a fork test only: it waits for the follow snapshot instead of sleeping one second.
+The merge of #23, `bb8dbfc`, passed [Run Tests `37852957788`](https://github.com/ydixken/pgcopydb/actions/runs/37852957788) and [Nightly Tests `37852960601`](https://github.com/ydixken/pgcopydb/actions/runs/37852960601).
 
 > [!warning]
 > Each source transaction waits for target WAL durability before apply progress advances.
 > This raises latency for workloads with many small transactions; [Performance tuning](../../docs/operations/performance.md#follow-receive-and-apply) has the measured cost.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all seven older versions so upgrading the operator does not suppress counters for existing workers.
+The manager and chart allow `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all eight older versions so upgrading the operator does not suppress counters for existing workers.
 Version `0.18.39.g93eda1d` has the #18 fixes but not the four fixes from #19, #20, #21 and #23.
 Version `0.18.36.g972e221` has the `--resume` error fix but not the #18 fixes.
 Version `0.18.34.g7fddd6f` has the three fixes above but not the `--resume` error fix.

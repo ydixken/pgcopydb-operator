@@ -100,9 +100,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `NEXT_PGCOPYDB_VERSION`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.70.gbb8dbfc`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/93eda1dd9b3864e46e6b5913a65e1e7e8a400783/src/bin/pgcopydb/ld_stream.c#L1521-L1546) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b/src/bin/pgcopydb/ld_stream.c#L1528-L1553) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
@@ -111,7 +111,7 @@ The drain verification after cutover proves that the target replication origin r
 When the origin sits exactly on endpos, that proof rests on the runner's origin bookkeeping alone.
 
 > [!warning]
-> Runners older than `NEXT_PGCOPYDB_VERSION` can lose committed source changes without an error, and the drain verification passes anyway.
+> Runners older than `0.18.70.gbb8dbfc` can lose committed source changes without an error, and the drain verification passes anyway.
 > They skip a transaction that began before another one committed ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)), keep one row per heap page of a source `COPY` ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)), and truncate only the first table of a multi-table `TRUNCATE` under `pgoutput` ([#358](https://github.com/ydixken/pgcopydb-operator/issues/358)).
 > After an apply crash or a failed `COMMIT` on a PostgreSQL 16 or newer target, the next run can skip the transaction that did not commit ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
 > In each case the origin reaches endpos, so the drain passes on the exact-LSN path without a content compare.

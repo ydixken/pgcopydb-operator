@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/93eda1dd9b3864e46e6b5913a65e1e7e8a400783) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -45,7 +45,7 @@ See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-d
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
 The progress poll supports nine pgcopydb versions, with different guarantees.
-The bundled runner, `NEXT_PGCOPYDB_VERSION`, adds four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and keeps the target replication origin in place when a `COMMIT` does not happen.
+The bundled runner, `0.18.70.gbb8dbfc`, adds four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and keeps the target replication origin in place when a `COMMIT` does not happen.
 See the [live migration hazard](../operations/live-migration.md#watching-the-stream) for what older runners lose, and the [live migration workload contract](#live-migration-specfollowenabled-true).
 `0.18.39.g93eda1d` added the NULL column fixes: it matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL.
 `0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
@@ -345,9 +345,9 @@ Schema and workload contract:
   It does not replay `CASCADE`, but the change already lists the tables a cascade reached on the source.
   A target table that references a truncated table, and was not truncated on the source, fails the replay.
   With `wal2json`, a multi-table `TRUNCATE` SHOULD NOT run during the window: pgcopydb truncates only its last table and never restarts identity.
-  Runners older than `NEXT_PGCOPYDB_VERSION` truncate only the first table under `pgoutput`, so with them, run one `TRUNCATE` per table.
+  Runners older than `0.18.70.gbb8dbfc` truncate only the first table under `pgoutput`, so with them, run one `TRUNCATE` per table.
 - `COPY FROM` and other multi-insert writes are replicated in full by the bundled runner.
-  A runner older than `NEXT_PGCOPYDB_VERSION` SHOULD NOT be used when the source runs `COPY FROM` during the window: it keeps one row per heap page of each such write, under every plugin.
+  A runner older than `0.18.70.gbb8dbfc` SHOULD NOT be used when the source runs `COPY FROM` during the window: it keeps one row per heap page of each such write, under every plugin.
 - On a table with `REPLICA IDENTITY FULL` and no key, the bundled runner changes one matching row per UPDATE or DELETE and matches each NULL column of the old row with `IS NULL`, under every plugin.
   That covers the NULL columns `test_decoding` leaves out of the old row, and an old row whose columns are all NULL.
   A runner older than `0.18.39.g93eda1d` SHOULD NOT be used with `test_decoding` on such a table if it holds rows that are equal except where one of them is NULL: it matches only the columns `test_decoding` sends, so the change can land on the wrong row.
