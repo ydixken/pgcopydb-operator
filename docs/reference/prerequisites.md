@@ -346,6 +346,7 @@ Schema and workload contract:
   A target table that references a truncated table, and was not truncated on the source, fails the replay.
   With `wal2json`, a multi-table `TRUNCATE` SHOULD NOT run during the window: pgcopydb truncates only its last table and never restarts identity.
   Runners older than `0.18.70.gbb8dbfc` truncate only the first table under `pgoutput`, so with them, run one `TRUNCATE` per table.
+  Tables linked by a foreign key cannot be truncated one at a time, so on those runners they SHOULD NOT be truncated during the window.
 - `COPY FROM` and other multi-insert writes are replicated in full by the bundled runner.
   A runner older than `0.18.70.gbb8dbfc` SHOULD NOT be used when the source runs `COPY FROM` during the window: it keeps one row per heap page of each such write, under every plugin.
 - On a table with `REPLICA IDENTITY FULL` and no key, the bundled runner changes one matching row per UPDATE or DELETE and matches each NULL column of the old row with `IS NULL`, under every plugin.
