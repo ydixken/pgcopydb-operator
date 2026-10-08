@@ -44,12 +44,14 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports eight pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.39.g93eda1d`, matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL; see the [live migration workload contract](#live-migration-specfollowenabled-true).
+The progress poll supports nine pgcopydb versions, with different guarantees.
+The bundled runner, `NEXT_PGCOPYDB_VERSION`, adds four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and keeps the target replication origin in place when a `COMMIT` does not happen.
+See the [live migration hazard](../operations/live-migration.md#watching-the-stream) for what older runners lose, and the [live migration workload contract](#live-migration-specfollowenabled-true).
+`0.18.39.g93eda1d` added the NULL column fixes: it matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL.
 `0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
-Both retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+All three retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
 They also retain [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
-`0.18.36.g972e221` lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
+`0.18.39.g93eda1d` lacks the four follow fixes, `0.18.36.g972e221` also lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.
@@ -339,6 +341,13 @@ Schema and workload contract:
   The bundled runner keeps `REPLICA IDENTITY USING INDEX` and `REPLICA IDENTITY FULL` on the target as the source has them.
   Stock pgcopydb falls back to the default identity where the source uses `USING INDEX`.
 - `TRUNCATE` is replicated: the target is truncated at the same point in the change stream.
+  With `pgoutput` and `test_decoding`, the bundled runner truncates every table the source statement reached in one statement, with `RESTART IDENTITY` when the source used it.
+  It does not replay `CASCADE`, but the change already lists the tables a cascade reached on the source.
+  A target table that references a truncated table, and was not truncated on the source, fails the replay.
+  With `wal2json`, a multi-table `TRUNCATE` SHOULD NOT run during the window: pgcopydb truncates only its last table and never restarts identity.
+  Runners older than `NEXT_PGCOPYDB_VERSION` truncate only the first table under `pgoutput`, so with them, run one `TRUNCATE` per table.
+- `COPY FROM` and other multi-insert writes are replicated in full by the bundled runner.
+  A runner older than `NEXT_PGCOPYDB_VERSION` SHOULD NOT be used when the source runs `COPY FROM` during the window: it keeps one row per heap page of each such write, under every plugin.
 - On a table with `REPLICA IDENTITY FULL` and no key, the bundled runner changes one matching row per UPDATE or DELETE and matches each NULL column of the old row with `IS NULL`, under every plugin.
   That covers the NULL columns `test_decoding` leaves out of the old row, and an old row whose columns are all NULL.
   A runner older than `0.18.39.g93eda1d` SHOULD NOT be used with `test_decoding` on such a table if it holds rows that are equal except where one of them is NULL: it matches only the columns `test_decoding` sends, so the change can land on the wrong row.

@@ -66,13 +66,30 @@ pgcopydb now adds each missing column back as NULL and matches it with `IS NULL`
 Under every plugin, a change whose old row is all NULL became a statement without parameters, which apply skipped, so the target kept the row; apply now runs it.
 The merged commit passed [Run Tests `37476971179`](https://github.com/ydixken/pgcopydb/actions/runs/37476971179) and [Nightly Tests `37476976824`](https://github.com/ydixken/pgcopydb/actions/runs/37476976824).
 
+Four fork PRs on top of `93eda1d` fix follow cases where the target lost committed source changes without an error, while the target replication origin still reached endpos:
+
+1. [Fork PR #19](https://github.com/ydixken/pgcopydb/pull/19) transforms transactions in commit order.
+   Before, a transaction that began on the source before another one committed was skipped, or apply stopped with exit 12 when it was the last commit before endpos ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)).
+   After a restart, apply now takes the unapplied transactions in replay.db in commit order, where it skipped one of them before, and it drops the part of a transaction that a killed apply left there, where the resumed run failed on a duplicate key.
+2. [Fork PR #20](https://github.com/ydixken/pgcopydb/pull/20) replays every table of a multi-table `TRUNCATE` in one statement, with `RESTART IDENTITY` when the source used it.
+   Before, `pgoutput` truncated only the first table ([#358](https://github.com/ydixken/pgcopydb-operator/issues/358)), and a `TRUNCATE` of tables linked by a foreign key stopped apply with exit 12.
+   With `wal2json`, pgcopydb still truncates only the last table of the statement and never restarts identity.
+3. [Fork PR #21](https://github.com/ydixken/pgcopydb/pull/21) keeps every row of a multi-insert record in output.db, under every plugin.
+   A source `COPY` writes one such record per heap page, and all its rows share one LSN, so receive kept only the last row of each page ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)).
+4. [Fork PR #23](https://github.com/ydixken/pgcopydb/pull/23) sends the origin setup and the `COMMIT` of each data transaction as one query, and moves the origin back when that `COMMIT` fails.
+   On PostgreSQL 16 and later, a transaction that aborts after the setup still advances the origin, so the next run skipped a transaction the target never committed.
+   A target backend terminated between the two statements of that query can still leave the origin advanced.
+
+[Fork PR #22](https://github.com/ydixken/pgcopydb/pull/22) changes a fork test only: it waits for the follow snapshot instead of sleeping one second.
+
 > [!warning]
 > Each source transaction waits for target WAL durability before apply progress advances.
-> This may raise latency for workloads with many small transactions; that cost is unmeasured.
+> This raises latency for workloads with many small transactions; [Performance tuning](../../docs/operations/performance.md#follow-receive-and-apply) has the measured cost.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
 The manager and chart allow `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
 We keep all seven older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.39.g93eda1d` has the #18 fixes but not the four fixes from #19, #20, #21 and #23.
 Version `0.18.36.g972e221` has the `--resume` error fix but not the #18 fixes.
 Version `0.18.34.g7fddd6f` has the three fixes above but not the `--resume` error fix.
 Version `0.18.22.g22e29c3` has partition comparison but none of the three fixes, and `0.18.15.gea2dc96` has neither.
