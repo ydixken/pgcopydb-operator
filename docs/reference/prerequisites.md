@@ -45,7 +45,7 @@ See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-d
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
 The progress poll supports nine pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.70.gbb8dbfc`, adds four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and keeps the target replication origin in place when a `COMMIT` does not happen.
+The bundled runner, `0.18.70.gbb8dbfc`, adds four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and keeps the target replication origin in place when a `COMMIT` fails.
 See the [live migration hazard](../operations/live-migration.md#watching-the-stream) for what older runners lose, and the [live migration workload contract](#live-migration-specfollowenabled-true).
 `0.18.39.g93eda1d` added the NULL column fixes: it matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL.
 `0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
