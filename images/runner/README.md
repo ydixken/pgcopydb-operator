@@ -76,9 +76,9 @@ Four fork PRs on top of `93eda1d` fix follow cases where the target lost committ
    With `wal2json`, pgcopydb still truncates only the last table of the statement and never restarts identity.
 3. [Fork PR #21](https://github.com/ydixken/pgcopydb/pull/21) keeps every row of a multi-insert record in output.db, under every plugin.
    A source `COPY` writes one such record per heap page, and all its rows share one LSN, so receive kept only the last row of each page ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)).
-4. [Fork PR #23](https://github.com/ydixken/pgcopydb/pull/23) sends the origin setup and the `COMMIT` of each data transaction as one query, and moves the origin back when that `COMMIT` fails.
+4. [Fork PR #23](https://github.com/ydixken/pgcopydb/pull/23) sends the origin setup and the `COMMIT` of each data transaction as one query, and moves the origin back when the target refuses that `COMMIT` and the connection stays up.
    On PostgreSQL 16 and later, a transaction that aborts after the setup still advances the origin, so the next run skipped a transaction the target never committed.
-   A target backend terminated between the two statements of that query can still leave the origin advanced.
+   A target backend terminated after the origin setup and before the `COMMIT` record is written can still leave the origin advanced, as can a `COMMIT` that breaks the connection.
 
 [Fork PR #22](https://github.com/ydixken/pgcopydb/pull/22) changes a fork test only: it waits for the follow snapshot instead of sleeping one second.
 The merge of #23, `bb8dbfc`, passed [Run Tests `37852957788`](https://github.com/ydixken/pgcopydb/actions/runs/37852957788) and [Nightly Tests `37852960601`](https://github.com/ydixken/pgcopydb/actions/runs/37852960601).

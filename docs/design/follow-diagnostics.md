@@ -26,8 +26,9 @@ The bundled runner, pgcopydb `0.18.70.gbb8dbfc`, certifies genuine primary keepa
 Synthetic keepalives and WAL data headers cannot establish that boundary.
 Confirmed flush is therefore not an independent transformation boundary, and `replay_lsn` is not strictly the last applied data transaction's position.
 The [apply path confirms target COMMIT results](https://github.com/ydixken/pgcopydb/blob/bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b/src/bin/pgcopydb/ld_apply.c#L1025-L1045) with [`synchronous_commit=on`](https://github.com/ydixken/pgcopydb/blob/bb8dbfcb255c611c4972c9a2e25f14d3cd4d657b/src/bin/pgcopydb/ld_apply.c#L38-L44) before advancing its data cursor.
-It sends the origin setup and the `COMMIT` of a data transaction as one query, and moves the origin back when that `COMMIT` fails, so the origin does not pass a transaction the target rolled back ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
-A target backend terminated between those two statements can still leave the origin advanced.
+It sends the origin setup and the `COMMIT` of a data transaction as one query, and moves the origin back when the target refuses that `COMMIT` and the connection stays up ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
+A target backend terminated after the origin setup and before the `COMMIT` record is written can still leave the origin advanced, because apply cannot move it back over a dead connection.
+So can a `COMMIT` that fails and breaks the connection, such as a target restart during the `COMMIT`.
 Keepalive certification changes network feedback without advancing that cursor, the target replication origin, or the sentinel's data replay position.
 The other supported runner versions do not all provide this certification; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
 
