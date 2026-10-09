@@ -7,10 +7,10 @@ It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles pos
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`2aa91e75807e01259a6be8f2eb15483060dec7a4`](https://github.com/ydixken/pgcopydb/commit/2aa91e75807e01259a6be8f2eb15483060dec7a4).
-The version string is `0.18.72.g2aa91e7`, derived from `git describe` (`v0.18-72-g2aa91e7`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is seventy-two commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:2c9e629c04312f0f6d8efcd1cc9dbe84cb475dcdb49139d311acb2d4bc58bd67`, published by [builder run `37888198692`](https://github.com/ydixken/pgcopydb-operator/actions/runs/37888198692).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`c682dce859a770adeffd10a38001aa7cd1bbb87c`](https://github.com/ydixken/pgcopydb/commit/c682dce859a770adeffd10a38001aa7cd1bbb87c).
+The version string is `0.18.74.gc682dce`, derived from `git describe` (`v0.18-74-gc682dce`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is seventy-four commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:a4b4c052d2b5a00667b4d775c577742f7cb3ec96b1f2b073f6f8e987d9cef1e4`, published by [builder run `37895605293`](https://github.com/ydixken/pgcopydb-operator/actions/runs/37895605293).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -88,13 +88,20 @@ When the walsender closed the connection after receive reached endpos and before
 Receive now reconnects and stops at endpos.
 The merged commit passed [Run Tests `37886654042`](https://github.com/ydixken/pgcopydb/actions/runs/37886654042) and [Nightly Tests `37886656126`](https://github.com/ydixken/pgcopydb/actions/runs/37886656126).
 
+[Fork PR #25](https://github.com/ydixken/pgcopydb/pull/25), merged as `c682dce`, stops a failed `IDENTIFY_SYSTEM` from finishing the source connection twice ([#364](https://github.com/ydixken/pgcopydb-operator/issues/364)).
+When the source ended the walsender while receive reconnected, receive aborted with `free(): invalid pointer` and follow ended the attempt.
+Receive now exits with the source error (code 6), and the next attempt resumes.
+The PR also clears two leaked results on the replication path.
+The merged commit passed [Run Tests `37893940302`](https://github.com/ydixken/pgcopydb/actions/runs/37893940302) and [Nightly Tests `37893942845`](https://github.com/ydixken/pgcopydb/actions/runs/37893942845).
+
 > [!warning]
 > Each source transaction waits for target WAL durability before apply progress advances.
 > This raises latency for workloads with many small transactions; [Performance tuning](../../docs/operations/performance.md#follow-receive-and-apply) has the measured cost.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all nine older versions so upgrading the operator does not suppress counters for existing workers.
+The manager and chart allow `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all ten older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.72.g2aa91e7` has the #24 receive fix but not the #25 reconnect fix.
 Version `0.18.70.gbb8dbfc` has the four follow fixes but not the #24 receive fix.
 Version `0.18.39.g93eda1d` has the #18 fixes but not the four fixes from #19, #20, #21 and #23.
 Version `0.18.36.g972e221` has the `--resume` error fix but not the #18 fixes.
