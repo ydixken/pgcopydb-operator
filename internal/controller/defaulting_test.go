@@ -21,6 +21,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -59,6 +61,25 @@ var _ = Describe("CRD defaulting", func() {
 		Expect(*got.Spec.Clone.UseCopyBinary).To(BeTrue())
 
 		// The whole point: the rendered argv has to carry the flag.
+		Expect(pgcopydb.CloneArgs(&got.Spec, false, false, false)).
+			To(ContainElement("--use-copy-binary"))
+	})
+
+	// A typed client always sends clone: {}, so only a manifest that omits
+	// spec.clone shows the nested default being skipped.
+	It("turns binary COPY on for a Migration without spec.clone", func() {
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(newMigration("defaulting-no-clone", v1beta1.CloneOptions{}))
+		Expect(err).NotTo(HaveOccurred())
+		unstructured.RemoveNestedField(obj, "spec", "clone")
+		u := &unstructured.Unstructured{Object: obj}
+		u.SetGroupVersionKind(v1beta1.GroupVersion.WithKind("Migration"))
+		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, u) })
+
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(u), got)).To(Succeed())
+		Expect(got.Spec.Clone.UseCopyBinary).To(BeNil(),
+			"the API server defaulted useCopyBinary without spec.clone; this case no longer covers the gap")
 		Expect(pgcopydb.CloneArgs(&got.Spec, false, false, false)).
 			To(ContainElement("--use-copy-binary"))
 	})

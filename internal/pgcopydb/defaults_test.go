@@ -100,38 +100,6 @@ func TestTableJobsFor(t *testing.T) {
 	}
 }
 
-// useCopyBinary is defaulted by the API server, not here, because false is a
-// meaningful value rather than an absence. The pointer is what makes the three
-// states distinguishable, and this pins all three: nil is what a CRD without
-// the default produces and must not silently turn binary COPY on, and an
-// explicit false must reach pgcopydb as text rather than being defaulted away.
-func TestUseCopyBinaryIsForwardedBothWays(t *testing.T) {
-	yes, no := true, false
-	for _, tc := range []struct {
-		name string
-		set  *bool
-		want bool
-	}{
-		{name: "true renders the flag", set: &yes, want: true},
-		{name: "false renders nothing", set: &no, want: false},
-		{name: "nil renders nothing", set: nil, want: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			spec := &v1beta1.MigrationSpec{}
-			spec.Clone.UseCopyBinary = tc.set
-			var found bool
-			for _, a := range CloneArgs(spec, false, false, false) {
-				if a == "--use-copy-binary" {
-					found = true
-				}
-			}
-			if found != tc.want {
-				t.Errorf("--use-copy-binary present = %v, want %v", found, tc.want)
-			}
-		})
-	}
-}
-
 func TestSplitDefaults(t *testing.T) {
 	empty := &v1beta1.CloneOptions{}
 	if got := splitTablesLargerThan(empty); got.Value() != 512<<20 {

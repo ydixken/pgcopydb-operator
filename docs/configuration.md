@@ -16,7 +16,7 @@ spec:
     skip: [largeObjects]         # steps to omit entirely
 ```
 
-The operator defaults table jobs to the worker's CPU request and enables same-table splitting; other unset options use pgcopydb's defaults.
+The operator defaults table jobs to the worker's CPU request and turns on same-table splitting and binary COPY; other unset options use pgcopydb's defaults.
 Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
 Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) lists them.
 
