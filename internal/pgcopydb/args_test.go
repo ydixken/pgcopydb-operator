@@ -17,6 +17,7 @@ limitations under the License.
 package pgcopydb
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,20 +27,43 @@ import (
 )
 
 // A Migration that configures nothing still gets the operator's opinion: table
-// jobs sized to the default worker, and same-table concurrency on. Only index
+// jobs sized to the default worker, same-table concurrency, binary COPY. Only index
 // jobs are left to pgcopydb, because their cost lands on the target and the
 // operator cannot see it.
 func TestCloneArgs_Minimal(t *testing.T) {
 	got := CloneArgs(&v1beta1.MigrationSpec{}, false, false, false)
-	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8")
+	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary")
 }
 
 func TestCloneArgs_FirstAttemptRestarts(t *testing.T) {
 	got := CloneArgs(&v1beta1.MigrationSpec{}, true, false, false)
-	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --restart")
+	assertArgs(t, got, "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary --restart")
 }
 
 var copyBinary = true
+
+// The CRD default for useCopyBinary applies only when spec.clone is present,
+// so every unset shape must still render the flag, and only false drops it.
+func TestCloneArgs_UseCopyBinary(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name  string
+		clone v1beta1.CloneOptions
+		want  bool
+	}{
+		{name: "no clone", want: true},
+		{name: "clone without the field", clone: v1beta1.CloneOptions{TableJobs: 2}, want: true},
+		{name: "explicit true", clone: v1beta1.CloneOptions{UseCopyBinary: &yes}, want: true},
+		{name: "explicit false", clone: v1beta1.CloneOptions{UseCopyBinary: &no}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := CloneArgs(&v1beta1.MigrationSpec{Clone: tc.clone}, false, false, false)
+			if got := slices.Contains(args, "--use-copy-binary"); got != tc.want {
+				t.Errorf("--use-copy-binary present = %v, want %v in %q", got, tc.want, args)
+			}
+		})
+	}
+}
 
 func TestCloneArgs_AllDatabases(t *testing.T) {
 	spec := &v1beta1.MigrationSpec{Clone: v1beta1.CloneOptions{
@@ -49,7 +73,7 @@ func TestCloneArgs_AllDatabases(t *testing.T) {
 	}}
 	assertArgs(t, CloneArgs(spec, true, false, false),
 		"clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8"+
-			" --roles --filters /etc/pgcopydb/conf/filters.ini --all-databases --restart")
+			" --roles --use-copy-binary --filters /etc/pgcopydb/conf/filters.ini --all-databases --restart")
 }
 
 func TestCloneArgs_Full(t *testing.T) {
