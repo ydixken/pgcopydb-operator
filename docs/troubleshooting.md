@@ -257,6 +257,7 @@ CloudNativePG (CNPG) defaults to 5s.
 
 Raise `wal_sender_timeout` to 60s or more for the migration window.
 On CNPG, set it in `spec.postgresql.parameters`.
+Runners older than `0.18.72.g2aa91e7` can also abort receive with `free(): double free detected in tcache 2` when the source closes the stream near endpos, for example with `wal_sender_timeout=5s`; the retry recovers, but each abort uses one attempt of `spec.backoffLimit` ([#362](https://github.com/ydixken/pgcopydb-operator/issues/362)).
 
 ### `CaughtUp` stays False
 
