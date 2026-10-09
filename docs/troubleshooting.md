@@ -258,6 +258,7 @@ CloudNativePG (CNPG) defaults to 5s.
 Raise `wal_sender_timeout` to 60s or more for the migration window.
 On CNPG, set it in `spec.postgresql.parameters`.
 Runners older than `0.18.72.g2aa91e7` can also abort receive with `free(): double free detected in tcache 2` when the source closes the stream near endpos, for example with `wal_sender_timeout=5s`; the retry recovers, but each abort uses one attempt of `spec.backoffLimit` ([#362](https://github.com/ydixken/pgcopydb-operator/issues/362)).
+Runners older than `0.18.74.gc682dce` abort receive with `free(): invalid pointer` or `double free or corruption` after `Failed to IDENTIFY_SYSTEM` when the source ends the walsender while receive reconnects; `0.18.74.gc682dce` exits receive with the source error instead, and that attempt still uses one retry ([#364](https://github.com/ydixken/pgcopydb-operator/issues/364)).
 
 ### `CaughtUp` stays False
 

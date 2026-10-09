@@ -34,7 +34,9 @@ import (
 )
 
 // patchedVersion is the allowlisted fixture version across these tests.
-const patchedVersion = "0.18.72.g2aa91e7"
+const patchedVersion = "0.18.74.gc682dce"
+
+const receiveDrainPatchedVersion = "0.18.72.g2aa91e7"
 
 const followFixesPatchedVersion = "0.18.70.gbb8dbfc"
 
@@ -106,7 +108,7 @@ func TestNewFromExec_DropsInvalidVersions(t *testing.T) {
 }
 
 func TestGateScript(t *testing.T) {
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	s := p.GateScript()
 	for _, want := range []string{
 		// The pattern list opens with "(", and that is asserted on the text
@@ -117,7 +119,7 @@ func TestGateScript(t *testing.T) {
 		// the bug, which is the one thing this test exists to prevent. The
 		// verify Job embeds this script inside $( ), where the bare form is
 		// ambiguous, so the leading "(" is the property, not the parse.
-		"\n(0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
+		"\n(0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd) pgcopydb list progress",
 		"pgcopydb list progress --json --dir /work/pgcopydb",
 		"v=${v#pgcopydb version }",
 	} {
@@ -173,29 +175,31 @@ func TestGateScript_UnderSh(t *testing.T) {
 	if err != nil {
 		t.Skipf("no sh available: %v", err)
 	}
-	p := NewFromExec(&fakeExec{}, []string{patchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
+	p := NewFromExec(&fakeExec{}, []string{patchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion})
 	for version, want := range map[string]string{
-		patchedVersion:            `{"tables":{"total":2,"done":1}}` + "\n",
-		followFixesPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
-		nullMatchPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		resumeErrorPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
-		rlsPatchedVersion:         `{"tables":{"total":2,"done":1}}` + "\n",
-		partitionPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		bootstrapPatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		keepalivePatchedVersion:   `{"tables":{"total":2,"done":1}}` + "\n",
-		previousPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
-		oldestPatchedVersion:      `{"tables":{"total":2,"done":1}}` + "\n",
-		"0.18":                    "",
-		"0.18.72.g2aa91e7-extra":  "",
-		"0.18.70.gbb8dbfc-extra":  "",
-		"0.18.39.g93eda1d-extra":  "",
-		"0.18.36.g972e221-extra":  "",
-		"0.18.34.g7fddd6f-extra":  "",
-		"0.18.22.g22e29c3-extra":  "",
-		"0.18.15.gea2dc96-extra":  "",
-		"0.18.13.g4873c18-extra":  "",
-		"0.18.10.gaadc4bf-extra":  "",
-		"0.18.5.ge37d2bd-extra":   "",
+		patchedVersion:             `{"tables":{"total":2,"done":1}}` + "\n",
+		receiveDrainPatchedVersion: `{"tables":{"total":2,"done":1}}` + "\n",
+		followFixesPatchedVersion:  `{"tables":{"total":2,"done":1}}` + "\n",
+		nullMatchPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		resumeErrorPatchedVersion:  `{"tables":{"total":2,"done":1}}` + "\n",
+		rlsPatchedVersion:          `{"tables":{"total":2,"done":1}}` + "\n",
+		partitionPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		bootstrapPatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		keepalivePatchedVersion:    `{"tables":{"total":2,"done":1}}` + "\n",
+		previousPatchedVersion:     `{"tables":{"total":2,"done":1}}` + "\n",
+		oldestPatchedVersion:       `{"tables":{"total":2,"done":1}}` + "\n",
+		"0.18":                     "",
+		"0.18.74.gc682dce-extra":   "",
+		"0.18.72.g2aa91e7-extra":   "",
+		"0.18.70.gbb8dbfc-extra":   "",
+		"0.18.39.g93eda1d-extra":   "",
+		"0.18.36.g972e221-extra":   "",
+		"0.18.34.g7fddd6f-extra":   "",
+		"0.18.22.g22e29c3-extra":   "",
+		"0.18.15.gea2dc96-extra":   "",
+		"0.18.13.g4873c18-extra":   "",
+		"0.18.10.gaadc4bf-extra":   "",
+		"0.18.5.ge37d2bd-extra":    "",
 	} {
 		cmd := exec.Command(sh, "-c", p.GateScript())
 		cmd.Env = append(os.Environ(), "PATH="+stubPgcopydb(t, version)+":"+os.Getenv("PATH"))
@@ -209,7 +213,7 @@ func TestGateScript_UnderSh(t *testing.T) {
 	}
 	// The disabled gate has to parse too: it is pasted into the verify Job's
 	// script, where a syntax error would be the whole file's problem.
-	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
+	for _, versions := range [][]string{nil, {patchedVersion}, {patchedVersion, receiveDrainPatchedVersion, followFixesPatchedVersion, nullMatchPatchedVersion, resumeErrorPatchedVersion, rlsPatchedVersion, partitionPatchedVersion, bootstrapPatchedVersion, keepalivePatchedVersion, previousPatchedVersion, oldestPatchedVersion}} {
 		script := NewFromExec(&fakeExec{}, versions).GateScript()
 		if err := exec.Command(sh, "-n", "-c", script).Run(); err != nil {
 			t.Errorf("allowlist %v renders a script sh rejects: %v\n%s", versions, err, script)
