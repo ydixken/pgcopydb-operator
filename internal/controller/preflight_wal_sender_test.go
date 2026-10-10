@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ import (
 const (
 	walSenderTimeoutProbe = "wal_sender_timeout"
 	wstWarnPrefix         = "warn: source wal_sender_timeout is "
-	wstURIRemedy          = "or on a uriSecretRef source add options=-c wal_sender_timeout=60s to its URI"
+	wstURIRemedy          = "or append options=-c%20wal_sender_timeout%3D60s to the source URI query"
 	wstOverrideURI        = "src?options=-c%20wal_sender_timeout%3D60s"
 	wstOK1min             = "ok: source wal_sender_timeout 1min"
 	wstServer5s           = "PSQL_WST=5000|5s"
@@ -114,6 +115,21 @@ func TestWalSenderTimeoutBlock_Server(t *testing.T) {
 			}
 		})
 	}
+	// Users paste the remedy from the event, so libpq must accept it as printed.
+	t.Run("the printed URI remedy applies", func(t *testing.T) {
+		cmd := exec.Command(shellPath, "-c", preflightHeader+walSenderTimeoutBlock)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+uri+sep+"options=-c%20wal_sender_timeout%3D5s",
+			"PGCOPYDB_TARGET_PGURI="+uri)
+		out, _ := cmd.CombinedOutput()
+		m := regexp.MustCompile(`append (.+?) to the source URI`).FindSubmatch(out)
+		if m == nil {
+			t.Fatalf("no URI remedy in:\n%s", out)
+		}
+		got, err := exec.Command("psql", "-XAtc", "show wal_sender_timeout", uri+sep+string(m[1])).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(got)) != "1min" {
+			t.Fatalf("remedy %q: err=%v out=%s", m[1], err, got)
+		}
+	})
 }
 
 // TestEmitPreflightOutcome_Warnings: warn lines become one Warning event

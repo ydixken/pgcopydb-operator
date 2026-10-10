@@ -711,7 +711,7 @@ wst_rest=${wst#*|}
 wst_value=${wst_rest%%|*}
 wst_uri_fix=''
 if [ "${wst_rest#*|}" -ge 12 ] 2>/dev/null; then
-  wst_uri_fix=', or on a uriSecretRef source add options=-c wal_sender_timeout=60s to its URI'
+  wst_uri_fix=', or append options=-c%20wal_sender_timeout%3D60s to the source URI query (uriSecretRef, or a secretRef DB key holding a URI)'
 fi
 case "$wst_ms" in
 ''|*[!0-9]*)

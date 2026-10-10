@@ -149,7 +149,7 @@ var _ = Describe("Dry run", func() {
 				if e.InvolvedObject.UID == completed.UID && e.Reason == "PreflightWarning" &&
 					e.Type == corev1.EventTypeWarning &&
 					strings.Contains(e.Message, "source wal_sender_timeout is 5s") &&
-					strings.Contains(e.Message, "options=-c wal_sender_timeout=60s") {
+					strings.Contains(e.Message, "options=-c%20wal_sender_timeout%3D60s") {
 					warned = true
 				}
 			}
