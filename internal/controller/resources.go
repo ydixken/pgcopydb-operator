@@ -703,10 +703,16 @@ fi
 `
 
 // walSenderTimeoutBlock only warns: below 60s a short receive stall (fsync, CPU
-// throttling) ends the stream, and at 5s pgcopydb's follow receive livelocked.
-// It reads over the worker's source URI, so an options=-c override counts.
-const walSenderTimeoutBlock = `wst=$(check "$PGCOPYDB_SOURCE_PGURI" "select setting || '|' || current_setting('wal_sender_timeout') from pg_settings where name = 'wal_sender_timeout'")
+// throttling) ends the stream. It reads over the worker's source URI, so an
+// options=-c override counts; that override needs PostgreSQL 12 (sighup before).
+const walSenderTimeoutBlock = `wst=$(check "$PGCOPYDB_SOURCE_PGURI" "select setting || '|' || current_setting('wal_sender_timeout') || '|' || current_setting('server_version_num')::int / 10000 from pg_settings where name = 'wal_sender_timeout'")
 wst_ms=${wst%%|*}
+wst_rest=${wst#*|}
+wst_value=${wst_rest%%|*}
+wst_uri_fix=''
+if [ "${wst_rest#*|}" -ge 12 ] 2>/dev/null; then
+  wst_uri_fix=', or on a uriSecretRef source add options=-c wal_sender_timeout=60s to its URI'
+fi
 case "$wst_ms" in
 ''|*[!0-9]*)
   echo "warn: could not read the source wal_sender_timeout; make sure it is 60s or more, a lower value can stall the follow stream" ;;
@@ -714,9 +720,9 @@ case "$wst_ms" in
   echo "ok: source wal_sender_timeout disabled" ;;
 *)
   if [ "$wst_ms" -lt 60000 ]; then
-    echo "warn: source wal_sender_timeout is ${wst#*|}, below 60s: a receive stall that long ends the follow stream, and at 5s pgcopydb's follow receive can livelock; raise it on the source server (on CloudNativePG, spec.postgresql.parameters) or add options=-c wal_sender_timeout=60s to the source URI"
+    echo "warn: source wal_sender_timeout is $wst_value, below 60s: a receive stall that long ends the follow stream; raise it on the source server (on CloudNativePG, spec.postgresql.parameters)$wst_uri_fix"
   else
-    echo "ok: source wal_sender_timeout ${wst#*|}"
+    echo "ok: source wal_sender_timeout $wst_value"
   fi ;;
 esac
 `

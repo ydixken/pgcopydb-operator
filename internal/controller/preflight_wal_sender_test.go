@@ -29,26 +29,32 @@ import (
 const (
 	walSenderTimeoutProbe = "wal_sender_timeout"
 	wstWarnPrefix         = "warn: source wal_sender_timeout is "
-	wstURIRemedy          = "options=-c wal_sender_timeout=60s"
+	wstURIRemedy          = "or on a uriSecretRef source add options=-c wal_sender_timeout=60s to its URI"
 	wstOverrideURI        = "src?options=-c%20wal_sender_timeout%3D60s"
 	wstOK1min             = "ok: source wal_sender_timeout 1min"
+	wstServer5s           = "PSQL_WST=5000|5s"
+	wstWarn5s             = wstWarnPrefix + "5s, below 60s"
 )
 
 // TestPreflightScript_WalSenderTimeout runs the follow preflight under the
-// stub: a timeout below 60s warns with both remedies and never fails, and the
-// probe reads over the source URI, so an options=-c override in it counts.
+// stub: a timeout below 60s warns and never fails, the URI remedy is offered
+// only from PostgreSQL 12 on, and an options=-c override in the URI counts.
 func TestPreflightScript_WalSenderTimeout(t *testing.T) {
 	run := followPreflightHarness(t)
 	cases := []struct {
 		name, ok, warn string
 		env            []string
+		noURIRemedy    bool
 	}{
 		{name: "disabled", ok: "ok: source wal_sender_timeout disabled", env: []string{"PSQL_WST=0|0"}},
-		{name: "5s warns", warn: wstWarnPrefix + "5s, below 60s", env: []string{"PSQL_WST=5000|5s"}},
+		{name: "5s warns", warn: wstWarn5s, env: []string{wstServer5s}},
+		// Before 12 wal_sender_timeout is sighup, so a URI override fails the connection.
+		{name: "5s on PostgreSQL 11 omits the URI remedy", warn: wstWarn5s,
+			env: []string{wstServer5s, "SRC_MAJOR=11"}, noURIRemedy: true},
 		{name: "59s warns", warn: wstWarnPrefix + "59s, below 60s", env: []string{"PSQL_WST=59000|59s"}},
 		{name: "60s passes", ok: wstOK1min, env: []string{"PSQL_WST=60000|1min"}},
 		{name: "URI override wins over a 5s server", ok: wstOK1min,
-			env: []string{"PSQL_WST=5000|5s", "PGCOPYDB_SOURCE_PGURI=" + wstOverrideURI}},
+			env: []string{wstServer5s, "PGCOPYDB_SOURCE_PGURI=" + wstOverrideURI}},
 		{name: "unreadable warns", warn: "warn: could not read the source wal_sender_timeout", env: []string{"PSQL_WST=fail"}},
 	}
 	for _, tc := range cases {
@@ -65,8 +71,8 @@ func TestPreflightScript_WalSenderTimeout(t *testing.T) {
 				t.Fatalf("missing %q:\n%s", tc.warn, out)
 			}
 			if strings.Contains(tc.warn, "below 60s") &&
-				(!strings.Contains(out, wstURIRemedy) || !strings.Contains(out, "spec.postgresql.parameters")) {
-				t.Fatalf("warning must name both remedies:\n%s", out)
+				(strings.Contains(out, wstURIRemedy) == tc.noURIRemedy || !strings.Contains(out, "spec.postgresql.parameters")) {
+				t.Fatalf("want the server remedy, and the URI remedy only from PostgreSQL 12 (noURIRemedy=%v):\n%s", tc.noURIRemedy, out)
 			}
 		})
 	}
@@ -93,7 +99,7 @@ func TestWalSenderTimeoutBlock_Server(t *testing.T) {
 		sep = "&"
 	}
 	for _, tc := range []struct{ value, want string }{
-		{"5s", wstWarnPrefix + "5s, below 60s"},
+		{"5s", wstWarn5s},
 		{"0", "ok: source wal_sender_timeout disabled"},
 		{"60s", wstOK1min},
 		{"2min", "ok: source wal_sender_timeout 2min"},

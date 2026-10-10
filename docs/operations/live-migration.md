@@ -57,7 +57,7 @@ With `superuserSecretRef` set, the preflight applies the grantable rights itself
 It emits one `PreflightRemediated` event per tier, clone rights and follow rights, with the applied statements.
 A [dry run](lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 On success a `PreflightPassed` event counts the checks and the applied grants.
-The `warn:` lines of a passing preflight become one `PreflightWarning` event: a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s.
+When the operator can read the Job log, the `warn:` lines of a passing preflight become one `PreflightWarning` event: a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s.
 They never fail the Migration.
 The operator keeps the finished preflight Job as an audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
 

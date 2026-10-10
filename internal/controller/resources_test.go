@@ -1230,8 +1230,8 @@ apply() {
 case "$q" in
   *wal_sender_timeout*)
     # A server applies options=-c from the URI to the session; emulate that.
-    case "$uri" in *wal_sender_timeout%3D60s*) echo '60000|1min' ;;
-    *) [ "${PSQL_WST-}" = fail ] && exit 2; echo "${PSQL_WST:-60000|1min}" ;; esac ;;
+    case "$uri" in *wal_sender_timeout%3D60s*) echo "60000|1min|${SRC_MAJOR-16}" ;;
+    *) [ "${PSQL_WST-}" = fail ] && exit 2; echo "${PSQL_WST:-60000|1min}|${SRC_MAJOR-16}" ;; esac ;;
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
   *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *server_version_num*) case "$uri" in src*) echo "${SRC_MAJOR-16}" ;; *) echo "${TGT_MAJOR-16}" ;; esac ;;
