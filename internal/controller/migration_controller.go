@@ -351,10 +351,11 @@ func (r *MigrationReconciler) preflightGate(ctx context.Context, m, base *v1beta
 
 // emitPreflightOutcome turns the finished preflight's log into events, one
 // PreflightRemediated (or, in a dry run, PreflightWouldRemediate) bundle per
-// tier: the recorder collapses same reason-and-action events into a counter.
+// tier and one PreflightWarning bundle: the recorder collapses same
+// reason-and-action events into a counter.
 func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1beta1.Migration) {
 	checks := 0
-	var clone, follow, wouldClone, wouldFollow []string
+	var clone, follow, wouldClone, wouldFollow, warns []string
 	tail := r.jobLogTail(ctx, m.Namespace, preflightJobName(m), preflightOkLogTail)
 	for line := range strings.SplitSeq(tail, "\n") {
 		switch {
@@ -368,7 +369,13 @@ func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1bet
 			wouldClone = append(wouldClone, strings.TrimPrefix(line, wouldPrefixClone))
 		case strings.HasPrefix(line, wouldPrefixFollow):
 			wouldFollow = append(wouldFollow, strings.TrimPrefix(line, wouldPrefixFollow))
+		case strings.HasPrefix(line, warnPrefix):
+			warns = append(warns, strings.TrimPrefix(line, warnPrefix))
 		}
+	}
+	if len(warns) > 0 {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "PreflightWarning", "Preflight",
+			"%s", truncate(strings.Join(warns, "\n"), maxDetailLen))
 	}
 	for _, b := range []struct {
 		reason, action string

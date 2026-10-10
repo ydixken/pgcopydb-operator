@@ -43,7 +43,7 @@ Individual checks appear as `ok:` log lines.
    Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
    See the [operator prerequisites](reference/prerequisites.md) for each check.
    Preflight does not audit TLS policy, every ownership and publication right, or whether the target schemas are empty.
-   A `superuserSecretRef` role without `rolsuper` only logs a warning, but an all-databases migration connection without `rolsuper` fails preflight.
+   A `superuserSecretRef` role without `rolsuper` only raises a `PreflightWarning` event, but an all-databases migration connection without `rolsuper` fails preflight.
 5. Partial.
    A pending pod or an unbound PVC can keep the status at `PreflightRunning`.
    Preflight does not measure data size, free space, throughput, connection headroom, compute, I/O, network, WAL growth, or work-disk capacity.
