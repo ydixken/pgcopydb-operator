@@ -29,6 +29,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -106,6 +107,53 @@ var _ = Describe("Dry run", func() {
 				}
 			}
 			g.Expect(reported).To(BeTrue(), "no PreflightWouldRemediate event for the schema grant")
+		}, time.Minute, 2*time.Second).Should(Succeed())
+	})
+
+	// The fixtures run the source at 60s, so the 5s comes from the URI alone:
+	// the warning proves preflight reads the value the worker's URI yields.
+	It("warns about a wal_sender_timeout below 60s set in the source URI and still passes", func() {
+		const name = "e2e-dry-run-wst"
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
+		DeferCleanup(func() {
+			deleteMigration(name)
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed())
+		})
+
+		uri := appURL(sourceCluster, appPassword(sourceCluster))
+		sep := "?"
+		if strings.Contains(uri, "?") {
+			sep = "&"
+		}
+		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, secret, func() error {
+			secret.Data = map[string][]byte{sourceKey: []byte(uri + sep + "options=-c%20wal_sender_timeout%3D5s")}
+			return nil
+		})
+		Expect(err).NotTo(HaveOccurred(), "failed to store the source URI Secret")
+
+		m := newFollowMigration(name, v1beta1.CutoverManual)
+		m.Spec.Source = v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: sourceKey}}
+		m.Spec.DryRun = true
+		create(m)
+
+		completed := waitCompleted(name, nsE2E)
+		expectDryRunSucceeded(completed)
+
+		By("checking the PreflightWarning event names the value and the URI remedy")
+		Eventually(func(g Gomega) {
+			events := &corev1.EventList{}
+			g.Expect(k8sClient.List(ctx, events, client.InNamespace(nsE2E))).To(Succeed())
+			var warned bool
+			for _, e := range events.Items {
+				if e.InvolvedObject.UID == completed.UID && e.Reason == "PreflightWarning" &&
+					e.Type == corev1.EventTypeWarning &&
+					strings.Contains(e.Message, "source wal_sender_timeout is 5s") &&
+					strings.Contains(e.Message, "options=-c%20wal_sender_timeout%3D60s") {
+					warned = true
+				}
+			}
+			g.Expect(warned).To(BeTrue(), "no PreflightWarning event for the 5s wal_sender_timeout")
 		}, time.Minute, 2*time.Second).Should(Succeed())
 	})
 })

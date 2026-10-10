@@ -144,6 +144,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants, or in a dry run the grants that would be applied. |
 | `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |
+| `PreflightWarning` | Warning | A passing preflight logged findings that do not block: a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s (or unreadable). One event lists them all. |
 | `PreflightWouldRemediate` | Normal | A dry run found grants `superuserSecretRef` would apply, and applied none; one event per tier, each message listing that tier's statements. |
 | `DryRunSucceeded` | Normal | A dry run's preflight passed; the Migration completed without a worker Job. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |

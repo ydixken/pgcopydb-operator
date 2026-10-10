@@ -264,6 +264,7 @@ Before the first attempt, and after the connectivity probes, the preflight Job a
 
 - `wal_level`.
 - Free-slot headroom.
+- `wal_sender_timeout`, which only warns.
 - The source role's REPLICATION attribute.
 - EXECUTE on the origin functions.
 - The `session_replication_role` SET privilege.
@@ -271,6 +272,7 @@ Before the first attempt, and after the connectivity probes, the preflight Job a
 - An audit of the tables in scope for unlogged tables.
 
 A failed check fails the Migration before any data moves, with the exact missing GRANT, setting, or table list in the `Validated` condition message.
+A `wal_sender_timeout` below 60s never fails it: preflight passes and emits a `PreflightWarning` event.
 When the failing side has no `superuserSecretRef`, the message adds a hint that names that field.
 With `superuserSecretRef` set, [the preflight applies](#superuser-remediation-superusersecretref) the three grantable rights and does not fail.
 Preflight does not cover the rest of the workload contract (no DDL, large objects, wal2json presence); that stays your job.
@@ -283,8 +285,18 @@ Source instance:
   Budget disk for the migration window.
   `max_slot_wal_keep_size` caps that retention, but a slot invalidated by the cap kills the migration.
   The operator drops the slot at cutover, on abort, and on Migration deletion.
-- `wal_sender_timeout` SHOULD be at its PostgreSQL default (60s) or higher.
-  Aggressive values terminate pgcopydb's logical-decoding walsender whenever a status update is a few seconds late; CloudNativePG sets 5s by default for its own HA streaming, so CNPG sources SHOULD override it in `spec.postgresql.parameters` for the migration window.
+- `wal_sender_timeout` SHOULD be at its PostgreSQL default (60s) or higher, or `0` (disabled).
+  A lower value ends pgcopydb's logical-decoding walsender whenever receive stalls that long, for example on an fsync or under CPU throttling.
+  At 5s, pgcopydb's receive livelocked during `clone --follow` in our test runs on pgcopydb 0.18.74 and 0.18.39 runners; at 60s the same runs completed.
+  CloudNativePG sets 5s by default for its own HA streaming.
+  Raise it on the server, which on CNPG means `spec.postgresql.parameters`.
+  Alternatively, raise it for the migration's connections only: from PostgreSQL 12 on the parameter is user-settable, and pgcopydb's replication connection uses the source URI, so `options=-c wal_sender_timeout=60s` in a source URI applies to it.
+  That URI is a `uriSecretRef`, or a `secretRef` DB key holding a URI, which keeps its query.
+  Append the parameter percent-encoded to the URI query, after `?` or `&`: `options=-c%20wal_sender_timeout%3D60s`.
+  libpq rejects the unencoded form with `extra key/value separator "=" in URI query parameter: "options"`.
+  Before PostgreSQL 12 the server rejects that override with `parameter "wal_sender_timeout" cannot be changed now`, so every connection fails and so does preflight.
+  Preflight reads the value over that same source URI, so an override in it counts, and it warns below 60s.
+  The warning names the URI remedy only for a PostgreSQL 12 or later source.
 
 Source role:
 
@@ -382,7 +394,7 @@ Each side of the Migration MAY carry `superuserSecretRef`, a Secret in the same 
 The `URL`/`URL_EXTERNAL` keys, when present, MUST match the connection's endpoint; a mismatch fails the preflight by name, and a value carrying `:port` is compared port and all.
 With a `secretRef` primary, the primary's `endpoint` field decides between the internal and external URL, so both connections always name the same server.
 The preflight probes the superuser connection with the same retries as the primaries, and checks `rolsuper`.
-A role without `rolsuper` only logs a warning, because managed-Postgres admin roles such as `rds_superuser` can hold the grant rights without the attribute.
+A role without `rolsuper` only warns (a `PreflightWarning` event), because managed-Postgres admin roles such as `rds_superuser` can hold the grant rights without the attribute.
 It then applies the rights the regular role is missing, exactly these statements:
 
 - `GRANT CREATE ON DATABASE <db> TO <role>` on the target, when the clone probe finds it missing (single-database migrations).

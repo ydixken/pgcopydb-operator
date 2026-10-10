@@ -135,7 +135,7 @@ Fix what it names, then create a new Migration.
 
 The preflight log shows `warn: ... lacks rolsuper` and later `applying ... via superuserSecretRef failed`.
 The `superuserSecretRef` role is no superuser and lacks the rights to apply the grants.
-A missing `rolsuper` alone is only a warning, because managed admin roles work without it.
+A missing `rolsuper` alone is only a `PreflightWarning` event, because managed admin roles work without it.
 
 Point the Secret at a role that can run the printed statements: a superuser, or the provider's admin role.
 If no such role is available, drop `superuserSecretRef` and apply the grants by hand.
@@ -252,11 +252,15 @@ Preflight checks this attribute too.
 ### The stream keeps dropping
 
 The stream keeps dropping, the source logs show terminated walsenders, and attempts burn during catchup or drain.
+Or the follow stops advancing while the worker keeps running.
 A low `wal_sender_timeout` on the source kills the logical walsender.
 CloudNativePG (CNPG) defaults to 5s.
+A `PreflightWarning` event names the value preflight read.
 
 Raise `wal_sender_timeout` to 60s or more for the migration window.
 On CNPG, set it in `spec.postgresql.parameters`.
+On PostgreSQL 12 and later, you can instead append `options=-c%20wal_sender_timeout%3D60s` to the source URI query (after `?` or `&`), which raises it for the migration's connections only.
+That works in a `uriSecretRef` URI and in a `secretRef` DB key holding a URI; keep the percent-encoding, because libpq rejects the plain form.
 Runners older than `0.18.72.g2aa91e7` can also abort receive with `free(): double free detected in tcache 2` when the source closes the stream near endpos, for example with `wal_sender_timeout=5s`; the retry recovers, but each abort uses one attempt of `spec.backoffLimit` ([#362](https://github.com/ydixken/pgcopydb-operator/issues/362)).
 Runners older than `0.18.74.gc682dce` abort receive with `free(): invalid pointer` or `double free or corruption` after `Failed to IDENTIFY_SYSTEM` when the source ends the walsender while receive reconnects; `0.18.74.gc682dce` exits receive with the source error instead, and that attempt still uses one retry ([#364](https://github.com/ydixken/pgcopydb-operator/issues/364)).
 

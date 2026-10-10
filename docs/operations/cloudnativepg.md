@@ -92,13 +92,17 @@ spec:
         replication: true  # reconciles to ALTER ROLE app REPLICATION
   postgresql:
     parameters:
-      wal_sender_timeout: 60s  # CNPG defaults to 5s, which kills logical walsenders
+      wal_sender_timeout: 60s  # CNPG defaults to 5s, too short for pgcopydb's receive
 ```
 
 - `managed.roles`: CNPG does not manage its bootstrap owner role by default, so the role needs this entry.
   Otherwise, run `ALTER ROLE app REPLICATION` once by hand.
 - `wal_sender_timeout`: raise CNPG's 5s default to the PostgreSQL default of 60s or more for the migration window.
-  The [source instance prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) explain why 5s is too short.
+  The [source instance prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) explain why 5s is too short, and how a source URI can raise it for the migration's connections only.
+
+> [!warning]
+> A CNPG source left at 5s can stall a live migration's follow stream.
+> Preflight does not block on it: it passes and emits a `PreflightWarning` event that names the value.
 
 ## 5. The Migration
 

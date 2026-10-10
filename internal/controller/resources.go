@@ -265,7 +265,8 @@ func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*b
 // pgcopydb 0.18 applies nothing while reporting success
 // (see docs/reference/prerequisites.md).
 // Checks print "ok: <check>"; applied grants print "remediated: " (follow tier)
-// or "remediated-clone: " (clone tier), which emitPreflightOutcome parses.
+// or "remediated-clone: " (clone tier), and findings that must not block print
+// "warn: ", all of which emitPreflightOutcome parses.
 
 // preflightHeader opens every preflight: general connectivity is validated
 // with retries. Two consecutive permanent-class errors end the ladder, not
@@ -361,6 +362,7 @@ const (
 	remPrefixClone    = "remediated-clone: "
 	wouldPrefixFollow = "would-remediate: "
 	wouldPrefixClone  = "would-remediate-clone: "
+	warnPrefix        = "warn: "
 )
 
 // wouldPrefix maps a tier's remediated prefix to its dry-run one.
@@ -698,6 +700,31 @@ if [ "${free_slots:-0}" -lt 1 ]; then
 else
   echo "ok: replication slot headroom"
 fi
+`
+
+// walSenderTimeoutBlock only warns: below 60s a short receive stall (fsync, CPU
+// throttling) ends the stream. It reads over the worker's source URI, so an
+// options=-c override counts; that override needs PostgreSQL 12 (sighup before).
+const walSenderTimeoutBlock = `wst=$(check "$PGCOPYDB_SOURCE_PGURI" "select setting || '|' || current_setting('wal_sender_timeout') || '|' || current_setting('server_version_num')::int / 10000 from pg_settings where name = 'wal_sender_timeout'")
+wst_ms=${wst%%|*}
+wst_rest=${wst#*|}
+wst_value=${wst_rest%%|*}
+wst_uri_fix=''
+if [ "${wst_rest#*|}" -ge 12 ] 2>/dev/null; then
+  wst_uri_fix=', or append options=-c%20wal_sender_timeout%3D60s to the source URI query (uriSecretRef, or a secretRef DB key holding a URI)'
+fi
+case "$wst_ms" in
+''|*[!0-9]*)
+  echo "warn: could not read the source wal_sender_timeout; make sure it is 60s or more, a lower value can stall the follow stream" ;;
+0)
+  echo "ok: source wal_sender_timeout disabled" ;;
+*)
+  if [ "$wst_ms" -lt 60000 ]; then
+    echo "warn: source wal_sender_timeout is $wst_value, below 60s: a receive stall that long ends the follow stream; raise it on the source server (on CloudNativePG, spec.postgresql.parameters)$wst_uri_fix"
+  else
+    echo "ok: source wal_sender_timeout $wst_value"
+  fi ;;
+esac
 `
 
 // replicationAttrCheck is the probe both variants of the block share.
@@ -1145,6 +1172,7 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 	if followEnabled(m) {
 		b.WriteString(walLevelBlock)
 		b.WriteString(slotHeadroomBlock)
+		b.WriteString(walSenderTimeoutBlock)
 		b.WriteString(replicationAttrBlock(superSrc, dry))
 		b.WriteString(originGrantsBlock(superTgt, dry))
 		b.WriteString(srrBlock(superTgt, dry))
