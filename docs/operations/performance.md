@@ -7,7 +7,7 @@ In follow mode, source decoding, receive-spool writes, inline transformation, an
 
 ## Follow receive and apply
 
-The bundled pgcopydb `0.18.74.gc682dce` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
+The bundled pgcopydb `0.18.76.gf9b328b` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
 It applies each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement, so a burst of them on such a table applies more slowly than on a keyed table; that cost is unmeasured.
 [Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch and these measurements, for one source transaction containing 20,000 four-column rows.
 These measurements predate the [certified keepalive feedback](../design/follow-diagnostics.md) in `0.18.13.g4873c18` and the bootstrap recovery in `0.18.15.gea2dc96`; they measure neither version.

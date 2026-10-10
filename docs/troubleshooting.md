@@ -263,6 +263,8 @@ On PostgreSQL 12 and later, you can instead append `options=-c%20wal_sender_time
 That works in a `uriSecretRef` URI and in a `secretRef` DB key holding a URI; keep the percent-encoding, because libpq rejects the plain form.
 Runners older than `0.18.72.g2aa91e7` can also abort receive with `free(): double free detected in tcache 2` when the source closes the stream near endpos, for example with `wal_sender_timeout=5s`; the retry recovers, but each abort uses one attempt of `spec.backoffLimit` ([#362](https://github.com/ydixken/pgcopydb-operator/issues/362)).
 Runners older than `0.18.74.gc682dce` abort receive with `free(): invalid pointer` or `double free or corruption` after `Failed to IDENTIFY_SYSTEM` when the source ends the walsender while receive reconnects; `0.18.74.gc682dce` exits receive with the source error instead, and that attempt still uses one retry ([#364](https://github.com/ydixken/pgcopydb-operator/issues/364)).
+Runners older than `0.18.76.gf9b328b` send receive status only every 10 seconds, so below a 10s timeout the source can end every session before receive reports a flush position: the slot's `confirmed_flush_lsn` stops moving while the worker keeps running ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
+`0.18.76.gf9b328b` sends status within half of `wal_sender_timeout`.
 
 ### `CaughtUp` stays False
 
