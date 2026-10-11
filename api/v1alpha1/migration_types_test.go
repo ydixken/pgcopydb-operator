@@ -102,6 +102,7 @@ func fullMigration() *Migration {
 				Enabled: true, Plugin: "wal2json", SlotName: "slot_1",
 				Publication: "pub", Wal2jsonNumericAsString: true,
 				ReplayNoOpUpdates:           true,
+				ApplyGroupTransactions:      50,
 				AllowMissingReplicaIdentity: []string{"public.log"},
 				MaxCatchupLag:               &lag,
 			},

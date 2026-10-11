@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/f9b328b028d62497f0aaadc6baf8dabc3f609d1d) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/baa94eead075b26f98f0e7e482ed596db52f653d) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -44,8 +44,9 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports twelve pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.76.gf9b328b`, sends receive status within half of the source `wal_sender_timeout`, where `0.18.74.gc682dce` sends it every 10 seconds, so a timeout below that can end every receive session before a receive that fell behind reports a flush position ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
+The progress poll supports thirteen pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.94.gbaa94ee`, commits up to 100 source transactions in one target transaction, where older runners commit each on its own; `spec.follow.applyGroupTransactions` sets the limit ([Apply groups](../operations/performance.md#apply-groups)).
+`0.18.76.gf9b328b` added the status interval fix: it sends receive status within half of the source `wal_sender_timeout`, where `0.18.74.gc682dce` sends it every 10 seconds, so a timeout below that can end every receive session before a receive that fell behind reports a flush position ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
 `0.18.74.gc682dce` added the reconnect fix: it exits receive with a source error when the source ends the walsender while receive reconnects, where `0.18.72.g2aa91e7` aborts receive with `free(): invalid pointer` ([#364](https://github.com/ydixken/pgcopydb-operator/issues/364)).
 `0.18.72.g2aa91e7` added the receive fix: it reconnects when the source closes the stream near endpos, where `0.18.70.gbb8dbfc` aborts receive with a double free ([#362](https://github.com/ydixken/pgcopydb-operator/issues/362)).
 `0.18.70.gbb8dbfc` added four follow fixes: it applies source transactions that overlapped in commit order, keeps every row of a multi-insert write such as a source `COPY`, replays every table of a multi-table `TRUNCATE` under `pgoutput` and `test_decoding`, and sends the origin setup and the `COMMIT` of a data transaction as one query, moving the target replication origin back when the target refuses that `COMMIT` and the connection stays up.
@@ -289,7 +290,7 @@ Source instance:
 - `wal_sender_timeout` SHOULD be at its PostgreSQL default (60s) or higher, or `0` (disabled).
   A lower value ends pgcopydb's logical-decoding walsender whenever receive stalls that long, for example on an fsync or under CPU throttling.
   At 5s, pgcopydb's receive livelocked during `clone --follow` in our test runs on pgcopydb 0.18.74 and 0.18.39 runners; at 60s the same runs completed.
-  The bundled `0.18.76.gf9b328b` sends receive status within half of the timeout: a build of the same source kept one walsender session at 5s in those runs, and its clone finished ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
+  Runners from `0.18.76.gf9b328b` on, the bundled one included, send receive status within half of the timeout: a build of the `0.18.76.gf9b328b` source kept one walsender session at 5s in those runs, and its clone finished ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
   A single receive stall longer than half the timeout still ends the session, so 60s stays the recommendation.
   CloudNativePG sets 5s by default for its own HA streaming.
   Raise it on the server, which on CNPG means `spec.postgresql.parameters`.

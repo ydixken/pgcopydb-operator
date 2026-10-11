@@ -102,9 +102,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.76.gf9b328b`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.94.gbaa94ee`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/f9b328b028d62497f0aaadc6baf8dabc3f609d1d/src/bin/pgcopydb/ld_stream.c#L1528-L1553) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/baa94eead075b26f98f0e7e482ed596db52f653d/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.

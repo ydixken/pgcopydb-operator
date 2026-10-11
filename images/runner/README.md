@@ -7,10 +7,10 @@ It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles pos
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`f9b328b028d62497f0aaadc6baf8dabc3f609d1d`](https://github.com/ydixken/pgcopydb/commit/f9b328b028d62497f0aaadc6baf8dabc3f609d1d).
-The version string is `0.18.76.gf9b328b`, derived from `git describe` (`v0.18-76-gf9b328b`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is seventy-six commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:46f41114ae292d16fbdac589656d1673050e2bbff350e0e52344cbb59569d30f`, published by [builder run `38085099400`](https://github.com/ydixken/pgcopydb-operator/actions/runs/38085099400).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`baa94eead075b26f98f0e7e482ed596db52f653d`](https://github.com/ydixken/pgcopydb/commit/baa94eead075b26f98f0e7e482ed596db52f653d).
+The version string is `0.18.94.gbaa94ee`, derived from `git describe` (`v0.18-94-gbaa94ee`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is ninety-four commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:ccca41b95be18d868f8c867650ea1c022ca8b3e6e825265dbdeb7891510c75ad`, published by [builder run `38164419513`](https://github.com/ydixken/pgcopydb-operator/actions/runs/38164419513).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -99,13 +99,22 @@ Receive used to send status every 10 seconds, so with a timeout below that a rec
 The default timeout of 60s keeps the 10 second interval.
 The PR head passed [Run Tests `38066109887`](https://github.com/ydixken/pgcopydb/actions/runs/38066109887) and [Nightly Tests `38066111693`](https://github.com/ydixken/pgcopydb/actions/runs/38066111693).
 
+Fork PRs [#27](https://github.com/ydixken/pgcopydb/pull/27), [#28](https://github.com/ydixken/pgcopydb/pull/28), [#29](https://github.com/ydixken/pgcopydb/pull/29) and [#30](https://github.com/ydixken/pgcopydb/pull/30), merged as `d87541f`, `9c6f96b`, `2ec35f3` and `baa94ee`, raise follow throughput.
+#27 wakes apply without waiting on the receive pipe after a pass that made progress.
+#28 runs the replay database at SQLite `synchronous=NORMAL` with indexes for its lookups, and writes the sentinel `replay_lsn` at most once a second.
+#29 commits receive output in groups.
+#30 commits up to 100 source transactions in one target transaction, which `spec.follow.applyGroupTransactions` sets through `PGCOPYDB_APPLY_GROUP_TXNS`.
+[Performance tuning](../../docs/operations/performance.md#follow-receive-and-apply) has the measurements.
+The merged commit `baa94ee` passed [Run Tests `38163150329`](https://github.com/ydixken/pgcopydb/actions/runs/38163150329) and [Nightly Tests `38163152578`](https://github.com/ydixken/pgcopydb/actions/runs/38163152578).
+
 > [!warning]
-> Each source transaction waits for target WAL durability before apply progress advances.
-> This raises latency for workloads with many small transactions; [Performance tuning](../../docs/operations/performance.md#follow-receive-and-apply) has the measured cost.
+> Each apply group waits for target WAL durability before apply progress advances.
+> With `applyGroupTransactions: 1` that is every source transaction, which raises latency for workloads with many small transactions.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all eleven older versions so upgrading the operator does not suppress counters for existing workers.
+The manager and chart allow `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all twelve older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.76.gf9b328b` has the #26 status interval fix but none of the throughput changes from #27 to #30.
 Version `0.18.74.gc682dce` has the #25 reconnect fix but not the #26 status interval fix.
 Version `0.18.72.g2aa91e7` has the #24 receive fix but not the #25 reconnect fix.
 Version `0.18.70.gbb8dbfc` has the four follow fixes but not the #24 receive fix.

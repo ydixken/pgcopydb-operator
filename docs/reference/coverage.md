@@ -43,6 +43,7 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--publication` | `spec.follow.publication` | Empty lets pgcopydb create and drop its own. |
 | `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`; other plugins would silently ignore it. |
 | `--replay-no-op-updates` | `spec.follow.replayNoOpUpdates` | |
+| `PGCOPYDB_APPLY_GROUP_TXNS` | `spec.follow.applyGroupTransactions` | An environment variable, not a flag; the worker Job sets it only when the field is set. |
 | `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name; a set name is pattern-restricted to PostgreSQL's slot charset. |
 | `--create-slot` | not exposed | `clone --follow` creates the slot during setup; nothing to configure. |
 | `--origin` | operator-managed | Always the same generated per-Migration name as the slot; unique, so fan-in stays safe. |

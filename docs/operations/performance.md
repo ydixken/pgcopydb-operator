@@ -7,8 +7,65 @@ In follow mode, source decoding, receive-spool writes, inline transformation, an
 
 ## Follow receive and apply
 
-The bundled pgcopydb `0.18.76.gf9b328b` retains the receive batching from `0.18.10.gaadc4bf`: SQLite transactions replace per-row and per-column commits, with SQLite `synchronous=FULL` unchanged.
-It applies each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement, so a burst of them on such a table applies more slowly than on a keyed table; that cost is unmeasured.
+The bundled pgcopydb `0.18.94.gbaa94ee` carries four changes to the follow pipeline, fork PRs #27 to #30:
+
+1. Apply waits on the receive pipe only after a pass that found nothing to do, and it returns from the pipeline sync as soon as the sync result is in ([#27](https://github.com/ydixken/pgcopydb/pull/27)).
+1. The replay database (`*-replay.db`) runs with SQLite `synchronous=NORMAL`, gets indexes for the next-event and transaction lookups, and apply writes the sentinel `replay_lsn` at most once a second ([#28](https://github.com/ydixken/pgcopydb/pull/28)).
+   A power loss can drop the last transactions of `*-replay.db`; apply resumes from the target replication origin and transforms them again from `*-output.db`, which stays at `synchronous=FULL`.
+1. Receive commits `*-output.db` in groups: a batch commits when the replication socket is drained, when it is 50 ms old, at every flush and close, and before a file rotation ([#29](https://github.com/ydixken/pgcopydb/pull/29)).
+1. Apply commits several source transactions in one target transaction, an apply group ([#30](https://github.com/ydixken/pgcopydb/pull/30)).
+
+Apply still sends each DELETE on a `REPLICA IDENTITY FULL` table without a key as its own statement, so a burst of them on such a table applies more slowly than on a keyed table; that cost is unmeasured.
+
+### Apply groups
+
+A group closes after 100 source transactions, 10,000 rows or 200 ms.
+It also closes at endpos, before a keepalive, and when the transform has no further complete transaction to hand over.
+The group COMMIT moves the replication origin to the COMMIT LSN of its last member, so a refused group leaves none of its rows on the target and the origin before the group.
+A member after the first that holds a TRUNCATE starts a new group, because PostgreSQL refuses a TRUNCATE while deferred trigger events are pending in the same transaction.
+A member that holds a ROLLBACK row starts a new group too.
+Deferred triggers and constraints on the target run at the group COMMIT, so they see the rows of every member.
+On PostgreSQL 17 and later, apply sets `transaction_timeout` to 0 in its own session, because a group can stay open while apply transforms the next source transaction.
+
+`spec.follow.applyGroupTransactions` sets the transaction limit (`PGCOPYDB_APPLY_GROUP_TXNS`).
+Unset leaves pgcopydb's default of 100.
+Set it to 1 to commit every source transaction in its own target transaction, as runners before `0.18.94.gbaa94ee` do.
+The row and time limits keep pgcopydb's defaults.
+
+> [!note]
+> The worker Job reads the field when the operator creates it, so a change reaches a running Migration on its next attempt.
+> Runners older than `0.18.94.gbaa94ee` ignore the variable.
+
+### What we measured
+
+We measured each change on one cluster, with the worker at 500m CPU and 64Mi memory, its work volume on Longhorn, and source `wal_sender_timeout` at 60s.
+The workload is pgbench `tpcb-like` with one client on the source: 3,000 transactions written while apply was stopped, then drained to endpos by `pgcopydb follow`.
+Every run compared equal to the source afterwards.
+
+| Change | Build before | With the change |
+| --- | ---: | ---: |
+| #27 apply wakeup | 32.7 txn/s | 65.8 txn/s |
+| #28 replay database | 65.8 txn/s | 174.4 txn/s |
+| #29 receive group commit | 185.1 txn/s | 189.4 txn/s |
+| #30 apply groups | 164.4 txn/s | 517.9 and 511.8 txn/s |
+
+The #29 and #30 rows compare against the build before them in the same session.
+The #27 row compares against `0.18.70.gbb8dbfc` and the #28 row against the #27 build, each from an earlier session of the same setup.
+#29 does not move this workload because apply, not receive, bounds it; it shortens receive instead.
+With a 200,000-transaction backlog, receive finished after 57 s instead of 1,101 s.
+
+With all four changes, a 200,000-transaction backlog drained at 513.7 txn/s in 389.3 s, in 2,004 target transactions.
+With `PGCOPYDB_APPLY_GROUP_TXNS=1` the same 3,000-transaction run gave 168.5 txn/s against 164.4 for the build without apply groups.
+A workload where 1 in 10 transactions truncates a table ran at 267.2 txn/s against 198.8 without apply groups.
+
+Before apply groups, one apply connection committed at most about 1 / (target commit latency) source transactions per second, roughly 800 per second on the [measured target](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#one-durable-commit-per-transaction-caps-a-single-connection-near-800-per-second).
+A group now waits for one durable target COMMIT, so commit latency is spread over up to 100 source transactions.
+These numbers come from one setup and one workload shape, so rehearse catch-up under the intended workload.
+A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
+
+### Receive batching in `0.18.10.gaadc4bf`
+
+`0.18.10.gaadc4bf` replaced per-row and per-column SQLite commits in receive with SQLite transactions.
 [Fork PR #7](https://github.com/ydixken/pgcopydb/pull/7) records the patch and these measurements, for one source transaction containing 20,000 four-column rows.
 These measurements predate the [certified keepalive feedback](../design/follow-diagnostics.md) in `0.18.13.g4873c18` and the bootstrap recovery in `0.18.15.gea2dc96`; they measure neither version.
 The before/after runs used the same configuration, but not identical volume or cache state.
@@ -23,13 +80,6 @@ Before values cover the row-only receive window; after values include the SQLite
 > There is no retained commit-inclusive baseline trace.
 > The conservative mixed-window ratios are about 330x on Longhorn and 164x on NVMe: receive-window speedups, not end-to-end migration speedups.
 > These individual bursts do not establish sustained throughput or measure target WAL durability waits.
-
-Apply confirms each target COMMIT before publishing data progress and uses `synchronous_commit=on` for each source transaction.
-Each transaction takes two round trips to the target: a pipeline sync before the COMMIT, then the COMMIT sent in one query with its origin update ([fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
-One apply connection therefore commits at most about 1 / (target commit latency) source transactions per second.
-On the [measured target](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#one-durable-commit-per-transaction-caps-a-single-connection-near-800-per-second), that was roughly 800 per second.
-Batching removes the measured per-insert sync cost, not the need to rehearse catch-up under the intended workload.
-A backlog above the catch-up threshold cannot drain while source changes keep arriving faster than the whole pipeline can process them.
 
 ## What the operator decides
 

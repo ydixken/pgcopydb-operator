@@ -318,6 +318,14 @@ spec:
                     x-kubernetes-validations:
                     - message: entries must be non-empty table names (or "*")
                       rule: self.all(x, x != '')
+                  applyGroupTransactions:
+                    description: |-
+                      applyGroupTransactions caps how many source transactions apply commits
+                      in one target transaction (PGCOPYDB_APPLY_GROUP_TXNS). Unset leaves
+                      pgcopydb's default of 100; 1 commits every source transaction on its own.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
@@ -2533,6 +2541,14 @@ spec:
                     x-kubernetes-validations:
                     - message: entries must be non-empty table names (or "*")
                       rule: self.all(x, x != '')
+                  applyGroupTransactions:
+                    description: |-
+                      applyGroupTransactions caps how many source transactions apply commits
+                      in one target transaction (PGCOPYDB_APPLY_GROUP_TXNS). Unset leaves
+                      pgcopydb's default of 100; 1 commits every source transaction on its own.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
