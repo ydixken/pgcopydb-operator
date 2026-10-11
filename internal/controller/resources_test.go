@@ -231,6 +231,35 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 	}
 }
 
+// TestBuildJob_ApplyGroupTransactions checks the worker gets
+// PGCOPYDB_APPLY_GROUP_TXNS only for a follow Migration that sets the size.
+func TestBuildJob_ApplyGroupTransactions(t *testing.T) {
+	cases := []struct {
+		name   string
+		follow *v1beta1.FollowOptions
+		want   string
+	}{
+		{"no follow", nil, ""},
+		{"follow, size unset", &v1beta1.FollowOptions{Enabled: true}, ""},
+		{"follow disabled", &v1beta1.FollowOptions{ApplyGroupTransactions: 5}, ""},
+		{"one transaction per commit", &v1beta1.FollowOptions{Enabled: true, ApplyGroupTransactions: 1}, "1"},
+		{"larger group", &v1beta1.FollowOptions{Enabled: true, ApplyGroupTransactions: 500}, "500"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Follow = tc.follow
+			job, err := buildJob(m, "img", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := envValue(job.Spec.Template.Spec.Containers[0].Env, "PGCOPYDB_APPLY_GROUP_TXNS"); got != tc.want {
+				t.Fatalf("PGCOPYDB_APPLY_GROUP_TXNS = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildVerifyJob_AuthAndPredicate covers the live-found verify-gate
 // defects: the script must run behind the passfile prelude (bare /bin/sh
 // failed auth and falsely refuted every drain), the fast path must pass only

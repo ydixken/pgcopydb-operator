@@ -381,6 +381,13 @@ type FollowOptions struct {
 	// +optional
 	ReplayNoOpUpdates bool `json:"replayNoOpUpdates,omitempty"`
 
+	// applyGroupTransactions caps how many source transactions apply commits
+	// in one target transaction (PGCOPYDB_APPLY_GROUP_TXNS). Unset leaves
+	// pgcopydb's default of 100; 1 commits every source transaction on its own.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ApplyGroupTransactions int32 `json:"applyGroupTransactions,omitempty"`
+
 	// allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit
 	// would otherwise fail on, as schema-qualified names exactly as the preflight prints them
 	// ("*" covers every offender). UPDATE or DELETE on an acknowledged table still fails on the

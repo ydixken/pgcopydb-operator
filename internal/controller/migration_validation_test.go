@@ -49,6 +49,14 @@ var _ = Describe("Migration CRD validation", func() {
 		Expect(err.Error()).To(ContainSubstring("set plugin: wal2json"))
 	})
 
+	It("rejects an applyGroupTransactions below 1", func() {
+		m := validMigration("val-apply-group-reject")
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, ApplyGroupTransactions: -1}
+		err := k8sClient.Create(ctx, m)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("applyGroupTransactions"))
+	})
+
 	It("accepts wal2jsonNumericAsString with plugin wal2json", func() {
 		m := validMigration("val-wal2json-accept")
 		m.Spec.Follow = &v1beta1.FollowOptions{
