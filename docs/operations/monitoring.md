@@ -142,8 +142,9 @@ A pass whose source row carried no confirmed position keeps the earlier replay a
 Apply backlog reads both operands from the same walsender row, so the order that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 
-The bundled runner, pgcopydb `0.18.76.gf9b328b`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
-It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/f9b328b028d62497f0aaadc6baf8dabc3f609d1d/src/bin/pgcopydb/ld_stream.c#L1528-L1553) from the current connection, advancing network feedback across filtered WAL.
+The bundled runner, pgcopydb `0.18.94.gbaa94ee`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
+It writes that progress at most once a second, so the replay gauge can trail the target replication origin by about a second.
+It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/baa94eead075b26f98f0e7e482ed596db52f653d/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
 That feedback does not move the target replication origin or the sentinel's data replay cursor; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 An advancing replay gauge on an idle publication therefore does not imply new target rows or measure applied-data throughput.
 Other supported runner versions differ; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
