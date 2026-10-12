@@ -1006,9 +1006,9 @@ func (r *MigrationReconciler) ensureJob(ctx context.Context, m *v1beta1.Migratio
 	return nil, true, nil
 }
 
-// recordWorkNode stores the node of the newest scheduled Job pod (every one
-// mounts the work PVC) in annotationWorkNode for runnerAffinity. Best effort:
-// the preference only saves a volume detach, so a failure must not stop a pass.
+// recordWorkNode stores the newest scheduled Job pod's node in annotationWorkNode
+// for runnerAffinity; only the preflight, which precedes every worker, lacks the PVC.
+// Best effort: the preference only saves a volume detach, so a failure must not stop a pass.
 func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Migration) {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(m.Namespace),

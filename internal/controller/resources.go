@@ -67,6 +67,9 @@ func labels(m *v1beta1.Migration) map[string]string {
 	return result
 }
 
+// workdirVolume is the pod volume mounted at pgcopydb.WorkMount.
+const workdirVolume = "workdir"
+
 func workPVCName(m *v1beta1.Migration) string   { return m.Name + "-work" }
 func filtersCMName(m *v1beta1.Migration) string { return m.Name + "-filters" }
 func jobName(m *v1beta1.Migration, attempt int32) string {
@@ -1222,6 +1225,13 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	if err != nil {
 		return nil, err
 	}
+	// The checks read nothing from the work dir. Without the PVC, a volume
+	// detach cannot get the pod deleted and take the verdict in its log with it.
+	for i := range job.Spec.Template.Spec.Volumes {
+		if v := &job.Spec.Template.Spec.Volumes[i]; v.Name == workdirVolume {
+			v.VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+		}
+	}
 	if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {
 		filters := struct {
 			Include []string `json:"include"`
@@ -1380,7 +1390,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 
 	volumes := []corev1.Volume{
 		{
-			Name: "workdir",
+			Name: workdirVolume,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: workPVCName(m),
@@ -1392,7 +1402,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	mounts := []corev1.VolumeMount{
-		{Name: "workdir", MountPath: pgcopydb.WorkMount},
+		{Name: workdirVolume, MountPath: pgcopydb.WorkMount},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
 	for _, mat := range sets {
