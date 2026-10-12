@@ -84,7 +84,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | Condition | Status | Reason | Appears when |
 |---|---|---|---|
 | `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly and the preflight passed; refreshed on every reconcile of an active Migration. |
-| `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unbound PVC, unschedulable). |
+| `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unschedulable). |
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
 | `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability or ownership, a target clone privilege, a source table that row-level security would filter, an all-databases superuser or database-listing probe, or a follow prerequisite (including unlogged tables in scope) failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. When the preflight log stays unreadable for two minutes after the Job fails, the message carries the read error and the Job name instead. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |

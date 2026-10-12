@@ -65,7 +65,7 @@ If you set `spec.suspend` while the gate runs, the operator deletes the prefligh
 The gate re-runs the preflight on resume.
 While the gate runs, the `Validated` condition is `Unknown` with reason `PreflightRunning`.
 If the preflight pod cannot start, the kubelet's reason lands verbatim in the condition message.
-A misnamed Secret, an unbound work PVC, and an unschedulable node all reach that path.
+A misnamed Secret and an unschedulable node both reach that path.
 
 Connections time out after 10 seconds, and the whole preflight after 30 minutes.
 A black-holed endpoint fails rather than hangs.

@@ -48,7 +48,7 @@ For the real run, create a separate Migration without it.
 
 > [!important]
 > `spec.dryRun` has nothing to do with `kubectl apply --dry-run`: the Migration is created, and its preflight Job connects to both databases.
-> It still allocates the work PVC, because the preflight pod mounts it.
+> It still creates the work PVC, although the preflight pod does not mount it.
 > A passed dry run reports as `Completed`: Argo CD shows it `Healthy`, the fleet dashboard counts it as completed, and `kubectl wait --for=condition=Complete` returns.
 > A dry run is final whether it passes or fails, and it never turns into the real run.
 

@@ -601,6 +601,41 @@ func TestBuildPreflightJob(t *testing.T) {
 	}
 }
 
+// TestBuildPreflightJob_NoWorkPVC pins #373: a storage detach deleted the
+// preflight pod and its verdict, so only the Jobs that read the work dir mount it.
+func TestBuildPreflightJob_NoWorkPVC(t *testing.T) {
+	m := passwordMigration()
+	workdir := func(job *batchv1.Job) corev1.Volume {
+		t.Helper()
+		for _, v := range job.Spec.Template.Spec.Volumes {
+			if v.Name == "workdir" {
+				return v
+			}
+		}
+		t.Fatalf("%s has no workdir volume", job.Name)
+		return corev1.Volume{}
+	}
+	pf, err := buildPreflightJob(m, "img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range pf.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			t.Fatalf("preflight mounts PVC %q in volume %s", v.PersistentVolumeClaim.ClaimName, v.Name)
+		}
+	}
+	if workdir(pf).EmptyDir == nil {
+		t.Fatal("preflight workdir is not an emptyDir")
+	}
+	verify, err := buildVerifyJob(m, "img", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pvc := workdir(verify).PersistentVolumeClaim; pvc == nil || pvc.ClaimName != workPVCName(m) {
+		t.Fatalf("verify workdir = %+v, want PVC %s", workdir(verify).VolumeSource, workPVCName(m))
+	}
+}
+
 // TestBuildPreflightJob_PluginAndAllowlist pins the wiring of the two
 // preflight extensions: the wal2json note appears only when that plugin is
 // selected (pgoutput and test_decoding ship with PostgreSQL, nothing to

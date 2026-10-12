@@ -105,7 +105,7 @@ Preflight does not install extensions, and source and target versions need not m
 
 The Migration sits in `Validating`, and `Validated` is `Unknown` with reason `PreflightRunning`.
 The preflight pod cannot start, and the condition message carries the kubelet reason verbatim: `CreateContainerConfigError`, `Unschedulable`, or a pull error.
-A misnamed credentials Secret or an unbound work PersistentVolumeClaim (PVC) are the typical causes.
+A misnamed credentials Secret is the typical cause.
 
 Fix the object the message names.
 The gate then resumes on its own.
