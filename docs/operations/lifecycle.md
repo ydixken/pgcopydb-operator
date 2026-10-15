@@ -59,8 +59,9 @@ The delete is in the foreground, so pgcopydb receives SIGTERM and shuts down cle
 The phase becomes `Suspended`.
 Set `spec.suspend` back to false to start the next attempt, which resumes from the work-dir catalogs.
 Each resume consumes one attempt from the `backoffLimit` budget.
-A live migration suspended after its replication slot exists and before its tables are copied cannot resume that copy; see [Retries and resume](#retries-and-resume).
-Its resume fails and the start-over takes a second attempt, so budget two attempts for each such suspend.
+A live migration suspended after its replication slot exists and before all its table data is copied cannot resume that copy, and neither can one whose worker dies in that window; see [Retries and resume](#retries-and-resume).
+With `spec.clone.dropIfExists: true`, the resume fails and the start-over takes a second attempt, so budget two attempts for each such suspend.
+Without `dropIfExists`, the refused resume ends the Migration as `SnapshotLost`.
 
 > [!warning]
 > Suspending a live migration does NOT drop the replication slot.
