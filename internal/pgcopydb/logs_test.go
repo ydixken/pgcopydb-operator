@@ -584,8 +584,9 @@ func TestSchemaDriftLine(t *testing.T) {
 }
 
 func TestSnapshotLostLine(t *testing.T) {
-	const refusal = `Refusing to resume the copy: slot \"pgcopydb\" at LSN 0\/1BF8B20 was created with snapshot 00000003-00000002-1 by an earlier run, and 1 of 2 tables are not copied yet`
-	const want = `Refusing to resume the copy: slot "pgcopydb" at LSN 0/1BF8B20 was created with snapshot 00000003-00000002-1 by an earlier run, and 1 of 2 tables are not copied yet`
+	// The fork's guard at cli_clone_follow.c:712, JSON-escaped as the runner logs it.
+	const refusal = `Refusing to resume the copy: 2 of 3 tables still need their data, and --not-consistent would copy them without snapshot \"0000007E-00000005-1\" of the re-used replication slot \"resume_guard\" created at 0\/18FD930`
+	const want = `Refusing to resume the copy: 2 of 3 tables still need their data, and --not-consistent would copy them without snapshot "0000007E-00000005-1" of the re-used replication slot "resume_guard" created at 0/18FD930`
 	cases := []struct {
 		name string
 		raw  string
@@ -594,9 +595,8 @@ func TestSnapshotLostLine(t *testing.T) {
 		{
 			// Only the prefix is the fork's contract; the rest of the wording may change.
 			name: "a follow resume refuses to copy without the slot snapshot",
-			raw: `{"error_severity":"INFO","message":"STEP 1: fetch source database tables, indexes, and sequences"}
-{"error_severity":"FATAL","message":"` + refusal + `"}
-{"error_severity":"INFO","message":"Start over with --restart, adding --drop-if-exists when the target already has the schema"}`,
+			raw: `{"timestamp":"2026-10-15 20:41:03.512","pid":1,"error_level":8,"error_severity":"FATAL","file_name":"cli_clone_follow.c","file_line_num":712,"message":"` + refusal + `"}
+{"timestamp":"2026-10-15 20:41:03.512","pid":1,"error_level":5,"error_severity":"INFO","file_name":"cli_clone_follow.c","file_line_num":721,"message":"Run pgcopydb stream cleanup with the same --dir, --slot-name and --origin as this run, then start over with --restart (and --drop-if-exists when the target already has the schema), or resume without --not-consistent while pgcopydb snapshot --follow keeps the snapshot alive"}`,
 			want: want,
 		},
 		{

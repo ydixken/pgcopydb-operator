@@ -708,7 +708,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 	// The first attempt dies after the slot exists; pgcopydb refuses the resume.
 	const (
 		sourceDied     = `{"error_severity":"ERROR","message":"[SOURCE 41] FATAL:  terminating connection due to administrator command"}` + "\n"
-		refusedResume  = `{"error_severity":"FATAL","message":"Refusing to resume the copy: slot \"s\" at LSN 0\/1BF8B20, 1 of 2 tables not copied"}` + "\n"
+		refusedResume  = `{"timestamp":"2026-10-15 20:41:03.512","pid":1,"error_level":8,"error_severity":"FATAL","file_name":"cli_clone_follow.c","file_line_num":712,"message":"Refusing to resume the copy: 2 of 3 tables still need their data, and --not-consistent would copy them without snapshot \"0000007E-00000005-1\" of the re-used replication slot \"resume_guard\" created at 0\/18FD930"}` + "\n"
 		refusalMessage = "Refusing to resume the copy: "
 	)
 	failAttempt := func(r *MigrationReconciler, name string, attempt int, log string) *v1beta1.Migration {
