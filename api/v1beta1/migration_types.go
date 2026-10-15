@@ -220,7 +220,7 @@ type CloneOptions struct {
 
 	// dropIfExists issues pg_restore --clean --if-exists on the target. A live
 	// migration needs it to start over after pgcopydb refuses to resume its copy;
-	// without it, that retry fails as SnapshotLost.
+	// without it, the Migration fails terminally as SnapshotLost.
 	// +optional
 	DropIfExists bool `json:"dropIfExists,omitempty"`
 
