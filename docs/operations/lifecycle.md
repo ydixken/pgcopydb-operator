@@ -90,7 +90,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   Without `dropIfExists`, the Migration ends as `SnapshotLost`.
   The refused resume and the start-over each consume one attempt, so a failure between the slot's creation and the end of the table copy costs two.
   Size `spec.backoffLimit` for that: the default of 3 survives one such failure, not two.
-  The refusal is not in every runner version; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
+  Runners older than `0.18.104.g362a559` lack the refusal; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
   A runner without it resumes the copy anyway, and the apply can then fail on a duplicate key or leave the target diverged.
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both remove the Job.
