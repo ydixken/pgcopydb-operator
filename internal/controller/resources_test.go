@@ -46,7 +46,7 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
-	patchedVersionForTest    = "0.18.98.g944abcc"
+	patchedVersionForTest    = "0.18.104.g362a559"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -339,8 +339,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -425,7 +425,7 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -550,6 +550,60 @@ func TestPublicationDropGuard(t *testing.T) {
 			exportAt := strings.Index(prelude, "export PGPASSFILE=")
 			if guardAt < 0 || execAt < 0 || exportAt < 0 || exportAt >= guardAt || guardAt >= execAt {
 				t.Fatalf("guard misplaced in prelude (export=%d guard=%d exec=%d):\n%s", exportAt, guardAt, execAt, prelude)
+			}
+		})
+	}
+}
+
+func TestBuildJob_StartsOverAfterSnapshotLost(t *testing.T) {
+	follow := func(pub, reason string, drop bool) *v1beta1.Migration {
+		m := passwordMigration()
+		m.Spec.Clone.DropIfExists = drop
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: pub}
+		m.Status.Conditions = []metav1.Condition{{
+			Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reason,
+		}}
+		return m
+	}
+	slot := pgcopydb.SlotName("ns", "m")
+	cleanup := "pgcopydb stream cleanup --dir " + pgcopydb.WorkDir + " --slot-name " + slot + " --origin " + slot + "\n"
+	const guard = "DROP PUBLICATION IF EXISTS"
+
+	cases := []struct {
+		name                  string
+		m                     *v1beta1.Migration
+		attempt               int32
+		fresh, cleans, guards bool
+	}{
+		{"a refused resume starts over", follow("", reasonSnapshotLost, true), 3, true, true, true},
+		{"a user publication is left to stream cleanup", follow("userpub", reasonSnapshotLost, true), 3, true, true, false},
+		{"attempt 1 has nothing to clean up", follow("", reasonSnapshotLost, true), 1, true, false, false},
+		{"any other reason resumes", follow("", reasonCloneRunning, true), 3, false, false, true},
+		// spec.clone is mutable: the resume is refused again and ends SnapshotLost.
+		{"dropIfExists unset after the latch resumes", follow("", reasonSnapshotLost, false), 3, false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job, err := buildJob(tc.m, "img", tc.attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := job.Spec.Template.Spec.Containers[0]
+			for flag, want := range map[string]bool{
+				"--restart": tc.fresh, "--resume": !tc.fresh, "--not-consistent": !tc.fresh,
+				"--drop-if-exists": tc.m.Spec.Clone.DropIfExists,
+			} {
+				if slices.Contains(c.Args, flag) != want {
+					t.Errorf("%s present = %v, want %v: %v", flag, !want, want, c.Args)
+				}
+			}
+			prelude := c.Command[2]
+			cleanupAt, guardAt := strings.Index(prelude, cleanup), strings.Index(prelude, guard)
+			if (cleanupAt >= 0) != tc.cleans || (guardAt >= 0) != tc.guards {
+				t.Fatalf("cleanup at %d (want %v), guard at %d (want %v):\n%s", cleanupAt, tc.cleans, guardAt, tc.guards, prelude)
+			}
+			if tc.cleans && tc.guards && guardAt < cleanupAt {
+				t.Fatalf("the publication guard runs before stream cleanup:\n%s", prelude)
 			}
 		})
 	}

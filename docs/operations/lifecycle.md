@@ -59,6 +59,9 @@ The delete is in the foreground, so pgcopydb receives SIGTERM and shuts down cle
 The phase becomes `Suspended`.
 Set `spec.suspend` back to false to start the next attempt, which resumes from the work-dir catalogs.
 Each resume consumes one attempt from the `backoffLimit` budget.
+A live migration suspended after its replication slot exists and before all its table data is copied cannot resume that copy, and neither can one whose worker dies in that window; see [Retries and resume](#retries-and-resume).
+With `spec.clone.dropIfExists: true`, the resume fails and the start-over takes a second attempt, so budget two attempts for each such suspend.
+Without `dropIfExists`, the refused resume ends the Migration as `SnapshotLost`.
 
 > [!warning]
 > Suspending a live migration does NOT drop the replication slot.
@@ -79,6 +82,16 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   The retry skips tables and indexes already recorded done in pgcopydb's catalogs, and restarts interrupted copies.
   `--not-consistent` is needed because the failed attempt's snapshot died with its process.
   The retry copies the remaining tables under a new snapshot.
+- A live migration cannot resume its table copy that way once its replication slot exists.
+  The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
+  pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.
+  The start-over runs `pgcopydb stream cleanup`, which drops the slot, the automatic publication, and the target origin, then `--restart`.
+  It needs `spec.clone.dropIfExists: true`, so the restore replaces the objects the earlier attempts left on the target.
+  Without `dropIfExists`, the Migration ends as `SnapshotLost`.
+  The refused resume and the start-over each consume one attempt, so a failure between the slot's creation and the end of the table copy costs two.
+  Size `spec.backoffLimit` for that: the default of 3 survives one such failure, not two.
+  Runners older than `0.18.104.g362a559` lack the refusal; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
+  A runner without it resumes the copy anyway, and the apply can then fail on a duplicate key or leave the target diverged.
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both remove the Job.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
@@ -93,8 +106,9 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   Usually DDL ran on the source, and every retry would stop at the same change.
 
 When worker logs are readable, the `AttemptFailed` event names the pgcopydb error after each failed attempt.
+A start-over emits a `SnapshotLost` event in its place.
 The terminal `Failed` condition keeps that error when the budget drains.
-When the log read fails, the operator retries it for two minutes after the Job fails, so a short API server outage does not cost the `PermissionDenied`, `DiskFull`, or `SchemaDrift` check.
+When the log read fails, the operator retries it for two minutes after the Job fails, so a short API server outage does not cost the `PermissionDenied`, `DiskFull`, `SchemaDrift`, or `SnapshotLost` check.
 Past that, the attempt retries without the check, and the event and the condition carry the read error instead.
 The log tail can contain a pg_restore database error before generic shutdown messages.
 In that case, retry events and the terminal `Failed` condition keep it, with the affected relation.

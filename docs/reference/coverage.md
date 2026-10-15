@@ -34,8 +34,8 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--requirements` | not exposed | Needs a file produced by `pgcopydb list extensions --requirements --json`, which has no declarative form in the spec. |
 | `--filters` | `spec.clone.filters` | Rendered to the INI, mounted from an operator-owned ConfigMap. All eight filter sections are covered. |
 | `--fail-fast` | `spec.clone.failFast` | |
-| `--restart` | operator-managed | First attempt only: any pre-existing work-dir state is foreign and gets wiped. |
-| `--resume` | operator-managed | Retry attempts resume from the work-dir catalogs. |
+| `--restart` | operator-managed | Attempt 1, which wipes any pre-existing work-dir state as foreign, and a live migration's retry that [starts over](../operations/lifecycle.md#retries-and-resume) after pgcopydb refuses its resume. |
+| `--resume` | operator-managed | Every other retry resumes from the work-dir catalogs. |
 | `--not-consistent` | operator-managed | Paired with `--resume`: the failed attempt's snapshot died with its process. |
 | `--snapshot` | not exposed | Needs a snapshot-holder sidecar to keep the exported snapshot alive for the whole clone. |
 | `--follow` | `spec.follow.enabled` | |

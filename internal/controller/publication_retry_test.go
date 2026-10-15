@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
 
@@ -37,13 +39,19 @@ func publicationRetryWorker(t *testing.T, slot, uri string) (*exec.Cmd, string) 
 	m := passwordMigration()
 	m.Spec.Source.PasswordSecretRef = nil
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: slot}
-	job, err := buildJob(m, "img", 2)
+	return preludeWorker(t, m, 2, uri, "#!/bin/sh\nprintf '%s\\n' '"+publicationWorkerStarted+"'\n")
+}
+
+// preludeWorker returns the worker command of m's attempt with pgcopydbStub as
+// the first pgcopydb on PATH, and the directory that holds the stub.
+func preludeWorker(t *testing.T, m *v1beta1.Migration, attempt int32, uri, pgcopydbStub string) (*exec.Cmd, string) {
+	t.Helper()
+	job, err := buildJob(m, "img", attempt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "pgcopydb"),
-		[]byte("#!/bin/sh\nprintf '%s\\n' '"+publicationWorkerStarted+"'\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "pgcopydb"), []byte(pgcopydbStub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	c := job.Spec.Template.Spec.Containers[0]
@@ -52,6 +60,38 @@ func publicationRetryWorker(t *testing.T, slot, uri string) (*exec.Cmd, string) 
 	cmd := exec.CommandContext(commandCtx, c.Command[0], append(c.Command[1:], c.Args...)...)
 	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "PGCOPYDB_SOURCE_PGURI="+uri)
 	return cmd, dir
+}
+
+// TestStartOverPrelude runs a start-over attempt's prelude on stub binaries:
+// stream cleanup runs before the publication guard, and a failed one starts nothing.
+func TestStartOverPrelude(t *testing.T) {
+	for _, code := range []int{0, 1} {
+		t.Run(fmt.Sprintf("stream cleanup exits %d", code), func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Source.PasswordSecretRef = nil
+			m.Spec.Clone.DropIfExists = true
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+			m.Status.Conditions = []metav1.Condition{{
+				Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reasonSnapshotLost,
+			}}
+			calls := filepath.Join(t.TempDir(), "calls")
+			cmd, dir := preludeWorker(t, m, 3, "unused", fmt.Sprintf(
+				"#!/bin/sh\necho \"pgcopydb $1\" >> '%s'\n[ \"$1\" != stream ] || exit %d\n", calls, code))
+			if err := os.WriteFile(filepath.Join(dir, "psql"),
+				[]byte("#!/bin/sh\necho psql >> '"+calls+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want := "pgcopydb stream\npsql\npgcopydb clone\n"
+			if code != 0 {
+				want = "pgcopydb stream\n"
+			}
+			out, err := cmd.CombinedOutput()
+			got, _ := os.ReadFile(calls)
+			if (err != nil) != (code != 0) || string(got) != want {
+				t.Fatalf("err=%v, calls=%q, want %q, output=%s", err, got, want, out)
+			}
+		})
+	}
 }
 
 func TestPublicationRetryShellFailure(t *testing.T) {

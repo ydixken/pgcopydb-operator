@@ -90,6 +90,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy, index or vacuum workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
+| `CloneCompleted` | `False` | `SnapshotLost` | Live migration with `spec.clone.dropIfExists`: pgcopydb refused to resume the copy without the replication slot's snapshot, so the next attempt starts over. The message carries the refusal; the next attempt's `CloneRunning` replaces it. |
 | `CloneCompleted` | `False` | `TablesEmptyOnTarget` | Live migration: the worker logged the base copy finished, but the pass's own sample found tables holding rows on the source and none on the target, which a `--resume` after killed attempts can produce. The message names them. The marker is not trusted, the stream is reported but not driven, and the reason stands until a sample finds a row in each of them. |
 | `CloneCompleted` | `False` | `CloneIncomplete` | Clone-only migration: the worker exited 0, but pgcopydb's own catalog, read by a Job that mounts the same work dir once the worker is gone, counts tables not done. The Migration fails with the same reason. |
 | `CloneCompleted` | `True` | `CloneSucceeded` | Clone-only migration: the worker Job finished, and pgcopydb's catalog, where it could be read, counted every table done. |
@@ -116,6 +117,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. An unreadable worker log is read again for two minutes after the Job fails; past that the attempt retries unclassified, with the read error in its message. |
 | `Failed` | `True` | `DiskFull` | An attempt filled the work volume; classified like `PermissionDenied`, and the message carries the matched log line. A full target retries. |
 | `Failed` | `True` | `SchemaDrift` | The apply hit a change naming a column the target lacks (SQLSTATE 42703), usually because DDL ran on the source; classified like `PermissionDenied`. The message carries the matched log line and the remedy. Other schema errors retry. |
+| `Failed` | `True` | `SnapshotLost` | pgcopydb refused to resume a live migration's copy without the replication slot's snapshot, and `spec.clone.dropIfExists` is false, so the attempt cannot start over on a target that holds the earlier attempts' objects. The message carries the refusal and the remedy. |
 | `Failed` | `True` | `CloneIncomplete` | A clone-only worker exited 0 while pgcopydb's catalog counted tables not done. Do not use the target as a complete copy. |
 | `Failed` | `True` | `DrainIncomplete` | Cutover drain verification refuted completeness. |
 | `Failed` | `True` | `OwnershipFailed` | The ownership handover failed; the data is on the target. |
@@ -139,8 +141,9 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
+| `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy. With `spec.clone.dropIfExists` (action `Retry`), the next attempt drops the slot and starts over with `--restart --drop-if-exists`; without it, this is the terminal failure event (action `Fail`) and no attempt follows. |
 | `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; the message names them. Once per refusal, see the condition reason of the same name. |
-| `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could resume. |
+| `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could run. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants, or in a dry run the grants that would be applied. |
 | `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |

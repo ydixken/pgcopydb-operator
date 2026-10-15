@@ -2529,14 +2529,13 @@ func grantTargetFollowPrivileges(db string) {
 	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster)))
 }
 
-// resetSourceReplication drops what a crashed follow run may have left on the
-// source: live-write rows (the fresh-clone scenario asserts exact fixture
-// counts), pgcopydb replication slots, and auto-created publications. Slot and
-// publication names are deterministic per Migration name, so a leftover would
-// collide with this run's follow scenarios.
+// resetSourceReplication drops what a crashed follow run left on the source: rows the
+// fresh-clone counts would see (live writes, post-slot documents) and pgcopydb's slots
+// and publications, whose names are fixed per Migration and would collide with this run.
 func resetSourceReplication() {
 	GinkgoHelper()
 	psql(sourceCluster, "DELETE FROM orders WHERE note LIKE 'live-%'")
+	psql(sourceCluster, fmt.Sprintf("DELETE FROM documents WHERE id >= %d", postSlotFirstID))
 	dropSourceReplication()
 }
 

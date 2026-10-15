@@ -77,7 +77,7 @@ tests:
                 Migration default/bad burned three or more attempts in 30m
               description: >-
                 The worker Job keeps failing and the operator keeps retrying
-                with --resume. The Failed condition and the AttemptFailed
+                it. The Failed condition and the AttemptFailed and SnapshotLost
                 events on the Migration carry the worker's last error.
 
   # A target size flat across the hour fires; any growth clears it.

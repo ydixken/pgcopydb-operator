@@ -46,6 +46,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [Phase `Failed`, reason `PermissionDenied`, after one attempt](#phase-failed-with-reason-permissiondenied) | Workers and cluster objects |
 | [Phase `Failed`, reason `DiskFull`, after one attempt](#phase-failed-with-reason-diskfull) | Workers and cluster objects |
 | [Phase `Failed`, reason `SchemaDrift`, after one attempt](#phase-failed-with-reason-schemadrift) | Workers and cluster objects |
+| [Phase `Failed`, reason `SnapshotLost`](#phase-failed-with-reason-snapshotlost) | Workers and cluster objects |
 | [Status and metrics lag behind the worker](#status-updates-lag-behind-the-worker) | Workers and cluster objects |
 | [Scrapes return 401](#scrapes-return-401) | Metrics and dashboards |
 | [Scrapes return 403](#scrapes-return-403) | Metrics and dashboards |
@@ -282,6 +283,7 @@ Check the publication and the resume state on the source.
 For `pgoutput` with an automatic publication, a retry preserves the publication whenever its source slot exists.
 The operator drops only an orphan that has no source slot, and pgcopydb then retries the incomplete setup.
 An explicit `spec.follow.publication` value bypasses this guard, and so does any plugin other than `pgoutput`, such as `wal2json` and `test_decoding`.
+A retry that [starts over](#phase-failed-with-reason-snapshotlost) runs `pgcopydb stream cleanup` before the guard, so it finds neither the slot nor the automatic publication.
 
 The bundled runner also repairs an interrupted setup when the retry creates a fresh slot and the work catalog has no sentinel row.
 This bootstrap recovery is not in every runner version; see [client tool versions](reference/prerequisites.md#client-tool-versions).
@@ -307,7 +309,7 @@ Earlier in its log, pid 1 said FATAL `Terminating all processes in our process g
 This is a pgcopydb 0.18 zombie: a child process survives and keeps the pod alive, so the Job never fails.
 
 The operator detects this and recovers on its own.
-It fires a `WorkerZombie` warning event, deletes the pod, and the normal retry resumes the migration.
+It fires a `WorkerZombie` warning event, deletes the pod, and the normal retry starts the next attempt.
 On an operator version without that recovery, delete the worker pod by hand.
 
 ### `Finalizing` takes a long time
@@ -506,6 +508,7 @@ The first attempt's logs almost always name it.
 A permission error mostly stops early as `PermissionDenied`, a full work volume as `DiskFull`, and a change naming a column the target lacks as `SchemaDrift`.
 One that sits outside the last 40 log lines the classifier reads lands here.
 A work volume that filled up then shows `database or disk is full` or `No space left on device` in the first attempt's logs.
+A live migration that kept starting over shows a `SnapshotLost` event for each start-over.
 `the pod log was not readable (...)` in the message means the operator could not read the worker log for two minutes after the Job failed, so it could not classify the cause.
 The text in parentheses is the read error.
 Read the cause with `kubectl logs job/<name>-run-<attempt>` while the Job still exists.
@@ -549,6 +552,21 @@ Run no DDL on either side until the cutover, as the [live migration prerequisite
 
 The operator classifies only SQLSTATE 42703 on the apply's target connection.
 A missing table (42P01) or any other schema error keeps normal retries and ends as `BackoffLimitExceeded`.
+
+### Phase `Failed` with reason `SnapshotLost`
+
+Phase `Failed` with reason `SnapshotLost` means a live migration's retry could not resume its table copy, and `spec.clone.dropIfExists` is false.
+The replication slot outlived the attempt that created it, and its snapshot did not.
+Tables copied without that snapshot would hold rows the slot then replays again, so pgcopydb refused the resume.
+The condition message carries its `Refusing to resume the copy: ...` line, which names the slot, its LSN, and how many tables are still to copy.
+
+Starting over needs `--drop-if-exists`, because the target holds the objects and rows of the earlier attempts.
+Delete the failed Migration first: a terminal failure keeps the slot, which retains WAL on the source, and deletion drops it.
+Then create a new Migration with `spec.clone.dropIfExists: true`, or one against an empty target.
+Keep that order when the new Migration reuses a fixed `spec.follow.slotName`: the failed Migration's cleanup drops the slot and origin of that name, which would then be the new Migration's.
+
+With `dropIfExists: true` the operator starts over on its own and emits a `SnapshotLost` warning event.
+That attempt runs `pgcopydb stream cleanup` to drop the slot, the automatic publication, and the target origin, then `pgcopydb clone --follow --restart --drop-if-exists`.
 
 ### Status updates lag behind the worker
 

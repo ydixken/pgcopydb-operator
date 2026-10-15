@@ -123,7 +123,7 @@ func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
 
 // buildJob assembles the worker Job for one attempt. backoffLimit is always 0:
 // retries are operator-driven so the attempt count and reasons live in the
-// Migration status, and each retry resumes from the work-dir catalogs.
+// Migration status, and a retry resumes from the work-dir catalogs or starts over.
 func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
 	// Older CRDs may lack CEL rules; Reconcile persists builder errors as terminal InvalidSpec.
 	if m.Spec.Clone.AllDatabases {
@@ -136,13 +136,19 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
 	}
-	// Attempt 1 wipes the work dir: any state there is foreign. A retry
-	// resumes from the catalogs, and the failed attempt's snapshot died with
-	// its process, so --resume needs --not-consistent.
-	resume := attempt > 1
-	args := pgcopydb.CloneArgs(&m.Spec, !resume, resume, resume)
+	// Attempt 1 wipes the work dir: any state there is foreign. A retry resumes
+	// with --not-consistent, as the failed attempt's snapshot died with it.
+	// A retry after a refused resume starts over if dropIfExists is still set.
+	fresh := attempt == 1 || (snapshotLost(m) && m.Spec.Clone.DropIfExists)
+	args := pgcopydb.CloneArgs(&m.Spec, fresh, !fresh, !fresh)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
-	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, publicationDropGuard(m, attempt), 0)
+	setup := publicationDropGuard(m, attempt)
+	if fresh && attempt > 1 {
+		// --restart wipes the catalog that records whether the publication is
+		// ours, so the old slot, publication and origin go before it runs.
+		setup = "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
+	}
+	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -196,18 +202,20 @@ PUBLICATION_RETRY`
 // origin after a live migration, abort or deletion. It reuses the worker pod
 // shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	// Both names are passed explicitly: stream cleanup defaults --origin to
-	// "pgcopydb", so a generated per-migration origin would stay on the
-	// target (observed live: origins accumulate while slots are dropped).
-	slot := effectiveSlotName(m)
-	args := []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir,
-		"--slot-name", slot, "--origin", slot}
-	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), args, "", 2)
+	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2)
 	if err != nil {
 		return nil, err
 	}
 	addConnectTimeout(job)
 	return job, nil
+}
+
+// cleanupArgs passes both names: stream cleanup defaults --origin to "pgcopydb",
+// so a generated per-migration origin would stay on the target (observed live:
+// origins accumulate while slots are dropped). Slot names are [a-z0-9_] only.
+func cleanupArgs(m *v1beta1.Migration) []string {
+	slot := effectiveSlotName(m)
+	return []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir, "--slot-name", slot, "--origin", slot}
 }
 
 // verifyProgressPrefix opens the verify Job's one-line copy-counter contract:

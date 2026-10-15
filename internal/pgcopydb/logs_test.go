@@ -582,3 +582,45 @@ func TestSchemaDriftLine(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotLostLine(t *testing.T) {
+	// The fork's guard at cli_clone_follow.c:712, JSON-escaped as the runner logs it.
+	const refusal = `Refusing to resume the copy: 2 of 3 tables still need their data, and --not-consistent would copy them without snapshot \"0000007E-00000005-1\" of the re-used replication slot \"resume_guard\" created at 0\/18FD930`
+	const want = `Refusing to resume the copy: 2 of 3 tables still need their data, and --not-consistent would copy them without snapshot "0000007E-00000005-1" of the re-used replication slot "resume_guard" created at 0/18FD930`
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// Only the prefix is the fork's contract; the rest of the wording may change.
+			name: "a follow resume refuses to copy without the slot snapshot",
+			raw: `{"timestamp":"2026-10-15 20:41:03.512","pid":1,"error_level":8,"error_severity":"FATAL","file_name":"cli_clone_follow.c","file_line_num":712,"message":"` + refusal + `"}
+{"timestamp":"2026-10-15 20:41:03.512","pid":1,"error_level":5,"error_severity":"INFO","file_name":"cli_clone_follow.c","file_line_num":721,"message":"Run pgcopydb stream cleanup with the same --dir, --slot-name and --origin as this run, then start over with --restart (and --drop-if-exists when the target already has the schema), or resume without --not-consistent while pgcopydb snapshot --follow keeps the snapshot alive"}`,
+			want: want,
+		},
+		{
+			name: "a mild line quoting the refusal does not classify",
+			raw:  `{"error_severity":"INFO","message":"` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "the prefix inside another message does not classify",
+			raw:  `{"error_severity":"ERROR","message":"Failed to clone: ` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "a refusal outside the terminal window does not classify",
+			raw: `{"error_severity":"FATAL","message":"` + refusal + `"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow),
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SnapshotLostLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("SnapshotLostLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

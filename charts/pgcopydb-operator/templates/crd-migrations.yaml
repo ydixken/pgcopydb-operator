@@ -72,7 +72,9 @@ spec:
                 default: 3
                 description: |-
                   backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0) that resumes via the pgcopydb work directory.
+                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
+                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
+                  migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
@@ -86,8 +88,10 @@ spec:
                       Filters and skips apply to every database; job counts are global across databases.
                     type: boolean
                   dropIfExists:
-                    description: dropIfExists issues pg_restore --clean --if-exists
-                      on the target.
+                    description: |-
+                      dropIfExists issues pg_restore --clean --if-exists on the target. A live
+                      migration needs it to start over after pgcopydb refuses to resume its copy;
+                      without it, the Migration fails terminally as SnapshotLost.
                     type: boolean
                   estimateTableSizes:
                     description: |-
@@ -2295,7 +2299,9 @@ spec:
                 default: 3
                 description: |-
                   backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0) that resumes via the pgcopydb work directory.
+                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
+                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
+                  migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
@@ -2309,8 +2315,10 @@ spec:
                       Filters and skips apply to every database; job counts are global across databases.
                     type: boolean
                   dropIfExists:
-                    description: dropIfExists issues pg_restore --clean --if-exists
-                      on the target.
+                    description: |-
+                      dropIfExists issues pg_restore --clean --if-exists on the target. A live
+                      migration needs it to start over after pgcopydb refuses to resume its copy;
+                      without it, the Migration fails terminally as SnapshotLost.
                     type: boolean
                   estimateTableSizes:
                     description: |-

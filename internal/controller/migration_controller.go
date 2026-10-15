@@ -94,6 +94,10 @@ const (
 // pgcopydb's own catalog still counts tables not done (see finishClone).
 const reasonCloneIncomplete = "CloneIncomplete"
 
+// reasonSnapshotLost: pgcopydb refused to resume a follow copy. Between attempts
+// it latches the start-over (see snapshotLost); without dropIfExists it is terminal.
+const reasonSnapshotLost = "SnapshotLost"
+
 // LogReader fetches worker pod logs so terminal errors reach status; nil
 // degrades to the Job's own condition message (envtest has no pods). The
 // zombie check dates the supervisor-death marker off the Timestamps variant.
@@ -565,6 +569,13 @@ func tablesEmptySeen(m *v1beta1.Migration) bool {
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonTablesEmptyOnTarget
 }
 
+// snapshotLost reports whether handleFailedJob latched a start-over. Like
+// copySeen, the latch lives in the condition reason.
+func snapshotLost(m *v1beta1.Migration) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonSnapshotLost
+}
+
 // confirmBaseCopy decides whether the worker's clone-done marker turns
 // CloneCompleted true. The marker is pgcopydb's own bookkeeping and has called
 // a table done that no rows ever reached
@@ -777,9 +788,9 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 }
 
 // nextAttempt is where a pass lands with no worker Job to observe. It starts
-// the next attempt, resuming from the work-dir catalogs, unless only the
-// finish path remains: restarting pgcopydb there would put a second writer on
-// the target beside a handover still altering ownership.
+// the next attempt unless only the finish path remains: restarting pgcopydb
+// there would put a second writer on the target beside a handover still
+// altering ownership.
 //
 // One window survives: a follow worker collected between its exit 0 and the
 // first finish pass has no handover Job yet, so it restarts, finds endpos
@@ -857,8 +868,8 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 }
 
 // attemptPhase is where the next attempt picks up, read off the conditions
-// rather than assumed: every attempt after the first resumes the migration,
-// and one that has already cut over is not back at the base copy.
+// rather than assumed: a resumed migration that has already cut over is not
+// back at the base copy.
 func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 	rep := m.Status.Replication
 	switch {
@@ -871,9 +882,9 @@ func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 	return v1beta1.PhaseCloning
 }
 
-// handleFailedJob either schedules the next resume attempt or fails the
-// Migration for good. The Job's condition only says that the pod failed, so
-// the pgcopydb ERROR behind it is appended from the pod log when readable.
+// handleFailedJob either schedules the next attempt or fails the Migration for
+// good. The Job's condition only says that the pod failed, so the pgcopydb
+// ERROR behind it is appended from the pod log when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
 	reason := failureReason(job)
 	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, workerLogTail)
@@ -902,7 +913,15 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		remedy = "; DDL is not replicated: create a new Migration, which copies the schema from the source again," +
 			" and run no DDL during the migration window"
 	}
-	if line != "" {
+	// A lost snapshot fails every resume alike, but a start-over can fix it once
+	// dropIfExists lets the restore replace what the earlier attempts left.
+	if line == "" {
+		terminal, what, line = reasonSnapshotLost, "a lost copy snapshot", pgcopydb.SnapshotLostLine([]byte(tail))
+		remedy = "; starting over needs spec.clone.dropIfExists because the target holds the earlier attempts' objects:" +
+			" create a new Migration with spec.clone.dropIfExists: true, or one against an empty target"
+	}
+	startOver := line != "" && terminal == reasonSnapshotLost && m.Spec.Clone.DropIfExists
+	if line != "" && !startOver {
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
 		r.fail(m, terminal, "Fail", fmt.Sprintf(
 			"attempt %d failed on %s retries cannot fix: %s%s",
@@ -917,9 +936,18 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
-	// Clear jobName; the next pass creates attempt N+1 with --resume.
-	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "AttemptFailed", "Retry",
-		"attempt %d failed (%s), retrying with --resume", m.Status.Attempts, reason)
+	if startOver {
+		// buildJob reads the latch; startAttempt replaces it once the next Job exists.
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonSnapshotLost,
+			fmt.Sprintf("attempt %d failed (%s); the next attempt starts over", m.Status.Attempts, reason))
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonSnapshotLost, "Retry",
+			"attempt %d failed (%s), starting over: the next attempt drops the slot and runs --restart --drop-if-exists",
+			m.Status.Attempts, reason)
+	} else {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "AttemptFailed", "Retry",
+			"attempt %d failed (%s), retrying with --resume", m.Status.Attempts, reason)
+	}
+	// Clear jobName; the next pass creates attempt N+1.
 	m.Status.JobName = ""
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
