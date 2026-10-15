@@ -102,9 +102,9 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 
 `writeLSN` reports receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
-The bundled runner, pgcopydb `0.18.94.gbaa94ee`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
+The bundled runner, pgcopydb `0.18.98.g944abcc`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
 
-When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/baa94eead075b26f98f0e7e482ed596db52f653d/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
+When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/944abcc5eb141bf9d91ed0a6117a2649e4191f50/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.
 `replayLSN` is therefore not necessarily the LSN of the last applied data transaction.
 See [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
@@ -116,6 +116,7 @@ In the first case, that proof rests on the runner's origin bookkeeping alone.
 > Runners older than `0.18.70.gbb8dbfc` can lose committed source changes during follow without an error.
 > They skip a transaction that began before another one committed ([#356](https://github.com/ydixken/pgcopydb-operator/issues/356)), keep one row per heap page of a source `COPY` ([#357](https://github.com/ydixken/pgcopydb-operator/issues/357)), and truncate only the first table of a multi-table `TRUNCATE` under `pgoutput` ([#358](https://github.com/ydixken/pgcopydb-operator/issues/358)).
 > After an apply crash or a failed `COMMIT` on a PostgreSQL 16 or newer target, the next run can skip the transaction that did not commit ([#359](https://github.com/ydixken/pgcopydb-operator/issues/359), fixed by [fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
+> Runners older than `0.18.98.g944abcc` can also skip the committed transactions left in an `output.db` that receive has closed, when apply falls behind receive across a file rotation while streaming, as with a backlog after a long clone ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376), fixed by [fork PR #31](https://github.com/ydixken/pgcopydb/pull/31)).
 > In each case the origin moves past the lost change.
 > At cutover the drain verification then passes without a content compare only when the origin lands exactly on endpos.
 > Otherwise the compare refuses the cutover as [`DrainIncomplete`](../troubleshooting.md#phase-failed-with-reason-drainincomplete).

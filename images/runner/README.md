@@ -7,10 +7,10 @@ It does not reuse the upstream `dimitri/pgcopydb:v0.18` image, which bundles pos
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`baa94eead075b26f98f0e7e482ed596db52f653d`](https://github.com/ydixken/pgcopydb/commit/baa94eead075b26f98f0e7e482ed596db52f653d).
-The version string is `0.18.94.gbaa94ee`, derived from `git describe` (`v0.18-94-gbaa94ee`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is ninety-four commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:ccca41b95be18d868f8c867650ea1c022ca8b3e6e825265dbdeb7891510c75ad`, published by [builder run `38164419513`](https://github.com/ydixken/pgcopydb-operator/actions/runs/38164419513).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`944abcc5eb141bf9d91ed0a6117a2649e4191f50`](https://github.com/ydixken/pgcopydb/commit/944abcc5eb141bf9d91ed0a6117a2649e4191f50).
+The version string is `0.18.98.g944abcc`, derived from `git describe` (`v0.18-98-g944abcc`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is ninety-eight commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:123acd352136358a5df975037fa485ec099d2e3bae53ebe29d2a27a3933f306c`, published by [builder run `38702852464`](https://github.com/ydixken/pgcopydb-operator/actions/runs/38702852464).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -112,8 +112,15 @@ The merged commit `baa94ee` passed [Run Tests `38163150329`](https://github.com/
 > With `applyGroupTransactions: 1` that is every source transaction, which raises latency for workloads with many small transactions.
 > A shutdown request does not guarantee that all received work was applied; interrupted work may need resume from the target replication origin.
 
-The manager and chart allow `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all twelve older versions so upgrading the operator does not suppress counters for existing workers.
+[Fork PR #31](https://github.com/ydixken/pgcopydb/pull/31), merged as `944abcc`, keeps apply on a closed `output.db` while it still holds committed work ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
+While streaming without endpos, apply took a pass that handed over only a keepalive for a drained file, and when receive had already closed that file, apply moved to the next one and never applied the transactions after the keepalive.
+It takes apply falling behind receive across a file rotation, as with a backlog after a long clone.
+Apply now moves to the next file only when the current one holds no complete transaction left to apply, with or without endpos.
+The PR head `6163b21`, whose tree the merge commit shares, passed [Run Tests `38575795318`](https://github.com/ydixken/pgcopydb/actions/runs/38575795318), and `d1f9b96`, which differs from it only in a test script, passed [Nightly Tests `38571943138`](https://github.com/ydixken/pgcopydb/actions/runs/38571943138).
+
+The manager and chart allow `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all thirteen older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.94.gbaa94ee` has the throughput changes from #27 to #30 but not the #31 `output.db` fix.
 Version `0.18.76.gf9b328b` has the #26 status interval fix but none of the throughput changes from #27 to #30.
 Version `0.18.74.gc682dce` has the #25 reconnect fix but not the #26 status interval fix.
 Version `0.18.72.g2aa91e7` has the #24 receive fix but not the #25 reconnect fix.
