@@ -19,6 +19,9 @@ The phases of a live migration:
 | `CuttingOver`    | Cutover LSN frozen; draining remaining changes, verifying the drain, cleaning up replication.  |
 | `Completed`      | Drain proven complete, sequences synced, slot dropped; safe to switch applications.            |
 
+A worker that dies after the replication slot exists and before its table copy ends takes the slot's snapshot with it, so the next attempt cannot resume that copy.
+Without `spec.clone.dropIfExists` the Migration then fails as [`SnapshotLost`](../troubleshooting.md#phase-failed-with-reason-snapshotlost); with it, the operator starts the clone over, and the failure costs two attempts ([Retries and resume](lifecycle.md#retries-and-resume)).
+
 ## Preflight
 
 A `<name>-preflight` Job gates every Migration's first attempt.
@@ -118,6 +121,7 @@ In the first case, that proof rests on the runner's origin bookkeeping alone.
 > After an apply crash or a failed `COMMIT` on a PostgreSQL 16 or newer target, the next run can skip the transaction that did not commit ([#359](https://github.com/ydixken/pgcopydb-operator/issues/359), fixed by [fork PR #23](https://github.com/ydixken/pgcopydb/pull/23)).
 > Runners older than `0.18.98.g944abcc` can also skip the committed transactions left in an `output.db` that receive has closed, when apply falls behind receive across a file rotation while streaming, as with a backlog after a long clone ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376), fixed by [fork PR #31](https://github.com/ydixken/pgcopydb/pull/31)).
 > In each case the origin moves past the lost change.
+> Runners older than `0.18.104.g362a559` can also copy the remaining tables of a retried live migration without the replication slot's snapshot, so apply can stop on a duplicate key or the target can diverge without an error ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378), fixed by [fork PR #32](https://github.com/ydixken/pgcopydb/pull/32)).
 > At cutover the drain verification then passes without a content compare only when the origin lands exactly on endpos.
 > Otherwise the compare refuses the cutover as [`DrainIncomplete`](../troubleshooting.md#phase-failed-with-reason-drainincomplete).
 > With such a runner, set [`spec.verification.data`](verification.md) so the content is compared after cutover even when the origin lands on endpos.

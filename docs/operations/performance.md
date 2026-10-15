@@ -7,7 +7,8 @@ In follow mode, source decoding, receive-spool writes, inline transformation, an
 
 ## Follow receive and apply
 
-The bundled pgcopydb `0.18.104.g362a559` carries four changes to the follow pipeline, fork PRs #27 to #30:
+The bundled pgcopydb carries the fork PRs that the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md) lists.
+Fork PRs #27 to #30 raise its follow throughput:
 
 1. Apply waits on the receive pipe only after a pass that found nothing to do, and it returns from the pipeline sync as soon as the sync result is in ([#27](https://github.com/ydixken/pgcopydb/pull/27)).
 1. The replay database (`*-replay.db`) runs with SQLite `synchronous=NORMAL`, gets indexes for the next-event and transaction lookups, and apply writes the sentinel `replay_lsn` at most once a second ([#28](https://github.com/ydixken/pgcopydb/pull/28)).
