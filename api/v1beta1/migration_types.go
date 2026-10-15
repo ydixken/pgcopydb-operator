@@ -553,8 +553,9 @@ type MigrationSpec struct {
 	Preflight *PreflightOptions `json:"preflight,omitempty"`
 
 	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
-	// Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or
-	// starts over when pgcopydb refuses to resume a live migration's copy.
+	// Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
+	// with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
+	// migration's copy.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	// +optional

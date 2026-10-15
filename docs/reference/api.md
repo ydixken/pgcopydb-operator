@@ -276,7 +276,7 @@ _Appears in:_
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
 | `dryRun` _boolean_ | dryRun runs the preflight checks and stops: no worker Job, no data<br />written, no replication slot, publication, or origin. A passed dry run<br />ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef<br />would apply are reported, not applied. Unrelated to kubectl --dry-run.<br />Immutable: the real run is a separate Migration. |  | Optional: \{\} <br /> |
 | `preflight` _[PreflightOptions](#preflightoptions)_ | preflight tunes optional preflight gates. |  | Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or<br />starts over when pgcopydb refuses to resume a live migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,<br />with clone.dropIfExists, starts over when pgcopydb refuses to resume a live<br />migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished deletes owned Jobs this long after completion. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 

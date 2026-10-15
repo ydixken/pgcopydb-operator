@@ -72,8 +72,9 @@ spec:
                 default: 3
                 description: |-
                   backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or
-                  starts over when pgcopydb refuses to resume a live migration's copy.
+                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
+                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
+                  migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
@@ -2298,8 +2299,9 @@ spec:
                 default: 3
                 description: |-
                   backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or
-                  starts over when pgcopydb refuses to resume a live migration's copy.
+                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
+                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
+                  migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
