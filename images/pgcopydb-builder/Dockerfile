@@ -9,16 +9,16 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#27 to #30 speed up follow: apply wakeup, replay.db,
-# receive group commit, and apply groups. Keeps #26's status interval, #25,
-# #24, #19, #20, #21 and #23's follow fixes, #18's keyless NULL match, #17's
-# resume error, #15, #16, #14, #12's partitions, #11's slot bootstrap and #9.
+# ydixken/pgcopydb#31 keeps apply on a closed output.db while it holds
+# committed work. Keeps #27 to #30's follow throughput, #26's status interval,
+# #25, #24, #19, #20, #21 and #23's follow fixes, #18's keyless NULL match,
+# #17's resume error, #15, #16, #14, #12's partitions, #11 and #9.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-94-gbaa94ee, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-98-g944abcc, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=baa94eead075b26f98f0e7e482ed596db52f653d
-ARG PGCOPYDB_VERSION=0.18.94.gbaa94ee
+ARG PGCOPYDB_SHA=944abcc5eb141bf9d91ed0a6117a2649e4191f50
+ARG PGCOPYDB_VERSION=0.18.98.g944abcc
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.
