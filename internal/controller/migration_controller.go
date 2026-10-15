@@ -569,8 +569,8 @@ func tablesEmptySeen(m *v1beta1.Migration) bool {
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonTablesEmptyOnTarget
 }
 
-// snapshotLost reports whether the next attempt must start over (see
-// handleFailedJob). Like copySeen, the latch lives in the condition reason.
+// snapshotLost reports whether handleFailedJob latched a start-over. Like
+// copySeen, the latch lives in the condition reason.
 func snapshotLost(m *v1beta1.Migration) bool {
 	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonSnapshotLost

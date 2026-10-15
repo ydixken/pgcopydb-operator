@@ -556,9 +556,9 @@ func TestPublicationDropGuard(t *testing.T) {
 }
 
 func TestBuildJob_StartsOverAfterSnapshotLost(t *testing.T) {
-	follow := func(pub, reason string) *v1beta1.Migration {
+	follow := func(pub, reason string, drop bool) *v1beta1.Migration {
 		m := passwordMigration()
-		m.Spec.Clone.DropIfExists = true
+		m.Spec.Clone.DropIfExists = drop
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: pub}
 		m.Status.Conditions = []metav1.Condition{{
 			Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reason,
@@ -575,10 +575,12 @@ func TestBuildJob_StartsOverAfterSnapshotLost(t *testing.T) {
 		attempt               int32
 		fresh, cleans, guards bool
 	}{
-		{"a refused resume starts over", follow("", reasonSnapshotLost), 3, true, true, true},
-		{"a user publication is left to stream cleanup", follow("userpub", reasonSnapshotLost), 3, true, true, false},
-		{"attempt 1 has nothing to clean up", follow("", reasonSnapshotLost), 1, true, false, false},
-		{"any other reason resumes", follow("", reasonCloneRunning), 3, false, false, true},
+		{"a refused resume starts over", follow("", reasonSnapshotLost, true), 3, true, true, true},
+		{"a user publication is left to stream cleanup", follow("userpub", reasonSnapshotLost, true), 3, true, true, false},
+		{"attempt 1 has nothing to clean up", follow("", reasonSnapshotLost, true), 1, true, false, false},
+		{"any other reason resumes", follow("", reasonCloneRunning, true), 3, false, false, true},
+		// spec.clone is mutable: the resume is refused again and ends SnapshotLost.
+		{"dropIfExists unset after the latch resumes", follow("", reasonSnapshotLost, false), 3, false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -588,7 +590,8 @@ func TestBuildJob_StartsOverAfterSnapshotLost(t *testing.T) {
 			}
 			c := job.Spec.Template.Spec.Containers[0]
 			for flag, want := range map[string]bool{
-				"--restart": tc.fresh, "--resume": !tc.fresh, "--not-consistent": !tc.fresh, "--drop-if-exists": true,
+				"--restart": tc.fresh, "--resume": !tc.fresh, "--not-consistent": !tc.fresh,
+				"--drop-if-exists": tc.m.Spec.Clone.DropIfExists,
 			} {
 				if slices.Contains(c.Args, flag) != want {
 					t.Errorf("%s present = %v, want %v: %v", flag, !want, want, c.Args)

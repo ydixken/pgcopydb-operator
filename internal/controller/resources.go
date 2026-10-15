@@ -137,9 +137,9 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		}
 	}
 	// Attempt 1 wipes the work dir: any state there is foreign. A retry resumes
-	// with --not-consistent, as the failed attempt's snapshot died with its process,
-	// unless pgcopydb refused that resume: then it starts over like attempt 1.
-	fresh := attempt == 1 || snapshotLost(m)
+	// with --not-consistent, as the failed attempt's snapshot died with its process.
+	// One pgcopydb refused starts over like attempt 1, if dropIfExists is still set.
+	fresh := attempt == 1 || (snapshotLost(m) && m.Spec.Clone.DropIfExists)
 	args := pgcopydb.CloneArgs(&m.Spec, fresh, !fresh, !fresh)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
 	setup := publicationDropGuard(m, attempt)
