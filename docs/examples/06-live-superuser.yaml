@@ -25,6 +25,9 @@ spec:
     superuserSecretRef:
       name: billing-pg-superuser  # e.g. the CNPG <cluster>-superuser Secret
       keys: {username: username, password: password}  # remap when the Secret uses other key names
+  # Without clone.dropIfExists, a worker that dies after the slot exists and before the
+  # table copy ends fails the Migration as SnapshotLost; with it, a later attempt starts over.
+  # dropIfExists drops existing target objects, so set it only on a target dedicated to this migration.
   follow:
     enabled: true
   cutover:

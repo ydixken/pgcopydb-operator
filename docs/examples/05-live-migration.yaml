@@ -21,6 +21,9 @@ spec:
     # PARAMETER session_replication_role; see prerequisites.
     username: app
     passwordSecretRef: {name: billing-pg-app, key: password}
+  # Without clone.dropIfExists, a worker that dies after the slot exists and before the
+  # table copy ends fails the Migration as SnapshotLost; with it, a later attempt starts over.
+  # dropIfExists drops existing target objects, so set it only on a target dedicated to this migration.
   follow:
     enabled: true
     # Defaults: plugin pgoutput; slot, origin, and publication names generated

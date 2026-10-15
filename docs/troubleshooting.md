@@ -558,7 +558,7 @@ A missing table (42P01) or any other schema error keeps normal retries and ends 
 Phase `Failed` with reason `SnapshotLost` means a live migration's retry could not resume its table copy, and `spec.clone.dropIfExists` is false.
 The replication slot outlived the attempt that created it, and its snapshot did not.
 Tables copied without that snapshot would hold rows the slot then replays again, so pgcopydb refused the resume.
-The condition message carries its `Refusing to resume the copy: ...` line, which names the slot, its LSN, and how many tables are still to copy.
+The condition message carries its `Refusing to resume the copy: ...` line, which names the slot, its snapshot and LSN, and how many tables are still to copy.
 
 Starting over needs `--drop-if-exists`, because the target holds the objects and rows of the earlier attempts.
 Delete the failed Migration first: a terminal failure keeps the slot, which retains WAL on the source, and deletion drops it.
