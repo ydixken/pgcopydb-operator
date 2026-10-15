@@ -141,7 +141,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 |---|---|---|
 | `AttemptStarted` | Normal | A worker attempt's Job was created. |
 | `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
-| `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy; the next attempt drops the slot and starts over with `--restart --drop-if-exists`. |
+| `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy. With `spec.clone.dropIfExists` (action `Retry`), the next attempt drops the slot and starts over with `--restart --drop-if-exists`; without it, this is the terminal failure event (action `Fail`) and no attempt follows. |
 | `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; the message names them. Once per refusal, see the condition reason of the same name. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could run. |
 | `PreflightStarted` | Normal | The preflight Job was created. |

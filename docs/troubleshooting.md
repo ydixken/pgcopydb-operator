@@ -561,8 +561,9 @@ Tables copied without that snapshot would hold rows the slot then replays again,
 The condition message carries its `Refusing to resume the copy: ...` line, which names the slot, its LSN, and how many tables are still to copy.
 
 Starting over needs `--drop-if-exists`, because the target holds the objects and rows of the earlier attempts.
-Create a new Migration with `spec.clone.dropIfExists: true`, or one against an empty target.
-Delete the failed Migration to release its slot: a terminal failure keeps the slot, and the slot retains WAL on the source.
+Delete the failed Migration first: a terminal failure keeps the slot, which retains WAL on the source, and deletion drops it.
+Then create a new Migration with `spec.clone.dropIfExists: true`, or one against an empty target.
+Keep that order when the new Migration reuses a fixed `spec.follow.slotName`: the failed Migration's cleanup drops the slot and origin of that name, which would then be the new Migration's.
 
 With `dropIfExists: true` the operator starts over on its own and emits a `SnapshotLost` warning event.
 That attempt runs `pgcopydb stream cleanup` to drop the slot, the automatic publication, and the target origin, then `pgcopydb clone --follow --restart --drop-if-exists`.

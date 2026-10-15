@@ -60,6 +60,7 @@ The phase becomes `Suspended`.
 Set `spec.suspend` back to false to start the next attempt, which resumes from the work-dir catalogs.
 Each resume consumes one attempt from the `backoffLimit` budget.
 A live migration suspended after its replication slot exists and before its tables are copied cannot resume that copy; see [Retries and resume](#retries-and-resume).
+Its resume fails and the start-over takes a second attempt, so budget two attempts for each such suspend.
 
 > [!warning]
 > Suspending a live migration does NOT drop the replication slot.
@@ -85,8 +86,11 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.
   The start-over runs `pgcopydb stream cleanup`, which drops the slot, the auto publication, and the target origin, then `--restart`.
   It needs `spec.clone.dropIfExists: true`, so the restore replaces the objects the earlier attempts left on the target.
-  A start-over consumes one attempt like any retry.
   Without `dropIfExists`, the Migration ends as `SnapshotLost`.
+  The refused resume and the start-over each consume one attempt, so a failure between the slot's creation and the end of the table copy costs two.
+  Size `spec.backoffLimit` for that: the default of 3 survives one such failure, not two.
+  The refusal is not in every runner version; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
+  A runner without it resumes the copy anyway, and the apply can then fail on a duplicate key or leave the target diverged.
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both remove the Job.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
