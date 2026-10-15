@@ -388,6 +388,7 @@ A verify Job that fails runs once more before the Migration fails, so a refusal 
 
 Phase `Failed` with reason `DrainIncomplete` means the verify Job found the target missing changes below the cutover LSN.
 `pgcopydb compare data` reported differing tables; the typical cause is a crash inside the drain window, after which pgcopydb `--resume` exits 0 without replaying.
+With a runner older than `0.18.98.g944abcc`, apply that fell behind receive across an `output.db` rotation while streaming can also have skipped committed changes ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 
 Do NOT switch applications to the target.
 No data is lost at the source: the slot is kept and retains WAL.
