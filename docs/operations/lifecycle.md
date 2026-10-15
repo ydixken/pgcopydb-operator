@@ -85,7 +85,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
 - A live migration cannot resume its table copy that way once its replication slot exists.
   The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.
-  The start-over runs `pgcopydb stream cleanup`, which drops the slot, the auto publication, and the target origin, then `--restart`.
+  The start-over runs `pgcopydb stream cleanup`, which drops the slot, the automatic publication, and the target origin, then `--restart`.
   It needs `spec.clone.dropIfExists: true`, so the restore replaces the objects the earlier attempts left on the target.
   Without `dropIfExists`, the Migration ends as `SnapshotLost`.
   The refused resume and the start-over each consume one attempt, so a failure between the slot's creation and the end of the table copy costs two.
