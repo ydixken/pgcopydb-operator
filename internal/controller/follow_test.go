@@ -767,8 +767,14 @@ var _ = Describe("Migration Controller follow mode", func() {
 		func(name string, dropIfExists bool, backoffLimit int32, reason string, details []string) {
 			defer removeMigration(ctx, name)
 			r := startFollow(name, dropIfExists, backoffLimit)
+			rec := r.Recorder.(*events.FakeRecorder)
+			drainEvents(rec)
 			m := failAttempt(r, name, 2, refusedResume)
 			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+			// The budget check runs before the latch, so a spent budget announces no start-over.
+			got := drainEvents(rec)
+			Expect(got).To(ContainElement(ContainSubstring(reason)))
+			Expect(got).NotTo(ContainElement(ContainSubstring("the next attempt drops the slot")))
 			failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 			Expect(failed.Reason).To(Equal(reason))
 			Expect(failed.Message).To(ContainSubstring(refusalMessage))
