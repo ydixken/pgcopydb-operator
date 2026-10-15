@@ -122,7 +122,7 @@ In the first case, that proof rests on the runner's origin bookkeeping alone.
 > Runners older than `0.18.98.g944abcc` can also skip the committed transactions left in an `output.db` that receive has closed, when apply falls behind receive across a file rotation while streaming, as with a backlog after a long clone ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376), fixed by [fork PR #31](https://github.com/ydixken/pgcopydb/pull/31)).
 > In each case the origin moves past the lost change.
 > Runners older than `0.18.104.g362a559` can also copy the remaining tables of a retried live migration without the replication slot's snapshot, so apply can stop on a duplicate key or the target can diverge without an error ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378), fixed by [fork PR #32](https://github.com/ydixken/pgcopydb/pull/32)).
-> At cutover the drain verification then passes without a content compare only when the origin lands exactly on endpos.
+> At cutover the drain verification passes without a content compare only when the origin lands exactly on endpos.
 > Otherwise the compare refuses the cutover as [`DrainIncomplete`](../troubleshooting.md#phase-failed-with-reason-drainincomplete).
 > With such a runner, set [`spec.verification.data`](verification.md) so the content is compared after cutover even when the origin lands on endpos.
 > The bundled runner still has [narrow windows](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) (a target backend terminated after the origin setup and before the `COMMIT` record, or a `COMMIT` that breaks the connection) in which a transaction can be lost while the origin lands on endpos, and `spec.verification.data` covers those too.
