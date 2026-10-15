@@ -582,3 +582,45 @@ func TestSchemaDriftLine(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotLostLine(t *testing.T) {
+	const refusal = `Refusing to resume the copy: slot \"pgcopydb\" at LSN 0\/1BF8B20 was created with snapshot 00000003-00000002-1 by an earlier run, and 1 of 2 tables are not copied yet`
+	const want = `Refusing to resume the copy: slot "pgcopydb" at LSN 0/1BF8B20 was created with snapshot 00000003-00000002-1 by an earlier run, and 1 of 2 tables are not copied yet`
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			// Only the prefix is the fork's contract; the rest of the wording may change.
+			name: "a follow resume refuses to copy without the slot snapshot",
+			raw: `{"error_severity":"INFO","message":"STEP 1: fetch source database tables, indexes, and sequences"}
+{"error_severity":"FATAL","message":"` + refusal + `"}
+{"error_severity":"INFO","message":"Start over with --restart, adding --drop-if-exists when the target already has the schema"}`,
+			want: want,
+		},
+		{
+			name: "a mild line quoting the refusal does not classify",
+			raw:  `{"error_severity":"INFO","message":"` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "the prefix inside another message does not classify",
+			raw:  `{"error_severity":"ERROR","message":"Failed to clone: ` + refusal + `"}`,
+			want: "",
+		},
+		{
+			name: "a refusal outside the terminal window does not classify",
+			raw: `{"error_severity":"FATAL","message":"` + refusal + `"}` + "\n" +
+				strings.Repeat(`{"error_severity":"INFO","message":"COPY progress"}`+"\n", permissionWindow),
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SnapshotLostLine([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("SnapshotLostLine() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

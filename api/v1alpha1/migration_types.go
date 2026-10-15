@@ -218,7 +218,9 @@ type CloneOptions struct {
 	// +optional
 	EstimateTableSizes bool `json:"estimateTableSizes,omitempty"`
 
-	// dropIfExists issues pg_restore --clean --if-exists on the target.
+	// dropIfExists issues pg_restore --clean --if-exists on the target. A live
+	// migration needs it to start over after pgcopydb refuses to resume its copy;
+	// without it, that retry fails as SnapshotLost.
 	// +optional
 	DropIfExists bool `json:"dropIfExists,omitempty"`
 
@@ -551,7 +553,8 @@ type MigrationSpec struct {
 	Preflight *PreflightOptions `json:"preflight,omitempty"`
 
 	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
-	// Job (backoffLimit 0) that resumes via the pgcopydb work directory.
+	// Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or
+	// starts over when pgcopydb refuses to resume a live migration's copy.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	// +optional

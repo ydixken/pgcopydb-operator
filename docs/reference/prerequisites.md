@@ -437,7 +437,9 @@ A permission error, a full work volume, or a change naming a column the target l
 The trade-off: re-copied tables read a fresh snapshot.
 A retried clone of a source that still takes writes is therefore not one single point in time across tables.
 If that matters, stop writes across the retry window, or delete and recreate the Migration for a fresh consistent copy.
-Follow migrations replay every change since the slot's consistent point on top of the base copy.
+Follow migrations replay every change since the slot's consistent point on top of the base copy, so their tables need the slot's own snapshot.
+A retry that creates the slot copies under it.
+A retry that finds the slot from an earlier attempt and still has tables to copy cannot resume: pgcopydb refuses it, and the operator starts the attempt over when `spec.clone.dropIfExists` is true, or fails the Migration as `SnapshotLost` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
 The cutover drain-verify gate and `spec.verification.data` are the checks that catch divergence.
 
 ## Cutover

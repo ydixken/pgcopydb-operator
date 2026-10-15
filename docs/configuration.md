@@ -116,7 +116,7 @@ Table names follow PostgreSQL quoting and `~/regex/` patterns work.
 ## Work volume
 
 `spec.workVolume` sizes the PersistentVolumeClaim that holds pgcopydb's dumps and catalogs.
-Retries resume from it.
+Retries resume from it, except when a live migration's retry [starts over](operations/lifecycle.md#retries-and-resume).
 
 ```yaml
 spec:
@@ -227,7 +227,7 @@ The operator adds TCP keepalive settings to every connection URI it composes, wh
 Without them libpq falls back to the kernel's two-hour default.
 A server that disappears without closing its connections, such as a replaced pod or a torn-down network path, then leaves the pgcopydb copy workers waiting on a dead socket for hours.
 With them, the read fails after about 70 seconds and the attempt ends with a connection error.
-A source outage longer than about 60 to 70 seconds, even a temporary network partition, therefore fails the attempt, and the operator's [retry](operations/lifecycle.md#retries-and-resume) resumes it from the work volume.
+A source outage longer than about 60 to 70 seconds, even a temporary network partition, therefore fails the attempt, and the operator starts the next one as [Retries and resume](operations/lifecycle.md#retries-and-resume) describes.
 
 Keepalives only probe an idle socket.
 When the source vanishes while a request to it is still unacknowledged, such as the `COMMIT` that closes pgcopydb's snapshot, the kernel keeps retransmitting up to its default limit instead (`tcp_retries2=15`, about 924 seconds).

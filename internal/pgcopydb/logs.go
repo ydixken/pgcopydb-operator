@@ -170,6 +170,15 @@ func SchemaDriftLine(raw []byte) string {
 	return ""
 }
 
+// SnapshotLostLine returns pgcopydb's refusal to resume a follow copy whose slot
+// snapshot died with an earlier attempt, or "". The prefix is the runner fork's
+// contract for that FATAL, which it logs before forking any copy process.
+func SnapshotLostLine(raw []byte) string {
+	return recentSevereLine(raw, func(msg string) bool {
+		return strings.HasPrefix(msg, "Refusing to resume the copy: ")
+	})
+}
+
 // recentSevereLine returns the first severe line in the terminal window that
 // match accepts, or "".
 func recentSevereLine(raw []byte, match func(string) bool) string {

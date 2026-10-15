@@ -51,9 +51,9 @@ groups:
             Migration {{ $labels.namespace }}/{{ $labels.name }} burned three
             or more attempts in 30m
           description: >-
-            The worker Job keeps failing and the operator keeps retrying with
-            --resume. The Failed condition and the AttemptFailed events on the
-            Migration carry the worker's last error.
+            The worker Job keeps failing and the operator keeps retrying it.
+            The Failed condition and the AttemptFailed and SnapshotLost events
+            on the Migration carry the worker's last error.
       # Clone without progress: the target database stopped growing. The size
       # gauge keeps its last sample after the worker pod ends, so a worker that
       # fails for 1h of Cloning fires this beside PgcopydbMigrationRetrying.

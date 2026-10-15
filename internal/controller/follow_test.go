@@ -705,6 +705,87 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(errors.IsNotFound(err)).To(BeTrue())
 	})
 
+	// The first attempt dies after the slot exists; pgcopydb refuses the resume.
+	const (
+		sourceDied     = `{"error_severity":"ERROR","message":"[SOURCE 41] FATAL:  terminating connection due to administrator command"}` + "\n"
+		refusedResume  = `{"error_severity":"FATAL","message":"Refusing to resume the copy: slot \"s\" at LSN 0\/1BF8B20, 1 of 2 tables not copied"}` + "\n"
+		refusalMessage = "Refusing to resume the copy: "
+	)
+	failAttempt := func(r *MigrationReconciler, name string, attempt int, log string) *v1beta1.Migration {
+		GinkgoHelper()
+		r.Logs = &fakeLogs{out: log}
+		finishJob(ctx, fmt.Sprintf("%s-run-%d", name, attempt), false)
+		return reconcileAndGet(ctx, r, name)
+	}
+	startFollow := func(name string, dropIfExists bool, backoffLimit int32) *MigrationReconciler {
+		GinkgoHelper()
+		r := followReconciler(&fakeSentinel{})
+		m := followMigration(name, v1beta1.CutoverManual)
+		m.Spec.Clone.DropIfExists = dropIfExists
+		m.Spec.BackoffLimit = backoffLimit
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passPreflight(r, name)
+		reconcileAndGet(ctx, r, name) // run-1
+		failAttempt(r, name, 1, sourceDied)
+		reconcileAndGet(ctx, r, name) // run-2
+		Expect(fetchJob(ctx, name+"-run-2").Spec.Template.Spec.Containers[0].Args).To(
+			ContainElements("--resume", "--not-consistent"))
+		return r
+	}
+
+	It("starts a follow retry over when pgcopydb refuses to resume the copy", func() {
+		const name = "mig-follow-start-over"
+		defer removeMigration(ctx, name)
+		r := startFollow(name, true, 3)
+		rec := r.Recorder.(*events.FakeRecorder)
+		drainEvents(rec)
+
+		m := failAttempt(r, name, 2, refusedResume)
+		Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal(reasonSnapshotLost))
+		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
+			ContainSubstring(reasonSnapshotLost), ContainSubstring("starting over"), ContainSubstring(refusalMessage))))
+
+		// The start-over drops the old slot before the guard, then copies from scratch.
+		m = reconcileAndGet(ctx, r, name) // run-3
+		Expect(m.Status.Attempts).To(Equal(int32(3)))
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal(reasonCloneRunning))
+		c := fetchJob(ctx, name+"-run-3").Spec.Template.Spec.Containers[0]
+		Expect(c.Args).To(ContainElements("--restart", "--drop-if-exists"))
+		Expect(c.Args).NotTo(ContainElement("--resume"))
+		Expect(c.Args).NotTo(ContainElement("--not-consistent"))
+		Expect(c.Command[2]).To(MatchRegexp(`(?s)pgcopydb stream cleanup --dir \S+ --slot-name \w+ --origin \w+\n.*DROP PUBLICATION IF EXISTS`))
+
+		// startAttempt spent the latch, so the next failure resumes again.
+		failAttempt(r, name, 3, sourceDied)
+		reconcileAndGet(ctx, r, name) // run-4
+		Expect(fetchJob(ctx, name+"-run-4").Spec.Template.Spec.Containers[0].Args).To(
+			ContainElements("--resume", "--not-consistent"))
+	})
+
+	DescribeTable("ends a refused follow resume that cannot start over",
+		func(name string, dropIfExists bool, backoffLimit int32, reason string, details []string) {
+			defer removeMigration(ctx, name)
+			r := startFollow(name, dropIfExists, backoffLimit)
+			m := failAttempt(r, name, 2, refusedResume)
+			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+			failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+			Expect(failed.Reason).To(Equal(reason))
+			Expect(failed.Message).To(ContainSubstring(refusalMessage))
+			for _, d := range details {
+				Expect(failed.Message).To(ContainSubstring(d))
+			}
+			Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal("CloneFailed"))
+			Expect(m.Status.Attempts).To(Equal(int32(2)))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: name + "-run-3", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		},
+		Entry("without dropIfExists", "mig-follow-snapshot-lost", false, int32(3), reasonSnapshotLost,
+			[]string{"attempt 2 failed on a lost copy snapshot", "create a new Migration with spec.clone.dropIfExists: true"}),
+		Entry("with the budget spent", "mig-follow-snapshot-budget", true, int32(1), "BackoffLimitExceeded",
+			[]string{"attempt 2 failed: "}),
+	)
+
 	It("routes deletion through slot cleanup", func() {
 		const name = "mig-follow-delete"
 		defer removeMigration(ctx, name)

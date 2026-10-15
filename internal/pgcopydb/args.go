@@ -62,8 +62,9 @@ var skipFlag = map[v1beta1.SkipOption]string{
 // CloneArgs renders the argv for `pgcopydb clone` from a Migration spec.
 // restart=true adds --restart: first attempts wipe the work directory, since
 // a fresh Migration can only find foreign state there (a stale volume from a
-// deleted Migration otherwise poisons the run). resume=true adds --resume
-// (retry attempts, when the catalogs are this Migration's own). notConsistent
+// deleted Migration otherwise poisons the run), and so do retries that start
+// over. resume=true adds --resume (retry attempts, when the catalogs are this
+// Migration's own). notConsistent
 // adds --not-consistent, needed when the original snapshot transaction is
 // gone. The source/target URIs are passed via the environment, so they are
 // deliberately absent from the returned argv.

@@ -555,6 +555,57 @@ func TestPublicationDropGuard(t *testing.T) {
 	}
 }
 
+func TestBuildJob_StartsOverAfterSnapshotLost(t *testing.T) {
+	follow := func(pub, reason string) *v1beta1.Migration {
+		m := passwordMigration()
+		m.Spec.Clone.DropIfExists = true
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: pub}
+		m.Status.Conditions = []metav1.Condition{{
+			Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reason,
+		}}
+		return m
+	}
+	slot := pgcopydb.SlotName("ns", "m")
+	cleanup := "pgcopydb stream cleanup --dir " + pgcopydb.WorkDir + " --slot-name " + slot + " --origin " + slot + "\n"
+	const guard = "DROP PUBLICATION IF EXISTS"
+
+	cases := []struct {
+		name                  string
+		m                     *v1beta1.Migration
+		attempt               int32
+		fresh, cleans, guards bool
+	}{
+		{"a refused resume starts over", follow("", reasonSnapshotLost), 3, true, true, true},
+		{"a user publication is left to stream cleanup", follow("userpub", reasonSnapshotLost), 3, true, true, false},
+		{"attempt 1 has nothing to clean up", follow("", reasonSnapshotLost), 1, true, false, false},
+		{"any other reason resumes", follow("", reasonCloneRunning), 3, false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job, err := buildJob(tc.m, "img", tc.attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := job.Spec.Template.Spec.Containers[0]
+			for flag, want := range map[string]bool{
+				"--restart": tc.fresh, "--resume": !tc.fresh, "--not-consistent": !tc.fresh, "--drop-if-exists": true,
+			} {
+				if slices.Contains(c.Args, flag) != want {
+					t.Errorf("%s present = %v, want %v: %v", flag, !want, want, c.Args)
+				}
+			}
+			prelude := c.Command[2]
+			cleanupAt, guardAt := strings.Index(prelude, cleanup), strings.Index(prelude, guard)
+			if (cleanupAt >= 0) != tc.cleans || (guardAt >= 0) != tc.guards {
+				t.Fatalf("cleanup at %d (want %v), guard at %d (want %v):\n%s", cleanupAt, tc.cleans, guardAt, tc.guards, prelude)
+			}
+			if tc.cleans && tc.guards && guardAt < cleanupAt {
+				t.Fatalf("the publication guard runs before stream cleanup:\n%s", prelude)
+			}
+		})
+	}
+}
+
 // TestBuildPreflightJob pins the preflight Job shape: a shell script (with
 // the passfile prelude intact) probing every follow prerequisite, one
 // fix-me line per check.
