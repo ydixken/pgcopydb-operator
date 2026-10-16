@@ -9,8 +9,8 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#33 sets server-side TCP keepalives on every target session,
-# so a session a killed runner leaves behind ends within about 70 s. Keeps
+# ydixken/pgcopydb#33 sets server-side TCP keepalives on its target sessions,
+# so one left waiting on a killed runner ends within about 70 s. Keeps
 # #32's snapshot refusal, #31's closed output.db fix, #27 to #30's throughput,
 # #26, #25, #24, #19, #20, #21, #23, #18, #17, #15, #16, #14, #12, #11, #9.
 
