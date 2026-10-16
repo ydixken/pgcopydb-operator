@@ -94,6 +94,9 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   A runner without it resumes the copy anyway, and the apply can then fail on a duplicate key or leave the target diverged.
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both remove the Job.
+- A runner lost without closing its connections, such as a deleted pod whose network went with it, can leave target sessions open with their table locks.
+  From runner `0.18.109.gbec4ebb` on, the target ends them within about 70 seconds.
+  With older runners they can stay for about two hours, and the next attempt's `DROP` or `TRUNCATE` waits behind them without an error.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
 - The [preflight](live-migration.md#preflight) stops some failures before the first attempt.
   It checks connectivity, credentials, and target clone privileges on every migration, and the follow prerequisites on live ones.
