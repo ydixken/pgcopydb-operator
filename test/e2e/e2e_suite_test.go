@@ -2286,13 +2286,61 @@ func seedConnEnv() []corev1.EnvVar {
 	return env
 }
 
-// jobLogs returns the last lines of a Job's log, kubectl's error text
+// jobLogs returns logTail of a Job's log, kubectl's error text
 // included: callers report it rather than assert on it, and "pod not found"
 // explains a missing log as well as the log would have.
 func jobLogs(job string, lines int) string {
-	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+job,
-		"--tail="+strconv.Itoa(lines)).CombinedOutput()
-	return string(out)
+	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+job).CombinedOutput()
+	return logTail(string(out), lines)
+}
+
+// streamHeartbeats are the stream receiver's status lines, two every 10 s in a
+// follow run: a plain tail shows only them and loses the clone's last lines (issue #381).
+var streamHeartbeats = []string{`"message":"Receive group commit `, `"message":"Reported write_lsn `}
+
+// logTail keeps the last lines of log once the stream heartbeats are dropped,
+// and says how many it dropped, so a reader knows the tail is not contiguous.
+func logTail(log string, lines int) string {
+	var kept []string
+	dropped := 0
+	for line := range strings.Lines(log) {
+		if slices.ContainsFunc(streamHeartbeats, func(h string) bool { return strings.Contains(line, h) }) {
+			dropped++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	tail := strings.Join(kept[max(0, len(kept)-lines):], "")
+	if dropped > 0 {
+		tail = fmt.Sprintf("(%d stream heartbeat lines dropped)\n", dropped) + tail
+	}
+	return tail
+}
+
+func TestLogTailDropsStreamHeartbeats(t *testing.T) {
+	const (
+		commit = `{"pid":15,"file_name":"ld_stream.c","message":"Receive group commit batches\/txns: idle 50\/50"}` + "\n"
+		lsn    = `{"pid":15,"file_name":"pgsql.c","message":"Reported write_lsn 0\/970234A0, replay_lsn 0\/0"}` + "\n"
+		drop   = `{"pid":13,"message":"Drop tables on the target database, per --drop-if-exists"}` + "\n"
+		step   = `{"pid":13,"message":"STEP 3: restore the pre-data section"}` + "\n"
+	)
+	for _, tc := range []struct {
+		name, log string
+		lines     int
+		want      string
+	}{
+		{"heartbeats after the clone", step + drop + commit + lsn + commit + lsn, 2,
+			"(4 stream heartbeat lines dropped)\n" + step + drop},
+		{"tail of what is left", step + commit + drop + lsn, 1, "(2 stream heartbeat lines dropped)\n" + drop},
+		{"no heartbeats", step + drop, 60, step + drop},
+		{"kubectl error without a newline", "Error from server (NotFound): pods not found", 60,
+			"Error from server (NotFound): pods not found"},
+		{"empty log", "", 60, ""},
+	} {
+		if got := logTail(tc.log, tc.lines); got != tc.want {
+			t.Errorf("%s: logTail=%q, want %q", tc.name, got, tc.want)
+		}
+	}
 }
 
 func TestEnsureFixtureStorageLeavesExplicitDefaultNamedClassAlone(t *testing.T) {

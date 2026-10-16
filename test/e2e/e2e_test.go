@@ -1457,11 +1457,11 @@ func reportFailedAttempt(m *v1beta1.Migration) {
 		}
 		// Chronological: the order is what tells the retry's story.
 		slices.SortFunc(mine, func(a, b corev1.Event) int {
-			return a.LastTimestamp.Compare(b.LastTimestamp.Time)
+			return eventTime(a).Compare(eventTime(b))
 		})
 		for _, e := range mine {
 			fmt.Fprintf(&b, "%s %s/%s: %s\n",
-				e.LastTimestamp.Format(time.RFC3339), e.Type, e.Reason, e.Message)
+				eventTime(e).UTC().Format(time.RFC3339), e.Type, e.Reason, e.Message)
 		}
 		if len(mine) == 0 {
 			b.WriteString("no events on the Migration; the TTL may have collected them\n")

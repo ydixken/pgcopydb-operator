@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/362a559e740569c440a587099642c563f502472e) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/bec4ebbb272c36335ab423238fe0010ae47caade) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -44,8 +44,10 @@ For a newer target major, set `spec.runner.image` to an image with client tools 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports fifteen pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.104.g362a559`, added the snapshot fix for live migration retries: a retry that creates the replication slot copies under the slot's snapshot, and one that finds the slot of an earlier attempt with tables still to copy stops with `Refusing to resume the copy: ...` before it copies any, where `0.18.98.g944abcc` copies the tables of either retry under a newer snapshot and apply can then stop on a duplicate key ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378)).
+The progress poll supports sixteen pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.109.gbec4ebb`, added the target keepalives: it sets server-side TCP keepalives on the target sessions it opens itself, so when a runner dies and such a session waits on it, the target ends the session within about 70 seconds, where with `0.18.104.g362a559` the session keeps its locks for about two hours at the kernel defaults ([#381](https://github.com/ydixken/pgcopydb-operator/issues/381)).
+[Retries and resume](../operations/lifecycle.md#retries-and-resume) lists the sessions that bound does not cover.
+`0.18.104.g362a559` added the snapshot fix for live migration retries: a retry that creates the replication slot copies under the slot's snapshot, and one that finds the slot of an earlier attempt with tables still to copy stops with `Refusing to resume the copy: ...` before it copies any, where `0.18.98.g944abcc` copies the tables of either retry under a newer snapshot and apply can then stop on a duplicate key ([#378](https://github.com/ydixken/pgcopydb-operator/issues/378)).
 `0.18.98.g944abcc` added the closed `output.db` fix: while streaming, apply stays on an `output.db` that receive has closed until it has applied every committed transaction in it, where `0.18.94.gbaa94ee` can move to the next file and skip them ([#376](https://github.com/ydixken/pgcopydb-operator/issues/376)).
 `0.18.94.gbaa94ee` added apply groups: it commits up to 100 source transactions in one target transaction, where older runners commit each on its own; `spec.follow.applyGroupTransactions` sets the limit ([Apply groups](../operations/performance.md#apply-groups)).
 `0.18.76.gf9b328b` added the status interval fix: it sends receive status within half of the source `wal_sender_timeout`, where `0.18.74.gc682dce` sends it every 10 seconds, so a timeout below that can end every receive session before a receive that fell behind reports a flush position ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
@@ -55,9 +57,9 @@ The bundled runner, `0.18.104.g362a559`, added the snapshot fix for live migrati
 See the [live migration hazard](../operations/live-migration.md#watching-the-stream) for what older runners lose, and the [live migration workload contract](#live-migration-specfollowenabled-true).
 `0.18.39.g93eda1d` added the NULL column fixes: it matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL.
 `0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
-All nine retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+All ten retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
 They also retain [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
-`0.18.98.g944abcc` lacks the snapshot fix, `0.18.94.gbaa94ee` and `0.18.76.gf9b328b` also lack the closed `output.db` fix, `0.18.74.gc682dce` also lacks the status interval fix, `0.18.72.g2aa91e7` also lacks the reconnect fix, `0.18.70.gbb8dbfc` also lacks the receive fix, `0.18.39.g93eda1d` also lacks the four follow fixes, `0.18.36.g972e221` also lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
+`0.18.104.g362a559` lacks the target keepalives, `0.18.98.g944abcc` also lacks the snapshot fix, `0.18.94.gbaa94ee` and `0.18.76.gf9b328b` also lack the closed `output.db` fix, `0.18.74.gc682dce` also lacks the status interval fix, `0.18.72.g2aa91e7` also lacks the reconnect fix, `0.18.70.gbb8dbfc` also lacks the receive fix, `0.18.39.g93eda1d` also lacks the four follow fixes, `0.18.36.g972e221` also lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.
@@ -439,7 +441,7 @@ The trade-off: re-copied tables read a fresh snapshot.
 A retried clone of a source that still takes writes is therefore not one single point in time across tables.
 If that matters, stop writes across the retry window, or delete and recreate the Migration for a fresh consistent copy.
 Follow migrations replay every change since the slot's consistent point on top of the base copy, so their tables need the slot's own snapshot.
-On runner `0.18.104.g362a559`, a retry that creates the slot copies under it.
+On runner `0.18.104.g362a559` and later, a retry that creates the slot copies under it.
 A retry that finds the slot from an earlier attempt and still has tables to copy cannot resume: that runner refuses it, and the operator starts the attempt over when `spec.clone.dropIfExists` is true, or fails the Migration as `SnapshotLost` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
 Older runners copy the remaining tables of either retry under a newer snapshot, so apply can stop on a duplicate key or leave the target diverged ([client tool versions](#client-tool-versions)).
 The cutover drain-verify gate and `spec.verification.data` are the checks that catch divergence.

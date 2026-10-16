@@ -17,8 +17,13 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"slices"
+	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -35,6 +40,17 @@ import (
 // postSlotFirstID is the first documents id the snapshot spec inserts. It sits
 // above every seeded id, even at stress scale, so resetSourceReplication finds them.
 const postSlotFirstID = 1000000000
+
+// pgcopydbSessionsSQL and pgcopydbBlockersSQL show what a stalled start-over waits
+// on, such as COPY backends that outlived a killed attempt's pod (issue #381).
+const (
+	pgcopydbSessionsSQL = "SELECT pid, client_addr, backend_start, xact_start, state, wait_event_type, wait_event," +
+		" left(query, 120) FROM pg_stat_activity WHERE application_name LIKE 'pgcopydb%' ORDER BY backend_start, pid"
+	pgcopydbBlockersSQL = "SELECT w.pid, blocker.pid, b.client_addr, left(b.query, 120) FROM pg_stat_activity w" +
+		" CROSS JOIN LATERAL unnest(pg_blocking_pids(w.pid)) AS blocker(pid)" +
+		" LEFT JOIN pg_stat_activity b ON b.pid = blocker.pid" +
+		" WHERE w.application_name LIKE 'pgcopydb%' ORDER BY w.pid, blocker.pid"
+)
 
 // Its own container because two base copies put it in the longest tier, and a
 // container's SpecPriority moves every spec in it.
@@ -80,6 +96,10 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 			if !CurrentSpecReport().Failed() {
 				return
 			}
+			AddReportEntry("target pgcopydb sessions", "pid|client_addr|backend_start|xact_start|state|"+
+				"wait_event_type|wait_event|query\n"+psqlDiag(targetCluster, pgcopydbSessionsSQL)+
+				"\n\nblocked pid|blocking pid|blocking client_addr|blocking query\n"+
+				psqlDiag(targetCluster, pgcopydbBlockersSQL), ReportEntryVisibilityFailureOrVerbose)
 			m := &v1beta1.Migration{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(mig), m); err != nil {
 				AddReportEntry("attempt logs", "Migration unavailable: "+err.Error(), ReportEntryVisibilityFailureOrVerbose)
@@ -197,3 +217,87 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 			"pgcopydb replication origin leaked on the target by the start-over")
 	})
 })
+
+// TestPgcopydbSessionSQL runs the failure report's two queries on a real lock
+// wait between pgcopydb-named sessions; a broken query would show only on a failed run.
+func TestPgcopydbSessionSQL(t *testing.T) {
+	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if uri == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance for the session diagnostics")
+	}
+	const (
+		table  = "e2e_session_probe"
+		holder = "pgcopydb[1] e2e holder"
+		waiter = "pgcopydb[2] e2e waiter"
+		lockOn = "relation"
+	)
+	psqlAs := func(ctx context.Context, app, sql string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "psql", uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql)
+		cmd.Env = append(os.Environ(), "PGAPPNAME="+app)
+		return cmd
+	}
+	run := func(sql string) string {
+		t.Helper()
+		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, err := psqlAs(runCtx, "e2e session probe", sql).Output()
+		if err != nil {
+			t.Fatalf("psql %q: %v", sql, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("CREATE TABLE " + table + " (id integer)")
+	t.Cleanup(func() { run("DROP TABLE " + table) })
+	var sessions []*exec.Cmd
+	t.Cleanup(func() {
+		// A backend in pg_sleep does not notice that its client is gone.
+		run("SELECT pg_terminate_backend(pid) FROM pg_stat_activity" +
+			" WHERE application_name IN ('" + holder + "', '" + waiter + "')")
+		for _, cmd := range sessions {
+			_ = cmd.Wait()
+		}
+	})
+	// start runs sql in the background and returns its backend pid once it waits on event.
+	start := func(app, sql, event string) string {
+		t.Helper()
+		cmd := psqlAs(t.Context(), app, sql)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s: %v", app, err)
+		}
+		sessions = append(sessions, cmd)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if pid := run("SELECT pid FROM pg_stat_activity WHERE application_name = '" + app +
+				"' AND wait_event = '" + event + "'"); pid != "" {
+				return pid
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("%s never waited on %s", app, event)
+		return ""
+	}
+	holderPID := start(holder, "BEGIN; LOCK TABLE "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(60)", "PgSleep")
+	waiterPID := start(waiter, "SELECT count(*) FROM "+table, lockOn)
+
+	rowOf := func(sql, pid string) []string {
+		t.Helper()
+		out := run(sql)
+		for row := range strings.Lines(out) {
+			if fields := strings.Split(strings.TrimSpace(row), "|"); fields[0] == pid {
+				return fields
+			}
+		}
+		t.Fatalf("no row for pid %s in:\n%s", pid, out)
+		return nil
+	}
+	if s := rowOf(pgcopydbSessionsSQL, holderPID); len(s) != 8 || s[4] != "active" || s[6] != "PgSleep" {
+		t.Fatalf("holder session %q", s)
+	}
+	if s := rowOf(pgcopydbSessionsSQL, waiterPID); len(s) != 8 || s[5] != "Lock" || s[6] != lockOn {
+		t.Fatalf("waiter session %q", s)
+	}
+	chain := rowOf(pgcopydbBlockersSQL, waiterPID)
+	if len(chain) != 4 || chain[1] != holderPID || !strings.Contains(chain[3], "LOCK TABLE "+table) {
+		t.Fatalf("blocking chain %q, want waiter %s blocked by holder %s", chain, waiterPID, holderPID)
+	}
+}
