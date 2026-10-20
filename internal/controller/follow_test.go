@@ -190,8 +190,12 @@ func (c failingPatchClient) Patch(context.Context, client.Object, client.Patch, 
 // sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
 // and tsErr the timestamped variant the zombie check reads.
 type fakeLogs struct {
-	out   string
-	err   error
+	out string
+	err error
+	// byJob replaces out for the Jobs it names.
+	byJob map[string]string
+	// byUID alone serves JobLogsByUID; a missing UID reads as a Job without pods.
+	byUID map[types.UID]string
 	tsOut string
 	tsErr error
 	// gotLines records the last requested tail budget, so tests can prove
@@ -199,9 +203,20 @@ type fakeLogs struct {
 	gotLines int64
 }
 
-func (f *fakeLogs) JobLogs(_ context.Context, _, _ string, lines int64) ([]byte, error) {
+func (f *fakeLogs) JobLogs(_ context.Context, _, jobName string, lines int64) ([]byte, error) {
 	f.gotLines = lines
+	if out, ok := f.byJob[jobName]; ok {
+		return []byte(out), f.err
+	}
 	return []byte(f.out), f.err
+}
+
+func (f *fakeLogs) JobLogsByUID(_ context.Context, _ string, uid types.UID, _ int64) ([]byte, error) {
+	out, ok := f.byUID[uid]
+	if !ok {
+		return nil, fmt.Errorf("no pods found for Job UID %s", uid)
+	}
+	return []byte(out), nil
 }
 
 func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {

@@ -3346,14 +3346,28 @@ func TestRecordWorkNode(t *testing.T) {
 		}
 	}
 	at := func(sec int64) metav1.Time { return metav1.Unix(1_700_000_000+sec, 0) }
+	// pod mounts its Migration's work claim, as every worker pod does.
 	pod := func(name, node string, created metav1.Time, migration string) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: testNS, CreationTimestamp: created,
 				Labels: map[string]string{labelManagedBy: managerName, labelMigration: migration},
 			},
-			Spec: corev1.PodSpec{NodeName: node},
+			Spec: corev1.PodSpec{NodeName: node, Volumes: []corev1.Volume{{
+				Name: workdirVolume,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: migration + "-work"},
+				},
+			}}},
 		}
+	}
+	// probe swaps the work claim for an emptyDir under the same volume name, as
+	// the retry gate and the preflight do.
+	probe := func(p *corev1.Pod) *corev1.Pod {
+		p.Spec.Volumes = []corev1.Volume{{
+			Name: workdirVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}}
+		return p
 	}
 	tests := []struct {
 		name    string
@@ -3373,6 +3387,10 @@ func TestRecordWorkNode(t *testing.T) {
 			pods: []client.Object{pod("p", nodeA, at(0), "work")}},
 		{name: "only unscheduled pods keep the last value", before: nodeA, want: nodeA,
 			pods: []client.Object{pod("p", "", at(0), "work")}},
+		{name: "probe pod is newer", before: nodeA, want: nodeA, pods: []client.Object{
+			pod("work-run-1", nodeA, at(0), "work"),
+			probe(pod("work-gate-2", nodeB, at(10), "work")),
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3423,4 +3441,38 @@ func TestRecordWorkNode(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestPodWaitDetail_ByUID covers the probe's selector: each probe for one
+// attempt reuses the Job name, so a deleted probe's pod shares its job-name.
+func TestPodWaitDetail_ByUID(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(name, uid, reason, message string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, Labels: map[string]string{
+				jobNameLabel: "work-gate-2", batchv1.ControllerUidLabel: uid,
+			}},
+			Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: workerContainer,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: reason, Message: message,
+				}},
+			}}},
+		}
+	}
+	// The stray pod sorts first in the fake client's list, so a dropped
+	// selector would answer with its reason.
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		waiting("work-gate-2-a", "uid-deleted", "CrashLoopBackOff", "back-off restarting failed container"),
+		waiting("work-gate-2-b", "uid-current", "ImagePullBackOff", `Back-off pulling image "runner:missing"`),
+	).Build()
+	r := &MigrationReconciler{Client: c, Scheme: scheme}
+
+	got := r.podWaitDetail(context.Background(), testNS, client.MatchingLabels{batchv1.ControllerUidLabel: "uid-current"})
+	if want := `ImagePullBackOff: Back-off pulling image "runner:missing"`; got != want {
+		t.Errorf("podWaitDetail = %q, want %q", got, want)
+	}
 }

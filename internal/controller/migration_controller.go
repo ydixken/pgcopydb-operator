@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,11 +100,12 @@ const reasonCloneIncomplete = "CloneIncomplete"
 const reasonSnapshotLost = "SnapshotLost"
 
 // LogReader fetches worker pod logs so terminal errors reach status; nil
-// degrades to the Job's own condition message (envtest has no pods). The
-// zombie check dates the supervisor-death marker off the Timestamps variant.
+// degrades to the Job's own condition message (envtest has no pods). The zombie check dates
+// the supervisor-death marker off the Timestamps variant; probes, which reuse a name, read by UID.
 type LogReader interface {
 	JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
 	JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
+	JobLogsByUID(ctx context.Context, namespace string, uid types.UID, tailLines int64) ([]byte, error)
 }
 
 // ProgressOps samples a running worker; nil disables sampling (envtest injects a fake).
@@ -417,13 +419,17 @@ func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1bet
 // log reader and the pod inspectors use.
 const jobNameLabel = "job-name"
 
-// preflightWaitDetail reports why the preflight pod is not progressing, or ""
-// while it starts normally. A pod that cannot start would otherwise show a
-// bare Validating phase with the cause buried in pod events (seen live).
+// preflightWaitDetail is podWaitDetail for the preflight Job's pods.
 func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace, jobName string) string {
+	return r.podWaitDetail(ctx, namespace, client.MatchingLabels{jobNameLabel: jobName})
+}
+
+// podWaitDetail reports why the selected pods are not progressing, or ""
+// while they start normally. A pod that cannot start would otherwise leave a
+// bare phase or condition, with the cause buried in pod events (seen live).
+func (r *MigrationReconciler) podWaitDetail(ctx context.Context, namespace string, selector client.MatchingLabels) string {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(namespace),
-		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+	if err := r.List(ctx, pods, client.InNamespace(namespace), selector); err != nil {
 		return ""
 	}
 	for i := range pods.Items {
@@ -1043,8 +1049,8 @@ func (r *MigrationReconciler) ensureJob(ctx context.Context, m *v1beta1.Migratio
 	return nil, true, nil
 }
 
-// recordWorkNode stores the newest scheduled Job pod's node in annotationWorkNode
-// for runnerAffinity; only the preflight, which precedes every worker, lacks the PVC.
+// recordWorkNode stores, for runnerAffinity, the node of the newest scheduled pod that mounts
+// the work PVC: a retry gate probe is newer than the worker but runs on an emptyDir.
 // Best effort: the preference only saves a volume detach, so a failure must not stop a pass.
 func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Migration) {
 	pods := &corev1.PodList{}
@@ -1053,10 +1059,15 @@ func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Mig
 		logf.FromContext(ctx).V(1).Info("work node lookup failed", "error", err)
 		return
 	}
+	claim := workPVCName(m)
+	onClaim := func(v corev1.Volume) bool {
+		return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim
+	}
 	var newest *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.Spec.NodeName != "" && (newest == nil || newest.CreationTimestamp.Before(&p.CreationTimestamp)) {
+		if p.Spec.NodeName != "" && slices.ContainsFunc(p.Spec.Volumes, onClaim) &&
+			(newest == nil || newest.CreationTimestamp.Before(&p.CreationTimestamp)) {
 			newest = p
 		}
 	}

@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/rest"
 	"k8s.io/streaming/pkg/httpstream/wsstream"
 )
@@ -60,6 +61,7 @@ func serveExecSuccess(w http.ResponseWriter, r *http.Request, out []byte) {
 // streaming fails there by design). It records request URLs because the
 // contract under test is what the client asks the server for: pod filtering
 // happens server-side via selectors, log routing via the pod name in the path.
+// The pod list applies the label selector, as the API server does.
 type apiServer struct {
 	*httptest.Server
 	pods     []corev1.Pod
@@ -77,6 +79,9 @@ const runnerContainer = "pgcopydb"
 // paramTrue is the query-parameter value boolean options serialize to.
 const paramTrue = "true"
 
+// podLog is what every pod of the fake API server logged.
+const podLog = "clone step 9/9 done\n"
+
 func newAPIServer(t *testing.T) *apiServer {
 	t.Helper()
 	s := &apiServer{}
@@ -86,14 +91,21 @@ func newAPIServer(t *testing.T) *apiServer {
 		case s.fail:
 			http.Error(w, "boom", http.StatusInternalServerError)
 		case strings.HasSuffix(r.URL.Path, "/pods"):
-			w.Header().Set("Content-Type", "application/json")
-			list := corev1.PodList{
-				TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"},
-				Items:    s.pods,
+			sel, err := labels.Parse(r.URL.Query().Get("labelSelector"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
+			list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}}
+			for _, p := range s.pods {
+				if sel.Matches(labels.Set(p.Labels)) {
+					list.Items = append(list.Items, p)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(list)
 		case strings.HasSuffix(r.URL.Path, "/log"):
-			_, _ = w.Write([]byte("clone step 9/9 done\n"))
+			_, _ = w.Write([]byte(podLog))
 		case strings.HasSuffix(r.URL.Path, "/exec") && s.execOut != nil:
 			serveExecSuccess(w, r, s.execOut)
 		default:
@@ -204,7 +216,7 @@ func TestJobLogs_PicksNewestPod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != "clone step 9/9 done\n" {
+	if string(out) != podLog {
 		t.Fatalf("logs = %q", out)
 	}
 	req := srv.lastRequest(t)
@@ -229,7 +241,7 @@ func TestJobLogsTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out) != "clone step 9/9 done\n" {
+	if string(out) != podLog {
 		t.Fatalf("logs = %q", out)
 	}
 	q := srv.lastRequest(t).Query()
@@ -254,6 +266,53 @@ func TestJobLogs_ListError(t *testing.T) {
 	if _, err := e.JobLogs(context.Background(), "ns", "mig-run-1", 10); err == nil {
 		t.Fatal("want error when the pod list fails")
 	}
+}
+
+// TestJobLogsByUID_SelectsByControllerUID: every probe for one attempt reuses
+// its Job name, so a pod left by a deleted probe carries the same job-name.
+func TestJobLogsByUID_SelectsByControllerUID(t *testing.T) {
+	// A test-local copy of the Job controller's label, so a rename fails here.
+	const controllerUID = "batch.kubernetes.io/controller-uid"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	probePod := func(name, uid string, created time.Time) corev1.Pod {
+		p := workerPod(name, created)
+		p.Labels = map[string]string{"job-name": "mig-gate-2", controllerUID: uid}
+		return p
+	}
+	stray := probePod("mig-gate-2-stray", "uid-deleted", base)
+	current := probePod("mig-gate-2-current", "uid-current", base.Add(time.Minute))
+
+	srv := newAPIServer(t)
+	srv.pods = []corev1.Pod{stray, current}
+	out, err := newExec(t, srv.URL).JobLogsByUID(context.Background(), "ns", "uid-current", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != podLog {
+		t.Fatalf("logs = %q", out)
+	}
+	if got := srv.requests[0].Query().Get("labelSelector"); got != controllerUID+"=uid-current" {
+		t.Fatalf("labelSelector = %q, want %s=uid-current", got, controllerUID)
+	}
+	req := srv.lastRequest(t)
+	if !strings.HasSuffix(req.Path, "/pods/mig-gate-2-current/log") {
+		t.Fatalf("logs fetched from %q, want the pod of the Job with that UID", req.Path)
+	}
+	if q := req.Query(); q.Get("container") != runnerContainer || q.Get("tailLines") != "60" {
+		t.Fatalf("log query = %v, want container=%s tailLines=60", q, runnerContainer)
+	}
+
+	t.Run("a deleted probe's pod alone is not found", func(t *testing.T) {
+		srv := newAPIServer(t)
+		srv.pods = []corev1.Pod{stray}
+		_, err := newExec(t, srv.URL).JobLogsByUID(context.Background(), "ns", "uid-current", 60)
+		if err == nil || !strings.Contains(err.Error(), "no pods found") {
+			t.Fatalf("want 'no pods found' error, got %v", err)
+		}
+		if n := len(srv.requests); n != 1 {
+			t.Fatalf("want only the pod list, saw %d requests: %v", n, srv.requests)
+		}
+	})
 }
 
 // TestInPod_RequestShape drives InPod against a server that cannot upgrade to

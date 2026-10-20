@@ -183,16 +183,19 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Annotations).NotTo(HaveKey(annotationWorkNode))
 		Expect(fetchJob(ctx, name+"-preflight").Spec.Template.Spec.Affinity).To(BeNil())
 
-		// envtest runs no scheduler: the test binds the preflight pod itself.
+		// envtest runs no scheduler: the test binds a pod on the work volume itself.
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: name + "-preflight-pod", Namespace: testNS,
+				Name: name + "-volume-pod", Namespace: testNS,
 				Labels: map[string]string{labelManagedBy: managerName, labelMigration: name},
 			},
 			Spec: corev1.PodSpec{
 				NodeName:      nodeA,
 				RestartPolicy: corev1.RestartPolicyNever,
 				Containers:    []corev1.Container{{Name: testPodContainer, Image: testPodImage}},
+				Volumes: []corev1.Volume{{Name: workdirVolume, VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name + "-work"},
+				}}},
 			},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
