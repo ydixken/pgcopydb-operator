@@ -1387,21 +1387,20 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		applySourceCluster(staleSource)
 		targetSize := applyTargetCluster()
 		// The target is only needed after seeding, so its start-up overlaps the seed.
-		// Gomega failures become errors here: the goroutine has no Ginkgo node of its own.
+		// GinkgoRecover fails the node from the goroutine: InterceptGomegaFailure is not goroutine-safe.
 		var wg sync.WaitGroup
-		var targetErr error
-		wg.Go(func() { targetErr = InterceptGomegaFailure(func() { waitTargetCluster(targetSize) }) })
-		sourceErr := InterceptGomegaFailure(func() {
-			waitSourceCluster()
-			By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
-			runSeedJob()
+		defer wg.Wait() // a failed source path skips the Wait below
+		var targetReady bool
+		wg.Go(func() {
+			defer GinkgoRecover()
+			waitTargetCluster(targetSize)
+			targetReady = true
 		})
+		waitSourceCluster()
+		By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
+		runSeedJob()
 		wg.Wait()
-		for _, err := range []error{sourceErr, targetErr} {
-			if err != nil {
-				Fail(err.Error())
-			}
-		}
+		Expect(targetReady).To(BeTrue(), "CNPG cluster %s did not become ready", targetCluster)
 	} else {
 		prepareExternalDatabases()
 		By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
