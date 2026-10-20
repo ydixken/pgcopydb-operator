@@ -228,7 +228,7 @@ printf '%s\n' "ok: ownership handed over to \"$REOWN_OWNER\""
 // migration role, not through superuserSecretRef: the candidate set is "owned
 // by current_user", so any other role would select the wrong set.
 func buildReownJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	job, err := scriptJob(m, runnerImage, reownJobName(m), reownScript())
+	job, err := scriptJob(m, runnerImage, reownJobName(m), reownScript(), false)
 	if err != nil {
 		return nil, err
 	}

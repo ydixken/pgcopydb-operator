@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
@@ -228,6 +229,110 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 		if !strings.Contains(c.Command[2], want) {
 			t.Fatalf("prelude misses %q:\n%s", want, c.Command[2])
 		}
+	}
+}
+
+func secretRefTarget() v1beta1.PostgresConnection {
+	return v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "tgt-bundle"}}
+}
+
+func uriSecretRefTarget() v1beta1.PostgresConnection {
+	return v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "tgt-dsn"}, Key: "dsn-uri",
+	}}
+}
+
+// TestBuildJobGolden pins the worker Job byte for byte for each target form,
+// so a new opt-in field that is unset provably leaves it unchanged.
+// UPDATE_GOLDEN=1 rewrites the snapshots.
+func TestBuildJobGolden(t *testing.T) {
+	for name, target := range map[string]v1beta1.PostgresConnection{
+		"inline":       passwordMigration().Spec.Target,
+		"secretref":    secretRefTarget(),
+		"urisecretref": uriSecretRefTarget(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Target = target
+			job, err := buildJob(m, "img", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := json.MarshalIndent(job, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, '\n')
+			path := filepath.Join("testdata", "worker-job-"+name+".json")
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(want) != string(got) {
+				t.Fatalf("the worker Job drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
+			}
+		})
+	}
+}
+
+// TestJobs_SynchronousCommitOnlyOnWorkerAndPreflight pins which Jobs start
+// their target sessions with synchronous_commit=local: the worker and the
+// preflight do, every Job that only reads or cleans up does not.
+func TestJobs_SynchronousCommitOnlyOnWorkerAndPreflight(t *testing.T) {
+	for form, target := range map[string]v1beta1.PostgresConnection{
+		"inline":    passwordMigration().Spec.Target,
+		"secretRef": secretRefTarget(),
+	} {
+		t.Run(form, func(t *testing.T) {
+			m := reownMigration()
+			m.Spec.Target = target
+			m.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+			for name, tc := range map[string]struct {
+				build func() (*batchv1.Job, error)
+				want  bool
+			}{
+				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
+				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
+				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
+				jobKindVerify:    {func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") }, false},
+				"catalog":        {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
+				"compare data":   {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) }, false},
+				"compare schema": {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) }, false},
+				"reown":          {func() (*batchv1.Job, error) { return buildReownJob(m, "img") }, false},
+			} {
+				job, err := tc.build()
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				c := job.Spec.Template.Spec.Containers[0]
+				source := envValue(c.Env, "PGCOPYDB_SOURCE_PGURI")
+				if source == "" || strings.Contains(source, "options=") {
+					t.Errorf("%s: source URI %q must exist and never set options=", name, source)
+				}
+				// The inline target URI is spec env; a secretRef prelude composes it.
+				targetURI := envValue(c.Env, "PGCOPYDB_TARGET_PGURI")
+				if form == "secretRef" {
+					if !strings.Contains(c.Command[2], "export PGCOPYDB_TARGET_PGURI=") {
+						t.Fatalf("%s: no target prelude to inspect:\n%s", name, c.Command[2])
+					}
+					targetURI = c.Command[2]
+				}
+				if targetURI == "" {
+					t.Fatalf("%s: no target URI to inspect", name)
+				}
+				if got := strings.Contains(targetURI, conn.SyncCommitLocalParam); got != tc.want {
+					t.Errorf("%s: target carries the synchronous_commit option = %v, want %v", name, got, tc.want)
+				}
+				if !tc.want && strings.Contains(targetURI, "synchronous_commit") {
+					t.Errorf("%s: target names synchronous_commit without the option:\n%s", name, targetURI)
+				}
+			}
+		})
 	}
 }
 
@@ -452,7 +557,7 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			dry.Spec.Clone.OwnerAfterRestore = reownTestOwner
 			return buildPreflightJob(dry, "img")
 		},
-		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		jobKindPreflight:  func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
@@ -874,10 +979,10 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	builders := map[string]func() (*batchv1.Job, error){
-		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
-		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
-		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+		"cleanup-job":    func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"compare":        func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
 	}
 	for name, build := range builders {
 		job, err := build()

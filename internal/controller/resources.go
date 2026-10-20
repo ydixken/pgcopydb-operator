@@ -148,7 +148,7 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		// ours, so the old slot, publication and origin go before it runs.
 		setup = "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
 	}
-	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0)
+	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0, true)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ PUBLICATION_RETRY`
 // origin after a live migration, abort or deletion. It reuses the worker pod
 // shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2)
+	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2, false)
 	if err != nil {
 		return nil, err
 	}
@@ -268,14 +268,14 @@ exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely
 	// refuted every password-based drain (found live).
-	return scriptJob(m, runnerImage, verifyJobName(m), script)
+	return scriptJob(m, runnerImage, verifyJobName(m), script, false)
 }
 
 // buildCatalogJob reads pgcopydb's catalog once a plain clone's worker has
 // exited, which exec cannot: the pod has left Running by then (#277).
 // finishClone reads only this Job's log, never its exit code.
 func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
-	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate))
+	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate), false)
 }
 
 // The preflight script is assembled per Migration by preflightScriptFor.
@@ -1229,7 +1229,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 			extras = append(extras, mat)
 		}
 	}
-	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), extras...)
+	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), true, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,8 +1339,8 @@ func probeSchemasFromTables(tables []string) ([]string, bool) {
 // scriptJob reuses the worker pod shape to run a shell script instead of a
 // pgcopydb argv: the prelude execs $0, which here is /bin/sh. Backoff is fixed
 // at 1 because every caller runs a bounded, idempotent script.
-func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, extras ...*conn.Materialized) (*batchv1.Job, error) {
-	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, extras...)
+func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, syncCommit bool, extras ...*conn.Materialized) (*batchv1.Job, error) {
+	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, syncCommit, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -1361,12 +1361,17 @@ func addConnectTimeout(job *batchv1.Job) {
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
 // is shell the prelude runs after the passfile is assembled (conn.PreludeScript).
 // extras are credential sets whose preludes run after the primary sides'.
-func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, extras ...*conn.Materialized) (*batchv1.Job, error) {
+func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, syncCommit bool, extras ...*conn.Materialized) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err
 	}
-	tgt, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	// synchronousCommit is opt-in per builder, so a new Job kind cannot inherit it.
+	target := m.Spec.Target
+	if !syncCommit {
+		target.SynchronousCommit = ""
+	}
+	tgt, err := conn.Materialize(conn.Target, &target)
 	if err != nil {
 		return nil, err
 	}
