@@ -684,3 +684,99 @@ func TestProgressSampleWithholdsAnEchoedURI(t *testing.T) {
 		}
 	}
 }
+
+// The SyncRep count needs no grant: a role reads the waits of its own sessions without
+// pg_monitor. A real SyncRep wait needs a synchronous standby, so a pg_sleep wait stands in.
+func TestSyncRepStatement_Server(t *testing.T) {
+	admin := testPGURI(t)
+	role := fmt.Sprintf("progress_syncrep_%d", time.Now().UnixNano())
+	// A role whose privileges the test role has: its sessions show their waits, so only
+	// the usename filter keeps them out of the count.
+	member := role + "_member"
+	sqlOutput(t, admin, "CREATE ROLE "+role+" LOGIN PASSWORD '"+role+"'; CREATE ROLE "+member+" LOGIN PASSWORD '"+member+"'; GRANT "+member+" TO "+role)
+	t.Cleanup(func() { sqlOutput(t, admin, "DROP ROLE "+role+"; DROP ROLE "+member) })
+	// login logs in as the named role, or as the admin for an empty name. It drops a URI
+	// application_name, which outranks PGAPPNAME, the name the sessions below carry.
+	login := func(name string) string {
+		u, err := url.Parse(admin)
+		if err != nil {
+			t.Fatal("test PostgreSQL URI is invalid")
+		}
+		if name != "" {
+			u.User = url.UserPassword(name, name)
+		}
+		q := u.Query()
+		q.Del("application_name")
+		u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
+		return u.String()
+	}
+	if got := sqlOutput(t, login(role), "select pg_has_role('pg_read_all_stats', 'member')"); got != "f" {
+		t.Fatalf("fixture: the test role reads every session's wait (pg_read_all_stats: %s)", got)
+	}
+	// syncrep_sql bounds the statement at 2 s whatever the URI sets.
+	cmd := exec.Command("sh", "-c", syncRepSQL+`syncrep_sql "$TEST_URI" "show statement_timeout"`)
+	cmd.Env = append(os.Environ(), "TEST_URI="+namedURI(t, login(role), "", "progress_syncrep_bound"))
+	if out, err := cmd.Output(); err != nil || string(out) != "2s\n" {
+		t.Fatalf("syncrep_sql statement_timeout = %q (%v), want 2s", out, err)
+	}
+
+	sleep := func(uri, app string) {
+		t.Helper()
+		session := exec.Command("psql", uri, "-XqtA", "-c", "select pg_sleep(20)")
+		session.Env = append(os.Environ(), "PGAPPNAME="+app)
+		if err := session.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			sqlOutput(t, admin, "select count(pg_terminate_backend(pid)) from pg_stat_activity where application_name = '"+app+"'")
+			_ = session.Wait()
+		})
+	}
+	sleep(login(role), "pgcopydb[1] clone")
+	sleep(login(member), "pgcopydb[2] clone")
+	sleep(login(""), "pgcopydb[3] clone")
+	waitFor(t, 5*time.Second, "the three pg_sleep sessions never started waiting", func() bool {
+		return sqlOutput(t, admin, "select count(*) from pg_stat_activity where wait_event = 'PgSleep' and application_name in ('pgcopydb[1] clone', 'pgcopydb[2] clone', 'pgcopydb[3] clone')") == "3"
+	})
+
+	// sample runs the single-database sampler as the test role, counting waitEvent in place of SyncRep.
+	sample := func(target, waitType, waitEvent string) (string, *Sample) {
+		t.Helper()
+		argv := progressCommand(false)
+		production := syncRepStatement("IPC", "SyncRep")
+		if !strings.Contains(argv[2], production) {
+			t.Fatal("the sample script does not carry the SyncRep count")
+		}
+		argv[2] = strings.Replace(argv[2], production, syncRepStatement(waitType, waitEvent), 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Env = append(os.Environ(), "PGCOPYDB_SOURCE_PGURI="+login(role), "PGCOPYDB_TARGET_PGURI="+target)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("sample failed: %v", err)
+		}
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if v, ok := strings.CutPrefix(line, "syncrep="); ok {
+				return v, parseSample(out)
+			}
+		}
+		t.Fatalf("sample printed no syncrep= line:\n%s", out)
+		return "", nil
+	}
+	sampler := namedURI(t, login(role), "", "progress_syncrep_sampler")
+	if line, s := sample(sampler, "IPC", "SyncRep"); line != "0 0 0" || s.SyncRep == nil || *s.SyncRep != (SyncRepWait{}) {
+		t.Errorf("SyncRep count = %q (parsed %+v, lost %q), want 0 0 0", line, s.SyncRep, s.Lost[syncRepKey])
+	}
+	line, s := sample(sampler, "Timeout", "PgSleep")
+	if s.SyncRep == nil {
+		t.Fatalf("PgSleep count = %q, want 1 <n> 1; lost %q", line, s.Lost[syncRepKey])
+	}
+	if got := *s.SyncRep; got.Waiting != 1 || got.OldestSeconds < 0 || got.PgcopydbNamed != 1 {
+		t.Errorf("PgSleep count = %q, want 1 <n> 1: only the test role's own session, named by pgcopydb", line)
+	}
+	line, s = sample("postgresql://"+role+"@127.0.0.1:1/postgres", "IPC", "SyncRep")
+	if reason := s.Lost[syncRepKey]; line != "" || s.SyncRep != nil || !strings.HasPrefix(reason, "psql: error: connection to server at ") {
+		t.Errorf("unreachable target: SyncRep count = %q (parsed %+v), reason %q; want unknown with the connection error", line, s.SyncRep, reason)
+	}
+}

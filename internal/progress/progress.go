@@ -105,9 +105,9 @@ esac
 // pg_stat_activity keeps only the first track_activity_query_size bytes (1kB by default).
 const SamplerMarker = "/* pgcopydb-operator progress sample */"
 
-// sampleScript prints the clone stage, six source figures, five target figures and the
-// tables still owed; a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
-const sampleScript = sampleSQL + stageScript + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
+// sampleScript prints the clone stage, six source figures, five target figures, the
+// tables still owed and the SyncRep count; a failed side prints empty. Design: docs/research/measurements.md#progress-sampling.
+var sampleScript = sampleSQL + stageScript + syncRepScript + `populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"
 present="case when t.copying then false else $populated end"
 tables="from pg_class c
   join pg_namespace n on n.oid = c.relnamespace"
@@ -148,19 +148,19 @@ s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "` + SamplerMarker + ` with t as (sele
     from t where not t.populated and $populated)") ||
   { s=; printf 'source_error=%s\n' "$(why)"; }
 rm -f "$err"
-printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}"
+printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\nsyncrep=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}" "$r"
 `
 
 // Instance catalogs have no relation counters; zero counts preserve the sample
 // row format without reporting progress. The FROM lives apart from the select
 // list so the source's sixth figure appends to the list: appended to the whole
 // query it lands on the WHERE clause, which then fails to parse (issue #277).
-const allDatabasesSampleScript = sampleSQL + stageScript + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
+var allDatabasesSampleScript = sampleSQL + stageScript + syncRepScript + `row="select sum(pg_database_size(oid)) || ' 0 0 0 0'"
 dbs="from pg_database where datname not in ('template0', 'template1')"
 s=$(progress_sql "$PGCOPYDB_SOURCE_PGURI" "$row || ' 0' $dbs") || { s=; printf 'source_error=%s\n' "$(why)"; }
 t=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "$row $dbs") || { t=; printf 'target_error=%s\n' "$(why)"; }
 rm -f "$err"
-printf 'stage=%s\nsource=%s\ntarget=%s\n' "$g" "$s" "$t"
+printf 'stage=%s\nsource=%s\ntarget=%s\nsyncrep=%s\n' "$g" "$s" "$t" "$r"
 `
 
 // One transaction pins the pooled queries to the backend that SET LOCAL bounds,
@@ -173,14 +173,22 @@ const progressSQL = `progress_sql() {
 }
 `
 
+// syncrep_sql is progress_sql bounded tighter, so the four calls' worst case,
+// 3 x 7 s + 4 s = 25 s, leaves the 30 s exec bound room for exec setup.
+const syncRepSQL = `syncrep_sql() {
+  ( timeout --signal=TERM --kill-after=1s 3s psql "$1" -XqtA --single-transaction -v ON_ERROR_STOP=1 \
+    -c 'SET LOCAL statement_timeout = 2000' -c "$2" 2>"${err:-/dev/stderr}" )
+}
+`
+
 // A failed side names its cause on a <side>_error= line; psql's stderr goes to
 // a file so that a connection warning on success cannot corrupt the row.
-const sampleSQL = progressSQL + `err=/tmp/pgm-progress-$$
+const sampleSQL = progressSQL + syncRepSQL + `err=/tmp/pgm-progress-$$
 why() { tr '\n' ' ' < "$err" | cut -c 1-300; }
 `
 
-// The sides a sample reads, as the script names them on its output lines.
-const sourceSide, targetSide = "source", "target"
+// The sides a sample reads and the SyncRep count, as the script names them on its output lines.
+const sourceSide, targetSide, syncRepKey = "source", "target", "syncrep"
 
 // withheldReason replaces any psql message a server did not write: libpq echoes
 // a connection URI it cannot parse, password included, and the reason is logged.
@@ -210,9 +218,19 @@ type Sample struct {
 	// restoring the schema, so the target no longer holds what an earlier run left.
 	CopyStarted bool
 
-	// Lost maps each side that returned no row to psql's error, empty when
-	// the script captured none, withheld when no server wrote it.
+	// SyncRep is nil when the count is unknown; nil never means that no commit waits.
+	SyncRep *SyncRepWait
+
+	// Lost maps each side that returned no row, and the SyncRep count when it is nil,
+	// to psql's error: empty when the script captured none, withheld when no server wrote it.
 	Lost map[string]string
+}
+
+// SyncRepWait counts the target sessions of the migration's role that wait for a synchronous
+// standby. OldestSeconds is the oldest waiting statement's age, an upper bound on its wait,
+// since PostgreSQL exposes no wait start.
+type SyncRepWait struct {
+	Waiting, OldestSeconds, PgcopydbNamed int64
 }
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
@@ -261,7 +279,7 @@ func (p *Poller) Sample(ctx context.Context, namespace, jobName string, allDatab
 func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, side := range []string{sourceSide, targetSide} {
+	for _, side := range []string{sourceSide, targetSide, syncRepKey} {
 		reason, failed := lost[side]
 		key := job + "/" + side
 		switch {
@@ -277,11 +295,11 @@ func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string
 }
 
 // parseSample reads the stage= line, the source= and target= lines, six integers for the source
-// and five for the target, the owed= line naming the tables the sixth figure
-// counted, and a <side>_error= line per failed side. A side that is missing,
-// short or not numeric contributes nothing rather than zero, and is lost.
+// and five for the target, the owed= line naming the tables the sixth figure counted, the
+// syncrep= line's three integers, and a <side>_error= line per failure. A line that is
+// missing, short or not numeric contributes nothing rather than zero, and is lost.
 func parseSample(out []byte) *Sample {
-	var src, tgt []int64
+	var src, tgt, syncRep []int64
 	var owed string
 	var copying, finalizing, started bool
 	reasons := map[string]string{}
@@ -294,6 +312,8 @@ func parseSample(out []byte) *Sample {
 			owed = strings.TrimSpace(v)
 		} else if v, ok := strings.CutPrefix(line, "stage="); ok {
 			copying, finalizing, started = parseStage(v)
+		} else if v, ok := strings.CutPrefix(line, "syncrep="); ok {
+			syncRep = parseFields(v)
 		} else if side, v, ok := strings.Cut(line, "_error="); ok {
 			reasons[side] = serverReason(strings.TrimSpace(v))
 		}
@@ -308,6 +328,11 @@ func parseSample(out []byte) *Sample {
 		sample.TargetSize = &tgt[0]
 	} else {
 		sample.Lost[targetSide] = reasons[targetSide]
+	}
+	if len(syncRep) == 3 {
+		sample.SyncRep = &SyncRepWait{Waiting: syncRep[0], OldestSeconds: syncRep[1], PgcopydbNamed: syncRep[2]}
+	} else {
+		sample.Lost[syncRepKey] = reasons[syncRepKey]
 	}
 	// Counts need both sides, and a target with no tables has no schema yet:
 	// 0 of 0 is an absent sample, not progress.
@@ -359,6 +384,29 @@ const stageScript = `g=$(progress_sql "$PGCOPYDB_TARGET_PGURI" "select
                       or application_name ilike '%vacuum worker%')
 from pg_stat_activity
 where application_name like 'pgcopydb%' and client_addr = inet_client_addr()") || g=
+`
+
+// PgcopydbAppNameLike matches the application_name pgcopydb gives every connection
+// (pgcopydb@bec4ebb:src/bin/pgcopydb/pgsql.c:520-550); the retry gate's census shares it.
+const PgcopydbAppNameLike = "pgcopydb[%"
+
+// syncRepStatement counts the role's sessions in one wait, the oldest one's age in seconds, and
+// the pgcopydb-named ones. The role alone scopes it: any other filter can under-match (client_addr
+// behind a proxy, application_name set by the URI), and under-matching reads as not blocked.
+func syncRepStatement(waitType, waitEvent string) string {
+	return `select count(*) || ' ' ||
+  coalesce(floor(extract(epoch from max(clock_timestamp() - query_start)))::bigint, 0) || ' ' ||
+  count(*) filter (where application_name like '` + PgcopydbAppNameLike + `')
+from pg_stat_activity
+where usename = session_user
+  and wait_event_type = '` + waitType + `' and wait_event = '` + waitEvent + `'
+  and pid <> pg_backend_pid()`
+}
+
+// syncRepScript counts in a call of its own, after the stage probe: its failure then freezes no
+// phase, and the size query's lock waits cannot hide it. A failed count leaves r empty: unknown.
+var syncRepScript = `r=$(syncrep_sql "$PGCOPYDB_TARGET_PGURI" "` + syncRepStatement("IPC", "SyncRep") + `") ||
+  { r=; printf 'syncrep_error=%s\n' "$(why)"; }
 `
 
 // parseStage reads the stage= line: copying while any copy worker is left, finalizing
