@@ -452,7 +452,7 @@ Older runners copy the remaining tables of either retry under a newer snapshot, 
 The cutover drain-verify gate and `spec.verification.data` are the checks that catch divergence.
 
 Before every retry, and before the attempt a resume starts, the [retry gate](../operations/lifecycle.md#the-retry-gate) checks the target.
-It holds the attempt until the previous worker's pod has ended and no session of the migration role under a pgcopydb name is left in the target database, and, where it runs one, until a test commit returns within 5 seconds with a synchronous standby's confirmation.
+It holds the attempt until the previous worker's pod has ended and no session of the migration role under a pgcopydb name is left in the target database, and, where it runs one, until a test commit returns within 5 seconds, which under synchronous replication takes a synchronous standby's confirmation.
 The census tells this Migration's sessions apart from others by role, database, and name, so:
 
 - Two Migrations that write one target database MUST use different migration roles.

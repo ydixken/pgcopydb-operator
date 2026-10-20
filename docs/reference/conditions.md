@@ -122,7 +122,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CommitsBlocked` | `False` | `NoSyncRepWait` | A sample read the count and found no session that has waited 30 seconds or more. One such sample clears `True`. |
 | `CommitsBlocked` | `False` | `WorkerSucceeded` | The worker Job completed, so every commit it sent has returned. No sampler runs on the finish path, so this keeps a stale `True` out of it. |
 | `CommitsBlocked` | `Unknown` | `SyncRepUnobserved` | A sample could not read the count: the exec or the count query failed, or no worker pod was running. It replaces `False`, never `True`. |
-| `RetryHeld` | `True` | `GateProbing` | The first probe of a hold is pending or running. Every retry passes through it. |
+| `RetryHeld` | `True` | `GateProbing` | The first probe of a hold is pending, running, or not created yet. Every retry passes through it. |
 | `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker has not ended; the message names the pod and its node. No probe runs meanwhile. |
 | `RetryHeld` | `True` | `SessionsRemain` | The probe's census found sessions of the migration role left on the target. The message lists up to ten with pid, state, wait event, age, backend start, and name. The operator never ends them. |
 | `RetryHeld` | `True` | `SyncCommitNotLocal` | With `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`: a pooler or proxy dropped the startup option. |

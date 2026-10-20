@@ -146,7 +146,8 @@ The probe runs up to three checks:
 - A census of the migration role's pgcopydb-named sessions in the target database, or on the whole instance with `clone.allDatabases`.
   It passes when it finds none.
 - With `spec.target.synchronousCommit: local`, `show synchronous_commit`, which has to read `local`.
-- A test commit with `synchronous_commit=on`, which passes when a synchronous standby confirms it within 5 seconds.
+- A test commit with `synchronous_commit=on`, which passes when it returns within 5 seconds.
+  Under synchronous replication, it returns only once a synchronous standby confirms it.
   It runs whenever the next worker could commit with `on`: always without `synchronousCommit`, and with it once the copy is done, because apply then sets `on` itself.
 
 When every check passes, the next attempt's worker starts.
@@ -164,7 +165,7 @@ The attempt is exempt when that census finds a pgcopydb session waiting for sync
 Such a wait started while the worker still ran and outlived it, which is what a proxy cut during a standby outage leaves behind.
 A catch-up wait that began just before an unrelated failure does not qualify.
 Neither does any wait when the target URI sets `application_name`, because the census then cannot tell pgcopydb's sessions from others.
-Only a failed attempt can be exempt: the attempt after a vanished Job and a resume always count.
+Only a failed attempt can be exempt: an attempt whose Job vanished, or that a suspend stopped, always counts.
 
 `status.exemptAttempts` counts the exempt attempts, and `kubectl get pgm -o wide` shows it in the `EXEMPT` column, so `ATTEMPTS` can exceed `backoffLimit + 1`.
 The next attempt's `AttemptStarted` event says that the failed one did not count.

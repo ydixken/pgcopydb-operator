@@ -332,13 +332,19 @@ A `RetryHeld` Warning event records the first result of a hold and each change o
 `kubectl logs job/<name>-gate-<n>` shows the probe's `gate:` result lines; the operator keeps a failed probe Job for 30 seconds.
 To stop a hold, set `spec.suspend: true`, which deletes the probe Job; the resume runs the gate again.
 
-`GateProbing` means the probe Job of the hold is pending or running.
-Every retry passes through it within seconds.
+`GateProbing` means the hold has no probe result yet: the probe Job is pending, running, or not created yet.
+Every retry passes through it, within seconds when the failed worker's log was readable.
+After a worker pod that vanished it can last several minutes, because the operator first waits up to 2 minutes for the log and then requeues with backoff before it creates `<name>-gate-<n>`.
 A probe pod that cannot start turns it into `ProbeFailed` with the kubelet reason.
 
 `WorkerPodRemains` means a pod of the previous attempt's worker has not ended; the message names the pod and its node.
 A pod on a lost node holds the retry until the pod object is gone.
-Force-delete it only once you have confirmed the node is down, because on a node that is only unreachable the old worker can still write to the target:
+
+> [!warning]
+> Force-delete the pod only once you have confirmed that its node is down.
+> On a node that is only unreachable, the old worker can still write to the target.
+
+To remove the pod of a node that is down:
 
 ```sh
 kubectl delete pod <pod> --grace-period=0 --force
@@ -388,7 +394,7 @@ A cancelled test commit is committed locally, and it only created a temporary ta
 `ProbeFailed` means a check gave no result: a failed connection, an SQL error, a deadline, a probe pod that cannot start, an unreadable log, or a log without the expected lines.
 The message carries the server's error: a failed connection shows the server's `FATAL:` line, such as a failed password or an unknown database.
 Any other client-side error, such as a host name that does not resolve, reads `client-side error withheld`, because libpq can echo a connection URI with its password; check the target connection settings.
-When the test commit fails for lack of `TEMPORARY` on the target database, the message ends with the `GRANT TEMPORARY ON DATABASE` statement that fixes it.
+When the test commit fails for lack of `TEMPORARY` on the target database, the message includes the `GRANT TEMPORARY ON DATABASE` statement that fixes it.
 
 ## Publication retry failures
 
