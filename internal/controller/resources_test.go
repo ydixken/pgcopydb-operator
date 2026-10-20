@@ -280,10 +280,10 @@ func TestBuildJobGolden(t *testing.T) {
 	}
 }
 
-// TestJobs_SynchronousCommitOnlyOnWorkerAndPreflight pins which Jobs start
-// their target sessions with synchronous_commit=local: the worker and the
-// preflight do, every Job that only reads or cleans up does not.
-func TestJobs_SynchronousCommitOnlyOnWorkerAndPreflight(t *testing.T) {
+// TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate pins which Jobs start
+// their target sessions with synchronous_commit=local: the worker, the preflight
+// and the retry gate do, every Job that only reads or cleans up does not.
+func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 	for form, target := range map[string]v1beta1.PostgresConnection{
 		"inline":    passwordMigration().Spec.Target,
 		"secretRef": secretRefTarget(),
@@ -298,6 +298,7 @@ func TestJobs_SynchronousCommitOnlyOnWorkerAndPreflight(t *testing.T) {
 			}{
 				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
 				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
+				"retry gate":     {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
 				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
 				jobKindVerify:    {func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") }, false},
 				"catalog":        {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
@@ -560,7 +561,13 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		"synchronousCommit local": func() (*batchv1.Job, error) {
 			return buildPreflightJob(syncCommitMigration(false), "img")
 		},
-		jobKindPreflight:  func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"retry gate":     func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		"retry gate, all databases": func() (*batchv1.Job, error) {
+			all := passwordMigration()
+			all.Spec.Clone.AllDatabases = true
+			return buildGateJob(all, "img", 2)
+		},
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
