@@ -91,20 +91,9 @@ var _ = Describe("Progress sampler transaction pooling", SpecPriority(1), func()
 			g.Expect(pod).NotTo(BeEmpty())
 		}, 3*time.Minute, time.Second).Should(Succeed())
 
-		// Fixture workloads need more than podexec's 30-second sampler transport budget.
-		pooledSQL := func(side conn.Side, sql string, budget time.Duration) (string, error) {
-			queryCtx, cancel := context.WithTimeout(ctx, budget+10*time.Second)
-			defer cancel()
-			out, queryErr := commandOutput(queryCtx, exec.CommandContext, "kubectl",
-				"exec", "-n", nsE2E, pod, "-c", "pgcopydb", "--", "sh", "-c", conn.URIRecover()+`
-case "$1" in source) uri=$PGCOPYDB_SOURCE_PGURI ;; target) uri=$PGCOPYDB_TARGET_PGURI ;; *) exit 1 ;; esac
-printf '%s\n' "$2" | timeout --signal=TERM --kill-after=1s "$3" psql "$uri" -XqtA -v ON_ERROR_STOP=1 -f -
-`, "sh", string(side), sql, strconv.FormatInt(int64(budget/time.Second), 10)+"s")
-			return strings.TrimSpace(string(out)), progressPoolCommandError(queryErr)
-		}
 		query := func(side conn.Side, sql string) string {
 			GinkgoHelper()
-			out, queryErr := pooledSQL(side, sql, 10*time.Second)
+			out, queryErr := workerSQL(pod, side, sql, 10*time.Second)
 			Expect(queryErr).NotTo(HaveOccurred(), "%s pooled SQL failed", side)
 			return out
 		}
@@ -113,7 +102,7 @@ printf '%s\n' "$2" | timeout --signal=TERM --kill-after=1s "$3" psql "$uri" -Xqt
 		pids := make([]int, len(sides))
 		for i, side := range sides {
 			Eventually(func(g Gomega) {
-				out, queryErr := pooledSQL(side, "SELECT 1;", 10*time.Second)
+				out, queryErr := workerSQL(pod, side, "SELECT 1;", 10*time.Second)
 				g.Expect(queryErr).NotTo(HaveOccurred(), "%s Pooler app connection failed", side)
 				g.Expect(out).To(Equal("1"), "%s Pooler app query returned no valid result", side)
 			}, 3*time.Minute, time.Second).Should(Succeed())
@@ -233,13 +222,13 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
 		}
 
 		By("running server-delayed COPY TO, COPY FROM, and CREATE INDEX on the same pooled backends")
-		// Both sides at once: they share no server. pooledSQL makes no Gomega
+		// Both sides at once: they share no server. workerSQL makes no Gomega
 		// calls, so the goroutines need no GinkgoRecover.
 		outs := make([]string, len(sides))
 		errs := make([]error, len(sides))
 		var wg sync.WaitGroup
 		for i, side := range sides {
-			wg.Go(func() { outs[i], errs[i] = pooledSQL(side, progressPoolLongWorkSQL(), time.Minute) })
+			wg.Go(func() { outs[i], errs[i] = workerSQL(pod, side, progressPoolLongWorkSQL(), time.Minute) })
 		}
 		wg.Wait()
 		for i, side := range sides {
@@ -403,6 +392,19 @@ func progressPoolCommandError(err error) error {
 		return fmt.Errorf("progress pooling command exited with status %d", exit.ExitCode())
 	}
 	return fmt.Errorf("progress pooling command failed (%T)", err)
+}
+
+// workerSQL runs sql in pod's pgcopydb container over that pod's own URI for side.
+// Fixture workloads need more than podexec's 30-second sampler transport budget.
+func workerSQL(pod string, side conn.Side, sql string, budget time.Duration) (string, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, budget+10*time.Second)
+	defer cancel()
+	out, err := commandOutput(queryCtx, exec.CommandContext, "kubectl",
+		"exec", "-n", nsE2E, pod, "-c", "pgcopydb", "--", "sh", "-c", conn.URIRecover()+`
+case "$1" in source) uri=$PGCOPYDB_SOURCE_PGURI ;; target) uri=$PGCOPYDB_TARGET_PGURI ;; *) exit 1 ;; esac
+printf '%s\n' "$2" | timeout --signal=TERM --kill-after=1s "$3" psql "$uri" -XqtA -v ON_ERROR_STOP=1 -f -
+`, "sh", string(side), sql, strconv.FormatInt(int64(budget/time.Second), 10)+"s")
+	return strings.TrimSpace(string(out)), progressPoolCommandError(err)
 }
 
 func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.Job {
