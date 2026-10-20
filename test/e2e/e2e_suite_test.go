@@ -2525,7 +2525,7 @@ func checkLonghornCapacity() {
 	if available < need {
 		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
 			" (%dGi requested x %d replica x 1.2 headroom, %d source/target pairs sized for"+
-			" %d CNPG instances each, plus the dedicated pooling pair) but only %dGi are free;"+
+			" %d CNPG instances each, plus the dedicated clusters) but only %dGi are free;"+
 			" free up space, lower E2E_SCALE or run fewer Ginkgo processes",
 			need>>30, required>>30, replicas, pairs, cnpgInstances, available>>30))
 	}
@@ -2533,7 +2533,7 @@ func checkLonghornCapacity() {
 
 // fixtureBytes is the volume space of pairs fixture pairs: source and target
 // once per CNPG instance, each holding a full copy, one work volume per pair,
-// and the dedicated pooling pair once per run.
+// and once per run the dedicated pooling pair and the pooled target.
 func fixtureBytes(pairs int) int64 {
 	var perPair int64
 	for _, size := range []string{srcStorageSize, tgtStorageSize} {
@@ -2543,7 +2543,7 @@ func fixtureBytes(pairs int) int64 {
 	work := resource.MustParse(workVolumeSize)
 	perPair += work.Value()
 	pool := resource.MustParse(progressPoolStorageSize)
-	return perPair*int64(pairs) + 2*pool.Value()
+	return perPair*int64(pairs) + 3*pool.Value()
 }
 
 // ensureFollowPrivileges grants the app role the non-superuser follow

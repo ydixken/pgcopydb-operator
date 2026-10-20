@@ -189,8 +189,8 @@ func TestParallelFixtureBytesScaleWithPairs(t *testing.T) {
 	})
 	srcStorageSize, tgtStorageSize, workVolumeSize, cnpgInstances = "5Gi", "6Gi", "1Gi", 2
 	const gi = int64(1) << 30
-	// Per pair: (5 + 6) x 2 instances + 1 work; the 1Gi pooling pair counts once.
-	for pairs, want := range map[int]int64{1: 23*gi + 2*gi, 4: 4*23*gi + 2*gi} {
+	// Per pair: (5 + 6) x 2 instances + 1 work; the pooling pair and the pooled target, 1Gi each, count once.
+	for pairs, want := range map[int]int64{1: 23*gi + 3*gi, 4: 4*23*gi + 3*gi} {
 		if got := fixtureBytes(pairs); got != want {
 			t.Errorf("fixtureBytes(%d) = %dGi, want %dGi", pairs, got/gi, want/gi)
 		}

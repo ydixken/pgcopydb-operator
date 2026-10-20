@@ -137,18 +137,21 @@ After refreshing the materialized view, `finish.sql` runs `VACUUM (ANALYZE)` acr
 Seeding is idempotent: an `e2e_seed` marker table records profile and scale, a matching marker skips the seed, and a kept cluster with a mismatching marker is recreated.
 The fixture manifest leaves `bootstrap.initdb.dataChecksums` unset; the [CNPG option defaults to `false`](https://cloudnative-pg.io/docs/1.27/bootstrap/#passing-options-to-initdb).
 
-The pooling spec creates its own ephemeral CNPG pair because [managed Pooler authentication](https://cloudnative-pg.io/docs/1.27/connection_pooling/#authentication) installs objects in `postgres`, even when clients use `app`.
+The pooling specs create their own ephemeral CNPG clusters because [managed Pooler authentication](https://cloudnative-pg.io/docs/1.27/connection_pooling/#authentication) installs objects in `postgres`, even when clients use `app`.
 Those objects can persist after Pooler deletion, so a separate application database does not isolate the shared maintenance catalogs used by all-databases clones.
-The dedicated pair follows `E2E_PG_SOURCE`/`E2E_PG_TARGET` and the fixture StorageClass, but always uses one instance and a 1Gi PVC per cluster, independent of scale, stress, and `E2E_CNPG_INSTANCES`.
+The progress sampler pooling spec creates a source and a target cluster.
+The `synchronousCommit` Pooler specs create one target cluster behind a transaction-mode Pooler and copy from the process's shared source.
+One of them seeds the schema `e2e_gate_pool_<process>` on that source and drops it when it ends.
+Each dedicated cluster follows `E2E_PG_SOURCE` or `E2E_PG_TARGET` and the fixture StorageClass, but always uses one instance and a 1Gi PVC, independent of scale, stress, and `E2E_CNPG_INSTANCES`.
 It requests 100m CPU and 256Mi memory per instance, uses PostgreSQL's default caches, and sizes `max_wal_size` at a fifth of its volume.
 Cleanup registers after each successful create and removes the runner and Poolers before the clusters, checks deletion UIDs, and waits for cluster-labelled pods and UID-owned PVCs to disappear, even with `E2E_KEEP_FIXTURES=true`.
-The spec requires dedicated-cluster Pooler ownership and unchanged schema/function signatures and owners in both shared `postgres` databases while pooling and after cleanup; it reads no authentication function bodies or secret values.
+The progress sampler pooling spec requires dedicated-cluster Pooler ownership and unchanged schema/function signatures and owners in both shared `postgres` databases while pooling and after cleanup; it reads no authentication function bodies or secret values.
 
 > [!important]
 > Recreate kept shared fixtures whose maintenance databases contain Pooler authentication objects before running all-databases tests.
 > `E2E_KEEP_FIXTURES=false` controls teardown after a run; it does not clean those databases before the run.
 
-The pooling fixture requires the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster, pod, and PVC permissions, including `pods/exec`.
+The pooling fixtures require the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster, pod, and PVC permissions, including `pods/exec`.
 Dedicated-cluster readiness and cleanup require `get`, `list`, and `delete` on PVCs in `pgcopydb-e2e`.
 Grant those three Pooler verbs through a dedicated Role and RoleBinding in `pgcopydb-e2e` only.
 The runner's ServiceAccount and GitOps RBAC live outside this repository (see private ops notes).
@@ -163,7 +166,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
   Scale 1 seeds roughly 12GB on 50Gi volumes; release candidate CI uses 0.1, roughly 1.2GB on 7Gi.
 - `E2E_CNPG_INSTANCES` (`1`) sets the instances per shared source/target CNPG cluster.
   Raise it to 3 for chaos failover coverage.
-  The pooling pair stays at one instance each.
+  The dedicated pooling clusters stay at one instance each.
 - `E2E_EXTRA_TABLES` (unset) adds this many extra tables on top of the base fixture, with sizes drawn from a normal distribution and normalised to `E2E_EXTRA_SIZE_GB`.
   The base fixture is lopsided, one table holding 73% of the bytes, and the extra tables give it a production shape.
   Must be set with `E2E_EXTRA_SIZE_GB`.
@@ -184,7 +187,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_MIGRATION_TIMEOUT` (`30m`, `2h` under stress) bounds each wait for a Migration to reach a phase, as a Go duration.
   The run's own `go test` timeout still has to cover the seed and the migrations; `task e2e:focus` and `task e2e:focus:unattended` take it as `TIMEOUT=` (default `1h`), and the two chaos tasks take it the same way (default `3h`).
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
-  The pooling pair is always removed.
+  The dedicated pooling clusters are always removed.
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
 - `E2E_PG_SOURCE` (`17`) is the PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.
 - `E2E_PG_TARGET` (`17`) is the PostgreSQL major for the target.
@@ -227,7 +230,7 @@ When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suit
 The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
 The class also sets `dataLocality: best-effort`, so the single replica follows its pod to the pod's node and the pairs' I/O spreads over the nodes' disks instead of landing on the disk with the most free space.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
-Its requested-storage budget includes the shared pair, work volume, and two additional 1Gi pooling volumes before applying 20% headroom.
+Its requested-storage budget includes the shared pair, work volume, and three additional 1Gi volumes for the dedicated pooling clusters before applying 20% headroom.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
 
 The shared fixtures are placed, not left to the scheduler.
