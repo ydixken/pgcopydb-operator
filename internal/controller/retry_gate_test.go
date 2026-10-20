@@ -557,6 +557,7 @@ var _ = Describe("retry gate", func() {
 		Expect(clone.Status).To(Equal(metav1.ConditionFalse))
 		Expect(clone.Reason).To(Equal("CloneFailed"))
 		Expect(m.Status.RetryGate.Exemption).To(Equal(v1beta1.RetryGateCounted))
+		expectHold(m, metav1.ConditionFalse, reasonHoldMigrationFailed)
 		Expect(jobAbsent(name + "-run-2")).To(BeTrue())
 	})
 
@@ -614,6 +615,7 @@ var _ = Describe("retry gate", func() {
 		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
 		Expect(failed.Message).To(Equal(budgetMessage(m)))
+		expectHold(m, metav1.ConditionFalse, reasonHoldMigrationFailed)
 		Expect(gateJobs(name)).To(BeEmpty())
 	})
 
@@ -736,4 +738,100 @@ var _ = Describe("retry gate", func() {
 		Entry("marker logged", "mig-gate-clone-done", copyingLine+cloneDoneLine, "commit=1,local=1", true),
 		Entry("no marker", "mig-gate-clone-owed", copyingLine, "commit=0,local=1", false),
 	)
+
+	It("deletes the probe on suspend and gates the resume", func() {
+		const name = "mig-gate-suspend"
+		defer removeMigration(ctx, name)
+		var clock time.Time
+		r := start(name, &clock, nil)
+		failRun1(r, name, "")
+		reconcileAndGet(ctx, r, name)
+		first := fetchJob(ctx, name+"-gate-2")
+
+		By("suspend while the probe runs")
+		m := getMigration(name)
+		m.Spec.Suspend = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(jobAbsent(name + "-gate-2")).To(BeTrue())
+		expectHold(m, metav1.ConditionFalse, reasonHoldSuspended)
+		Expect(m.Status.RetryGate).NotTo(BeNil())
+		Expect(m.Status.RetryGate.FailedAttempt).To(Equal(int32(1)))
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseSuspended))
+		exempt := m.Status.ExemptAttempts
+
+		By("resume")
+		m.Spec.Suspend = false
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		Expect(fetchJob(ctx, name+"-gate-2").UID).NotTo(Equal(first.UID))
+		expectHold(m, metav1.ConditionTrue, reasonGateProbing)
+		Expect(m.Status.Phase).To(Equal(attemptPhase(m)))
+		Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseSuspended))
+		Expect(jobAbsent(name + "-run-2")).To(BeTrue())
+
+		m = passRetryGate(ctx, r, name)
+		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
+		Expect(m.Status.ExemptAttempts).To(Equal(exempt))
+	})
+
+	It("clears a stale RetryHeld and deletes a stray probe once the worker runs", func() {
+		const name = "mig-gate-stray"
+		defer removeMigration(ctx, name)
+		var clock time.Time
+		r := start(name, &clock, nil)
+		failRun1(r, name, "")
+		m := passRetryGate(ctx, r, name)
+		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
+
+		// What a pass working from a stale cache can leave behind once run-2 started.
+		meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+			Type: v1beta1.ConditionRetryHeld, Status: metav1.ConditionTrue, Reason: reasonGateProbing, Message: "a stale pass",
+		})
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
+		stray, err := buildGateJob(m, testRunnerImage, 2)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(controllerutil.SetControllerReference(m, stray, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Create(ctx, stray)).To(Succeed())
+		Expect(gateJobs(name)).To(ConsistOf(name + "-gate-2"))
+
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
+		expectHold(m, metav1.ConditionFalse, reasonGatePassed)
+		Expect(gateJobs(name)).To(BeEmpty())
+	})
+
+	It("creates no probe for a Migration being deleted", func() {
+		const name = "mig-gate-deleted"
+		defer removeMigration(ctx, name)
+		var clock time.Time
+		r := start(name, &clock, func(m *v1beta1.Migration) {
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		})
+		// Held with no probe yet, so any pass that reached the gate would create one.
+		m := failRun1(r, name, "")
+		expectHold(m, metav1.ConditionTrue, reasonGateProbing)
+		Expect(gateJobs(name)).To(BeEmpty())
+		Expect(controllerutil.ContainsFinalizer(m, finalizerName)).To(BeTrue())
+
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		Expect(getMigration(name).DeletionTimestamp).NotTo(BeNil())
+		reconcileAndGet(ctx, r, name)
+		// Only the deletion path creates the cleanup Job, so this pass saw the deletionTimestamp.
+		Expect(fetchJob(ctx, name+"-cleanup")).NotTo(BeNil())
+		finishJob(ctx, name+"-cleanup", true)
+		Eventually(func() bool {
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}})
+			return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, &v1beta1.Migration{}))
+		}).WithTimeout(deletionDriveTimeout).Should(BeTrue())
+
+		jobs := &batchv1.JobList{}
+		Expect(k8sClient.List(ctx, jobs, client.InNamespace(testNS), client.MatchingLabels{labelMigration: name})).To(Succeed())
+		names := make([]string, 0, len(jobs.Items))
+		for _, j := range jobs.Items {
+			names = append(names, j.Name)
+		}
+		Expect(names).To(ContainElement(name + "-cleanup"))
+		Expect(names).NotTo(ContainElement(HavePrefix(name + "-gate-")))
+	})
 })

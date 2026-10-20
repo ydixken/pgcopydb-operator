@@ -52,6 +52,9 @@ const (
 	reasonGateProbing        = "GateProbing"
 	reasonWorkerPodRemains   = "WorkerPodRemains"
 	reasonGatePassed         = "GatePassed"
+	// Hold in these names sets them apart from the Suspended phase and event reason.
+	reasonHoldSuspended       = "Suspended"
+	reasonHoldMigrationFailed = "MigrationFailed"
 )
 
 // The results a probe prints on its gate: commit line.

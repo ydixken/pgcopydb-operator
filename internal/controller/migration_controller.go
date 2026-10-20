@@ -549,6 +549,8 @@ func (r *MigrationReconciler) observeRunningJob(
 		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
 		record("follow_control", started)
 	}
+	// A pass working from a stale cache can rewrite the conditions after this worker started.
+	r.endHold(m, reasonGatePassed, fmt.Sprintf("Attempt %d runs as Job %s", m.Status.Attempts, job.Name))
 	started = r.currentTime()
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		record("status_patch", started)
@@ -568,6 +570,10 @@ func (r *MigrationReconciler) observeRunningJob(
 		return res, err
 	}
 	record("zombie_reap", started)
+	if err := r.deleteStrayProbes(ctx, m); err != nil {
+		outcome = "stray_probe_error"
+		return ctrl.Result{}, err
+	}
 	// The pass keeps pollInterval for status; the sampler times the size gauges.
 	delay := r.activePollDelay(reconcileStart)
 	timings = append(timings, "next_delay", delay)
@@ -747,7 +753,7 @@ func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobN
 }
 
 // reconcileSuspended deletes the active worker (keeping the PVC, so a later
-// resume continues from the catalogs) and parks the Migration.
+// resume continues from the catalogs) and any retry gate probe, and parks the Migration.
 func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if m.Status.JobName != "" {
 		job := &batchv1.Job{}
@@ -805,6 +811,13 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 			return ctrl.Result{}, err
 		}
 	}
+	// The probe's test commit writes too. retryGate stays, so a resume gates again and a
+	// pending verdict stays pending.
+	next := m.Status.Attempts + 1
+	if err := r.deleteGateJob(ctx, m, next); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.endHold(m, reasonHoldSuspended, fmt.Sprintf("Attempt %d waits for a resume: spec.suspend stopped the retry gate", next))
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
@@ -1067,11 +1080,14 @@ func (r *MigrationReconciler) createStrictlyOwned(ctx context.Context, m *v1beta
 	return nil
 }
 
-// fail marks the Migration terminally failed. The event note is capped by the
-// server's ~1KiB limit; the condition keeps the full message.
+// fail marks the Migration terminally failed and ends a retry hold; the probe TTL collects a
+// probe left behind. The event note is capped by the server's ~1KiB limit; the condition
+// keeps the full message.
 func (r *MigrationReconciler) fail(m *v1beta1.Migration, reason, action, msg string) {
 	m.Status.Phase = v1beta1.PhaseFailed
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, reason, msg)
+	r.endHold(m, reasonHoldMigrationFailed,
+		fmt.Sprintf("Attempt %d does not start: the Migration failed with %s", m.Status.Attempts+1, reason))
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reason, action, "%s", truncate(msg, maxDetailLen))
 }
 

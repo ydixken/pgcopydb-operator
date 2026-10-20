@@ -84,6 +84,29 @@ func TestConfirmBaseCopy_NamesTheTables(t *testing.T) {
 	}
 }
 
+// Every path into Failed ends a hold; a Migration that never held gains no RetryHeld.
+func TestFail_EndsRetryHold(t *testing.T) {
+	r := &MigrationReconciler{Recorder: events.NewFakeRecorder(10)}
+	held := &v1beta1.Migration{}
+	meta.SetStatusCondition(&held.Status.Conditions, metav1.Condition{
+		Type: v1beta1.ConditionRetryHeld, Status: metav1.ConditionTrue, Reason: reasonSessionsRemain, Message: "pid=4242",
+	})
+	r.fail(held, "InvalidSpec", "Validate", "target: host is required")
+	if c := meta.FindStatusCondition(held.Status.Conditions, v1beta1.ConditionRetryHeld); c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != reasonHoldMigrationFailed {
+		t.Fatalf("RetryHeld = %+v, want False/%s", c, reasonHoldMigrationFailed)
+	}
+
+	never := &v1beta1.Migration{}
+	r.fail(never, "InvalidSpec", "Validate", "target: host is required")
+	if !meta.IsStatusConditionTrue(never.Status.Conditions, v1beta1.ConditionFailed) {
+		t.Fatal("fail() set no Failed condition")
+	}
+	if c := meta.FindStatusCondition(never.Status.Conditions, v1beta1.ConditionRetryHeld); c != nil {
+		t.Fatalf("a Migration that never held gained RetryHeld %+v", c)
+	}
+}
+
 // defaultFailureMsg is failureReason's fallback; a test-local copy so a
 // reworded fallback fails here.
 const defaultFailureMsg = "worker Job failed"

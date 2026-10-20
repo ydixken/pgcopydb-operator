@@ -228,9 +228,28 @@ func (r *MigrationReconciler) deleteGateProbe(ctx context.Context, job *batchv1.
 	return nil
 }
 
-// deleteGateJob removes attempt n's probe once the worker it cleared is recorded.
+// deleteGateJob removes attempt n's probe once the worker it cleared is recorded, or on suspend.
 func (r *MigrationReconciler) deleteGateJob(ctx context.Context, m *v1beta1.Migration, attempt int32) error {
 	return r.deleteGateProbe(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Namespace: m.Namespace, Name: gateJobName(m, attempt)}})
+}
+
+// deleteStrayProbes removes every probe of m while a worker runs: a pass working from a stale
+// cache can create one after the worker started, and its test commit writes to the target.
+func (r *MigrationReconciler) deleteStrayProbes(ctx context.Context, m *v1beta1.Migration) error {
+	jobs := &batchv1.JobList{}
+	if err := r.uncached().List(ctx, jobs, client.InNamespace(m.Namespace),
+		client.MatchingLabels{labelMigration: m.Name}); err != nil {
+		return err
+	}
+	for i := range jobs.Items {
+		if !strings.HasPrefix(jobs.Items[i].Name, m.Name+"-gate-") {
+			continue
+		}
+		if err := r.deleteGateProbe(ctx, &jobs.Items[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // setHold holds the next attempt. The Warning goes out when a hold gets its first result and
@@ -266,6 +285,13 @@ func (r *MigrationReconciler) probing(m *v1beta1.Migration, msg string) {
 		return
 	}
 	r.setHold(m, reasonGateProbing, msg)
+}
+
+// endHold turns a hold that is on False; a Migration that never held gains no RetryHeld.
+func (r *MigrationReconciler) endHold(m *v1beta1.Migration, reason, msg string) {
+	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionRetryHeld) {
+		r.setCondition(m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, reason, msg)
+	}
 }
 
 // decide records the verdict and, when it is Counted with the budget spent, fails the
