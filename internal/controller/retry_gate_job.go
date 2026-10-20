@@ -151,6 +151,9 @@ bounded() {
 why() {
   e=$(cat "$err")
   case ${e%%"$nl"*} in
+  'psql:<stdin>:'[0-9]*': '*) e=${e#'psql:<stdin>:'*': '} ;;
+  esac
+  case ${e%%"$nl"*} in
   '') ;;
   ERROR:*|FATAL:*|'psql: error: connection to server at '*) printf '%s ' "$(printf '%s' "$e" | tr '\n' ' ' | cut -c 1-300)" ;;
   *) printf 'client-side error withheld ' ;;

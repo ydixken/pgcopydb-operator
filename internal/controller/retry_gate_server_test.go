@@ -147,6 +147,29 @@ func TestGateProbe_Server(t *testing.T) {
 		}
 	})
 
+	t.Run("a census SQL error carries the server's message", func(t *testing.T) {
+		// A database of its own, because the census of the other subtests needs pg_stat_activity.
+		nostat := db + "_nostat"
+		query(t, admin, "CREATE DATABASE "+nostat)
+		t.Cleanup(func() { query(t, admin, "DROP DATABASE "+nostat+" WITH (FORCE)") })
+		query(t, admin, "GRANT CONNECT ON DATABASE "+nostat+" TO "+role)
+		owner, err := url.Parse(admin)
+		if err != nil {
+			t.Fatal("PGCOPYDB_TEST_PGURI is not a URI")
+		}
+		owner.Path = "/" + nostat
+		query(t, owner.String(), "REVOKE SELECT ON pg_stat_activity FROM PUBLIC")
+		denied := *u
+		denied.Path = "/" + nostat
+
+		out, code, g := probe(t, denied.String(), commitOnly)
+		mustContain(t, out, "gate: census failed ERROR:  permission denied", gateSkippedNoCensus)
+		reason, msg := g.hold(commitOnly, &passwordMigration().Spec.Target)
+		if code != 1 || reason != reasonProbeFailed || !strings.Contains(msg, "permission denied") {
+			t.Errorf("exit %d, reason %q, message %q; want 1, %s and the server's error", code, reason, msg, reasonProbeFailed)
+		}
+	})
+
 	t.Run("SHOW reads the startup option", func(t *testing.T) {
 		sep := "?"
 		if strings.Contains(target, "?") {

@@ -99,6 +99,7 @@ func TestRetryGateScript(t *testing.T) {
 		connectErr     = `psql: error: connection to server at "h" (10.0.0.1), port 5432 failed: FATAL:  password authentication failed for user "app"`
 		uriErr         = `psql: error: invalid URI query parameter: "postgresql://u:secret@h/db?x"`
 		tempErr        = `ERROR:  42501: permission denied to create temporary tables in database "app"`
+		statErr        = "ERROR:  permission denied for view pg_stat_activity"
 		session1       = "gate: session pid=11 state=idle wait=ClientRead age=40s started=2026-10-20T10:00:00Z app=pgcopydb[7] copy worker"
 		session2       = "gate: session pid=12 state=active wait=- age=3s started=2026-10-20T10:00:05Z app=pgcopydb[7] clone"
 	)
@@ -189,6 +190,14 @@ func TestRetryGateScript(t *testing.T) {
 			code: 1, calls: callsCensusShow,
 			want: []string{"gate: census failed client-side error withheld", "gate: synchronous_commit failed client-side error withheld"},
 			not:  []string{"secret"},
+		},
+		{
+			name: "census SQL error behind the script prefix", census: stderr("psql:<stdin>:1: "+statErr, 3), code: 1, calls: callsCensus,
+			want: []string{"gate: census failed " + statErr + " (exit 3)"}, not: []string{"withheld"},
+		},
+		{
+			name: "prefixed client-side error", census: stderr("psql:<stdin>:2: unterminated quoted string", 3), code: 1, calls: callsCensus,
+			want: []string{"gate: census failed client-side error withheld (exit 3)"},
 		},
 		{
 			name: "42501", commit: stderr(tempErr, 1), code: 1, calls: callsCensusCommit,
