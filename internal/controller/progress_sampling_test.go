@@ -459,11 +459,11 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Progress).NotTo(BeNil(), "the estimate stands until the catalog line replaces it")
 		Expect(got.Status.Progress.IndexesDone).To(Equal(int64(81)))
 
-		// The finished worker Job goes (TTL, a manual delete); the next pass
-		// starts attempt 2, which samples the databases again.
+		// The finished worker Job goes (TTL, a manual delete); once the retry
+		// gate passes, attempt 2 starts and samples the databases again.
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		Expect(reconcileAndGet(ctx, r, name).Status.Attempts).To(Equal(int32(2)))
+		Expect(passRetryGate(ctx, r, name).Status.Attempts).To(Equal(int32(2)))
 		got = reconcileAndGet(ctx, r, name)
 		Expect(got.Status.Progress.IndexesDone).To(Equal(int64(81)))
 
@@ -1293,7 +1293,7 @@ var _ = Describe("Migration Controller attempt phase", func() {
 
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 	})
@@ -1331,7 +1331,8 @@ var _ = Describe("Migration Controller attempt phase", func() {
 
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 	})
@@ -1356,7 +1357,7 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		// copy is still done and the cutover is still under way.
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, r, name)
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())

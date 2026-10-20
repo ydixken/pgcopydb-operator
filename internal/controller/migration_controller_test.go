@@ -93,6 +93,17 @@ func passGate(ctx context.Context, r *MigrationReconciler, name string) {
 	reconcileAndGet(ctx, r, name)
 }
 
+// passRetryGate drives the next attempt through the retry gate: one pass creates the probe,
+// the probe logs a pass on r's clock, and the next pass starts the worker.
+func passRetryGate(ctx context.Context, r *MigrationReconciler, name string) *v1beta1.Migration {
+	GinkgoHelper()
+	m := reconcileAndGet(ctx, r, name)
+	gate := fetchJob(ctx, gateJobName(m, m.Status.Attempts+1))
+	gateLogs(r).byUID[gate.UID] = gatePassLog(gate.Annotations[annotationRetryGateInputs])
+	finishJobAt(ctx, gate.Name, true, r.currentTime())
+	return reconcileAndGet(ctx, r, name)
+}
+
 // confirmCaughtUp runs the second pass a caught-up stream needs before the
 // operator acts on it. One sample below the threshold only arms the CaughtUp
 // latch; the next consecutive one turns the condition true (see lagSeenBelow),
@@ -383,8 +394,8 @@ var _ = Describe("Migration Controller", func() {
 		passGate(ctx, newReconciler(), name)
 
 		finishJob(ctx, name+"-run-1", false)
-		reconcileAndGet(ctx, newReconciler(), name)     // observes failure, clears jobName
-		m = reconcileAndGet(ctx, newReconciler(), name) // starts attempt 2
+		reconcileAndGet(ctx, newReconciler(), name) // observes failure, hands the retry to the gate
+		m = passRetryGate(ctx, newReconciler(), name)
 
 		job2 := fetchJob(ctx, name+"-run-2")
 		args := strings.Join(job2.Spec.Template.Spec.Containers[0].Args, " ")
@@ -392,10 +403,17 @@ var _ = Describe("Migration Controller", func() {
 		Expect(args).To(ContainSubstring("--not-consistent"))
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 
+		// The budget waits for the gate's verdict: attempt 2 may yet prove exempt.
 		finishJob(ctx, name+"-run-2", false)
-		final := reconcileAndGet(ctx, newReconciler(), name)
+		held := reconcileAndGet(ctx, newReconciler(), name)
+		Expect(held.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
+		final := passRetryGate(ctx, newReconciler(), name)
 		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
-		Expect(meta.IsStatusConditionTrue(final.Status.Conditions, v1beta1.ConditionFailed)).To(BeTrue())
+		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
+		Expect(failed.Message).To(HavePrefix("retry budget exhausted after 2 attempts (0 exempt): attempt 2 failed: " + jobFailedMsg))
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-run-3", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
 	})
 
 	It("fails without a fresh attempt when the final attempt's Job vanishes", func() {
@@ -407,7 +425,7 @@ var _ = Describe("Migration Controller", func() {
 		passGate(ctx, newReconciler(), name) // run-1
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, newReconciler(), name) // observes failure, clears jobName
-		reconcileAndGet(ctx, newReconciler(), name) // run-2, the final attempt
+		passRetryGate(ctx, newReconciler(), name)   // run-2, the final attempt
 
 		// The final attempt's Job disappears while the budget is spent (TTL or
 		// manual delete): the next pass must fail instead of starting a third
@@ -419,10 +437,13 @@ var _ = Describe("Migration Controller", func() {
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
-		Expect(failed.Message).To(ContainSubstring("retry budget exhausted after 2 attempts"))
+		Expect(failed.Message).To(Equal("retry budget exhausted after 2 attempts (0 exempt)"))
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(errors.IsNotFound(k8sClient.Get(ctx,
 			types.NamespacedName{Name: name + "-run-3", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
+		// A vanished Job is no failure: the budget check runs before the gate, which never probes.
+		Expect(errors.IsNotFound(k8sClient.Get(ctx,
+			types.NamespacedName{Name: name + "-gate-3", Namespace: testNS}, &batchv1.Job{}))).To(BeTrue())
 	})
 
 	It("keeps a database error ahead of later termination summaries", func() {
@@ -447,10 +468,11 @@ var _ = Describe("Migration Controller", func() {
 		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
 			ContainSubstring("AttemptFailed"), ContainSubstring(lastError))))
 
-		reconcileAndGet(ctx, r, name) // run-2
+		passRetryGate(ctx, r, name) // run-2
 		finishJob(ctx, name+"-run-2", false)
-		// Budget spent: the Failed condition carries the log detail.
-		final := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		// Budget spent at the gate's pass: the Failed condition carries the log detail.
+		final := passRetryGate(ctx, r, name)
 		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Message).To(ContainSubstring(jobFailedMsg))
@@ -593,10 +615,11 @@ var _ = Describe("Migration Controller", func() {
 		reconcileAndGet(ctx, r, name) // retry scheduled
 		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
 			ContainSubstring("AttemptFailed"), ContainSubstring(unreadable))))
-		reconcileAndGet(ctx, r, name) // run-2
+		passRetryGate(ctx, r, name) // run-2
 		finishJob(ctx, name+"-run-2", false)
-		// Budget spent.
-		final := reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		// Budget spent at the gate's pass.
+		final := passRetryGate(ctx, r, name)
 		Expect(final.Status.Phase).To(Equal(v1beta1.PhaseFailed))
 		failed := meta.FindStatusCondition(final.Status.Conditions, v1beta1.ConditionFailed)
 		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
@@ -645,7 +668,12 @@ var _ = Describe("Migration Controller", func() {
 
 		m.Spec.Suspend = false
 		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		// The resume waits for the retry gate, and a held Migration must not read Suspended.
 		m = reconcileAndGet(ctx, newReconciler(), name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionRetryHeld)).To(BeTrue())
+		Expect(m.Status.Attempts).To(Equal(int32(1)))
+		m = passRetryGate(ctx, newReconciler(), name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		args := strings.Join(fetchJob(ctx, fmt.Sprintf("%s-run-2", name)).Spec.Template.Spec.Containers[0].Args, " ")

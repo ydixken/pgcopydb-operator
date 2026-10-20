@@ -39,6 +39,8 @@ const (
 	gateProbeTTL int32 = 600
 	// gateSessionLimit caps the session lines a census prints.
 	gateSessionLimit = 10
+	// gateLogTail bounds the probe log read; a probe prints at most 14 gate: lines and a shell notice.
+	gateLogTail int64 = 60
 )
 
 // The RetryHeld reasons.
@@ -47,6 +49,9 @@ const (
 	reasonSyncCommitNotLocal = "SyncCommitNotLocal"
 	reasonCommitBlocked      = "CommitBlocked"
 	reasonProbeFailed        = "ProbeFailed"
+	reasonGateProbing        = "GateProbing"
+	reasonWorkerPodRemains   = "WorkerPodRemains"
+	reasonGatePassed         = "GatePassed"
 )
 
 // The results a probe prints on its gate: commit line.

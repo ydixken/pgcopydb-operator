@@ -52,6 +52,10 @@ import (
 // now, not the five catalog-opening pgcopydb commands that bought 30s.
 const pollInterval = 10 * time.Second
 
+// retryGateInterval caps the requeue of a held retry and is how long a failed probe stays:
+// deleting it sooner would let its delete event start the next probe right away.
+const retryGateInterval = 30 * time.Second
+
 // zombieGrace is not pollInterval: a worker inside Kubernetes' default 30s
 // termination grace is still alive several polls in and is no zombie.
 const zombieGrace = 30 * time.Second
@@ -128,6 +132,9 @@ type MigrationReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+
+	// APIReader reads past the informer cache; nil falls back to the client.
+	APIReader client.Reader
 
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
@@ -831,18 +838,38 @@ func (r *MigrationReconciler) nextAttempt(ctx context.Context, m, base *v1beta1.
 	return r.startAttempt(ctx, m, base)
 }
 
-// startAttempt creates the next worker Job, unless the retry budget is spent.
-// Budget: backoffLimit is the number of retries, so backoffLimit+1 attempts.
+// startAttempt creates the next worker Job. Every attempt after the first waits for the
+// retry gate (see retry_gate.go), and only a settled budget lets the worker start.
 func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
-	// Reachable despite handleFailedJob's own budget check: the final attempt's
-	// Job can vanish while running, and the next pass lands here over budget.
-	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		r.fail(m, "BackoffLimitExceeded", "Fail",
-			fmt.Sprintf("retry budget exhausted after %d attempts", m.Status.Attempts))
+	attempt := m.Status.Attempts + 1
+	if attempt > 1 {
+		// A pass that crashed between creating this worker and recording it left a live worker
+		// the gate would count as leftover sessions; the cache may not show it yet.
+		job := &batchv1.Job{}
+		err := r.uncached().Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: jobName(m, attempt)}, job)
+		switch {
+		case err == nil:
+			return r.recordAttempt(ctx, m, base, job, false)
+		case !apierrors.IsNotFound(err):
+			return ctrl.Result{}, err
+		}
+	}
+	// Counted attempts, on the paths that are no failure: the final attempt's Job vanished,
+	// a resume, or a retry pending across an upgrade. A failed attempt waits for its verdict.
+	if !onFailurePath(m) && budgetSpent(m) {
+		r.failBudget(m)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
+	if attempt > 1 {
+		res, passed, err := r.retryGate(ctx, m, base, attempt)
+		if err != nil || !passed {
+			return res, err
+		}
+		if failed, err := r.settleBudget(ctx, m, base); err != nil || failed {
+			return ctrl.Result{}, err
+		}
+	}
 
-	attempt := m.Status.Attempts + 1
 	job, err := buildJob(m, r.RunnerImage, attempt)
 	if err != nil {
 		// buildJob was already exercised during validation; an error here is
@@ -856,7 +883,22 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 	if createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 		return ctrl.Result{}, createErr
 	}
+	// AlreadyExists means an overlapping pass created this Job and announced
+	// the attempt; a second event would just be noise.
+	return r.recordAttempt(ctx, m, base, job, createErr == nil)
+}
 
+// recordAttempt records job as the running attempt and ends the retry hold.
+func (r *MigrationReconciler) recordAttempt(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job, announce bool) (ctrl.Result, error) {
+	attempt := m.Status.Attempts + 1
+	note := fmt.Sprintf("attempt %d as Job %s", attempt, job.Name)
+	if held := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionRetryHeld); held != nil && held.Status == metav1.ConditionTrue {
+		note += fmt.Sprintf("; the retry gate held it for %s",
+			max(r.currentTime().Sub(held.LastTransitionTime.Time), 0).Round(time.Second))
+	}
+	if rg := m.Status.RetryGate; rg != nil && rg.Exemption == v1beta1.RetryGateExempt {
+		note += fmt.Sprintf("; attempt %d did not count against backoffLimit: its sessions waited for synchronous replication", rg.FailedAttempt)
+	}
 	if m.Status.StartedAt == nil {
 		now := metav1.Now()
 		m.Status.StartedAt = &now
@@ -871,13 +913,21 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneRunning,
 			fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
 	}
-	if createErr == nil {
-		// AlreadyExists means an overlapping pass created this Job and
-		// announced the attempt; a second event would just be noise.
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "attempt %d as Job %s", attempt, job.Name)
+	if attempt > 1 {
+		m.Status.RetryGate = nil
+		r.setCondition(m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, reasonGatePassed,
+			fmt.Sprintf("Attempt %d runs as Job %s", attempt, job.Name))
+	}
+	if announce {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "%s", note)
 	}
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
+	}
+	if attempt > 1 {
+		if err := r.deleteGateJob(ctx, m, attempt); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
 }
@@ -897,7 +947,7 @@ func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 	return v1beta1.PhaseCloning
 }
 
-// handleFailedJob either schedules the next attempt or fails the Migration for
+// handleFailedJob either hands the next attempt to the retry gate or fails the Migration for
 // good. The Job's condition only says that the pod failed, so the pgcopydb
 // ERROR behind it is appended from the pod log when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
@@ -944,25 +994,30 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
-	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
-		r.fail(m, "BackoffLimitExceeded", "Fail",
-			fmt.Sprintf("attempt %d failed: %s", m.Status.Attempts, reason))
-		return ctrl.Result{}, r.updateStatus(ctx, m, base)
-	}
-
+	// The budget waits for the gate's verdict: an attempt cut by a standby outage does not count.
 	if startOver {
 		// buildJob reads the latch; startAttempt replaces it once the next Job exists.
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonSnapshotLost,
 			fmt.Sprintf("attempt %d failed (%s); the next attempt starts over", m.Status.Attempts, reason))
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonSnapshotLost, "Retry",
-			"attempt %d failed (%s), starting over: the next attempt drops the slot and runs --restart --drop-if-exists",
+			"attempt %d failed (%s); a retry waits for the retry gate and starts over: it drops the slot and runs --restart --drop-if-exists",
 			m.Status.Attempts, reason)
 	} else {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "AttemptFailed", "Retry",
-			"attempt %d failed (%s), retrying with --resume", m.Status.Attempts, reason)
+			"attempt %d failed (%s); a retry with --resume waits for the retry gate", m.Status.Attempts, reason)
 	}
-	// Clear jobName; the next pass creates attempt N+1.
+	failedAt := jobFailedAt(job)
+	if failedAt.IsZero() {
+		failedAt = r.currentTime()
+	}
+	m.Status.RetryGate = &v1beta1.RetryGateStatus{
+		FailedAttempt: m.Status.Attempts,
+		FailedAt:      metav1.NewTime(failedAt),
+		Failure:       truncate(reason, maxDetailLen),
+		CloneDoneSeen: pgcopydb.CloneDone([]byte(tail)),
+	}
+	r.setHold(m, reasonGateProbing, fmt.Sprintf("Attempt %d waits for the retry gate to probe the target", m.Status.Attempts+1))
+	// Clear jobName; the gate decides when attempt N+1 starts.
 	m.Status.JobName = ""
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err

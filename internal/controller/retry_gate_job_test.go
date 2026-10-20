@@ -49,6 +49,7 @@ const (
 	gateShowOnLine      = "gate: synchronous_commit=on"
 	gateBlockedLine     = "gate: commit blocked"
 	gateSkippedSyncRep  = "gate: commit skipped syncrep=1"
+	gateSkippedWaiting  = "gate: commit skipped gate_waiting=1"
 	gateSkippedNoCensus = "gate: commit skipped no census"
 	callsCensus         = "census\n"
 	callsCensusCommit   = "census\ncommit\n"
@@ -143,7 +144,7 @@ func TestRetryGateScript(t *testing.T) {
 			name:   "earlier probe waits",
 			census: echo("gate: census total=0 syncrep=0 named=yes syncrep_since=0 gate_waiting=1"),
 			code:   1, calls: callsCensus,
-			want: []string{"gate: commit skipped gate_waiting=1"},
+			want: []string{gateSkippedWaiting},
 		},
 		{
 			name:   "named=no",
@@ -493,7 +494,7 @@ func TestGateResultHold(t *testing.T) {
 		},
 		{
 			name:  "commit skipped",
-			lines: []string{census(0, 0, "yes", 1), "gate: commit skipped gate_waiting=1"}, in: commitOnly, reason: reasonCommitBlocked,
+			lines: []string{census(0, 0, "yes", 1), gateSkippedWaiting}, in: commitOnly, reason: reasonCommitBlocked,
 			want: []string{"earlier", "gate_waiting=1"},
 		},
 		{
