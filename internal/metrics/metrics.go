@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -100,6 +101,12 @@ var (
 
 	targetDatabaseSizeBytes = gauge("pgcopydb_migration_target_database_size_bytes",
 		"Target database size in bytes, sampled from the worker pod.")
+
+	syncRepWaitingSessions = gauge("pgcopydb_migration_target_sync_rep_waiting_sessions",
+		"Target sessions of the migration role waiting for synchronous replication at the last sample (absent when the sample could not read them).")
+
+	syncRepOldestWaitSeconds = gauge("pgcopydb_migration_target_sync_rep_oldest_wait_seconds",
+		"Seconds since the oldest waiting statement started (0 with no waiter; absent when unknown).")
 
 	clonePlannedBytes = gauge("pgcopydb_migration_clone_planned_bytes",
 		"Bytes the base copy plans to move (absent without a progress sample).")
@@ -307,6 +314,18 @@ func RecordDatabaseSizes(namespace, name string, src, tgt *int64) {
 	if tgt != nil {
 		targetDatabaseSizeBytes.WithLabelValues(namespace, name).Set(float64(*tgt))
 	}
+}
+
+// RecordSyncRepWaits sets both synchronous replication gauges from a parsed sample, zeros
+// included. A nil count deletes them, unlike the sizes: a stale "3 waiting" reads as current.
+func RecordSyncRepWaits(namespace, name string, w *progress.SyncRepWait) {
+	if w == nil {
+		syncRepWaitingSessions.DeleteLabelValues(namespace, name)
+		syncRepOldestWaitSeconds.DeleteLabelValues(namespace, name)
+		return
+	}
+	syncRepWaitingSessions.WithLabelValues(namespace, name).Set(float64(w.Waiting))
+	syncRepOldestWaitSeconds.WithLabelValues(namespace, name).Set(float64(w.OldestSeconds))
 }
 
 // RecordBuildInfo publishes the manager's build version, once at startup.
