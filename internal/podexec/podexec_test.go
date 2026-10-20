@@ -56,12 +56,11 @@ func serveExecSuccess(w http.ResponseWriter, r *http.Request, out []byte) {
 	_, _ = streams[1].Write(out)
 }
 
-// apiServer fakes the parts of the Kubernetes API this package talks to: pod
-// lists, pod logs, and the exec subresource (which never upgrades to SPDY, so
-// streaming fails there by design). It records request URLs because the
-// contract under test is what the client asks the server for: pod filtering
-// happens server-side via selectors, log routing via the pod name in the path.
-// The pod list applies the label selector, as the API server does.
+// apiServer fakes the parts of the Kubernetes API this package talks to: pod lists, which
+// apply the label selector as the API server does, pod logs, and the exec subresource (which
+// never upgrades to SPDY, so streaming fails there by design). It records request URLs because
+// the contract under test is what the client asks the server for: pod filtering happens
+// server-side via selectors, log routing via the pod name in the path.
 type apiServer struct {
 	*httptest.Server
 	pods     []corev1.Pod

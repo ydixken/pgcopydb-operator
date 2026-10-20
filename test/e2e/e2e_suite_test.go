@@ -2531,10 +2531,9 @@ func checkLonghornCapacity() {
 	}
 }
 
-// fixtureBytes is the volume space of pairs fixture pairs: source and target
-// once per CNPG instance, each holding a full copy, one work volume per pair,
-// and once per run the dedicated pooling pair, the pooled target and the two
-// instances of the synchronous target.
+// fixtureBytes is the volume space of pairs fixture pairs, each holding a full source and
+// target copy per CNPG instance and one work volume, plus the dedicated clusters, which
+// count once per run.
 func fixtureBytes(pairs int) int64 {
 	var perPair int64
 	for _, size := range []string{srcStorageSize, tgtStorageSize} {

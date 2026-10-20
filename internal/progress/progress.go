@@ -297,9 +297,8 @@ func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string
 	}
 }
 
-// parseSample reads the stage= line, the source= and target= lines, six integers for the source
-// and five for the target, the owed= line naming the tables the sixth figure counted, the
-// syncrep= line's three integers, and a <side>_error= line per failure. A line that is
+// parseSample reads stage=, source= (six integers), target= (five), owed= (the tables the sixth
+// source figure counted), syncrep= (three) and a <side>_error= line per failure. A line that is
 // missing, short or not numeric contributes nothing rather than zero, and is lost.
 func parseSample(out []byte) *Sample {
 	var src, tgt, syncRep []int64

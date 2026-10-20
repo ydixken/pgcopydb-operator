@@ -236,8 +236,7 @@ var emptyOK = map[panelKey]bool{
 	{uid: uidOperator, title: "Leader Elected", ref: "A"}: true,
 }
 
-// streamPanels read the lag and LSN series, which leave with the stream, and the
-// synchronous replication waits, which leave with the sampler run, so the sweep
+// streamPanels read series that leave with the stream or the sampler run, so the sweep
 // replays them over the run instead of at its own instant.
 var streamPanels = map[panelKey]bool{
 	{uid: uidFleet, title: "Total Lag", ref: "A"}:                    true,
