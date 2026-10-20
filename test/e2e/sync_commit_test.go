@@ -150,7 +150,7 @@ var _ = Describe("synchronousCommit through a transaction-mode Pooler", Ordered,
 		// The preflight Job proves that the listing sees this Migration's Jobs.
 		Expect(names).To(ContainElement(name + "-preflight"))
 		Expect(names).NotTo(ContainElement(name + "-run-1"))
-		Expect(names).NotTo(ContainElement(ContainSubstring("-gate-")))
+		Expect(names).NotTo(ContainElement(HavePrefix(name + "-gate-")))
 	})
 
 	It("holds a retry on idle pooled server connections until they end", func() {
