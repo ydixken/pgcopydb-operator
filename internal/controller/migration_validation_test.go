@@ -294,7 +294,8 @@ var _ = Describe("Migration CRD validation", func() {
 
 		changed = fresh()
 		changed.Spec.Target.Database = "other"
-		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("target is immutable")))
+		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring(
+			"target is immutable except synchronousCommit")))
 
 		changed = fresh()
 		changed.Spec.Source.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: "late-admin"}
@@ -313,6 +314,48 @@ var _ = Describe("Migration CRD validation", func() {
 		changed.Spec.Clone.TableJobs = 8
 		changed.Spec.Cutover.Approved = true
 		Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+	})
+
+	It("lets synchronousCommit alone change on the target and rejects it elsewhere", func() {
+		const name = "cel-sync-commit"
+		m := validMigration(name)
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		for _, value := range []string{v1beta1.SynchronousCommitLocal, ""} {
+			changed := &v1beta1.Migration{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, changed)).To(Succeed())
+			changed.Spec.Target.SynchronousCommit = value
+			Expect(k8sClient.Update(ctx, changed)).To(Succeed())
+			Expect(changed.Spec.Target.SynchronousCommit).To(Equal(value))
+		}
+
+		src := validMigration("cel-sync-commit-source")
+		src.Spec.Source.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		Expect(k8sClient.Create(ctx, src)).To(MatchError(ContainSubstring(
+			"synchronousCommit applies to the target only")))
+
+		uri := validMigration("cel-sync-commit-uri")
+		uri.Spec.Target = v1beta1.PostgresConnection{
+			URISecretRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: name + "-dsn"}, Key: "dsn-uri",
+			},
+			SynchronousCommit: v1beta1.SynchronousCommitLocal,
+		}
+		Expect(k8sClient.Create(ctx, uri)).To(MatchError(ContainSubstring(
+			"synchronousCommit cannot be combined with uriSecretRef")))
+
+		inline := validMigration("cel-sync-commit-inline")
+		inline.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		secret := validMigration("cel-sync-commit-secretref")
+		secret.Spec.Target = v1beta1.PostgresConnection{
+			SecretRef:         &v1beta1.ConnectionSecret{Name: name + "-conn"},
+			SynchronousCommit: v1beta1.SynchronousCommitLocal,
+		}
+		for _, accepted := range []*v1beta1.Migration{inline, secret} {
+			Expect(k8sClient.Create(ctx, accepted)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, accepted)).To(Succeed())
+		}
 	})
 
 	It("pins ownerAfterRestore once the Migration exists", func() {

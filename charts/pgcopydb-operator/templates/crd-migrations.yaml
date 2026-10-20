@@ -66,7 +66,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec is the migration to run; source and target are immutable.
+            description: |-
+              spec is the migration to run; source and target are immutable, except
+              target.synchronousCommit.
             properties:
               backoffLimit:
                 default: 3
@@ -1594,6 +1596,15 @@ spec:
                     required:
                     - name
                     type: object
+                  synchronousCommit:
+                    description: |-
+                      synchronousCommit, target only, starts every connection of the worker, the
+                      preflight and the retry gate with this synchronous_commit through the libpq
+                      startup option. CDC apply still SETs synchronous_commit=on. Applies from the
+                      next attempt.
+                    enum:
+                    - local
+                    type: string
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -1705,6 +1716,8 @@ spec:
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
+                - message: synchronousCommit applies to the target only
+                  rule: '!has(self.synchronousCommit)'
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
                     connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
@@ -1717,7 +1730,9 @@ spec:
                 description: suspend stops the worker while preserving the work volume.
                 type: boolean
               target:
-                description: target is the PostgreSQL endpoint to migrate to. Immutable.
+                description: |-
+                  target is the PostgreSQL endpoint to migrate to. Immutable except
+                  synchronousCommit, which applies from the next attempt.
                 properties:
                   database:
                     description: database is the database name to connect to, for
@@ -1880,6 +1895,15 @@ spec:
                     required:
                     - name
                     type: object
+                  synchronousCommit:
+                    description: |-
+                      synchronousCommit, target only, starts every connection of the worker, the
+                      preflight and the retry gate with this synchronous_commit through the libpq
+                      startup option. CDC apply still SETs synchronous_commit=on. Applies from the
+                      next attempt.
+                    enum:
+                    - local
+                    type: string
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -1989,8 +2013,28 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-validations:
-                - message: target is immutable
-                  rule: self == oldSelf
+                - message: target is immutable except synchronousCommit
+                  rule: has(self.host) == has(oldSelf.host) && (!has(self.host) ||
+                    self.host == oldSelf.host) && has(self.port) == has(oldSelf.port)
+                    && (!has(self.port) || self.port == oldSelf.port) && has(self.database)
+                    == has(oldSelf.database) && (!has(self.database) || self.database
+                    == oldSelf.database) && has(self.username) == has(oldSelf.username)
+                    && (!has(self.username) || self.username == oldSelf.username)
+                    && has(self.passwordSecretRef) == has(oldSelf.passwordSecretRef)
+                    && (!has(self.passwordSecretRef) || self.passwordSecretRef ==
+                    oldSelf.passwordSecretRef) && has(self.sslMode) == has(oldSelf.sslMode)
+                    && (!has(self.sslMode) || self.sslMode == oldSelf.sslMode) &&
+                    has(self.tls) == has(oldSelf.tls) && (!has(self.tls) || self.tls
+                    == oldSelf.tls) && has(self.uriSecretRef) == has(oldSelf.uriSecretRef)
+                    && (!has(self.uriSecretRef) || self.uriSecretRef == oldSelf.uriSecretRef)
+                    && has(self.secretRef) == has(oldSelf.secretRef) && (!has(self.secretRef)
+                    || self.secretRef == oldSelf.secretRef) && has(self.superuserSecretRef)
+                    == has(oldSelf.superuserSecretRef) && (!has(self.superuserSecretRef)
+                    || self.superuserSecretRef == oldSelf.superuserSecretRef)
+                - message: 'synchronousCommit cannot be combined with uriSecretRef:
+                    the operator never reads that Secret, so it cannot add the option;
+                    use secretRef or the inline fields'
+                  rule: '!(has(self.synchronousCommit) && has(self.uriSecretRef))'
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
                     connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
@@ -2293,7 +2337,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec is the migration to run; source and target are immutable.
+            description: |-
+              spec is the migration to run; source and target are immutable, except
+              target.synchronousCommit.
             properties:
               backoffLimit:
                 default: 3
@@ -3821,6 +3867,15 @@ spec:
                     required:
                     - name
                     type: object
+                  synchronousCommit:
+                    description: |-
+                      synchronousCommit, target only, starts every connection of the worker, the
+                      preflight and the retry gate with this synchronous_commit through the libpq
+                      startup option. CDC apply still SETs synchronous_commit=on. Applies from the
+                      next attempt.
+                    enum:
+                    - local
+                    type: string
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -3932,6 +3987,8 @@ spec:
                 x-kubernetes-validations:
                 - message: source is immutable
                   rule: self == oldSelf
+                - message: synchronousCommit applies to the target only
+                  rule: '!has(self.synchronousCommit)'
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
                     connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?
@@ -3944,7 +4001,9 @@ spec:
                 description: suspend stops the worker while preserving the work volume.
                 type: boolean
               target:
-                description: target is the PostgreSQL endpoint to migrate to. Immutable.
+                description: |-
+                  target is the PostgreSQL endpoint to migrate to. Immutable except
+                  synchronousCommit, which applies from the next attempt.
                 properties:
                   database:
                     description: database is the database name to connect to, for
@@ -4107,6 +4166,15 @@ spec:
                     required:
                     - name
                     type: object
+                  synchronousCommit:
+                    description: |-
+                      synchronousCommit, target only, starts every connection of the worker, the
+                      preflight and the retry gate with this synchronous_commit through the libpq
+                      startup option. CDC apply still SETs synchronous_commit=on. Applies from the
+                      next attempt.
+                    enum:
+                    - local
+                    type: string
                   tls:
                     description: tls references client certificate material, mounted
                       0600 for libpq.
@@ -4216,8 +4284,28 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-validations:
-                - message: target is immutable
-                  rule: self == oldSelf
+                - message: target is immutable except synchronousCommit
+                  rule: has(self.host) == has(oldSelf.host) && (!has(self.host) ||
+                    self.host == oldSelf.host) && has(self.port) == has(oldSelf.port)
+                    && (!has(self.port) || self.port == oldSelf.port) && has(self.database)
+                    == has(oldSelf.database) && (!has(self.database) || self.database
+                    == oldSelf.database) && has(self.username) == has(oldSelf.username)
+                    && (!has(self.username) || self.username == oldSelf.username)
+                    && has(self.passwordSecretRef) == has(oldSelf.passwordSecretRef)
+                    && (!has(self.passwordSecretRef) || self.passwordSecretRef ==
+                    oldSelf.passwordSecretRef) && has(self.sslMode) == has(oldSelf.sslMode)
+                    && (!has(self.sslMode) || self.sslMode == oldSelf.sslMode) &&
+                    has(self.tls) == has(oldSelf.tls) && (!has(self.tls) || self.tls
+                    == oldSelf.tls) && has(self.uriSecretRef) == has(oldSelf.uriSecretRef)
+                    && (!has(self.uriSecretRef) || self.uriSecretRef == oldSelf.uriSecretRef)
+                    && has(self.secretRef) == has(oldSelf.secretRef) && (!has(self.secretRef)
+                    || self.secretRef == oldSelf.secretRef) && has(self.superuserSecretRef)
+                    == has(oldSelf.superuserSecretRef) && (!has(self.superuserSecretRef)
+                    || self.superuserSecretRef == oldSelf.superuserSecretRef)
+                - message: 'synchronousCommit cannot be combined with uriSecretRef:
+                    the operator never reads that Secret, so it cannot add the option;
+                    use secretRef or the inline fields'
+                  rule: '!(has(self.synchronousCommit) && has(self.uriSecretRef))'
                 - message: set exactly one of secretRef, uriSecretRef, or the inline
                     connection fields
                   rule: '(has(self.secretRef) ? 1 : 0) + (has(self.uriSecretRef) ?

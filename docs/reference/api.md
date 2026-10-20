@@ -218,7 +218,7 @@ optionally following changes until cutover.
 | `apiVersion` _string_ | `pgcopydb-operator.io/v1beta1` | | |
 | `kind` _string_ | `Migration` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
-| `spec` _[MigrationSpec](#migrationspec)_ | spec is the migration to run; source and target are immutable. |  | Required: \{\} <br /> |
+| `spec` _[MigrationSpec](#migrationspec)_ | spec is the migration to run; source and target are immutable, except<br />target.synchronousCommit. |  | Required: \{\} <br /> |
 | `status` _[MigrationStatus](#migrationstatus)_ | status reports progress. Conditions are authoritative; phase summarizes them. |  | Optional: \{\} <br /> |
 
 
@@ -256,7 +256,8 @@ _Appears in:_
 
 
 MigrationSpec is the desired state of a Migration. source and target are
-immutable after creation (a migration is a one-shot job, like batch/v1 Job).
+immutable after creation (a migration is a one-shot job, like batch/v1 Job),
+except target.synchronousCommit.
 
 
 
@@ -266,7 +267,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `source` _[PostgresConnection](#postgresconnection)_ | source is the PostgreSQL endpoint to migrate from. Immutable. |  | Required: \{\} <br /> |
-| `target` _[PostgresConnection](#postgresconnection)_ | target is the PostgreSQL endpoint to migrate to. Immutable. |  | Required: \{\} <br /> |
+| `target` _[PostgresConnection](#postgresconnection)_ | target is the PostgreSQL endpoint to migrate to. Immutable except<br />synchronousCommit, which applies from the next attempt. |  | Required: \{\} <br /> |
 | `clone` _[CloneOptions](#cloneoptions)_ | clone configures the base copy. |  | Optional: \{\} <br /> |
 | `follow` _[FollowOptions](#followoptions)_ | follow enables live migration (CDC after the base copy). Immutable:<br />a one-shot clone cannot become a live migration after the fact. |  | Optional: \{\} <br /> |
 | `cutover` _[CutoverSpec](#cutoverspec)_ | cutover controls how a live migration ends; ignored without follow. |  | Optional: \{\} <br /> |
@@ -331,6 +332,7 @@ _Appears in:_
 | `uriSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | uriSecretRef selects a full libpq connection URI/DSN (with credentials).<br />Mutually exclusive with the inline fields; useful for DBaaS sources. |  | Optional: \{\} <br /> |
 | `secretRef` _[ConnectionSecret](#connectionsecret)_ | secretRef references one Secret carrying the connection details as<br />individual keys, the way platform provisioners hand them out.<br />Mutually exclusive with the inline fields and uriSecretRef. |  | Optional: \{\} <br /> |
 | `superuserSecretRef` _[ConnectionSecret](#connectionsecret)_ | superuserSecretRef names a superuser on this same endpoint, in the same<br />Secret convention (USER/PW; URL keys, when present, must match this<br />connection). The preflight uses it to verify and apply missing grants;<br />applied statements are logged and kept, never reverted. |  | Optional: \{\} <br /> |
+| `synchronousCommit` _string_ | synchronousCommit, target only, starts every connection of the worker, the<br />preflight and the retry gate with this synchronous_commit through the libpq<br />startup option. CDC apply still SETs synchronous_commit=on. Applies from the<br />next attempt. |  | Enum: [local] <br />Optional: \{\} <br /> |
 
 
 #### PreflightOptions
