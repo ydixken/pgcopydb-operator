@@ -557,6 +557,9 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			dry.Spec.Clone.OwnerAfterRestore = reownTestOwner
 			return buildPreflightJob(dry, "img")
 		},
+		"synchronousCommit local": func() (*batchv1.Job, error) {
+			return buildPreflightJob(syncCommitMigration(false), "img")
+		},
 		jobKindPreflight:  func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
@@ -1216,7 +1219,7 @@ func TestPreflightScriptFor_AllDatabases(t *testing.T) {
 			t.Fatalf("all-databases script missing %q", want)
 		}
 	}
-	for _, absent := range []string{"has_database_privilege", "has_schema_privilege", databaseOwnerProbe, walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "remediated:", "@SOURCE@"} {
+	for _, absent := range []string{"has_database_privilege(current_user, current_database(), 'CREATE')", "has_schema_privilege", databaseOwnerProbe, walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "remediated:", "@SOURCE@"} {
 		if strings.Contains(s, absent) {
 			t.Fatalf("all-databases script contains %q", absent)
 		}
@@ -1451,6 +1454,8 @@ apply() {
   exit 0
 }
 case "$q" in
+  'show synchronous_commit') [ "${PSQL_SYNC_COMMIT-}" = fail ] && exit 2; echo "${PSQL_SYNC_COMMIT:-on}" ;;
+  *"'TEMP'"*) [ "${PSQL_TEMP-}" = fail ] && exit 2; echo "${PSQL_TEMP:-1}" ;;
   *wal_sender_timeout*)
     # A server applies options=-c from the URI to the session; emulate that.
     case "$uri" in *wal_sender_timeout%3D60s*) echo "60000|1min|${SRC_MAJOR-16}" ;;
