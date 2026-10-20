@@ -181,6 +181,7 @@ func failedCommitRetried() {
 		g.Expect(current.Status.Attempts).To(BeNumerically(">=", before.Status.Attempts+1),
 			"the attempt whose COMMIT failed has not ended")
 	}, migrationTimeout, time.Second).Should(Succeed())
+	waitGatePassed(m.Name, before.Status.Attempts+1)
 
 	By("dropping the target-only objects and cutting over")
 	psql(targetCluster, asTargetApp+"DROP TRIGGER reject_once ON "+schema+".t; DROP FUNCTION "+schema+".reject_once(); "+

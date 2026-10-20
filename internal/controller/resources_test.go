@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
@@ -228,6 +229,111 @@ func TestBuildJob_PGPassfileInSpecEnv(t *testing.T) {
 		if !strings.Contains(c.Command[2], want) {
 			t.Fatalf("prelude misses %q:\n%s", want, c.Command[2])
 		}
+	}
+}
+
+func secretRefTarget() v1beta1.PostgresConnection {
+	return v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "tgt-bundle"}}
+}
+
+func uriSecretRefTarget() v1beta1.PostgresConnection {
+	return v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "tgt-dsn"}, Key: "dsn-uri",
+	}}
+}
+
+// TestBuildJobGolden pins the worker Job byte for byte for each target form,
+// so a new opt-in field that is unset provably leaves it unchanged.
+// UPDATE_GOLDEN=1 rewrites the snapshots.
+func TestBuildJobGolden(t *testing.T) {
+	for name, target := range map[string]v1beta1.PostgresConnection{
+		"inline":       passwordMigration().Spec.Target,
+		"secretref":    secretRefTarget(),
+		"urisecretref": uriSecretRefTarget(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := passwordMigration()
+			m.Spec.Target = target
+			job, err := buildJob(m, "img", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := json.MarshalIndent(job, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, '\n')
+			path := filepath.Join("testdata", "worker-job-"+name+".json")
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(want) != string(got) {
+				t.Fatalf("the worker Job drifted from %s; review the change, then rerun with UPDATE_GOLDEN=1 to accept it", path)
+			}
+		})
+	}
+}
+
+// TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate pins which Jobs start
+// their target sessions with synchronous_commit=local: the worker, the preflight
+// and the retry gate do, every Job that only reads or cleans up does not.
+func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
+	for form, target := range map[string]v1beta1.PostgresConnection{
+		"inline":    passwordMigration().Spec.Target,
+		"secretRef": secretRefTarget(),
+	} {
+		t.Run(form, func(t *testing.T) {
+			m := reownMigration()
+			m.Spec.Target = target
+			m.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+			for name, tc := range map[string]struct {
+				build func() (*batchv1.Job, error)
+				want  bool
+			}{
+				"worker":         {func() (*batchv1.Job, error) { return buildJob(m, "img", 1) }, true},
+				jobKindPreflight: {func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") }, true},
+				"retry gate":     {func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) }, true},
+				jobKindCleanup:   {func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") }, false},
+				jobKindVerify:    {func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") }, false},
+				"catalog":        {func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", "") }, false},
+				"compare data":   {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) }, false},
+				"compare schema": {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) }, false},
+				"reown":          {func() (*batchv1.Job, error) { return buildReownJob(m, "img") }, false},
+			} {
+				job, err := tc.build()
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				c := job.Spec.Template.Spec.Containers[0]
+				source := envValue(c.Env, "PGCOPYDB_SOURCE_PGURI")
+				if source == "" || strings.Contains(source, "options=") {
+					t.Errorf("%s: source URI %q must exist and never set options=", name, source)
+				}
+				// The inline target URI is spec env; a secretRef prelude composes it.
+				targetURI := envValue(c.Env, "PGCOPYDB_TARGET_PGURI")
+				if form == "secretRef" {
+					if !strings.Contains(c.Command[2], "export PGCOPYDB_TARGET_PGURI=") {
+						t.Fatalf("%s: no target prelude to inspect:\n%s", name, c.Command[2])
+					}
+					targetURI = c.Command[2]
+				}
+				if targetURI == "" {
+					t.Fatalf("%s: no target URI to inspect", name)
+				}
+				if got := strings.Contains(targetURI, conn.SyncCommitLocalParam); got != tc.want {
+					t.Errorf("%s: target carries the synchronous_commit option = %v, want %v", name, got, tc.want)
+				}
+				if !tc.want && strings.Contains(targetURI, "synchronous_commit") {
+					t.Errorf("%s: target names synchronous_commit without the option:\n%s", name, targetURI)
+				}
+			}
+		})
 	}
 }
 
@@ -452,7 +558,16 @@ func TestJobScripts_ShellValid(t *testing.T) {
 			dry.Spec.Clone.OwnerAfterRestore = reownTestOwner
 			return buildPreflightJob(dry, "img")
 		},
-		"preflight":       func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"synchronousCommit local": func() (*batchv1.Job, error) {
+			return buildPreflightJob(syncCommitMigration(false), "img")
+		},
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"retry gate":     func() (*batchv1.Job, error) { return buildGateJob(m, "img", 2) },
+		"retry gate, all databases": func() (*batchv1.Job, error) {
+			all := passwordMigration()
+			all.Spec.Clone.AllDatabases = true
+			return buildGateJob(all, "img", 2)
+		},
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
@@ -874,10 +989,10 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	builders := map[string]func() (*batchv1.Job, error){
-		"cleanup-job": func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
-		jobKindVerify: func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
-		"preflight":   func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
-		"compare":     func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+		"cleanup-job":    func() (*batchv1.Job, error) { return buildCleanupJob(m, "img") },
+		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
+		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
+		"compare":        func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
 	}
 	for name, build := range builders {
 		job, err := build()
@@ -1111,7 +1226,7 @@ func TestPreflightScriptFor_AllDatabases(t *testing.T) {
 			t.Fatalf("all-databases script missing %q", want)
 		}
 	}
-	for _, absent := range []string{"has_database_privilege", "has_schema_privilege", databaseOwnerProbe, walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "remediated:", "@SOURCE@"} {
+	for _, absent := range []string{"has_database_privilege(current_user, current_database(), 'CREATE')", "has_schema_privilege", databaseOwnerProbe, walLevelProbe, replicationAttrProbe, replicaIdentityProbe, "remediated:", "@SOURCE@"} {
 		if strings.Contains(s, absent) {
 			t.Fatalf("all-databases script contains %q", absent)
 		}
@@ -1346,6 +1461,8 @@ apply() {
   exit 0
 }
 case "$q" in
+  'show synchronous_commit') [ "${PSQL_SYNC_COMMIT-}" = fail ] && exit 2; echo "${PSQL_SYNC_COMMIT:-on}" ;;
+  *"'TEMP'"*) [ "${PSQL_TEMP-}" = fail ] && exit 2; echo "${PSQL_TEMP:-1}" ;;
   *wal_sender_timeout*)
     # A server applies options=-c from the URI to the session; emulate that.
     case "$uri" in *wal_sender_timeout%3D60s*) echo "60000|1min|${SRC_MAJOR-16}" ;;
@@ -3229,14 +3346,28 @@ func TestRecordWorkNode(t *testing.T) {
 		}
 	}
 	at := func(sec int64) metav1.Time { return metav1.Unix(1_700_000_000+sec, 0) }
+	// pod mounts its Migration's work claim, as every worker pod does.
 	pod := func(name, node string, created metav1.Time, migration string) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: testNS, CreationTimestamp: created,
 				Labels: map[string]string{labelManagedBy: managerName, labelMigration: migration},
 			},
-			Spec: corev1.PodSpec{NodeName: node},
+			Spec: corev1.PodSpec{NodeName: node, Volumes: []corev1.Volume{{
+				Name: workdirVolume,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: migration + "-work"},
+				},
+			}}},
 		}
+	}
+	// probe swaps the work claim for an emptyDir under the same volume name, as
+	// the retry gate and the preflight do.
+	probe := func(p *corev1.Pod) *corev1.Pod {
+		p.Spec.Volumes = []corev1.Volume{{
+			Name: workdirVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}}
+		return p
 	}
 	tests := []struct {
 		name    string
@@ -3256,6 +3387,10 @@ func TestRecordWorkNode(t *testing.T) {
 			pods: []client.Object{pod("p", nodeA, at(0), "work")}},
 		{name: "only unscheduled pods keep the last value", before: nodeA, want: nodeA,
 			pods: []client.Object{pod("p", "", at(0), "work")}},
+		{name: "probe pod is newer", before: nodeA, want: nodeA, pods: []client.Object{
+			pod("work-run-1", nodeA, at(0), "work"),
+			probe(pod("work-gate-2", nodeB, at(10), "work")),
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3306,4 +3441,38 @@ func TestRecordWorkNode(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestPodWaitDetail_ByUID covers the probe's selector: each probe for one
+// attempt reuses the Job name, so a deleted probe's pod shares its job-name.
+func TestPodWaitDetail_ByUID(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(name, uid, reason, message string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, Labels: map[string]string{
+				jobNameLabel: "work-gate-2", batchv1.ControllerUidLabel: uid,
+			}},
+			Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: workerContainer,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: reason, Message: message,
+				}},
+			}}},
+		}
+	}
+	// The stray pod sorts first in the fake client's list, so a dropped
+	// selector would answer with its reason.
+	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		waiting("work-gate-2-a", "uid-deleted", "CrashLoopBackOff", "back-off restarting failed container"),
+		waiting("work-gate-2-b", "uid-current", "ImagePullBackOff", `Back-off pulling image "runner:missing"`),
+	).Build()
+	r := &MigrationReconciler{Client: c, Scheme: scheme}
+
+	got := r.podWaitDetail(context.Background(), testNS, client.MatchingLabels{batchv1.ControllerUidLabel: "uid-current"})
+	if want := `ImagePullBackOff: Back-off pulling image "runner:missing"`; got != want {
+		t.Errorf("podWaitDetail = %q, want %q", got, want)
+	}
 }

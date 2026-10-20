@@ -26,8 +26,10 @@ import (
 	"fmt"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -94,7 +96,7 @@ func (e *Exec) RunningPod(ctx context.Context, namespace, jobName string) (strin
 // error or preflight verdict only exists in the pod log. The newest pod is
 // the right one when the Job's own backoffLimit produced several.
 func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
-	return e.jobLogs(ctx, namespace, jobName, tailLines, false)
+	return e.newestPodLogs(ctx, namespace, "job-name="+jobName, "Job "+jobName, tailLines, false)
 }
 
 // JobLogsTimestamps is JobLogs with the container runtime's timestamp
@@ -102,20 +104,27 @@ func (e *Exec) JobLogs(ctx context.Context, namespace, jobName string, tailLines
 // check dates the supervisor-death marker with it: the runtime's stamp is a
 // fixed format, unlike pgcopydb's own log timestamps.
 func (e *Exec) JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error) {
-	return e.jobLogs(ctx, namespace, jobName, tailLines, true)
+	return e.newestPodLogs(ctx, namespace, "job-name="+jobName, "Job "+jobName, tailLines, true)
 }
 
-func (e *Exec) jobLogs(ctx context.Context, namespace, jobName string, tailLines int64, timestamps bool) ([]byte, error) {
+// JobLogsByUID is JobLogs for one Job object. A Job deleted and recreated
+// under the same name can leave pods behind that carry its job-name label,
+// but the controller-uid label names a single Job.
+func (e *Exec) JobLogsByUID(ctx context.Context, namespace string, uid types.UID, tailLines int64) ([]byte, error) {
+	return e.newestPodLogs(ctx, namespace, batchv1.ControllerUidLabel+"="+string(uid), "Job UID "+string(uid), tailLines, false)
+}
+
+// newestPodLogs reads the newest pod the label selector matches; job names
+// the Job in the error when none does.
+func (e *Exec) newestPodLogs(ctx context.Context, namespace, selector, job string, tailLines int64, timestamps bool) ([]byte, error) {
 	ctx, cancel := e.bounded(ctx)
 	defer cancel()
-	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "job-name=" + jobName,
-	})
+	pods, err := e.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}
 	if len(pods.Items) == 0 {
-		return nil, fmt.Errorf("no pods found for Job %s", jobName)
+		return nil, fmt.Errorf("no pods found for %s", job)
 	}
 	newest := pods.Items[0]
 	for _, p := range pods.Items[1:] {

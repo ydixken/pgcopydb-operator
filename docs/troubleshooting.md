@@ -20,6 +20,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`no replica identity usable for UPDATE/DELETE`](#no-replica-identity-usable-for-updatedelete) | Preflight failures |
 | [`row-level security hides rows of these tables`](#row-level-security-hides-rows) | Preflight failures |
 | [`follow cannot replicate unlogged tables`](#follow-cannot-replicate-unlogged-tables) | Preflight failures |
+| [`spec.target.synchronousCommit is local but the target connection reports ...`](#target-synchronous_commit-is-not-local) | Preflight failures |
 | [`must be owner of extension ...`, or `target extension ownership required`](#extension-ownership-failures) | Extension ownership failures |
 | [Slot creation fails with `could not access file "wal2json"`](#wal2json-is-not-installed-on-the-source) | Replication and follow |
 | [Slot creation fails with `may not be used as an output plugin`](#wal2json-is-not-trusted-by-the-source) | Replication and follow |
@@ -28,6 +29,8 @@ It falls back to the bare Job message when the pod is already gone.
 | [`permission denied to start WAL sender`](#permission-denied-to-start-wal-sender) | Replication and follow |
 | [The stream keeps dropping and attempts burn](#the-stream-keeps-dropping) | Replication and follow |
 | [`CaughtUp` stays False](#caughtup-stays-false) | Replication and follow |
+| [`CommitsBlocked` is True, or `PgcopydbMigrationCommitsBlocked` fires](#commits-blocked-on-synchronous-replication) | Synchronous replication and retries |
+| [`RetryHeld` is True and no new attempt starts](#retryheld-is-true) | Synchronous replication and retries |
 | [`publication ... already exists` or `publication retry refused`](#publication-retry-failures) | Publication retry failures |
 | [The worker pod runs and logs, but the phase never moves](#the-worker-pod-runs-but-the-phase-never-moves) | Clone progress |
 | [`Finalizing` runs long with the target size flat](#finalizing-takes-a-long-time) | Clone progress |
@@ -63,7 +66,7 @@ It falls back to the bare Job message when the pod is already gone.
 The operator log repeats `follow is immutable`, or `source is immutable`, or `target is immutable`.
 
 The spec gives an optional field of an immutable block an explicit zero value.
-The immutable blocks are `follow`, `source`, and `target`.
+The immutable blocks are `follow`, `source`, and `target`, apart from `target.synchronousCommit`.
 The typical case is `allowMissingReplicaIdentity: []` from a template that renders an empty list.
 Operators up to v0.8.1 rejected that spelling before any status could be set.
 
@@ -178,6 +181,17 @@ Run `ALTER TABLE ... SET LOGGED` on the source, or leave the tables out with `ex
 The list can name tables outside `includeOnlySchemas`: without `includeOnlyTables`, pgcopydb still publishes them, so leave them out with `excludeTables`.
 Then create a new Migration.
 
+### Target `synchronous_commit` is not local
+
+`PreflightFailed` with `spec.target.synchronousCommit is local but the target connection reports synchronous_commit=<value>` means the libpq startup option did not reach the server.
+A connection pooler or proxy on the way dropped it, as a CloudNativePG Pooler or a PgBouncer with `options` in `ignore_startup_parameters` does.
+A PgBouncer that refuses the option fails the connectivity check instead, and that message names `spec.target.synchronousCommit`.
+
+Connect the target directly, or through a session-mode pooler that passes the option on, such as PgBouncer 1.20 or later with `synchronous_commit` in `track_extra_parameters`.
+Alternatively, leave `synchronousCommit` unset.
+Then create a new Migration.
+See [Synchronous commit on the target](configuration.md#synchronous-commit-on-the-target).
+
 ## Extension ownership failures
 
 `must be owner of extension ...` in the worker log and `target extension ownership required` from preflight have the same meaning.
@@ -267,6 +281,10 @@ Runners older than `0.18.74.gc682dce` abort receive with `free(): invalid pointe
 Runners older than `0.18.76.gf9b328b` send receive status only every 10 seconds, so below a 10s timeout the source can end every session before receive reports a flush position: the slot's `confirmed_flush_lsn` stops moving while the worker keeps running ([#369](https://github.com/ydixken/pgcopydb-operator/issues/369)).
 `0.18.76.gf9b328b` sends status within half of `wal_sender_timeout`.
 
+Attempts that fail in apply setup with `replication origin with ID 1 is already active for PID ...` have a target-side cause.
+The previous attempt's apply backend is still on the target and holds the replication origin, typically because a proxy cut it while its commit waited for a synchronous standby.
+The [retry gate](#retryheld-is-true) holds the next attempt while that backend remains, with reason `SessionsRemain`, so the attempt starts once the origin is free.
+
 ### `CaughtUp` stays False
 
 `CaughtUp` stays False in three cases: the lag is above `follow.maxCatchupLag`, only one below-threshold sample has arrived, or no replication sample exists yet.
@@ -274,6 +292,109 @@ With one below-threshold sample the reason is `ConfirmingCatchUp`, and it clears
 
 Check `status.replication.lagBytes`.
 If heavy write traffic keeps the lag high, throttle the traffic or raise the threshold.
+
+## Synchronous replication and retries
+
+### Commits blocked on synchronous replication
+
+`CommitsBlocked` is True with reason `SyncRepWait`, and a `CommitsBlocked` Warning event names the waiting sessions.
+After 15 minutes the `PgcopydbMigrationCommitsBlocked` alert fires.
+Two progress samples in a row found a target session of the migration role whose commit has waited 30 seconds or more in wait event `SyncRep`.
+Under strict synchronous replication, such as Patroni `synchronous_mode_strict` or CloudNativePG `dataDurability: required`, a commit waits until a synchronous standby confirms it, and without a standby it keeps waiting.
+While it waits, the session sends nothing.
+
+Healthy standbys can raise the condition too.
+After a bulk load, the first commits that wait for a standby can wait while it catches up on the load's WAL ([measured](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#catch-up-waits-followed-a-bulk-load-with-both-standbys-attached)).
+Such a wait sets `CommitsBlocked` and emits its event once it lasts roughly 40 seconds while samples come every 5 seconds, or roughly 50 seconds once they come every 10 seconds after the table copy.
+The next sample that finds no wait of 30 seconds or more clears it.
+
+Check the target's standbys in `pg_stat_replication` on the primary, and its `synchronous_standby_names`.
+The waiting commits finish on their own once a synchronous standby confirms them.
+A proxy or load balancer with an idle timeout cuts a connection that sends nothing for that long, and the backend behind it keeps waiting on the target.
+The attempt then fails, and the [retry gate](#retryheld-is-true) holds the next one until those backends are gone and a test commit returns.
+With a 900-second proxy timeout, the proxy cuts the worker at about the time the alert fires, so the alert can fire just as the retry gate takes over.
+It keeps firing while `RetryHeld` is True, because the rule reads both conditions on one 15-minute clock.
+
+To keep the copy's commits from waiting for a standby, set [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target).
+Apply still waits for one, because a lost apply commit would lose source changes for good.
+
+When a sample cannot read the count, the operator logs `progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown`.
+A True condition stands until a sample shows no wait of 30 seconds or more, or the worker succeeds.
+No sampler runs between attempts, while suspended, or after the Migration ends, so the condition keeps its last value there; the alert skips `Failed`, `Completed`, and `Suspended` for that reason.
+
+### `RetryHeld` is True
+
+`RetryHeld` is True, and no new attempt starts.
+The [retry gate](operations/lifecycle.md#the-retry-gate) holds the next attempt, and the reason names the first check that did not pass.
+The gate probes again every 30 seconds and starts the attempt once a probe passes.
+A hold spends no attempt, and the operator never ends, cancels, or terminates a session.
+A `RetryHeld` Warning event records the first result of a hold and each change of reason.
+`kubectl logs job/<name>-gate-<n>` shows the probe's `gate:` result lines; the operator keeps a failed probe Job for 30 seconds.
+To stop a hold, set `spec.suspend: true`, which deletes the probe Job; the resume runs the gate again.
+
+`GateProbing` means the hold has no probe result yet: the probe Job is pending, running, or not created yet.
+Every retry passes through it, within seconds when the failed worker's log was readable.
+After a worker pod that vanished it can last several minutes, because the operator first waits up to 2 minutes for the log and then requeues with backoff before it creates `<name>-gate-<n>`.
+A probe pod that cannot start turns it into `ProbeFailed` with the kubelet reason.
+
+`WorkerPodRemains` means a pod of the previous attempt's worker has not ended; the message names the pod and its node.
+A pod on a lost node holds the retry until the pod object is gone.
+
+> [!warning]
+> Force-delete the pod only once you have confirmed that its node is down.
+> On a node that is only unreachable, the old worker can still write to the target.
+
+To remove the pod of a node that is down:
+
+```sh
+kubectl delete pod <pod> --grace-period=0 --force
+```
+
+`SessionsRemain` means the probe's census found sessions of the migration role on the target under pgcopydb's name.
+The message lists up to ten, with pid, state, wait event, age, backend start (`started=`), and name.
+On a direct connection, a session that started before the failed attempt is not its leftover: it belongs to another workload under the same role, which the [prerequisites](reference/prerequisites.md#retries-and-snapshot-consistency) rule out.
+List the sessions yourself on the target, connected as the migration role, a superuser, or a member of `pg_read_all_stats`:
+
+```sql
+SELECT pid, state, wait_event, backend_start,
+       clock_timestamp() - coalesce(query_start, backend_start) AS age,
+       application_name
+  FROM pg_stat_activity
+ WHERE usename = '<migration role>'
+   AND datname = '<target database>'
+   AND application_name LIKE 'pgcopydb[%'
+ ORDER BY coalesce(query_start, backend_start);
+```
+
+The query only reads `pg_stat_activity`.
+Drop the `datname` line for an all-databases Migration.
+Drop the `application_name` line when the target URI sets `application_name`, because the gate then counts every session of the role, and its message says so.
+A session waiting in `SyncRep` ends once a synchronous standby confirms its commit; see [Commits blocked on synchronous replication](#commits-blocked-on-synchronous-replication).
+A session busy in a long statement stays until the statement ends.
+A session in state `idle` holds no transaction, so ending it by hand with `SELECT pg_terminate_backend(<pid>);` is safe.
+We count idle sessions too, because an idle backend can still hold apply's replication origin, and neither `pg_locks` nor `pg_stat_activity` shows that.
+
+Through a transaction-mode pooler, idle server connections keep the name of the last client they served, so connections that last served pgcopydb hold the retry until the pooler closes them.
+PgBouncer does that after `server_idle_timeout`, 600 seconds by default, or after `server_lifetime`, 3600 seconds by default, when the idle timeout is off.
+When every listed session is `idle`, the message adds that a pooler can keep them and that ending them is safe.
+
+`SyncCommitNotLocal` means that with `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`.
+A pooler or proxy on the way dropped the startup option.
+The preflight checks the same, so either the path changed since, or `synchronousCommit` was set after the preflight ran.
+Make the pooler pass the option on, as the [preflight entry](#target-synchronous_commit-is-not-local) describes, or unset `synchronousCommit`; the next probe uses the new setting.
+The target's endpoint fields are immutable, so connecting directly takes a new Migration.
+
+`CommitBlocked` means the test commit, run with `synchronous_commit=on`, waited for a synchronous standby until the probe cancelled it after 5 seconds.
+The next worker's commits would wait the same way.
+It also appears when the probe skipped the test commit because a session, or an earlier probe's commit, still waits in `SyncRep`.
+We skip it then, so that the gate never adds waiting commits of its own.
+Restore a synchronous standby; the gate passes once a probe after that also finds no sessions left.
+A cancelled test commit is committed locally, and it only created a temporary table that its own commit dropped.
+
+`ProbeFailed` means a check gave no result: a failed connection, an SQL error, a deadline, a probe pod that cannot start, an unreadable log, or a log without the expected lines.
+The message carries the server's error: a failed connection shows the server's `FATAL:` line, such as a failed password or an unknown database.
+Any other client-side error, such as a host name that does not resolve, reads `client-side error withheld`, because libpq can echo a connection URI with its password; check the target connection settings.
+When the test commit fails for lack of `TEMPORARY` on the target database, the message includes the `GRANT TEMPORARY ON DATABASE` statement that fixes it.
 
 ## Publication retry failures
 
@@ -318,7 +439,9 @@ The Migration sits in `Finalizing` for a long time, the target database size is 
 The end of a clone narrows to a single `VACUUM ANALYZE` on the largest table, and the target stops growing during it.
 The pass is healthy while the worker pod log advances; a stopped log is a stall.
 
-Watch the worker pod log instead of the target size.
+Check `CommitsBlocked` first.
+When it is True, the tail waits for a synchronous standby to confirm its commits; see [Commits blocked on synchronous replication](#commits-blocked-on-synchronous-replication).
+Otherwise watch the worker pod log instead of the target size.
 If the tail is too long, set `skip: [vacuum]`, which leaves the target without statistics.
 Then run `ANALYZE` yourself before you send traffic.
 See [The VACUUM tail](operations/performance.md#the-vacuum-tail) and the [phase table](reference/conditions.md#phases).
@@ -503,8 +626,12 @@ Set `spec.workVolume.storageClassName`, or fix the cluster default.
 
 ### Phase `Failed` with retry budget exhausted
 
-Phase `Failed` with "retry budget exhausted" means every attempt failed on a cause the operator cannot classify as deterministic.
-The first attempt's logs almost always name it.
+Phase `Failed` with "retry budget exhausted" means the counted attempts reached `backoffLimit + 1`, each failing on a cause the operator cannot classify as deterministic.
+The message reads `retry budget exhausted after N attempts (M exempt)`, followed by `: attempt K failed:` and that attempt's error when a failed attempt spent the last of the budget.
+Exempt attempts are those the retry gate found cut during a synchronous standby outage, and they do not count, so `N` can exceed `backoffLimit + 1`; see [Exempt attempts](operations/lifecycle.md#exempt-attempts).
+The gate decides at its first census after the failure.
+When no probe gets a census within 15 minutes of the failure, for example because it cannot connect, the attempt counts, and with the budget spent the Migration fails then.
+The first attempt's logs almost always name the cause.
 A permission error mostly stops early as `PermissionDenied`, a full work volume as `DiskFull`, and a change naming a column the target lacks as `SchemaDrift`.
 One that sits outside the last 40 log lines the classifier reads lands here.
 A work volume that filled up then shows `database or disk is full` or `No space left on device` in the first attempt's logs.

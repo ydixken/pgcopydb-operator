@@ -17,6 +17,7 @@ limitations under the License.
 package conn
 
 import (
+	"errors"
 	"maps"
 	"os"
 	"os/exec"
@@ -578,9 +579,6 @@ func TestMaterialize_SecretRef_TLS(t *testing.T) {
 	}
 }
 
-// runSecretRefPrelude executes the generated prelude for one secretRef source
-// under sh with the given env and password file, and returns the URI the
-// exec'd process sees, the passfile and URI-file contents, and the raw output.
 func TestURIRecover(t *testing.T) {
 	dir := t.TempDir()
 	srcFile := filepath.Join(dir, "src-uri")
@@ -612,14 +610,23 @@ func TestURIRecover(t *testing.T) {
 	}
 }
 
+// runSecretRefPrelude executes the generated prelude for one secretRef source
+// under sh with the given env and password file, and returns the URI the
+// exec'd process sees, the passfile and URI-file contents, and the raw output.
 func runSecretRefPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string]string, password string) (uri, passfile, urifile, out string, err error) {
 	t.Helper()
 	m, merr := Materialize(Source, c)
 	if merr != nil {
 		t.Fatal(merr)
 	}
+	return runSidePrelude(t, Source, m.Prelude, env, password)
+}
+
+// runSidePrelude is runSecretRefPrelude for a given side's prelude snippet.
+func runSidePrelude(t *testing.T, s Side, prelude string, env map[string]string, password string) (uri, passfile, urifile, out string, err error) {
+	t.Helper()
 	dir := t.TempDir()
-	pwFile := filepath.Join(dir, "source-password")
+	pwFile := filepath.Join(dir, string(s)+"-password")
 	// An empty password stands for "PW key absent": the optional mount then
 	// projects no file at all, which the prelude must catch by name.
 	if password != "" {
@@ -629,12 +636,12 @@ func runSecretRefPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[st
 	}
 	pgpass := filepath.Join(dir, "pgpass")
 	uriFile := filepath.Join(dir, "uri")
-	script := PreludeScript([]string{m.Prelude}, nil, "")
+	script := PreludeScript([]string{prelude}, nil, "")
 	script = strings.ReplaceAll(script, PgpassPath, pgpass)
-	script = strings.ReplaceAll(script, URIFile(Source), uriFile)
-	script = strings.ReplaceAll(script, credsDir+"/source-mnt/source-password", pwFile)
+	script = strings.ReplaceAll(script, URIFile(s), uriFile)
+	script = strings.ReplaceAll(script, credsDir+"/"+string(s)+"-mnt/"+string(s)+"-password", pwFile)
 
-	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$PGCOPYDB_SOURCE_PGURI"`)
+	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$`+uriEnv(s)+`"`)
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -1007,20 +1014,20 @@ func TestMaterializeSuperuser_EndpointAndKeys(t *testing.T) {
 	}
 }
 
-// runSuperPrelude executes a primary prelude (when the connection has one)
-// followed by the superuser snippet under sh, and returns the super URI the
-// exec'd process sees plus the passfile, super URI file, and raw output.
-func runSuperPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string]string, primaryPassword, superPassword string) (superURI, passfile, urifile, out string, err error) {
+// runSuperPrelude executes side s's primary prelude (when the connection has
+// one) followed by its superuser snippet under sh, and returns the super URI
+// the exec'd process sees plus the passfile, super URI file, and raw output.
+func runSuperPrelude(t *testing.T, s Side, c *v1beta1.PostgresConnection, env map[string]string, primaryPassword, superPassword string) (superURI, passfile, urifile, out string, err error) {
 	t.Helper()
 	var preludes []string
 	if c.SecretRef != nil {
-		pm, merr := Materialize(Source, c)
+		pm, merr := Materialize(s, c)
 		if merr != nil {
 			t.Fatal(merr)
 		}
 		preludes = append(preludes, pm.Prelude)
 	}
-	sm := MaterializeSuperuser(Source, c)
+	sm := MaterializeSuperuser(s, c)
 	preludes = append(preludes, sm.Prelude)
 
 	dir := t.TempDir()
@@ -1033,19 +1040,20 @@ func runSuperPrelude(t *testing.T, c *v1beta1.PostgresConnection, env map[string
 		}
 		return p
 	}
-	pwFile := write("source-password", primaryPassword)
-	superPwFile := write("source-super-password", superPassword)
+	side := string(s)
+	pwFile := write(side+"-password", primaryPassword)
+	superPwFile := write(side+"-super-password", superPassword)
 	pgpass := filepath.Join(dir, "pgpass")
 	uriFile := filepath.Join(dir, "super-uri")
 
 	script := PreludeScript(preludes, nil, "")
 	script = strings.ReplaceAll(script, PgpassPath, pgpass)
-	script = strings.ReplaceAll(script, URIFile(Source), filepath.Join(dir, "uri"))
-	script = strings.ReplaceAll(script, SuperURIFile(Source), uriFile)
-	script = strings.ReplaceAll(script, credsDir+"/source-super-mnt/source-super-password", superPwFile)
-	script = strings.ReplaceAll(script, credsDir+"/source-mnt/source-password", pwFile)
+	script = strings.ReplaceAll(script, URIFile(s), filepath.Join(dir, "uri"))
+	script = strings.ReplaceAll(script, SuperURIFile(s), uriFile)
+	script = strings.ReplaceAll(script, credsDir+"/"+side+"-super-mnt/"+side+"-super-password", superPwFile)
+	script = strings.ReplaceAll(script, credsDir+"/"+side+"-mnt/"+side+"-password", pwFile)
 
-	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$PGM_SOURCE_SUPER_PGURI"`)
+	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$`+SuperURIEnv(s)+`"`)
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -1161,7 +1169,7 @@ func TestSuperPrelude(t *testing.T) {
 			env := map[string]string{}
 			maps.Copy(env, superEnv)
 			maps.Copy(env, tc.env)
-			superURI, passfile, urifile, out, err := runSuperPrelude(t, c, env, tPass, tSuperPass)
+			superURI, passfile, urifile, out, err := runSuperPrelude(t, Source, c, env, tPass, tSuperPass)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want failure %q, got success with %q", tc.wantErr, superURI)
@@ -1197,7 +1205,7 @@ func TestSuperPrelude(t *testing.T) {
 }
 
 func TestSuperPrelude_MissingPasswordFile(t *testing.T) {
-	_, _, _, out, err := runSuperPrelude(t, superConn(),
+	_, _, _, out, err := runSuperPrelude(t, Source, superConn(),
 		map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: tSuperUser}, tPass, "")
 	if err == nil {
 		t.Fatal("want failure for a missing super password file")
@@ -1235,5 +1243,192 @@ func TestURIRecover_Superuser(t *testing.T) {
 	}
 	if got := string(out); got != "postgresql://r@s/db1|" {
 		t.Fatalf("recovered %q, want only the present super URI restored", got)
+	}
+}
+
+// Fixture literals for the synchronousCommit tests.
+const (
+	tSyncLocal      = "options=-c%20synchronous_commit%3Dlocal"
+	tOptionsRefusal = "target connection secret: the DB URI sets options, which spec.target.synchronousCommit would replace; remove options from the DB URI or unset synchronousCommit"
+	tURIDB          = "postgresql://u@h:5432/db"
+	tPlainURI       = "postgresql://" + tUser + "@" + tHost + ":5432/" + tDB
+	envTgtDB        = "PGM_TARGET_DB"
+	envTgtSuperUser = "PGM_TARGET_SUPER_USER"
+)
+
+// TestComposeURI_SynchronousCommitLocal pins the encoding: url.Values would
+// write the space as "+", which libpq keeps literally.
+func TestComposeURI_SynchronousCommitLocal(t *testing.T) {
+	if SyncCommitLocalParam != tSyncLocal {
+		t.Fatalf("SyncCommitLocalParam = %q, want %q", SyncCommitLocalParam, tSyncLocal)
+	}
+	c := inlineConn()
+	c.SynchronousCommit = v1beta1.SynchronousCommitLocal
+	uri, err := ComposeURI(Target, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, query, _ := strings.Cut(uri, "?")
+	if !strings.HasSuffix(query, "&"+tSyncLocal) {
+		t.Fatalf("query %q must end with &%s", query, tSyncLocal)
+	}
+	if n := strings.Count(uri, "options="); n != 1 {
+		t.Fatalf("URI %q sets options= %d times, want once", uri, n)
+	}
+	if strings.Contains(query, "+") {
+		t.Fatalf("query %q holds a +, which libpq reads literally", query)
+	}
+
+	if uri, err = ComposeURI(Source, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(uri, tSrcKeep) || strings.Contains(uri, "options=") {
+		t.Fatalf("source URI %q must keep its defaults and never set options=", uri)
+	}
+
+	c.SynchronousCommit = ""
+	if uri, err = ComposeURI(Target, c); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(uri, tKeep) || strings.Contains(uri, "options=") {
+		t.Fatalf("unset field: URI %q must keep its defaults and set no options=", uri)
+	}
+}
+
+// TestMaterialize_SynchronousCommitBackstop covers a CRD without the CEL rules:
+// the materializer refuses the shapes the API rejects at admission.
+func TestMaterialize_SynchronousCommitBackstop(t *testing.T) {
+	uriRef := &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "tgt-dsn"}, Key: "dsn"}
+	cases := []struct {
+		name    string
+		side    Side
+		conn    *v1beta1.PostgresConnection
+		wantErr string
+	}{
+		{"inline source", Source, inlineConn(), "source: synchronousCommit applies to the target only"},
+		{"secretRef source", Source, secretConn(), "source: synchronousCommit applies to the target only"},
+		{"uriSecretRef target", Target, &v1beta1.PostgresConnection{URISecretRef: uriRef}, "target: synchronousCommit cannot be combined with uriSecretRef"},
+		{"inline target", Target, inlineConn(), ""},
+		{"secretRef target", Target, secretConn(), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.conn.SynchronousCommit = v1beta1.SynchronousCommitLocal
+			m, err := Materialize(tc.side, tc.conn)
+			if tc.wantErr == "" {
+				if err != nil || m == nil {
+					t.Fatalf("want a materialized side, got %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("error %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSecretRefPrelude_SynchronousCommit runs the prelude for real: the options
+// refusal must match the key after ? or &, never text inside another value.
+func TestSecretRefPrelude_SynchronousCommit(t *testing.T) {
+	plain := map[string]string{envTgtDB: tDB, "PGM_TARGET_HOST": tHost, "PGM_TARGET_USER": tUser}
+	cases := []struct {
+		name    string
+		side    Side
+		unset   bool
+		env     map[string]string
+		wantURI string
+		wantErr bool
+	}{
+		{name: "plain database key", side: Target, env: plain, wantURI: tPlainURI + "?" + tKeep + "&" + tSyncLocal},
+		{
+			name: "DB URI with a query", side: Target,
+			env:     map[string]string{envTgtDB: tURIDB + "?sslmode=require"},
+			wantURI: tURIDB + "?sslmode=require&" + tKeep + "&" + tSyncLocal,
+		},
+		{name: "options after the question mark", side: Target, env: map[string]string{envTgtDB: tURIDB + "?options=-c%20work_mem%3D64MB"}, wantErr: true},
+		{name: "options after an ampersand", side: Target, env: map[string]string{envTgtDB: tURIDB + "?sslmode=require&options=-c%20a%3Db"}, wantErr: true},
+		{
+			name: "options inside a value", side: Target,
+			env:     map[string]string{envTgtDB: tURIDB + "?application_name=nooptions=x"},
+			wantURI: tURIDB + "?application_name=nooptions=x&" + tKeep + "&" + tSyncLocal,
+		},
+		{name: "field unset", side: Target, unset: true, env: plain, wantURI: tPlainURI + "?" + tKeep},
+		{
+			name: "source side", side: Source,
+			env:     map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
+			wantURI: tPlainURI + "?" + tSrcKeep,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := secretConn()
+			if !tc.unset {
+				c.SynchronousCommit = v1beta1.SynchronousCommitLocal
+			}
+			// Materialize refuses the field on the source before any prelude
+			// exists, so the source row checks the prelude's own side guard.
+			m := materializeSecretRef(tc.side, c)
+			uri, _, _, out, err := runSidePrelude(t, tc.side, m.Prelude, tc.env, tPass)
+			if tc.wantErr {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+					t.Fatalf("want exit 1, got %v with %q", err, out)
+				}
+				if out != tOptionsRefusal+"\n" {
+					t.Fatalf("output %q, want the refusal %q", out, tOptionsRefusal)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("prelude failed: %v\n%s", err, out)
+			}
+			if uri != tc.wantURI {
+				t.Fatalf("composed URI %q, want %q", uri, tc.wantURI)
+			}
+		})
+	}
+}
+
+// TestSuperPrelude_KeepsSynchronousCommit: the preflight's remediation runs on
+// the derived superuser URI, which keeps the primary URI's query.
+func TestSuperPrelude_KeepsSynchronousCommit(t *testing.T) {
+	inline := superConn()
+	inline.SynchronousCommit = v1beta1.SynchronousCommitLocal
+	primary, err := ComposeURI(Target, inline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := secretConn()
+	secret.SynchronousCommit = v1beta1.SynchronousCommitLocal
+	secret.SuperuserSecretRef = &v1beta1.ConnectionSecret{Name: tSuperBundle}
+	superURI := "postgresql://" + tSuperUser + "@" + tHost
+	cases := []struct {
+		name string
+		c    *v1beta1.PostgresConnection
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "inline primary", c: inline,
+			env:  map[string]string{"PGCOPYDB_TARGET_PGURI": primary, envTgtSuperUser: tSuperUser},
+			want: superURI + ":5432/shop?sslmode=require&" + tKeep + "&" + tSyncLocal,
+		},
+		{
+			name: "secretRef primary", c: secret,
+			env:  map[string]string{envTgtDB: tURI6432, envTgtSuperUser: tSuperUser},
+			want: superURI + ":6432/" + tDB + "?" + tKeep + "&" + tSyncLocal,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, _, out, err := runSuperPrelude(t, Target, tc.c, tc.env, tPass, tSuperPass)
+			if err != nil {
+				t.Fatalf("prelude failed: %v\n%s", err, out)
+			}
+			if got != tc.want {
+				t.Fatalf("super URI %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

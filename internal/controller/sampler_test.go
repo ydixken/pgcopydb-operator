@@ -21,12 +21,15 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -97,6 +100,42 @@ func (s *Sampler) running(key types.NamespacedName) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.runs[key] != nil
+}
+
+// lastSampled is key's stored sample, zero until one lands. Unlike Observe it starts nothing.
+func (s *Sampler) lastSampled(key types.NamespacedName) sampled {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run := s.runs[key]; run != nil {
+		return run.last
+	}
+	return sampled{}
+}
+
+// heldSampler is a started Sampler whose run for key only the test feeds, through
+// SampleNow: no loop samples behind the test's back.
+func heldSampler(p ProgressOps, key types.NamespacedName, job string) *Sampler {
+	s := NewSampler(p)
+	s.ctx = context.Background()
+	s.runs[key] = &samplerRun{job: job, cancel: func() {}}
+	return s
+}
+
+// syncRepGauges reads both sync rep series of a Migration; found is false unless both exist.
+func syncRepGauges(t *testing.T, name string) (waiting, oldest float64, found bool) {
+	t.Helper()
+	waiting, foundWaiting, err := readGauge("pgcopydb_migration_target_sync_rep_waiting_sessions", migLabels(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldest, foundOldest, err := readGauge("pgcopydb_migration_target_sync_rep_oldest_wait_seconds", migLabels(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foundWaiting != foundOldest {
+		t.Fatalf("waiting series found %v, oldest series found %v: the pair must come and go together", foundWaiting, foundOldest)
+	}
+	return waiting, oldest, foundWaiting
 }
 
 // startSampler runs a sampler the way the manager does, until the spec ends
@@ -514,4 +553,175 @@ type slowLogs struct {
 func (l *slowLogs) JobLogsTimestamps(ctx context.Context, ns, job string, lines int64) ([]byte, error) {
 	time.Sleep(l.delay)
 	return l.fakeLogs.JobLogsTimestamps(ctx, ns, job, lines)
+}
+
+func TestSampler_SyncRepConfirmation(t *testing.T) {
+	over := &progress.SyncRepWait{Waiting: 2, OldestSeconds: 31, PgcopydbNamed: 1}
+	under := &progress.SyncRepWait{Waiting: 2, OldestSeconds: 29, PgcopydbNamed: 1}
+	// Each step answers w, or no sample at all when gone is set.
+	type step struct {
+		w         *progress.SyncRepWait
+		gone      bool
+		confirmed bool
+	}
+	for name, steps := range map[string][]step{
+		"over, over confirms on the second":        {{w: over}, {w: over, confirmed: true}},
+		"a third over stays confirmed":             {{w: over}, {w: over, confirmed: true}, {w: over, confirmed: true}},
+		"over, nil SyncRep, over":                  {{w: over}, {}, {w: over}},
+		"over, no sample, over":                    {{w: over}, {gone: true}, {w: over}},
+		"over, under, over":                        {{w: over}, {w: under}, {w: over}},
+		"two samples under the threshold, nothing": {{w: under}, {w: under}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const mig = "sampler-syncrep-confirm"
+			defer metrics.Forget(testNS, mig)
+			key := types.NamespacedName{Namespace: testNS, Name: mig}
+			fake := &fakeProgress{}
+			s := heldSampler(fake, key, "job")
+			for i, st := range steps {
+				fake.mu.Lock()
+				fake.syncRep, fake.nilSample = st.w, st.gone
+				fake.mu.Unlock()
+				if got := s.SampleNow(context.Background(), key, "job", false); got.syncRepConfirmed != st.confirmed {
+					t.Fatalf("sample %d: confirmed = %v, want %v", i, got.syncRepConfirmed, st.confirmed)
+				}
+				if kept := s.lastSampled(key); kept.syncRepConfirmed != st.confirmed {
+					t.Fatalf("sample %d: the run keeps confirmed = %v, want %v", i, kept.syncRepConfirmed, st.confirmed)
+				}
+			}
+		})
+	}
+}
+
+// Observe hands the pass the run's latest sample on every call, so the pass seeing a
+// sample twice must not count as two samples.
+func TestSampler_ObserveTwiceDoesNotConfirm(t *testing.T) {
+	const mig = "sampler-syncrep-observe"
+	defer metrics.Forget(testNS, mig)
+	key := types.NamespacedName{Namespace: testNS, Name: mig}
+	s := heldSampler(&fakeProgress{syncRep: &progress.SyncRepWait{Waiting: 1, OldestSeconds: 45, PgcopydbNamed: 1}}, key, "job")
+	s.SampleNow(context.Background(), key, "job", false)
+	for i := range 2 {
+		got, ok := s.Observe(key, "job", false, samplerHint{})
+		if !ok || got.sample == nil {
+			t.Fatalf("observe %d: ok = %v, sample = %v, want the stored sample", i, ok, got.sample)
+		}
+		if got.syncRepConfirmed {
+			t.Fatalf("observe %d confirmed a single sample", i)
+		}
+	}
+	// A second stored sample over the threshold does confirm, so the loop above can fail.
+	s.SampleNow(context.Background(), key, "job", false)
+	if got, _ := s.Observe(key, "job", false, samplerHint{}); !got.syncRepConfirmed {
+		t.Fatal("two stored samples over the threshold did not confirm")
+	}
+}
+
+// The pass samples for itself when no sampler runs, and may repeat that within a
+// sample interval, so its samples never confirm.
+func TestSampler_PassFallbackNeverConfirms(t *testing.T) {
+	over := &progress.SyncRepWait{Waiting: 4, OldestSeconds: 50, PgcopydbNamed: 3}
+	for name, sampler := range map[string]func(ProgressOps) *Sampler{
+		"no sampler":          func(ProgressOps) *Sampler { return nil },
+		"sampler not started": NewSampler,
+	} {
+		t.Run(name, func(t *testing.T) {
+			const mig = "sampler-syncrep-fallback"
+			defer metrics.Forget(testNS, mig)
+			fake := &fakeProgress{syncRep: over}
+			r := &MigrationReconciler{Progress: fake, Sampler: sampler(fake), Recorder: events.NewFakeRecorder(10)}
+			m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: mig}}
+			for i := range 3 {
+				got := r.progressSample(context.Background(), m, "job", false)
+				if got.sample == nil || got.sample.SyncRep == nil {
+					t.Fatalf("pass %d: the fallback took no SyncRep count", i)
+				}
+				if got.syncRepConfirmed {
+					t.Fatalf("pass %d: the fallback confirmed", i)
+				}
+				r.applyCommitsBlocked(m, got)
+			}
+			if c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCommitsBlocked); c != nil {
+				t.Fatalf("condition = %+v from fallback samples alone", *c)
+			}
+			if waiting, oldest, found := syncRepGauges(t, mig); !found || waiting != 4 || oldest != 50 {
+				t.Fatalf("gauges = %v, %v (found %v), want 4 and 50", waiting, oldest, found)
+			}
+		})
+	}
+}
+
+// A lost count deletes the pair rather than leaving the last reading to pass as current.
+func TestSampler_UnknownSampleDeletesSyncRepGauges(t *testing.T) {
+	const mig = "sampler-syncrep-unknown"
+	defer metrics.Forget(testNS, mig)
+	key := types.NamespacedName{Namespace: testNS, Name: mig}
+	fake := &fakeProgress{}
+	s := heldSampler(fake, key, "job")
+	parsed := &progress.SyncRepWait{Waiting: 2, OldestSeconds: 12, PgcopydbNamed: 2}
+	for _, step := range []struct {
+		what string
+		w    *progress.SyncRepWait
+		gone bool
+		err  error
+		want *progress.SyncRepWait
+	}{
+		{what: "parsed", w: parsed, want: parsed},
+		{what: "nil SyncRep", want: nil},
+		{what: "no waiter", w: &progress.SyncRepWait{}, want: &progress.SyncRepWait{}},
+		{what: "no sample", w: parsed, gone: true, want: nil},
+		{what: "parsed again", w: parsed, want: parsed},
+		{what: "exec error", w: parsed, err: errors.New("exec refused"), want: nil},
+	} {
+		fake.mu.Lock()
+		fake.syncRep, fake.nilSample, fake.sizesErr = step.w, step.gone, step.err
+		fake.mu.Unlock()
+		s.SampleNow(context.Background(), key, "job", false)
+		waiting, oldest, found := syncRepGauges(t, mig)
+		if found != (step.want != nil) {
+			t.Fatalf("%s: gauges found = %v, want %v", step.what, found, step.want != nil)
+		}
+		if found && (waiting != float64(step.want.Waiting) || oldest != float64(step.want.OldestSeconds)) {
+			t.Fatalf("%s: gauges = %v, %v, want %+v", step.what, waiting, oldest, *step.want)
+		}
+	}
+}
+
+func TestSampler_StopDeletesSyncRepGauges(t *testing.T) {
+	const mig = "sampler-syncrep-stop"
+	defer metrics.Forget(testNS, mig)
+	key := types.NamespacedName{Namespace: testNS, Name: mig}
+	s := heldSampler(&fakeProgress{syncRep: &progress.SyncRepWait{Waiting: 3, OldestSeconds: 45, PgcopydbNamed: 2}}, key, "job")
+	s.SampleNow(context.Background(), key, "job", false)
+	if waiting, oldest, found := syncRepGauges(t, mig); !found || waiting != 3 || oldest != 45 {
+		t.Fatalf("gauges = %v, %v (found %v), want 3 and 45", waiting, oldest, found)
+	}
+	s.Stop(key)
+	if _, _, found := syncRepGauges(t, mig); found {
+		t.Fatal("the sync rep gauges outlived the run")
+	}
+}
+
+// A retry's worker is a new run: the old run's last sample does not count toward it.
+func TestSampler_NewJobStartsUnconfirmed(t *testing.T) {
+	const mig = "sampler-syncrep-new-job"
+	defer metrics.Forget(testNS, mig)
+	key := types.NamespacedName{Namespace: testNS, Name: mig}
+	s := heldSampler(&fakeProgress{syncRep: &progress.SyncRepWait{Waiting: 1, OldestSeconds: 60, PgcopydbNamed: 1}}, key, "run-1")
+	ctx := t.Context()
+	// The new run samples once when it starts and then waits out the hour.
+	s.ctx, s.copyPeriod, s.period = ctx, time.Hour, time.Hour
+	defer s.Stop(key)
+
+	s.SampleNow(ctx, key, "run-1", false)
+	if got := s.SampleNow(ctx, key, "run-1", false); !got.syncRepConfirmed {
+		t.Fatal("two samples over the threshold on run-1 did not confirm")
+	}
+	if _, ok := s.Observe(key, "run-2", false, samplerHint{}); !ok {
+		t.Fatal("the sampler did not take run-2")
+	}
+	NewWithT(t).Eventually(func() time.Time { return s.lastSampled(key).at }).ShouldNot(BeZero())
+	if got := s.lastSampled(key); got.syncRepConfirmed {
+		t.Fatal("run-2 confirmed its first sample off run-1's")
+	}
 }

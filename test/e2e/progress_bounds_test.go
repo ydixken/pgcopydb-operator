@@ -326,6 +326,13 @@ const progressSamplerMatch = "a.query LIKE '" + progress.SamplerMarker + "%'"
 
 func holdProgressLock(side, cluster, table string) func() {
 	GinkgoHelper()
+	return holdLockFor(side, cluster, table, 140*time.Second)
+}
+
+// holdLockFor holds an ACCESS EXCLUSIVE lock on table for at most hold and
+// returns its release, which DeferCleanup also calls; a second call is a no-op.
+func holdLockFor(side, cluster, table string, hold time.Duration) func() {
+	GinkgoHelper()
 	readPrimary := func() (corev1.Pod, bool) {
 		lookupCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
@@ -350,11 +357,13 @@ func holdProgressLock(side, cluster, table string) func() {
 				"-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout=3000", "-c", sql)...)
 		return strings.TrimSpace(string(out)), err == nil
 	}
-	lockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	lockCtx, cancel := context.WithTimeout(context.Background(), hold+40*time.Second)
 	cmd := exec.CommandContext(lockCtx, "kubectl", psqlArgv(cluster, holder.Name, appDatabase(cluster), false,
 		"-XqtA", "-v", "ON_ERROR_STOP=1",
-		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout=150000",
-		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(140)")...)
+		"-c", "SET application_name='e2e_progress_blocker'; SET statement_timeout="+
+			strconv.FormatInt((hold+10*time.Second).Milliseconds(), 10),
+		"-c", "BEGIN; LOCK "+table+" IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep("+
+			strconv.FormatFloat(hold.Seconds(), 'f', -1, 64)+")")...)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		Fail(side + " lock process could not start")

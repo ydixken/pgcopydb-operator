@@ -36,6 +36,17 @@ Two values control it:
 - `crds.keep` (default `true`): annotate the CRD with `helm.sh/resource-policy: keep`.
   `helm uninstall` then leaves the CRD in place.
 
+### Downgrades
+
+An operator release without the [retry gate](operations/lifecycle.md#the-retry-gate) ignores `status.exemptAttempts` and counts every attempt against `spec.backoffLimit`.
+`kubectl get pgm -A -o wide` shows the exempt attempts of every Migration in the `EXEMPT` column.
+
+> [!warning]
+> Before a downgrade, raise `spec.backoffLimit` to at least `status.attempts` on every Migration with exempt attempts.
+> Otherwise the older operator can fail such a Migration for good at its next retry.
+> An older release also ignores `spec.target.synchronousCommit` and runs no retry gate, so the copy's commits wait for a synchronous standby again and retries start without waiting for a cut worker's sessions.
+> After upgrading back, check that `spec.target.synchronousCommit` is still set, because the older CRD can drop the field.
+
 ### API versions
 
 The CRD serves two versions: `v1beta1` and the deprecated `v1alpha1`.

@@ -2028,6 +2028,93 @@
       "interval": "5s"
     },
     {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Synchronous Replication Waits",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pgcopydb_migration_target_sync_rep_waiting_sessions{namespace=\"$namespace\", name=\"$name\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "Waiting Sessions"
+        },
+        {
+          "refId": "B",
+          "expr": "pgcopydb_migration_target_sync_rep_oldest_wait_seconds{namespace=\"$namespace\", name=\"$name\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "Oldest Wait"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows how many target sessions of the migration role wait for a synchronous standby to confirm a commit (Waiting Sessions), and how long ago the oldest waiting statement started (Oldest Wait), which is an upper bound on its wait. The operator samples both with the progress, every 5 seconds until the copy is done, then every 10. A gap means that a sample could not read them, and both lines end when the worker pod does. Two samples in a row with a wait of 30 seconds or more set the CommitsBlocked condition.",
+      "interval": "5s"
+    },
+    {
       "id": 13,
       "type": "row",
       "title": "Replication",
@@ -2036,7 +2123,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 28
       },
       "panels": []
     },
@@ -2052,7 +2139,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 29
       },
       "targets": [
         {
@@ -2142,7 +2229,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 29
       },
       "targets": [
         {
@@ -2222,7 +2309,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 29
+        "y": 36
       },
       "targets": [
         {
@@ -2285,7 +2372,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 29
+        "y": 36
       },
       "targets": [
         {

@@ -301,7 +301,7 @@ var _ = Describe("Migration Controller ownership handover", func() {
 		// No handover Job exists, so nothing says the worker exited 0: the
 		// guard must let the ordinary resume happen.
 		dropWorker(name)
-		m := reconcileAndGet(ctx, r, name)
+		m := passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
 		fetchJob(ctx, name+"-run-2")

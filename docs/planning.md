@@ -41,6 +41,8 @@ Individual checks appear as `ok:` log lines.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.
 4. Partial.
    Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
+   With [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target), it also checks that the target connection reports `synchronous_commit=local`.
+   A migration role without `TEMPORARY` on the target database only raises a `PreflightWarning` event, but the retry gate's test commit needs that grant, so a retry that runs the test holds without it.
    See the [operator prerequisites](reference/prerequisites.md) for each check.
    Preflight does not audit TLS policy, every ownership and publication right, or whether the target schemas are empty.
    A `superuserSecretRef` role without `rolsuper` only raises a `PreflightWarning` event, but an all-databases migration connection without `rolsuper` fails preflight.

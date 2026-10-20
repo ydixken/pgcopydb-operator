@@ -299,6 +299,7 @@ func deletePublicationRetryMigration(mig *v1beta1.Migration) {
 
 func expectPublicationRetryAttempt(name string) *batchv1.Job {
 	GinkgoHelper()
+	waitGatePassed(name, 2)
 	m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 	Expect(m.Status.Attempts).To(Equal(int32(2)))
 	Expect(m.Spec.Cutover.Approved).To(BeFalse())

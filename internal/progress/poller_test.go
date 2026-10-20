@@ -243,6 +243,9 @@ func TestGateScript_UnderSh(t *testing.T) {
 
 func ptr(n int64) *int64 { return &n }
 
+// noWaits is the syncrep= line of a target where no session waits for a standby.
+const noWaits = "syncrep=0 0 0\n"
+
 func eq(a, b *int64) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -255,15 +258,20 @@ func TestSample(t *testing.T) {
 	// Five fields a side: database size, tables, tables holding rows, indexes,
 	// table bytes; the source adds a sixth, the tables it holds rows in that
 	// the target holds none in, and names them on a third line.
+	none := &SyncRepWait{}
+	// A healthy pair of sides with no schema yet, for the cases about the syncrep= line.
+	sides := "source=1 0 0 0 0 0\ntarget=1 0 0 0 0\n"
 	for name, tc := range map[string]struct {
 		out        string
 		src, tgt   *int64
 		wantCounts *RelationCounts
+		syncRep    *SyncRepWait
 		lost       map[string]string
 	}{
 		"mid copy": {
-			out: "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\nowed=public.a, public.b\n",
-			src: ptr(1073741824), tgt: ptr(536870912),
+			out:     "source=1073741824 60 60 85 48000000000 37\ntarget=536870912 60 23 0 12000000000\nowed=public.a, public.b\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1073741824), tgt: ptr(536870912),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 23,
 				IndexesTotal: 85, IndexesDone: 0,
@@ -272,8 +280,9 @@ func TestSample(t *testing.T) {
 			},
 		},
 		"index build under way": {
-			out: "source=1073741824 60 60 85 48000000000 0\ntarget=1000000000 60 60 41 47000000000\nowed=\n",
-			src: ptr(1073741824), tgt: ptr(1000000000),
+			out:     "source=1073741824 60 60 85 48000000000 0\ntarget=1000000000 60 60 41 47000000000\nowed=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1073741824), tgt: ptr(1000000000),
 			wantCounts: &RelationCounts{
 				TablesTotal: 60, TablesDone: 60,
 				IndexesTotal: 85, IndexesDone: 41,
@@ -286,8 +295,9 @@ func TestSample(t *testing.T) {
 		// the schema restore on; the owed count reads 56, and the name rides
 		// along for the condition message.
 		"table empty on the target": {
-			out: "source=10134634496 57 57 81 10134634496 1\ntarget=9247000000 57 56 81 9247000000\nowed=public.documents\n",
-			src: ptr(10134634496), tgt: ptr(9247000000),
+			out:     "source=10134634496 57 57 81 10134634496 1\ntarget=9247000000 57 56 81 9247000000\nowed=public.documents\n" + noWaits,
+			syncRep: none,
+			src:     ptr(10134634496), tgt: ptr(9247000000),
 			wantCounts: &RelationCounts{
 				TablesTotal: 57, TablesDone: 56,
 				IndexesTotal: 81, IndexesDone: 81,
@@ -298,8 +308,9 @@ func TestSample(t *testing.T) {
 		// A table empty on both sides owes nothing and counts done, so a
 		// finished copy reads whole without anything rounding it up.
 		"table empty on both sides": {
-			out: "source=1000 3 2 4 500 0\ntarget=900 3 2 4 480\nowed=\n",
-			src: ptr(1000), tgt: ptr(900),
+			out:     "source=1000 3 2 4 500 0\ntarget=900 3 2 4 480\nowed=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1000), tgt: ptr(900),
 			wantCounts: &RelationCounts{
 				TablesTotal: 3, TablesDone: 3,
 				IndexesTotal: 4, IndexesDone: 4,
@@ -308,8 +319,9 @@ func TestSample(t *testing.T) {
 		},
 		// The all-databases script prints no owed line; nothing is named.
 		"no owed line": {
-			out: "source=1000 3 3 4 500 0\ntarget=900 3 3 4 480\n",
-			src: ptr(1000), tgt: ptr(900),
+			out:     "source=1000 3 3 4 500 0\ntarget=900 3 3 4 480\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1000), tgt: ptr(900),
 			wantCounts: &RelationCounts{
 				TablesTotal: 3, TablesDone: 3,
 				IndexesTotal: 4, IndexesDone: 4,
@@ -319,54 +331,79 @@ func TestSample(t *testing.T) {
 		// The schema restore has not run yet, so there is a size but nothing
 		// to count. 0 of 0 is an absent sample, not progress.
 		"target has no schema": {
-			out: "source=1073741824 60 60 85 48000000000 0\ntarget=8388608 0 0 0 0\nowed=\n",
-			src: ptr(1073741824), tgt: ptr(8388608),
+			out:     "source=1073741824 60 60 85 48000000000 0\ntarget=8388608 0 0 0 0\nowed=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1073741824), tgt: ptr(8388608),
 		},
 		// One side unreadable: its size goes too, and counts need both, so a
 		// name on the owed line has no count to ride with.
 		"source failed": {
-			out:  "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n",
-			tgt:  ptr(536870912),
-			lost: map[string]string{sourceSide: ""},
+			out:     "source=\ntarget=536870912 60 23 0 12000000000\nowed=\n" + noWaits,
+			syncRep: none,
+			tgt:     ptr(536870912),
+			lost:    map[string]string{sourceSide: ""},
 		},
 		"target failed": {
-			out:  "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n",
-			src:  ptr(1073741824),
-			lost: map[string]string{targetSide: ""},
+			out:     "source=1073741824 60 60 85 48000000000 1\ntarget=\nowed=public.orders\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1073741824),
+			lost:    map[string]string{targetSide: ""},
 		},
 		// The script names what psql said, so the log can carry it.
 		"target timed out": {
-			out:  "target_error=ERROR:  canceling statement due to statement timeout \nsource=1073741824 0 0 0 0 0\ntarget=\nowed=\n",
-			src:  ptr(1073741824),
-			lost: map[string]string{targetSide: "ERROR:  canceling statement due to statement timeout"},
+			out:     "target_error=ERROR:  canceling statement due to statement timeout \nsource=1073741824 0 0 0 0 0\ntarget=\nowed=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1073741824),
+			lost:    map[string]string{targetSide: "ERROR:  canceling statement due to statement timeout"},
 		},
 		"target refused the connection": {
-			out:  "target_error=psql: error: connection to server at \"db\" (10.0.0.1), port 5432 failed: Connection refused \nsource=1 0 0 0 0 0\ntarget=\n",
-			src:  ptr(1),
-			lost: map[string]string{targetSide: `psql: error: connection to server at "db" (10.0.0.1), port 5432 failed: Connection refused`},
+			out:     "target_error=psql: error: connection to server at \"db\" (10.0.0.1), port 5432 failed: Connection refused \nsource=1 0 0 0 0 0\ntarget=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1),
+			lost:    map[string]string{targetSide: `psql: error: connection to server at "db" (10.0.0.1), port 5432 failed: Connection refused`},
 		},
 		"source rejected the password": {
-			out:  "source_error=FATAL:  password authentication failed for user \"app\"\nsource=\ntarget=1 0 0 0 0\n",
-			tgt:  ptr(1),
-			lost: map[string]string{sourceSide: `FATAL:  password authentication failed for user "app"`},
+			out:     "source_error=FATAL:  password authentication failed for user \"app\"\nsource=\ntarget=1 0 0 0 0\n" + noWaits,
+			syncRep: none,
+			tgt:     ptr(1),
+			lost:    map[string]string{sourceSide: `FATAL:  password authentication failed for user "app"`},
 		},
 		// libpq echoes a URI it cannot parse, password and all; the log must not.
 		"target URI unparsable": {
-			out:  "target_error=psql: error: invalid percent-encoded token: \"hunter%zz2\"\nsource=1 0 0 0 0 0\ntarget=\n",
-			src:  ptr(1),
-			lost: map[string]string{targetSide: withheldReason},
+			out:     "target_error=psql: error: invalid percent-encoded token: \"hunter%zz2\"\nsource=1 0 0 0 0 0\ntarget=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1),
+			lost:    map[string]string{targetSide: withheldReason},
 		},
 		// dash reports a SIGKILLed child on stderr; that is not a server error.
 		"target killed": {
-			out:  "target_error=Killed \nsource=1 0 0 0 0 0\ntarget=\n",
-			src:  ptr(1),
-			lost: map[string]string{targetSide: withheldReason},
+			out:     "target_error=Killed \nsource=1 0 0 0 0 0\ntarget=\n" + noWaits,
+			syncRep: none,
+			src:     ptr(1),
+			lost:    map[string]string{targetSide: withheldReason},
 		},
 		// A source row that is short or not numeric kills the counts, which
 		// need both sides, but the target answered and its size still stands.
-		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
-		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n", tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
-		"no output":           {out: "", lost: map[string]string{sourceSide: "", targetSide: ""}},
+		"short source row":    {out: "source=1 60 60 85 48\ntarget=1 60 23 0 12\n" + noWaits, syncRep: none, tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"source not a number": {out: "source=1 60 60 85 48 oom\ntarget=1 60 23 0 12\n" + noWaits, syncRep: none, tgt: ptr(1), lost: map[string]string{sourceSide: ""}},
+		"no output":           {out: "", lost: map[string]string{sourceSide: "", targetSide: "", syncRepKey: ""}},
+		// Three integers or nothing: a line that is missing, empty, short or not numeric
+		// is unknown, never zero waiters.
+		"syncrep waits":       {out: sides + "syncrep=2 45 1\n", src: ptr(1), tgt: ptr(1), syncRep: &SyncRepWait{Waiting: 2, OldestSeconds: 45, PgcopydbNamed: 1}},
+		"syncrep missing":     {out: sides, src: ptr(1), tgt: ptr(1), lost: map[string]string{syncRepKey: ""}},
+		"syncrep empty":       {out: sides + "syncrep=\n", src: ptr(1), tgt: ptr(1), lost: map[string]string{syncRepKey: ""}},
+		"syncrep short":       {out: sides + "syncrep=1 2\n", src: ptr(1), tgt: ptr(1), lost: map[string]string{syncRepKey: ""}},
+		"syncrep not numbers": {out: sides + "syncrep=a b c\n", src: ptr(1), tgt: ptr(1), lost: map[string]string{syncRepKey: ""}},
+		"syncrep timed out": {
+			out: "syncrep_error=ERROR:  canceling statement due to statement timeout \n" + sides + "syncrep=\n",
+			src: ptr(1), tgt: ptr(1),
+			lost: map[string]string{syncRepKey: "ERROR:  canceling statement due to statement timeout"},
+		},
+		"syncrep URI unparsable": {
+			out: "syncrep_error=psql: error: invalid percent-encoded token: \"hunter%zz2\"\n" + sides + "syncrep=\n",
+			src: ptr(1), tgt: ptr(1),
+			lost: map[string]string{syncRepKey: withheldReason},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeExec{pod: "p", out: []byte(tc.out)}
@@ -388,6 +425,14 @@ func TestSample(t *testing.T) {
 			case tc.wantCounts != nil && *got.Counts != *tc.wantCounts:
 				t.Errorf("counts = %+v, want %+v", got.Counts, tc.wantCounts)
 			}
+			switch {
+			case tc.syncRep == nil && got.SyncRep != nil:
+				t.Errorf("syncrep = %+v, want unknown", *got.SyncRep)
+			case tc.syncRep != nil && got.SyncRep == nil:
+				t.Errorf("syncrep unknown, want %+v", *tc.syncRep)
+			case tc.syncRep != nil && *got.SyncRep != *tc.syncRep:
+				t.Errorf("syncrep = %+v, want %+v", *got.SyncRep, *tc.syncRep)
+			}
 			if !maps.Equal(got.Lost, tc.lost) {
 				t.Errorf("lost = %q, want %q", got.Lost, tc.lost)
 			}
@@ -402,8 +447,9 @@ func TestSample_LogsLostSidesOnTransition(t *testing.T) {
 	ctx := logf.IntoContext(context.Background(), zap.New(zap.WriteTo(&buf)))
 	f := &fakeExec{pod: "p"}
 	p := NewFromExec(f, nil)
-	healthy := "source=1 1 1 0 8 0\ntarget=1 1 1 0 8\nowed=\n"
-	timedOut := "target_error=ERROR:  canceling statement due to statement timeout\nsource=1 0 0 0 0 0\ntarget=\nowed=\n"
+	healthy := "source=1 1 1 0 8 0\ntarget=1 1 1 0 8\nowed=\n" + noWaits
+	timedOut := "target_error=ERROR:  canceling statement due to statement timeout\nsource=1 0 0 0 0 0\ntarget=\nowed=\n" + noWaits
+	syncRepTimedOut := "syncrep_error=ERROR:  canceling statement due to statement timeout\nsource=1 1 1 0 8 0\ntarget=1 1 1 0 8\nowed=\nsyncrep=\n"
 	for i, step := range []struct {
 		out  string
 		want []string
@@ -413,7 +459,10 @@ func TestSample_LogsLostSidesOnTransition(t *testing.T) {
 		{timedOut, nil},
 		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"target"`}},
 		{healthy, nil},
-		{"", []string{`"side":"source","reason":""`, `"side":"target","reason":""`}},
+		{syncRepTimedOut, []string{`"msg":"progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown","job":"ns/job","side":"syncrep","reason":"ERROR:  canceling statement due to statement timeout"`}},
+		{syncRepTimedOut, nil},
+		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"syncrep"`}},
+		{"", []string{`"side":"source","reason":""`, `"side":"target","reason":""`, `"side":"syncrep","reason":""`}},
 	} {
 		buf.Reset()
 		f.out = []byte(step.out)
@@ -553,13 +602,13 @@ func TestRelationCountsScript_TestsPresenceNotCount(t *testing.T) {
 		`populated="query_to_xml(format('select 1 from %I.%I limit 1', t.nspname, t.relname), false, true, '')::text <> ''"`,
 		`present="case when t.copying then false else $populated end"`, // a table in flight owes the copy unprobed
 		"(select count(*) from t where $present)",
-		"|| ',' || ($present)::text || ')'",                                                 // the target's row carries the flag per table
-		"join ($landed) as landed(name, populated)",                                         // and the source joins it
-		"from t where not t.populated and $populated)",                                      // owed: rows on the source, none on the target
-		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)",     // named, for the condition message
-		`*\|?*) landed="values ${t#*|}"`,                                                    // the list rides the row as a second column
-		`*) landed="select null::text, false where false"`,                                  // and a target that did not answer joins nothing
-		`printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}"`, // the names leave the source row for a line of their own
+		"|| ',' || ($present)::text || ')'",                                                                  // the target's row carries the flag per table
+		"join ($landed) as landed(name, populated)",                                                          // and the source joins it
+		"from t where not t.populated and $populated)",                                                       // owed: rows on the source, none on the target
+		"string_agg(t.nspname || '.' || t.relname, ', ' order by t.nspname, t.relname)",                      // named, for the condition message
+		`*\|?*) landed="values ${t#*|}"`,                                                                     // the list rides the row as a second column
+		`*) landed="select null::text, false where false"`,                                                   // and a target that did not answer joins nothing
+		`printf 'stage=%s\nsource=%s\ntarget=%s\nowed=%s\nsyncrep=%s\n' "$g" "${s%%|*}" "$t" "${s#*|}" "$r"`, // the names leave the source row for a line of their own
 	} {
 		if !strings.Contains(sampleScript, want) {
 			t.Errorf("sampleScript is missing %q", want)
@@ -745,6 +794,7 @@ func TestSampleScript_BothQueriesLeadWithSamplerMarker(t *testing.T) {
 	}
 	// The stub records each query as the shell expands it and fails the side.
 	stub := `progress_sql() { printf '%s\036' "$2" >&2; return 1; }
+syncrep_sql() { progress_sql "$@"; }
 why() { :; }
 err=` + filepath.Join(t.TempDir(), "err") + "\n"
 	cmd := exec.Command("sh", "-c", stub+strings.TrimPrefix(sampleScript, sampleSQL))
@@ -754,14 +804,55 @@ err=` + filepath.Join(t.TempDir(), "err") + "\n"
 		t.Fatalf("sampleScript failed: %v\n%s", err, sent.String())
 	}
 	queries := strings.Split(strings.TrimSuffix(sent.String(), "\036"), "\036")
-	if len(queries) != 3 {
-		t.Fatalf("sampleScript sent %d queries, want the stage probe's, the target's and the source's", len(queries))
+	if len(queries) != 4 {
+		t.Fatalf("sampleScript sent %d queries, want the stage probe's, the SyncRep count's, the target's and the source's", len(queries))
 	}
-	// The stage probe takes no relation lock, so the specs have no reason to find it.
-	for i, query := range queries[1:] {
-		if seen := query[:min(len(query), 1023)]; !strings.HasPrefix(seen, SamplerMarker+" ") {
-			t.Errorf("the %s query does not open with %q, so the e2e specs cannot find its backend:\n%s",
-				[]string{targetSide, sourceSide}[i], SamplerMarker, seen)
+	// The stage probe and the SyncRep count take no relation lock, so the specs have no reason to find them.
+	for i, query := range queries {
+		seen := query[:min(len(query), 1023)]
+		name := []string{"stage", syncRepKey, targetSide, sourceSide}[i]
+		if marked := strings.HasPrefix(seen, SamplerMarker+" "); marked != (i >= 2) {
+			t.Errorf("the %s query opens with %q: %t, want %t:\n%s", name, SamplerMarker, marked, i >= 2, seen)
+		}
+	}
+}
+
+// The SyncRep count is scoped by the role alone. Each filter pinned absent here can under-match
+// (client_addr behind a proxy, datname in all-databases mode), and under-matching reads as not blocked.
+func TestSampleScript_SyncRepShape(t *testing.T) {
+	statement := syncRepStatement("IPC", "SyncRep")
+	call := `r=$(syncrep_sql "$PGCOPYDB_TARGET_PGURI" "` + statement + `")`
+	for name, script := range map[string]string{"single-database": sampleScript, "all-databases": allDatabasesSampleScript} {
+		at := strings.Index(script, call)
+		if at < 0 {
+			t.Fatalf("the %s script does not run the SyncRep count:\n%s", name, script)
+		}
+		stage := strings.Index(script, `g=$(progress_sql "$PGCOPYDB_TARGET_PGURI"`)
+		size := strings.Index(script, `t=$(progress_sql "$PGCOPYDB_TARGET_PGURI"`)
+		if stage < 0 || size < 0 || stage > at || at > size {
+			t.Errorf("the %s script runs the SyncRep count at %d, want it between the stage probe (%d) and the target size query (%d)", name, at, stage, size)
+		}
+		if !strings.Contains(script, `{ r=; printf 'syncrep_error=%s\n' "$(why)"; }`) {
+			t.Errorf("the %s script prints no syncrep_error= line for a failed count", name)
+		}
+		if last := script[strings.LastIndex(script, "printf 'stage="):]; !strings.Contains(last, `syncrep=%s\n`) || !strings.HasSuffix(last, ` "$r"`+"\n") {
+			t.Errorf("the %s script's closing printf does not print syncrep=$r: %s", name, last)
+		}
+	}
+	for _, want := range []string{
+		"from pg_stat_activity",
+		"usename = session_user",
+		"wait_event_type = 'IPC' and wait_event = 'SyncRep'",
+		"application_name like 'pgcopydb[%'",
+		"pid <> pg_backend_pid()",
+	} {
+		if !strings.Contains(statement, want) {
+			t.Errorf("the SyncRep count is missing %q:\n%s", want, statement)
+		}
+	}
+	for _, forbidden := range []string{"client_addr", "backend_type", "datname"} {
+		if strings.Contains(statement, forbidden) {
+			t.Errorf("the SyncRep count filters on %s:\n%s", forbidden, statement)
 		}
 	}
 }

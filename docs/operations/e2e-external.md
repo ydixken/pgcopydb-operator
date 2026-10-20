@@ -24,6 +24,7 @@ That shows the operator works with your servers, network, and roles; it says not
 - One database on each server, holding no user objects on the first run.
 - On each side, an app role that can log in, owns its database, and is not a superuser.
   The migrations run as this role, and the seed creates schemas and the `citext` extension as it.
+  On the target it also needs `TEMPORARY` on its database for the [retry gate](lifecycle.md#the-retry-gate)'s test commit, which owning the database gives unless someone revoked it.
 - On each side, a separate admin role that is a true superuser (`rolsuper`), of which the app role is not a member.
   As this role the suite seeds and resets, runs `SET SESSION AUTHORIZATION`, creates and drops roles, and grants and revokes `REPLICATION`, `EXECUTE` on `pg_catalog` functions, and `SET` on `session_replication_role`.
   It also comments on a database the app role owns, and drops replication slots and origins.
@@ -139,6 +140,9 @@ Every spec runs except these, each of which skips with its reason in the report:
 - Fixture placement (both specs): they read the CloudNativePG instance pods.
 - Keepalive feedback (Manual and Automatic) and early Manual cutover: they pause the source WAL sender with a signal sent inside the database pod.
 - Progress sampler transaction pooling: it creates its own CloudNativePG clusters and a Pooler.
+- `synchronousCommit` on a direct target: it holds its table lock through a psql session inside the source's database pod.
+- `synchronousCommit` through a transaction-mode Pooler (both specs): they create their own CloudNativePG cluster and a Pooler.
+- Synchronous replication on the target (both specs): they create their own two-instance CloudNativePG cluster and fence its standby.
 - All databases (both specs): they create and drop databases server-wide and connect to the `postgres` database.
 - Chaos source-kill and target-kill: they delete the primary pod.
 - Chaos fan-out: it creates and drops a second database on the target server.
@@ -211,6 +215,7 @@ END $$;
 
 When you are done with the pair, drop both databases: the suite leaves its fixtures and the stamp in them.
 Two grants live outside the databases and survive that: the source app role keeps the `REPLICATION` attribute, and the target app role keeps `SET` on `session_replication_role`.
+A `TEMPORARY` grant on the target database goes with the database.
 To remove them, run this on the source:
 
 ```sql

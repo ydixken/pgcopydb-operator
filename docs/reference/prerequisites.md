@@ -24,6 +24,8 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 | Primary key or replica identity on replicated tables    | source | follow           |
 | No row-level security that filters the migration role  | source | single-database migrations |
 | No unlogged tables in scope                             | source | follow           |
+| `TEMPORARY` on the database (`PUBLIC` holds it by default) | target | retries        |
+| A migration role no other Migration shares on the target database | target | every migration |
 
 ## Kubernetes
 
@@ -126,6 +128,9 @@ Target role:
   When the objects have to end up under a role the migration cannot connect as, add [`clone.ownerAfterRestore`](#ownership-after-restore-cloneownerafterrestore).
 - `ALTER DATABASE ... SET` (the db-properties step) needs database ownership or superuser.
   If the target role has neither, add `dbProperties` to `clone.skip`.
+- `TEMPORARY` on the target database, for the test commit of the [retry gate](#retries-and-snapshot-consistency).
+  `PUBLIC` and the database owner hold it by default, so only a revoked default needs `GRANT TEMPORARY ON DATABASE <db> TO <role>`.
+  Without it, the preflight only warns, and a retry that runs the test commit holds with reason `ProbeFailed` and the `GRANT` in its message.
 
 Superuser is needed only for:
 
@@ -445,6 +450,20 @@ On runner `0.18.104.g362a559` and later, a retry that creates the slot copies un
 A retry that finds the slot from an earlier attempt and still has tables to copy cannot resume: that runner refuses it, and the operator starts the attempt over when `spec.clone.dropIfExists` is true, or fails the Migration as `SnapshotLost` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
 Older runners copy the remaining tables of either retry under a newer snapshot, so apply can stop on a duplicate key or leave the target diverged ([client tool versions](#client-tool-versions)).
 The cutover drain-verify gate and `spec.verification.data` are the checks that catch divergence.
+
+Before every retry, and before the attempt a resume starts, the [retry gate](../operations/lifecycle.md#the-retry-gate) checks the target.
+It holds the attempt until the previous worker's pod has ended and no session of the migration role under a pgcopydb name is left in the target database, and, where it runs one, until a test commit returns within 5 seconds, which under synchronous replication takes a synchronous standby's confirmation.
+The census tells this Migration's sessions apart from others by role, database, and name, so:
+
+- Two Migrations that write one target database MUST use different migration roles.
+- A Migration with `clone.allDatabases` MUST NOT share its migration role with another Migration on that instance, because its census covers every database.
+- The target URI SHOULD NOT set `application_name`.
+  pgcopydb names every connection `pgcopydb[<pid>] <process>`, and a URI parameter overrides that name, so the gate falls back to counting every session of the role.
+
+A shared role lets another Migration's sessions hold this Migration's retries for as long as they run, and can exempt an attempt that should count.
+Through a transaction-mode pooler, a retry can wait until the pooler closes its idle server connections.
+A server connection keeps the name of the last client it served, so the census counts it as a leftover.
+PgBouncer closes it after `server_idle_timeout`, or after `server_lifetime` when the idle timeout is off.
 
 ## Cutover
 

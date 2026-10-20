@@ -388,6 +388,64 @@ var _ = Describe("Migration", func() {
 		Expect(err.Error()).To(ContainSubstring("set exactly one of secretRef, uriSecretRef"))
 	})
 
+	It("rejects synchronousCommit on the source or beside a target uriSecretRef, "+
+		"and lets only it change on the target", func() {
+		const invalid, name = "e2e-sync-commit-invalid", "e2e-sync-commit-cel"
+		// Nothing is left behind unless a create wrongly succeeds.
+		DeferCleanup(func() {
+			deleteMigration(invalid)
+			deleteMigration(name)
+		})
+		m := newMigration(invalid, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Source.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		err := k8sClient.Create(ctx, m)
+		Expect(err).To(HaveOccurred(), "CEL validation should reject synchronousCommit on the source")
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid API error, got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("synchronousCommit applies to the target only"))
+
+		By("rejecting synchronousCommit beside a target uriSecretRef")
+		m = newMigration(invalid, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Target = v1beta1.PostgresConnection{
+			URISecretRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: invalid},
+				Key:                  "uri",
+			},
+			SynchronousCommit: v1beta1.SynchronousCommitLocal,
+		}
+		err = k8sClient.Create(ctx, m)
+		Expect(err).To(HaveOccurred(), "CEL validation should reject synchronousCommit with a target uriSecretRef")
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid API error, got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("synchronousCommit cannot be combined with uriSecretRef: " +
+			"the operator never reads that Secret, so it cannot add the option; use secretRef or the inline fields"))
+
+		By("changing only synchronousCommit on a suspended Migration's target")
+		// Suspended from the start, so no Job runs against the fixtures.
+		m = newMigration(name, nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Suspend = true
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		// A merge patch carries no resourceVersion, so status writes cannot conflict with it.
+		patchTarget := func(change func(*v1beta1.PostgresConnection)) error {
+			GinkgoHelper()
+			cur := &v1beta1.Migration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
+			patch := client.MergeFrom(cur.DeepCopy())
+			change(&cur.Spec.Target)
+			return k8sClient.Patch(ctx, cur, patch)
+		}
+		Expect(patchTarget(func(t *v1beta1.PostgresConnection) {
+			t.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		})).To(Succeed())
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, got)).To(Succeed())
+		Expect(got.Spec.Target.SynchronousCommit).To(Equal(v1beta1.SynchronousCommitLocal))
+
+		By("rejecting a change to any other target field")
+		err = patchTarget(func(t *v1beta1.PostgresConnection) { t.Host = "elsewhere.example.com" })
+		Expect(err).To(HaveOccurred(), "CEL validation should keep target.host immutable")
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid API error, got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("target is immutable except synchronousCommit"))
+	})
+
 	It("clones with uriSecretRef connections built from the app credentials", func() {
 		const uriSecretName = "e2e-uris"
 		By("building libpq URIs from the app credentials and storing them in one Secret")
@@ -636,6 +694,7 @@ var _ = Describe("Migration", func() {
 		setSuspend(name, false)
 
 		By("waiting for streaming to recover on a fresh attempt")
+		waitGatePassed(name, 2)
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 
@@ -985,6 +1044,11 @@ var _ = Describe("Migration", func() {
 		Expect(failureMessage(failed)).NotTo(ContainSubstring("permission denied"),
 			"the budget carrier must fail on a class the classifier ignores")
 
+		By("checking the retry gate counted both attempts and ended its hold on the failure")
+		Expect(failed.Status.ExemptAttempts).To(BeZero())
+		expectConditionReason(Default, failed, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "MigrationFailed")
+		Expect(failureMessage(failed)).To(ContainSubstring("(0 exempt)"))
+
 		By("checking Failed is absorbing: no third attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
@@ -1233,6 +1297,23 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.Migration
 			"migration %s/%s at phase %q, attempts %d", ns, name, m.Status.Phase, m.Status.Attempts)
 	}, timeout, time.Second).Should(Succeed())
 	return m
+}
+
+// waitGatePassed waits until the retry gate started attempt, or a later one, with no attempt exempt.
+// A phase wait cannot tell: a resume the gate holds already reads the next attempt's phase.
+func waitGatePassed(name string, attempt int32) {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		m := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		if m.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying(fmt.Sprintf("migration %s failed before attempt %d started: %s",
+				name, attempt, failureMessage(m))).Now()
+		}
+		g.Expect(m.Status.Attempts).To(BeNumerically(">=", attempt), "the retry gate has not started attempt %d", attempt)
+		expectConditionReason(g, m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "GatePassed")
+		g.Expect(m.Status.ExemptAttempts).To(BeZero())
+	}, migrationTimeout, time.Second).Should(Succeed())
 }
 
 func failureMessage(m *v1beta1.Migration) string {
@@ -1507,7 +1588,13 @@ func sourceSlotCount() string {
 // sees it.
 func targetOriginCount() string {
 	GinkgoHelper()
-	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
+	return targetOriginCountOn(targetCluster)
+}
+
+// targetOriginCountOn is targetOriginCount on another target cluster.
+func targetOriginCountOn(cluster string) string {
+	GinkgoHelper()
+	return psql(cluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
 }
 
 // copySecret merges one key into a secret, keeping any other key; CreateOrUpdate

@@ -84,6 +84,29 @@ func TestConfirmBaseCopy_NamesTheTables(t *testing.T) {
 	}
 }
 
+// Every path into Failed ends a hold; a Migration that never held gains no RetryHeld.
+func TestFail_EndsRetryHold(t *testing.T) {
+	r := &MigrationReconciler{Recorder: events.NewFakeRecorder(10)}
+	held := &v1beta1.Migration{}
+	meta.SetStatusCondition(&held.Status.Conditions, metav1.Condition{
+		Type: v1beta1.ConditionRetryHeld, Status: metav1.ConditionTrue, Reason: reasonSessionsRemain, Message: "pid=4242",
+	})
+	r.fail(held, "InvalidSpec", "Validate", "target: host is required")
+	if c := meta.FindStatusCondition(held.Status.Conditions, v1beta1.ConditionRetryHeld); c == nil ||
+		c.Status != metav1.ConditionFalse || c.Reason != reasonHoldMigrationFailed {
+		t.Fatalf("RetryHeld = %+v, want False/%s", c, reasonHoldMigrationFailed)
+	}
+
+	never := &v1beta1.Migration{}
+	r.fail(never, "InvalidSpec", "Validate", "target: host is required")
+	if !meta.IsStatusConditionTrue(never.Status.Conditions, v1beta1.ConditionFailed) {
+		t.Fatal("fail() set no Failed condition")
+	}
+	if c := meta.FindStatusCondition(never.Status.Conditions, v1beta1.ConditionRetryHeld); c != nil {
+		t.Fatalf("a Migration that never held gained RetryHeld %+v", c)
+	}
+}
+
 // defaultFailureMsg is failureReason's fallback; a test-local copy so a
 // reworded fallback fails here.
 const defaultFailureMsg = "worker Job failed"
@@ -181,8 +204,9 @@ func TestJobFinished(t *testing.T) {
 // overrides the operator default, and every derived Job honors it.
 // Names for the non-worker Jobs, so the table keys are not bare literals.
 const (
-	jobKindCleanup = "cleanup"
-	jobKindVerify  = "verify"
+	jobKindCleanup   = "cleanup"
+	jobKindVerify    = "verify"
+	jobKindPreflight = "preflight"
 )
 
 // The worker default must not leak onto the other Jobs. buildJob, cleanup,
@@ -255,19 +279,35 @@ func TestBuildJob_RunnerImage(t *testing.T) {
 	}
 }
 
-// TestBuildJob_InvalidSpec pins that a spec neither inline-complete nor
-// URI-based fails materialization on both sides: this error is what flips
-// the Validated condition to InvalidSpec.
+// TestBuildJob_InvalidSpec pins that a connection the materializer rejects
+// fails the worker build on either side: this error is what flips the
+// Validated condition to InvalidSpec.
 func TestBuildJob_InvalidSpec(t *testing.T) {
-	m := passwordMigration()
-	m.Spec.Source.Host = ""
-	m.Spec.Source.Username = ""
-	if _, err := buildJob(m, "img", 1); err == nil || !strings.Contains(err.Error(), "source") {
-		t.Fatalf("want source materialization error, got %v", err)
-	}
-	m = passwordMigration()
-	m.Spec.Target.Host = ""
-	if _, err := buildJob(m, "img", 1); err == nil || !strings.Contains(err.Error(), "target") {
-		t.Fatalf("want target materialization error, got %v", err)
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*v1beta1.Migration)
+		wantErr string
+	}{
+		{"source neither inline nor URI", func(m *v1beta1.Migration) { m.Spec.Source.Host, m.Spec.Source.Username = "", "" }, "source"},
+		{"target without host", func(m *v1beta1.Migration) { m.Spec.Target.Host = "" }, "target"},
+		{
+			"synchronousCommit on the source",
+			func(m *v1beta1.Migration) { m.Spec.Source.SynchronousCommit = v1beta1.SynchronousCommitLocal },
+			"source: synchronousCommit applies to the target only",
+		},
+		{
+			"synchronousCommit with a target uriSecretRef",
+			func(m *v1beta1.Migration) {
+				m.Spec.Target = uriSecretRefTarget()
+				m.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+			},
+			"target: synchronousCommit cannot be combined with uriSecretRef",
+		},
+	} {
+		m := passwordMigration()
+		tc.mutate(m)
+		if _, err := buildJob(m, "img", 1); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: want an error containing %q, got %v", tc.name, tc.wantErr, err)
+		}
 	}
 }

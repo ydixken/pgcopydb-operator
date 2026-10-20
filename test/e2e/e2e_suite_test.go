@@ -2525,15 +2525,15 @@ func checkLonghornCapacity() {
 	if available < need {
 		Skip(fmt.Sprintf("this run needs %dGi available across Longhorn disks"+
 			" (%dGi requested x %d replica x 1.2 headroom, %d source/target pairs sized for"+
-			" %d CNPG instances each, plus the dedicated pooling pair) but only %dGi are free;"+
+			" %d CNPG instances each, plus the dedicated clusters) but only %dGi are free;"+
 			" free up space, lower E2E_SCALE or run fewer Ginkgo processes",
 			need>>30, required>>30, replicas, pairs, cnpgInstances, available>>30))
 	}
 }
 
-// fixtureBytes is the volume space of pairs fixture pairs: source and target
-// once per CNPG instance, each holding a full copy, one work volume per pair,
-// and the dedicated pooling pair once per run.
+// fixtureBytes is the volume space of pairs fixture pairs, each holding a full source and
+// target copy per CNPG instance and one work volume, plus the dedicated clusters, which
+// count once per run.
 func fixtureBytes(pairs int) int64 {
 	var perPair int64
 	for _, size := range []string{srcStorageSize, tgtStorageSize} {
@@ -2543,7 +2543,8 @@ func fixtureBytes(pairs int) int64 {
 	work := resource.MustParse(workVolumeSize)
 	perPair += work.Value()
 	pool := resource.MustParse(progressPoolStorageSize)
-	return perPair*int64(pairs) + 2*pool.Value()
+	syncRep := resource.MustParse(syncRepStorageSize)
+	return perPair*int64(pairs) + 3*pool.Value() + 2*syncRep.Value()
 }
 
 // ensureFollowPrivileges grants the app role the non-superuser follow
@@ -2562,19 +2563,25 @@ func ensureFollowPrivileges() {
 	grantTargetFollowPrivileges(appDatabase(targetCluster))
 }
 
-// grantTargetFollowPrivileges grants the target-side follow prerequisites to
-// the migration role in one database. EXECUTE on catalog functions is
+// grantTargetFollowPrivileges is grantTargetFollowPrivilegesOn for the shared target.
+func grantTargetFollowPrivileges(db string) {
+	GinkgoHelper()
+	grantTargetFollowPrivilegesOn(targetCluster, db)
+}
+
+// grantTargetFollowPrivilegesOn grants the target-side follow prerequisites to
+// the migration role in one database of cluster. EXECUTE on catalog functions is
 // per-database, so a second target database (the chaos fan-out scenario) needs
 // its own pass; the parameter grant is cluster-wide but idempotent and simply
 // rides along.
-func grantTargetFollowPrivileges(db string) {
+func grantTargetFollowPrivilegesOn(cluster, db string) {
 	GinkgoHelper()
-	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+	psqlDB(cluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, "+
-		sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
-	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster)))
+		sqlLiteral(appRole(cluster))+"); END LOOP; END $$")
+	psqlDB(cluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(cluster)))
 }
 
 // resetSourceReplication drops what a crashed follow run left on the source: rows the

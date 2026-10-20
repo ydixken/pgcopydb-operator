@@ -624,3 +624,23 @@ func TestSnapshotLostLine(t *testing.T) {
 		})
 	}
 }
+
+// The origin error stays retryable: the retry gate holds on the orphaned apply backend that
+// keeps the origin busy, and a classifier hit here would fail the Migration instead.
+func TestOriginBusyIsNotTerminal(t *testing.T) {
+	const busy = "replication origin with ID 1 is already active for PID 4242"
+	raw := []byte(`{"error_severity":"ERROR","message":"[TARGET 4321] ERROR:  ` + busy + `"}` + "\n")
+	if got := LastErrorLine(raw); !strings.Contains(got, busy) {
+		t.Fatalf("LastErrorLine() = %q, want the origin error read as the attempt's last error", got)
+	}
+	for name, classify := range map[string]func([]byte) string{
+		"PermissionDeniedLine": PermissionDeniedLine,
+		"DiskFullLine":         DiskFullLine,
+		"SchemaDriftLine":      SchemaDriftLine,
+		"SnapshotLostLine":     SnapshotLostLine,
+	} {
+		if got := classify(raw); got != "" {
+			t.Errorf("%s() = %q, want the origin error left retryable", name, got)
+		}
+	}
+}

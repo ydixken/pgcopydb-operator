@@ -62,8 +62,15 @@ func fetchJob(ctx context.Context, name string) *batchv1.Job {
 }
 
 func finishJob(ctx context.Context, name string, succeeded bool) {
+	GinkgoHelper()
+	finishJobAt(ctx, name, succeeded, time.Now())
+}
+
+// finishJobAt is finishJob on a given clock: the retry gate compares a probe's finish with r.now.
+func finishJobAt(ctx context.Context, name string, succeeded bool, at time.Time) {
+	GinkgoHelper()
 	j := fetchJob(ctx, name)
-	now := metav1.Now()
+	now := metav1.NewTime(at)
 	if j.Status.StartTime == nil {
 		j.Status.StartTime = &now
 	}
@@ -81,7 +88,7 @@ func finishJob(ctx context.Context, name string, succeeded bool) {
 			batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now,
 				Reason: batchv1.JobReasonBackoffLimitExceeded, Message: jobFailedMsg})
 	}
-	ExpectWithOffset(1, k8sClient.Status().Update(ctx, j)).To(Succeed())
+	Expect(k8sClient.Status().Update(ctx, j)).To(Succeed())
 }
 
 func removeMigration(ctx context.Context, name string) {
@@ -190,8 +197,12 @@ func (c failingPatchClient) Patch(context.Context, client.Object, client.Patch, 
 // sentinel: tests choose what a pod "logged". out/err serve JobLogs, tsOut
 // and tsErr the timestamped variant the zombie check reads.
 type fakeLogs struct {
-	out   string
-	err   error
+	out string
+	err error
+	// byJob replaces out for the Jobs it names.
+	byJob map[string]string
+	// byUID alone serves JobLogsByUID; a missing UID reads as a Job without pods.
+	byUID map[types.UID]string
 	tsOut string
 	tsErr error
 	// gotLines records the last requested tail budget, so tests can prove
@@ -199,9 +210,20 @@ type fakeLogs struct {
 	gotLines int64
 }
 
-func (f *fakeLogs) JobLogs(_ context.Context, _, _ string, lines int64) ([]byte, error) {
+func (f *fakeLogs) JobLogs(_ context.Context, _, jobName string, lines int64) ([]byte, error) {
 	f.gotLines = lines
+	if out, ok := f.byJob[jobName]; ok {
+		return []byte(out), f.err
+	}
 	return []byte(f.out), f.err
+}
+
+func (f *fakeLogs) JobLogsByUID(_ context.Context, _ string, uid types.UID, _ int64) ([]byte, error) {
+	out, ok := f.byUID[uid]
+	if !ok {
+		return nil, fmt.Errorf("no pods found for Job UID %s", uid)
+	}
+	return []byte(out), nil
 }
 
 func (f *fakeLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {
@@ -727,7 +749,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 		passPreflight(r, name)
 		reconcileAndGet(ctx, r, name) // run-1
 		failAttempt(r, name, 1, sourceDied)
-		reconcileAndGet(ctx, r, name) // run-2
+		passRetryGate(ctx, r, name) // run-2
 		Expect(fetchJob(ctx, name+"-run-2").Spec.Template.Spec.Containers[0].Args).To(
 			ContainElements("--resume", "--not-consistent"))
 		return r
@@ -744,10 +766,10 @@ var _ = Describe("Migration Controller follow mode", func() {
 		Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
 		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal(reasonSnapshotLost))
 		Expect(drainEvents(rec)).To(ContainElement(SatisfyAll(
-			ContainSubstring(reasonSnapshotLost), ContainSubstring("starting over"), ContainSubstring(refusalMessage))))
+			ContainSubstring(reasonSnapshotLost), ContainSubstring("starts over"), ContainSubstring(refusalMessage))))
 
 		// The start-over drops the old slot before the guard, then copies from scratch.
-		m = reconcileAndGet(ctx, r, name) // run-3
+		m = passRetryGate(ctx, r, name) // run-3
 		Expect(m.Status.Attempts).To(Equal(int32(3)))
 		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted).Reason).To(Equal(reasonCloneRunning))
 		c := fetchJob(ctx, name+"-run-3").Spec.Template.Spec.Containers[0]
@@ -758,7 +780,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 
 		// startAttempt spent the latch, so the next failure resumes again.
 		failAttempt(r, name, 3, sourceDied)
-		reconcileAndGet(ctx, r, name) // run-4
+		passRetryGate(ctx, r, name) // run-4
 		Expect(fetchJob(ctx, name+"-run-4").Spec.Template.Spec.Containers[0].Args).To(
 			ContainElements("--resume", "--not-consistent"))
 	})
@@ -770,11 +792,17 @@ var _ = Describe("Migration Controller follow mode", func() {
 			rec := r.Recorder.(*events.FakeRecorder)
 			drainEvents(rec)
 			m := failAttempt(r, name, 2, refusedResume)
+			if dropIfExists {
+				// A start-over waits for the gate like any retry, since the attempt may yet prove
+				// exempt; the gate's pass then finds the budget spent.
+				Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
+				Expect(drainEvents(rec)).To(ContainElement(ContainSubstring("starts over")))
+				m = passRetryGate(ctx, r, name)
+			}
 			Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
-			// The budget check runs before the latch, so a spent budget announces no start-over.
 			got := drainEvents(rec)
 			Expect(got).To(ContainElement(ContainSubstring(reason)))
-			Expect(got).NotTo(ContainElement(ContainSubstring("the next attempt drops the slot")))
+			Expect(got).NotTo(ContainElement(ContainSubstring("starts over")))
 			failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 			Expect(failed.Reason).To(Equal(reason))
 			Expect(failed.Message).To(ContainSubstring(refusalMessage))

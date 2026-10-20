@@ -210,6 +210,7 @@ Two settings are not worth changing:
 `synchronous_commit = off` buys close to nothing during a base copy, because pgcopydb copies a whole table, or one split part, in a single transaction.
 There is one commit per table, not per row.
 Follow-mode transactions may be small and frequent, but the bundled runner explicitly sets `synchronous_commit=on` for SQLite apply, overriding a server default of `off` to confirm target WAL durability before publishing progress.
+[`spec.target.synchronousCommit: local`](../configuration.md#synchronous-commit-on-the-target) is for availability under strict synchronous replication, not for speed.
 
 `full_page_writes = off` is not safe on a target that becomes production.
 CloudNativePG defaults `wal_log_hints` to `on`, which WAL-logs hint-bit full-page images even without data checksums; enabling checksums independently requires that logging.

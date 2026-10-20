@@ -568,6 +568,120 @@ func TestHandleFailedJob_NoFailedTimeNoLogGrace(t *testing.T) {
 	}
 }
 
+// gateFixture seeds a Migration whose attempt 1 failed a minute ago and whose probe for
+// attempt 2 finished now with log. patches records each status patch the hooks see.
+func gateFixture(t *testing.T, result error, passed bool, log string) (r *MigrationReconciler, m *v1beta1.Migration, patches *[]string) {
+	t.Helper()
+	now := time.Now()
+	seed := passwordMigration()
+	seed.Spec.BackoffLimit = 3
+	seed.Status.Phase = v1beta1.PhaseCloning
+	seed.Status.Attempts = 1
+	seed.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: 1, FailedAt: metav1.NewTime(now.Add(-time.Minute)), Failure: jobFailedMsg}
+	gate, err := buildGateJob(seed, testRunnerImage, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate.UID = "gate-uid"
+	at := metav1.NewTime(now)
+	gate.Status.StartTime = &at
+	if passed {
+		gate.Status.CompletionTime = &at
+		gate.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: at}}
+	} else {
+		gate.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: at}}
+	}
+	patches = &[]string{}
+	r = failingReconciler(t, interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, obj client.Object, p client.Patch, _ ...client.SubResourcePatchOption) error {
+			data, err := p.Data(obj)
+			if err != nil {
+				return err
+			}
+			*patches = append(*patches, string(data))
+			return result
+		},
+	}, seed, gate)
+	r.Logs = &fakeLogs{byUID: map[types.UID]string{gate.UID: log}}
+	r.now = func() time.Time { return now }
+	m = &v1beta1.Migration{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(seed), m); err != nil {
+		t.Fatal(err)
+	}
+	return r, m, patches
+}
+
+// expectNoRetry fails when the gate fixture's attempt 2 worker exists or its Migration
+// changed on the server; patches must show which locked patch was refused.
+func expectNoRetry(t *testing.T, r *MigrationReconciler, m *v1beta1.Migration, patches []string, want string) {
+	t.Helper()
+	if len(patches) != 1 || !strings.Contains(patches[0], `"resourceVersion"`) || !strings.Contains(patches[0], want) {
+		t.Fatalf("status patches %q, want one locked patch carrying %s", patches, want)
+	}
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: m.Namespace, Name: jobName(m, 2)}, &batchv1.Job{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("worker 2 started behind a refused patch: %v", err)
+	}
+	got := &v1beta1.Migration{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ExemptAttempts != 0 || got.Status.RetryGate == nil || got.Status.RetryGate.Exemption != "" || got.Status.Attempts != 1 {
+		t.Fatalf("a refused patch changed the server: %+v", got.Status)
+	}
+}
+
+// requeuedSilently asserts the bare requeue a Conflict turns into.
+func requeuedSilently(t *testing.T, res ctrl.Result, err error) {
+	t.Helper()
+	//nolint:staticcheck // Assert the intentional silent rate-limited Requeue result.
+	if err != nil || res != (ctrl.Result{Requeue: true}) {
+		t.Fatalf("a conflict must requeue silently, got (%+v, %v)", res, err)
+	}
+}
+
+func migrationConflict(m *v1beta1.Migration) error {
+	return apierrors.NewConflict(schema.GroupResource{Group: v1beta1.GroupVersion.Group, Resource: "migrations"}, m.Name, errBoom)
+}
+
+// The budget patch is the last step before a worker starts: a failed one starts none.
+func TestSettleBudget_PatchError(t *testing.T) {
+	r, m, patches := gateFixture(t, errBoom, true, gatePassLog("commit=1,local=0"))
+	if _, err := r.startAttempt(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
+		t.Fatalf("a failed budget patch must propagate, got %v", err)
+	}
+	expectNoRetry(t, r, m, *patches, `"exemption":"Counted"`)
+}
+
+func TestSettleBudget_Conflict(t *testing.T) {
+	r, m, patches := gateFixture(t, migrationConflict(passwordMigration()), true, gatePassLog("commit=1,local=0"))
+	res, err := r.Reconcile(context.Background(), migrationRequest(m))
+	requeuedSilently(t, res, err)
+	expectNoRetry(t, r, m, *patches, `"exemption":"Counted"`)
+}
+
+// exemptProbeLog is a failed probe whose census proves a SyncRep wait from before the failure.
+func exemptProbeLog() string {
+	return strings.Join([]string{censusLine(1, 1, time.Now().Add(-10*time.Minute).Unix(), 0),
+		gateSyncRepSession, gateSkippedSyncRep}, "\n") + "\n"
+}
+
+// A verdict patch that does not land decides nothing: the next pass decides again.
+func TestVerdictPatch_PatchError(t *testing.T) {
+	r, m, patches := gateFixture(t, errBoom, false, exemptProbeLog())
+	if _, err := r.startAttempt(context.Background(), m, m.DeepCopy()); !errors.Is(err, errBoom) {
+		t.Fatalf("a failed verdict patch must propagate, got %v", err)
+	}
+	expectNoRetry(t, r, m, *patches, `"exemptAttempts":1`)
+}
+
+func TestVerdictPatch_Conflict(t *testing.T) {
+	r, m, patches := gateFixture(t, migrationConflict(passwordMigration()), false, exemptProbeLog())
+	res, err := r.Reconcile(context.Background(), migrationRequest(m))
+	requeuedSilently(t, res, err)
+	expectNoRetry(t, r, m, *patches, `"exemptAttempts":1`)
+}
+
 // TestEnsureOwned_OwnerRefFailure: a scheme that cannot resolve the owner's
 // GVK fails the PVC's owner reference, and the pass with it.
 func TestEnsureOwned_OwnerRefFailure(t *testing.T) {

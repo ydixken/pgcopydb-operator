@@ -72,11 +72,11 @@ var _ = Describe("Migration Controller resilience", func() {
 		Expect(m.Status.Progress).To(BeNil())
 		Expect(m.Status.Attempts).To(Equal(int32(1)))
 
-		// TTL or a manual delete removed the Job mid-run: the next pass must
-		// start attempt 2 resuming from the work-dir catalogs, not fail.
+		// TTL or a manual delete removed the Job mid-run: once the retry gate
+		// passes, attempt 2 must resume from the work-dir catalogs, not fail.
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCloning))
@@ -397,10 +397,15 @@ var _ = Describe("Migration Controller resilience", func() {
 			ContainSubstring("WorkerZombie"), ContainSubstring("upstream defect"))))
 
 		// The pod's failure trips the Job's backoffLimit 0 (scripted here, as
-		// always in envtest); the normal retry path starts attempt 2.
+		// always in envtest); the retry gate waits for the pod to end, then the
+		// normal retry path starts attempt 2.
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod); err == nil {
+			pod.Status.Phase = corev1.PodFailed
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, r, name) // observes the failure, clears jobName
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.JobName).To(Equal(name + "-run-2"))
 	})

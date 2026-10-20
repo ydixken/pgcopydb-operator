@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,6 +51,10 @@ import (
 // pollInterval is 10s, not the old 30s: a pass is one psql query per view
 // now, not the five catalog-opening pgcopydb commands that bought 30s.
 const pollInterval = 10 * time.Second
+
+// retryGateInterval caps the requeue of a held retry and is how long a failed probe stays:
+// deleting it sooner would let its delete event start the next probe right away.
+const retryGateInterval = 30 * time.Second
 
 // zombieGrace is not pollInterval: a worker inside Kubernetes' default 30s
 // termination grace is still alive several polls in and is no zombie.
@@ -99,16 +104,17 @@ const reasonCloneIncomplete = "CloneIncomplete"
 const reasonSnapshotLost = "SnapshotLost"
 
 // LogReader fetches worker pod logs so terminal errors reach status; nil
-// degrades to the Job's own condition message (envtest has no pods). The
-// zombie check dates the supervisor-death marker off the Timestamps variant.
+// degrades to the Job's own condition message (envtest has no pods). The zombie check dates
+// the supervisor-death marker off the Timestamps variant; probes, which reuse a name, read by UID.
 type LogReader interface {
 	JobLogs(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
 	JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
+	JobLogsByUID(ctx context.Context, namespace string, uid types.UID, tailLines int64) ([]byte, error)
 }
 
-// ProgressOps samples a running worker; nil disables sampling (envtest
-// injects a fake). Best effort throughout: a nil sample keeps the previous
-// value and an error never fails the pass.
+// ProgressOps samples a running worker; nil disables sampling (envtest injects a fake).
+// Best effort throughout: a nil sample keeps the previous value, except CommitsBlocked,
+// which reads it as unknown, never "not blocked", and an error never fails the pass.
 type ProgressOps interface {
 	// Sample reads both databases and the clone stage in one exec. Safe with a
 	// live worker, which is what makes the progress fields move during a copy.
@@ -126,6 +132,9 @@ type MigrationReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+
+	// APIReader reads past the informer cache; nil falls back to the client.
+	APIReader client.Reader
 
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
@@ -264,6 +273,12 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	if done, ok := jobFinished(job); done {
 		if ok {
+			// Exit 0 means every commit pgcopydb sent returned. No sampler runs on the
+			// finish path, so nothing else would clear a True.
+			if meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCommitsBlocked) != nil {
+				r.setCondition(m, v1beta1.ConditionCommitsBlocked, metav1.ConditionFalse, reasonWorkerSucceeded,
+					"the worker exited 0, so every commit it sent has returned")
+			}
 			if followEnabled(m) {
 				// Worker exit 0 in follow mode means endpos reached and
 				// sequences synced; Complete waits for slot cleanup.
@@ -411,13 +426,17 @@ func (r *MigrationReconciler) emitPreflightOutcome(ctx context.Context, m *v1bet
 // log reader and the pod inspectors use.
 const jobNameLabel = "job-name"
 
-// preflightWaitDetail reports why the preflight pod is not progressing, or ""
-// while it starts normally. A pod that cannot start would otherwise show a
-// bare Validating phase with the cause buried in pod events (seen live).
+// preflightWaitDetail is podWaitDetail for the preflight Job's pods.
 func (r *MigrationReconciler) preflightWaitDetail(ctx context.Context, namespace, jobName string) string {
+	return r.podWaitDetail(ctx, namespace, client.MatchingLabels{jobNameLabel: jobName})
+}
+
+// podWaitDetail reports why the selected pods are not progressing, or ""
+// while they start normally. A pod that cannot start would otherwise leave a
+// bare phase or condition, with the cause buried in pod events (seen live).
+func (r *MigrationReconciler) podWaitDetail(ctx context.Context, namespace string, selector client.MatchingLabels) string {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(namespace),
-		client.MatchingLabels{jobNameLabel: jobName}); err != nil {
+	if err := r.List(ctx, pods, client.InNamespace(namespace), selector); err != nil {
 		return ""
 	}
 	for i := range pods.Items {
@@ -510,6 +529,7 @@ func (r *MigrationReconciler) observeRunningJob(
 	if got.err != nil {
 		logf.FromContext(ctx).V(1).Info("database sample failed", "job", job.Name, "error", got.err)
 	}
+	r.applyCommitsBlocked(m, got)
 	var counts *progress.RelationCounts
 	if s := got.sample; s != nil {
 		r.applyStage(m, s, got.copySeen)
@@ -529,6 +549,8 @@ func (r *MigrationReconciler) observeRunningJob(
 		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
 		record("follow_control", started)
 	}
+	// A pass working from a stale cache can rewrite the conditions after this worker started.
+	r.endHold(m, reasonGatePassed, fmt.Sprintf("Attempt %d runs as Job %s", m.Status.Attempts, job.Name))
 	started = r.currentTime()
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		record("status_patch", started)
@@ -548,6 +570,10 @@ func (r *MigrationReconciler) observeRunningJob(
 		return res, err
 	}
 	record("zombie_reap", started)
+	if err := r.deleteStrayProbes(ctx, m); err != nil {
+		outcome = "stray_probe_error"
+		return ctrl.Result{}, err
+	}
 	// The pass keeps pollInterval for status; the sampler times the size gauges.
 	delay := r.activePollDelay(reconcileStart)
 	timings = append(timings, "next_delay", delay)
@@ -627,10 +653,12 @@ func (r *MigrationReconciler) progressSample(ctx context.Context, m *v1beta1.Mig
 			return got
 		}
 	}
+	// The pass can sample twice within one interval, so its samples never confirm a SyncRep wait.
 	at := r.currentTime()
 	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
 	got := sampled{sample: s, err: err, at: at, copySeen: s != nil && s.CopyStarted}
 	recordSizes(m.Namespace, m.Name, s, hint.copyStarted || got.copySeen)
+	metrics.RecordSyncRepWaits(m.Namespace, m.Name, syncRepWait(s))
 	return got
 }
 
@@ -725,7 +753,7 @@ func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobN
 }
 
 // reconcileSuspended deletes the active worker (keeping the PVC, so a later
-// resume continues from the catalogs) and parks the Migration.
+// resume continues from the catalogs) and any retry gate probe, and parks the Migration.
 func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	if m.Status.JobName != "" {
 		job := &batchv1.Job{}
@@ -783,6 +811,13 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 			return ctrl.Result{}, err
 		}
 	}
+	// The probe's test commit writes too. retryGate stays, so a resume gates again and a
+	// pending verdict stays pending.
+	next := m.Status.Attempts + 1
+	if err := r.deleteGateJob(ctx, m, next); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.endHold(m, reasonHoldSuspended, fmt.Sprintf("Attempt %d waits for a resume: spec.suspend stopped the retry gate", next))
 	m.Status.Phase = v1beta1.PhaseSuspended
 	return ctrl.Result{}, r.updateStatus(ctx, m, base)
 }
@@ -816,18 +851,38 @@ func (r *MigrationReconciler) nextAttempt(ctx context.Context, m, base *v1beta1.
 	return r.startAttempt(ctx, m, base)
 }
 
-// startAttempt creates the next worker Job, unless the retry budget is spent.
-// Budget: backoffLimit is the number of retries, so backoffLimit+1 attempts.
+// startAttempt creates the next worker Job. Every attempt after the first waits for the
+// retry gate (see retry_gate.go), and only a settled budget lets the worker start.
 func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
-	// Reachable despite handleFailedJob's own budget check: the final attempt's
-	// Job can vanish while running, and the next pass lands here over budget.
-	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		r.fail(m, "BackoffLimitExceeded", "Fail",
-			fmt.Sprintf("retry budget exhausted after %d attempts", m.Status.Attempts))
+	attempt := m.Status.Attempts + 1
+	if attempt > 1 {
+		// A pass that crashed between creating this worker and recording it left a live worker
+		// the gate would count as leftover sessions; the cache may not show it yet.
+		job := &batchv1.Job{}
+		err := r.uncached().Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: jobName(m, attempt)}, job)
+		switch {
+		case err == nil:
+			return r.recordAttempt(ctx, m, base, job, false)
+		case !apierrors.IsNotFound(err):
+			return ctrl.Result{}, err
+		}
+	}
+	// A spent budget fails here after a vanished Job, a resume, a retry pending across an
+	// upgrade, or a failed attempt whose verdict is recorded; an undecided one waits for it.
+	if (!onFailurePath(m) || m.Status.RetryGate.Exemption != "") && budgetSpent(m) {
+		r.failBudget(m)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
+	if attempt > 1 {
+		res, passed, err := r.retryGate(ctx, m, base, attempt)
+		if err != nil || !passed {
+			return res, err
+		}
+		if failed, err := r.settleBudget(ctx, m, base); err != nil || failed {
+			return ctrl.Result{}, err
+		}
+	}
 
-	attempt := m.Status.Attempts + 1
 	job, err := buildJob(m, r.RunnerImage, attempt)
 	if err != nil {
 		// buildJob was already exercised during validation; an error here is
@@ -841,7 +896,22 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 	if createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 		return ctrl.Result{}, createErr
 	}
+	// AlreadyExists means an overlapping pass created this Job and announced
+	// the attempt; a second event would just be noise.
+	return r.recordAttempt(ctx, m, base, job, createErr == nil)
+}
 
+// recordAttempt records job as the running attempt and ends the retry hold.
+func (r *MigrationReconciler) recordAttempt(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job, announce bool) (ctrl.Result, error) {
+	attempt := m.Status.Attempts + 1
+	note := fmt.Sprintf("attempt %d as Job %s", attempt, job.Name)
+	if held := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionRetryHeld); held != nil && held.Status == metav1.ConditionTrue {
+		note += fmt.Sprintf("; the retry gate held it for %s",
+			max(r.currentTime().Sub(held.LastTransitionTime.Time), 0).Round(time.Second))
+	}
+	if rg := m.Status.RetryGate; rg != nil && rg.Exemption == v1beta1.RetryGateExempt {
+		note += fmt.Sprintf("; attempt %d did not count against backoffLimit: its sessions waited for synchronous replication", rg.FailedAttempt)
+	}
 	if m.Status.StartedAt == nil {
 		now := metav1.Now()
 		m.Status.StartedAt = &now
@@ -856,13 +926,21 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneRunning,
 			fmt.Sprintf("attempt %d running as Job %s", attempt, job.Name))
 	}
-	if createErr == nil {
-		// AlreadyExists means an overlapping pass created this Job and
-		// announced the attempt; a second event would just be noise.
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "attempt %d as Job %s", attempt, job.Name)
+	if attempt > 1 {
+		m.Status.RetryGate = nil
+		r.setCondition(m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, reasonGatePassed,
+			fmt.Sprintf("Attempt %d runs as Job %s", attempt, job.Name))
+	}
+	if announce {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "%s", note)
 	}
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
+	}
+	if attempt > 1 {
+		if err := r.deleteGateJob(ctx, m, attempt); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
 }
@@ -882,7 +960,7 @@ func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 	return v1beta1.PhaseCloning
 }
 
-// handleFailedJob either schedules the next attempt or fails the Migration for
+// handleFailedJob either hands the next attempt to the retry gate or fails the Migration for
 // good. The Job's condition only says that the pod failed, so the pgcopydb
 // ERROR behind it is appended from the pod log when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
@@ -929,25 +1007,30 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
 
-	if m.Status.Attempts >= m.Spec.BackoffLimit+1 {
-		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
-		r.fail(m, "BackoffLimitExceeded", "Fail",
-			fmt.Sprintf("attempt %d failed: %s", m.Status.Attempts, reason))
-		return ctrl.Result{}, r.updateStatus(ctx, m, base)
-	}
-
+	// The budget waits for the gate's verdict: an attempt cut by a standby outage does not count.
 	if startOver {
 		// buildJob reads the latch; startAttempt replaces it once the next Job exists.
 		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonSnapshotLost,
 			fmt.Sprintf("attempt %d failed (%s); the next attempt starts over", m.Status.Attempts, reason))
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonSnapshotLost, "Retry",
-			"attempt %d failed (%s), starting over: the next attempt drops the slot and runs --restart --drop-if-exists",
+			"attempt %d failed (%s); a retry waits for the retry gate and starts over: it drops the slot and runs --restart --drop-if-exists",
 			m.Status.Attempts, reason)
 	} else {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "AttemptFailed", "Retry",
-			"attempt %d failed (%s), retrying with --resume", m.Status.Attempts, reason)
+			"attempt %d failed (%s); a retry with --resume waits for the retry gate", m.Status.Attempts, reason)
 	}
-	// Clear jobName; the next pass creates attempt N+1.
+	failedAt := jobFailedAt(job)
+	if failedAt.IsZero() {
+		failedAt = r.currentTime()
+	}
+	m.Status.RetryGate = &v1beta1.RetryGateStatus{
+		FailedAttempt: m.Status.Attempts,
+		FailedAt:      metav1.NewTime(failedAt),
+		Failure:       truncate(reason, maxDetailLen),
+		CloneDoneSeen: pgcopydb.CloneDone([]byte(tail)),
+	}
+	r.setHold(m, reasonGateProbing, fmt.Sprintf("Attempt %d waits for the retry gate to probe the target", m.Status.Attempts+1))
+	// Clear jobName; the gate decides when attempt N+1 starts.
 	m.Status.JobName = ""
 	if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
@@ -997,11 +1080,14 @@ func (r *MigrationReconciler) createStrictlyOwned(ctx context.Context, m *v1beta
 	return nil
 }
 
-// fail marks the Migration terminally failed. The event note is capped by the
-// server's ~1KiB limit; the condition keeps the full message.
+// fail marks the Migration terminally failed and ends a retry hold; the probe TTL collects a
+// probe left behind. The event note is capped by the server's ~1KiB limit; the condition
+// keeps the full message.
 func (r *MigrationReconciler) fail(m *v1beta1.Migration, reason, action, msg string) {
 	m.Status.Phase = v1beta1.PhaseFailed
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, reason, msg)
+	r.endHold(m, reasonHoldMigrationFailed,
+		fmt.Sprintf("Attempt %d does not start: the Migration failed with %s", m.Status.Attempts+1, reason))
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reason, action, "%s", truncate(msg, maxDetailLen))
 }
 
@@ -1034,8 +1120,8 @@ func (r *MigrationReconciler) ensureJob(ctx context.Context, m *v1beta1.Migratio
 	return nil, true, nil
 }
 
-// recordWorkNode stores the newest scheduled Job pod's node in annotationWorkNode
-// for runnerAffinity; only the preflight, which precedes every worker, lacks the PVC.
+// recordWorkNode stores, for runnerAffinity, the node of the newest scheduled pod that mounts
+// the work PVC: a retry gate probe is newer than the worker but runs on an emptyDir.
 // Best effort: the preference only saves a volume detach, so a failure must not stop a pass.
 func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Migration) {
 	pods := &corev1.PodList{}
@@ -1044,10 +1130,15 @@ func (r *MigrationReconciler) recordWorkNode(ctx context.Context, m *v1beta1.Mig
 		logf.FromContext(ctx).V(1).Info("work node lookup failed", "error", err)
 		return
 	}
+	claim := workPVCName(m)
+	onClaim := func(v corev1.Volume) bool {
+		return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim
+	}
 	var newest *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.Spec.NodeName != "" && (newest == nil || newest.CreationTimestamp.Before(&p.CreationTimestamp)) {
+		if p.Spec.NodeName != "" && slices.ContainsFunc(p.Spec.Volumes, onClaim) &&
+			(newest == nil || newest.CreationTimestamp.Before(&p.CreationTimestamp)) {
 			newest = p
 		}
 	}

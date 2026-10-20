@@ -74,6 +74,28 @@ groups:
             looks exactly like this and is not a stall, which is why the
             expression matches Cloning only: the operator reports that tail
             as Finalizing once it has seen the copy running.
+      # Reads the conditions, so the 30 s threshold lives in Go only. max by keeps
+      # one series per Migration, so one 15m clock spans a blocked worker that is
+      # cut and then held at the gate. Both conditions outlive the run: phase scope.
+      - alert: PgcopydbMigrationCommitsBlocked
+        expr: >-
+          max by (namespace, name) (
+            pgcopydb_migration_condition_transition_timestamp_seconds{type=~"CommitsBlocked|RetryHeld", status="True"}
+          )
+          and on (namespace, name)
+          (pgcopydb_migration_phase{phase!~"Failed|Completed|Suspended"} == 1)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Migration {{ $labels.namespace }}/{{ $labels.name }} has had commits
+            blocked on synchronous replication, or its retry held, for 15m
+          description: >-
+            Target commits wait for a synchronous standby, or the retry gate
+            holds the next attempt. The CommitsBlocked and RetryHeld conditions
+            name the cause; the operator resumes once a standby confirms
+            commits again and the earlier attempt's sessions have ended.
   - name: pgcopydb-migration-replication
     rules:
       # Streaming lag. The gauge only exists in follow mode, so this never

@@ -1,6 +1,7 @@
 # Promtool tests for dashboard panel queries that branch on what Prometheus
-# holds. Each expr is a panel target with $namespace=ns, $name=m and the
-# default $__range of 1h; TestPanelCasesMatchTheDashboard keeps them in step.
+# holds, or must show nothing when it holds nothing. Each expr is a panel
+# target with $namespace=ns, $name=m and the default $__range of 1h;
+# TestPanelCasesMatchTheDashboard keeps them in step.
 # Run via `bin/promtool test rules test/dashboards/panels_test.yaml`.
 rule_files: []
 
@@ -91,3 +92,40 @@ tests:
         exp_samples:
           - labels: '{namespace="ns", name="m"}'
             value: 500
+
+  # Synchronous Replication Waits. A sample with no waiter is a reading and
+  # stays 0. Once the sampler run stops the series go stale, and the panel
+  # reads nothing rather than the last count.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_target_sync_rep_waiting_sessions{namespace="ns", name="m"}'
+        values: "3 3 0 0 stale"
+      - series: 'pgcopydb_migration_target_sync_rep_oldest_wait_seconds{namespace="ns", name="m"}'
+        values: "45 105 0 0 stale"
+    promql_expr_test:
+      - expr: &syncrepWaiting 'pgcopydb_migration_target_sync_rep_waiting_sessions{namespace="ns", name="m"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'pgcopydb_migration_target_sync_rep_waiting_sessions{namespace="ns", name="m"}'
+            value: 3
+      - expr: *syncrepWaiting
+        eval_time: 3m
+        exp_samples:
+          - labels: 'pgcopydb_migration_target_sync_rep_waiting_sessions{namespace="ns", name="m"}'
+            value: 0
+      - expr: *syncrepWaiting
+        eval_time: 4m
+        exp_samples: []
+      - expr: &syncrepOldest 'pgcopydb_migration_target_sync_rep_oldest_wait_seconds{namespace="ns", name="m"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'pgcopydb_migration_target_sync_rep_oldest_wait_seconds{namespace="ns", name="m"}'
+            value: 105
+      - expr: *syncrepOldest
+        eval_time: 3m
+        exp_samples:
+          - labels: 'pgcopydb_migration_target_sync_rep_oldest_wait_seconds{namespace="ns", name="m"}'
+            value: 0
+      - expr: *syncrepOldest
+        eval_time: 4m
+        exp_samples: []

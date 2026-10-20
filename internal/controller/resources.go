@@ -148,7 +148,7 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 		// ours, so the old slot, publication and origin go before it runs.
 		setup = "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
 	}
-	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0)
+	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0, true)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ PUBLICATION_RETRY`
 // origin after a live migration, abort or deletion. It reuses the worker pod
 // shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
-	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2)
+	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2, false)
 	if err != nil {
 		return nil, err
 	}
@@ -268,14 +268,14 @@ exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely
 	// refuted every password-based drain (found live).
-	return scriptJob(m, runnerImage, verifyJobName(m), script)
+	return scriptJob(m, runnerImage, verifyJobName(m), script, false)
 }
 
 // buildCatalogJob reads pgcopydb's catalog once a plain clone's worker has
 // exited, which exec cannot: the pod has left Running by then (#277).
 // finishClone reads only this Job's log, never its exit code.
 func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*batchv1.Job, error) {
-	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate))
+	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate), false)
 }
 
 // The preflight script is assembled per Migration by preflightScriptFor.
@@ -286,8 +286,9 @@ func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*b
 // or "remediated-clone: " (clone tier), and findings that must not block print
 // "warn: ", all of which emitPreflightOutcome parses.
 
-// preflightHeader opens every preflight: general connectivity is validated
-// with retries. Two consecutive permanent-class errors end the ladder, not
+// preflightHeader opens every preflight: source connectivity is validated with
+// retries, and preflightPrelude adds the target's, whose failure text depends
+// on the Migration. Two consecutive permanent-class errors end the ladder, not
 // one: PgBouncer with auth_query and the managed proxies answer "password
 // authentication failed" from a cold auth backend after a failover, and a
 // preflight failure is terminal.
@@ -327,8 +328,38 @@ connect_retry() {
 }
 connect_retry "$PGCOPYDB_SOURCE_PGURI" source "preflight: cannot connect to the source database"
 echo "ok: connectivity source"
-connect_retry "$PGCOPYDB_TARGET_PGURI" target "preflight: cannot connect to the target database"
-echo "ok: connectivity target"
+`
+
+// targetConnectFailure is the third connect_retry argument for the target.
+// With synchronousCommit set, it adds the hint for a pooler that refuses the
+// libpq startup option.
+func targetConnectFailure(m *v1beta1.Migration) string {
+	const failure = "preflight: cannot connect to the target database"
+	if m.Spec.Target.SynchronousCommit != v1beta1.SynchronousCommitLocal {
+		return failure
+	}
+	return failure + " (spec.target.synchronousCommit adds a libpq startup option, and a pooler that refuses startup options," +
+		" such as a PgBouncer without options in ignore_startup_parameters, refuses the connection)"
+}
+
+// syncCommitBlock reads the setting over the worker's own target URI: a pooler
+// that drops the startup option still connects, so only SHOW can tell.
+const syncCommitBlock = `sync_commit=$(check "$PGCOPYDB_TARGET_PGURI" 'show synchronous_commit') || sync_commit=''
+if [ "$sync_commit" = local ]; then
+  echo "ok: target synchronous_commit local"
+else
+  note "preflight: spec.target.synchronousCommit is local but the target connection reports synchronous_commit=${sync_commit:-(unreadable)}; a connection pooler or proxy dropped the libpq startup option; connect the target directly or unset synchronousCommit"
+fi
+`
+
+// temporaryPrivilegeBlock only warns, and prints nothing while the role holds
+// TEMPORARY: the retry gate's test commit creates a temporary table.
+const temporaryPrivilegeBlock = `temp_priv=$(check "$PGCOPYDB_TARGET_PGURI" "select has_database_privilege(current_database(), 'TEMP')::int") || temp_priv=''
+case "$temp_priv" in
+1) ;;
+0) echo "warn: the migration role lacks TEMPORARY on the target database, so the retry gate's test commit fails and holds any retry that runs it; run GRANT TEMPORARY ON DATABASE <database> TO <role> on the target" ;;
+*) echo "warn: could not read whether the migration role holds TEMPORARY on the target database, which the retry gate's test commit needs" ;;
+esac
 `
 
 // majorVersionBlock compares majors from server_version_num, because the
@@ -344,13 +375,20 @@ else
 fi
 `
 
-// preflightPrelude is the header plus the opt-in gates that run on every path.
-// A major mismatch stops the script, so no later probe buries it.
+// preflightPrelude is the header plus the target checks and opt-in gates that
+// run on every path. A major mismatch stops the script, so no later probe buries it.
 func preflightPrelude(m *v1beta1.Migration) string {
-	if m.Spec.Preflight != nil && m.Spec.Preflight.RequireSameMajorVersion {
-		return preflightHeader + majorVersionBlock + preflightStopOnFailure
+	s := preflightHeader + `connect_retry "$PGCOPYDB_TARGET_PGURI" target "` + targetConnectFailure(m) + `"
+echo "ok: connectivity target"
+`
+	if m.Spec.Target.SynchronousCommit == v1beta1.SynchronousCommitLocal {
+		s += syncCommitBlock
 	}
-	return preflightHeader
+	s += temporaryPrivilegeBlock
+	if m.Spec.Preflight != nil && m.Spec.Preflight.RequireSameMajorVersion {
+		s += majorVersionBlock + preflightStopOnFailure
+	}
+	return s
 }
 
 // superVerifyBlock probes a configured superuser connection. rolsuper=false
@@ -1229,7 +1267,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 			extras = append(extras, mat)
 		}
 	}
-	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), extras...)
+	job, err := scriptJob(m, runnerImage, preflightJobName(m), preflightScriptFor(m), true, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,8 +1377,8 @@ func probeSchemasFromTables(tables []string) ([]string, bool) {
 // scriptJob reuses the worker pod shape to run a shell script instead of a
 // pgcopydb argv: the prelude execs $0, which here is /bin/sh. Backoff is fixed
 // at 1 because every caller runs a bounded, idempotent script.
-func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, extras ...*conn.Materialized) (*batchv1.Job, error) {
-	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, extras...)
+func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, syncCommit bool, extras ...*conn.Materialized) (*batchv1.Job, error) {
+	job, err := jobSkeleton(m, runnerImage, name, []string{"-c", script}, "", 1, syncCommit, extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -1361,12 +1399,17 @@ func addConnectTimeout(job *batchv1.Job) {
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
 // is shell the prelude runs after the passfile is assembled (conn.PreludeScript).
 // extras are credential sets whose preludes run after the primary sides'.
-func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, extras ...*conn.Materialized) (*batchv1.Job, error) {
+func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, syncCommit bool, extras ...*conn.Materialized) (*batchv1.Job, error) {
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err
 	}
-	tgt, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	// synchronousCommit is opt-in per builder, so a new Job kind cannot inherit it.
+	target := m.Spec.Target
+	if !syncCommit {
+		target.SynchronousCommit = ""
+	}
+	tgt, err := conn.Materialize(conn.Target, &target)
 	if err != nil {
 		return nil, err
 	}

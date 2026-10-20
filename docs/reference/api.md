@@ -218,7 +218,7 @@ optionally following changes until cutover.
 | `apiVersion` _string_ | `pgcopydb-operator.io/v1beta1` | | |
 | `kind` _string_ | `Migration` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
-| `spec` _[MigrationSpec](#migrationspec)_ | spec is the migration to run; source and target are immutable. |  | Required: \{\} <br /> |
+| `spec` _[MigrationSpec](#migrationspec)_ | spec is the migration to run; source and target are immutable, except<br />target.synchronousCommit. |  | Required: \{\} <br /> |
 | `status` _[MigrationStatus](#migrationstatus)_ | status reports progress. Conditions are authoritative; phase summarizes them. |  | Optional: \{\} <br /> |
 
 
@@ -256,7 +256,8 @@ _Appears in:_
 
 
 MigrationSpec is the desired state of a Migration. source and target are
-immutable after creation (a migration is a one-shot job, like batch/v1 Job).
+immutable after creation (a migration is a one-shot job, like batch/v1 Job),
+except target.synchronousCommit.
 
 
 
@@ -266,7 +267,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `source` _[PostgresConnection](#postgresconnection)_ | source is the PostgreSQL endpoint to migrate from. Immutable. |  | Required: \{\} <br /> |
-| `target` _[PostgresConnection](#postgresconnection)_ | target is the PostgreSQL endpoint to migrate to. Immutable. |  | Required: \{\} <br /> |
+| `target` _[PostgresConnection](#postgresconnection)_ | target is the PostgreSQL endpoint to migrate to. Immutable except<br />synchronousCommit, which applies from the next attempt. |  | Required: \{\} <br /> |
 | `clone` _[CloneOptions](#cloneoptions)_ | clone configures the base copy. |  | Optional: \{\} <br /> |
 | `follow` _[FollowOptions](#followoptions)_ | follow enables live migration (CDC after the base copy). Immutable:<br />a one-shot clone cannot become a live migration after the fact. |  | Optional: \{\} <br /> |
 | `cutover` _[CutoverSpec](#cutoverspec)_ | cutover controls how a live migration ends; ignored without follow. |  | Optional: \{\} <br /> |
@@ -276,7 +277,7 @@ _Appears in:_
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
 | `dryRun` _boolean_ | dryRun runs the preflight checks and stops: no worker Job, no data<br />written, no replication slot, publication, or origin. A passed dry run<br />ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef<br />would apply are reported, not applied. Unrelated to kubectl --dry-run.<br />Immutable: the real run is a separate Migration. |  | Optional: \{\} <br /> |
 | `preflight` _[PreflightOptions](#preflightoptions)_ | preflight tunes optional preflight gates. |  | Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,<br />with clone.dropIfExists, starts over when pgcopydb refuses to resume a live<br />migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget: at most backoffLimit+1<br />counted attempts. An attempt the retry gate exempts (status.exemptAttempts)<br />does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes<br />via the pgcopydb work directory, or, with clone.dropIfExists, starts over<br />when pgcopydb refuses to resume a live migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished deletes owned Jobs this long after completion. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
@@ -297,6 +298,8 @@ _Appears in:_
 | `phase` _[MigrationPhase](#migrationphase)_ | phase summarizes conditions and worker progress after the controller's<br />initial Pending observation. |  | Enum: [Pending Validating Cloning Finalizing Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended] <br />Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#condition-v1-meta) array_ | conditions represent the current state of the Migration. |  | Optional: \{\} <br /> |
 | `attempts` _integer_ | attempts is the number of worker Jobs created so far. |  | Optional: \{\} <br /> |
+| `exemptAttempts` _integer_ | exemptAttempts counts failed attempts that do not count against backoffLimit:<br />the retry gate found their sessions waiting for synchronous replication. |  | Optional: \{\} <br /> |
+| `retryGate` _[RetryGateStatus](#retrygatestatus)_ | retryGate records a failed attempt while the retry gate decides about the next. |  | Optional: \{\} <br /> |
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
 | `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
@@ -331,6 +334,7 @@ _Appears in:_
 | `uriSecretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | uriSecretRef selects a full libpq connection URI/DSN (with credentials).<br />Mutually exclusive with the inline fields; useful for DBaaS sources. |  | Optional: \{\} <br /> |
 | `secretRef` _[ConnectionSecret](#connectionsecret)_ | secretRef references one Secret carrying the connection details as<br />individual keys, the way platform provisioners hand them out.<br />Mutually exclusive with the inline fields and uriSecretRef. |  | Optional: \{\} <br /> |
 | `superuserSecretRef` _[ConnectionSecret](#connectionsecret)_ | superuserSecretRef names a superuser on this same endpoint, in the same<br />Secret convention (USER/PW; URL keys, when present, must match this<br />connection). The preflight uses it to verify and apply missing grants;<br />applied statements are logged and kept, never reverted. |  | Optional: \{\} <br /> |
+| `synchronousCommit` _string_ | synchronousCommit, target only, starts every connection of the worker, the<br />preflight and the retry gate with this synchronous_commit through the libpq<br />startup option. CDC apply still SETs synchronous_commit=on. Applies from the<br />next attempt. |  | Enum: [local] <br />Optional: \{\} <br /> |
 
 
 #### PreflightOptions
@@ -368,6 +372,26 @@ _Appears in:_
 | `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application. |  | Optional: \{\} <br /> |
 | `endpos` _string_ | endpos is the cutover LSN once set. |  | Optional: \{\} <br /> |
 | `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
+
+
+#### RetryGateStatus
+
+
+
+RetryGateStatus is the retry gate's record of one failed attempt.
+
+
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `failedAttempt` _integer_ |  |  |  |
+| `failedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | failedAt is when the attempt's Job failed; the exemption and the verdict<br />deadline are measured from it. |  |  |
+| `failure` _string_ | failure is the attempt's failure text, capped at maxDetailLen; the budget<br />verdict can come much later, after the events expired. |  | Optional: \{\} <br /> |
+| `exemption` _string_ | exemption is the first census's verdict; empty while undecided. |  | Enum: [Exempt Counted] <br />Optional: \{\} <br /> |
+| `cloneDoneSeen` _boolean_ |  |  | Optional: \{\} <br /> |
 
 
 #### RunnerSpec

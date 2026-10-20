@@ -28,7 +28,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
-// copyPollInterval paces the sampler until the data is across. A sample fills a seventh of
+// copyPollInterval paces the sampler until the data is across. A sample fills a sixth of
 // each gap (docs/research/measurements.md#one-sample-costs-under-a-second).
 const copyPollInterval = 5 * time.Second
 
@@ -40,6 +40,9 @@ type sampled struct {
 	// copySeen: this or an earlier sample of the run saw the copy start, which a
 	// superseded sample would otherwise take with it.
 	copySeen bool
+	// syncRepConfirmed: this sample and the run's previous one are both over syncRepThreshold.
+	// Only keepLocked sets it, because Observe can hand the pass one sample twice.
+	syncRepConfirmed bool
 }
 
 // samplerHint is what status knows about the copy that a sample alone cannot tell,
@@ -71,6 +74,8 @@ type samplerRun struct {
 	hint         samplerHint
 	last         sampled
 	copySeen     bool
+	// syncRepOver: the last stored sample was over syncRepThreshold.
+	syncRepOver bool
 }
 
 // NewSampler builds a sampler; it samples nothing until the manager starts it.
@@ -135,16 +140,22 @@ func (s *Sampler) SampleNow(ctx context.Context, key types.NamespacedName, job s
 	return got
 }
 
-// keepLocked latches the copy and stores got with its sizes, unless the run already
-// holds a newer sample: status and the gauges never step back.
+// keepLocked latches the copy and stores got with its sizes and SyncRep waits, unless the
+// run already holds a newer sample: status and the gauges never step back. A stored sample
+// confirms a SyncRep wait when the one stored before it was over the threshold too.
 func (s *Sampler) keepLocked(key types.NamespacedName, run *samplerRun, got sampled) sampled {
 	run.copySeen = run.copySeen || got.copySeen
 	got.copySeen = run.copySeen
 	if got.at.Before(run.last.at) {
 		return got
 	}
+	w := syncRepWait(got.sample)
+	over := syncRepOver(w)
+	got.syncRepConfirmed = over && run.syncRepOver
+	run.syncRepOver = over
 	run.last = got
 	recordSizes(key.Namespace, key.Name, got.sample, run.hint.copyStarted || run.copySeen)
+	metrics.RecordSyncRepWaits(key.Namespace, key.Name, w)
 	return got
 }
 
@@ -156,11 +167,14 @@ func (s *Sampler) Stop(key types.NamespacedName) {
 	s.stopLocked(key)
 }
 
+// stopLocked ends key's run. The SyncRep gauges go too, unlike the sizes, or a wait read off
+// a gone worker passes as current; a pass that sampled for itself set them as well.
 func (s *Sampler) stopLocked(key types.NamespacedName) {
 	if run := s.runs[key]; run != nil {
 		run.cancel()
 		delete(s.runs, key)
 	}
+	metrics.RecordSyncRepWaits(key.Namespace, key.Name, nil)
 }
 
 // loop samples at once, then once per period measured start to start, so a slow

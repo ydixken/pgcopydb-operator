@@ -110,8 +110,27 @@ func pgmEnv(s Side, part string) string {
 	return "PGM_" + strings.ToUpper(string(s)) + "_" + part
 }
 
+// SyncCommitLocalParam is the libpq startup option for synchronousCommit: local, pre-encoded because url.Values writes the
+// space as "+", which libpq keeps. pgcopydb carries it to every target connection (docs/research/measurements.md#a-startup-option-reaches-every-pgcopydb-target-connection).
+const SyncCommitLocalParam = "options=-c%20synchronous_commit%3Dlocal"
+
+// syncCommitLocal reports whether side s starts its sessions with
+// SyncCommitLocalParam; the source never does.
+func syncCommitLocal(s Side, c *v1beta1.PostgresConnection) bool {
+	return s == Target && c.SynchronousCommit == v1beta1.SynchronousCommitLocal
+}
+
 // Materialize renders one side of the migration.
 func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
+	// The CEL rules reject both shapes at admission; this covers a CRD without them.
+	if c.SynchronousCommit != "" {
+		switch {
+		case s != Target:
+			return nil, fmt.Errorf("%s: synchronousCommit applies to the target only", s)
+		case c.URISecretRef != nil:
+			return nil, fmt.Errorf("%s: synchronousCommit cannot be combined with uriSecretRef", s)
+		}
+	}
 	if c.SecretRef != nil {
 		return materializeSecretRef(s, c), nil
 	}
@@ -236,7 +255,7 @@ func materializeSecretRef(s Side, c *v1beta1.PostgresConnection) *Materialized {
 	vol, mount, file := passwordVolume(string(s), sr.Name, keys.Password, true)
 	m.Volumes = append(m.Volumes, vol)
 	m.Mounts = append(m.Mounts, mount)
-	m.Prelude = secretRefPrelude(s, sslParam(c), tlsParams(s, c), file, keys.Password)
+	m.Prelude = secretRefPrelude(s, sslParam(c), tlsParams(s, c), file, keys.Password, syncCommitLocal(s, c))
 	return m
 }
 
@@ -399,6 +418,9 @@ func querySuffix(s Side, c *v1beta1.PostgresConnection) string {
 	if ssl := sslParam(c); ssl != "" {
 		q = ssl + "&" + q
 	}
+	if syncCommitLocal(s, c) {
+		q += "&" + SyncCommitLocalParam
+	}
 	return q
 }
 
@@ -420,7 +442,7 @@ func fillParams(q string) string {
 // rejected by name, because they would compose a wrong URI or a passfile line
 // libpq never matches; uriSecretRef is the escape hatch.
 // Host parsing assumes host or host:port; bracketed IPv6 literals are out of scope.
-func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string) string {
+func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string, syncLocal bool) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 db=$@DB@
 case "$db" in
@@ -477,6 +499,12 @@ host=${hostport%%:*}
 		b += fillParams(sslmode)
 	}
 	b += fillParams(defaultParams(s))
+	if syncLocal {
+		// Refused by name, never filled: a skip would switch the protection off
+		// silently, and a second options key drops the user's own (libpq keeps the last).
+		b += `case "$uri" in *"?options="*|*"&options="*) echo "` + string(s) + ` connection secret: the DB URI sets options, which spec.target.synchronousCommit would replace; remove options from the DB URI or unset synchronousCommit" >&2; exit 1 ;; *\?*) uri="$uri&` + SyncCommitLocalParam + `" ;; *) uri="$uri?` + SyncCommitLocalParam + `" ;; esac
+`
+	}
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
 [ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }

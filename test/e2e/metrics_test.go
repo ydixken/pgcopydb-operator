@@ -214,10 +214,11 @@ const (
 	uidOperator = "pgcopydb-operator"
 )
 
-// Detail panels with one emptyOK entry per target.
+// Detail panels with one streamPanels entry per target.
 const (
 	panelLSNPositions = "LSN Positions"
 	panelLagSplit     = "Replication Lag Split"
+	panelSyncRepWaits = "Synchronous Replication Waits"
 )
 
 // emptyOK lists the panels that are legitimately empty for a healthy,
@@ -235,8 +236,8 @@ var emptyOK = map[panelKey]bool{
 	{uid: uidOperator, title: "Leader Elected", ref: "A"}: true,
 }
 
-// streamPanels read the lag and LSN series, which leave with the stream, so
-// the sweep replays them over the run instead of at its own instant.
+// streamPanels read series that leave with the stream or the sampler run, so the sweep
+// replays them over the run instead of at its own instant.
 var streamPanels = map[panelKey]bool{
 	{uid: uidFleet, title: "Total Lag", ref: "A"}:                    true,
 	{uid: uidFleet, title: "All Migrations", ref: "E"}:               true,
@@ -249,6 +250,8 @@ var streamPanels = map[panelKey]bool{
 	{uid: uidDetail, title: panelLagSplit, ref: "B"}:                 true,
 	{uid: uidDetail, title: panelLagSplit, ref: "C"}:                 true,
 	{uid: uidDetail, title: "WAL Generation", ref: "A"}:              true,
+	{uid: uidDetail, title: panelSyncRepWaits, ref: "A"}:             true,
+	{uid: uidDetail, title: panelSyncRepWaits, ref: "B"}:             true,
 }
 
 // panelFailure replays one panel target and describes what is wrong with the

@@ -56,8 +56,10 @@ For the real run, create a separate Migration without it.
 
 `spec.suspend: true` deletes the worker Job and keeps the work volume.
 The delete is in the foreground, so pgcopydb receives SIGTERM and shuts down cleanly.
+While the [retry gate](#the-retry-gate) holds a retry, there is no worker, and the suspend deletes the gate's probe Job instead, because its test commit writes to the target.
 The phase becomes `Suspended`.
-Set `spec.suspend` back to false to start the next attempt, which resumes from the work-dir catalogs.
+Set `spec.suspend` back to false to start the next attempt.
+It waits for the retry gate, then resumes from the work-dir catalogs.
 Each resume consumes one attempt from the `backoffLimit` budget.
 A live migration suspended after its replication slot exists and before all its table data is copied cannot resume that copy, and neither can one whose worker dies in that window; see [Retries and resume](#retries-and-resume).
 With `spec.clone.dropIfExists: true`, the resume fails and the start-over takes a second attempt, so budget two attempts for each such suspend.
@@ -71,7 +73,8 @@ Without `dropIfExists`, the refused resume ends the Migration as `SnapshotLost`.
 
 ## Retries and resume
 
-`spec.backoffLimit` is the number of retries, so a Migration makes `backoffLimit + 1` attempts.
+`spec.backoffLimit` is the number of retries, so a Migration makes `backoffLimit + 1` counted attempts.
+An attempt that the retry gate finds cut during a synchronous standby outage does not count; see [Exempt attempts](#exempt-attempts).
 The default budget is 4 attempts.
 Each attempt is a fresh Job with Kubernetes-level retries disabled.
 The operator owns the retry policy, so attempt counts and failure reasons live on the Migration.
@@ -95,11 +98,11 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
 - A worker Job that disappears triggers the next attempt the same way.
   The `ttlSecondsAfterFinished` TTL and manual deletion both remove the Job.
 - A runner lost without closing its connections, such as a deleted pod whose network went with it, can leave target sessions open with their table locks.
-  The next attempt's `DROP` or `TRUNCATE` then waits behind them without an error.
+  The [retry gate](#the-retry-gate) holds the next attempt until they are gone, so the attempt does not start behind them.
   From runner `0.18.109.gbec4ebb` on, the target ends a session that waits on the lost runner, such as an open `COPY`, within about 70 seconds.
   With older runners such a session can stay for about two hours.
-  A session busy in a long statement such as `CREATE INDEX` keeps its locks until that statement ends.
-  The `pg_restore` sessions, the session in which `pgcopydb compare` reads the target's catalogs, and any session that reaches the target through a connection pooler do not get that bound, so they can keep their locks for longer.
+  A session busy in a long statement such as `CREATE INDEX` stays until that statement ends.
+  The `pg_restore` sessions, the session in which `pgcopydb compare` reads the target's catalogs, and any session that reaches the target through a connection pooler do not get that bound, so they can stay for longer.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
 - The [preflight](live-migration.md#preflight) stops some failures before the first attempt.
   It checks connectivity, credentials, and target clone privileges on every migration, and the follow prerequisites on live ones.
@@ -120,8 +123,57 @@ The log tail can contain a pg_restore database error before generic shutdown mes
 In that case, retry events and the terminal `Failed` condition keep it, with the affected relation.
 
 A `Completed` or `Failed` Migration is terminal and never restarts.
-The source and target are immutable.
+The source and target are immutable, except `spec.target.synchronousCommit`, which applies from the next attempt.
 Fix the cause and create a new Migration.
+
+### The retry gate
+
+Every attempt after the first waits for the retry gate: a retry after a failure, the attempt after a vanished worker Job, and the attempt a resume starts.
+A failed attempt can leave target sessions behind.
+For example, a proxy that cuts a worker while its commit waits for a synchronous standby leaves the backend waiting on the target, holding its locks and, for apply, the replication origin.
+A new attempt would fail on those sessions or wait behind them.
+
+The gate checks two things in order:
+
+1. The previous attempt's worker pod has ended.
+   While it runs or terminates, `RetryHeld` is True with reason `WorkerPodRemains`, and no probe runs.
+   We wait for the pod, because a terminating pod can still hold source connections that the target cannot show.
+2. A probe Job, `<name>-gate-<n>` for attempt n, passes.
+   It connects as the migration role over the worker's own target connection.
+
+The probe runs up to three checks:
+
+- A census of the migration role's pgcopydb-named sessions in the target database, or on the whole instance with `clone.allDatabases`.
+  It passes when it finds none.
+- With `spec.target.synchronousCommit: local`, `show synchronous_commit`, which has to read `local`.
+- A test commit with `synchronous_commit=on`, which passes when it returns within 5 seconds.
+  Under synchronous replication, it returns only once a synchronous standby confirms it.
+  It runs whenever the next worker could commit with `on`: always without `synchronousCommit`, and with it once the copy is done, because apply then sets `on` itself.
+
+When every check passes, the next attempt's worker starts.
+Otherwise `RetryHeld` stays True with the reason of the first check that failed, and the gate probes again 30 seconds later.
+A hold spends no attempt, and the gate ends no session: the sessions end on their own, or you end them.
+[`RetryHeld` is True](../troubleshooting.md#retryheld-is-true) covers each reason.
+The test commit creates a temporary table, so the migration role needs `TEMPORARY` on the target database, which `PUBLIC` holds by default.
+A suspend stops a hold, and the resume runs the gate again.
+
+### Exempt attempts
+
+An attempt that failed while its commits waited for a missing synchronous standby does not count against `backoffLimit`.
+The first census after the failure decides.
+The attempt is exempt when that census finds a pgcopydb session waiting for synchronous replication whose statement started 30 seconds or more before the attempt failed.
+Such a wait started while the worker still ran and outlived it, which is what a proxy cut during a standby outage leaves behind.
+A catch-up wait that began just before an unrelated failure does not qualify.
+Neither does any wait when the target URI sets `application_name`, because the census then cannot tell pgcopydb's sessions from others.
+Only a failed attempt can be exempt: an attempt whose Job vanished, or that a suspend stopped, always counts.
+
+`status.exemptAttempts` counts the exempt attempts, and `kubectl get pgm -o wide` shows it in the `EXEMPT` column, so `ATTEMPTS` can exceed `backoffLimit + 1`.
+The next attempt's `AttemptStarted` event says that the failed one did not count.
+Exempt attempts are not capped: a standby that keeps failing keeps the Migration retrying, and the `PgcopydbMigrationRetrying` and `PgcopydbMigrationCommitsBlocked` alerts report it.
+
+When no census has decided 15 minutes after the failure, for example because the probe cannot reach the target, the attempt counts.
+With the budget spent, the Migration then fails as `BackoffLimitExceeded`; otherwise the gate keeps holding until a probe passes.
+Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
 
 ## Deletion
 

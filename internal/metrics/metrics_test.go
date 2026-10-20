@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 func newMigration(namespace, name string) *v1beta1.Migration {
@@ -159,6 +160,7 @@ func TestForget(t *testing.T) {
 		Record(m)
 		src, tgt := int64(1), int64(2)
 		RecordDatabaseSizes(m.Namespace, m.Name, &src, &tgt)
+		RecordSyncRepWaits(m.Namespace, m.Name, &progress.SyncRepWait{Waiting: 1, OldestSeconds: 30})
 	}
 	t.Cleanup(func() { Forget(stays.Namespace, stays.Name) })
 
@@ -432,6 +434,41 @@ func TestRecordDatabaseSizes(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(targetDatabaseSizeBytes.WithLabelValues("ns1", "sizes")); got != 4096 {
 		t.Fatalf("target size = %v, want 4096", got)
+	}
+}
+
+func TestRecordSyncRepWaits(t *testing.T) {
+	t.Cleanup(func() { Forget("ns1", "syncrep") })
+	gauges := map[string]*prometheus.GaugeVec{
+		"waiting_sessions": syncRepWaitingSessions, "oldest_wait_seconds": syncRepOldestWaitSeconds,
+	}
+
+	RecordSyncRepWaits("ns1", "syncrep", &progress.SyncRepWait{Waiting: 3, OldestSeconds: 45, PgcopydbNamed: 2})
+	if got := testutil.ToFloat64(syncRepWaitingSessions.WithLabelValues("ns1", "syncrep")); got != 3 {
+		t.Errorf("waiting sessions = %v, want 3", got)
+	}
+	if got := testutil.ToFloat64(syncRepOldestWaitSeconds.WithLabelValues("ns1", "syncrep")); got != 45 {
+		t.Errorf("oldest wait = %v, want 45", got)
+	}
+
+	// No waiter is a reading, so both series stay at 0.
+	RecordSyncRepWaits("ns1", "syncrep", &progress.SyncRepWait{})
+	for metric, g := range gauges {
+		if got := testutil.CollectAndCount(g); got != 1 {
+			t.Fatalf("%s series without a waiter = %d, want 1", metric, got)
+		}
+		if got := testutil.ToFloat64(g.WithLabelValues("ns1", "syncrep")); got != 0 {
+			t.Errorf("%s without a waiter = %v, want 0", metric, got)
+		}
+	}
+
+	// An unknown count drops both series: the last count, or a 0, would read as current.
+	// Count only from here on; WithLabelValues would resurrect a series.
+	RecordSyncRepWaits("ns1", "syncrep", nil)
+	for metric, g := range gauges {
+		if got := testutil.CollectAndCount(g); got != 0 {
+			t.Errorf("%s series after a nil sample = %d, want 0", metric, got)
+		}
 	}
 }
 

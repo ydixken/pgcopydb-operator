@@ -17,7 +17,10 @@ limitations under the License.
 package v1beta1
 
 import (
+	"fmt"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/yaml"
 )
 
 // TestAddToScheme pins the registration cmd/main depends on: both kinds
@@ -77,7 +81,7 @@ func fullMigration() *Migration {
 					Keys: &ConnectionSecretKeys{Username: "admin", Password: "adminpw"},
 				},
 			},
-			Target: PostgresConnection{URISecretRef: secretRef("dsn", "uri")},
+			Target: PostgresConnection{URISecretRef: secretRef("dsn", "uri"), SynchronousCommit: SynchronousCommitLocal},
 			Clone: CloneOptions{
 				AllDatabases: true,
 				TableJobs:    4, IndexJobs: 4, RestoreJobs: 2, LargeObjectsJobs: 2,
@@ -139,7 +143,12 @@ func fullMigration() *Migration {
 				Type: ConditionStreaming, Status: metav1.ConditionTrue,
 				Reason: "Replaying", Message: "applying", LastTransitionTime: now,
 			}},
-			Attempts: 2,
+			Attempts:       2,
+			ExemptAttempts: 1,
+			RetryGate: &RetryGateStatus{
+				FailedAttempt: 2, FailedAt: now, Failure: "exit 1",
+				Exemption: RetryGateExempt, CloneDoneSeen: true,
+			},
 			Progress: &CloneProgress{
 				TablesTotal: 10, TablesDone: 5, IndexesTotal: 4, IndexesDone: 1,
 				BytesTotal: resource.NewQuantity(1024, resource.BinarySI),
@@ -175,7 +184,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		&m.Spec.Source, m.Spec.Source.TLS, &m.Spec.Clone, m.Spec.Clone.Filters,
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
-		m.Status.Progress, m.Status.Replication,
+		m.Status.Progress, m.Status.Replication, m.Status.RetryGate,
 	}
 	for _, obj := range objs {
 		v := reflect.ValueOf(obj)
@@ -214,6 +223,8 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	*c.Status.Progress.BytesDone = resource.MustParse("9Gi")
 	c.Status.Progress.ObservedAt.Time = time.Unix(1, 0)
 	*c.Status.Replication.LagBytes = 9
+	c.Status.RetryGate.Failure = mutated
+	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")
 	}
@@ -238,4 +249,118 @@ func TestFiltersIsEmpty(t *testing.T) {
 		}
 		v.Field(i).SetZero()
 	}
+}
+
+// TestTargetImmutabilityRuleCoversEveryField closes the gap the per-field
+// target rule leaves open: a field added to PostgresConnection would otherwise
+// be mutable on the target without anyone deciding so.
+func TestTargetImmutabilityRuleCoversEveryField(t *testing.T) {
+	rules := specFieldRules(t, GroupVersion.Version, "target")
+	// Every rule with this message, joined, so a CEL cost split keeps the test true.
+	rule := strings.Join(rulesWithMessage(t, rules, "target is immutable except synchronousCommit"), " && ")
+	sawSyncCommit := false
+	for _, tag := range jsonTags(reflect.TypeFor[PostgresConnection]()) {
+		if tag == "synchronousCommit" {
+			sawSyncCommit = true
+			if strings.Contains(rule, "self.synchronousCommit") {
+				t.Errorf("the immutability rule must not compare synchronousCommit")
+			}
+			continue
+		}
+		want := fmt.Sprintf("has(self.%[1]s) == has(oldSelf.%[1]s) && (!has(self.%[1]s) || self.%[1]s == oldSelf.%[1]s)", tag)
+		if !strings.Contains(rule, want) {
+			t.Errorf("target rule misses %q", tag)
+		}
+	}
+	if !sawSyncCommit {
+		t.Error("PostgresConnection has no synchronousCommit JSON tag")
+	}
+	uri := ruleWithMessage(t, rules, "synchronousCommit cannot be combined with uriSecretRef: the operator never reads that Secret, so it cannot add the option; use secretRef or the inline fields")
+	if uri != "!(has(self.synchronousCommit) && has(self.uriSecretRef))" {
+		t.Errorf("target uriSecretRef rule = %q", uri)
+	}
+	src := ruleWithMessage(t, specFieldRules(t, GroupVersion.Version, "source"), "synchronousCommit applies to the target only")
+	if src != "!has(self.synchronousCommit)" {
+		t.Errorf("source rule = %q", src)
+	}
+}
+
+// celRule is one x-kubernetes-validations entry of the generated CRD.
+type celRule struct{ rule, message string }
+
+// specFieldRules reads the CEL rules on spec.<field> of one served version
+// from the generated CRD, the schema real clusters enforce.
+func specFieldRules(t *testing.T, version, field string) []celRule {
+	t.Helper()
+	raw, err := os.ReadFile("../../config/crd/bases/pgcopydb-operator.io_migrations.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatal(err)
+	}
+	versions, _ := dig(crd, "spec", "versions").([]any)
+	for _, v := range versions {
+		if dig(v, "name") != version {
+			continue
+		}
+		entries, ok := dig(v, "schema", "openAPIV3Schema", "properties", "spec", "properties", field,
+			"x-kubernetes-validations").([]any)
+		if !ok {
+			t.Fatalf("CRD %s spec.%s has no x-kubernetes-validations", version, field)
+		}
+		rules := make([]celRule, 0, len(entries))
+		for _, e := range entries {
+			rule, _ := dig(e, "rule").(string)
+			message, _ := dig(e, "message").(string)
+			rules = append(rules, celRule{rule: rule, message: message})
+		}
+		return rules
+	}
+	t.Fatalf("CRD has no version %s", version)
+	return nil
+}
+
+// dig walks nested YAML maps; a missing key yields nil.
+func dig(v any, path ...string) any {
+	for _, key := range path {
+		m, _ := v.(map[string]any)
+		v = m[key]
+	}
+	return v
+}
+
+// rulesWithMessage returns every rule carrying message, and fails when none does.
+func rulesWithMessage(t *testing.T, rules []celRule, message string) []string {
+	t.Helper()
+	var out []string
+	for _, r := range rules {
+		if r.message == message {
+			out = append(out, r.rule)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no rule with message %q", message)
+	}
+	return out
+}
+
+// ruleWithMessage returns the one rule carrying message.
+func ruleWithMessage(t *testing.T, rules []celRule, message string) string {
+	t.Helper()
+	out := rulesWithMessage(t, rules, message)
+	if len(out) != 1 {
+		t.Fatalf("%d rules with message %q, want 1", len(out), message)
+	}
+	return out[0]
+}
+
+// jsonTags lists the JSON field names of a struct type.
+func jsonTags(typ reflect.Type) []string {
+	tags := make([]string, 0, typ.NumField())
+	for field := range typ.Fields() {
+		tags = append(tags, strings.Split(field.Tag.Get("json"), ",")[0])
+	}
+	return tags
 }

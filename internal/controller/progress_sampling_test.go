@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,8 @@ type fakeProgress struct {
 	sizesErr     error
 	sizeCalls    int
 	allDatabases bool
+	// syncRep is the SyncRep count every sample carries; nil stands for a lost one.
+	syncRep *progress.SyncRepWait
 
 	// started alone stands for index or vacuum workers with no copy worker left.
 	copying, finalizing, started bool
@@ -83,7 +86,14 @@ func (f *fakeProgress) Sample(_ context.Context, _, _ string, allDatabases bool)
 		return nil, nil
 	}
 	return &progress.Sample{SourceSize: f.src, TargetSize: f.tgt, Counts: f.relations,
-		Copying: f.copying, Finalizing: f.finalizing, CopyStarted: f.copying || f.started}, nil
+		Copying: f.copying, Finalizing: f.finalizing, CopyStarted: f.copying || f.started, SyncRep: f.syncRep}, nil
+}
+
+// setSyncRep changes the SyncRep count the next Sample answers.
+func (f *fakeProgress) setSyncRep(w *progress.SyncRepWait) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.syncRep = w
 }
 
 // counts returns the size samples seen so far.
@@ -101,8 +111,17 @@ func migLabels(name string) map[string]string {
 // gaugeValue reads one series from the controller-runtime registry, the same
 // surface Prometheus scrapes.
 func gaugeValue(metric string, labels map[string]string) (float64, bool) {
-	families, err := crmetrics.Registry.Gather()
+	v, found, err := readGauge(metric, labels)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return v, found
+}
+
+// readGauge is gaugeValue for plain Go tests, which have no Gomega fail handler.
+func readGauge(metric string, labels map[string]string) (float64, bool, error) {
+	families, err := crmetrics.Registry.Gather()
+	if err != nil {
+		return 0, false, err
+	}
 	for _, mf := range families {
 		if mf.GetName() != metric {
 			continue
@@ -118,10 +137,10 @@ func gaugeValue(metric string, labels map[string]string) (float64, bool) {
 					continue series
 				}
 			}
-			return s.GetGauge().GetValue(), true
+			return s.GetGauge().GetValue(), true, nil
 		}
 	}
-	return 0, false
+	return 0, false, nil
 }
 
 var _ = Describe("Migration Controller progress sampling", func() {
@@ -440,11 +459,11 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Progress).NotTo(BeNil(), "the estimate stands until the catalog line replaces it")
 		Expect(got.Status.Progress.IndexesDone).To(Equal(int64(81)))
 
-		// The finished worker Job goes (TTL, a manual delete); the next pass
-		// starts attempt 2, which samples the databases again.
+		// The finished worker Job goes (TTL, a manual delete); once the retry
+		// gate passes, attempt 2 starts and samples the databases again.
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		Expect(reconcileAndGet(ctx, r, name).Status.Attempts).To(Equal(int32(2)))
+		Expect(passRetryGate(ctx, r, name).Status.Attempts).To(Equal(int32(2)))
 		got = reconcileAndGet(ctx, r, name)
 		Expect(got.Status.Progress.IndexesDone).To(Equal(int64(81)))
 
@@ -892,6 +911,205 @@ var _ = Describe("Migration Controller progress sampling", func() {
 	})
 })
 
+var _ = Describe("Migration Controller CommitsBlocked condition", func() {
+	ctx := context.Background()
+	int64p := func(n int64) *int64 { return &n }
+	key := func(name string) types.NamespacedName { return types.NamespacedName{Namespace: testNS, Name: name} }
+
+	findBlocked := func(m *v1beta1.Migration) *metav1.Condition {
+		return meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCommitsBlocked)
+	}
+	blocked := func(m *v1beta1.Migration) *metav1.Condition {
+		GinkgoHelper()
+		c := findBlocked(m)
+		Expect(c).NotTo(BeNil(), "%+v", m.Status.Conditions)
+		return c
+	}
+	blockedEvents := func(rec *events.FakeRecorder) []string {
+		var out []string
+		for _, e := range drainEvents(rec) {
+			if strings.Contains(e, v1beta1.ConditionCommitsBlocked) {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	setSample := func(f *fakeProgress, w *progress.SyncRepWait, gone bool) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.syncRep, f.nilSample = w, gone
+	}
+
+	// sampledClone drives a plain clone to a running worker whose sampler samples once
+	// when its run starts and after that only when the spec calls sampleNow, because
+	// confirmation counts the samples the sampler stores.
+	sampledClone := func(name string, fake *fakeProgress) (r *MigrationReconciler, rec *events.FakeRecorder, sampleNow func()) {
+		GinkgoHelper()
+		s, _, _ := startSampler(fake, time.Hour, time.Hour)
+		rec = events.NewFakeRecorder(100)
+		r = newReconciler()
+		r.Progress, r.Sampler, r.Recorder = fake, s, rec
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		Expect(findBlocked(reconcileAndGet(ctx, r, name))).To(BeNil(), "no sample yet changes nothing")
+		Eventually(func() time.Time { return s.lastSampled(key(name)).at }).ShouldNot(BeZero())
+		return r, rec, func() { s.SampleNow(ctx, key(name), name+"-run-1", false) }
+	}
+
+	It("raises CommitsBlocked after two samples over 30 s and keeps it through an unknown sample", func() {
+		const name = "mig-commits-blocked"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(9000), copying: true,
+			syncRep: &progress.SyncRepWait{Waiting: 3, OldestSeconds: 35, PgcopydbNamed: 2}}
+		r, rec, sampleNow := sampledClone(name, fake)
+		Expect(findBlocked(reconcileAndGet(ctx, r, name))).To(BeNil(), "one sample over 30 s is not confirmed")
+
+		fake.setSyncRep(&progress.SyncRepWait{Waiting: 3, OldestSeconds: 45, PgcopydbNamed: 2})
+		sampleNow()
+		c := blocked(reconcileAndGet(ctx, r, name))
+		Expect(c.Status).To(Equal(metav1.ConditionTrue))
+		Expect(c.Reason).To(Equal(reasonSyncRepWait))
+		Expect(c.Message).To(SatisfyAll(ContainSubstring("2 of them pgcopydb"), ContainSubstring("45s")))
+		Expect(blockedEvents(rec)).To(ConsistOf(HavePrefix("Warning CommitsBlocked ")))
+		raised := c.LastTransitionTime
+
+		// A lost count and a worker pod gone are no proof that the waits ended.
+		for _, lose := range []struct {
+			what string
+			w    *progress.SyncRepWait
+			gone bool
+		}{{"a nil SyncRep", nil, false}, {"no running worker pod", nil, true}} {
+			setSample(fake, lose.w, lose.gone)
+			sampleNow()
+			c = blocked(reconcileAndGet(ctx, r, name))
+			Expect(c.Status).To(Equal(metav1.ConditionTrue), lose.what)
+			Expect(c.Reason).To(Equal(reasonSyncRepWait), lose.what)
+			Expect(c.LastTransitionTime).To(Equal(raised), lose.what)
+		}
+		Expect(blockedEvents(rec)).To(BeEmpty(), "True was entered once")
+	})
+
+	It("clears CommitsBlocked when a sample shows no 30 s wait", func() {
+		const name = "mig-commits-cleared"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// One commit has waited 60 s at the run's first sample and 70 s at the next.
+		fake := &fakeProgress{src: int64p(9000), copying: true,
+			syncRep: &progress.SyncRepWait{Waiting: 1, OldestSeconds: 60, PgcopydbNamed: 1}}
+		r, rec, sampleNow := sampledClone(name, fake)
+		fake.setSyncRep(&progress.SyncRepWait{Waiting: 1, OldestSeconds: 70, PgcopydbNamed: 1})
+		sampleNow()
+		Expect(blocked(reconcileAndGet(ctx, r, name)).Status).To(Equal(metav1.ConditionTrue))
+		Expect(blockedEvents(rec)).To(HaveLen(1))
+
+		// The standby confirmed it; the next commit has waited 2 s.
+		fake.setSyncRep(&progress.SyncRepWait{Waiting: 1, OldestSeconds: 2, PgcopydbNamed: 1})
+		sampleNow()
+		c := blocked(reconcileAndGet(ctx, r, name))
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(reasonNoSyncRepWait))
+		Expect(blockedEvents(rec)).To(BeEmpty(), "clearing announces nothing")
+	})
+
+	It("sets CommitsBlocked Unknown from False when the sample cannot read the target", func() {
+		const name = "mig-commits-unknown"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(9000), syncRep: &progress.SyncRepWait{}}
+		r := newReconciler()
+		r.Progress = fake
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		for _, lose := range []struct {
+			what string
+			w    *progress.SyncRepWait
+			gone bool
+		}{{"no running worker pod", &progress.SyncRepWait{}, true}, {"a nil SyncRep", nil, false}} {
+			setSample(fake, &progress.SyncRepWait{}, false)
+			c := blocked(reconcileAndGet(ctx, r, name))
+			Expect(c.Status).To(Equal(metav1.ConditionFalse), lose.what)
+			Expect(c.Reason).To(Equal(reasonNoSyncRepWait), lose.what)
+
+			setSample(fake, lose.w, lose.gone)
+			c = blocked(reconcileAndGet(ctx, r, name))
+			Expect(c.Status).To(Equal(metav1.ConditionUnknown), lose.what)
+			Expect(c.Reason).To(Equal(reasonSyncRepUnobserved), lose.what)
+		}
+	})
+
+	It("sets CommitsBlocked False with WorkerSucceeded when the worker exits 0", func() {
+		const name = "mig-commits-worker-ok"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(9000), copying: true,
+			syncRep: &progress.SyncRepWait{Waiting: 2, OldestSeconds: 50, PgcopydbNamed: 2}}
+		r, rec, sampleNow := sampledClone(name, fake)
+		sampleNow()
+		Expect(blocked(reconcileAndGet(ctx, r, name)).Status).To(Equal(metav1.ConditionTrue))
+		drainEvents(rec)
+
+		// No sampler runs on the finish path, so only the exit can clear a stale True.
+		finishJob(ctx, name+"-run-1", true)
+		c := blocked(reconcileAndGet(ctx, r, name))
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(reasonWorkerSucceeded))
+		Expect(blockedEvents(rec)).To(BeEmpty())
+	})
+
+	It("adds no CommitsBlocked on a successful exit when no sample ever set it", func() {
+		const name = "mig-commits-never-sampled"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		r := newReconciler()
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		Expect(findBlocked(reconcileAndGet(ctx, r, name))).To(BeNil())
+
+		finishJob(ctx, name+"-run-1", true)
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted), "the pass ran the success branch")
+		Expect(findBlocked(m)).To(BeNil())
+	})
+
+	It("publishes the sync rep gauges from each sample", func() {
+		const name = "mig-sync-rep-gauges"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		fake := &fakeProgress{src: int64p(9000)}
+		r := newReconciler()
+		r.Progress = fake
+		Expect(k8sClient.Create(ctx, validMigration(name))).To(Succeed())
+		passGate(ctx, r, name)
+		for i, step := range []struct {
+			w    *progress.SyncRepWait
+			gone bool
+		}{
+			{w: &progress.SyncRepWait{Waiting: 3, OldestSeconds: 12, PgcopydbNamed: 2}},
+			// No waiter is a reading, published as zeros.
+			{w: &progress.SyncRepWait{}},
+			{w: nil},
+			{w: &progress.SyncRepWait{Waiting: 1, OldestSeconds: 5, PgcopydbNamed: 1}},
+			{gone: true},
+		} {
+			setSample(fake, step.w, step.gone)
+			reconcileAndGet(ctx, r, name)
+			waiting, foundWaiting := gaugeValue("pgcopydb_migration_target_sync_rep_waiting_sessions", migLabels(name))
+			oldest, foundOldest := gaugeValue("pgcopydb_migration_target_sync_rep_oldest_wait_seconds", migLabels(name))
+			want := step.w
+			if step.gone {
+				want = nil
+			}
+			Expect(foundWaiting).To(Equal(want != nil), "sample %d", i)
+			Expect(foundOldest).To(Equal(want != nil), "sample %d", i)
+			if want != nil {
+				Expect(waiting).To(Equal(float64(want.Waiting)), "sample %d", i)
+				Expect(oldest).To(Equal(float64(want.OldestSeconds)), "sample %d", i)
+			}
+		}
+	})
+})
+
 // The copy and its tail are reported apart because they behave differently: a
 // copy runs every worker, the tail narrows to index builds and a vacuum on the
 // largest table, and during it the target stops growing so any size-derived
@@ -1075,7 +1293,7 @@ var _ = Describe("Migration Controller attempt phase", func() {
 
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 	})
@@ -1113,7 +1331,8 @@ var _ = Describe("Migration Controller attempt phase", func() {
 
 		Expect(k8sClient.Delete(ctx, fetchJob(ctx, name+"-run-1"),
 			client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
+		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 	})
@@ -1138,7 +1357,7 @@ var _ = Describe("Migration Controller attempt phase", func() {
 		// copy is still done and the cutover is still under way.
 		finishJob(ctx, name+"-run-1", false)
 		reconcileAndGet(ctx, r, name)
-		m = reconcileAndGet(ctx, r, name)
+		m = passRetryGate(ctx, r, name)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())

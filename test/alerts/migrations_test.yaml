@@ -245,3 +245,162 @@ tests:
                 Cutover set an endpos but the target has not replayed up to
                 it, so the migration cannot complete. Check the worker logs
                 and the target's apply rate.
+
+  # Commits blocked for over 15m fire, and at 14m the alert is still pending.
+  # "clear" carries both conditions with status False only, which never fires.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="blocked", phase="Streaming"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="blocked", type="CommitsBlocked", status="True"}
+        values: "1700000000x20"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="clear", phase="Streaming"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="clear", type="CommitsBlocked", status="False"}
+        values: "1700000000x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="clear", type="RetryHeld", status="False"}
+        values: "1700000000x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: blocked
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Migration default/blocked has had commits blocked on
+                synchronous replication, or its retry held, for 15m
+              description: >-
+                Target commits wait for a synchronous standby, or the retry
+                gate holds the next attempt. The CommitsBlocked and RetryHeld
+                conditions name the cause; the operator resumes once a standby
+                confirms commits again and the earlier attempt's sessions have
+                ended.
+
+  # A held retry in Cloning fires after 15m. The same hold in Failed, Completed
+  # or Suspended stays silent: the condition outlives the run, so the phase
+  # scopes it.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="held", phase="Cloning"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="held", type="RetryHeld", status="True"}
+        values: "1700000000x20"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="failed", phase="Failed"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="failed", type="RetryHeld", status="True"}
+        values: "1700000000x20"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="completed", phase="Completed"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="completed", type="RetryHeld", status="True"}
+        values: "1700000000x20"
+      - series: 'pgcopydb_migration_phase{namespace="default", name="suspended", phase="Suspended"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="suspended", type="RetryHeld", status="True"}
+        values: "1700000000x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: held
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Migration default/held has had commits blocked on synchronous
+                replication, or its retry held, for 15m
+              description: >-
+                Target commits wait for a synchronous standby, or the retry
+                gate holds the next attempt. The CommitsBlocked and RetryHeld
+                conditions name the cause; the operator resumes once a standby
+                confirms commits again and the earlier attempt's sessions have
+                ended.
+
+  # The hand-off: CommitsBlocked clears at 10m as RetryHeld turns True. One
+  # series per Migration keeps the clock that started at 0, so it fires at 16m.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="handoff", phase="Cloning"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="handoff", type="CommitsBlocked", status="True"}
+        values: "1700000000x9 stale"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="handoff", type="CommitsBlocked", status="False"}
+        values: "_x10 1700000600x10"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="handoff", type="RetryHeld", status="True"}
+        values: "_x10 1700000600x10"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: handoff
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Migration default/handoff has had commits blocked on
+                synchronous replication, or its retry held, for 15m
+              description: >-
+                Target commits wait for a synchronous standby, or the retry
+                gate holds the next attempt. The CommitsBlocked and RetryHeld
+                conditions name the cause; the operator resumes once a standby
+                confirms commits again and the earlier attempt's sessions have
+                ended.
+
+  # A resume that holds: the patch that sets RetryHeld True also moves the
+  # phase from Suspended back to the attempt's phase, so the hold fires.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_phase{namespace="default", name="resumed", phase="Cloning"}'
+        values: "1x20"
+      - series: >-
+          pgcopydb_migration_condition_transition_timestamp_seconds{namespace="default",
+          name="resumed", type="RetryHeld", status="True"}
+        values: "1700000000x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: PgcopydbMigrationCommitsBlocked
+        exp_alerts:
+          - exp_labels:
+              namespace: default
+              name: resumed
+              severity: warning
+            exp_annotations:
+              summary: >-
+                Migration default/resumed has had commits blocked on
+                synchronous replication, or its retry held, for 15m
+              description: >-
+                Target commits wait for a synchronous standby, or the retry
+                gate holds the next attempt. The CommitsBlocked and RetryHeld
+                conditions name the cause; the operator resumes once a standby
+                confirms commits again and the earlier attempt's sessions have
+                ended.

@@ -23,6 +23,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil/promlint"
 	dto "github.com/prometheus/client_model/go"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
 // frozenLintExceptions are the two legacy gauge names promlint flags for their
@@ -41,6 +43,7 @@ func TestPromlint(t *testing.T) {
 	Record(m)
 	src, tgt := int64(1<<30), int64(1<<20)
 	RecordDatabaseSizes(m.Namespace, m.Name, &src, &tgt)
+	RecordSyncRepWaits(m.Namespace, m.Name, &progress.SyncRepWait{Waiting: 2, OldestSeconds: 40, PgcopydbNamed: 1})
 	RecordBuildInfo("v0.0.0-promlint")
 
 	families, err := crmetrics.Registry.Gather()

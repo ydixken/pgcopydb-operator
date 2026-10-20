@@ -87,7 +87,7 @@ With `rbac.create=false` you supply the manager's RBAC, which includes the two r
 
 ## Alerts
 
-`metrics.prometheusRule.enabled=true` installs the alert rules from [rules/migrations.yaml](rules/migrations.yaml) as a PrometheusRule: failed and verification-failed migrations, retry churn, a stalled clone, high replication lag, and a stalled cutover drain.
+`metrics.prometheusRule.enabled=true` installs the alert rules from [rules/migrations.yaml](rules/migrations.yaml) as a PrometheusRule: failed and verification-failed migrations, retry churn, a stalled clone, commits blocked on synchronous replication or a held retry, high replication lag, and a stalled cutover drain.
 If your Prometheus selects rules by label (kube-prometheus-stack does), add its matching label via `metrics.prometheusRule.additionalLabels`.
 Thresholds and windows are starting points; promtool unit tests in the repository pin each one, so check there before retuning.
 

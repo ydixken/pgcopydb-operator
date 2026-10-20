@@ -32,6 +32,10 @@ Automation should wait on conditions, not on phase strings.
 | `Failed` | Finished badly; terminal | |
 | `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
 
+No phase stands for the [retry gate](../operations/lifecycle.md#the-retry-gate).
+A held retry keeps the phase the failed attempt left, and `RetryHeld` reports the hold.
+The one exception is a resumed Migration: while the gate holds its next attempt, the phase moves from `Suspended` to the phase that attempt picks up, so it no longer reads as suspended.
+
 ### Inside `Cloning` and `Finalizing`
 
 pgcopydb does not run its steps in sequence.
@@ -63,7 +67,8 @@ Zero on both counts is the unknown answer, not the tail, so the phase stays wher
 
 Each type is named for what `True` means.
 Eight are normal-true: True is the desired state.
-`Failed` is abnormal-true: True means the migration ended in failure.
+Three are abnormal-true: True reports a problem.
+`Failed` means the migration ended in failure, while `CommitsBlocked` and `RetryHeld` report a wait that clears once its cause is gone.
 
 | Type | Polarity | True means |
 |---|---|---|
@@ -76,6 +81,8 @@ Eight are normal-true: True is the desired state.
 | `Verified` | normal-true | The requested `pgcopydb compare` checks found source and target matching. |
 | `Complete` | normal-true | The migration finished. Terminal and absorbing. |
 | `Failed` | abnormal-true | The migration failed for good. Terminal and absorbing. |
+| `CommitsBlocked` | abnormal-true | Two progress samples in a row found a target session of the migration role whose commit has waited 30 seconds or more for a synchronous standby. Present from the first sample on. |
+| `RetryHeld` | abnormal-true | The [retry gate](../operations/lifecycle.md#the-retry-gate) holds the next attempt. Present from the first retry or resume on. |
 
 ## Reasons
 
@@ -86,7 +93,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Validated` | `True` | `SpecValid` | The connections and clone options materialize cleanly and the preflight passed; refreshed on every reconcile of an active Migration. |
 | `Validated` | `Unknown` | `PreflightRunning` | The preflight Job is running; when its pod cannot start, the message carries the kubelet reason verbatim (misnamed Secret, unschedulable). |
 | `Validated` | `False` | `InvalidSpec` | The spec cannot be rendered into a worker Job. The Migration fails terminally with the same reason. |
-| `Validated` | `False` | `PreflightFailed` | Connectivity, selected extension availability or ownership, a target clone privilege, a source table that row-level security would filter, an all-databases superuser or database-listing probe, or a follow prerequisite (including unlogged tables in scope) failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. When the preflight log stays unreadable for two minutes after the Job fails, the message carries the read error and the Job name instead. Terminal. |
+| `Validated` | `False` | `PreflightFailed` | Connectivity, the `synchronousCommit` check, selected extension availability or ownership, a target clone privilege, a source table that row-level security would filter, an all-databases superuser or database-listing probe, or a follow prerequisite (including unlogged tables in scope) failed. The message names the failed check and recovery action; a `superuserSecretRef` hint applies only to grant remediation. When the preflight log stays unreadable for two minutes after the Job fails, the message carries the read error and the Job name instead. Terminal. |
 | `CloneCompleted` | `False` | `CloneRunning` | A worker attempt is running the base copy. |
 | `CloneCompleted` | `False` | `CopyingData` | The probe has seen this attempt's copy, index or vacuum workers connected to the target; it replaces `CloneRunning` for the rest of the attempt, and the phase cannot reach `Finalizing` before it is set. |
 | `CloneCompleted` | `False` | `CloneFailed` | The final attempt failed; the message carries the Job failure and the last pgcopydb error line. |
@@ -111,9 +118,22 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `Verified` | `False` | `DataMismatch` | `pgcopydb compare data` reported differences while the schema matched (or was not checked). |
 | `Complete` | `True` | `MigrationSucceeded` | The migration finished; on live migrations, set after cleanup and verification. |
 | `Complete` | `True` | `DryRunSucceeded` | A `spec.dryRun` Migration's preflight passed. No worker Job was created and no data moved. |
-| `Failed` | `True` | `InvalidSpec` | Spec validation failed; retrying cannot help (source and target are immutable). |
+| `CommitsBlocked` | `True` | `SyncRepWait` | Two samples in a row found a target session of the migration role waiting 30 seconds or more for a synchronous standby to confirm its commit. The message gives the waiting sessions, how many of them are pgcopydb's, and the oldest wait. It stands until a sample shows no such wait or the worker succeeds; a sample that cannot read the count leaves it `True`. |
+| `CommitsBlocked` | `False` | `NoSyncRepWait` | A sample read the count and found no session that has waited 30 seconds or more. One such sample clears `True`. |
+| `CommitsBlocked` | `False` | `WorkerSucceeded` | The worker Job completed, so every commit it sent has returned. No sampler runs on the finish path, so this keeps a stale `True` out of it. |
+| `CommitsBlocked` | `Unknown` | `SyncRepUnobserved` | A sample could not read the count: the exec or the count query failed, or no worker pod was running. It replaces `False`, never `True`. |
+| `RetryHeld` | `True` | `GateProbing` | The first probe of a hold is pending, running, or not created yet. Every retry passes through it. |
+| `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker has not ended; the message names the pod and its node. No probe runs meanwhile. |
+| `RetryHeld` | `True` | `SessionsRemain` | The probe's census found sessions of the migration role left on the target. The message lists up to ten with pid, state, wait event, age, backend start, and name. The operator never ends them. |
+| `RetryHeld` | `True` | `SyncCommitNotLocal` | With `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`: a pooler or proxy dropped the startup option. |
+| `RetryHeld` | `True` | `CommitBlocked` | The test commit waited for a synchronous standby until the probe cancelled it at 5 seconds, or it was skipped because a session, or an earlier probe, still waits for one. |
+| `RetryHeld` | `True` | `ProbeFailed` | A check gave no result: a failed connection, an SQL error, a deadline, a probe pod that cannot start, an unreadable log, or a log without the expected lines. The message carries the server's error, and for a missing `TEMPORARY` grant the `GRANT` that fixes it. |
+| `RetryHeld` | `False` | `GatePassed` | The probe passed, and the next attempt's worker Job exists. |
+| `RetryHeld` | `False` | `Suspended` | `spec.suspend` stopped the hold; the resume runs the gate again. |
+| `RetryHeld` | `False` | `MigrationFailed` | The Migration failed instead of retrying. |
+| `Failed` | `True` | `InvalidSpec` | Spec validation failed; retrying cannot help (source and target are immutable, except `target.synchronousCommit`). |
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
-| `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted (`backoffLimit` + 1 attempts). |
+| `Failed` | `True` | `BackoffLimitExceeded` | The retry budget is exhausted: `backoffLimit` + 1 counted attempts. Attempts the retry gate exempted (`status.exemptAttempts`) do not count. The message reads `retry budget exhausted after N attempts (M exempt)`, followed by the last failed attempt's error when the gate recorded one. |
 | `Failed` | `True` | `PermissionDenied` | An attempt hit a permission error retries cannot fix (best-effort log-tail classification; a miss keeps normal retries); the message carries the matched log line, and the remaining retry budget stays unspent. An unreadable worker log is read again for two minutes after the Job fails; past that the attempt retries unclassified, with the read error in its message. |
 | `Failed` | `True` | `DiskFull` | An attempt filled the work volume; classified like `PermissionDenied`, and the message carries the matched log line. A full target retries. |
 | `Failed` | `True` | `SchemaDrift` | The apply hit a change naming a column the target lacks (SQLSTATE 42703), usually because DDL ran on the source; classified like `PermissionDenied`. The message carries the matched log line and the remedy. Other schema errors retry. |
@@ -131,6 +151,9 @@ The condition message carries the Job's last lines: the missing role, or the exa
 A mismatch on `Verified` does not fail the Migration, because the transfer itself finished.
 `Complete` is set either way; see [Verification](../operations/verification.md).
 
+The `RetryHeld` reason names the first check that did not pass, in the order census, `synchronous_commit`, test commit, and the message lists every check that did not pass.
+A new probe every 30 seconds keeps the reason until its own result differs.
+
 ## Event reasons
 
 Events record each transition.
@@ -139,15 +162,17 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 
 | Reason | Type | Appears when |
 |---|---|---|
-| `AttemptStarted` | Normal | A worker attempt's Job was created. |
-| `AttemptFailed` | Warning | An attempt failed; the next one resumes from the work-dir catalogs. |
-| `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy. With `spec.clone.dropIfExists` (action `Retry`), the next attempt drops the slot and starts over with `--restart --drop-if-exists`; without it, this is the terminal failure event (action `Fail`) and no attempt follows. |
+| `AttemptStarted` | Normal | A worker attempt's Job was created. After a hold, the message says how long the retry gate held the attempt, and for an exempt attempt that the failed one did not count against `backoffLimit`. |
+| `AttemptFailed` | Warning | An attempt failed. A retry waits for the retry gate, then resumes from the work-dir catalogs; with the budget spent, it follows only when the gate exempts the failed attempt. |
+| `SnapshotLost` | Warning | pgcopydb refused to resume a live migration's copy. With `spec.clone.dropIfExists` (action `Retry`), a retry waits for the retry gate, then drops the slot and starts over with `--restart --drop-if-exists`; with the budget spent, it follows only when the gate exempts the failed attempt. Without `dropIfExists`, this is the terminal failure event (action `Fail`) and no attempt follows. |
 | `TablesEmptyOnTarget` | Warning | The worker logged the base copy finished while a sample showed tables holding rows on the source and none on the target; the message names them. Once per refusal, see the condition reason of the same name. |
+| `CommitsBlocked` | Warning | `CommitsBlocked` turned `True` (action `Sample`): once on each entry into `True`, with the condition's message. |
+| `RetryHeld` | Warning | The retry gate holds the next attempt (action `Retry`): when a hold gets its first result, and whenever its reason changes. `GateProbing` emits none, because every retry passes through it. |
 | `WorkerZombie` | Warning | The pgcopydb supervisor died but a child process kept the worker pod alive (upstream pgcopydb 0.18 defect); the operator removed the pod so the normal retry could run. |
 | `PreflightStarted` | Normal | The preflight Job was created. |
 | `PreflightPassed` | Normal | Every preflight check passed; the message counts checks and applied grants, or in a dry run the grants that would be applied. |
 | `PreflightRemediated` | Normal | The preflight applied missing grants through `superuserSecretRef`; one event per tier (clone, follow), each message listing that tier's exact statements. |
-| `PreflightWarning` | Warning | A passing preflight logged findings that do not block: a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s (or unreadable). One event lists them all. |
+| `PreflightWarning` | Warning | A passing preflight logged findings that do not block: a `superuserSecretRef` role without `rolsuper`, a source `wal_sender_timeout` below 60s (or unreadable), or a migration role without `TEMPORARY` on the target database (or unreadable), which the retry gate's test commit needs. One event lists them all. |
 | `PreflightWouldRemediate` | Normal | A dry run found grants `superuserSecretRef` would apply, and applied none; one event per tier, each message listing that tier's statements. |
 | `DryRunSucceeded` | Normal | A dry run's preflight passed; the Migration completed without a worker Job. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |

@@ -81,7 +81,19 @@ type PostgresConnection struct {
 	// applied statements are logged and kept, never reverted.
 	// +optional
 	SuperuserSecretRef *ConnectionSecret `json:"superuserSecretRef,omitempty"`
+
+	// synchronousCommit, target only, starts every connection of the worker, the
+	// preflight and the retry gate with this synchronous_commit through the libpq
+	// startup option. CDC apply still SETs synchronous_commit=on. Applies from the
+	// next attempt.
+	// +kubebuilder:validation:Enum=local
+	// +optional
+	SynchronousCommit string `json:"synchronousCommit,omitempty"`
 }
+
+// SynchronousCommitLocal makes a commit wait for the local WAL flush only,
+// never for a synchronous standby.
+const SynchronousCommitLocal = "local"
 
 // ConnectionSecret points at a Secret whose keys hold the parts of a
 // connection. Key names are remappable; defaults match the common platform
@@ -493,18 +505,22 @@ type ReplicationStatus struct {
 }
 
 // MigrationSpec is the desired state of a Migration. source and target are
-// immutable after creation (a migration is a one-shot job, like batch/v1 Job).
+// immutable after creation (a migration is a one-shot job, like batch/v1 Job),
+// except target.synchronousCommit.
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode"
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
 // +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
+	// +kubebuilder:validation:XValidation:rule="!has(self.synchronousCommit)",message="synchronousCommit applies to the target only"
 	// +required
 	Source PostgresConnection `json:"source"`
 
-	// target is the PostgreSQL endpoint to migrate to. Immutable.
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="target is immutable"
+	// target is the PostgreSQL endpoint to migrate to. Immutable except
+	// synchronousCommit, which applies from the next attempt.
+	// +kubebuilder:validation:XValidation:rule="has(self.host) == has(oldSelf.host) && (!has(self.host) || self.host == oldSelf.host) && has(self.port) == has(oldSelf.port) && (!has(self.port) || self.port == oldSelf.port) && has(self.database) == has(oldSelf.database) && (!has(self.database) || self.database == oldSelf.database) && has(self.username) == has(oldSelf.username) && (!has(self.username) || self.username == oldSelf.username) && has(self.passwordSecretRef) == has(oldSelf.passwordSecretRef) && (!has(self.passwordSecretRef) || self.passwordSecretRef == oldSelf.passwordSecretRef) && has(self.sslMode) == has(oldSelf.sslMode) && (!has(self.sslMode) || self.sslMode == oldSelf.sslMode) && has(self.tls) == has(oldSelf.tls) && (!has(self.tls) || self.tls == oldSelf.tls) && has(self.uriSecretRef) == has(oldSelf.uriSecretRef) && (!has(self.uriSecretRef) || self.uriSecretRef == oldSelf.uriSecretRef) && has(self.secretRef) == has(oldSelf.secretRef) && (!has(self.secretRef) || self.secretRef == oldSelf.secretRef) && has(self.superuserSecretRef) == has(oldSelf.superuserSecretRef) && (!has(self.superuserSecretRef) || self.superuserSecretRef == oldSelf.superuserSecretRef)",message="target is immutable except synchronousCommit"
+	// +kubebuilder:validation:XValidation:rule="!(has(self.synchronousCommit) && has(self.uriSecretRef))",message="synchronousCommit cannot be combined with uriSecretRef: the operator never reads that Secret, so it cannot add the option; use secretRef or the inline fields"
 	// +required
 	Target PostgresConnection `json:"target"`
 
@@ -552,10 +568,11 @@ type MigrationSpec struct {
 	// +optional
 	Preflight *PreflightOptions `json:"preflight,omitempty"`
 
-	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
-	// Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
-	// with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
-	// migration's copy.
+	// backoffLimit is the operator-level retry budget: at most backoffLimit+1
+	// counted attempts. An attempt the retry gate exempts (status.exemptAttempts)
+	// does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes
+	// via the pgcopydb work directory, or, with clone.dropIfExists, starts over
+	// when pgcopydb refuses to resume a live migration's copy.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -594,7 +611,8 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true, ConditionFailed is abnormal-true.
+// are normal-true; ConditionFailed, ConditionCommitsBlocked and ConditionRetryHeld
+// are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -605,6 +623,8 @@ const (
 	ConditionVerified         = "Verified"
 	ConditionComplete         = "Complete"
 	ConditionFailed           = "Failed"
+	ConditionCommitsBlocked   = "CommitsBlocked"
+	ConditionRetryHeld        = "RetryHeld"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs
@@ -632,6 +652,30 @@ type CloneProgress struct {
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
+// RetryGateStatus is the retry gate's record of one failed attempt.
+type RetryGateStatus struct {
+	FailedAttempt int32 `json:"failedAttempt"`
+	// failedAt is when the attempt's Job failed; the exemption and the verdict
+	// deadline are measured from it.
+	FailedAt metav1.Time `json:"failedAt"`
+	// failure is the attempt's failure text, capped at maxDetailLen; the budget
+	// verdict can come much later, after the events expired.
+	// +optional
+	Failure string `json:"failure,omitempty"`
+	// exemption is the first census's verdict; empty while undecided.
+	// +kubebuilder:validation:Enum=Exempt;Counted
+	// +optional
+	Exemption string `json:"exemption,omitempty"`
+	// +optional
+	CloneDoneSeen bool `json:"cloneDoneSeen,omitempty"`
+}
+
+// The retry gate's verdicts, as retryGate.exemption spells them.
+const (
+	RetryGateExempt  = "Exempt"
+	RetryGateCounted = "Counted"
+)
+
 // MigrationStatus is the observed state of a Migration.
 type MigrationStatus struct {
 	// observedGeneration is the .metadata.generation last reconciled.
@@ -652,6 +696,15 @@ type MigrationStatus struct {
 	// attempts is the number of worker Jobs created so far.
 	// +optional
 	Attempts int32 `json:"attempts,omitempty"`
+
+	// exemptAttempts counts failed attempts that do not count against backoffLimit:
+	// the retry gate found their sessions waiting for synchronous replication.
+	// +optional
+	ExemptAttempts int32 `json:"exemptAttempts,omitempty"`
+
+	// retryGate records a failed attempt while the retry gate decides about the next.
+	// +optional
+	RetryGate *RetryGateStatus `json:"retryGate,omitempty"`
 
 	// progress reports base-copy progress.
 	// +optional
@@ -687,6 +740,7 @@ type MigrationStatus struct {
 // +kubebuilder:printcolumn:name="Complete",type=string,JSONPath=`.status.conditions[?(@.type=="Complete")].status`
 // +kubebuilder:printcolumn:name="Lag",type=integer,priority=1,JSONPath=`.status.replication.lagBytes`
 // +kubebuilder:printcolumn:name="Attempts",type=integer,JSONPath=`.status.attempts`
+// +kubebuilder:printcolumn:name="Exempt",type=integer,priority=1,JSONPath=`.status.exemptAttempts`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Migration copies PostgreSQL data from a source endpoint to a target,
@@ -697,7 +751,8 @@ type Migration struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec is the migration to run; source and target are immutable.
+	// spec is the migration to run; source and target are immutable, except
+	// target.synchronousCommit.
 	// +required
 	Spec MigrationSpec `json:"spec"`
 

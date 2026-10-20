@@ -237,6 +237,7 @@ func setupRunnables(mgr ctrl.Manager, f *flags) error {
 	}
 	if err := (&controller.MigrationReconciler{
 		Client:      mgr.GetClient(),
+		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
 		Recorder:    mgr.GetEventRecorder("pgcopydb-operator"),
 		RunnerImage: f.runnerImage,

@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -84,18 +85,20 @@ func waitFor(t *testing.T, budget time.Duration, description string, check func(
 // Removing any remote bound leaves the observed stub alive after its budget.
 func TestProgressProcessBounds(t *testing.T) {
 	requireTimeout(t)
-	// psql runs three times: the stage probe, then the target, then the source.
+	// psql runs four times: the stage probe, the SyncRep count, the target, then the source.
 	for _, tc := range []struct {
 		name   string
 		hang   int
 		resist bool
 		want   string
 	}{
-		{"success", 0, false, "stage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
-		{"stage", 1, false, "stage=\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\n"},
-		{"target count", 2, false, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
-		{"source count", 3, false, "source_error=\nstage=4 0 0\nsource=\ntarget=100 2 1 3 80\nowed=\n"},
-		{"term-resistant", 2, true, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\n"},
+		{"success", 0, false, "stage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\nsyncrep=0 0 0\n"},
+		{"stage", 1, false, "stage=\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\nsyncrep=0 0 0\n"},
+		{"syncrep", 2, false, "syncrep_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\nsyncrep=\n"},
+		{"syncrep term-resistant", 2, true, "syncrep_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=100 2 1 3 80\nowed=public.items\nsyncrep=\n"},
+		{"target count", 3, false, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\nsyncrep=0 0 0\n"},
+		{"source count", 4, false, "source_error=\nstage=4 0 0\nsource=\ntarget=100 2 1 3 80\nowed=\nsyncrep=0 0 0\n"},
+		{"term-resistant", 3, true, "target_error=\nstage=4 0 0\nsource=100 2 2 3 80 1\ntarget=\nowed=public.items\nsyncrep=0 0 0\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -114,6 +117,7 @@ for arg do query=$arg; done
 case "$query" in
   *quote_literal*) echo "100 2 1 3 80|('public.items',false),('public.other',true)" ;;
   *"not t.populated"*) echo "100 2 2 3 80 1|public.items" ;;
+  *SyncRep*) echo "0 0 0" ;;
   *pg_stat_activity*) echo '4 0 0' ;;
   *) echo '100 2 2 3 80' ;;
 esac
@@ -177,6 +181,35 @@ esac
 				}
 			}
 		})
+	}
+}
+
+// The exec that runs a sample gives up at 30 s and loses all of it, stage and sizes included,
+// so the calls' outer bounds plus kill grace stay at 25 s and leave the rest for exec setup.
+func TestProgressProcessBounds_WorstCase(t *testing.T) {
+	definition := regexp.MustCompile(`(?m)^(\w+_sql)\(\) \{\n  \( timeout --signal=TERM --kill-after=(\d+)s (\d+)s psql `)
+	budgets := map[string]int{}
+	for _, m := range definition.FindAllStringSubmatch(sampleSQL, -1) {
+		grace, _ := strconv.Atoi(m[2])
+		limit, _ := strconv.Atoi(m[3])
+		budgets[m[1]] = grace + limit
+	}
+	if budgets["progress_sql"] != 6+1 || budgets["syncrep_sql"] != 3+1 || len(budgets) != 2 {
+		t.Fatalf("bounded psql helpers = %v, want progress_sql at 6+1 s and syncrep_sql at 3+1 s", budgets)
+	}
+	call := regexp.MustCompile(`\$\((\w+_sql) "`)
+	for name, script := range map[string]string{"single-database": sampleScript, "all-databases": allDatabasesSampleScript} {
+		total, calls := 0, call.FindAllStringSubmatch(script, -1)
+		for _, m := range calls {
+			budget, bounded := budgets[m[1]]
+			if !bounded {
+				t.Errorf("the %s script calls %s, which has no bound", name, m[1])
+			}
+			total += budget
+		}
+		if len(calls) != 4 || total != 3*7+4 {
+			t.Errorf("the %s script makes %d psql calls with a worst case of %d s, want 4 calls and 25 s (3 x 7 s + 4 s)", name, len(calls), total)
+		}
 	}
 }
 

@@ -115,8 +115,8 @@ Where `copyPollInterval` and `recordSizes` in `internal/controller/sampler.go` d
 ### One sample costs under a second
 
 Measured during the release-candidate e2e behind issue #200: one psql query took 70 to 90 ms, and the exec round trip around the script took about 480 ms.
-A sample is one exec running three psql calls, so about 0.7 s.
-At a 5-second interval that fills a seventh of each gap; at 2 seconds it would fill a third, and its own jitter would show in the spacing.
+A sample is one exec running four psql calls, so about 0.8 s; the fourth, the synchronous replication count, came after this measurement and is costed like the others.
+At a 5-second interval that fills a sixth of each gap; at 2 seconds it would fill two fifths, and its own jitter would show in the spacing.
 
 ### The first size sample of a copy read the target before pgcopydb cleaned it
 
@@ -196,3 +196,41 @@ Measured on 2026-10-08 with pgbench while investigating follow catch-up for issu
 One pgbench client over a local socket stood in for the single apply connection, committing one single-row INSERT per transaction.
 With `synchronous_commit=on`, two runs reached 824 and 787 tps at 1.21 and 1.27 ms latency.
 With `synchronous_commit=off`, they reached 13656 and 13605 tps at 0.073 ms.
+
+## Synchronous replication waits
+
+Where the progress sample, the retry gate's probe, and the target's startup option depend on how PostgreSQL treats a commit that waits for a synchronous standby.
+Measured on a test cluster under strict synchronous replication, with both standbys fenced unless a section says otherwise.
+
+### statement_timeout does not end a SyncRep wait
+
+In `gateScript`, `internal/controller/retry_gate_job.go`.
+Neither `statement_timeout` nor `transaction_timeout` ended a commit that waited in `SyncRep`.
+A client-side cancel did: a psql commit probe under `timeout -s INT 5` returned after 5.007 s with `WARNING: canceling wait for synchronous replication due to user request`, and left no session behind.
+The transaction is committed locally at that point, and only the standby's confirmation is missing.
+Reproduction: see private ops notes.
+
+### A startup option reaches every pgcopydb target connection
+
+In `SyncCommitLocalParam`, `internal/conn/conn.go`.
+With `options=-c%20synchronous_commit%3Dlocal` in the target URI, pgcopydb kept the option on every target connection and on pg_restore, and post-data finished while both standbys were fenced.
+Apply still waited, because it sets `synchronous_commit=on` itself.
+Reproduction: see private ops notes.
+
+### A role sees its own SyncRep waiters without pg_monitor
+
+In `syncRepStatement`, `internal/progress/progress.go`, and `censusSQL`, `internal/controller/retry_gate_job.go`.
+A read-only `pg_stat_activity` query, run as a non-superuser role without `pg_monitor`, saw that role's own `SyncRep` waiters within 0.65 s of their `COMMIT`, and stopped seeing them within 1.7 s of the unfence.
+It never waited itself, because it assigns no transaction ID.
+The reproduction's migration role was a superuser.
+That a non-superuser migration role sees pgcopydb's sessions the same way is inferred from PostgreSQL's `HAS_PGSTAT_PERMISSIONS` (`src/backend/utils/adt/pgstatfuncs.c` on `REL_18_STABLE`).
+Reproduction: see private ops notes.
+
+### Catch-up waits followed a bulk load with both standbys attached
+
+In `syncRepThreshold`, `internal/controller/syncrep.go`, and `exemptionVerdict`, `internal/controller/retry_gate_budget.go`.
+With both standbys attached, the first post-data statements that committed with `synchronous_commit=on` still waited 70.65 s and 21 s while the standbys caught up on the bulk load's WAL.
+That the backlog caused the waits is inferred, not proven.
+At the sampler's 5 s and 10 s cadences, any wait of roughly 40 s or more gives two samples in a row over the 30 s threshold, so a wait like the first raises `CommitsBlocked` with healthy standbys.
+The retry gate exempts an attempt only for a wait that began 30 s or more before the attempt failed, so a catch-up wait that began just before an unrelated failure still spends the budget.
+Reproduction: see private ops notes.
