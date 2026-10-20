@@ -32,6 +32,8 @@ The [OpenTelemetry guide](opentelemetry.md) covers turning the scrape off.
 A background sampler reads each running worker on its own timer, so a slow reconcile pass does not delay the size gauges.
 It takes its first sample as soon as a pass sees the worker Job, then samples every 5 seconds until the data is across and every 10 seconds after that, which covers the index and vacuum tail, streaming, and cutover.
 Only the elected leader samples, and a worker that ends, a suspend, or a deletion stops its sampler.
+Each sample runs four psql statements from the worker pod: the clone stage probe, a count of target sessions that wait for synchronous replication, then the target and source sizes.
+The count runs under a 3-second bound instead of the others' 6, so the four statements together stay inside the 30-second limit on the whole exec.
 
 A reconcile pass for an active worker still asks for the next pass 10 seconds after it started.
 It copies the latest sample's relation counts and clone stage into status, and it is the only writer of status.
@@ -61,6 +63,8 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied and tables planned | once sampled |
 | `pgcopydb_migration_indexes_done` / `_indexes_total` | | Indexes built and indexes planned | once sampled |
 | `pgcopydb_migration_clone_copied_bytes` / `_clone_planned_bytes` | | Table data on the target and on the source, then pgcopydb's counts after the copy (see [below](#why-does-the-target-show-fewer-bytes-than-the-source)) | once sampled |
+| `pgcopydb_migration_target_sync_rep_waiting_sessions` | | Target sessions of the migration role waiting for a synchronous standby to confirm a commit | while sampled |
+| `pgcopydb_migration_target_sync_rep_oldest_wait_seconds` | | Seconds since the oldest waiting statement started, 0 with no waiter | while sampled |
 | `pgcopydb_migration_replication_lag_bytes` | | Total replication lag | follow, streaming |
 | `pgcopydb_migration_source_lsn_bytes` | | Source write-ahead log (WAL) head as an absolute byte position | follow, streaming |
 | `pgcopydb_migration_write_lsn_bytes` | | The walsender's `write_lsn` on the source, or the slot's `confirmed_flush_lsn` where the stat columns are masked | follow, streaming |
@@ -88,6 +92,11 @@ The "Exists" column is the contract for when a series is present:
   The sample needs psql and GNU `timeout` in the runner.
   pgcopydb's own accounting then replaces it where it can be read: at clone completion for a plain clone, and from the verify Job's log after cutover for a follow migration.
   Both need an allowlisted runner version (see [Troubleshooting](../troubleshooting.md)).
+- **while sampled**: the two synchronous replication gauges follow every sample that reads them, zeros included.
+  A sample that cannot read them removes both, so a missing series means unknown, never "nothing waits".
+  They also go when the sampler stops, unlike the sizes, so a stale count of waiting sessions never reads as current.
+  The count covers every session of the migration role on the target, not only pgcopydb's, because any narrower filter can miss a waiter behind a proxy or a pinned `application_name`.
+  PostgreSQL records no start time for the wait itself, so the age runs from the start of the waiting statement and is an upper bound.
 - **follow, streaming**: a plain clone never produces these lag and log sequence number (LSN) gauges.
   In follow mode they appear as soon as the replication slot answers, which is during the base copy and before the `Streaming` phase.
   The worker samples them from `Cloning` through `CuttingOver`.
@@ -116,6 +125,8 @@ Each progress query runs under a timeout that connection-string options cannot d
 A sample therefore leaves no session timeout behind for a later COPY or index build to inherit.
 When one side fails, its gauges keep their last value while the other side updates.
 The operator logs `progress sample lost a side` with the reason when a side stops answering, and logs again when it answers.
+The synchronous replication count has its own line, because its gauges go instead of standing: `progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown`.
+Its recovery is the same `progress sample side answers again` line, with side `syncrep`.
 The reason is the server's error or the failed connection's host and port.
 Any other psql message is withheld, because libpq echoes a connection URI it cannot parse, password included.
 A failed sample never completes or fails a migration.
@@ -143,6 +154,7 @@ Apply backlog reads both operands from the same walsender row, so the order that
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 
 The bundled runner, pgcopydb `0.18.109.gbec4ebb`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
+On a target with synchronous standbys, each of those commits waits for a standby, whatever [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target) says, and the `CommitsBlocked` condition reports a wait that lasts.
 It writes that progress at most once a second, so the replay gauge can trail the target replication origin by about a second.
 It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/bec4ebbb272c36335ab423238fe0010ae47caade/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
 That feedback does not move the target replication origin or the sentinel's data replay cursor; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
@@ -157,7 +169,7 @@ The chart ships three dashboards, linked to each other through their shared `pgc
 - **Migration Detail** (uid `pgcopydb-migration`): one migration end to end.
   Two rows of stat tiles come first: state and timing, then progress and the compare check results.
   Below them are two timeline tables side by side, phases as sampled and condition transitions as stamped.
-  The rest charts database sizes and copy throughput, LSN positions with the lag split, WAL generation, and the cutover drain.
+  The rest charts database sizes and copy throughput, synchronous replication waits, LSN positions with the lag split, WAL generation, and the cutover drain.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
@@ -265,6 +277,12 @@ Some tiles report a fact about the run rather than its current state: Attempts, 
 These read over the whole range, so a deleted Migration keeps what it last reported instead of N/A.
 They read the range end first, so a live Migration wins: a wide range can also hold an earlier run that reused the name.
 
+The **Synchronous Replication Waits** panel, below the copy charts, plots the two synchronous replication gauges as **Waiting Sessions** and **Oldest Wait**.
+**Oldest Wait** runs from the start of the waiting statement, so it is an upper bound on the wait itself.
+A gap means that a sample could not read the count, and both lines end when the worker pod does.
+Two samples in a row with a wait of 30 seconds or more set `CommitsBlocked`; see [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
+Healthy standbys can do that too while they catch up on the WAL of a bulk load ([measured](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#catch-up-waits-followed-a-bulk-load-with-both-standbys-attached)).
+
 ### Why does the target show fewer bytes than the source?
 
 **Bytes (Source)** is the size of the table data on the source: the tables in scope with their TOAST, without indexes.
@@ -313,10 +331,14 @@ Thresholds and windows are defaults; the promtool unit tests under `test/alerts/
 | `PgcopydbMigrationVerificationFailed` | critical | A compare mismatch stands for 5m |
 | `PgcopydbMigrationRetrying` | warning | Three or more new attempts in 30m while active |
 | `PgcopydbMigrationCloneStalled` | warning | Cloning while the target size is flat for 1h |
+| `PgcopydbMigrationCommitsBlocked` | warning | `CommitsBlocked` or `RetryHeld` is True for 15m while active |
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
 | `PgcopydbMigrationCutoverStalled` | critical | The endpos is not reached for 15m in `CuttingOver` |
 
 `PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing` and leaves the target size flat while nothing is stalled.
+`PgcopydbMigrationCommitsBlocked` reads the two conditions rather than the gauges, so the 30-second threshold lives in the operator alone.
+It keeps one series per Migration over both conditions, so a worker that waits on a commit, is cut by a proxy, and is then held at the retry gate runs on one 15-minute clock.
+Both conditions keep their last value while no worker runs, so the rule skips `Failed`, `Completed`, and `Suspended`.
 `PgcopydbMigrationReplicationLagHigh` skips the base copy, where the lag gauge already exists, a large lag is normal, and nothing can act on it.
 `PgcopydbMigrationCutoverStalled` matches `CuttingOver` alone and stops when `CutoverCompleted` is `True`.
 After the worker exits, the replay gauge keeps its last sample, which can be below the endpos.
@@ -339,6 +361,8 @@ It replays the lag and LSN panels over the whole run, because their series are g
 
 - The gauges are process state in the manager, so an operator restart clears them and the next reconcile of each Migration restores them.
   A scrape gap around a restart is normal.
+- An alert's `for:` clock starts over whenever its series go missing, as they do after an operator restart until the next reconcile, or for a failed scrape.
+  Commits that stay blocked across a restart therefore fire `PgcopydbMigrationCommitsBlocked` 15 minutes after the restart, not 15 minutes after the wait began.
 - A finished migration has no worker pod, so the two size series do not come back after an operator restart.
   Its other series come back, except the lag and LSN series, which a finished migration does not have.
 - `rate()` over the size gauges misreads a database that shrinks as a counter reset.

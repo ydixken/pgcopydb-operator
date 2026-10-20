@@ -35,18 +35,20 @@ Each success prints an `ok:` line in the Job log.
    A permanent connection error ends the retries once the next probe repeats it: a wrong password, an unknown role, an unknown database.
    The server's error line lands in the condition message.
    It takes two in a row because a pooler with `auth_query` reports an authentication failure of its own when its backend blips.
-2. With `spec.preflight.requireSameMajorVersion: true`, the source and target PostgreSQL major versions must match.
+2. With [`spec.target.synchronousCommit: local`](../configuration.md#synchronous-commit-on-the-target), `show synchronous_commit` over the worker's own target URI must read `local`.
+   A connection pooler or proxy that dropped the libpq startup option fails this check.
+3. With `spec.preflight.requireSameMajorVersion: true`, the source and target PostgreSQL major versions must match.
    See [prerequisites](../reference/prerequisites.md#major-version-gate).
-3. The superuser connection on each side that sets a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref).
+4. The superuser connection on each side that sets a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref).
    The Job probes it the same way.
    If the role does not have `rolsuper`, the Job logs a `warn:` line and remediation proceeds.
    Managed-Postgres admin roles hold the grant rights without the attribute.
-4. The selected source extensions, which must be installed or default-available on the target.
+5. The selected source extensions, which must be installed or default-available on the target.
    With `spec.clone.dropIfExists`, their default versions must be installable.
    To bypass this gate, set `spec.clone.skip` to include `extensions`.
-5. The clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe.
+6. The clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe.
    See [prerequisites](../reference/prerequisites.md#base-clone-every-migration) for the details.
-6. The follow prerequisites: `wal_level`, free replication-slot headroom, `wal_sender_timeout` (a warning only), the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
+7. The follow prerequisites: `wal_level`, free replication-slot headroom, `wal_sender_timeout` (a warning only), the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
    Two of these lose data and raise no error.
 
 The `Validated` and `Failed` condition messages name the exact `GRANT` or setting that fixes a failed rights check.
@@ -60,7 +62,7 @@ With `superuserSecretRef` set, the preflight applies the grantable rights itself
 It emits one `PreflightRemediated` event per tier, clone rights and follow rights, with the applied statements.
 A [dry run](lifecycle.md#dry-run) applies none of them and reports them in `PreflightWouldRemediate` events instead.
 On success a `PreflightPassed` event counts the checks and the applied grants.
-When the operator can read the Job log, the `warn:` lines of a passing preflight become one `PreflightWarning` event: a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s.
+When the operator can read the Job log, the `warn:` lines of a passing preflight become one `PreflightWarning` event: a `superuserSecretRef` role without `rolsuper`, a source `wal_sender_timeout` below 60s, or a migration role without `TEMPORARY` on the target database, which the retry gate's test commit needs.
 They never fail the Migration.
 The operator keeps the finished preflight Job as an audit trail: `spec.ttlSecondsAfterFinished` does not apply to it, and it is removed with the Migration.
 
@@ -106,6 +108,10 @@ kubectl get pgm billing -o jsonpath='{.status.replication}' | jq
 `writeLSN` reports receive progress from the walsender, or the slot's `confirmed_flush_lsn` as a fallback.
 `replayLSN` is the walsender's replay position, or the slot's `confirmed_flush_lsn` where the migration role may not read the walsender.
 The bundled runner, pgcopydb `0.18.109.gbec4ebb`, confirms target COMMITs with `synchronous_commit=on` before it reports their replay progress.
+On a target with synchronous standbys, each of those COMMITs waits until a standby confirms it, with or without [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target).
+`CommitsBlocked` turns True once two samples in a row show a wait of 30 seconds or more; see [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
+A proxy that cuts the apply connection during such a wait leaves its backend waiting on the target and holding the replication origin.
+The next attempt resumes only once the [retry gate](lifecycle.md#retries-and-resume) finds that session gone and a test commit confirmed by a standby.
 
 When published tables are idle, genuine primary keepalives from the current connection can [advance certified network replay and flush feedback](https://github.com/ydixken/pgcopydb/blob/bec4ebbb272c36335ab423238fe0010ae47caade/src/bin/pgcopydb/ld_stream.c#L1628-L1653) across WAL outside the publication.
 That feedback does not move the target replication origin or the sentinel's data replay cursor.

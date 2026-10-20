@@ -110,8 +110,8 @@ func pgmEnv(s Side, part string) string {
 	return "PGM_" + strings.ToUpper(string(s)) + "_" + part
 }
 
-// SyncCommitLocalParam is the libpq startup option for synchronousCommit: local.
-// It is pre-encoded: url.Values writes the space as "+", which libpq keeps.
+// SyncCommitLocalParam is the libpq startup option for synchronousCommit: local, pre-encoded because url.Values writes the
+// space as "+", which libpq keeps. pgcopydb carries it to every target connection (docs/research/measurements.md#a-startup-option-reaches-every-pgcopydb-target-connection).
 const SyncCommitLocalParam = "options=-c%20synchronous_commit%3Dlocal"
 
 // syncCommitLocal reports whether side s starts its sessions with

@@ -41,6 +41,7 @@ spec:
     database: payroll
     username: app
     passwordSecretRef: {name: payroll-pg-app, key: password}
+    synchronousCommit: local    # copy commits skip the standby wait; after a target failover, start over
     superuserSecretRef:
       name: payroll-pg-superuser
       keys: {username: username, password: password}  # remap deviating key names

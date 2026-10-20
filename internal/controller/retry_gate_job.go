@@ -91,9 +91,9 @@ func gateFlag(on bool) string {
 	return "0"
 }
 
-// censusSQL counts the migration role's other sessions in the target database (any database
-// in all-databases mode) under pgcopydb's name, or all of them when the URI pins
-// application_name, and lists the oldest.
+// censusSQL counts the migration role's other sessions in the target database (any database in all-databases mode)
+// under pgcopydb's name, or all of them when the URI pins application_name, and lists the oldest. The role sees its
+// own sessions without a grant (docs/research/measurements.md#a-role-sees-its-own-syncrep-waiters-without-pg_monitor).
 func censusSQL(allDatabases bool) string {
 	db, gateDB := "\n  and datname = current_database()", "\n      and g.datname = current_database()"
 	if allDatabases {
@@ -126,9 +126,9 @@ order by coalesce(query_start, backend_start)
 limit ` + strconv.Itoa(gateSessionLimit) + `;`
 }
 
-// gateScript prints one gate: line per check and gate: pass only when every enabled check
-// passed. why applies progress.serverReason's rule in the pod: libpq echoes a URI it cannot
-// parse, password included. The subshells keep the shell's notice of a killed timeout out of $err.
+// gateScript prints one gate: line per check and gate: pass only when every enabled check passed. The commit test ends on
+// SIGINT, because no server timeout ends a SyncRep wait (docs/research/measurements.md#statement_timeout-does-not-end-a-syncrep-wait).
+// why filters stderr as progress.serverReason does, and the subshells keep the shell's notice of a killed timeout out of $err.
 func gateScript(allDatabases bool) string {
 	return `set -u
 for v in "${GATE_COMMIT_TEST:-}" "${GATE_EXPECT_LOCAL:-}"; do

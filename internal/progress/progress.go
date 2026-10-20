@@ -393,9 +393,9 @@ where application_name like 'pgcopydb%' and client_addr = inet_client_addr()") |
 // (pgcopydb@bec4ebb:src/bin/pgcopydb/pgsql.c:520-550); the retry gate's census shares it.
 const PgcopydbAppNameLike = "pgcopydb[%"
 
-// syncRepStatement counts the role's sessions in one wait, the oldest one's age in seconds, and
-// the pgcopydb-named ones. The role alone scopes it: any other filter can under-match (client_addr
-// behind a proxy, application_name set by the URI), and under-matching reads as not blocked.
+// syncRepStatement counts the role's sessions in one wait, the oldest one's age in seconds, and the pgcopydb-named ones.
+// The role alone scopes it, with no grant (docs/research/measurements.md#a-role-sees-its-own-syncrep-waiters-without-pg_monitor):
+// any other filter can under-match (client_addr behind a proxy, application_name set by the URI), and under-matching reads as not blocked.
 func syncRepStatement(waitType, waitEvent string) string {
 	return `select count(*) || ' ' ||
   coalesce(floor(extract(epoch from max(clock_timestamp() - query_start)))::bigint, 0) || ' ' ||

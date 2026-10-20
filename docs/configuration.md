@@ -242,3 +242,57 @@ Only a `DB` URI or a `uriSecretRef` value lets you change them: a `DB` URI keeps
 > [!note]
 > The operator does not rewrite a `uriSecretRef` value.
 > Add the keepalive parameters, and `tcp_user_timeout` on the source, to that connection string yourself.
+
+### Synchronous commit on the target
+
+`spec.target.synchronousCommit: local` makes the copy's target sessions commit with `synchronous_commit=local`, so their commits do not wait for a synchronous standby.
+It is meant for a target with strict synchronous replication, such as Patroni `synchronous_mode_strict` or CloudNativePG `dataDurability: required`, reached through a TCP proxy or load balancer with an idle timeout.
+A commit that waits for a standby sends nothing, so such a proxy cuts the connection while the backend behind it keeps waiting.
+
+```yaml
+spec:
+  target:
+    host: payroll-pg-rw.payroll.svc
+    database: payroll
+    username: app
+    passwordSecretRef: {name: payroll-pg-app, key: password}
+    synchronousCommit: local      # the only value; unset keeps the server's setting
+```
+
+The field is unset by default, which leaves `synchronous_commit` to the server.
+When it is set, the operator adds the libpq startup option `options=-c%20synchronous_commit%3Dlocal` to the target URI of three Jobs: the worker, the preflight, and the retry gate's probe.
+pgcopydb passes the option on to every target connection it opens, pg_restore included ([measured](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#a-startup-option-reaches-every-pgcopydb-target-connection)).
+The source and every other Job, such as cleanup, verification, and the ownership handover, connect without it.
+
+CDC apply still waits for a standby.
+It sets `synchronous_commit=on` after every `BEGIN`, and a session `SET` outranks the startup option.
+We keep apply that way because it reports replay progress to the source after each commit, and the source never resends what it has confirmed: an apply commit lost in a target failover would lose those changes for good.
+
+`synchronousCommit` is the only target field you can change after the Migration exists.
+A change applies from the next attempt, because a running worker keeps the URI it started with.
+
+Admission rejects the field on the source.
+It also rejects the field together with `uriSecretRef`, because the operator never reads that Secret and cannot add the option to it.
+To use the field, a `uriSecretRef` target has to move to `secretRef` or the inline fields, and because the rest of the target is immutable, that takes a new Migration.
+With `secretRef`, a `DB` URI that sets its own `options` is refused, because the operator's option would replace it.
+The Jobs that carry the option then exit with `target connection secret: the DB URI sets options, which spec.target.synchronousCommit would replace; remove options from the DB URI or unset synchronousCommit`, so the preflight fails before any data moves.
+
+A connection pooler can refuse the startup option or drop it silently, and the preflight fails either way.
+An unconfigured PgBouncer refuses the connection, and the preflight's connectivity failure says so.
+A pooler that ignores the parameter, as a CloudNativePG Pooler does, connects without it.
+The preflight then reads `show synchronous_commit` over the worker's own target URI and fails on any value but `local`.
+The retry gate repeats that check before every retry and holds the retry with reason `SyncCommitNotLocal` while it fails.
+The field is supported on direct connections and session-mode poolers only.
+Through a transaction-mode pooler, one check samples one server connection and cannot vouch for the ones the worker gets later.
+
+> [!warning]
+> A target failover during the copy can lose recently copied data on the new primary.
+> The next attempt resumes and trusts what pgcopydb recorded as done, so start the copy over instead: create a new Migration with `spec.clone.dropIfExists: true`.
+> The bulk COPY and the index builds already commit with `synchronous_commit=off` today.
+> This field makes pg_restore, VACUUM, index builds after a reconnect, and the other copy statements commit with `local`.
+
+Apply still waits for a standby, and its first confirmed commit also confirms every earlier local commit.
+We infer that from how synchronous replication works: a standby confirms a WAL position, and every earlier commit lies below it.
+The sequence reset at cutover commits locally too.
+A clone without follow has no waiting commit after the copy, unless `clone.ownerAfterRestore` is set: the ownership handover commits with the server's setting.
+Either way, confirm in `pg_stat_replication` on the target primary that its standbys are streaming and caught up before you switch applications.

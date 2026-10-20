@@ -28,7 +28,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 )
 
-// copyPollInterval paces the sampler until the data is across. A sample fills a seventh of
+// copyPollInterval paces the sampler until the data is across. A sample fills a sixth of
 // each gap (docs/research/measurements.md#one-sample-costs-under-a-second).
 const copyPollInterval = 5 * time.Second
 
