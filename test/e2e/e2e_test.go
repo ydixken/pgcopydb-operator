@@ -1565,7 +1565,13 @@ func sourceSlotCount() string {
 // sees it.
 func targetOriginCount() string {
 	GinkgoHelper()
-	return psql(targetCluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
+	return targetOriginCountOn(targetCluster)
+}
+
+// targetOriginCountOn is targetOriginCount on another target cluster.
+func targetOriginCountOn(cluster string) string {
+	GinkgoHelper()
+	return psql(cluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
 }
 
 // copySecret merges one key into a secret, keeping any other key; CreateOrUpdate

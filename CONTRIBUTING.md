@@ -142,7 +142,10 @@ Those objects can persist after Pooler deletion, so a separate application datab
 The progress sampler pooling spec creates a source and a target cluster.
 The `synchronousCommit` Pooler specs create one target cluster behind a transaction-mode Pooler and copy from the process's shared source.
 One of them seeds the schema `e2e_gate_pool_<process>` on that source and drops it when it ends.
-Each dedicated cluster follows `E2E_PG_SOURCE` or `E2E_PG_TARGET` and the fixture StorageClass, but always uses one instance and a 1Gi PVC, independent of scale, stress, and `E2E_CNPG_INSTANCES`.
+The synchronous replication specs need their own target as well, because `synchronous_standby_names` and fencing act on the whole server.
+That target has two instances and `dataDurability: required`, and it drops the fixture node preference so the two instances can spread across nodes.
+One of these specs seeds the schema `e2e_syncrep_<process>` on the shared source and drops it when it ends.
+Each dedicated cluster follows `E2E_PG_SOURCE` or `E2E_PG_TARGET` and the fixture StorageClass, but its size does not depend on scale, stress, or `E2E_CNPG_INSTANCES`: one instance, or two for the synchronous target, with a 1Gi PVC each.
 It requests 100m CPU and 256Mi memory per instance, uses PostgreSQL's default caches, and sizes `max_wal_size` at a fifth of its volume.
 Cleanup registers after each successful create and removes the runner and Poolers before the clusters, checks deletion UIDs, and waits for cluster-labelled pods and UID-owned PVCs to disappear, even with `E2E_KEEP_FIXTURES=true`.
 The progress sampler pooling spec requires dedicated-cluster Pooler ownership and unchanged schema/function signatures and owners in both shared `postgres` databases while pooling and after cleanup; it reads no authentication function bodies or secret values.
@@ -154,6 +157,7 @@ The progress sampler pooling spec requires dedicated-cluster Pooler ownership an
 The pooling fixtures require the E2E runner to have `create`, `get`, and `delete` on `poolers.postgresql.cnpg.io`, in addition to its existing CNPG Cluster, pod, and PVC permissions, including `pods/exec`.
 Dedicated-cluster readiness and cleanup require `get`, `list`, and `delete` on PVCs in `pgcopydb-e2e`.
 Grant those three Pooler verbs through a dedicated Role and RoleBinding in `pgcopydb-e2e` only.
+The synchronous replication specs fence a standby by patching an annotation on their own CNPG Cluster, so the runner needs `patch` on `clusters.postgresql.cnpg.io` in `pgcopydb-e2e`, the verb the fixtures' server-side apply already uses.
 The runner's ServiceAccount and GitOps RBAC live outside this repository (see private ops notes).
 The [chart's RBAC and ServiceAccount values](charts/pgcopydb-operator/README.md#rbac-and-serviceaccounts) configure the manager, which does not manage CNPG fixtures; changing them cannot repair a runner authorization failure.
 
@@ -187,7 +191,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_MIGRATION_TIMEOUT` (`30m`, `2h` under stress) bounds each wait for a Migration to reach a phase, as a Go duration.
   The run's own `go test` timeout still has to cover the seed and the migrations; `task e2e:focus` and `task e2e:focus:unattended` take it as `TIMEOUT=` (default `1h`), and the two chaos tasks take it the same way (default `3h`).
 - `E2E_KEEP_FIXTURES` (unset) keeps the fixture namespaces and shared clusters for iteration when `true`, and the next run reuses them and skips a matching seed.
-  The dedicated pooling clusters are always removed.
+  The dedicated clusters are always removed.
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
 - `E2E_PG_SOURCE` (`17`) is the PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.
 - `E2E_PG_TARGET` (`17`) is the PostgreSQL major for the target.
@@ -230,7 +234,7 @@ When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suit
 The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.
 The class also sets `dataLocality: best-effort`, so the single replica follows its pod to the pod's node and the pairs' I/O spreads over the nodes' disks instead of landing on the disk with the most free space.
 The capacity check reads live cluster state; nothing about the cluster is hardcoded.
-Its requested-storage budget includes the shared pair, work volume, and three additional 1Gi volumes for the dedicated pooling clusters before applying 20% headroom.
+Its requested-storage budget includes the shared pair, work volume, three additional 1Gi volumes for the dedicated pooling clusters, and two 1Gi volumes for the synchronous target before applying 20% headroom.
 On a cluster without Longhorn the fixtures fall back to the default StorageClass and no capacity check runs.
 
 The shared fixtures are placed, not left to the scheduler.

@@ -2533,7 +2533,8 @@ func checkLonghornCapacity() {
 
 // fixtureBytes is the volume space of pairs fixture pairs: source and target
 // once per CNPG instance, each holding a full copy, one work volume per pair,
-// and once per run the dedicated pooling pair and the pooled target.
+// and once per run the dedicated pooling pair, the pooled target and the two
+// instances of the synchronous target.
 func fixtureBytes(pairs int) int64 {
 	var perPair int64
 	for _, size := range []string{srcStorageSize, tgtStorageSize} {
@@ -2543,7 +2544,8 @@ func fixtureBytes(pairs int) int64 {
 	work := resource.MustParse(workVolumeSize)
 	perPair += work.Value()
 	pool := resource.MustParse(progressPoolStorageSize)
-	return perPair*int64(pairs) + 3*pool.Value()
+	syncRep := resource.MustParse(syncRepStorageSize)
+	return perPair*int64(pairs) + 3*pool.Value() + 2*syncRep.Value()
 }
 
 // ensureFollowPrivileges grants the app role the non-superuser follow
@@ -2562,19 +2564,25 @@ func ensureFollowPrivileges() {
 	grantTargetFollowPrivileges(appDatabase(targetCluster))
 }
 
-// grantTargetFollowPrivileges grants the target-side follow prerequisites to
-// the migration role in one database. EXECUTE on catalog functions is
+// grantTargetFollowPrivileges is grantTargetFollowPrivilegesOn for the shared target.
+func grantTargetFollowPrivileges(db string) {
+	GinkgoHelper()
+	grantTargetFollowPrivilegesOn(targetCluster, db)
+}
+
+// grantTargetFollowPrivilegesOn grants the target-side follow prerequisites to
+// the migration role in one database of cluster. EXECUTE on catalog functions is
 // per-database, so a second target database (the chaos fan-out scenario) needs
 // its own pass; the parameter grant is cluster-wide but idempotent and simply
 // rides along.
-func grantTargetFollowPrivileges(db string) {
+func grantTargetFollowPrivilegesOn(cluster, db string) {
 	GinkgoHelper()
-	psqlDB(targetCluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
+	psqlDB(cluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
 		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
 		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
 		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, "+
-		sqlLiteral(appRole(targetCluster))+"); END LOOP; END $$")
-	psqlDB(targetCluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(targetCluster)))
+		sqlLiteral(appRole(cluster))+"); END LOOP; END $$")
+	psqlDB(cluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(cluster)))
 }
 
 // resetSourceReplication drops what a crashed follow run left on the source: rows the

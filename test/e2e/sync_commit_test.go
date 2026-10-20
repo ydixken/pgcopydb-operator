@@ -231,7 +231,8 @@ AND b.pid = ANY(pg_blocking_pids(a.pid)))`)).NotTo(Equal("0"), "no pgcopydb sess
 		release()
 
 		By("expecting the gate to hold the retry on the idle pooled sessions")
-		// The worker pod is gone, so the probe follows a 2 minute log grace.
+		// The pod is gone, so the 2 minute log grace and its rate-limited requeues
+		// create the probe about 330 s after the failure.
 		Eventually(func(g Gomega) {
 			cur := get(g)
 			c := apimeta.FindStatusCondition(cur.Status.Conditions, v1beta1.ConditionRetryHeld)
@@ -251,7 +252,7 @@ AND b.pid = ANY(pg_blocking_pids(a.pid)))`)).NotTo(Equal("0"), "no pgcopydb sess
 				}
 			}
 			g.Expect(found).To(BeTrue(), "no RetryHeld warning event on %s", name)
-		}, 4*time.Minute, 2*time.Second).Should(Succeed())
+		}, 8*time.Minute, 2*time.Second).Should(Succeed())
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, key, cur)).To(Succeed())

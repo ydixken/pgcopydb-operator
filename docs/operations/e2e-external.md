@@ -140,6 +140,9 @@ Every spec runs except these, each of which skips with its reason in the report:
 - Fixture placement (both specs): they read the CloudNativePG instance pods.
 - Keepalive feedback (Manual and Automatic) and early Manual cutover: they pause the source WAL sender with a signal sent inside the database pod.
 - Progress sampler transaction pooling: it creates its own CloudNativePG clusters and a Pooler.
+- `synchronousCommit` on a direct target: it holds its table lock through a psql session inside the source's database pod.
+- `synchronousCommit` through a transaction-mode Pooler (both specs): they create their own CloudNativePG cluster and a Pooler.
+- Synchronous replication on the target (both specs): they create their own two-instance CloudNativePG cluster and fence its standby.
 - All databases (both specs): they create and drop databases server-wide and connect to the `postgres` database.
 - Chaos source-kill and target-kill: they delete the primary pod.
 - Chaos fan-out: it creates and drops a second database on the target server.
