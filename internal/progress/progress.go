@@ -285,8 +285,11 @@ func (p *Poller) logLost(ctx context.Context, job string, lost map[string]string
 		switch {
 		case failed && !p.lost[key]:
 			p.lost[key] = true
-			logf.FromContext(ctx).Info("progress sample lost a side; status keeps its last progress until it answers again",
-				"job", job, "side", side, "reason", reason)
+			msg := "progress sample lost a side; status keeps its last progress until it answers again"
+			if side == syncRepKey {
+				msg = "progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown"
+			}
+			logf.FromContext(ctx).Info(msg, "job", job, "side", side, "reason", reason)
 		case !failed && p.lost[key]:
 			delete(p.lost, key)
 			logf.FromContext(ctx).Info("progress sample side answers again", "job", job, "side", side)

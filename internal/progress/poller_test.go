@@ -459,7 +459,7 @@ func TestSample_LogsLostSidesOnTransition(t *testing.T) {
 		{timedOut, nil},
 		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"target"`}},
 		{healthy, nil},
-		{syncRepTimedOut, []string{`"msg":"progress sample lost a side; status keeps its last progress until it answers again","job":"ns/job","side":"syncrep","reason":"ERROR:  canceling statement due to statement timeout"`}},
+		{syncRepTimedOut, []string{`"msg":"progress sample lost the SyncRep count; until it answers again, CommitsBlocked stays True or turns Unknown","job":"ns/job","side":"syncrep","reason":"ERROR:  canceling statement due to statement timeout"`}},
 		{syncRepTimedOut, nil},
 		{healthy, []string{`"msg":"progress sample side answers again","job":"ns/job","side":"syncrep"`}},
 		{"", []string{`"side":"source","reason":""`, `"side":"target","reason":""`, `"side":"syncrep","reason":""`}},

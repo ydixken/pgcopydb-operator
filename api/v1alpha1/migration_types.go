@@ -610,7 +610,7 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true, ConditionFailed is abnormal-true.
+// are normal-true, ConditionFailed and ConditionCommitsBlocked are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -621,6 +621,7 @@ const (
 	ConditionVerified         = "Verified"
 	ConditionComplete         = "Complete"
 	ConditionFailed           = "Failed"
+	ConditionCommitsBlocked   = "CommitsBlocked"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs

@@ -106,9 +106,9 @@ type LogReader interface {
 	JobLogsTimestamps(ctx context.Context, namespace, jobName string, tailLines int64) ([]byte, error)
 }
 
-// ProgressOps samples a running worker; nil disables sampling (envtest
-// injects a fake). Best effort throughout: a nil sample keeps the previous
-// value and an error never fails the pass.
+// ProgressOps samples a running worker; nil disables sampling (envtest injects a fake).
+// Best effort throughout: a nil sample keeps the previous value, except CommitsBlocked,
+// which reads it as unknown, never "not blocked", and an error never fails the pass.
 type ProgressOps interface {
 	// Sample reads both databases and the clone stage in one exec. Safe with a
 	// live worker, which is what makes the progress fields move during a copy.
@@ -264,6 +264,12 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	if done, ok := jobFinished(job); done {
 		if ok {
+			// Exit 0 means every commit pgcopydb sent returned. No sampler runs on the
+			// finish path, so nothing else would clear a True.
+			if meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCommitsBlocked) != nil {
+				r.setCondition(m, v1beta1.ConditionCommitsBlocked, metav1.ConditionFalse, reasonWorkerSucceeded,
+					"the worker exited 0, so every commit it sent has returned")
+			}
 			if followEnabled(m) {
 				// Worker exit 0 in follow mode means endpos reached and
 				// sequences synced; Complete waits for slot cleanup.
@@ -510,6 +516,7 @@ func (r *MigrationReconciler) observeRunningJob(
 	if got.err != nil {
 		logf.FromContext(ctx).V(1).Info("database sample failed", "job", job.Name, "error", got.err)
 	}
+	r.applyCommitsBlocked(m, got)
 	var counts *progress.RelationCounts
 	if s := got.sample; s != nil {
 		r.applyStage(m, s, got.copySeen)
@@ -627,10 +634,12 @@ func (r *MigrationReconciler) progressSample(ctx context.Context, m *v1beta1.Mig
 			return got
 		}
 	}
+	// The pass can sample twice within one interval, so its samples never confirm a SyncRep wait.
 	at := r.currentTime()
 	s, err := r.Progress.Sample(ctx, m.Namespace, jobName, m.Spec.Clone.AllDatabases)
 	got := sampled{sample: s, err: err, at: at, copySeen: s != nil && s.CopyStarted}
 	recordSizes(m.Namespace, m.Name, s, hint.copyStarted || got.copySeen)
+	metrics.RecordSyncRepWaits(m.Namespace, m.Name, syncRepWait(s))
 	return got
 }
 
