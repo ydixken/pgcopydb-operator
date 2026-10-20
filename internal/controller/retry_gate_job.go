@@ -130,7 +130,9 @@ limit ` + strconv.Itoa(gateSessionLimit) + `;`
 // SIGINT, because no server timeout ends a SyncRep wait (docs/research/measurements.md#statement_timeout-does-not-end-a-syncrep-wait).
 // why filters stderr as progress.serverReason does, and the subshells keep the shell's notice of a killed timeout out of $err.
 func gateScript(allDatabases bool) string {
-	return `set -u
+	// The shell runs as PID 1, which ignores an untrapped TERM.
+	return `trap 'exit 143' TERM
+set -u
 for v in "${GATE_COMMIT_TEST:-}" "${GATE_EXPECT_LOCAL:-}"; do
   case $v in
   0|1) ;;

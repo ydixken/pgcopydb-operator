@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -25,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -261,6 +263,52 @@ func TestRetryGateScript(t *testing.T) {
 			}
 		})
 	}
+
+	// The probe's shell is PID 1, which ignores an untrapped TERM; here an untrapped shell
+	// dies by the signal at once, so only the trap gives a normal exit 143.
+	t.Run("TERM ends the probe once the running check returns", func(t *testing.T) {
+		t.Parallel()
+		state := t.TempDir()
+		var out bytes.Buffer
+		cmd := exec.Command(shellPath, "-c", script)
+		cmd.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"), "STATE="+state, "PGCOPYDB_TARGET_PGURI=tgt",
+			"STUB_CENSUS=sleep 2; "+echo(gateCensusClean), "STUB_SHOW=echo local", "STUB_COMMIT=exit 0",
+			"GATE_COMMIT_TEST=1", "GATE_EXPECT_LOCAL=0")
+		cmd.Stdout, cmd.Stderr = &out, &out
+		start := time.Now()
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			for _, f := range []string{"err", "out"} {
+				_ = os.Remove(fmt.Sprintf("/tmp/pgm-gate-%d.%s", cmd.Process.Pid, f))
+			}
+		})
+		waitUntil(t, "the census never ran", func() bool {
+			calls, _ := os.ReadFile(filepath.Join(state, "calls"))
+			return string(calls) == callsCensus
+		})
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		_ = cmd.Wait()
+		elapsed := time.Since(start)
+		if ps := cmd.ProcessState; !ps.Exited() || ps.ExitCode() != 143 {
+			t.Errorf("the probe ended with %s, want a normal exit 143", ps)
+		}
+		if elapsed >= 4*time.Second {
+			t.Errorf("the probe took %s, want under 4s", elapsed.Round(time.Millisecond))
+		}
+		if calls, _ := os.ReadFile(filepath.Join(state, "calls")); string(calls) != callsCensus {
+			t.Errorf("psql calls = %q, want %q", calls, callsCensus)
+		}
+		if strings.Contains(out.String(), "gate: commit") {
+			t.Errorf("a check ran after TERM:\n%s", out.String())
+		}
+	})
 }
 
 func TestCensusSQL(t *testing.T) {
