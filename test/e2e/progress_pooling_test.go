@@ -153,10 +153,17 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL`, pids[i]))).To(Equal("1"),
 			Expect(got.Counts.TablesTotal).To(BeNumerically(">", 0))
 			Expect(got.Counts.TablesDone).To(BeNumerically(">", 0))
 		}
+		// The dedicated target has no standby, so a parsed syncrep= line counts no waiter.
+		assertNoSyncRepWait := func(got *progress.Sample) {
+			GinkgoHelper()
+			Expect(got.SyncRep).NotTo(BeNil(), "the sample lost the syncrep= line")
+			Expect(got.SyncRep.Waiting).To(BeZero())
+		}
 
 		By("sampling successfully through both single-slot transaction pools")
 		baseline := sample()
 		assertComplete(baseline)
+		assertNoSyncRepWait(baseline)
 		assertRestored()
 		allDB, err := poller.Sample(ctx, nsE2E, job.Name, true)
 		Expect(progressPoolCommandError(err)).NotTo(HaveOccurred(), "all-databases sampler exec failed")
@@ -166,6 +173,7 @@ WHERE pid=%d AND state='idle' AND xact_start IS NULL`, pids[i]))).To(Equal("1"),
 		Expect(*allDB.SourceSize).To(BeNumerically(">", 0))
 		Expect(*allDB.TargetSize).To(BeNumerically(">", 0))
 		Expect(allDB.Counts).To(BeNil())
+		assertNoSyncRepWait(allDB)
 		// Read before assertRestored: its identity query replaces the sampler's COMMIT as the last statement.
 		Expect(psql(clusters[1], fmt.Sprintf(`SELECT count(*) FROM pg_stat_activity
 WHERE pid=%d AND state='idle' AND xact_start IS NULL AND query='COMMIT'`, pids[1]))).To(Equal("1"),
@@ -213,6 +221,8 @@ AND b.pid=ANY(pg_blocking_pids(a.pid)))`, pids[i], progressSamplerMatch))
 					Expect(completed.sample.TargetSize).To(BeNil())
 					Expect(completed.sample.SourceSize).NotTo(BeNil())
 					Expect(*completed.sample.SourceSize).To(BeNumerically(">", 0))
+					// The count runs in its own call before the size query, so the lock leaves it known.
+					assertNoSyncRepWait(completed.sample)
 				}
 				Expect(psql(clusters[i], progressBlockerCount)).To(Equal("1"))
 				assertRestored()

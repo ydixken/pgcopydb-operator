@@ -694,6 +694,7 @@ var _ = Describe("Migration", func() {
 		setSuspend(name, false)
 
 		By("waiting for streaming to recover on a fresh attempt")
+		waitGatePassed(name, 2)
 		m := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseStreaming, v1beta1.PhaseCutoverPending)
 		Expect(m.Status.Attempts).To(Equal(int32(2)))
 
@@ -1043,6 +1044,11 @@ var _ = Describe("Migration", func() {
 		Expect(failureMessage(failed)).NotTo(ContainSubstring("permission denied"),
 			"the budget carrier must fail on a class the classifier ignores")
 
+		By("checking the retry gate counted both attempts and ended its hold on the failure")
+		Expect(failed.Status.ExemptAttempts).To(BeZero())
+		expectConditionReason(Default, failed, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "MigrationFailed")
+		Expect(failureMessage(failed)).To(ContainSubstring("(0 exempt)"))
+
 		By("checking Failed is absorbing: no third attempt within two poll intervals")
 		Consistently(func(g Gomega) {
 			cur := &v1beta1.Migration{}
@@ -1291,6 +1297,23 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.Migration
 			"migration %s/%s at phase %q, attempts %d", ns, name, m.Status.Phase, m.Status.Attempts)
 	}, timeout, time.Second).Should(Succeed())
 	return m
+}
+
+// waitGatePassed waits until the retry gate started attempt, or a later one, with no attempt exempt.
+// A phase wait cannot tell: a resume the gate holds already reads the next attempt's phase.
+func waitGatePassed(name string, attempt int32) {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		m := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		if m.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying(fmt.Sprintf("migration %s failed before attempt %d started: %s",
+				name, attempt, failureMessage(m))).Now()
+		}
+		g.Expect(m.Status.Attempts).To(BeNumerically(">=", attempt), "the retry gate has not started attempt %d", attempt)
+		expectConditionReason(g, m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "GatePassed")
+		g.Expect(m.Status.ExemptAttempts).To(BeZero())
+	}, migrationTimeout, time.Second).Should(Succeed())
 }
 
 func failureMessage(m *v1beta1.Migration) string {
