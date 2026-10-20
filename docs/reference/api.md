@@ -277,7 +277,7 @@ _Appears in:_
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
 | `dryRun` _boolean_ | dryRun runs the preflight checks and stops: no worker Job, no data<br />written, no replication slot, publication, or origin. A passed dry run<br />ends Completed with reason DryRunSucceeded. Grants a superuserSecretRef<br />would apply are reported, not applied. Unrelated to kubectl --dry-run.<br />Immutable: the real run is a separate Migration. |  | Optional: \{\} <br /> |
 | `preflight` _[PreflightOptions](#preflightoptions)_ | preflight tunes optional preflight gates. |  | Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget. Each attempt is a fresh<br />Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,<br />with clone.dropIfExists, starts over when pgcopydb refuses to resume a live<br />migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `backoffLimit` _integer_ | backoffLimit is the operator-level retry budget: at most backoffLimit+1<br />counted attempts. An attempt the retry gate exempts (status.exemptAttempts)<br />does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes<br />via the pgcopydb work directory, or, with clone.dropIfExists, starts over<br />when pgcopydb refuses to resume a live migration's copy. | 3 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished deletes owned Jobs this long after completion. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
@@ -298,6 +298,8 @@ _Appears in:_
 | `phase` _[MigrationPhase](#migrationphase)_ | phase summarizes conditions and worker progress after the controller's<br />initial Pending observation. |  | Enum: [Pending Validating Cloning Finalizing Streaming CutoverPending CuttingOver Verifying Completed Failed Suspended] <br />Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#condition-v1-meta) array_ | conditions represent the current state of the Migration. |  | Optional: \{\} <br /> |
 | `attempts` _integer_ | attempts is the number of worker Jobs created so far. |  | Optional: \{\} <br /> |
+| `exemptAttempts` _integer_ | exemptAttempts counts failed attempts that do not count against backoffLimit:<br />the retry gate found their sessions waiting for synchronous replication. |  | Optional: \{\} <br /> |
+| `retryGate` _[RetryGateStatus](#retrygatestatus)_ | retryGate records a failed attempt while the retry gate decides about the next. |  | Optional: \{\} <br /> |
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
 | `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
@@ -370,6 +372,26 @@ _Appears in:_
 | `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application. |  | Optional: \{\} <br /> |
 | `endpos` _string_ | endpos is the cutover LSN once set. |  | Optional: \{\} <br /> |
 | `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
+
+
+#### RetryGateStatus
+
+
+
+RetryGateStatus is the retry gate's record of one failed attempt.
+
+
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `failedAttempt` _integer_ |  |  |  |
+| `failedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | failedAt is when the attempt's Job failed; the exemption and the verdict<br />deadline are measured from it. |  |  |
+| `failure` _string_ | failure is the attempt's failure text, capped at maxDetailLen; the budget<br />verdict can come much later, after the events expired. |  | Optional: \{\} <br /> |
+| `exemption` _string_ | exemption is the first census's verdict; empty while undecided. |  | Enum: [Exempt Counted] <br />Optional: \{\} <br /> |
+| `cloneDoneSeen` _boolean_ |  |  | Optional: \{\} <br /> |
 
 
 #### RunnerSpec

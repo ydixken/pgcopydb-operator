@@ -568,10 +568,11 @@ type MigrationSpec struct {
 	// +optional
 	Preflight *PreflightOptions `json:"preflight,omitempty"`
 
-	// backoffLimit is the operator-level retry budget. Each attempt is a fresh
-	// Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
-	// with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
-	// migration's copy.
+	// backoffLimit is the operator-level retry budget: at most backoffLimit+1
+	// counted attempts. An attempt the retry gate exempts (status.exemptAttempts)
+	// does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes
+	// via the pgcopydb work directory, or, with clone.dropIfExists, starts over
+	// when pgcopydb refuses to resume a live migration's copy.
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -610,7 +611,8 @@ const (
 )
 
 // Condition type constants. Each is named for what True means: the first eight
-// are normal-true, ConditionFailed and ConditionCommitsBlocked are abnormal-true.
+// are normal-true; ConditionFailed, ConditionCommitsBlocked and ConditionRetryHeld
+// are abnormal-true.
 const (
 	ConditionValidated        = "Validated"
 	ConditionCloneCompleted   = "CloneCompleted"
@@ -622,6 +624,7 @@ const (
 	ConditionComplete         = "Complete"
 	ConditionFailed           = "Failed"
 	ConditionCommitsBlocked   = "CommitsBlocked"
+	ConditionRetryHeld        = "RetryHeld"
 )
 
 // CloneProgress carries how far the base copy has got. While the copy runs
@@ -649,6 +652,30 @@ type CloneProgress struct {
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
+// RetryGateStatus is the retry gate's record of one failed attempt.
+type RetryGateStatus struct {
+	FailedAttempt int32 `json:"failedAttempt"`
+	// failedAt is when the attempt's Job failed; the exemption and the verdict
+	// deadline are measured from it.
+	FailedAt metav1.Time `json:"failedAt"`
+	// failure is the attempt's failure text, capped at maxDetailLen; the budget
+	// verdict can come much later, after the events expired.
+	// +optional
+	Failure string `json:"failure,omitempty"`
+	// exemption is the first census's verdict; empty while undecided.
+	// +kubebuilder:validation:Enum=Exempt;Counted
+	// +optional
+	Exemption string `json:"exemption,omitempty"`
+	// +optional
+	CloneDoneSeen bool `json:"cloneDoneSeen,omitempty"`
+}
+
+// The retry gate's verdicts, as retryGate.exemption spells them.
+const (
+	RetryGateExempt  = "Exempt"
+	RetryGateCounted = "Counted"
+)
+
 // MigrationStatus is the observed state of a Migration.
 type MigrationStatus struct {
 	// observedGeneration is the .metadata.generation last reconciled.
@@ -669,6 +696,15 @@ type MigrationStatus struct {
 	// attempts is the number of worker Jobs created so far.
 	// +optional
 	Attempts int32 `json:"attempts,omitempty"`
+
+	// exemptAttempts counts failed attempts that do not count against backoffLimit:
+	// the retry gate found their sessions waiting for synchronous replication.
+	// +optional
+	ExemptAttempts int32 `json:"exemptAttempts,omitempty"`
+
+	// retryGate records a failed attempt while the retry gate decides about the next.
+	// +optional
+	RetryGate *RetryGateStatus `json:"retryGate,omitempty"`
 
 	// progress reports base-copy progress.
 	// +optional
@@ -704,6 +740,7 @@ type MigrationStatus struct {
 // +kubebuilder:printcolumn:name="Complete",type=string,JSONPath=`.status.conditions[?(@.type=="Complete")].status`
 // +kubebuilder:printcolumn:name="Lag",type=integer,priority=1,JSONPath=`.status.replication.lagBytes`
 // +kubebuilder:printcolumn:name="Attempts",type=integer,JSONPath=`.status.attempts`
+// +kubebuilder:printcolumn:name="Exempt",type=integer,priority=1,JSONPath=`.status.exemptAttempts`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Migration copies PostgreSQL data from a source endpoint to a target,

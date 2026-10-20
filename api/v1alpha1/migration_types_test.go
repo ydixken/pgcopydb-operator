@@ -143,7 +143,12 @@ func fullMigration() *Migration {
 				Type: ConditionStreaming, Status: metav1.ConditionTrue,
 				Reason: "Replaying", Message: "applying", LastTransitionTime: now,
 			}},
-			Attempts: 2,
+			Attempts:       2,
+			ExemptAttempts: 1,
+			RetryGate: &RetryGateStatus{
+				FailedAttempt: 2, FailedAt: now, Failure: "exit 1",
+				Exemption: RetryGateExempt, CloneDoneSeen: true,
+			},
 			Progress: &CloneProgress{
 				TablesTotal: 10, TablesDone: 5, IndexesTotal: 4, IndexesDone: 1,
 				BytesTotal: resource.NewQuantity(1024, resource.BinarySI),
@@ -179,7 +184,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		&m.Spec.Source, m.Spec.Source.TLS, &m.Spec.Clone, m.Spec.Clone.Filters,
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
-		m.Status.Progress, m.Status.Replication,
+		m.Status.Progress, m.Status.Replication, m.Status.RetryGate,
 	}
 	for _, obj := range objs {
 		v := reflect.ValueOf(obj)
@@ -218,6 +223,8 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	*c.Status.Progress.BytesDone = resource.MustParse("9Gi")
 	c.Status.Progress.ObservedAt.Time = time.Unix(1, 0)
 	*c.Status.Replication.LagBytes = 9
+	c.Status.RetryGate.Failure = mutated
+	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")
 	}

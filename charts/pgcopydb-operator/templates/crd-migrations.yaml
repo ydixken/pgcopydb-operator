@@ -35,6 +35,10 @@ spec:
     - jsonPath: .status.attempts
       name: Attempts
       type: integer
+    - jsonPath: .status.exemptAttempts
+      name: Exempt
+      priority: 1
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -73,10 +77,11 @@ spec:
               backoffLimit:
                 default: 3
                 description: |-
-                  backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
-                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
-                  migration's copy.
+                  backoffLimit is the operator-level retry budget: at most backoffLimit+1
+                  counted attempts. An attempt the retry gate exempts (status.exemptAttempts)
+                  does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes
+                  via the pgcopydb work directory, or, with clone.dropIfExists, starts over
+                  when pgcopydb refuses to resume a live migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
@@ -2171,6 +2176,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              exemptAttempts:
+                description: |-
+                  exemptAttempts counts failed attempts that do not count against backoffLimit:
+                  the retry gate found their sessions waiting for synchronous replication.
+                format: int32
+                type: integer
               jobName:
                 description: jobName is the current worker Job.
                 type: string
@@ -2257,6 +2268,37 @@ spec:
                       writeLSN is the walsender's write position, with slot confirmed-flush fallback
                       when the migration role cannot read it.
                     type: string
+                type: object
+              retryGate:
+                description: retryGate records a failed attempt while the retry gate
+                  decides about the next.
+                properties:
+                  cloneDoneSeen:
+                    type: boolean
+                  exemption:
+                    description: exemption is the first census's verdict; empty while
+                      undecided.
+                    enum:
+                    - Exempt
+                    - Counted
+                    type: string
+                  failedAt:
+                    description: |-
+                      failedAt is when the attempt's Job failed; the exemption and the verdict
+                      deadline are measured from it.
+                    format: date-time
+                    type: string
+                  failedAttempt:
+                    format: int32
+                    type: integer
+                  failure:
+                    description: |-
+                      failure is the attempt's failure text, capped at maxDetailLen; the budget
+                      verdict can come much later, after the events expired.
+                    type: string
+                required:
+                - failedAt
+                - failedAttempt
                 type: object
               startedAt:
                 format: date-time
@@ -2309,6 +2351,10 @@ spec:
     - jsonPath: .status.attempts
       name: Attempts
       type: integer
+    - jsonPath: .status.exemptAttempts
+      name: Exempt
+      priority: 1
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -2344,10 +2390,11 @@ spec:
               backoffLimit:
                 default: 3
                 description: |-
-                  backoffLimit is the operator-level retry budget. Each attempt is a fresh
-                  Job (backoffLimit 0). A retry resumes via the pgcopydb work directory, or,
-                  with clone.dropIfExists, starts over when pgcopydb refuses to resume a live
-                  migration's copy.
+                  backoffLimit is the operator-level retry budget: at most backoffLimit+1
+                  counted attempts. An attempt the retry gate exempts (status.exemptAttempts)
+                  does not count. Each attempt is a fresh Job (backoffLimit 0). A retry resumes
+                  via the pgcopydb work directory, or, with clone.dropIfExists, starts over
+                  when pgcopydb refuses to resume a live migration's copy.
                 format: int32
                 minimum: 0
                 type: integer
@@ -4442,6 +4489,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              exemptAttempts:
+                description: |-
+                  exemptAttempts counts failed attempts that do not count against backoffLimit:
+                  the retry gate found their sessions waiting for synchronous replication.
+                format: int32
+                type: integer
               jobName:
                 description: jobName is the current worker Job.
                 type: string
@@ -4528,6 +4581,37 @@ spec:
                       writeLSN is the walsender's write position, with slot confirmed-flush fallback
                       when the migration role cannot read it.
                     type: string
+                type: object
+              retryGate:
+                description: retryGate records a failed attempt while the retry gate
+                  decides about the next.
+                properties:
+                  cloneDoneSeen:
+                    type: boolean
+                  exemption:
+                    description: exemption is the first census's verdict; empty while
+                      undecided.
+                    enum:
+                    - Exempt
+                    - Counted
+                    type: string
+                  failedAt:
+                    description: |-
+                      failedAt is when the attempt's Job failed; the exemption and the verdict
+                      deadline are measured from it.
+                    format: date-time
+                    type: string
+                  failedAttempt:
+                    format: int32
+                    type: integer
+                  failure:
+                    description: |-
+                      failure is the attempt's failure text, capped at maxDetailLen; the budget
+                      verdict can come much later, after the events expired.
+                    type: string
+                required:
+                - failedAt
+                - failedAttempt
                 type: object
               startedAt:
                 format: date-time
