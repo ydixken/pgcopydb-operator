@@ -136,6 +136,15 @@ func (r *MigrationReconciler) judgeProbe(ctx context.Context, m, base *v1beta1.M
 			return ctrl.Result{}, false, err
 		}
 	}
+	// Judged against the current inputs, a failed probe from other inputs would report a
+	// check it never ran. Its census verdict stands: the census does not read the inputs.
+	if !current {
+		if err := r.deleteGateProbe(ctx, job); err != nil {
+			return ctrl.Result{}, false, err
+		}
+		r.probing(m, probing)
+		return held, false, r.updateStatus(ctx, m, base)
+	}
 	reason, msg := result.hold(in, &m.Spec.Target)
 	switch {
 	case readErr != nil:
@@ -148,8 +157,8 @@ func (r *MigrationReconciler) judgeProbe(ctx context.Context, m, base *v1beta1.M
 	}
 	r.setHold(m, reason, msg)
 
-	// Keeping the failed probe paces the loop; a probe from other inputs goes at once.
-	if keep := finishedAt.Add(retryGateInterval).Sub(now); current && keep > 0 {
+	// Keeping the failed probe paces the loop.
+	if keep := finishedAt.Add(retryGateInterval).Sub(now); keep > 0 {
 		held.RequeueAfter = min(keep, retryGateInterval)
 	} else if err := r.deleteGateProbe(ctx, job); err != nil {
 		return ctrl.Result{}, false, err

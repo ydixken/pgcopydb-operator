@@ -354,6 +354,35 @@ var _ = Describe("retry gate", func() {
 		Expect(third.Spec.Template.Spec.Containers[0].Env).To(ContainElement(corev1.EnvVar{Name: "GATE_EXPECT_LOCAL", Value: "1"}))
 	})
 
+	It("never judges a failed probe built from other inputs", func() {
+		const name = "mig-gate-stale-failed"
+		defer removeMigration(ctx, name)
+		var clock time.Time
+		r := start(name, &clock, nil)
+		rec := r.Recorder.(*events.FakeRecorder)
+		failRun1(r, name, "")
+		reconcileAndGet(ctx, r, name)
+		probe(r, name+"-gate-2", false, gateCensusClean, gateBlockedLine)
+		m := reconcileAndGet(ctx, r, name)
+		blocked := expectHold(m, metav1.ConditionTrue, reasonCommitBlocked).Message
+		Expect(fetchJob(ctx, name+"-gate-2").Annotations).To(HaveKeyWithValue(annotationRetryGateInputs, "commit=1,local=0"))
+		drainEvents(rec)
+
+		By("synchronousCommit set while the failed probe is kept")
+		m.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m = reconcileAndGet(ctx, r, name)
+		c := expectHold(m, metav1.ConditionTrue, reasonCommitBlocked)
+		Expect(c.Message).To(Equal(blocked))
+		Expect(c.Message).NotTo(ContainSubstring("SHOW synchronous_commit"))
+		Expect(drainEvents(rec)).NotTo(ContainElement(HavePrefix("Warning RetryHeld")))
+		Expect(jobAbsent(name + "-gate-2")).To(BeTrue())
+
+		reconcileAndGet(ctx, r, name)
+		Expect(fetchJob(ctx, name+"-gate-2").Annotations).To(HaveKeyWithValue(annotationRetryGateInputs, "commit=0,local=1"))
+		Expect(jobAbsent(name + "-run-2")).To(BeTrue())
+	})
+
 	It("holds with ProbeFailed when a fresh completion lacks a pass line", func() {
 		const name = "mig-gate-no-pass-line"
 		defer removeMigration(ctx, name)
