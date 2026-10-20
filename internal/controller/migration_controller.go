@@ -867,9 +867,9 @@ func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1
 			return ctrl.Result{}, err
 		}
 	}
-	// Counted attempts, on the paths that are no failure: the final attempt's Job vanished,
-	// a resume, or a retry pending across an upgrade. A failed attempt waits for its verdict.
-	if !onFailurePath(m) && budgetSpent(m) {
+	// A spent budget fails here after a vanished Job, a resume, a retry pending across an
+	// upgrade, or a failed attempt whose verdict is recorded; an undecided one waits for it.
+	if (!onFailurePath(m) || m.Status.RetryGate.Exemption != "") && budgetSpent(m) {
 		r.failBudget(m)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}

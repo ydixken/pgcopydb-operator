@@ -638,7 +638,7 @@ var _ = Describe("retry gate", func() {
 		Expect(getMigration(name).Status.ExemptAttempts).To(Equal(int32(1)))
 	})
 
-	It("fails at the pass when backoffLimit drops below the counted attempts during a hold", func() {
+	It("fails at the next pass when backoffLimit drops below the counted attempts during a hold", func() {
 		const name = "mig-gate-limit-drop"
 		defer removeMigration(ctx, name)
 		var clock time.Time
@@ -649,11 +649,15 @@ var _ = Describe("retry gate", func() {
 		Expect(reconcileAndGet(ctx, r, name).Status.RetryGate.Exemption).To(Equal(v1beta1.RetryGateCounted))
 
 		setBackoffLimit(name, 0)
-		clock = clock.Add(retryGateInterval)
-		Expect(reconcileAndGet(ctx, r, name).Status.Phase).NotTo(Equal(v1beta1.PhaseFailed))
-		m := passRetryGate(ctx, r, name)
+		m := reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseFailed))
-		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed).Reason).To(Equal("BackoffLimitExceeded"))
+		failed := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed.Reason).To(Equal("BackoffLimitExceeded"))
+		Expect(failed.Message).To(Equal(budgetMessage(m)))
+		expectHold(m, metav1.ConditionFalse, reasonHoldMigrationFailed)
+		clone := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+		Expect(clone.Status).To(Equal(metav1.ConditionFalse))
+		Expect(clone.Reason).To(Equal("CloneFailed"))
 		Expect(jobAbsent(name + "-run-2")).To(BeTrue())
 	})
 
