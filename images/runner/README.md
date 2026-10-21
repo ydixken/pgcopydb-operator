@@ -198,6 +198,6 @@ A `scratch` image assembled from copied binaries would also report near zero, wh
 ## Canary
 
 The build-time canary checks the pinned pgcopydb build, client 18, GNU sed, GNU `timeout`, getopt argument permutation, and the absence of perl after package purging.
-Progress sampling requires GNU `timeout` with `--signal=TERM --kill-after=1s 6s`; custom runners MUST provide this command as well as psql.
+Progress sampling requires GNU `timeout` with `--signal=TERM --kill-after=1s 6s`; custom runners MUST provide this command as well as psql 18 or later, which the preflight's PgBouncer check needs.
 The canary executes that invocation after purging, because a missing timeout command would suppress all database progress readings.
 The base image is pinned by tag and digest, and Renovate bumps both together.

@@ -20,6 +20,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`no replica identity usable for UPDATE/DELETE`](#no-replica-identity-usable-for-updatedelete) | Preflight failures |
 | [`row-level security hides rows of these tables`](#row-level-security-hides-rows) | Preflight failures |
 | [`follow cannot replicate unlogged tables`](#follow-cannot-replicate-unlogged-tables) | Preflight failures |
+| [`... connection goes through a connection pooler such as PgBouncer`](#a-connection-goes-through-pgbouncer) | Preflight failures |
 | [`spec.target.synchronousCommit is local but the target connection reports ...`](#target-synchronous_commit-is-not-local) | Preflight failures |
 | [`must be owner of extension ...`, or `target extension ownership required`](#extension-ownership-failures) | Extension ownership failures |
 | [Slot creation fails with `could not access file "wal2json"`](#wal2json-is-not-installed-on-the-source) | Replication and follow |
@@ -84,7 +85,7 @@ Create a new Migration with the same spec and without `dryRun`.
 ### Phase `Failed` at `Validating`
 
 Phase `Failed` at `Validating` with reason `PreflightFailed` means one preflight check failed.
-The possible causes are connectivity, selected extension availability or ownership, a clone privilege, a source table audit, an all-databases probe, or a follow prerequisite.
+The possible causes are connectivity, PgBouncer in a connection, the target's `synchronous_commit`, the major version gate, selected extension availability or ownership, a clone privilege, a source table audit, an all-databases probe, or a follow prerequisite.
 
 Follow the condition's recovery action, then create a new Migration.
 No worker attempt has started.
@@ -181,14 +182,29 @@ Run `ALTER TABLE ... SET LOGGED` on the source, or leave the tables out with `ex
 The list can name tables outside `includeOnlySchemas`: without `includeOnlyTables`, pgcopydb still publishes them, so leave them out with `excludeTables`.
 Then create a new Migration.
 
+### A connection goes through PgBouncer
+
+`PreflightFailed` with `the <side> connection goes through a connection pooler such as PgBouncer (the server's backend PID is <n>, the connection reported <m>)` means a connection pooler, such as PgBouncer, sits between the runner and PostgreSQL on that side.
+The check compares, on one session, the backend PID in psql 18's `\conninfo` with `pg_backend_pid()`, and PgBouncer issues a cancel key of its own, so the two differ in every pool mode.
+A direct connection or a TCP proxy forwards the server's key; pgpool-II does too, so the check does not detect it.
+
+`cannot tell whether the <side> connection goes through a connection pooler such as PgBouncer` fails as well, because we never read a missing answer as a direct connection.
+The text after it names the reason: the probe connection failed, psql printed no `Backend PID` in `\conninfo`, or `select pg_backend_pid()` returned no PID.
+A custom runner image with psql older than 18 prints no `Backend PID`.
+
+Point that side of the Migration at PostgreSQL directly, for example at the database's primary Service instead of the pooler's.
+With a custom `spec.runner.image`, use one that ships psql 18 or later.
+Then create a new Migration.
+
 ### Target `synchronous_commit` is not local
 
 `PreflightFailed` with `spec.target.synchronousCommit is local but the target connection reports synchronous_commit=<value>` means the libpq startup option did not reach the server.
 A connection pooler or proxy on the way dropped it, as a CloudNativePG Pooler or a PgBouncer with `options` in `ignore_startup_parameters` does.
+Listing `synchronous_commit` in PgBouncer's `track_extra_parameters` does not change that: in session mode, PgBouncer 1.25.2 accepts the option at connect and never sends it to the server.
+Behind PgBouncer, the [PgBouncer check](#a-connection-goes-through-pgbouncer) fails as well.
 A PgBouncer that refuses the option fails the connectivity check instead, and that message names `spec.target.synchronousCommit`.
 
-Connect the target directly, or through a session-mode pooler that passes the option on, such as PgBouncer 1.20 or later with `synchronous_commit` in `track_extra_parameters`.
-Alternatively, leave `synchronousCommit` unset.
+Connect the target directly, or leave `synchronousCommit` unset.
 Then create a new Migration.
 See [Synchronous commit on the target](configuration.md#synchronous-commit-on-the-target).
 
@@ -374,6 +390,7 @@ A session busy in a long statement stays until the statement ends.
 A session in state `idle` holds no transaction, so ending it by hand with `SELECT pg_terminate_backend(<pid>);` is safe.
 We count idle sessions too, because an idle backend can still hold apply's replication origin, and neither `pg_locks` nor `pg_stat_activity` shows that.
 
+Preflight fails a target behind PgBouncer, so a pooler holds a retry here only when preflight did not see it, for example one that joined the target path later.
 Through a transaction-mode pooler, idle server connections keep the name of the last client they served, so connections that last served pgcopydb hold the retry until the pooler closes them.
 PgBouncer does that after `server_idle_timeout`, 600 seconds by default, or after `server_lifetime`, 3600 seconds by default, when the idle timeout is off.
 When every listed session is `idle`, the message adds that a pooler can keep them and that ending them is safe.
@@ -381,7 +398,7 @@ When every listed session is `idle`, the message adds that a pooler can keep the
 `SyncCommitNotLocal` means that with `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`.
 A pooler or proxy on the way dropped the startup option.
 The preflight checks the same, so either the path changed since, or `synchronousCommit` was set after the preflight ran.
-Make the pooler pass the option on, as the [preflight entry](#target-synchronous_commit-is-not-local) describes, or unset `synchronousCommit`; the next probe uses the new setting.
+Unset `synchronousCommit`, which the next probe picks up, or connect the target directly as the [preflight entry](#target-synchronous_commit-is-not-local) describes.
 The target's endpoint fields are immutable, so connecting directly takes a new Migration.
 
 `CommitBlocked` means the test commit, run with `synchronous_commit=on`, waited for a synchronous standby until the probe cancelled it after 5 seconds.
@@ -598,7 +615,7 @@ An array type and a row type show up beside the type or relation they belong to,
 
 A `canceling statement due to lock timeout` in the log is not a privilege problem.
 The Job caps each `ALTER` and its lock wait at 60 seconds, and a session on the target holds a conflicting lock.
-It sets both caps with `SET LOCAL` inside that statement's own transaction, so they also hold behind PgBouncer in session or transaction pooling.
+It sets both caps with `SET LOCAL` inside that statement's own transaction.
 Clear that session, then replay.
 
 ## Workers and cluster objects

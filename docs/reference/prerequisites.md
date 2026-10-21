@@ -14,6 +14,7 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 
 | Requirement                                             | Where  | Needed for       |
 |---------------------------------------------------------|--------|------------------|
+| No PgBouncer between the runner and either endpoint     | both   | every migration  |
 | SELECT on copied tables and sequences, USAGE on schemas | source | every migration  |
 | CREATE on the database, ownership alignment             | target | every migration  |
 | `wal_level = logical`                                   | source | follow           |
@@ -42,6 +43,7 @@ The runner image bundles pgcopydb and the PostgreSQL client tools.
 `pg_dump`/`pg_restore` MUST be at least the target server's major version.
 The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools.
 For a newer target major, set `spec.runner.image` to an image with client tools for that major version.
+A custom runner image MUST ship psql 18 or later, because the [PgBouncer check](#no-pgbouncer-in-the-connection) reads the backend PID that psql 18 added to `\conninfo`, and every preflight fails without it.
 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
@@ -73,7 +75,8 @@ Its first check is connectivity: `select 1` against both endpoints, with each re
 The probe retries up to six times, 10 seconds apart.
 Two consecutive permanent errors, such as a failed password authentication, an unknown role, or an unknown database, end the retries early.
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt runs.
-With `spec.preflight.requireSameMajorVersion: true`, the [major version gate](#major-version-gate) runs right after connectivity.
+The [PgBouncer check](#no-pgbouncer-in-the-connection) runs right after connectivity, on both sides.
+With `spec.preflight.requireSameMajorVersion: true`, the [major version gate](#major-version-gate) runs after it.
 Selected installed source extensions must be installed on the target or have a non-null default version in `pg_available_extensions`.
 With `clone.dropIfExists: true` or `clone.allDatabases: true`, an installed extension also needs a target default version.
 Restore may recreate the extension, or create it in a new database.
@@ -222,6 +225,17 @@ It follows its table, as array types, row types and multirange types follow the 
 > Nothing in the catalog records which objects a restore created.
 > Use a migration role dedicated to the migration when the target database also holds objects that role owns.
 
+### No PgBouncer in the connection
+
+The source and the target connection MUST reach PostgreSQL without PgBouncer in between, in any pool mode.
+Preflight checks both sides on one session each: it compares the backend PID in psql 18's `\conninfo`, which comes from the cancel key the connection received, with `pg_backend_pid()`, and PgBouncer issues a cancel key of its own, so the two differ behind it.
+A direct connection or a TCP proxy such as HAProxy forwards the server's key, so the check passes.
+pgpool-II forwards the server's key as well, so preflight does not detect it.
+The failure names the side and both PIDs; point that side of the Migration at PostgreSQL directly and create a new Migration.
+
+A check that cannot tell fails instead of passing: the probe connection failed, psql printed no backend PID, as psql older than 18 does, or `pg_backend_pid()` returned none.
+The check runs on the plain and the all-databases path.
+
 ### Major version gate
 
 `spec.preflight.requireSameMajorVersion: true` fails preflight when the source and target PostgreSQL major versions differ.
@@ -231,7 +245,6 @@ The gate runs on the plain and the all-databases path, and under `spec.dryRun` i
 
 Preflight asks each live server over the Migration's own source and target connections: `current_setting('server_version_num')`, divided by 10000.
 It does not trust the spec, the image tag, or the `server_version` text, because managed services decorate that text (Debian or Aurora suffixes).
-Through PgBouncer the query runs on the real backend, so it reports the server's version, not the one PgBouncer advertises at connect.
 A side that cannot be read fails the gate rather than passing it.
 A failed gate stops preflight, so no later check runs and the version line is the one reported.
 
@@ -461,7 +474,8 @@ The census tells this Migration's sessions apart from others by role, database, 
   pgcopydb names every connection `pgcopydb[<pid>] <process>`, and a URI parameter overrides that name, so the gate falls back to counting every session of the role.
 
 A shared role lets another Migration's sessions hold this Migration's retries for as long as they run, and can exempt an attempt that should count.
-Through a transaction-mode pooler, a retry can wait until the pooler closes its idle server connections.
+Preflight fails a target behind PgBouncer, so a pooler reaches the retry gate only when preflight did not see it, for example one that joined the target path later.
+Through a transaction-mode pooler, a retry can then wait until the pooler closes its idle server connections.
 A server connection keeps the name of the last client it served, so the census counts it as a leftover.
 PgBouncer closes it after `server_idle_timeout`, or after `server_lifetime` when the idle timeout is off.
 
