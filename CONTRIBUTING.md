@@ -284,7 +284,7 @@ The published-release workflow `e2e.yml` defines its scale independently, defaul
 
 ### How does a parallel run work?
 
-`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value, which is 6.
+`release.yml` and `e2e.yml` run the suite with `--procs` set from their `E2E_PROCS` value.
 `go test` cannot run Ginkgo in parallel, so they use the ginkgo CLI at the version that `go.mod` pins.
 Local tasks such as `task e2e` run one process.
 
