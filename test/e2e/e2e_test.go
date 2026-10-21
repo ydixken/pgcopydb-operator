@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1314,6 +1315,71 @@ func waitGatePassed(name string, attempt int32) {
 		expectConditionReason(g, m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "GatePassed")
 		g.Expect(m.Status.ExemptAttempts).To(BeZero())
 	}, migrationTimeout, time.Second).Should(Succeed())
+}
+
+// waitWorkerRunning waits for the worker pod of attempt, or of a retry that replaced it, to run
+// and returns its name. Windows timed after it pay for no scheduling, and a pod that never gets
+// a node fails here with the scheduler's reason.
+func waitWorkerRunning(name string, attempt int32) string {
+	GinkgoHelper()
+	var pod string
+	Eventually(func(g Gomega) {
+		m := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+		if m.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying(fmt.Sprintf("migration %s failed while waiting for the worker pod of attempt %d: %s",
+				name, attempt, failureMessage(m))).Now()
+		}
+		g.Expect(m.Status.Attempts).To(BeNumerically(">=", attempt),
+			"%s has not started attempt %d, it is at phase %q", name, attempt, m.Status.Phase)
+		job := fmt.Sprintf("%s-run-%d", name, m.Status.Attempts)
+		pods := &corev1.PodList{}
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E),
+			client.MatchingLabels{migrationLabel: name, batchv1.JobNameLabel: job})).To(Succeed())
+		g.Expect(pods.Items).To(HaveLen(1), "no single pod of Job %s yet", job)
+		p := &pods.Items[0]
+		g.Expect(p.Status.Phase).To(Equal(corev1.PodRunning), "pod %s is %s, PodScheduled %s",
+			p.Name, p.Status.Phase, podScheduled(p))
+		pod = p.Name
+	}, workerRunningTimeout, time.Second).Should(Succeed())
+	return pod
+}
+
+// podScheduled reads p's PodScheduled condition: "True" once bound, else "Reason: message",
+// which for a pod without a node is the scheduler's account of why.
+func podScheduled(p *corev1.Pod) string {
+	for _, c := range p.Status.Conditions {
+		if c.Type != corev1.PodScheduled {
+			continue
+		}
+		if c.Status == corev1.ConditionTrue {
+			return string(c.Status)
+		}
+		return c.Reason + ": " + c.Message
+	}
+	return "not reported"
+}
+
+func TestPodScheduled(t *testing.T) {
+	const unschedulable = "0/3 nodes are available: 3 Insufficient memory."
+	for _, tc := range []struct {
+		name string
+		cond []corev1.PodCondition
+		want string
+	}{
+		{"unschedulable", []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+			{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				Message: unschedulable},
+		}, "Unschedulable: " + unschedulable},
+		{"scheduled", []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}}, "True"},
+		{"no condition yet", nil, "not reported"},
+	} {
+		p := &corev1.Pod{Status: corev1.PodStatus{Conditions: tc.cond}}
+		if got := podScheduled(p); got != tc.want {
+			t.Errorf("%s: podScheduled=%q, want %q", tc.name, got, tc.want)
+		}
+	}
 }
 
 func failureMessage(m *v1beta1.Migration) string {

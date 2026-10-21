@@ -23,6 +23,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
@@ -42,6 +43,13 @@ const (
 	// gateLogTail bounds the probe log read; a probe prints at most 14 gate: lines and a shell notice.
 	gateLogTail int64 = 60
 )
+
+// gateProbeCaps bound what the probe takes from spec.runner.resources. Its three psql calls use about
+// 25ms of CPU and peak near 19Mi with a cold page cache in the v0.22.0 runner image (measured 2026-10-21).
+var gateProbeCaps = corev1.ResourceList{
+	corev1.ResourceCPU:    resource.MustParse("100m"),
+	corev1.ResourceMemory: resource.MustParse("128Mi"),
+}
 
 // The RetryHeld reasons.
 const (
@@ -236,12 +244,28 @@ func buildGateJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*bat
 	job.Spec.TTLSecondsAfterFinished = &ttl
 	job.Annotations = map[string]string{annotationRetryGateInputs: in.String()}
 	c := &job.Spec.Template.Spec.Containers[0]
+	c.Resources = capProbeResources(c.Resources)
 	c.Env = append(c.Env,
 		corev1.EnvVar{Name: "PGAPPNAME", Value: gateAppName},
 		corev1.EnvVar{Name: "GATE_COMMIT_TEST", Value: gateFlag(in.CommitTest)},
 		corev1.EnvVar{Name: "GATE_EXPECT_LOCAL", Value: gateFlag(in.ExpectLocal)},
 	)
 	return job, nil
+}
+
+// capProbeResources lowers cpu and memory to gateProbeCaps but keeps every key, which a namespace
+// ResourceQuota or LimitRange may require. It copies first: jobSkeleton passes the Migration's own
+// maps, and a builder must not change the Migration it is given.
+func capProbeResources(r corev1.ResourceRequirements) corev1.ResourceRequirements {
+	out := *r.DeepCopy()
+	for _, list := range []corev1.ResourceList{out.Requests, out.Limits} {
+		for name, ceiling := range gateProbeCaps {
+			if q, ok := list[name]; ok && q.Cmp(ceiling) > 0 {
+				list[name] = ceiling.DeepCopy()
+			}
+		}
+	}
+	return out
 }
 
 // gateResult is what a probe's log says. A nil Census or SyncCommit, or an empty Commit,
