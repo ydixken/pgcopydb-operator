@@ -1327,7 +1327,7 @@ func waitWorkerRunning(name string, attempt int32) string {
 		m := &v1beta1.Migration{}
 		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 		if m.Status.Phase == v1beta1.PhaseFailed {
-			StopTrying(fmt.Sprintf("migration %s failed before attempt %d ran: %s",
+			StopTrying(fmt.Sprintf("migration %s failed while waiting for the worker pod of attempt %d: %s",
 				name, attempt, failureMessage(m))).Now()
 		}
 		g.Expect(m.Status.Attempts).To(BeNumerically(">=", attempt),
@@ -1345,8 +1345,8 @@ func waitWorkerRunning(name string, attempt int32) string {
 	return pod
 }
 
-// podScheduled reads p's PodScheduled condition as "Reason: message", which for a pod
-// without a node is the scheduler's account of why.
+// podScheduled reads p's PodScheduled condition: "True" once bound, else "Reason: message",
+// which for a pod without a node is the scheduler's account of why.
 func podScheduled(p *corev1.Pod) string {
 	for _, c := range p.Status.Conditions {
 		if c.Type != corev1.PodScheduled {

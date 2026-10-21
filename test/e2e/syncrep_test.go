@@ -194,10 +194,9 @@ var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(
 		deletePod(client.MatchingLabels{migrationLabel: name, batchv1.JobNameLabel: name + "-run-1"})
 
 		By("expecting the gate to hold the retry on the waiting sessions and exempt attempt 1")
-		// The pod is gone, so the 2 minute log grace and its rate-limited requeues
-		// create the probe about 330 s after the failure, and it may wait for a node until its deadline.
-		// The budget stays under the operator's 15 min verdictDeadline, after which attempt 1
-		// counts and backoffLimit 0 fails the Migration.
+		// The probe comes about 330 s after the failure (log grace plus rate-limited requeues) and may wait
+		// for a node until its deadline; the budget stays under the 15 min verdictDeadline, past which
+		// attempt 1 counts and backoffLimit 0 fails the Migration.
 		Eventually(func(g Gomega) {
 			cur := get(g)
 			c := expectConditionReason(g, cur, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, "SessionsRemain")

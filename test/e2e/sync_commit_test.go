@@ -51,8 +51,8 @@ var _ = Describe("synchronousCommit on a direct target", func() {
 		resetTargetObjects()
 
 		By("locking " + syncCommitTable + " on the source so the worker's pg_dump waits")
-		// pg_dump locks every table it dumps, so the hold outlasts the worker pod wait
-		// and the SHOW checks after it.
+		// pg_dump locks every table it dumps, so this lock stalls the worker. It outlasts the worker
+		// pod wait and the SHOW checks after it.
 		release := holdLockFor(sourceKey, sourceCluster, syncCommitTable, workerRunningTimeout+2*time.Minute)
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{
