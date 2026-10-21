@@ -87,7 +87,7 @@ func parallelProcs() int {
 }
 
 // Requests for a parallel run, from the peaks of a scale 0.25 run: a runner
-// under 200MiB, a seed Job about 25MiB. The fixture request is 1Gi because six
+// under 200MiB, a seed Job about 25MiB. The fixture request is 1Gi because four
 // pairs must fit, so its caches shrink with it (see suiteCaches).
 const (
 	parallelFixtureCPU, parallelFixtureMemory = "1", "1Gi"

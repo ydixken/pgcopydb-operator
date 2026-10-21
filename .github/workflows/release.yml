@@ -317,8 +317,9 @@ jobs:
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
-          # Ginkgo processes, each with its own CNPG source/target pair.
-          E2E_PROCS: "6"
+          # One CNPG pair per Ginkgo process, about 2.5 GiB of requests each. Six
+          # outgrew the memory free to request on the shared cluster (2026-10-21).
+          E2E_PROCS: "4"
           # The context the runner's kubeconfig must be on. TestE2E skips
           # without it, so the run step refuses an empty one.
           E2E_CONTEXT: ${{ secrets.E2E_EXPECT_CONTEXT }}

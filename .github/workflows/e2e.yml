@@ -86,8 +86,8 @@ jobs:
           E2E_MANAGE_NAMESPACES: "false"
           E2E_STORAGE_CLASS: ${{ vars.E2E_STORAGE_CLASS }}
           E2E_PROMETHEUS_URL: ${{ vars.E2E_PROMETHEUS_URL }}
-          # Ginkgo processes, each with its own CNPG source/target pair.
-          E2E_PROCS: "6"
+          # Ginkgo processes, one CNPG pair each; release.yml says why.
+          E2E_PROCS: "4"
           # The context the runner's kubeconfig must be on. TestE2E skips
           # without it, so the run step refuses an empty one.
           E2E_CONTEXT: ${{ secrets.E2E_EXPECT_CONTEXT }}
