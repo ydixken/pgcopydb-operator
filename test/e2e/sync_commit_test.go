@@ -51,9 +51,9 @@ var _ = Describe("synchronousCommit on a direct target", func() {
 		resetTargetObjects()
 
 		By("locking " + syncCommitTable + " on the source so the worker's pg_dump waits")
-		// pg_dump locks every table it dumps. 10 minutes outlive the preflight and
-		// the pod start of a loaded candidate run, where 140 s may not.
-		release := holdLockFor(sourceKey, sourceCluster, syncCommitTable, 10*time.Minute)
+		// pg_dump locks every table it dumps, so the hold outlasts the worker pod wait
+		// and the SHOW checks after it.
+		release := holdLockFor(sourceKey, sourceCluster, syncCommitTable, workerRunningTimeout+2*time.Minute)
 
 		m := newMigration(name, nsE2E, v1beta1.CloneOptions{
 			DropIfExists: true,
@@ -63,21 +63,7 @@ var _ = Describe("synchronousCommit on a direct target", func() {
 		create(m)
 
 		By("waiting for the attempt-1 worker pod to run")
-		var pod string
-		Eventually(func(g Gomega) {
-			cur := &v1beta1.Migration{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, cur)).To(Succeed())
-			if cur.Status.Phase == v1beta1.PhaseFailed {
-				StopTrying("migration " + name + " failed: " + failureMessage(cur)).Now()
-			}
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), client.MatchingLabels{
-				migrationLabel: name, batchv1.JobNameLabel: name + "-run-1",
-			})).To(Succeed())
-			g.Expect(pods.Items).To(HaveLen(1), "attempt-1 pod not created yet")
-			g.Expect(pods.Items[0].Status.Phase).To(Equal(corev1.PodRunning))
-			pod = pods.Items[0].Name
-		}, 5*time.Minute, time.Second).Should(Succeed())
+		pod := waitWorkerRunning(name, 1)
 
 		By("reading synchronous_commit over the worker's own target and source URIs")
 		// A pod turns Running before its prelude has written the passfile.
@@ -193,8 +179,12 @@ var _ = Describe("synchronousCommit through a transaction-mode Pooler", Ordered,
 		m.Spec.BackoffLimit = 3
 		create(m)
 
+		By("waiting for the attempt-1 worker pod to run")
+		waitWorkerRunning(name, 1)
+
 		By("waiting for the target to run the three COPYs at once")
 		// Three concurrent COPYs hold three server connections, and pg_dump has finished.
+		// The window starts on a running pod: it times the dump, the restore and the COPY start.
 		Eventually(func(g Gomega) {
 			get(g)
 			g.Expect(psql(dedicated.GetName(), fmt.Sprintf(`SELECT count(DISTINCT relid) FROM pg_stat_progress_copy

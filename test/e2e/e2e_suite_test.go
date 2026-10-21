@@ -145,6 +145,10 @@ const (
 	// instead, which is what the budget is really sized for.
 	clusterReadyTimeout = 10 * time.Minute
 
+	// workerRunningTimeout covers a preflight and then a worker pod waiting for a node: on a
+	// release run short of memory they sat Pending about 360 s and 140 s.
+	workerRunningTimeout = 10 * time.Minute
+
 	// seedProfile names the fixture generation; bump it when the schema,
 	// seeded shapes, or seed preparation changes so kept clusters get recreated.
 	baseSeedProfile = "v4"
