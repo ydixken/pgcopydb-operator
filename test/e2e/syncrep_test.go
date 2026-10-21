@@ -51,6 +51,10 @@ const (
 	cnpgFencedInstances = "cnpg.io/fencedInstances"
 	// retryGateAppName is the application_name of the retry gate probe's sessions.
 	retryGateAppName = "pgm-retry-gate"
+	// gateProbeDeadline and retryGateInterval copy the operator's unexported constants: a probe
+	// that never gets a node holds the gate for their sum before its successor starts.
+	gateProbeDeadline = 300 * time.Second
+	retryGateInterval = 30 * time.Second
 )
 
 var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(3), func() {
@@ -191,7 +195,9 @@ var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(
 
 		By("expecting the gate to hold the retry on the waiting sessions and exempt attempt 1")
 		// The pod is gone, so the 2 minute log grace and its rate-limited requeues
-		// create the probe about 330 s after the failure.
+		// create the probe about 330 s after the failure, and it may wait for a node until its deadline.
+		// The budget stays under the operator's 15 min verdictDeadline, after which attempt 1
+		// counts and backoffLimit 0 fails the Migration.
 		Eventually(func(g Gomega) {
 			cur := get(g)
 			c := expectConditionReason(g, cur, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, "SessionsRemain")
@@ -203,7 +209,7 @@ var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(
 			g.Expect(cur.Status.ExemptAttempts).To(Equal(int32(1)))
 			g.Expect(hasEvent(g, cur, corev1.EventTypeWarning, v1beta1.ConditionRetryHeld, "")).
 				To(BeTrue(), "no RetryHeld warning event on %s", name)
-		}, 8*time.Minute, 2*time.Second).Should(Succeed())
+		}, 330*time.Second+gateProbeDeadline+retryGateInterval+time.Minute, 2*time.Second).Should(Succeed())
 
 		By("holding with backoffLimit 0 while the standby stays fenced")
 		// A Counted verdict would have failed the Migration at the census.
@@ -239,15 +245,18 @@ var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(
 			Should(BeZero(), "pgcopydb sessions still wait for synchronous replication")
 
 		By("expecting the gate to pass and attempt 2 to start on the unspent budget")
+		// A probe that held before the unfence stays retryGateInterval. Its successor may wait for
+		// a node until gateProbeDeadline and stay retryGateInterval too, before the next one passes.
 		Eventually(func(g Gomega) {
 			cur := get(g)
+			// First, so a timeout prints why the operator still holds.
+			expectConditionReason(g, cur, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "GatePassed")
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})).
 				To(Succeed())
 			g.Expect(cur.Status.Attempts).To(Equal(int32(2)))
 			g.Expect(cur.Status.ExemptAttempts).To(Equal(int32(1)))
-			expectConditionReason(g, cur, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, "GatePassed")
 			g.Expect(cur.Status.RetryGate).To(BeNil())
-		}, 3*time.Minute, 2*time.Second).Should(Succeed())
+		}, retryGateInterval+gateProbeDeadline+retryGateInterval+2*time.Minute, 2*time.Second).Should(Succeed())
 		// The hold proved the 0 budget. Issue #88 fails a resumed follow attempt about one run in three;
 		// a failed attempt 2 needs a new probe and census before any verdict, so this patch is in time.
 		patchBackoffLimit(name, 5)
@@ -261,6 +270,10 @@ var _ = Describe("Synchronous replication on the target", Ordered, SpecPriority(
 			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-gate-2"}, &batchv1.Job{})
 			return apierrors.IsNotFound(err)
 		}, 2*time.Minute, 2*time.Second).Should(BeTrue(), "the probe Job %s-gate-2 is still there", name)
+
+		By("waiting for the attempt-2 worker pod to run")
+		// The marker's lagConvergeTimeout then pays for streaming only, not for scheduling.
+		waitWorkerRunning(name, 2)
 
 		By("streaming a marker row with the standby back")
 		psql(sourceCluster, asSourceAppRole()+"INSERT INTO "+table+" VALUES (102, 'marker')")
