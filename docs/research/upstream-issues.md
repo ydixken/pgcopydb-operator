@@ -325,6 +325,7 @@ After signaling the process group, wait with a bounded timeout and escalate to S
 ## `clone --resume` re-vacuums already-copied tables and dies on `vacuum_summary`'s `unique(tableoid)` (exit 12 loop)
 
 Status: draft, not filed.
+The fork branch [ydixken/pgcopydb `v0.18-fixes`](https://github.com/ydixken/pgcopydb/tree/v0.18-fixes) carries the fix since `0.18.112.g4c61e97` ([ydixken/pgcopydb#34](https://github.com/ydixken/pgcopydb/pull/34)): the vacuum worker skips a table whose `vacuum_summary` row is done, and `summary_add_vacuum` replaces an unfinished row.
 
 ### Environment
 
