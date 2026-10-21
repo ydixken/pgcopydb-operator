@@ -93,6 +93,7 @@ spec:
                       allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
                       Both connections must name a maintenance database and use superuser roles.
                       Filters and skips apply to every database; job counts are global across databases.
+                      Immutable: retries and compares reuse the work directory this mode lays out.
                     type: boolean
                   dropIfExists:
                     description: |-
@@ -2105,6 +2106,9 @@ spec:
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
+            - message: 'allDatabases is immutable: create a separate Migration'
+              rule: (has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases)
+                == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2406,6 +2410,7 @@ spec:
                       allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
                       Both connections must name a maintenance database and use superuser roles.
                       Filters and skips apply to every database; job counts are global across databases.
+                      Immutable: retries and compares reuse the work directory this mode lays out.
                     type: boolean
                   dropIfExists:
                     description: |-
@@ -4418,6 +4423,9 @@ spec:
             - message: 'dryRun is immutable: create a separate Migration for the real
                 run'
               rule: (has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)
+            - message: 'allDatabases is immutable: create a separate Migration'
+              rule: (has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases)
+                == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.

@@ -180,6 +180,7 @@ type CloneOptions struct {
 	// allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.
 	// Both connections must name a maintenance database and use superuser roles.
 	// Filters and skips apply to every database; job counts are global across databases.
+	// Immutable: retries and compares reuse the work directory this mode lays out.
 	// +optional
 	AllDatabases bool `json:"allDatabases,omitempty"`
 
@@ -510,6 +511,7 @@ type ReplicationStatus struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="allDatabases cannot be combined with follow.enabled: pgcopydb ignores follow in this mode"
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
 // +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
+// +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases) == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)",message="allDatabases is immutable: create a separate Migration"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
