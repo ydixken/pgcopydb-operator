@@ -259,18 +259,20 @@ AND b.pid = ANY(pg_blocking_pids(a.pid)))`)).NotTo(Equal("0"), "no pgcopydb sess
 		Expect(strings.Fields(ended)).To(HaveEach(Equal("t")), "every pgcopydb-named session must end")
 
 		By("expecting the gate to pass and attempt 2 to start")
+		// As in the syncrep pass: the held probe stays, and its successor may wait for a node until its deadline.
 		Eventually(func(g Gomega) {
 			cur := get(g)
-			g.Expect(cur.Status.Attempts).To(Equal(int32(2)))
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})).
-				To(Succeed())
+			// First, so a timeout prints why the operator still holds.
 			c := apimeta.FindStatusCondition(cur.Status.Conditions, v1beta1.ConditionRetryHeld)
 			g.Expect(c).NotTo(BeNil(), "RetryHeld is not set")
 			g.Expect(c.Status).To(Equal(metav1.ConditionFalse), "RetryHeld is %s/%s: %s", c.Status, c.Reason, c.Message)
 			g.Expect(c.Reason).To(Equal("GatePassed"), c.Message)
+			g.Expect(cur.Status.Attempts).To(Equal(int32(2)))
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-run-2"}, &batchv1.Job{})).
+				To(Succeed())
 			g.Expect(cur.Status.ExemptAttempts).To(BeZero())
 			g.Expect(cur.Status.RetryGate).To(BeNil())
-		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		}, retryGateInterval+gateProbeDeadline+retryGateInterval+2*time.Minute, 2*time.Second).Should(Succeed())
 		// pgcopydb through a transaction pooler is unproven, so the spec ends at the gate.
 	})
 })
