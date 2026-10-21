@@ -42,6 +42,7 @@ Individual checks appear as `ok:` log lines.
 4. Partial.
    Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
    With [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target), it also checks that the target connection reports `synchronous_commit=local`.
+   It fails when the source or target connection goes through PgBouncer, and it does not detect pgpool-II.
    A migration role without `TEMPORARY` on the target database only raises a `PreflightWarning` event, but the retry gate's test commit needs that grant, so a retry that runs the test holds without it.
    See the [operator prerequisites](reference/prerequisites.md) for each check.
    Preflight does not audit TLS policy, every ownership and publication right, or whether the target schemas are empty.

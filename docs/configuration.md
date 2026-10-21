@@ -282,8 +282,8 @@ An unconfigured PgBouncer refuses the connection, and the preflight's connectivi
 A pooler that ignores the parameter, as a CloudNativePG Pooler does, connects without it.
 The preflight then reads `show synchronous_commit` over the worker's own target URI and fails on any value but `local`.
 The retry gate repeats that check before every retry and holds the retry with reason `SyncCommitNotLocal` while it fails.
-The field is supported on direct connections and session-mode poolers only.
-Through a transaction-mode pooler, one check samples one server connection and cannot vouch for the ones the worker gets later.
+The field is supported on targets reached directly or through a TCP proxy, not through a connection pooler.
+The preflight fails a target behind PgBouncer in any pool mode, with or without the field; see [preflight](operations/live-migration.md#preflight).
 
 > [!warning]
 > A target failover during the copy can lose recently copied data on the new primary.

@@ -199,16 +199,30 @@ jobs:
             echo "GOMODCACHE=/cache/go-mod"
             echo "GOLANGCI_LINT_CACHE=/cache/golangci"
           } >> "$GITHUB_ENV"
-      # The runner image carries these; a hosted runner, which is what a fork's
-      # pull request gets, does not. The check makes this a no-op on ours.
-      # psql is the one this suite needs: TestCompareDataQuery fails, not skips,
-      # when PGCOPYDB_TEST_PGURI is set and psql is missing.
-      - name: Install make and psql, which the runner image lacks
+      # The runner image carries these; a hosted runner, which is what a fork's pull request
+      # gets, does not. The check makes this a no-op on ours. With PGCOPYDB_TEST_PGURI
+      # set, TestCompareDataQuery fails without psql and TestPreflightSyncCommit_Server
+      # fails with a psql older than 18, whose \conninfo has no Backend PID.
+      - name: Install make and psql 18, which the runner image lacks
         run: |
-          if ! command -v make >/dev/null || ! command -v psql >/dev/null; then
+          if ! command -v make >/dev/null; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq make postgresql-client
+            sudo apt-get install -y -qq make
           fi
+          psql_major() {
+            v=$(psql --version 2>/dev/null | sed -n 's/^psql (PostgreSQL) \([0-9]*\).*/\1/p')
+            echo "${v:-0}"
+          }
+          if [ "$(psql_major)" -lt 18 ]; then
+            codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+            sudo install -d -m 0755 /etc/apt/keyrings
+            sudo curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc
+            echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-18
+          fi
+          [ "$(psql_major)" -ge 18 ] || { psql --version; echo "psql 18 or later is required" >&2; exit 1; }
       - name: Unit and envtest suites
         # make test downloads the envtest control-plane binaries itself.
         # The throwaway service above holds no data; the query only selects.

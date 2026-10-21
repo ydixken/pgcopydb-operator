@@ -105,7 +105,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   The `pg_restore` sessions, the session in which `pgcopydb compare` reads the target's catalogs, and any session that reaches the target through a connection pooler do not get that bound, so they can stay for longer.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
 - The [preflight](live-migration.md#preflight) stops some failures before the first attempt.
-  It checks connectivity, credentials, and target clone privileges on every migration, and the follow prerequisites on live ones.
+  It checks connectivity, credentials, that no PgBouncer sits in either connection, and target clone privileges on every migration, and the follow prerequisites on live ones.
 - Permission errors end the Migration as `PermissionDenied`, on the attempt whose log tail shows one as the terminal cause.
   Permission matching is best-effort, so a missed match keeps normal retries.
 - A full work volume ends the Migration as `DiskFull` the same way.

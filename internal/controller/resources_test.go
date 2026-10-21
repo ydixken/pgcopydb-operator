@@ -854,6 +854,7 @@ for a in "$@"; do
   case "$a" in -f) q=$(cat) ;; list=*) list=${a#list=} ;; esac
 done
 case "$q" in
+  '\conninfo') printf 'Backend PID|4711\n4711\n' ;;
   "$PREFLIGHT_SOURCE_EXTENSION_QUERY")
     [ "$1" = src ] && [ "$list" = '{"include":[],"exclude":[]}' ] || exit 1
     printf '[]' ;;
@@ -1461,6 +1462,17 @@ apply() {
   exit 0
 }
 case "$q" in
+  '\conninfo')
+    # The PID query must share this session, and psql translates the label without LC_ALL=C.
+    [ "$7" = -c ] && [ "$8" = 'select pg_backend_pid()' ] || exit 2
+    label='Backend PID'; [ "${LC_ALL-}" = C ] || label='Backend-PID'
+    case "$uri" in src*) key=${PSQL_KEY_PID_SOURCE-4711} ;; *) key=${PSQL_KEY_PID_TARGET-4711} ;; esac
+    case "$key" in
+      fail) echo 'psql: error: connection to server failed' >&2; exit 2 ;;
+      none) printf 'Database|app\n4711\n' ;;
+      nopid) printf 'Database|app\n%s|4711\n' "$label" ;;
+      *) printf 'Database|app\n%s|%s\n4711\n' "$label" "$key" ;;
+    esac ;;
   'show synchronous_commit') [ "${PSQL_SYNC_COMMIT-}" = fail ] && exit 2; echo "${PSQL_SYNC_COMMIT:-on}" ;;
   *"'TEMP'"*) [ "${PSQL_TEMP-}" = fail ] && exit 2; echo "${PSQL_TEMP:-1}" ;;
   *wal_sender_timeout*)
@@ -1516,7 +1528,9 @@ esac
 		t.Helper()
 		state := t.TempDir()
 		cmd := exec.Command(shellPath, "-c", script)
-		cmd.Env = append(os.Environ(),
+		// The runner image exports no LC_ALL, so only the probe's own LC_ALL=C may reach psql.
+		env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "LC_ALL=") })
+		cmd.Env = append(env,
 			"PATH="+dir+":"+os.Getenv("PATH"),
 			"PGCOPYDB_SOURCE_PGURI=src",
 			"PGCOPYDB_TARGET_PGURI=tgt",
@@ -1777,6 +1791,96 @@ func TestPreflightScript_Connectivity(t *testing.T) {
 		// a warning must not lose it.
 		if !strings.Contains(out, warn) {
 			t.Fatalf("the warning from a successful connect never reached the log:\n%s", out)
+		}
+	})
+}
+
+const (
+	poolerSourceCall = `pooler_check source "$PGCOPYDB_SOURCE_PGURI"`
+	poolerTargetCall = `pooler_check target "$PGCOPYDB_TARGET_PGURI"`
+	pooledKeyPID     = "8403139"
+)
+
+func poolerOK(side conn.Side) string {
+	return "ok: no PgBouncer in the " + string(side) + " connection"
+}
+
+// poolerNote is the verdict for a side whose key PID differs from the stub's
+// pg_backend_pid() answer, 4711.
+func poolerNote(side conn.Side, key string) string {
+	return "preflight: the " + string(side) + " connection goes through a connection pooler such as PgBouncer" +
+		" (the server's backend PID is 4711, the connection reported " + key + "); connect directly to PostgreSQL"
+}
+
+func poolerUnknown(side conn.Side, why string) string {
+	return "preflight: cannot tell whether the " + string(side) + " connection goes through a connection pooler such as PgBouncer: " + why
+}
+
+// TestPreflightScript_Pooler drives the pooler check under the follow stub: a key
+// PID other than pg_backend_pid() fails its side by name, a probe that cannot tell
+// fails closed, and either way the checks through the extension block still report.
+func TestPreflightScript_Pooler(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(passwordMigration())
+
+	t.Run("a direct connection passes on both sides", func(t *testing.T) {
+		out, code, _ := run(t, script, "")
+		if code != 0 || !strings.Contains(out, poolerOK(conn.Source)) || !strings.Contains(out, poolerOK(conn.Target)) {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
+	for _, tc := range []struct {
+		name, env   string
+		side, other conn.Side
+		want        string
+	}{
+		{"a pooled source fails by name", "PSQL_KEY_PID_SOURCE=" + pooledKeyPID, conn.Source, conn.Target,
+			poolerNote(conn.Source, pooledKeyPID)},
+		{"a pooled target fails by name", "PSQL_KEY_PID_TARGET=" + pooledKeyPID, conn.Target, conn.Source,
+			poolerNote(conn.Target, pooledKeyPID)},
+		{"a negative key PID reads as pooled", "PSQL_KEY_PID_TARGET=-1087345872", conn.Target, conn.Source,
+			poolerNote(conn.Target, "-1087345872")},
+		{"a missing Backend PID fails closed", "PSQL_KEY_PID_SOURCE=none", conn.Source, conn.Target,
+			poolerUnknown(conn.Source, `psql printed no Backend PID in \conninfo; the runner image needs psql 18 or later`)},
+		{"a non-integer Backend PID fails closed", "PSQL_KEY_PID_TARGET=12a", conn.Target, conn.Source,
+			poolerUnknown(conn.Target, `psql printed no Backend PID in \conninfo; the runner image needs psql 18 or later`)},
+		{"a failed probe connection fails closed", "PSQL_KEY_PID_TARGET=fail", conn.Target, conn.Source,
+			poolerUnknown(conn.Target, "the probe connection failed")},
+		{"a missing pg_backend_pid() fails closed", "PSQL_KEY_PID_SOURCE=nopid", conn.Source, conn.Target,
+			poolerUnknown(conn.Source, "select pg_backend_pid() returned no PID")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, _ := run(t, script, "", tc.env)
+			if code != 1 || !strings.Contains(out, tc.want) {
+				t.Fatalf("code=%d, want 1 and %q:\n%s", code, tc.want, out)
+			}
+			if strings.Contains(out, poolerOK(tc.side)) || !strings.Contains(out, poolerOK(tc.other)) {
+				t.Fatalf("only the %s side may lose its ok line:\n%s", tc.side, out)
+			}
+			// A fail-closed branch that falls through would add a second verdict for the side.
+			if n := strings.Count(out, "pooler such as PgBouncer"); n != 1 {
+				t.Fatalf("want one pooler verdict, got %d:\n%s", n, out)
+			}
+			// The extension block is the first to stop on an earlier note.
+			if !strings.Contains(out, extensionAvailableOK) {
+				t.Fatalf("the pooler note must not stop the checks through the extension block:\n%s", out)
+			}
+		})
+	}
+	t.Run("a pooled target still reaches the SHOW check", func(t *testing.T) {
+		out, code, _ := run(t, preflightScriptFor(syncCommitMigration(false)), "",
+			"PSQL_KEY_PID_TARGET="+pooledKeyPID, "PSQL_SYNC_COMMIT=on")
+		if code != 1 {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		mustPrecede(t, out, poolerNote(conn.Target, pooledKeyPID), syncCommitNote("on"))
+	})
+	t.Run("every path runs it after connectivity and before the SHOW check", func(t *testing.T) {
+		for _, all := range []bool{false, true} {
+			s := preflightScriptFor(syncCommitMigration(all))
+			mustPrecede(t, s, connectedTarget, poolerSourceCall)
+			mustPrecede(t, s, poolerSourceCall, poolerTargetCall)
+			mustPrecede(t, s, poolerTargetCall, showSyncCommit)
 		}
 	})
 }
@@ -2440,6 +2544,7 @@ case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ "$uri" = tgt ] && [ -f "${STATE_DIR:?}/target-down" ] && exit 2
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
+  '\conninfo') printf 'Backend PID|4711\n4711\n' ;;
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
   *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;

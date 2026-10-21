@@ -34,21 +34,27 @@ Each success prints an `ok:` line in the Job log.
    A failover blip does not fail the Migration.
    A permanent connection error ends the retries once the next probe repeats it: a wrong password, an unknown role, an unknown database.
    The server's error line lands in the condition message.
-   It takes two in a row because a pooler with `auth_query` reports an authentication failure of its own when its backend blips.
-2. With [`spec.target.synchronousCommit: local`](../configuration.md#synchronous-commit-on-the-target), `show synchronous_commit` over the worker's own target URI must read `local`.
+   It takes two in a row because a managed proxy can report an authentication failure of its own when its backend blips.
+2. No PgBouncer in the source or target connection.
+   On one session per side, the Job compares the backend PID in psql 18's `\conninfo`, which comes from the cancel key the connection received, with `pg_backend_pid()`: PgBouncer issues a cancel key of its own, so the two differ behind it in every pool mode.
+   A direct connection or a TCP proxy forwards the server's key, so the check passes.
+   pgpool-II forwards it as well, so this check does not detect it.
+   Point the Migration at PostgreSQL directly; [troubleshooting](../troubleshooting.md#a-connection-goes-through-pgbouncer) explains the messages.
+   A check that cannot tell fails too, for example on a custom runner image with psql older than 18.
+3. With [`spec.target.synchronousCommit: local`](../configuration.md#synchronous-commit-on-the-target), `show synchronous_commit` over the worker's own target URI must read `local`.
    A connection pooler or proxy that dropped the libpq startup option fails this check.
-3. With `spec.preflight.requireSameMajorVersion: true`, the source and target PostgreSQL major versions must match.
+4. With `spec.preflight.requireSameMajorVersion: true`, the source and target PostgreSQL major versions must match.
    See [prerequisites](../reference/prerequisites.md#major-version-gate).
-4. The superuser connection on each side that sets a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref).
+5. The superuser connection on each side that sets a [`superuserSecretRef`](../reference/prerequisites.md#superuser-remediation-superusersecretref).
    The Job probes it the same way.
    If the role does not have `rolsuper`, the Job logs a `warn:` line and remediation proceeds.
    Managed-Postgres admin roles hold the grant rights without the attribute.
-5. The selected source extensions, which must be installed or default-available on the target.
+6. The selected source extensions, which must be installed or default-available on the target.
    With `spec.clone.dropIfExists`, their default versions must be installable.
    To bypass this gate, set `spec.clone.skip` to include `extensions`.
-6. The clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe.
+7. The clone privileges on the target: CREATE on the database, CREATE on the schemas the restore targets, and the db-properties ownership probe.
    See [prerequisites](../reference/prerequisites.md#base-clone-every-migration) for the details.
-7. The follow prerequisites: `wal_level`, free replication-slot headroom, `wal_sender_timeout` (a warning only), the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
+8. The follow prerequisites: `wal_level`, free replication-slot headroom, `wal_sender_timeout` (a warning only), the source role's `REPLICATION` attribute, `EXECUTE` on the target's `pg_replication_origin_*` functions, the `session_replication_role` SET privilege, and the replica-identity audit of every user table.
    Two of these lose data and raise no error.
 
 The `Validated` and `Failed` condition messages name the exact `GRANT` or setting that fixes a failed rights check.
