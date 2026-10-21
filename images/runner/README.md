@@ -135,7 +135,8 @@ The PR head `56b3998`, whose tree the merge commit shares, passed [Run Tests `38
 A resume truncated every split table and then skipped the parts an earlier attempt had recorded done, so the retry exited 0 without the rows of those parts.
 A resume now keeps a split table whose parts were all copied and builds its indexes once.
 When only some parts were copied, it truncates the table and copies every part again.
-It runs a table's `VACUUM` at most once across resumes, where a table without indexes that a killed run had already vacuumed failed every later resume with exit code 12.
+It runs a table's `VACUUM` at most once across resumes, where a table without indexes whose `VACUUM` a killed run had started failed the next resume with exit code 12.
+If the failed one had built every index, the resume after it skipped the data phase and exited 0, so a table whose `VACUUM` the killed run had not finished was never analyzed.
 It also drops the index rows a killed run left unfinished, so a resume in a fresh pod, where process IDs start over, no longer refuses an index that one of those rows names.
 The `--all-databases` resume never truncated split tables and is unchanged: it copies again only the parts not recorded done, and copies a part twice when the run died between its `COPY` and that record.
 The PR head `4c2e8e3`, whose tree the merge commit shares, passed [Run Tests `39636487051`](https://github.com/ydixken/pgcopydb/actions/runs/39636487051) and [Nightly Tests `39636520942`](https://github.com/ydixken/pgcopydb/actions/runs/39636520942).

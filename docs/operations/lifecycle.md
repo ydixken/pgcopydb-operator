@@ -86,7 +86,10 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   Without `clone.allDatabases`, when only some parts of a split table were copied, the retry copies every part again, and when all were, it keeps the table.
   `--not-consistent` is needed because the failed attempt's snapshot died with its process.
   The retry copies the remaining tables under a new snapshot.
-  Runners older than `0.18.112.g4c61e97` can lose rows of a split table on a resume without `clone.allDatabases`, or fail every retry on a table without indexes that was already vacuumed; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
+  Runners older than `0.18.112.g4c61e97` can lose rows of a split table on a resume without `clone.allDatabases`; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
+  They also fail a retry with exit code 12 on a table without indexes whose `VACUUM` an earlier attempt had started.
+  If the failed retry built every index, the retry after it skips the data phase and exits 0.
+  A table whose `VACUUM` had not finished then has no planner statistics until you run `ANALYZE` on it.
 - A live migration cannot resume its table copy that way once its replication slot exists.
   The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.
