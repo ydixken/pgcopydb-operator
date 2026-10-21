@@ -240,7 +240,8 @@ func TestBuildJob_WorkerDefaultDoesNotLeakToOtherJobs(t *testing.T) {
 		}
 	}
 
-	// What the Migration does ask for still reaches every Job.
+	// What the Migration does ask for still reaches every Job; only the gate probe caps cpu and
+	// memory (TestBuildGateJobResources).
 	m.Spec.Runner.Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
 	}
