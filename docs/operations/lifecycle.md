@@ -141,6 +141,7 @@ The gate checks two things in order:
 2. A probe Job, `<name>-gate-<n>` for attempt n, passes.
    It connects as the migration role over the worker's own target connection.
    Its pod takes at most 100m CPU and 128Mi memory from `spec.runner.resources`.
+   A namespace LimitRange with a `min` above these values rejects the probe pod, and once the probe Job reaches its deadline the gate holds with `ProbeFailed`.
 
 The probe runs up to three checks:
 
