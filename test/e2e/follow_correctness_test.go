@@ -232,36 +232,52 @@ func startPSQLScript(cluster, script string, timeout time.Duration) <-chan error
 }
 
 // holdTargetLock locks table on the target from a background session until
-// the returned release runs. The spec's cleanup releases it as well, before
-// the stamped schemas are dropped.
+// the returned release runs.
 func holdTargetLock(table string) func() {
 	GinkgoHelper()
 	const session = "e2e_apply_hold"
-	done := startPSQLScript(targetCluster, "SET application_name = '"+session+"';\nBEGIN;\n"+
-		"LOCK TABLE "+table+" IN ACCESS EXCLUSIVE MODE;\nSELECT pg_sleep(1200);\n", 25*time.Minute)
-	held := true
+	return holdOnTarget(session, "LOCK TABLE "+table+" IN ACCESS EXCLUSIVE MODE",
+		"SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"+
+			" WHERE a.application_name = '"+session+"' AND l.relation = '"+table+"'::regclass AND l.granted")
+}
+
+// holdOnTarget takes lock in a background target session named session and returns once held prints 1.
+// The returned release terminates that session, which frees the lock, and waits for its psql to exit.
+// The spec's cleanup calls release as well, before the stamped schemas are dropped.
+func holdOnTarget(session, lock, held string) func() {
+	GinkgoHelper()
+	done := startPSQLScript(targetCluster, holdSQL(session, lock), 25*time.Minute)
+	holding := true
 	release := func() {
-		if !held {
+		if !holding {
 			return
 		}
-		held = false
-		psql(targetCluster, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity"+
-			" WHERE application_name = '"+session+"'")
+		holding = false
+		psql(targetCluster, endSessionSQL(session))
 		Eventually(done, time.Minute).Should(Receive(), "the lock session did not end")
 	}
 	DeferCleanup(release)
 	Eventually(func(g Gomega) {
 		select {
 		case err := <-done:
-			held = false
+			holding = false
 			StopTrying(fmt.Sprintf("the lock session ended before it held the lock: %v", err)).Now()
 		default:
 		}
-		g.Expect(psql(targetCluster, "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"+
-			" WHERE a.application_name = '"+session+"' AND l.relation = '"+table+"'::regclass AND l.granted")).
-			To(Equal("1"))
+		g.Expect(psql(targetCluster, held)).To(Equal("1"))
 	}, time.Minute, 250*time.Millisecond).Should(Succeed())
 	return release
+}
+
+// holdSQL keeps lock in an open transaction of a session named session for up
+// to 20 minutes; endSessionSQL ends it sooner.
+func holdSQL(session, lock string) string {
+	return "SET application_name = '" + session + "';\nBEGIN;\n" + lock + ";\nSELECT pg_sleep(1200);\n"
+}
+
+// endSessionSQL ends every session named session and prints how many it ended.
+func endSessionSQL(session string) string {
+	return "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = '" + session + "'"
 }
 
 // waitOnTarget waits until query returns want on the target, and stops early

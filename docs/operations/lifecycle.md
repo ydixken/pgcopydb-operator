@@ -83,6 +83,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   A fresh Migration has no prior state of its own, so that state is foreign.
 - Retries run with `--resume --not-consistent`.
   The retry skips tables and indexes already recorded done in pgcopydb's catalogs, and restarts interrupted copies.
+  Without `clone.allDatabases`, when only some parts of a split table were copied, the retry copies every part again, and when all were, it keeps the table.
   `--not-consistent` is needed because the failed attempt's snapshot died with its process.
   The retry copies the remaining tables under a new snapshot.
   Runners older than `0.18.112.g4c61e97` can lose rows of a split table on a resume without `clone.allDatabases`, or fail every retry on a table without indexes that was already vacuumed; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
