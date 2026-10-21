@@ -153,10 +153,10 @@ A pass whose source row carried no confirmed position keeps the earlier replay a
 Apply backlog reads both operands from the same walsender row, so the order that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 
-The bundled runner, pgcopydb `0.18.109.gbec4ebb`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
+The bundled runner, pgcopydb `0.18.112.g4c61e97`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
 On a target with synchronous standbys, each of those commits waits for a standby, whatever [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target) says, and the `CommitsBlocked` condition reports a wait that lasts.
 It writes that progress at most once a second, so the replay gauge can trail the target replication origin by about a second.
-It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/bec4ebbb272c36335ab423238fe0010ae47caade/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
+It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/4c61e97f2630ee4cf5f5fe49e54ff45b755e7498/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
 That feedback does not move the target replication origin or the sentinel's data replay cursor; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 An advancing replay gauge on an idle publication therefore does not imply new target rows or measure applied-data throughput.
 Other supported runner versions differ; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
