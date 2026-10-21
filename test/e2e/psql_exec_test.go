@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -107,6 +108,7 @@ const (
 	psqlExecHelperStderrEnv = "PSQL_EXEC_HELPER_STDERR"
 	psqlExecHelperBlockEnv  = "PSQL_EXEC_HELPER_BLOCK"
 	psqlExecHelperExitEnv   = "PSQL_EXEC_HELPER_EXIT"
+	psqlExecHelperStdinEnv  = "PSQL_EXEC_HELPER_STDIN"
 	psqlExecTestTimeout     = 1_000 * time.Millisecond
 	psqlExecKubectl         = "kubectl"
 	psqlExecTestPod         = "source-1"
@@ -118,6 +120,8 @@ type psqlExecResult struct {
 	stderr   string
 	block    bool
 	exitCode int
+	// stdinPath, if set, receives what the child read on stdin.
+	stdinPath string
 }
 
 type psqlExecCall struct {
@@ -160,6 +164,7 @@ func (s *psqlExecState) command(ctx context.Context, name string, args ...string
 		psqlExecHelperStderrEnv+"="+result.stderr,
 		psqlExecHelperBlockEnv+"="+strconv.FormatBool(result.block),
 		psqlExecHelperExitEnv+"="+strconv.Itoa(result.exitCode),
+		psqlExecHelperStdinEnv+"="+result.stdinPath,
 	)
 	s.calls = append(s.calls, psqlExecCall{name: name, args: append([]string(nil), args...)})
 	s.contexts = append(s.contexts, ctx)
@@ -178,6 +183,15 @@ func (s *psqlExecState) snapshot() ([]psqlExecCall, []context.Context, []*exec.C
 func TestPSQLExecHelper(t *testing.T) {
 	if os.Getenv(psqlExecHelperEnv) != "1" {
 		return
+	}
+	if path := os.Getenv(psqlExecHelperStdinEnv); path != "" {
+		stdin, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			t.Fatalf("read stdin: %v", err)
+		}
+		if err := os.WriteFile(path, stdin, 0o600); err != nil {
+			t.Fatalf("record stdin: %v", err)
+		}
 	}
 	if _, err := io.WriteString(os.Stdout, os.Getenv(psqlExecHelperStdoutEnv)); err != nil {
 		t.Fatalf("write stdout: %v", err)
@@ -632,6 +646,62 @@ func TestPSQLDBErrRetriesOnlyReadsAfterATimeout(t *testing.T) {
 			}
 			if err != nil || out != "0" || fmt.Sprint(waits) != "[5s]" {
 				t.Fatalf("out=%q err=%v waits=%v, want 0 after one 5s wait", out, err, waits)
+			}
+		})
+	}
+}
+
+func TestPSQLIdempotentScriptRetriesATimeoutOnStdin(t *testing.T) {
+	const (
+		cluster = "source-cluster"
+		call    = "script dropping 2 stamped schemas on the source side"
+	)
+	script := dropStampedSchemasSQL(cnpgAppRole, []string{"cov_a", "cov_b"}, "stamp", unlinkCoverageLargeObjectsSQL)
+	for _, tt := range []struct {
+		name      string
+		results   []psqlExecResult
+		wantWaits []time.Duration
+	}{
+		{name: "one timeout", results: []psqlExecResult{{block: true}, {stdout: " 0\n"}},
+			wantWaits: []time.Duration{5 * time.Second}},
+		{name: "three timeouts", results: []psqlExecResult{{block: true}, {block: true}, {block: true}},
+			wantWaits: []time.Duration{5 * time.Second, 5 * time.Second}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for i := range tt.results {
+				tt.results[i].stdinPath = filepath.Join(dir, fmt.Sprintf("stdin-%d", i+1))
+			}
+			command, state := newPSQLExecCommand(t, tt.results...)
+			var waits []time.Duration
+			out, err := psqlIdempotentScriptWith(cluster, psqlExecTestDatabase, call, script,
+				func(string) string { return psqlExecTestPod },
+				func(delay time.Duration) { waits = append(waits, delay) },
+				command, psqlExecTestTimeout)
+			calls, _, commands := state.snapshot()
+			requirePSQLCommandsReaped(t, commands)
+			if len(calls) != len(tt.results) || !slices.Equal(waits, tt.wantWaits) {
+				t.Fatalf("calls=%d waits=%v, want %d and %v", len(calls), waits, len(tt.results), tt.wantWaits)
+			}
+			// Every attempt, the retries included, must read the whole script on stdin.
+			for i, c := range calls {
+				stdin, readErr := os.ReadFile(tt.results[i].stdinPath)
+				if !slices.Contains(c.args, "-i") || slices.Contains(c.args, script) || readErr != nil ||
+					string(stdin) != script {
+					t.Fatalf("attempt %d read %d of %d script bytes on stdin (%v), argv %q",
+						i+1, len(stdin), len(script), readErr, c.args)
+				}
+			}
+			if !tt.results[len(tt.results)-1].block {
+				if err != nil || out != "0" {
+					t.Fatalf("out=%q err=%v, want 0 after the retry", out, err)
+				}
+				return
+			}
+			// The error names the call, not the script, and keeps the deadline.
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), call+" for cluster "+cluster) ||
+				strings.Contains(err.Error(), "DROP SCHEMA") {
+				t.Fatalf("err = %v, want a deadline naming %q and no script", err, call)
 			}
 		})
 	}

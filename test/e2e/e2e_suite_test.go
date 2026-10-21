@@ -2865,7 +2865,7 @@ func commandOutput(
 	return out, err
 }
 
-// psqlFailure is psqlDBErr's error result: the pod the last attempt ran
+// psqlFailure is psqlRetrying's error result: the pod the last attempt ran
 // against and its stderr, so psqlDB can raise its exact failure message
 // without a second copy of the retry loop.
 type psqlFailure struct {
@@ -2912,13 +2912,58 @@ func psqlDBErrWith(
 	command commandFactory,
 	timeout time.Duration,
 ) (string, error) {
+	return psqlRetrying(cluster, fmt.Sprintf("%q", sql), readOnlySQL(sql), primary, wait, timeout,
+		func(ctx context.Context, pod string) ([]byte, error) {
+			return commandOutput(ctx, command, "kubectl", psqlArgv(cluster, pod, db, false, "-tAc", sql)...)
+		})
+}
+
+// psqlIdempotentScript feeds script to one psql session on stdin, as clusterPSQL
+// does, and returns its output. It retries a timed-out attempt, so script must
+// be safe to run twice; name stands for the call in a timeout error.
+func psqlIdempotentScript(cluster, name, script string) (string, error) {
+	GinkgoHelper()
+	return psqlIdempotentScriptWith(cluster, appDatabase(cluster), name, script,
+		primaryPod, time.Sleep, exec.CommandContext, e2eCommandTimeout)
+}
+
+func psqlIdempotentScriptWith(
+	cluster, db, name, script string,
+	primary func(string) string,
+	wait func(time.Duration),
+	command commandFactory,
+	timeout time.Duration,
+) (string, error) {
+	withStdin := func(ctx context.Context, program string, args ...string) *exec.Cmd {
+		cmd := command(ctx, program, args...)
+		cmd.Stdin = strings.NewReader(script)
+		return cmd
+	}
+	return psqlRetrying(cluster, name, true, primary, wait, timeout,
+		func(ctx context.Context, pod string) ([]byte, error) {
+			argv := psqlArgv(cluster, pod, db, true, "-XqtA", "-v", "ON_ERROR_STOP=1")
+			return commandOutput(ctx, withStdin, "kubectl", argv...)
+		})
+}
+
+// psqlRetrying runs one psql attempt per freshly resolved primary. It retries
+// transient connection failures, and a timeout only when idempotent, since
+// anything else may have committed although its exec hung.
+func psqlRetrying(
+	cluster, name string,
+	idempotent bool,
+	primary func(string) string,
+	wait func(time.Duration),
+	timeout time.Duration,
+	run func(ctx context.Context, pod string) ([]byte, error),
+) (string, error) {
 	var lastErr error
 	var lastStderr string
 	var pod string
 	for attempt := 1; attempt <= 3; attempt++ {
 		pod = primary(cluster)
 		attemptCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		out, err := commandOutput(attemptCtx, command, "kubectl", psqlArgv(cluster, pod, db, false, "-tAc", sql)...)
+		out, err := run(attemptCtx, pod)
 		cancel()
 		if err == nil {
 			return strings.TrimSpace(string(out)), nil
@@ -2931,10 +2976,10 @@ func psqlDBErrWith(
 		retry := transientExecError(lastStderr)
 		if errors.Is(err, context.DeadlineExceeded) {
 			lastErr = fmt.Errorf(
-				"psql %q for cluster %s on pod %s timed out after %s: %w",
-				sql, cluster, pod, timeout, err,
+				"psql %s for cluster %s on pod %s timed out after %s: %w",
+				name, cluster, pod, timeout, err,
 			)
-			retry = readOnlySQL(sql)
+			retry = idempotent
 		}
 		if !retry {
 			break

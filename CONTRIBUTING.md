@@ -329,7 +329,9 @@ The `TestLiveWriterHelper` subprocess entry point skips in the parent process; t
 `TestPSQLExecHelper` is the psql-channel tests' child entry point and returns at once in the parent process.
 
 A spec that writes bulk data through psql calls `psqlBulk`, which gives the statement five minutes instead of the 30-second command timeout.
-Like `psql`, it never re-runs a statement that timed out, because the statement may have committed.
+Like `psql`, it never re-runs a write that timed out, because the write may have committed.
+`psqlIdempotentScript` feeds a script to one psql session on stdin and re-runs a timed-out attempt, so it takes only a script that is safe to run twice.
+The stamped-schema cleanup sends each side's guards and drops through it.
 
 The live-load spec emits a writer report only on failure, after stopping the writer.
 It records failure-time timestamps, submitted marker and byte counts, the child exit or signal, and final-query execution, parsing, and marker availability separately from the first returned error.
