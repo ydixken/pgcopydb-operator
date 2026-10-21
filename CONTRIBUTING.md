@@ -141,8 +141,7 @@ The fixture manifest leaves `bootstrap.initdb.dataChecksums` unset; the [CNPG op
 The pooling specs create their own ephemeral CNPG clusters because [managed Pooler authentication](https://cloudnative-pg.io/docs/1.27/connection_pooling/#authentication) installs objects in `postgres`, even when clients use `app`.
 Those objects can persist after Pooler deletion, so a separate application database does not isolate the shared maintenance catalogs used by all-databases clones.
 The progress sampler pooling spec creates a source and a target cluster.
-The `synchronousCommit` Pooler specs create one target cluster behind a transaction-mode Pooler and copy from the process's shared source.
-One of them seeds the schema `e2e_gate_pool_<process>` on that source and drops it when it ends.
+The `synchronousCommit` Pooler spec creates one target cluster behind a transaction-mode Pooler and uses the process's shared source.
 The synchronous replication specs need their own target as well, because `synchronous_standby_names` and fencing act on the whole server.
 That target has two instances and `dataDurability: required`, and it drops the fixture node preference so the two instances can spread across nodes.
 One of these specs seeds the schema `e2e_syncrep_<process>` on the shared source and drops it when it ends.
