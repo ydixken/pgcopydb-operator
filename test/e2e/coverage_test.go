@@ -86,9 +86,7 @@ func createCoverageSchemas(m *v1beta1.Migration, identity string, schemas []stri
 	for _, cluster := range []string{sourceCluster, targetCluster} {
 		psql(cluster, ensureCoverageReaderSQL)
 	}
-	createStampedSchemas(m, identity, "pgcopydb-e2e-coverage:"+identity, schemas, func(cluster, schema string) {
-		psql(cluster, "SET ROLE "+sqlIdent(appRole(cluster))+"; "+unlinkCoverageLargeObjectsSQL(schema))
-	})
+	createStampedSchemas(m, identity, "pgcopydb-e2e-coverage:"+identity, schemas, unlinkCoverageLargeObjectsSQL)
 }
 
 // applyCoverageSection runs one section of c on the source as the app role.
