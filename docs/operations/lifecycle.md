@@ -140,6 +140,7 @@ The gate checks two things in order:
    We wait for the pod, because a terminating pod can still hold source connections that the target cannot show.
 2. A probe Job, `<name>-gate-<n>` for attempt n, passes.
    It connects as the migration role over the worker's own target connection.
+   Its pod takes at most 100m CPU and 128Mi memory from `spec.runner.resources`.
 
 The probe runs up to three checks:
 

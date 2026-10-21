@@ -31,6 +31,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -449,6 +451,72 @@ func checkGateContainer(t *testing.T, m *v1beta1.Migration, c corev1.Container) 
 		if strings.Contains(script, ends) {
 			t.Errorf("the probe script calls %s: the gate ends no session", ends)
 		}
+	}
+}
+
+// The probe caps cpu and memory, keeps every key, and shares no map with the Migration or its worker.
+func TestBuildGateJobResources(t *testing.T) {
+	list := func(kv ...string) corev1.ResourceList {
+		l := corev1.ResourceList{}
+		for i := 0; i < len(kv); i += 2 {
+			l[corev1.ResourceName(kv[i])] = resource.MustParse(kv[i+1])
+		}
+		return l
+	}
+	for _, tc := range []struct {
+		name             string
+		runner           corev1.ResourceRequirements
+		requests, limits corev1.ResourceList
+	}{
+		{
+			"above the caps",
+			corev1.ResourceRequirements{Requests: list("cpu", "250m", "memory", "512Mi"), Limits: list("cpu", "500m", "memory", "1Gi")},
+			list("cpu", "100m", "memory", "128Mi"), list("cpu", "100m", "memory", "128Mi"),
+		},
+		{"below the cap", corev1.ResourceRequirements{Requests: list("memory", "32Mi")}, list("memory", "32Mi"), nil},
+		{"unset", corev1.ResourceRequirements{}, nil, nil},
+		{
+			"other resources",
+			corev1.ResourceRequirements{Requests: list("ephemeral-storage", "1Gi", "memory", "512Mi")},
+			list("ephemeral-storage", "1Gi", "memory", "128Mi"), nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := superMigration()
+			m.Spec.Runner.Resources = tc.runner
+			spec := *tc.runner.DeepCopy()
+			job, err := buildGateJob(m, "runner:gate", 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := job.Spec.Template.Spec.Containers[0].Resources
+			if !apiequality.Semantic.DeepEqual(got.Requests, tc.requests) || !apiequality.Semantic.DeepEqual(got.Limits, tc.limits) {
+				t.Errorf("probe requests %v, limits %v, want %v, %v", got.Requests, got.Limits, tc.requests, tc.limits)
+			}
+
+			for _, l := range []corev1.ResourceList{got.Requests, got.Limits} {
+				if l != nil {
+					l["example.com/probe-only"] = resource.MustParse("1")
+				}
+			}
+			if !apiequality.Semantic.DeepEqual(m.Spec.Runner.Resources, spec) {
+				t.Errorf("building the probe changed spec.runner.resources to %v, want %v", m.Spec.Runner.Resources, spec)
+			}
+
+			worker, err := buildJob(m, "runner:gate", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := worker.Spec.Template.Spec.Containers[0].Resources
+			for name, q := range spec.Requests {
+				if wq, ok := w.Requests[name]; !ok || wq.Cmp(q) != 0 {
+					t.Errorf("worker requests %s=%s, want the Migration's %s", name, wq.String(), q.String())
+				}
+			}
+			if !apiequality.Semantic.DeepEqual(w.Limits, spec.Limits) {
+				t.Errorf("worker limits %v, want the Migration's %v", w.Limits, spec.Limits)
+			}
+		})
 	}
 }
 
