@@ -342,6 +342,36 @@ func targetConnectFailure(m *v1beta1.Migration) string {
 		" such as a PgBouncer without options in ignore_startup_parameters, refuses the connection)"
 }
 
+// poolerBlock compares psql 18's \conninfo Backend PID, the cancel key's, with
+// pg_backend_pid() on one session (LC_ALL=C keeps the label): PgBouncer issues its own
+// key, negative on 1.19 and 1.20, and a direct connection or TCP proxy passes the server's.
+const poolerBlock = `pooler_check() {
+  if ! pooler_out=$(LC_ALL=C psql "$2" -XAtq -v ON_ERROR_STOP=1 -c '\conninfo' -c 'select pg_backend_pid()'); then
+    note "preflight: cannot tell whether the $1 connection goes through a connection pooler such as PgBouncer: the probe connection failed"
+    return 0
+  fi
+  pooler_key=$(printf '%s\n' "$pooler_out" | sed -n 's/^Backend PID|//p')
+  pooler_pid=$(printf '%s\n' "$pooler_out" | sed -n '$p')
+  case "${pooler_key#-}" in
+  ''|*[!0-9]*)
+    note "preflight: cannot tell whether the $1 connection goes through a connection pooler such as PgBouncer: psql printed no Backend PID in \\conninfo; the runner image needs psql 18 or later"
+    return 0 ;;
+  esac
+  case "$pooler_pid" in
+  ''|*[!0-9]*)
+    note "preflight: cannot tell whether the $1 connection goes through a connection pooler such as PgBouncer: select pg_backend_pid() returned no PID"
+    return 0 ;;
+  esac
+  if [ "$pooler_key" = "$pooler_pid" ]; then
+    echo "ok: no PgBouncer in the $1 connection"
+  else
+    note "preflight: the $1 connection goes through a connection pooler such as PgBouncer (the server's backend PID is $pooler_pid, the connection reported $pooler_key); connect directly to PostgreSQL"
+  fi
+}
+pooler_check source "$PGCOPYDB_SOURCE_PGURI"
+pooler_check target "$PGCOPYDB_TARGET_PGURI"
+`
+
 // syncCommitBlock reads the setting over the worker's own target URI: a pooler
 // that drops the startup option still connects, so only SHOW can tell.
 const syncCommitBlock = `sync_commit=$(check "$PGCOPYDB_TARGET_PGURI" 'show synchronous_commit') || sync_commit=''
@@ -375,12 +405,13 @@ else
 fi
 `
 
-// preflightPrelude is the header plus the target checks and opt-in gates that
-// run on every path. A major mismatch stops the script, so no later probe buries it.
+// preflightPrelude is the header plus the pooler check on both sides, the target
+// checks and the opt-in gates that run on every path. A major mismatch stops the
+// script, so no later probe buries it.
 func preflightPrelude(m *v1beta1.Migration) string {
 	s := preflightHeader + `connect_retry "$PGCOPYDB_TARGET_PGURI" target "` + targetConnectFailure(m) + `"
 echo "ok: connectivity target"
-`
+` + poolerBlock
 	if m.Spec.Target.SynchronousCommit == v1beta1.SynchronousCommitLocal {
 		s += syncCommitBlock
 	}

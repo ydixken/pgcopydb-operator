@@ -19,19 +19,27 @@ ARG YAMLLINT_VERSION=1.38.0
 # renovate: datasource=github-releases depName=rhysd/actionlint
 ARG ACTIONLINT_VERSION=v1.7.7
 
-# gh and postgresql-client are what the release and test jobs shell out to, and
-# make drives the Makefile. gcc and libc6-dev are here because cgo is on by
+# gh and postgresql-client-18 are what the release and test jobs shell out to,
+# and make drives the Makefile. gcc and libc6-dev are here because cgo is on by
 # default and a package that needs it fails confusingly without them;
 # build-essential would pull about 200MB for the one compiler we want.
+# psql is PGDG's 18 because the unit tests run the preflight pooler check,
+# which reads the Backend PID that psql 18 added to \conninfo.
 #
 # No buildah, though this image is what builds the next one. That build goes
 # through the pod's dind sidecar instead, because the runner container runs
 # under cri-containerd.apparmor.d and that profile denies mount as an LSM rule,
 # which layer extraction needs and no capability overrides.
-RUN apt-get update -qq \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        make gcc libc6-dev gh postgresql-client python3-pip pipx \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
+    . /etc/os-release; \
+    echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update -qq; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        make gcc libc6-dev gh postgresql-client-18 python3-pip pipx; \
+    rm -rf /var/lib/apt/lists/*
 
 # System-wide rather than through pipx: pipx installs into ~/.local/bin, which
 # is not on PATH in this image. mkdocs-material carries the same pin as ci.yml

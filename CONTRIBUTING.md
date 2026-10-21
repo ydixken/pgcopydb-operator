@@ -41,6 +41,7 @@ Regeneration writes to the working tree; inspect the generated changes and inclu
 The CI `test` job runs beside throwaway PostgreSQL 16 and 18 service containers and points `PGCOPYDB_TEST_PGURI` at the 16 one.
 A second step runs the coverage tests against 18, because release candidates never stream a case that needs it.
 `TestPreflightExtensionOwnershipQueries`, `TestPreflightOwnerAfterRestoreQueries`, `TestReownCandidateQueries` and `TestPreflightTableAuditQueries` require that variable and a working `psql`; `task test` fails without them rather than leaving the ownership and table audit SQL untested.
+With the variable set, `TestPreflightSyncCommit_Server` needs psql 18 or later first on `PATH`, because the preflight pooler check reads the Backend PID that psql 18 added to `\conninfo`.
 The two `ownerAfterRestore` tests run the handover's candidate query and the preflight's `SET ROLE` probe against a live server, because both have version-dependent answers (multirange types, `WITH SET FALSE` membership) that no golden test can pin down.
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.

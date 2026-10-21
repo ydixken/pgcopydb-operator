@@ -166,9 +166,9 @@ func TestPreflightTargetConnectHint(t *testing.T) {
 	}
 }
 
-// TestPreflightSyncCommit_Server runs the prelude against a real server: the
-// encoded startup option reaches the session, and a plain URI reports the
-// server default by name. The TEMPORARY probe must parse and stay silent.
+// TestPreflightSyncCommit_Server runs the prelude against a real server: the startup
+// option reaches the session, a plain URI reports the server default by name, the
+// pooler check reads the direct connection as direct, and the TEMPORARY probe stays silent.
 func TestPreflightSyncCommit_Server(t *testing.T) {
 	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
 	if uri == "" {
@@ -204,6 +204,9 @@ func TestPreflightSyncCommit_Server(t *testing.T) {
 			}
 			if !strings.Contains(string(out), "ok: connectivity target") || strings.Contains(string(out), "TEMPORARY") {
 				t.Fatalf("the superuser holds TEMPORARY, so its probe must connect and print nothing:\n%s", out)
+			}
+			if !strings.Contains(string(out), poolerOK(conn.Source)) || !strings.Contains(string(out), poolerOK(conn.Target)) {
+				t.Fatalf("a direct connection must pass the pooler check on both sides (needs psql 18):\n%s", out)
 			}
 		})
 	}
