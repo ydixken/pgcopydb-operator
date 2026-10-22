@@ -147,6 +147,7 @@ Every spec runs except these, each of which skips with its reason in the report:
 - All databases (both specs): the first creates and drops databases, sets the `postgres` password and creates an extension in `postgres` on both servers; both connect to the `postgres` database.
 - All databases resume: it sets the `postgres` password on both servers, creates a role on the source and a schema in the source's `postgres` database, and connects to the `postgres` database.
   The clone copies the role and the schema to the target.
+- Large object resume: it locks `pg_largeobject` on the target, which takes a superuser.
 - Chaos source-kill and target-kill: they delete the primary pod.
 - Chaos fan-out: it creates and drops a second database on the target server.
 - Feature coverage: it creates the `cov_reader` role, which is server-wide, on both servers.
