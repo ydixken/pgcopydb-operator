@@ -96,7 +96,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   `0.18.129.gd7547b5` still fails that way when the attempt died between adding a constraint and recording it, a window of milliseconds per constraint.
   With `clone.allDatabases`, older runners also fail every retry that way after an attempt died while it built a split table's indexes, and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
   A Migration whose retry already failed that way on an older runner keeps failing after an upgrade, so create a new one against a target that does not hold the failed copy, or, without `clone.allDatabases`, a new one with `clone.dropIfExists: true`.
-  Without `clone.allDatabases`, an older runner's retry skips an unfinished large-object or extension configuration step if the tables, indexes and sequences were already done and then exits 0 without what that step had not copied.
+  Without `clone.allDatabases`, an older runner's retry skips an unfinished large-object or extension configuration step when the tables, indexes and sequences were already done, and then exits 0 without what that step had not copied.
 - A live migration cannot resume its table copy that way once its replication slot exists.
   The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.

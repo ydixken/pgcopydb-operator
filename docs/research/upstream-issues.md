@@ -374,7 +374,7 @@ Look up `vacuum_summary` before vacuuming and skip tables already done, mirrorin
 ## Repeated resumes accumulate duplicate index rows in `summary`; single-row lookups then fail with `[SQLite 100: another row available]`, wedging every later resume
 
 Status: draft, not filed.
-The fork branch [ydixken/pgcopydb `v0.18-fixes`](https://github.com/ydixken/pgcopydb/tree/v0.18-fixes) deletes the index rows that a killed run left without a done time before a resume builds indexes, since `0.18.112.g4c61e97` ([ydixken/pgcopydb#34](https://github.com/ydixken/pgcopydb/pull/34)) for a single database and since `0.18.129.gd7547b5` ([ydixken/pgcopydb#35](https://github.com/ydixken/pgcopydb/pull/35)) in each database under `--all-databases`; the missing `unique(indexoid)` and `LIMIT 1` remain.
+The fork branch [ydixken/pgcopydb `v0.18-fixes`](https://github.com/ydixken/pgcopydb/tree/v0.18-fixes) deletes the index rows that a killed run left without a done time before a resume builds indexes, since `0.18.112.g4c61e97` ([ydixken/pgcopydb#34](https://github.com/ydixken/pgcopydb/pull/34)) for a single database and since `0.18.116.g587a2bb` ([ydixken/pgcopydb#35](https://github.com/ydixken/pgcopydb/pull/35)) in each database under `--all-databases`; the missing `unique(indexoid)` and `LIMIT 1` remain.
 
 ### Environment
 

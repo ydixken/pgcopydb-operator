@@ -146,12 +146,13 @@ The PR head `4c2e8e3`, whose tree the merge commit shares, passed [Run Tests `39
 [Fork PR #35](https://github.com/ydixken/pgcopydb/pull/35), merged as `587a2bb`, resets each database's resume state before an `--all-databases` copy, as a single-database resume does.
 A retry after a kill during a split table's index or constraint build now builds them, where every retry failed with exit code 12 on `relation "..." already exists`.
 A retry after a kill during a split table's copy truncates it and copies every part again, where it could copy a part twice or keep rows that the source had changed since.
+It also drops the `COPY` and index rows that a killed run left unfinished in each database, so a retry in a fresh pod, where process IDs start over, no longer refuses a table or index that one of those rows names.
 A resume also builds the constraints of a table whose constraint builder died, with or without `--all-databases`, unless it died between adding a constraint and recording it.
 The merge commit passed [Run Tests `39718723530`](https://github.com/ydixken/pgcopydb/actions/runs/39718723530) and [Nightly Tests `39718726071`](https://github.com/ydixken/pgcopydb/actions/runs/39718726071).
 
 [Fork PR #36](https://github.com/ydixken/pgcopydb/pull/36), merged as `ab522c1`, copies large objects and the user rows of extension configuration tables under `--all-databases`, which never copied them.
 The `postgres` database's rows are copied too, which with `pg_cron` are the jobs in `cron.job`.
-A single-database resume now finishes a large-object or extension-data step that an earlier run started, where it skipped both if the tables, indexes and sequences were already done and then exited 0.
+A single-database resume now finishes a large-object or extension-data step that an earlier run started, where it skipped both when the tables, indexes and sequences were already done, and then exited 0.
 It creates a large object missing on the target on every server version, cuts a re-copied object to its source length, and stops the large-object supervisor when a worker fails, where the run hung once every worker had failed with more objects left than the queue holds.
 It raises pgcopydb's limit of SysV slots from 16 to 32, because the large-object supervisor's queue did not fit in 16 on an `--all-databases` resume.
 The merge commit passed [Run Tests `39780666342`](https://github.com/ydixken/pgcopydb/actions/runs/39780666342) and [Nightly Tests `39780670337`](https://github.com/ydixken/pgcopydb/actions/runs/39780670337).
