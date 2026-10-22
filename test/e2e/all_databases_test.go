@@ -18,6 +18,8 @@ package e2e
 
 import (
 	"fmt"
+	"strings"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,17 +36,19 @@ import (
 )
 
 var _ = Describe("All databases", func() {
-	// Both specs act server-wide: the first creates and drops databases and
-	// sets the postgres password, the second connects to the postgres database.
+	// Both specs act server-wide: the first creates and drops databases, sets the postgres
+	// password and creates an extension in postgres on both servers; both connect to postgres.
 	BeforeEach(requireCNPGFixtures)
 
-	It("clones all databases as superuser, including a newly created database", func() {
+	It("clones all databases as superuser, including a newly created database, "+
+		"large objects and extension configuration rows", func() {
 		const name = "e2e-all-databases"
 		const extraDB = "e2e_all_databases"
 		// Registered first, so it runs after the Migration's cleanup: the worker must be gone.
 		DeferCleanup(func() {
 			for _, cluster := range []string{sourceCluster, targetCluster} {
 				psqlDB(cluster, postgresContainer, "DROP DATABASE IF EXISTS "+extraDB+" WITH (FORCE)")
+				psqlDB(cluster, postgresContainer, extConfigDropSQL)
 			}
 		})
 		mig := allDatabasesMigration(name, v1beta1.CloneOptions{})
@@ -53,13 +57,25 @@ var _ = Describe("All databases", func() {
 		psqlDB(sourceCluster, postgresContainer, "CREATE DATABASE "+extraDB)
 		psqlDB(sourceCluster, extraDB, "CREATE TABLE all_database_rows (id integer PRIMARY KEY); "+
 			"INSERT INTO all_database_rows VALUES (1), (2), (3)")
+		psqlDB(sourceCluster, extraDB, allDatabasesLargeObjectSQL)
 		Expect(psqlDB(targetCluster, postgresContainer, "SELECT count(*) FROM pg_database WHERE datname = '"+extraDB+"'")).
 			To(Equal("0"))
+
+		By("emulating an extension configuration table in postgres on both servers")
+		// pg_dump emits no DDL for an extension member, so the target needs the table first;
+		// its shipped rows stand in for those its CREATE EXTENSION would insert.
+		psqlDB(sourceCluster, postgresContainer, extConfigSetupSQL(extConfigShippedRows+", "+extConfigUserRows))
+		psqlDB(targetCluster, postgresContainer, extConfigSetupSQL(extConfigShippedRows))
+		// Counted on the source, so an empty source cannot pass the comparison below.
+		Expect(largeObjectCount(sourceCluster)).To(Equal(fmt.Sprint(scaled(40))))
+		Expect(psqlDB(sourceCluster, extraDB, largeObjectDigestSQL)).To(HavePrefix("1|"))
+		Expect(psqlDB(sourceCluster, postgresContainer, extConfigRowsSQL)).To(HavePrefix("4|"))
 
 		create(mig)
 		waitCompleted(name, nsE2E)
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
 		Expect(psqlDB(targetCluster, extraDB, "SELECT count(*) FROM all_database_rows")).To(Equal("3"))
+		Expect(allDatabasesExtras(targetCluster, extraDB)).To(Equal(allDatabasesExtras(sourceCluster, extraDB)))
 	})
 
 	It("rejects all databases as app before starting a worker", func() {
@@ -120,4 +136,64 @@ func allDatabasesMigration(name string, clone v1beta1.CloneOptions) *v1beta1.Mig
 		}
 	}
 	return m
+}
+
+const (
+	// extcondition picks the user rows, above 100, and leaves out the shipped ones,
+	// as an extension's condition leaves out the rows its script inserts.
+	extConfigShippedRows = "(1, 'shipped 1'), (2, 'shipped 2')"
+	extConfigUserRows    = "(101, 'user 101'), (102, 'user 102')"
+	extConfigRowsSQL     = "SELECT count(*) || '|' || md5(string_agg(id || ':' || val, ',' ORDER BY id))" +
+		" FROM public.e2e_extcfg"
+	// Drops the member table with the extension.
+	extConfigDropSQL     = "DROP EXTENSION IF EXISTS seg CASCADE"
+	largeObjectDigestSQL = "SELECT count(*) || '|' || md5(coalesce(string_agg(oid || ':' || md5(lo_get(oid)), ','" +
+		" ORDER BY oid), '')) FROM pg_largeobject_metadata"
+	// One object of 320000 bytes, in a database pgcopydb creates on the target.
+	allDatabasesLargeObjectSQL = "SELECT lo_from_bytea(0, decode(string_agg(md5(g::text), '' ORDER BY g), 'hex'))" +
+		" FROM generate_series(1, 20000) g"
+)
+
+// extConfigSetupSQL makes e2e_extcfg a configuration table of seg, as pg_extension_config_dump
+// in an extension script would: no extension in the fixture image declares one, and its
+// extension directory is read-only.
+func extConfigSetupSQL(rows string) string {
+	return "CREATE EXTENSION seg;\n" +
+		"CREATE TABLE public.e2e_extcfg (id integer PRIMARY KEY, val text NOT NULL);\n" +
+		"ALTER EXTENSION seg ADD TABLE public.e2e_extcfg;\n" +
+		"UPDATE pg_extension SET extconfig = ARRAY['public.e2e_extcfg'::regclass::oid],\n" +
+		"  extcondition = ARRAY['WHERE id > 100'] WHERE extname = 'seg';\n" +
+		"INSERT INTO public.e2e_extcfg VALUES " + rows + ";\n"
+}
+
+// allDatabasesExtras prints what an all-databases clone copies besides tables in one line,
+// so a failed comparison shows every gap at once.
+func allDatabasesExtras(cluster, extraDB string) string {
+	GinkgoHelper()
+	return fmt.Sprintf("app LOs %s; %s LOs %s; postgres e2e_extcfg %s",
+		psql(cluster, largeObjectDigestSQL),
+		extraDB, psqlDB(cluster, extraDB, largeObjectDigestSQL),
+		psqlDB(cluster, postgresContainer, extConfigRowsSQL))
+}
+
+// TestAllDatabasesExtensionConfigSQL runs the emulation on a local server: the server accepts
+// a superuser's catalog update, and the table ends up a member that extconfig lists.
+func TestAllDatabasesExtensionConfigSQL(t *testing.T) {
+	run := testPSQL(t)
+	t.Cleanup(func() { testQuery(t, run, extConfigDropSQL) })
+	// psql commits each statement from stdin alone; without the transaction a failed setup leaves the table behind.
+	testQuery(t, run, "BEGIN;\n"+extConfigSetupSQL(extConfigShippedRows+", "+extConfigUserRows)+"COMMIT;\n")
+	for _, check := range []struct{ sql, want string }{
+		{"SELECT extconfig::regclass[]::text || '|' || extcondition::text FROM pg_extension WHERE extname = 'seg'",
+			`{e2e_extcfg}|{"WHERE id > 100"}`},
+		{"SELECT count(*) FROM pg_depend WHERE classid = 'pg_class'::regclass" +
+			" AND objid = 'public.e2e_extcfg'::regclass AND deptype = 'e'", "1"},
+	} {
+		if got := testQuery(t, run, check.sql); got != check.want {
+			t.Fatalf("%s printed %q, want %q", check.sql, got, check.want)
+		}
+	}
+	if got := testQuery(t, run, extConfigRowsSQL); !strings.HasPrefix(got, "4|") {
+		t.Fatalf("seeded %q, want 4|<md5>", got)
+	}
 }

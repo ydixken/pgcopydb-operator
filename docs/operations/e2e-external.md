@@ -144,7 +144,7 @@ Every spec runs except these, each of which skips with its reason in the report:
 - `synchronousCommit` on a direct target: it holds its table lock through a psql session inside the source's database pod.
 - `synchronousCommit` through a transaction-mode Pooler: it creates its own CloudNativePG cluster and a Pooler.
 - Synchronous replication on the target (both specs): they create their own two-instance CloudNativePG cluster and fence its standby.
-- All databases (both specs): they create and drop databases server-wide and connect to the `postgres` database.
+- All databases (both specs): the first creates and drops databases, sets the `postgres` password and creates an extension in `postgres` on both servers; both connect to the `postgres` database.
 - All databases resume: it sets the `postgres` password on both servers, creates a role on the source and a schema in the source's `postgres` database, and connects to the `postgres` database.
   The clone copies the role and the schema to the target.
 - Chaos source-kill and target-kill: they delete the primary pod.
