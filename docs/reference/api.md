@@ -29,7 +29,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `allDatabases` _boolean_ | allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.<br />Both connections must name a maintenance database and use superuser roles.<br />Filters and skips apply to every database; job counts are global across databases. |  | Optional: \{\} <br /> |
+| `allDatabases` _boolean_ | allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.<br />Both connections must name a maintenance database and use superuser roles.<br />Filters and skips apply to every database; job counts are global across databases.<br />Immutable: retries and compares reuse the work directory this mode lays out. |  | Optional: \{\} <br /> |
 | `tableJobs` _integer_ | tableJobs is the number of concurrent table COPY workers (pgcopydb<br />--table-jobs). Unset follows the worker's CPU request, minimum four. Each<br />job also gets a concurrent VACUUM ANALYZE backend on the target, so N<br />here means up to 2N target connections. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `indexJobs` _integer_ | indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).<br />Unset leaves pgcopydb's default of four. Size it against the TARGET, not<br />the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,<br />overriding the server's own setting, so four jobs authorise 4GB there. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `restoreJobs` _integer_ | restoreJobs is pg_restore --jobs (--restore-jobs); 0 follows indexJobs. |  | Minimum: 0 <br />Optional: \{\} <br /> |

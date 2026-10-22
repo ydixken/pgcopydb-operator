@@ -85,6 +85,9 @@ Admission rejects those three options for these reasons:
 
 If admission does not enforce these rules, the controller rejects the same combinations with terminal reason `InvalidSpec` before it creates any Jobs.
 
+Admission also rejects a change to `allDatabases` on an existing Migration with `allDatabases is immutable: create a separate Migration`.
+Retries and compares reuse the work directory this mode laid out, and a single-database data compare on an all-databases work directory checks only the maintenance database.
+
 pgcopydb copies roles unconditionally, so `clone.roles: true` is allowed but redundant.
 `clone.noRolePasswords` omits the role passwords, and the superuser contract still applies.
 Filters, skip options, and other clone options apply to every database.

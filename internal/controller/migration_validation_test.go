@@ -25,8 +25,12 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
+	v1alpha1 "github.com/ydixken/pgcopydb-operator/api/v1alpha1"
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
@@ -426,4 +430,56 @@ var _ = Describe("Migration CRD validation", func() {
 			Expect(k8sClient.Update(ctx, changed)).To(Succeed())
 		}
 	})
+
+	// Unstructured, because a typed client always sends clone: {}, while a
+	// manifest can leave spec.clone out on either side of an update.
+	allDatabasesEntries := func(gv schema.GroupVersion) []TableEntry {
+		on := map[string]any{"allDatabases": true}
+		off := map[string]any{"allDatabases": false}
+		entry := func(desc, name string, created, updated map[string]any, wantErr bool) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-alldb-"+name+"-"+gv.Version, created, updated, wantErr)
+		}
+		return []TableEntry{
+			entry("false to true", "on", off, on, true),
+			entry("true to false", "off", on, off, true),
+			entry("no clone to true", "add", nil, on, true),
+			entry("true to no clone", "drop", on, nil, true),
+			entry("true kept", "keep-on", on, on, false),
+			entry("false kept", "keep-off", off, off, false),
+			entry("no clone kept", "keep-none", nil, nil, false),
+			entry("no clone written back as {}", "typed", nil, map[string]any{}, false),
+		}
+	}
+	DescribeTable("pins allDatabases",
+		func(gv schema.GroupVersion, name string, created, updated map[string]any, wantErr bool) {
+			// A nil clone leaves spec.clone out.
+			setClone := func(u *unstructured.Unstructured, clone map[string]any) {
+				unstructured.RemoveNestedField(u.Object, "spec", "clone")
+				if clone != nil {
+					ExpectWithOffset(1, unstructured.SetNestedMap(u.Object, clone, "spec", "clone")).To(Succeed())
+				}
+			}
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			setClone(u, created)
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, u) })
+
+			// suspend changes too, so an accepted case is a real update that
+			// leaves allDatabases alone.
+			setClone(u, updated)
+			Expect(unstructured.SetNestedField(u.Object, true, "spec", "suspend")).To(Succeed())
+			err = k8sClient.Update(ctx, u)
+			if !wantErr {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring("allDatabases is immutable: create a separate Migration")))
+		},
+		allDatabasesEntries(v1beta1.GroupVersion),
+		allDatabasesEntries(v1alpha1.GroupVersion),
+	)
 })

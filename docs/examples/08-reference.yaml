@@ -48,7 +48,7 @@ spec:
   clone:
     # Whole instance, including postgres; requires superuser maintenance connections.
     # Incompatible with this example's follow, dropIfExists, and verification.data.
-    # allDatabases: true
+    # allDatabases: true        # immutable
     # Parallelism.
     tableJobs: 8                # concurrent table copies
     indexJobs: 8                # concurrent index builds
