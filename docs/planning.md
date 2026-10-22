@@ -36,6 +36,7 @@ Individual checks appear as `ok:` log lines.
    The API validates the filters, but preflight does not check the declared scope against your intent.
 2. Partial.
    Preflight checks the selected extensions and their target ownership.
+   It fails when the runner's `pg_restore` is 17 or later and the target runs PostgreSQL 16 or older (see [`pg_restore` and the target major](reference/prerequisites.md#pg_restore-and-the-target-major)).
    It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality (unless `spec.preflight.requireSameMajorVersion` is set, which compares major versions only), or wider source-to-target compatibility.
 3. Partial outside preflight.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.

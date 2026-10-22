@@ -773,8 +773,8 @@ func pgMajorEnv(name string) int {
 }
 
 // checkMajors holds the version rules: upgrade direction only, since a newer
-// pg_dump does not restore into an older server, and a PG15+ target for
-// follow mode's GRANT SET ON PARAMETER (docs/reference/prerequisites.md).
+// pg_dump does not restore into an older server, a PG15+ target for follow
+// mode's GRANT SET ON PARAMETER, and a PG17+ target for the runner's pg_restore 18.
 func checkMajors(source, target int) error {
 	if target < source {
 		return fmt.Errorf("target PostgreSQL %d is older than source %d: the suite runs upgrade direction only",
@@ -783,6 +783,10 @@ func checkMajors(source, target int) error {
 	if target < 15 {
 		return fmt.Errorf("target PostgreSQL %d is older than 15: follow mode needs GRANT SET ON PARAMETER"+
 			" session_replication_role; PG14 works as a source only", target)
+	}
+	if target < 17 {
+		return fmt.Errorf("target PostgreSQL %d is older than 17: the runner's pg_restore 18 sends"+
+			" SET transaction_timeout, which PostgreSQL 16 and older reject (docs/reference/prerequisites.md)", target)
 	}
 	return nil
 }

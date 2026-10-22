@@ -195,7 +195,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_FORCE` (unset) takes over the helm release a crashed run left behind when `true`.
 - `E2E_PG_SOURCE` (`17`) is the PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.
 - `E2E_PG_TARGET` (`17`) is the PostgreSQL major for the target.
-  It MUST NOT be older than the source, and MUST be at least 15 (see below).
+  It MUST NOT be older than the source, and MUST be at least 17 (see below).
 - `E2E_OPERATOR_TAG` (unset) is a manager image tag to install instead of the pinned release; the runner follows it.
 - `E2E_RUNNER_TAG` (unset) is the worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.
 - `E2E_STORAGE_CLASS` (unset) pins the fixture volumes to one StorageClass, and wins over the suite-owned one.
@@ -228,7 +228,7 @@ One confirmation prompt up front covers all three; each combo is echoed before i
 The fixture namespaces stay up between combos (only a cluster on the wrong major gets recreated) and the last combo tears them down.
 A failing combo does not stop the rest: the task prints a pass/fail summary at the end and exits nonzero if any combo failed.
 The matrix is upgrade-direction only because pgcopydb needs `pg_dump` at least at the target's major and a newer major's dump does not restore into an older server.
-PG14 appears as a source only because the follow-mode target contract includes `GRANT SET ON PARAMETER session_replication_role`, which PostgreSQL grew in 15 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md)).
+PG14 and PG15 appear as sources only, because the runner's `pg_restore` 18 cannot restore into a target older than PostgreSQL 17 ([docs/reference/prerequisites.md](docs/reference/prerequisites.md#client-tool-versions)).
 
 When `E2E_STORAGE_CLASS` is unset and the suite-owned path is selected, the suite creates and capacity-checks its ephemeral StorageClass; release callers that supply an existing class through the override use that class and skip suite-owned setup and capacity checking.
 The suite-owned class uses one Longhorn replica: CNPG already manages its own instances, so a three-replica StorageClass would store three copies beneath every instance without adding coverage the suite can observe.

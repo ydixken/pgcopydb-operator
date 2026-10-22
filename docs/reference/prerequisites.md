@@ -41,8 +41,18 @@ Whole-instance clones (`spec.clone.allDatabases: true`) MUST connect as superuse
 
 The runner image bundles pgcopydb and the PostgreSQL client tools.
 `pg_dump`/`pg_restore` MUST be at least the target server's major version.
-The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools.
+`pg_restore` 17 or later MUST NOT restore into a target older than PostgreSQL 17.
+The default runner image ships pgcopydb 0.18 with PostgreSQL 18 client tools, so its target MUST run PostgreSQL 17 or later.
+
+> [!warning]
+> The default runner cannot clone into PostgreSQL 16 or older.
+> Its `pg_restore` sends `SET transaction_timeout = 0` on every target connection, which those servers reject, so every attempt fails at the pre-data restore.
+> Preflight fails such a Migration with the [`pg_restore` check](#pg_restore-and-the-target-major).
+
 For a newer target major, set `spec.runner.image` to an image with client tools for that major version.
+For a PostgreSQL 16 or older target, set it to an image whose `pg_restore` is version 16 or older.
+pgcopydb takes `pg_dump` and `pg_restore` from one directory: the one holding the `psql` in `$PG_CONFIG --bindir` when `PG_CONFIG` names a file, otherwise the one holding the first `psql` on `PATH`.
+That `pg_dump` is therefore as old as the `pg_restore`, and it refuses a source newer than its own major.
 A custom runner image MUST ship psql 18 or later, because the [PgBouncer check](#no-pgbouncer-in-the-connection) reads the backend PID that psql 18 added to `\conninfo`, and every preflight fails without it.
 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
@@ -80,6 +90,7 @@ Two consecutive permanent errors, such as a failed password authentication, an u
 Wrong credentials or an unreachable host fail the Migration in `Validating`, before any worker attempt runs.
 The [PgBouncer check](#no-pgbouncer-in-the-connection) runs right after connectivity, on both sides.
 With `spec.preflight.requireSameMajorVersion: true`, the [major version gate](#major-version-gate) runs after it.
+The [`pg_restore` check](#pg_restore-and-the-target-major) runs next, on every Migration.
 Selected installed source extensions must be installed on the target or have a non-null default version in `pg_available_extensions`.
 With `clone.dropIfExists: true` or `clone.allDatabases: true`, an installed extension also needs a target default version.
 Restore may recreate the extension, or create it in a new database.
@@ -256,6 +267,21 @@ spec:
   preflight:
     requireSameMajorVersion: true
 ```
+
+### `pg_restore` and the target major
+
+Preflight fails when the runner's `pg_restore` is version 17 or later and the target runs PostgreSQL 16 or older.
+`pg_restore` 17 and later send `SET transaction_timeout = 0` on every target connection without checking the server version, and a server older than 17 rejects the setting.
+pgcopydb then fails the pre-data restore on every attempt, before it copies any data, so retries never converge.
+The check runs on every Migration, on the plain and the all-databases path, and under `spec.dryRun` it reports like any other failed check.
+
+Preflight runs `pg_restore --version` on the binary pgcopydb runs, found as described in [Client tool versions](#client-tool-versions).
+We read that binary rather than the first `pg_restore` on `PATH`, so a custom image that points `PG_CONFIG` at older client tools passes.
+The target's major comes from `server_version_num`, as in the [major version gate](#major-version-gate).
+Version output it cannot parse, or a target major it cannot read, fails the check rather than passing it.
+A failed check stops preflight, so its line is the one reported.
+
+Use a PostgreSQL 17 or later target, or a custom `spec.runner.image` whose `pg_restore` is version 16 or older.
 
 ## All databases
 
@@ -438,7 +464,7 @@ The preflight re-checks and logs every applied statement in its output.
 One `PreflightRemediated` event per tier (clone rights, follow rights) on the Migration lists that tier's statements.
 Under [`spec.dryRun`](../operations/lifecycle.md#dry-run) the preflight verifies the superuser connection and applies nothing.
 It prints each statement it would apply as `would-remediate:` or `would-remediate-clone:`, and one `PreflightWouldRemediate` event per tier lists them.
-It runs none of them, so a statement that would fail, such as the `session_replication_role` grant on a PostgreSQL 14 target, passes the dry run and fails the real preflight.
+It runs none of them, so a statement that would fail, such as a grant the `superuserSecretRef` user has no right to give, passes the dry run and fails the real preflight.
 Applied grants are kept, never reverted: they are the same grants you would run by hand.
 Remediation never alters schema objects or data; it only grants rights.
 It never touches replica identity, `wal_level`, plugin installation, database ownership, or extension ownership (the ownership probes only report remedies).

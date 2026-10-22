@@ -22,6 +22,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`follow cannot replicate unlogged tables`](#follow-cannot-replicate-unlogged-tables) | Preflight failures |
 | [`... connection goes through a connection pooler such as PgBouncer`](#a-connection-goes-through-pgbouncer) | Preflight failures |
 | [`spec.target.synchronousCommit is local but the target connection reports ...`](#target-synchronous_commit-is-not-local) | Preflight failures |
+| [`the runner's pg_restore ... cannot restore into the target's PostgreSQL ...`](#the-runners-pg_restore-cannot-restore-into-the-target) | Preflight failures |
 | [`must be owner of extension ...`, or `target extension ownership required`](#extension-ownership-failures) | Extension ownership failures |
 | [Slot creation fails with `could not access file "wal2json"`](#wal2json-is-not-installed-on-the-source) | Replication and follow |
 | [Slot creation fails with `may not be used as an output plugin`](#wal2json-is-not-trusted-by-the-source) | Replication and follow |
@@ -85,7 +86,7 @@ Create a new Migration with the same spec and without `dryRun`.
 ### Phase `Failed` at `Validating`
 
 Phase `Failed` at `Validating` with reason `PreflightFailed` means one preflight check failed.
-The possible causes are connectivity, PgBouncer in a connection, the target's `synchronous_commit`, the major version gate, selected extension availability or ownership, a clone privilege, a source table audit, an all-databases probe, or a follow prerequisite.
+The possible causes are connectivity, PgBouncer in a connection, the target's `synchronous_commit`, the major version gate, the runner's `pg_restore` against the target major, selected extension availability or ownership, a clone privilege, a source table audit, an all-databases probe, or a follow prerequisite.
 
 Follow the condition's recovery action, then create a new Migration.
 No worker attempt has started.
@@ -207,6 +208,19 @@ A PgBouncer that refuses the option fails the connectivity check instead, and th
 Connect the target directly, or leave `synchronousCommit` unset.
 Then create a new Migration.
 See [Synchronous commit on the target](configuration.md#synchronous-commit-on-the-target).
+
+### The runner's `pg_restore` cannot restore into the target
+
+`PreflightFailed` with `the runner's pg_restore <n> cannot restore into the target's PostgreSQL <m>` means the runner's `pg_restore` is version 17 or later and the target runs PostgreSQL 16 or older.
+`pg_restore` 17 and later send `SET transaction_timeout = 0`, which those servers reject with `unrecognized configuration parameter "transaction_timeout"`, so every worker attempt would fail at the pre-data restore.
+The default runner ships `pg_restore` 18.
+
+Use a PostgreSQL 17 or later target, or set `spec.runner.image` to an image whose `pg_restore` is version 16 or older, as [Client tool versions](reference/prerequisites.md#client-tool-versions) describes.
+Then create a new Migration.
+
+`cannot read the major version of the runner's pg_restore` fails as well, because we never read an unknown version as a compatible one.
+It names the binary preflight ran, and a custom image whose `pg_restore` is missing there or prints an unexpected `--version` line produces it.
+`cannot read the target major version for the pg_restore check` means the target's `server_version_num` query failed after the connectivity check had passed.
 
 ## Extension ownership failures
 

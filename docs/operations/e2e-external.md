@@ -32,7 +32,8 @@ That shows the operator works with your servers, network, and roles; it says not
 - On the source, `wal_level=logical` and room for one more replication slot and WAL sender.
   The suite runs one follow migration at a time.
   External mode runs as one Ginkgo process and refuses `ginkgo --procs` above 1, because it has one database pair.
-- A target on PostgreSQL 15 or later, not older than the source; the source may be 14 or later.
+- A target on PostgreSQL 17 or later, not older than the source; the source may be 14 or later.
+  The runner's `pg_restore` 18 cannot restore into PostgreSQL 16 or older ([Client tool versions](../reference/prerequisites.md#client-tool-versions)).
 - The `citext` and `hstore` extensions available on both servers (PostgreSQL contrib).
 - An `sslmode` of `disable`, `allow`, `prefer`, or `require`.
   `verify-ca` and `verify-full` are not supported, because the suite cannot pass a CA certificate.

@@ -405,6 +405,46 @@ else
 fi
 `
 
+// restoreMajorBlock reads the pg_restore pgcopydb runs (PG_CONFIG's bindir, else the first psql's
+// directory): pg_restore 17 and later send SET transaction_timeout, which a pre-17 target rejects.
+const restoreMajorBlock = `restore_bin=''
+if [ -n "${PG_CONFIG-}" ] && [ -f "$PG_CONFIG" ] && restore_dir=$("$PG_CONFIG" --bindir) && [ -f "$restore_dir/psql" ]; then
+  restore_bin=$restore_dir/pg_restore
+elif restore_psql=$(command -v psql); then
+  restore_bin=${restore_psql%/*}/pg_restore
+fi
+restore_ver=''
+[ -n "$restore_bin" ] && restore_ver=$("$restore_bin" --version) || restore_ver=''
+restore_major=''
+case "$restore_ver" in
+*'
+'*) ;;
+'pg_restore (PostgreSQL) '*)
+  restore_rest=${restore_ver#'pg_restore (PostgreSQL) '}
+  case "$restore_rest" in
+  [1-9].[0-9]*|[1-9]devel*|[1-9]beta[0-9]*|[1-9]rc[0-9]*|[1-9][0-9].[0-9]*|[1-9][0-9]devel*|[1-9][0-9]beta[0-9]*|[1-9][0-9]rc[0-9]*)
+    restore_major=${restore_rest%%[!0-9]*} ;;
+  esac ;;
+esac
+restore_tgt=$(check "$PGCOPYDB_TARGET_PGURI" "select current_setting('server_version_num')::int / 10000") || restore_tgt=''
+case "$restore_tgt" in
+''|*[!0-9]*) restore_tgt='' ;;
+esac
+restore_gate=''
+if [ -z "$restore_major" ]; then
+  restore_gate="preflight: cannot read the major version of the runner's pg_restore: ${restore_bin:-pg_restore} --version did not print one line of the form pg_restore (PostgreSQL) <major>.<minor>"
+elif [ -z "$restore_tgt" ]; then
+  restore_gate="preflight: cannot read the target major version for the pg_restore check"
+elif [ "$restore_major" -ge 17 ] && [ "$restore_tgt" -lt 17 ]; then
+  restore_gate="preflight: the runner's pg_restore $restore_major cannot restore into the target's PostgreSQL $restore_tgt: pg_restore 17 and later send SET transaction_timeout = 0, which PostgreSQL 16 and older reject, so every attempt fails at the pre-data restore; use a PostgreSQL 17 or later target, or a custom spec.runner.image whose pg_restore major is not newer than 16"
+else
+  echo "ok: runner pg_restore $restore_major restores into target major $restore_tgt"
+fi
+if [ -n "$restore_gate" ]; then
+  note "$restore_gate"` + preflightScriptFooter + `
+fi
+`
+
 // preflightPrelude is the header plus the pooler check on both sides, the target
 // checks and the opt-in gates that run on every path. A major mismatch stops the
 // script, so no later probe buries it.
@@ -1221,11 +1261,12 @@ fi
 }
 
 // preflightScriptFor assembles the per-Migration check script: connectivity
-// first, optional superuser checks, extensions, then grant checks.
-// Follow-only prerequisites remain outside the clone path.
+// first, the pg_restore gate, optional superuser checks, extensions, then grant
+// checks. Follow-only prerequisites remain outside the clone path.
 func preflightScriptFor(m *v1beta1.Migration) string {
 	var b strings.Builder
 	b.WriteString(preflightPrelude(m))
+	b.WriteString(restoreMajorBlock)
 	if m.Spec.Clone.AllDatabases {
 		b.WriteString(allDatabasesPreflightBlock())
 		if !slices.Contains(m.Spec.Clone.Skip, v1beta1.SkipOption("extensions")) {

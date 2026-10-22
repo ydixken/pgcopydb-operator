@@ -35,7 +35,8 @@ It prints each statement it would apply as `would-remediate:` (follow rights) or
 Without a `superuserSecretRef`, a missing grant fails the dry run exactly as it fails a real preflight.
 
 A dry run applies none of the statements it reports, so it cannot show that they succeed.
-On a PostgreSQL 14 target it reports `GRANT SET ON PARAMETER session_replication_role` and passes, although that grant exists only on PostgreSQL 15 and later.
+On a PostgreSQL 14 target, with a custom runner whose `pg_restore` is version 16 or older, it reports `GRANT SET ON PARAMETER session_replication_role` and passes, although that grant exists only on PostgreSQL 15 and later.
+The default runner fails that target earlier, at the [`pg_restore` check](../reference/prerequisites.md#pg_restore-and-the-target-major).
 A `superuserSecretRef` user that lacks the right to grant passes too.
 Both fail the real preflight.
 
