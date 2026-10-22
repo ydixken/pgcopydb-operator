@@ -151,7 +151,7 @@ A resume also builds the constraints of a table whose constraint builder died, w
 The merge commit passed [Run Tests `39718723530`](https://github.com/ydixken/pgcopydb/actions/runs/39718723530) and [Nightly Tests `39718726071`](https://github.com/ydixken/pgcopydb/actions/runs/39718726071).
 
 [Fork PR #36](https://github.com/ydixken/pgcopydb/pull/36), merged as `ab522c1`, copies large objects and the user rows of extension configuration tables under `--all-databases`, which never copied them.
-The `postgres` database's rows are copied too, which with `pg_cron` are the jobs in `cron.job`.
+The `postgres` database's rows are copied too, which with `pg_cron` are its jobs in `cron.job` and their history in `cron.job_run_details`.
 A single-database resume now finishes a large-object or extension-data step that an earlier run started, where it skipped both when the tables, indexes and sequences were already done, and then exited 0.
 It creates a large object missing on the target on every server version, cuts a re-copied object to its source length, and stops the large-object supervisor when a worker fails, where the run hung once every worker had failed with more objects left than the queue holds.
 It raises pgcopydb's limit of SysV slots from 16 to 32, because the large-object supervisor's queue did not fit in 16 on an `--all-databases` resume.

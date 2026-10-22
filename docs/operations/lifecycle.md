@@ -94,7 +94,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   Runners older than `0.18.129.gd7547b5` fail every retry with exit code 12 after an attempt died while it built a table's constraints, with or without `clone.allDatabases`.
   The error names one of that table's constraints, as in `relation "cx_pkey" already exists`.
   `0.18.129.gd7547b5` still fails that way when the attempt died between adding a constraint and recording it, a window of milliseconds per constraint.
-  With `clone.allDatabases`, older runners also fail every retry that way after an attempt died while it built a split table's indexes, and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
+  With `clone.allDatabases`, older runners also fail every retry with exit code 12 after an attempt died while it built a split table's indexes, on an error that names one of those indexes (as in `relation "big_gate" already exists`), and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
   A Migration whose retry already failed that way on an older runner keeps failing after an upgrade, so create a new one against a target that does not hold the failed copy, or, without `clone.allDatabases`, a new one with `clone.dropIfExists: true`.
   Without `clone.allDatabases`, an older runner's retry skips an unfinished large-object or extension configuration step when the tables, indexes and sequences were already done, and then exits 0 without what that step had not copied.
 - A live migration cannot resume its table copy that way once its replication slot exists.
