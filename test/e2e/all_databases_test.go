@@ -41,30 +41,13 @@ var _ = Describe("All databases", func() {
 	It("clones all databases as superuser, including a newly created database", func() {
 		const name = "e2e-all-databases"
 		const extraDB = "e2e_all_databases"
-		sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
-		Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
-		Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+		// Registered first, so it runs after the Migration's cleanup: the worker must be gone.
 		DeferCleanup(func() {
-			deleteMigration(name)
 			for _, cluster := range []string{sourceCluster, targetCluster} {
 				psqlDB(cluster, postgresContainer, "DROP DATABASE IF EXISTS "+extraDB+" WITH (FORCE)")
-				psql(cluster, "ALTER ROLE postgres PASSWORD NULL")
 			}
-			resetTargetObjects()
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, sec))).To(Succeed())
 		})
-
-		By("preparing an empty target and temporary postgres credentials on both clusters")
-		resetTargetObjects()
-		pw := name + "-pw"
-		for _, cluster := range []string{sourceCluster, targetCluster} {
-			psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
-		}
-		_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
-			sec.Data = map[string][]byte{passwordKey: []byte(pw)}
-			return nil
-		})
-		Expect(err).NotTo(HaveOccurred(), "failed to store temporary postgres credentials")
+		mig := allDatabasesMigration(name, v1beta1.CloneOptions{})
 
 		By("seeding a source database that pgcopydb must create on the target")
 		psqlDB(sourceCluster, postgresContainer, "CREATE DATABASE "+extraDB)
@@ -73,14 +56,6 @@ var _ = Describe("All databases", func() {
 		Expect(psqlDB(targetCluster, postgresContainer, "SELECT count(*) FROM pg_database WHERE datname = '"+extraDB+"'")).
 			To(Equal("0"))
 
-		mig := newMigration(name, nsE2E, v1beta1.CloneOptions{AllDatabases: true})
-		for _, connection := range []*v1beta1.PostgresConnection{&mig.Spec.Source, &mig.Spec.Target} {
-			connection.Database = postgresContainer
-			connection.Username = postgresContainer
-			connection.PasswordSecretRef = &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: passwordKey,
-			}
-		}
 		create(mig)
 		waitCompleted(name, nsE2E)
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
@@ -105,3 +80,44 @@ var _ = Describe("All databases", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "a rejected all-databases clone has a worker Job")
 	})
 })
+
+// allDatabasesMigration returns a Migration of clone with allDatabases, connecting as
+// postgres to the postgres database with a temporary password, against an empty target.
+// Its cleanup deletes the Migration, then the password, the target's objects and the Secret.
+func allDatabasesMigration(name string, clone v1beta1.CloneOptions) *v1beta1.Migration {
+	GinkgoHelper()
+	sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}}
+	Eventually(sourceSlotCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+	Eventually(targetOriginCount, 2*time.Minute, 2*time.Second).Should(Equal("0"))
+	DeferCleanup(func() {
+		deleteMigration(name)
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			psql(cluster, "ALTER ROLE postgres PASSWORD NULL")
+		}
+		resetTargetObjects()
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, sec))).To(Succeed())
+	})
+
+	By("preparing an empty target and temporary postgres credentials on both clusters")
+	resetTargetObjects()
+	pw := name + "-pw"
+	for _, cluster := range []string{sourceCluster, targetCluster} {
+		psql(cluster, fmt.Sprintf("ALTER ROLE postgres PASSWORD '%s'", pw))
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, k8sClient, sec, func() error {
+		sec.Data = map[string][]byte{passwordKey: []byte(pw)}
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to store temporary postgres credentials")
+
+	clone.AllDatabases = true
+	m := newMigration(name, nsE2E, clone)
+	for _, connection := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
+		connection.Database = postgresContainer
+		connection.Username = postgresContainer
+		connection.PasswordSecretRef = &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: passwordKey,
+		}
+	}
+	return m
+}

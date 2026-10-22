@@ -76,53 +76,13 @@ var _ = Describe("Split table resume", SpecPriority(3), func() {
 		By("holding the gate on the target, so the last part's COPY waits at its last id")
 		release := holdOnTarget(splitResumeGateSession, splitResumeLockSQL, splitResumeHeldSQL)
 		create(m)
-		DeferCleanup(func() {
-			if !CurrentSpecReport().Failed() {
-				return
-			}
-			cur := &v1beta1.Migration{}
-			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(m), cur); err != nil {
-				AddReportEntry("attempts", "Migration unavailable: "+err.Error(), ReportEntryVisibilityFailureOrVerbose)
-				return
-			}
-			// The events carry every attempt's failure; attempt 1's Job and log come with them.
-			reportFailedAttempt(cur)
-			for n := int32(2); n <= cur.Status.Attempts; n++ {
-				job := fmt.Sprintf("%s-run-%d", name, n)
-				state := &batchv1.Job{}
-				summary := fmt.Sprintf("phase %q", cur.Status.Phase)
-				if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: job}, state); err != nil {
-					summary += ", Job unavailable: " + err.Error()
-				} else {
-					summary += fmt.Sprintf(", Job %d succeeded, %d failed", state.Status.Succeeded, state.Status.Failed)
-				}
-				AddReportEntry(job, summary+"\n"+jobLogs(job, attemptLogTail), ReportEntryVisibilityFailureOrVerbose)
-			}
-		})
+		reportResumedAttempts(m)
 		waitWorkerRunning(name, 1)
-		Eventually(func(g Gomega) {
-			cur := &v1beta1.Migration{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), cur)).To(Succeed())
-			if cur.Status.Attempts > 1 || cur.Status.Phase == v1beta1.PhaseFailed ||
-				cur.Status.Phase == v1beta1.PhaseCompleted {
-				StopTrying(fmt.Sprintf("attempt 1 ended before the gate held it: attempt %d at phase %q",
-					cur.Status.Attempts, cur.Status.Phase)).Now()
-			}
-			state, err := psqlDBErr(targetCluster, appDatabase(targetCluster), splitResumeStateSQL(table))
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(state).To(Equal(fmt.Sprintf("1|%d", splitResumeRows/2)),
-				"pgcopydb sessions waiting on the gate|committed rows of the split table on the target")
-		}, 5*time.Minute, time.Second).Should(Succeed())
+		waitAttemptOneHeld(m, splitResumeStateSQL(table), fmt.Sprintf("1|%d", splitResumeRows/2),
+			"pgcopydb sessions waiting on the gate|committed rows of the split table on the target")
 
 		By("deleting the attempt-1 worker pod while the last part waits")
-		worker := client.MatchingLabels{migrationLabel: name, batchv1.JobNameLabel: name + "-run-1"}
-		deletePod(worker)
-		Eventually(func(g Gomega) {
-			pods := &corev1.PodList{}
-			g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), worker)).To(Succeed())
-			left := len(pods.Items)
-			g.Expect(left).To(BeZero(), "the attempt-1 worker pod is still there")
-		}, 2*time.Minute, time.Second).Should(Succeed())
+		deleteAttemptOneWorker(name)
 
 		By("releasing the gate, so the killed COPY ends and the retry gate passes")
 		// Not earlier: a worker still alive would commit the last part and finish attempt 1.
@@ -132,19 +92,87 @@ var _ = Describe("Split table resume", SpecPriority(3), func() {
 		AddReportEntry("attempts after the worker deletion", completed.Status.Attempts)
 		Expect(completed.Status.Attempts).To(BeNumerically(">=", 2))
 		// A start-over copies every part again and would pass on any runner.
-		for n := int32(2); n <= completed.Status.Attempts; n++ {
-			retry := &batchv1.Job{}
-			key := client.ObjectKey{Namespace: nsE2E, Name: fmt.Sprintf("%s-run-%d", name, n)}
-			Expect(k8sClient.Get(ctx, key, retry)).To(Succeed())
-			Expect(retry.Spec.Template.Spec.Containers[0].Args).To(ContainElements("--resume", "--not-consistent"),
-				"attempt %d did not resume, so it cannot show what a resume keeps", n)
-		}
+		expectResumedRetries(name, completed.Status.Attempts, "--resume", "--not-consistent")
 
 		By("comparing the split table on both sides")
 		Expect(psql(targetCluster, splitResumeRowsSQL(table))).To(Equal(rows),
 			"count(*)|count(DISTINCT id) of the split table on the target after the resumed copy")
 	})
 })
+
+// reportResumedAttempts reports, when the spec fails, why m kept retrying: the
+// events with attempt 1's Job and log, then each later attempt's phase, Job and log tail.
+func reportResumedAttempts(m *v1beta1.Migration) {
+	GinkgoHelper()
+	DeferCleanup(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		cur := &v1beta1.Migration{}
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(m), cur); err != nil {
+			AddReportEntry("attempts", "Migration unavailable: "+err.Error(), ReportEntryVisibilityFailureOrVerbose)
+			return
+		}
+		// The events carry every attempt's failure; attempt 1's Job and log come with them.
+		reportFailedAttempt(cur)
+		for n := int32(2); n <= cur.Status.Attempts; n++ {
+			job := fmt.Sprintf("%s-run-%d", m.Name, n)
+			state := &batchv1.Job{}
+			summary := fmt.Sprintf("phase %q", cur.Status.Phase)
+			if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: job}, state); err != nil {
+				summary += ", Job unavailable: " + err.Error()
+			} else {
+				summary += fmt.Sprintf(", Job %d succeeded, %d failed", state.Status.Succeeded, state.Status.Failed)
+			}
+			AddReportEntry(job, summary+"\n"+jobLogs(job, attemptLogTail), ReportEntryVisibilityFailureOrVerbose)
+		}
+	})
+}
+
+// waitAttemptOneHeld polls stateSQL on the target until it prints want, which what
+// describes, and stops at once when attempt 1 ends, fails or completes first.
+func waitAttemptOneHeld(m *v1beta1.Migration, stateSQL, want, what string) {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		cur := &v1beta1.Migration{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), cur)).To(Succeed())
+		if cur.Status.Attempts > 1 || cur.Status.Phase == v1beta1.PhaseFailed ||
+			cur.Status.Phase == v1beta1.PhaseCompleted {
+			StopTrying(fmt.Sprintf("attempt 1 ended before the gate held it: attempt %d at phase %q",
+				cur.Status.Attempts, cur.Status.Phase)).Now()
+		}
+		state, err := psqlDBErr(targetCluster, appDatabase(targetCluster), stateSQL)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(state).To(Equal(want), what)
+	}, 5*time.Minute, time.Second).Should(Succeed())
+}
+
+// deleteAttemptOneWorker deletes the worker pod of attempt 1 and waits until it is gone.
+func deleteAttemptOneWorker(name string) {
+	GinkgoHelper()
+	worker := client.MatchingLabels{migrationLabel: name, batchv1.JobNameLabel: name + "-run-1"}
+	deletePod(worker)
+	Eventually(func(g Gomega) {
+		pods := &corev1.PodList{}
+		g.Expect(k8sClient.List(ctx, pods, client.InNamespace(nsE2E), worker)).To(Succeed())
+		left := len(pods.Items)
+		g.Expect(left).To(BeZero(), "the attempt-1 worker pod is still there")
+	}, 2*time.Minute, time.Second).Should(Succeed())
+}
+
+// expectResumedRetries expects the Job of every attempt from 2 to attempts to carry args.
+func expectResumedRetries(name string, attempts int32, args ...string) {
+	GinkgoHelper()
+	// ContainElements of no args matches any argv, a start-over's included.
+	Expect(args).NotTo(BeEmpty())
+	for n := int32(2); n <= attempts; n++ {
+		retry := &batchv1.Job{}
+		key := client.ObjectKey{Namespace: nsE2E, Name: fmt.Sprintf("%s-run-%d", name, n)}
+		Expect(k8sClient.Get(ctx, key, retry)).To(Succeed())
+		Expect(retry.Spec.Template.Spec.Containers[0].Args).To(ContainElements(args),
+			"attempt %d did not resume, so it cannot show what a resume keeps", n)
+	}
+}
 
 // splitResumeSeedSQL creates schema.big with a CHECK whose function waits on the
 // gate for the last id only. pg_dump keeps a valid CHECK inside CREATE TABLE, so
@@ -192,40 +220,45 @@ func TestSplitResumeSQL(t *testing.T) {
 
 	bgCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	background := func(script string) <-chan error {
-		done := make(chan error, 1)
-		go func() {
-			_, err := run(bgCtx, script)
-			done <- err
-		}()
-		return done
-	}
-	waitFor := func(sql, want string) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for got := testQuery(t, run, sql); got != want; got = testQuery(t, run, sql) {
-			if time.Now().After(deadline) {
-				t.Fatalf("%s printed %q, want %q", sql, got, want)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	holder := background(holdSQL(splitResumeGateSession, splitResumeLockSQL))
+	holder := testBackground(bgCtx, run, holdSQL(splitResumeGateSession, splitResumeLockSQL))
 	t.Cleanup(func() {
 		testQuery(t, run, endSessionSQL(splitResumeGateSession))
 		<-holder
 	})
-	waitFor(splitResumeHeldSQL, "1")
+	testWaitFor(t, run, splitResumeHeldSQL, "1")
 
 	update := "UPDATE " + table + " SET payload = payload WHERE id = "
 	testQuery(t, run, "SET statement_timeout = '5s';\n"+update+strconv.Itoa(splitResumeRows-1))
-	writer := background("SET application_name = 'pgcopydb[1] e2e copy';\n" + update + rows + ";\n")
-	waitFor(splitResumeStateSQL(table), "1|"+rows)
+	writer := testBackground(bgCtx, run, "SET application_name = 'pgcopydb[1] e2e copy';\n"+update+rows+";\n")
+	testWaitFor(t, run, splitResumeStateSQL(table), "1|"+rows)
 	if got := testQuery(t, run, endSessionSQL(splitResumeGateSession)); got != "1" {
 		t.Fatalf("ended %s sessions holding the gate, want 1", got)
 	}
 	if err := <-writer; err != nil {
 		t.Fatalf("the write of the gated id failed after the release: %v", err)
 	}
-	waitFor(splitResumeStateSQL(table), "0|"+rows)
+	testWaitFor(t, run, splitResumeStateSQL(table), "0|"+rows)
+}
+
+// testBackground runs script on run's server in the background; the channel
+// receives its error, nil on success, once it ends.
+func testBackground(ctx context.Context, run psqlScript, script string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := run(ctx, script)
+		done <- err
+	}()
+	return done
+}
+
+// testWaitFor polls sql on run's server for up to 10 seconds until it prints want.
+func testWaitFor(t *testing.T, run psqlScript, sql, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for got := testQuery(t, run, sql); got != want; got = testQuery(t, run, sql) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s printed %q, want %q", sql, got, want)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
