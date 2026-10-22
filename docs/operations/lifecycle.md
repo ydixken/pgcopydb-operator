@@ -84,13 +84,19 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   A fresh Migration has no prior state of its own, so that state is foreign.
 - Retries run with `--resume --not-consistent`.
   The retry skips tables and indexes already recorded done in pgcopydb's catalogs, and restarts interrupted copies.
-  Without `clone.allDatabases`, when only some parts of a split table were copied, the retry copies every part again, and when all were, it keeps the table.
+  When only some parts of a split table were copied, the retry copies every part again, and when all were, it keeps the table.
   `--not-consistent` is needed because the failed attempt's snapshot died with its process.
   The retry copies the remaining tables under a new snapshot.
   Runners older than `0.18.112.g4c61e97` can lose rows of a split table on a resume without `clone.allDatabases`; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
   They also fail a retry with exit code 12 on a table without indexes whose `VACUUM` an earlier attempt had started.
   If the failed retry built every index, the retry after it skips the data phase and exits 0.
   A table whose `VACUUM` had not finished then has no planner statistics until you run `ANALYZE` on it.
+  Runners older than `0.18.129.gd7547b5` fail every retry with exit code 12 after an attempt died while it built a table's constraints, with or without `clone.allDatabases`.
+  The error names one of that table's constraints, as in `relation "cx_pkey" already exists`.
+  `0.18.129.gd7547b5` still fails that way when the attempt died between adding a constraint and recording it, a window of milliseconds per constraint.
+  With `clone.allDatabases`, older runners also fail every retry that way after an attempt died while it built a split table's indexes, and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
+  A Migration whose retry already failed that way on an older runner keeps failing after an upgrade, so create a new one against a target that does not hold the failed copy, or, without `clone.allDatabases`, a new one with `clone.dropIfExists: true`.
+  Without `clone.allDatabases`, an older runner's retry skips an unfinished large-object or extension configuration step if the tables, indexes and sequences were already done and then exits 0 without what that step had not copied.
 - A live migration cannot resume its table copy that way once its replication slot exists.
   The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.

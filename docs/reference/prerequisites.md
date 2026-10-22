@@ -4,7 +4,7 @@ What a `Migration` needs from your PostgreSQL endpoints and your Kubernetes clus
 The keywords MUST, SHOULD, and MAY are to be interpreted as described in RFC 2119.
 
 Scope: base clone (`pgcopydb clone`), whole-instance clone (`clone --all-databases`), live migration (`clone --follow`), cutover, and cleanup.
-Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/4c61e97f2630ee4cf5f5fe49e54ff45b755e7498) for all-databases behavior, partition comparison, and row-level security.
+Ground truth for the pgcopydb behavior behind each rule is the [upstream pgcopydb documentation](https://pgcopydb.readthedocs.io/) and the [pinned fork](https://github.com/ydixken/pgcopydb/tree/d7547b55537c89f89da8b317a8fce4f7dda76dc3) for all-databases behavior, partition comparison, and row-level security.
 The e2e fixtures ([test/e2e](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e)) apply the grants below.
 Use the [Planning checklist](../planning.md) to record scope, operational, cutover, recovery, and rehearsal decisions that preflight cannot verify.
 
@@ -58,8 +58,16 @@ A custom runner image MUST ship psql 18 or later, because the [PgBouncer check](
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).
 
-The progress poll supports seventeen pgcopydb versions, with different guarantees.
-The bundled runner, `0.18.112.g4c61e97`, added the split-table resume fix: without `clone.allDatabases`, a retry keeps a split table whose parts were all copied and copies a partly copied one again in full, where `0.18.109.gbec4ebb` truncates the table and skips the finished parts, so the Migration can complete without their rows.
+The progress poll supports eighteen pgcopydb versions, with different guarantees.
+The bundled runner, `0.18.129.gd7547b5`, added the all-databases resume fixes: with `clone.allDatabases`, a retry after an attempt died during a split table's copy or index build copies or keeps that table as a single-database retry does, where `0.18.112.g4c61e97` can fail every retry with exit code 12, copy a part twice, or keep rows that the source changed since.
+It also builds a table's constraints after an attempt died while it built them, in both modes, where `0.18.112.g4c61e97` fails every retry with exit code 12 on `relation "..." already exists`; a kill between adding a constraint and recording it still fails that way.
+It copies large objects and the user rows of extension configuration tables with `clone.allDatabases`, where `0.18.112.g4c61e97` leaves both out and still exits 0.
+Without `clone.allDatabases`, a retry finishes a large-object or extension configuration step that an earlier attempt started, where `0.18.112.g4c61e97` skips that step if the tables, indexes and sequences were already done and then exits 0 without the objects or rows that attempt had not copied.
+It logs a message longer than 2 KB in full, where `0.18.112.g4c61e97` aborts with `stack smashing detected`.
+With `clone.allDatabases` it clones an instance of five or more databases, where `0.18.112.g4c61e97` with four table jobs fails every attempt in its first phase from five databases on, counting `postgres`.
+It finds an existing role whose name needs quoting, where `0.18.112.g4c61e97` fails on `role "..." already exists` whenever the target already has such a role, which includes every retry of a Migration with `clone.allDatabases` or `clone.roles: true`.
+It also copies a role whose quoted name is 64 bytes or longer, where `0.18.112.g4c61e97` cuts that name to 63 bytes and sends a broken `CREATE ROLE`, even into a target without the role.
+`0.18.112.g4c61e97` added the split-table resume fix: without `clone.allDatabases`, a retry keeps a split table whose parts were all copied and copies a partly copied one again in full, where `0.18.109.gbec4ebb` truncates the table and skips the finished parts, so the Migration can complete without their rows.
 It also vacuums each table at most once across retries, where `0.18.109.gbec4ebb` fails a retry with exit code 12 on a table without indexes whose `VACUUM` an earlier attempt had started.
 The retry after it can then exit 0 without ever analyzing that table; see [Retries and resume](../operations/lifecycle.md#retries-and-resume).
 `0.18.109.gbec4ebb` added the target keepalives: it sets server-side TCP keepalives on the target sessions it opens itself, so when a runner dies and such a session waits on it, the target ends the session within about 70 seconds, where with `0.18.104.g362a559` the session keeps its locks for about two hours at the kernel defaults ([#381](https://github.com/ydixken/pgcopydb-operator/issues/381)).
@@ -74,9 +82,9 @@ The retry after it can then exit 0 without ever analyzing that table; see [Retri
 See the [live migration hazard](../operations/live-migration.md#watching-the-stream) for what older runners lose, and the [live migration workload contract](#live-migration-specfollowenabled-true).
 `0.18.39.g93eda1d` added the NULL column fixes: it matches the NULL columns that `test_decoding` leaves out of a keyless `REPLICA IDENTITY FULL` old row, and applies a keyless change whose old row is all NULL.
 `0.18.36.g972e221` added the retry error fix: a retry that cannot read the previous run's catalog reports that read failure, where older runners asked for `--not-consistent`.
-All eleven retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
+All twelve retain three fixes from `0.18.34.g7fddd6f`, listed in the [runner image README](https://github.com/ydixken/pgcopydb-operator/blob/main/images/runner/README.md): reads with [`row_security` off](#row-level-security), restores `REPLICA IDENTITY USING INDEX` on the target, and applies changes on a keyless `REPLICA IDENTITY FULL` table to one row.
 They also retain [partition comparison](../operations/verification.md#partitioned-tables) from `0.18.22.g22e29c3`, and [certified idle feedback](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) and [missing-sentinel bootstrap recovery](../troubleshooting.md#publication-retry-failures) from `0.18.15.gea2dc96`.
-`0.18.109.gbec4ebb` lacks the split-table resume fix, `0.18.104.g362a559` also lacks the target keepalives, `0.18.98.g944abcc` also lacks the snapshot fix, `0.18.94.gbaa94ee` and `0.18.76.gf9b328b` also lack the closed `output.db` fix, `0.18.74.gc682dce` also lacks the status interval fix, `0.18.72.g2aa91e7` also lacks the reconnect fix, `0.18.70.gbb8dbfc` also lacks the receive fix, `0.18.39.g93eda1d` also lacks the four follow fixes, `0.18.36.g972e221` also lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
+`0.18.112.g4c61e97` lacks the all-databases resume, large-object and robustness fixes, `0.18.109.gbec4ebb` also lacks the split-table resume fix, `0.18.104.g362a559` also lacks the target keepalives, `0.18.98.g944abcc` also lacks the snapshot fix, `0.18.94.gbaa94ee` and `0.18.76.gf9b328b` also lack the closed `output.db` fix, `0.18.74.gc682dce` also lacks the status interval fix, `0.18.72.g2aa91e7` also lacks the reconnect fix, `0.18.70.gbb8dbfc` also lacks the receive fix, `0.18.39.g93eda1d` also lacks the four follow fixes, `0.18.36.g972e221` also lacks the NULL column fixes, `0.18.34.g7fddd6f` also lacks the retry error fix, `0.18.22.g22e29c3` also lacks the three fixes, and `0.18.15.gea2dc96` also lacks partition comparison.
 `0.18.13.g4873c18` has certified idle feedback but lacks bootstrap recovery.
 `0.18.10.gaadc4bf` and `0.18.5.ge37d2bd` have neither.
 An older or custom runner may report weaker durability guarantees.
@@ -307,6 +315,15 @@ A failed database query fails preflight; it never reports success on an empty re
 
 The target extension check needs package availability, not installation in the maintenance database, because target databases may not exist yet.
 
+The clone copies large objects and the user rows of extension configuration tables in every database, `postgres` included, and a retry copies every large object again.
+Runners older than `0.18.129.gd7547b5` leave both out in this mode and still exit 0; see [client tool versions](#client-tool-versions).
+
+> [!caution]
+> In `postgres`, the configuration rows of `pg_cron` are its jobs in `cron.job` and their history in `cron.job_run_details`, so the target receives the source's schedule.
+> A target that runs `pg_cron` can run those jobs as well as the source, from the moment they arrive.
+> Set `clone.filters.excludeExtensions: [pg_cron]` before the clone to leave the extension and its rows out.
+> Otherwise unschedule the copied jobs on the target as soon as the clone finishes.
+
 Filters and skips apply to every database, and job counts are global across databases.
 The operator reports summed database sizes without per-database relation or catalog counters.
 See [All databases configuration](../configuration.md#all-databases) and [the example](../examples/09-all-databases.yaml).
@@ -481,6 +498,7 @@ The operator retries a failed attempt with `pgcopydb clone --resume --not-consis
 Finished tables are skipped, and interrupted tables are re-copied from scratch.
 Each table's COPY is a single transaction, so a killed attempt leaves no partial rows.
 Runners older than `0.18.112.g4c61e97` truncate a split table on a retry without `clone.allDatabases` and skip its finished parts, so their rows are lost ([client tool versions](#client-tool-versions)).
+Runners older than `0.18.129.gd7547b5` can also fail every retry after an attempt died while building a table's constraints, or, without `clone.allDatabases`, skip an unfinished large-object or extension configuration step ([client tool versions](#client-tool-versions)).
 `--not-consistent` is needed here: the first attempt's exported snapshot dies with its session.
 A plain `--resume` fails before it touches any data ("snapshot ... does not exist").
 A permission error, a full work volume, or a change naming a column the target lacks stops the `--resume` retry: the Migration ends as `PermissionDenied`, `DiskFull`, or `SchemaDrift` (see [Retries and resume](../operations/lifecycle.md#retries-and-resume)).
