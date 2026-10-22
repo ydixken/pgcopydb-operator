@@ -192,6 +192,53 @@ So naming a partitioned table in `includeOnlyTables` copies none of its partitio
 The follow publication takes a table when either list names it or any partition ancestor, because `FOR TABLE` on a partitioned table covers its partitions.
 An entry the audits cannot match exactly (a `~` pattern, a quoted name, a table name without a schema, or an uppercase schema name) widens them instead: it voids its include list and the publication's, and drops out of an exclude list.
 
+### Large objects
+
+pgcopydb copies every large object with its OID and content, whatever `clone.filters` selects, and `clone.skip: [largeObjects]` leaves them all out.
+
+> [!caution]
+> On the target each large object belongs to the migration role, with no grants and no comment.
+> `pg_dump` 17 and later, which the bundled runner ships, keep the owner, grants and comment of a large object in the data section, and pgcopydb restores only the pre-data and post-data sections.
+> A role that is neither a superuser nor a member of the migration role then gets `permission denied for large object`, unless `lo_compat_privileges` is on, and neither the clone nor `spec.verification` reports it.
+
+To restore them after the clone:
+
+1. Save this query as `lo-metadata.sql` and run it against the source database:
+
+    ```sql
+    SELECT 'BEGIN; ' || string_agg(stmt, ' ' ORDER BY o, k) || ' COMMIT;'
+      FROM (SELECT oid, 1, format('ALTER LARGE OBJECT %s OWNER TO %I;', oid, pg_get_userbyid(lomowner))
+              FROM pg_largeobject_metadata
+            UNION ALL
+            SELECT m.oid, 2, format('GRANT %s ON LARGE OBJECT %s TO %s%s;', a.privilege_type, m.oid,
+                                    CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END,
+                                    CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END)
+              FROM pg_largeobject_metadata m, aclexplode(m.lomacl) a
+             WHERE a.grantee <> m.lomowner
+            UNION ALL
+            SELECT objoid, 3, format('COMMENT ON LARGE OBJECT %s IS %L;', objoid, description)
+              FROM pg_description
+             WHERE classoid = 'pg_catalog.pg_largeobject'::regclass) AS t(o, k, stmt)
+     GROUP BY o::bigint / 1000
+     ORDER BY o::bigint / 1000;
+    ```
+
+    ```sh
+    psql "<source URI>" -XAt -v ON_ERROR_STOP=1 -f lo-metadata.sql > lo-metadata-apply.sql
+    ```
+
+2. Apply the statements on the target database as a superuser:
+
+    ```sh
+    psql "<target URI>" -X -v ON_ERROR_STOP=1 -f lo-metadata-apply.sql
+    ```
+
+Each `BEGIN; ... COMMIT;` group in `lo-metadata-apply.sql` is one transaction over at most 1000 large objects, because each statement locks its object until commit, and one transaction over every object can exhaust the lock table.
+The statements are idempotent, so after a stop, run the file again.
+Step 2 stops at a large object that the target lacks, such as one created on the source after the clone started, and that error repeats on every run.
+Every owner and grantee MUST exist on the target first.
+With `clone.allDatabases`, run both steps once per database.
+
 ### Ownership after restore (`clone.ownerAfterRestore`)
 
 `clone.noOwner: true` leaves every restored object owned by the migration role.
