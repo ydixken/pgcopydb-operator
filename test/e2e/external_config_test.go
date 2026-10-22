@@ -286,8 +286,13 @@ func TestExternalServerMajors(t *testing.T) {
 	}{
 		{source: 17, target: 17},
 		{source: 14, target: 18},
+		{source: 15, target: 17},
 		{source: 16, target: 15, wantErr: "target PostgreSQL 15 is older than source 16"},
 		{source: 14, target: 14, wantErr: "target PostgreSQL 14 is older than 15"},
+		{source: 15, target: 15, wantErr: "target PostgreSQL 15 is older than 17"},
+		{source: 14, target: 16, wantErr: "target PostgreSQL 16 is older than 17"},
+		{source: 16, target: 16,
+			wantErr: "target PostgreSQL 16 is older than 17: the runner's pg_restore 18 sends SET transaction_timeout"},
 	} {
 		err := checkMajors(tt.source, tt.target)
 		if tt.wantErr == "" && err != nil {

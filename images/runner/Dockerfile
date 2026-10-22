@@ -1,9 +1,9 @@
 # Runner image for the operator's migration Jobs: the forked pgcopydb 0.18
 # plus the PostgreSQL 18 client tools, on debian:trixie-slim with the PGDG apt
-# repo. pg_dump/pg_restore MUST be >= the newest server major on either side.
-# The binary comes from the pgcopydb-builder image rather than from PGDG, and
-# the install purges what a migration never runs. See images/runner/README.md
-# for the pinned patch list, the removals, and why not Alpine or Wolfi.
+# repo. pg_dump/pg_restore MUST be >= the newest server major on either side,
+# and pg_restore 17+ MUST NOT restore into a pre-17 target. pgcopydb comes from
+# the pgcopydb-builder image, not PGDG, and the install purges what a migration
+# never runs. images/runner/README.md says why, and why not Alpine or Wolfi.
 
 # Pinned by tag and digest, not just tag: a debian bump inside the
 # builder republishes this same tag, so only the digest stops that
@@ -30,10 +30,10 @@ RUN set -eux; \
     curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
-    # Client major 18 covers every supported server major on either side:
-    # pg_dump/pg_restore must be >= the newest server they talk to, and 18
-    # reads servers back to 9.2. libgc1 is the one library the fork-built
-    # pgcopydb links beyond postgresql-client-18's libpq5.
+    # Client 18 dumps sources back to 9.2 but restores only into targets on
+    # 17 or later, the servers that accept the SET transaction_timeout it sends.
+    # libgc1 is the one library the fork-built pgcopydb links beyond
+    # postgresql-client-18's libpq5.
     apt-get install -y --no-install-recommends postgresql-client-18 libgc1; \
     # curl was build-time only; drop it to shrink the attack surface
     apt-get purge -y --auto-remove curl; \

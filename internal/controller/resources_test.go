@@ -882,6 +882,7 @@ esac
 	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writePgRestoreStub(t, dir)
 
 	run := func(t *testing.T, plugin, offenders string, allow []string) (string, int) {
 		t.Helper()
@@ -895,6 +896,7 @@ esac
 		cmd := exec.Command(shellPath, "-c", c.Args[1])
 		cmd.Env = append(os.Environ(),
 			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PG_CONFIG=",
 			"PGCOPYDB_SOURCE_PGURI=src",
 			"PGCOPYDB_TARGET_PGURI=tgt",
 			"PSQL_RI="+offenders,
@@ -1148,7 +1150,7 @@ func TestPreflightScriptFor_SameMajor(t *testing.T) {
 		plain.Spec.Clone.AllDatabases = all
 		off := preflightScriptFor(plain)
 		plain.Spec.Preflight = &v1beta1.PreflightOptions{}
-		if got := preflightScriptFor(plain); got != off || strings.Contains(off, "server_version_num") {
+		if got := preflightScriptFor(plain); got != off || strings.Contains(off, majorVersionBlock) {
 			t.Fatalf("allDatabases=%v: unset or false flag must leave the script unchanged", all)
 		}
 		on := preflightScriptFor(sameMajorMigration(all))
@@ -1210,6 +1212,129 @@ func TestPreflightScript_SameMajorLive(t *testing.T) {
 	if err != nil || !strings.Contains(string(out), "ok: major version source ") {
 		t.Fatalf("err=%v out:\n%s", err, out)
 	}
+}
+
+const (
+	restoreMajorOK     = "ok: runner pg_restore "
+	restoreMajorUnread = "preflight: cannot read the major version of the runner's pg_restore"
+)
+
+// restoreMajorFailure is the pg_restore gate's verdict for the given majors.
+func restoreMajorFailure(target, restore string) string {
+	return "preflight: the runner's pg_restore " + restore + " cannot restore into the target's PostgreSQL " + target +
+		": pg_restore 17 and later send SET transaction_timeout = 0, which PostgreSQL 16 and older reject," +
+		" so every attempt fails at the pre-data restore; use a PostgreSQL 17 or later target," +
+		" or a custom spec.runner.image whose pg_restore major is not newer than 16"
+}
+
+// TestPreflightScriptFor_RestoreMajor pins the pg_restore gate on both paths,
+// after the prelude and before the first path-specific probe.
+func TestPreflightScriptFor_RestoreMajor(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		m := passwordMigration()
+		m.Spec.Clone.AllDatabases = all
+		s := preflightScriptFor(m)
+		mustPrecede(t, s, `echo "ok: connectivity target"`, restoreMajorOK)
+		mustPrecede(t, s, restoreMajorOK, sourceExtensionsQuery)
+		if all {
+			mustPrecede(t, s, restoreMajorOK, "ok: all-databases source superuser")
+		}
+		m.Spec.Preflight = &v1beta1.PreflightOptions{RequireSameMajorVersion: true}
+		mustPrecede(t, preflightScriptFor(m), "differs from target major", restoreMajorOK)
+	}
+}
+
+// TestPreflightScript_RestoreMajor runs the pg_restore gate under the stubs:
+// the runner's pg_restore is the stub next to psql unless PG_CONFIG names another.
+func TestPreflightScript_RestoreMajor(t *testing.T) {
+	run := followPreflightHarness(t)
+	script := preflightScriptFor(passwordMigration())
+	gate := func(t *testing.T, restore, target string, extra ...string) (string, int) {
+		t.Helper()
+		out, code, _ := run(t, script, "", append([]string{"PG_RESTORE_VERSION=" + restore, "TGT_MAJOR=" + target}, extra...)...)
+		return out, code
+	}
+	// Extensions are enabled in this script: a failed gate stops before that probe.
+	failsWith := func(t *testing.T, out string, code int, want string) {
+		t.Helper()
+		if code != 1 || !strings.Contains(out, "preflight failed:\n"+want) || strings.Contains(out, restoreMajorOK) ||
+			strings.Contains(out, "selected extension") || strings.Contains(out, preflightAllChecksPassed) {
+			t.Fatalf("want a stop on %q, code=%d out:\n%s", want, code, out)
+		}
+	}
+	for _, tc := range []struct{ name, restore, target, want string }{
+		{"target 16 with pg_restore 18 fails", restoreVersion18, "16", restoreMajorFailure("16", "18")},
+		{"target 15 fails", restoreVersion18, "15", restoreMajorFailure("15", "18")},
+		{"pg_restore 17 into target 16 fails", "pg_restore (PostgreSQL) 17.10 (Debian 17.10-1.pgdg12+1)", "16",
+			restoreMajorFailure("16", "17")},
+		{"an unreadable target fails closed", restoreVersion18, "",
+			"preflight: cannot read the target major version for the pg_restore check"},
+		// Without the digit filter, [ abc -lt 17 ] errors and the gate would pass open.
+		{"a non-numeric target fails closed", restoreVersion18, "abc",
+			"preflight: cannot read the target major version for the pg_restore check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := gate(t, tc.restore, tc.target)
+			failsWith(t, out, code, tc.want)
+		})
+	}
+	for _, tc := range []struct{ name, restore, target, ok string }{
+		{"target 17 passes", restoreVersion18, "17", "18 restores into target major 17"},
+		{"target 18 passes", restoreVersion18, "18", "18 restores into target major 18"},
+		{"pg_restore 16 with target 16 passes", restoreVersion16, "16", "16 restores into target major 16"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := gate(t, tc.restore, tc.target)
+			if code != 0 || !strings.Contains(out, restoreMajorOK+tc.ok) || !strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+	t.Run("garbage version output fails closed", func(t *testing.T) {
+		// A PostgreSQL 17 target takes any pg_restore, so only the parse can fail.
+		for _, garbage := range []string{"garbage", "", "psql (PostgreSQL) 18.6", "pg_restore (PostgreSQL) devel",
+			restoreVersion16 + "\n" + restoreVersion18} {
+			out, code := gate(t, garbage, "17")
+			failsWith(t, out, code, restoreMajorUnread)
+		}
+	})
+	t.Run("PG_CONFIG picks the pg_restore pgcopydb runs", func(t *testing.T) {
+		bin := t.TempDir()
+		write := func(name, body string) {
+			if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write("pg_config", `[ "$1" = --bindir ] && echo `+bin)
+		write("psql", "echo 'psql (PostgreSQL) 16.10'")
+		write("pg_restore", "echo '"+restoreVersion16+"'")
+		out, code := gate(t, restoreVersion18, "16", "PG_CONFIG="+filepath.Join(bin, "pg_config"))
+		if code != 0 || !strings.Contains(out, restoreMajorOK+"16 restores into target major 16") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		// pgcopydb ignores a PG_CONFIG that names no file and takes the directory of the first psql.
+		out, code = gate(t, restoreVersion18, "16", "PG_CONFIG="+filepath.Join(bin, "missing"))
+		failsWith(t, out, code, restoreMajorFailure("16", "18"))
+		if err := os.Remove(filepath.Join(bin, "pg_restore")); err != nil {
+			t.Fatal(err)
+		}
+		out, code = gate(t, restoreVersion18, "17", "PG_CONFIG="+filepath.Join(bin, "pg_config"))
+		failsWith(t, out, code, restoreMajorUnread)
+	})
+	t.Run("the all-databases path stops before its superuser probes", func(t *testing.T) {
+		runAll := clonePreflightHarness(t)
+		m := passwordMigration()
+		m.Spec.Clone.AllDatabases = true
+		out, code, _, _ := runAll(t, m, "PG_RESTORE_VERSION="+restoreVersion18, "TGT_MAJOR=16")
+		if code != 1 || !strings.Contains(out, "preflight failed:\n"+restoreMajorFailure("16", "18")) ||
+			strings.Contains(out, "all-databases source superuser") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+		out, code, _, _ = runAll(t, m, "PG_RESTORE_VERSION="+restoreVersion18, "TGT_MAJOR=17")
+		if code != 0 || !strings.Contains(out, restoreMajorOK+"18 restores into target major 17") {
+			t.Fatalf("code=%d out:\n%s", code, out)
+		}
+	})
 }
 
 func TestPreflightScriptFor_AllDatabases(t *testing.T) {
@@ -1437,6 +1562,21 @@ func TestBuildPreflightJob_SuperuserWiring(t *testing.T) {
 	}
 }
 
+const (
+	restoreVersion16 = "pg_restore (PostgreSQL) 16.10"
+	restoreVersion18 = "pg_restore (PostgreSQL) 18.6 (Debian 18.6-1.pgdg13+2)"
+)
+
+// writePgRestoreStub puts pg_restore next to a psql stub, where the preflight
+// looks for it. PG_RESTORE_VERSION replaces its --version output.
+func writePgRestoreStub(t *testing.T, dir string) {
+	t.Helper()
+	stub := "#!/bin/sh\n[ \"$1\" = --version ] || exit 2\nprintf '%s\\n' \"${PG_RESTORE_VERSION-" + restoreVersion16 + "}\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "pg_restore"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // followPreflightHarness writes the stateful follow-battery psql stub and
 // returns the runner TestPreflightScript_Remediation and
 // TestPreflightScript_Connectivity share; splitting keeps gocyclo quiet.
@@ -1523,6 +1663,7 @@ esac
 	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writePgRestoreStub(t, dir)
 
 	return func(t *testing.T, script, mode string, extra ...string) (string, int, string) {
 		t.Helper()
@@ -1532,6 +1673,7 @@ esac
 		env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "LC_ALL=") })
 		cmd.Env = append(env,
 			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PG_CONFIG=",
 			"PGCOPYDB_SOURCE_PGURI=src",
 			"PGCOPYDB_TARGET_PGURI=tgt",
 			"PGM_SOURCE_SUPER_PGURI=src-super",
@@ -2545,6 +2687,7 @@ case "$q" in *"${PSQL_FAIL_SUBSTR:-@@none@@}"*) exit 2 ;; esac
 [ -n "$database" ] && [ "$database" = "${PSQL_FAIL_DATABASE:-}" ] && exit 2
 case "$q" in
   '\conninfo') printf 'Backend PID|4711\n4711\n' ;;
+  *server_version_num*) echo "${TGT_MAJOR-16}" ;;
   *relrowsecurity*) printf '%s' "${PSQL_RLS_TABLES:-}" ;;
   *"relpersistence = 'u'"*) printf '%s' "${PSQL_UNLOGGED_TABLES:-}" ;;
   *jsonb_typeof*) case "$list" in '[]'|'[ ]') echo 0 ;; '["citext"]'|'["extension citext (owner postgres, migration role limited)"]') echo 1 ;; *) echo -1 ;; esac ;;
@@ -2601,6 +2744,7 @@ esac
 	if err := os.WriteFile(filepath.Join(dir, "psql"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writePgRestoreStub(t, dir)
 
 	return func(t *testing.T, m *v1beta1.Migration, extra ...string) (string, int, string, string) {
 		t.Helper()
@@ -2615,6 +2759,7 @@ esac
 		cmd := exec.Command(shellPath, "-c", c.Args[1])
 		cmd.Env = append(os.Environ(),
 			"PATH="+dir+":"+os.Getenv("PATH"),
+			"PG_CONFIG=",
 			"PGCOPYDB_SOURCE_PGURI=src",
 			"PGCOPYDB_TARGET_PGURI=tgt",
 			"PGM_TARGET_SUPER_PGURI=tgt-super",

@@ -154,6 +154,7 @@ spec:
       requests: {cpu: "2", memory: 4Gi}
 ```
 
+The default image's `pg_restore` 18 cannot restore into PostgreSQL 16 or older, so such a target needs a `spec.runner.image` whose `pg_restore` is version 16 or older.
 `pg_dump` in the image must be at least the target's major version; see [client tool versions](reference/prerequisites.md#client-tool-versions).
 
 If you leave `resources` unset, it defaults to 4 CPUs and 4Gi, requests only.

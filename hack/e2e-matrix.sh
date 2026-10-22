@@ -3,8 +3,8 @@
 # holds the single confirmation prompt. Runs against the CURRENT kubectl
 # context, so never call this directly against a cluster you did not intend.
 # Upgrade-direction only: pg_dump must be at least the target's major, and a
-# newer major's dump does not restore into an older server. PG14 is a source
-# only; a follow-mode target needs PG15 (docs/reference/prerequisites.md).
+# newer major's dump does not restore into an older server. Targets are 17 or
+# later: the runner's pg_restore 18 fails on older ones (docs/reference/prerequisites.md).
 set -u
 
 combos="14:18 18:18 15:17"
