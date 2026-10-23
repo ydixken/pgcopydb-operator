@@ -8,7 +8,7 @@ It falls back to the bare Job message when the pod is already gone.
 | Symptom | Section |
 |---|---|
 | [`describe` shows no phase, no conditions, no events](#migration-has-no-status-and-the-log-repeats-is-immutable) | Spec and admission |
-| [An update fails with `dryRun is immutable` or `allDatabases is immutable`](#an-update-fails-with-dryrun-is-immutable-or-alldatabases-is-immutable) | Spec and admission |
+| [An update fails with `<field> is immutable`, for `dryRun`, `allDatabases`, `ownerAfterRestore`, `source`, `target` or `follow`](#an-update-fails-with-field-is-immutable) | Spec and admission |
 | [Phase `Failed` at `Validating`, reason `PreflightFailed`](#phase-failed-at-validating) | Preflight failures |
 | [`PreflightFailed` names the all-databases superuser requirement](#all-databases-superuser-requirement) | Preflight failures |
 | [`PreflightFailed` names unavailable selected extensions](#unavailable-selected-extensions) | Preflight failures |
@@ -75,12 +75,17 @@ Operators up to v0.8.1 rejected that spelling before any status could be set.
 Upgrade past v0.8.1, where both spellings work.
 On an older version, omit the field or set it to `null` instead of `[]`, `""`, or `false`.
 
-### An update fails with `dryRun is immutable` or `allDatabases is immutable`
+### An update fails with `<field> is immutable`
 
-Admission rejects a change to `spec.dryRun` on an existing Migration with `dryRun is immutable: create a separate Migration for the real run`.
-A dry run stops before the first worker attempt, so turning it on mid-run would halt the migration between attempts, and turning it off after completion would change nothing.
-Admission rejects a change to `spec.clone.allDatabases` with `allDatabases is immutable: create a separate Migration`, because retries and compares reuse the work directory that mode laid out.
-Dropping the field or the whole `clone` block from a Migration created with `allDatabases: true` is such a change.
+Admission rejects the changes below to an existing Migration, each with its message:
+
+- `dryRun is immutable: create a separate Migration for the real run`: a dry run stops before the first worker attempt, so turning it on mid-run would halt the migration between attempts, and turning it off after completion would change nothing.
+- `allDatabases is immutable: create a separate Migration`: retries and compares reuse the work directory that mode laid out.
+  Dropping the field or the whole `clone` block from a Migration created with `allDatabases: true` is such a change.
+- `ownerAfterRestore is immutable: the preflight probes the target role before the first attempt, and the handover Job is built once`.
+- `source is immutable`, `target is immutable except synchronousCommit` or `follow is immutable`: admission rejects any change to an endpoint apart from `target.synchronousCommit`, and any change inside a `follow` block that the Migration already has.
+  If the Migration also shows no status at all, see [Migration has no status and the log repeats `is immutable`](#migration-has-no-status-and-the-log-repeats-is-immutable).
+
 Create a new Migration with the spec you want.
 
 ## Preflight failures
