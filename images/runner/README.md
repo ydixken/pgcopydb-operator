@@ -166,7 +166,7 @@ The merge commit passed [Run Tests `39832973214`](https://github.com/ydixken/pgc
 
 [Fork PR #38](https://github.com/ydixken/pgcopydb/pull/38), merged as `d4a2db1`, asks the target before it adds a constraint that has no done time.
 When the table already has a constraint of that name with the same `pg_get_constraintdef()` text as the source's, the resume skips the `ALTER TABLE` and records the constraint as done, where every resume failed with exit code 12 on `relation "..." already exists` or `index "..." is already associated with a constraint`.
-A killed run's `ALTER TABLE` keeps running on the target and commits, so that failure followed a kill at any point of the `ALTER TABLE`, not only one between its commit and its record.
+A killed run's `ALTER TABLE` keeps running on the target and commits with the server default `client_connection_check_interval`, so that failure followed a kill at any point of the `ALTER TABLE`, not only one between its commit and its record.
 When the two texts differ, the resume stops with an error that prints both.
 The merge commit passed [Run Tests `39909400610`](https://github.com/ydixken/pgcopydb/actions/runs/39909400610) and [Nightly Tests `39909403376`](https://github.com/ydixken/pgcopydb/actions/runs/39909403376).
 

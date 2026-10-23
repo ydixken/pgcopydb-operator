@@ -88,7 +88,7 @@ The "Exists" column is the contract for when a series is present:
   A table with rows on the source and none on the target does not, whatever storage its restored schema holds.
   Neither does a table that one of pgcopydb's copy workers holds under an exclusive lock, or, on a PostgreSQL 14 or later target, any table the worker is still copying into.
   The sample never reads such a table, because its rows stay invisible until that copy commits.
-  Any other pgcopydb lock is short, such as an index worker attaching a constraint to a copied table, and the sample waits for it.
+  The lock an index worker takes to attach a constraint `USING INDEX` to a copied table is short, and the sample waits for it.
   The sample needs psql and GNU `timeout` in the runner.
   pgcopydb's own accounting then replaces it where it can be read: at clone completion for a plain clone, and from the verify Job's log after cutover for a follow migration.
   Both need an allowlisted runner version (see [Troubleshooting](../troubleshooting.md)).
