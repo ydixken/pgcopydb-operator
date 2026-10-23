@@ -9,17 +9,17 @@
 # renovate: datasource=docker depName=debian
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS build
 
-# ydixken/pgcopydb#35 and #36 fix the --all-databases resume, large objects
-# and extension data; #37 fixes long JSON logs, SysV slots and quoted roles.
-# Keeps #34's split-table resume, #33's target keepalives, #32's snapshot
-# refusal, #31's closed output.db fix, #27 to #30's throughput, #26, #25,
-# #24, #19, #20, #21, #23, #18, #17, #15, #16, #14, #12, #11, #9.
+# ydixken/pgcopydb#38 keeps a constraint a killed run left on the target.
+# Keeps #35 to #37's all-databases resume, large objects, long logs, SysV
+# slots and quoted roles, #34's split-table resume, #33's target keepalives,
+# #32's snapshot refusal, #31's closed output.db fix, #27 to #30's throughput,
+# #26, #25, #24, #19, #20, #21, #23, #18, #17, #15, #16, #14, #12, #11, #9.
 
 # These two move together: the version is what `git describe` prints for the
-# sha (v0.18-129-gd7547b5, dashes become dots). GIT-VERSION-GEN reads VERSION
+# sha (v0.18-132-gd4a2db1, dashes become dots). GIT-VERSION-GEN reads VERSION
 # from the environment because a tarball has no .git to describe.
-ARG PGCOPYDB_SHA=d7547b55537c89f89da8b317a8fce4f7dda76dc3
-ARG PGCOPYDB_VERSION=0.18.129.gd7547b5
+ARG PGCOPYDB_SHA=d4a2db114eaf29c675b6837529af5c48f06ceb2c
+ARG PGCOPYDB_VERSION=0.18.132.gd4a2db1
 
 # DL3008: apt versions deliberately float within their majors; the version
 # canary in the final stage fails the build on a major drift.

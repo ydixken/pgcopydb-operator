@@ -93,10 +93,16 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   A table whose `VACUUM` had not finished then has no planner statistics until you run `ANALYZE` on it.
   Runners older than `0.18.129.gd7547b5` fail every retry with exit code 12 after an attempt died while it built a table's constraints, with or without `clone.allDatabases`.
   The error names one of that table's constraints, as in `relation "cx_pkey" already exists`.
-  `0.18.129.gd7547b5` still fails that way when the attempt died between adding a constraint and recording it, a window of milliseconds per constraint.
-  With `clone.allDatabases`, older runners also fail every retry with exit code 12 after an attempt died while it built a split table's indexes, on an error that names one of those indexes (as in `relation "big_gate" already exists`), and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
-  A Migration whose retry already failed that way on an older runner keeps failing after an upgrade, so create a new one against a target that does not hold the failed copy, or, without `clone.allDatabases`, a new one with `clone.dropIfExists: true`.
-  Without `clone.allDatabases`, an older runner's retry skips an unfinished large-object or extension configuration step when the tables, indexes and sequences were already done, and then exits 0 without what that step had not copied.
+  `0.18.129.gd7547b5` still fails every retry that way when the attempt died while it added a constraint, or after it added one and before it recorded it.
+  When it died while it added one, its `ALTER TABLE` keeps running on the target and commits with the server default `client_connection_check_interval`, and the retry gate holds the retry until that session has ended, so either way the target holds the constraint without a record.
+  From `0.18.132.gd4a2db1` on, the retry keeps such a constraint when its `pg_get_constraintdef()` text equals the source's.
+  When the two texts differ, every retry stops with exit code 12 on an error that prints both.
+  The texts of one constraint can differ when it names an object whose schema is on the `search_path` of one database and not the other, such as the function in an `EXCLUDE` constraint, or when the two servers' major versions print it differently.
+  With `clone.allDatabases`, runners older than `0.18.129.gd7547b5` also fail every retry with exit code 12 after an attempt died while it built a split table's indexes, on an error that names one of those indexes (as in `relation "big_gate" already exists`), and after one died during a split table's copy they can copy a part twice or keep rows that the source changed since.
+  A Migration whose retry failed after a constraint or index build on a runner older than `0.18.129.gd7547b5` can keep failing after an upgrade.
+  One whose retries fail on a constraint on `0.18.129.gd7547b5` converges after an upgrade to `0.18.132.gd4a2db1`, unless it has already ended `Failed`.
+  Replace a `Failed` Migration with a new one against a target that does not hold the failed copy, or, without `clone.allDatabases`, with a new one with `clone.dropIfExists: true`.
+  Without `clone.allDatabases`, the retry of a runner older than `0.18.129.gd7547b5` skips an unfinished large-object or extension configuration step when the tables, indexes and sequences were already done, and then exits 0 without what that step had not copied.
 - A live migration cannot resume its table copy that way once its replication slot exists.
   The slot replays every change since its own snapshot, so tables copied under a newer one would get some changes twice.
   pgcopydb refuses that resume with `Refusing to resume the copy: ...`, and the operator starts the next attempt over.
@@ -113,7 +119,7 @@ The operator owns the retry policy, so attempt counts and failure reasons live o
   The [retry gate](#the-retry-gate) holds the next attempt until they are gone, so the attempt does not start behind them.
   From runner `0.18.109.gbec4ebb` on, the target ends a session that waits on the lost runner, such as an open `COPY`, within about 70 seconds.
   With older runners such a session can stay for about two hours.
-  A session busy in a long statement such as `CREATE INDEX` stays until that statement ends.
+  With the server default `client_connection_check_interval`, a session busy in a long statement such as `CREATE INDEX` stays until that statement ends.
   The `pg_restore` sessions, the session in which `pgcopydb compare` reads the target's catalogs, and any session that reaches the target through a connection pooler do not get that bound, so they can stay for longer.
 - Failures the retry cannot fix, such as a source that dies mid-copy or a broken restore, still consume the budget one attempt at a time.
 - The [preflight](live-migration.md#preflight) stops some failures before the first attempt.

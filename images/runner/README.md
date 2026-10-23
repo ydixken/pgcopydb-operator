@@ -9,10 +9,10 @@ This image's targets MUST therefore run PostgreSQL 17 or later; see [`pg_restore
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`d7547b55537c89f89da8b317a8fce4f7dda76dc3`](https://github.com/ydixken/pgcopydb/commit/d7547b55537c89f89da8b317a8fce4f7dda76dc3).
-The version string is `0.18.129.gd7547b5`, derived from `git describe` (`v0.18-129-gd7547b5`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is one hundred and twenty-nine commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:54bcd2e26362f13953051103c68e915d0020384ea0d7ea3ba6c657990b623f9c`, published by [builder run `39842318122`](https://github.com/ydixken/pgcopydb-operator/actions/runs/39842318122).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`d4a2db114eaf29c675b6837529af5c48f06ceb2c`](https://github.com/ydixken/pgcopydb/commit/d4a2db114eaf29c675b6837529af5c48f06ceb2c).
+The version string is `0.18.132.gd4a2db1`, derived from `git describe` (`v0.18-132-gd4a2db1`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is one hundred and thirty-two commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:38622c6689cf703dd19231b4a1e4479887b100fdc926a2386dac5f67ba7ed3a1`, published by [builder run `39916120846`](https://github.com/ydixken/pgcopydb-operator/actions/runs/39916120846).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -144,10 +144,10 @@ The `--all-databases` resume never truncated split tables, and #34 left it so: i
 The PR head `4c2e8e3`, whose tree the merge commit shares, passed [Run Tests `39636487051`](https://github.com/ydixken/pgcopydb/actions/runs/39636487051) and [Nightly Tests `39636520942`](https://github.com/ydixken/pgcopydb/actions/runs/39636520942).
 
 [Fork PR #35](https://github.com/ydixken/pgcopydb/pull/35), merged as `587a2bb`, resets each database's resume state before an `--all-databases` copy, as a single-database resume does.
-A retry after a kill during a split table's index or constraint build now builds them, where every retry failed with exit code 12 on `relation "..." already exists`.
+A retry after a kill during a split table's index or constraint build now builds them, where every retry failed with exit code 12 on `relation "..." already exists`; a constraint that the killed run had added without recording it still stopped every retry until #38 (below).
 A retry after a kill during a split table's copy truncates it and copies every part again, where it could copy a part twice or keep rows that the source had changed since.
 It also drops the `COPY` and index rows that a killed run left unfinished in each database, so a retry in a fresh pod, where process IDs start over, no longer refuses a table or index that one of those rows names.
-A resume also builds the constraints of a table whose constraint builder died, with or without `--all-databases`, unless it died between adding a constraint and recording it.
+A resume also builds the constraints of a table whose constraint builder died, with or without `--all-databases`, unless the target already held one of them that the killed run had added without recording it.
 The merge commit passed [Run Tests `39718723530`](https://github.com/ydixken/pgcopydb/actions/runs/39718723530) and [Nightly Tests `39718726071`](https://github.com/ydixken/pgcopydb/actions/runs/39718726071).
 
 [Fork PR #36](https://github.com/ydixken/pgcopydb/pull/36), merged as `ab522c1`, copies large objects and the user rows of extension configuration tables under `--all-databases`, which never copied them.
@@ -164,8 +164,15 @@ It finds an existing role whose name needs quoting, where a run that copies role
 It no longer cuts a role's quoted name of 64 bytes or more, whose `CREATE ROLE` arrived broken even at a target without the role.
 The merge commit passed [Run Tests `39832973214`](https://github.com/ydixken/pgcopydb/actions/runs/39832973214) and [Nightly Tests `39832977832`](https://github.com/ydixken/pgcopydb/actions/runs/39832977832).
 
-The manager and chart allow `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all seventeen older versions so upgrading the operator does not suppress counters for existing workers.
+[Fork PR #38](https://github.com/ydixken/pgcopydb/pull/38), merged as `d4a2db1`, asks the target before it adds a constraint that has no done time.
+When the table already has a constraint of that name with the same `pg_get_constraintdef()` text as the source's, the resume skips the `ALTER TABLE` and records the constraint as done, where every resume failed with exit code 12 on `relation "..." already exists` or `index "..." is already associated with a constraint`.
+A killed run's `ALTER TABLE` keeps running on the target and commits with the server default `client_connection_check_interval`, so that failure followed a kill at any point of the `ALTER TABLE`, not only one between its commit and its record.
+When the two texts differ, the resume stops with an error that prints both.
+The merge commit passed [Run Tests `39909400610`](https://github.com/ydixken/pgcopydb/actions/runs/39909400610) and [Nightly Tests `39909403376`](https://github.com/ydixken/pgcopydb/actions/runs/39909403376).
+
+The manager and chart allow `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all eighteen older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.129.gd7547b5` has the fixes from #35, #36 and #37 but not the #38 constraint fix.
 Version `0.18.112.g4c61e97` has the #34 split-table resume fix but none of the fixes from #35, #36 and #37.
 Version `0.18.109.gbec4ebb` has the #33 target keepalives but not the #34 split-table resume fix.
 Version `0.18.104.g362a559` has the #32 snapshot fix but not the #33 target keepalives.
