@@ -68,6 +68,7 @@ spec:
     noTablespaces: true         # ignore source tablespace assignments
     useCopyBinary: true         # COPY BINARY with per-table fallback for unsafe types
     failFast: true              # abort on the first error instead of collecting
+    deferIndexes: false         # build indexes after the whole copy; immutable
     # Sections to skip entirely; also: extensions, collations, dbProperties, ctidSplit.
     skip: [largeObjects, extensionComments, vacuum, analyze]
     filters:

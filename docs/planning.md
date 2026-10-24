@@ -20,6 +20,7 @@ pgcopydb is a migration tool, not a backup system.
 5. What are the database size, largest relations, write and WAL rates, largest transaction, and growth?
    What connection, compute, I/O, network, and work-disk capacity is available?
 6. Does the agreed downtime justify follow mode, and did a plain clone rehearsal measure copy time and resource use?
+   Should index builds wait until all data is copied (see [Deferring index builds](operations/performance.md#deferring-index-builds))?
 7. Is logical decoding ready: logical WAL, slot and WAL sender capacity, plugin availability, HBA access, retention limits, and slot behavior after failover?
 8. Who stops source writes, confirms quiescence, sets the end position, waits for replay, switches clients, and authorizes cutover?
 9. Which validation checks must pass, when is rollback still safe, who decides, and when do you clean up the replication resources?

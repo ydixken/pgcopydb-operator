@@ -54,6 +54,8 @@ For a PostgreSQL 16 or older target, set it to an image whose `pg_restore` is ve
 pgcopydb takes `pg_dump` and `pg_restore` from one directory: the one holding the `psql` in `$PG_CONFIG --bindir` when `PG_CONFIG` names a file, otherwise the one holding the first `psql` on `PATH`.
 That `pg_dump` is therefore as old as the `pg_restore`, and it refuses a source newer than its own major.
 A custom runner image MUST ship psql 18 or later, because the [PgBouncer check](#no-pgbouncer-in-the-connection) reads the backend PID that psql 18 added to `\conninfo`, and every preflight fails without it.
+A custom runner image used with `spec.clone.deferIndexes` MUST ship pgcopydb `0.18.136.gb42f560` or later, because preflight then fails unless its `pgcopydb clone --help` lists `--defer-indexes` as `Build indexes once all table data is copied`.
+The check matches that description, not only the flag name, because another pgcopydb fork ships a `--defer-indexes` that behaves differently.
 
 See [Follow diagnostics](../design/follow-diagnostics.md#what-the-snapshot-can-distinguish) for the feedback guarantees behind `status.replication.lagBytes`.
 The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](https://github.com/ydixken/pgcopydb-operator/blob/main/images/pgcopydb-builder/Dockerfile).

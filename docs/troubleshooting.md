@@ -8,7 +8,7 @@ It falls back to the bare Job message when the pod is already gone.
 | Symptom | Section |
 |---|---|
 | [`describe` shows no phase, no conditions, no events](#migration-has-no-status-and-the-log-repeats-is-immutable) | Spec and admission |
-| [An update fails with `<field> is immutable`, for `dryRun`, `allDatabases`, `ownerAfterRestore`, `source`, `target` or `follow`](#an-update-fails-with-field-is-immutable) | Spec and admission |
+| [An update fails with `<field> is immutable`, for `dryRun`, `allDatabases`, `deferIndexes`, `ownerAfterRestore`, `source`, `target` or `follow`](#an-update-fails-with-field-is-immutable) | Spec and admission |
 | [Phase `Failed` at `Validating`, reason `PreflightFailed`](#phase-failed-at-validating) | Preflight failures |
 | [`PreflightFailed` names the all-databases superuser requirement](#all-databases-superuser-requirement) | Preflight failures |
 | [`PreflightFailed` names unavailable selected extensions](#unavailable-selected-extensions) | Preflight failures |
@@ -35,7 +35,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`RetryHeld` is True and no new attempt starts](#retryheld-is-true) | Synchronous replication and retries |
 | [`publication ... already exists` or `publication retry refused`](#publication-retry-failures) | Publication retry failures |
 | [The worker pod runs and logs, but the phase never moves](#the-worker-pod-runs-but-the-phase-never-moves) | Clone progress |
-| [`Finalizing` runs long with the target size flat](#finalizing-takes-a-long-time) | Clone progress |
+| [`Finalizing` runs long and the worker pod is still running](#finalizing-takes-a-long-time) | Clone progress |
 | [`Streaming` and `CaughtUp` stay unset during the clone](#streaming-and-caughtup-stay-unset-during-the-clone) | Clone progress |
 | [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
@@ -82,6 +82,8 @@ Admission rejects the changes below to an existing Migration, each with its mess
 - `dryRun is immutable: create a separate Migration for the real run`: a dry run stops before the first worker attempt, so turning it on mid-run would halt the migration between attempts, and turning it off after completion would change nothing.
 - `allDatabases is immutable: create a separate Migration`: retries and compares reuse the work directory that mode laid out.
   Dropping the field or the whole `clone` block from a Migration created with `allDatabases: true` is such a change.
+- `clone.deferIndexes is immutable: create a separate Migration`: preflight checks the runner for `--defer-indexes` only before the first attempt, so every attempt keeps the mode that preflight saw.
+  Dropping the field or the whole `clone` block from a Migration created with `deferIndexes: true` is such a change.
 - `ownerAfterRestore is immutable: the preflight probes the target role before the first attempt, and the handover Job is built once`.
 - `source is immutable`, `target is immutable except synchronousCommit` or `follow is immutable`: admission rejects any change to an endpoint apart from `target.synchronousCommit`, and any change inside a `follow` block that the Migration already has.
   If the Migration also shows no status at all, see [Migration has no status and the log repeats `is immutable`](#migration-has-no-status-and-the-log-repeats-is-immutable).
@@ -473,8 +475,9 @@ On an operator version without that recovery, delete the worker pod by hand.
 
 ### `Finalizing` takes a long time
 
-The Migration sits in `Finalizing` for a long time, the target database size is flat, and the worker pod is still running.
-The end of a clone narrows to a single `VACUUM ANALYZE` on the largest table, and the target stops growing during it.
+The Migration sits in `Finalizing` for a long time, and the worker pod is still running.
+Without `clone.deferIndexes`, the target database size is flat: the end of a clone narrows to a single `VACUUM ANALYZE` on the largest table, and the target stops growing during it.
+With it, `Finalizing` holds every index build, and the target grows while they run.
 The pass is healthy while the worker pod log advances; a stopped log is a stall.
 
 Check `CommitsBlocked` first.
@@ -482,7 +485,7 @@ When it is True, the tail waits for a synchronous standby to confirm its commits
 Otherwise watch the worker pod log instead of the target size.
 If the tail is too long, set `skip: [vacuum]`, which leaves the target without statistics.
 Then run `ANALYZE` yourself before you send traffic.
-See [The VACUUM tail](operations/performance.md#the-vacuum-tail) and the [phase table](reference/conditions.md#phases).
+See [The VACUUM tail](operations/performance.md#the-vacuum-tail), [Deferring index builds](operations/performance.md#deferring-index-builds) and the [phase table](reference/conditions.md#phases).
 
 ### `Streaming` and `CaughtUp` stay unset during the clone
 

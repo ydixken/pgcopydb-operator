@@ -39,22 +39,23 @@ The one exception is a resumed Migration: while the gate holds its next attempt,
 ### Inside `Cloning` and `Finalizing`
 
 pgcopydb does not run its steps in sequence.
-Once the schema is in place it starts the table copy, index builds, constraint creation, large-object copy and vacuum **all at once**.
+Once the schema is in place it starts the table copy, index builds, constraint creation, large-object copy and vacuum **all at once**, unless `clone.deferIndexes` holds the index builds, constraints and vacuum until every table is copied.
 It then prints nothing until they finish, so the operator reports the copy and its tail as separate phases.
 
 | Sub-state | Phase | What is running | How it looks |
 |---|---|---|---|
 | Catalog and schema | `Cloning` | Source catalog queries, `pg_dump`, pre-data `pg_restore` | Seconds. The target barely grows |
-| Table data | `Cloning` | `tableJobs` COPY workers, plus index, constraint and vacuum workers on whatever has already finished | The bulk of the run. The target grows steadily |
-| The tail | `Finalizing` | Index builds, constraints, and vacuum on the tables that finished last | **The target stops growing** while work continues |
+| Table data | `Cloning` | `tableJobs` COPY workers, plus, without `clone.deferIndexes`, index, constraint and vacuum workers on whatever has already finished | The bulk of the run. The target grows steadily |
+| The tail | `Finalizing` | Index builds, constraints, and vacuum on the tables that finished last, or on every table with `clone.deferIndexes` | **The target stops growing** while work continues, unless `clone.deferIndexes` moved every index build here |
 | Post-data | `Finalizing` | Post-data `pg_restore`: foreign keys and the rest | Seconds |
 
 A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
-So a clone routinely ends with one `VACUUM ANALYZE` still running while every other worker is idle.
+Without `clone.deferIndexes`, a clone therefore routinely ends with one `VACUUM ANALYZE` still running while every other worker is idle.
+With it, no vacuum starts before every table is copied, and each table's vacuum follows its own index builds and constraints.
 [The VACUUM tail](../operations/performance.md#the-vacuum-tail) has the measurement.
 
 > [!important]
-> During `Finalizing` the target database stops growing, so anything derived from its size reads as finished while real work continues.
+> During `Finalizing` the target database stops growing unless `clone.deferIndexes` moved every index build there, so anything derived from its size can read as finished while real work continues.
 > This is why `PgcopydbMigrationCloneStalled` matches `Cloning` alone: a long tail is not a stall.
 > [Performance tuning](../operations/performance.md) explains how to trade the vacuum away for the time.
 
