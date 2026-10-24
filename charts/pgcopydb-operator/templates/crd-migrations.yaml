@@ -95,6 +95,13 @@ spec:
                       Filters and skips apply to every database; job counts are global across databases.
                       Immutable: retries and compares reuse the work directory this mode lays out.
                     type: boolean
+                  deferIndexes:
+                    description: |-
+                      deferIndexes builds indexes, constraints and VACUUM ANALYZE once every table is
+                      copied (--defer-indexes), so the copy runs without index builds on the target and
+                      the clone takes longer. Immutable. Preflight checks the runner's pgcopydb help
+                      for the flag. See docs/operations/performance.md.
+                    type: boolean
                   dropIfExists:
                     description: |-
                       dropIfExists issues pg_restore --clean --if-exists on the target. A live
@@ -260,7 +267,8 @@ spec:
                       tableJobs is the number of concurrent table COPY workers (pgcopydb
                       --table-jobs). Unset follows the worker's CPU request, minimum four. Each
                       job also gets a concurrent VACUUM ANALYZE backend on the target, so N
-                      here means up to 2N target connections.
+                      here means up to 2N target connections while the copy runs, unless
+                      deferIndexes moves the vacuum pool after it.
                     format: int32
                     minimum: 1
                     type: integer
@@ -2109,6 +2117,9 @@ spec:
             - message: 'allDatabases is immutable: create a separate Migration'
               rule: (has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases)
                 == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)
+            - message: 'clone.deferIndexes is immutable: create a separate Migration'
+              rule: (has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes)
+                == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2412,6 +2423,13 @@ spec:
                       Filters and skips apply to every database; job counts are global across databases.
                       Immutable: retries and compares reuse the work directory this mode lays out.
                     type: boolean
+                  deferIndexes:
+                    description: |-
+                      deferIndexes builds indexes, constraints and VACUUM ANALYZE once every table is
+                      copied (--defer-indexes), so the copy runs without index builds on the target and
+                      the clone takes longer. Immutable. Preflight checks the runner's pgcopydb help
+                      for the flag. See docs/operations/performance.md.
+                    type: boolean
                   dropIfExists:
                     description: |-
                       dropIfExists issues pg_restore --clean --if-exists on the target. A live
@@ -2577,7 +2595,8 @@ spec:
                       tableJobs is the number of concurrent table COPY workers (pgcopydb
                       --table-jobs). Unset follows the worker's CPU request, minimum four. Each
                       job also gets a concurrent VACUUM ANALYZE backend on the target, so N
-                      here means up to 2N target connections.
+                      here means up to 2N target connections while the copy runs, unless
+                      deferIndexes moves the vacuum pool after it.
                     format: int32
                     minimum: 1
                     type: integer
@@ -4426,6 +4445,9 @@ spec:
             - message: 'allDatabases is immutable: create a separate Migration'
               rule: (has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases)
                 == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)
+            - message: 'clone.deferIndexes is immutable: create a separate Migration'
+              rule: (has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes)
+                == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.

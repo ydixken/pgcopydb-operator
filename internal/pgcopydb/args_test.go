@@ -96,6 +96,7 @@ func TestCloneArgs_Full(t *testing.T) {
 			NoTablespaces:         true,
 			UseCopyBinary:         &copyBinary,
 			FailFast:              true,
+			DeferIndexes:          true,
 			Skip: []v1beta1.SkipOption{
 				"vacuum", "largeObjects", "analyze", "extensionComments",
 			},
@@ -109,10 +110,19 @@ func TestCloneArgs_Full(t *testing.T) {
 		" --split-tables-larger-than 1073741824 --split-max-parts 5" +
 		" --estimate-table-sizes" +
 		" --drop-if-exists --roles --no-role-passwords --no-owner --no-acl" +
-		" --no-comments --no-tablespaces --use-copy-binary --fail-fast" +
+		" --no-comments --no-tablespaces --use-copy-binary --fail-fast --defer-indexes" +
 		" --skip-analyze --skip-ext-comments --skip-large-objects --skip-vacuum" +
 		" --filters /etc/pgcopydb/conf/filters.ini --resume --not-consistent"
 	assertArgs(t, got, want)
+}
+
+// Unset must leave the default argv alone: a runner whose pgcopydb lacks the
+// flag still runs every Migration that does not ask for it.
+func TestCloneArgs_DeferIndexes(t *testing.T) {
+	const minimal = "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary"
+	assertArgs(t, CloneArgs(&v1beta1.MigrationSpec{}, false, false, false), minimal)
+	spec := &v1beta1.MigrationSpec{Clone: v1beta1.CloneOptions{DeferIndexes: true}}
+	assertArgs(t, CloneArgs(spec, false, false, false), minimal+" --defer-indexes")
 }
 
 func TestCloneArgs_EmptyFiltersOmitsFlag(t *testing.T) {

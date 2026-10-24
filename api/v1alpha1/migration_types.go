@@ -187,7 +187,8 @@ type CloneOptions struct {
 	// tableJobs is the number of concurrent table COPY workers (pgcopydb
 	// --table-jobs). Unset follows the worker's CPU request, minimum four. Each
 	// job also gets a concurrent VACUUM ANALYZE backend on the target, so N
-	// here means up to 2N target connections.
+	// here means up to 2N target connections while the copy runs, unless
+	// deferIndexes moves the vacuum pool after it.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TableJobs int32 `json:"tableJobs,omitempty"`
@@ -286,6 +287,13 @@ type CloneOptions struct {
 	// failFast stops the whole run on the first failed child (--fail-fast).
 	// +optional
 	FailFast bool `json:"failFast,omitempty"`
+
+	// deferIndexes builds indexes, constraints and VACUUM ANALYZE once every table is
+	// copied (--defer-indexes), so the copy runs without index builds on the target and
+	// the clone takes longer. Immutable. Preflight checks the runner's pgcopydb help
+	// for the flag. See docs/operations/performance.md.
+	// +optional
+	DeferIndexes bool `json:"deferIndexes,omitempty"`
 
 	// skip lists base-copy sections to skip.
 	// +listType=set
@@ -512,6 +520,7 @@ type ReplicationStatus struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases && has(self.verification) && has(self.verification.data) && self.verification.data)",message="allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode"
 // +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases) == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)",message="allDatabases is immutable: create a separate Migration"
+// +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes) == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)",message="clone.deferIndexes is immutable: create a separate Migration"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
@@ -600,8 +609,9 @@ const (
 	PhaseCloning    MigrationPhase = "Cloning"
 	// PhaseFinalizing is the tail of a base copy: data across, worker building
 	// indexes, applying constraints and vacuuming, and on a clone-only migration
-	// the ownerAfterRestore handover. The target stops growing, so size-based
-	// estimates read as finished. See docs/operations/performance.md#the-vacuum-tail.
+	// the ownerAfterRestore handover. The target stops growing unless
+	// clone.deferIndexes moved every index build here, so size-based estimates
+	// read as finished early. See docs/operations/performance.md#the-vacuum-tail.
 	PhaseFinalizing     MigrationPhase = "Finalizing"
 	PhaseStreaming      MigrationPhase = "Streaming"
 	PhaseCutoverPending MigrationPhase = "CutoverPending"

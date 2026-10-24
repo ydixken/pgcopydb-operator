@@ -59,6 +59,10 @@ var skipFlag = map[v1beta1.SkipOption]string{
 	v1beta1.SkipOption("ctidSplit"):         "--skip-split-by-ctid",
 }
 
+// DeferIndexesHelp is our fork's help text for --defer-indexes. The preflight probe
+// and the runner canary match it, not the flag name, which another fork also ships.
+const DeferIndexesHelp = "Build indexes once all table data is copied"
+
 // CloneArgs renders the `pgcopydb clone` argv; each bool adds its flag. restart
 // wipes the work dir, so state a deleted Migration left on the volume cannot
 // poison the run. The URIs are passed via the environment, never in the argv.
@@ -67,8 +71,8 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	args := []string{"clone", flagDir, WorkDir}
 
 	// The target pays twice: pgcopydb sizes its VACUUM ANALYZE pool from this
-	// same number (copydb.c) and runs it alongside the copy, so N table jobs
-	// means up to 2N concurrent backends on the target.
+	// same number (copydb.c) and runs it alongside the copy unless --defer-indexes
+	// moves it after, so N table jobs means up to 2N concurrent target backends.
 	if c.TableJobs > 0 {
 		args = append(args, "--table-jobs", itoa(c.TableJobs))
 	} else {
@@ -123,6 +127,9 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 	}
 	if c.FailFast {
 		args = append(args, "--fail-fast")
+	}
+	if c.DeferIndexes {
+		args = append(args, "--defer-indexes")
 	}
 
 	// Skip flags in a deterministic order so the argv is stable across runs.

@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 const (
@@ -220,6 +222,15 @@ func TestRunnerPullsThePinnedBuilder(t *testing.T) {
 	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
 	if !strings.Contains(read(t, runnerDockerfile), "grep -qF '"+wantVersion+"'") {
 		t.Errorf("builder pins version %s, runner canary does not assert it", wantVersion)
+	}
+}
+
+// The preflight probe matches this help line before attempt 1; the canary fails
+// the image build when the bundled pgcopydb stops printing it.
+func TestRunnerCanaryMatchesDeferIndexesProbe(t *testing.T) {
+	want := "pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF '" + pgcopydb.DeferIndexesHelp + "'"
+	if !strings.Contains(read(t, runnerDockerfile), want) {
+		t.Errorf("the runner canary does not assert the help line the preflight probe matches:\n  %s", want)
 	}
 }
 

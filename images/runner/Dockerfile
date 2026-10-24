@@ -73,6 +73,7 @@ ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 # a missing runtime capability fails the image build.
 RUN set -eux; \
     pgcopydb --version | grep -qF '0.18.136.gb42f560'; \
+    pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF 'Build indexes once all table data is copied'; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \
