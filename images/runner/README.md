@@ -9,10 +9,10 @@ This image's targets MUST therefore run PostgreSQL 17 or later; see [`pg_restore
 ## Why pgcopydb comes from a fork
 
 Stock pgcopydb 0.18 cannot report progress: `pgcopydb list progress` always fails on a broken SQL query ([dimitri/pgcopydb#1036](https://github.com/dimitri/pgcopydb/issues/1036)) and corrupts the stored filtering of a filtered catalog along the way ([#1038](https://github.com/dimitri/pgcopydb/issues/1038)), which kills concurrent or resumed `clone --filters` runs.
-The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`d4a2db114eaf29c675b6837529af5c48f06ceb2c`](https://github.com/ydixken/pgcopydb/commit/d4a2db114eaf29c675b6837529af5c48f06ceb2c).
-The version string is `0.18.132.gd4a2db1`, derived from `git describe` (`v0.18-132-gd4a2db1`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
-The Git distance from upstream v0.18 is one hundred and thirty-two commits, including merge commits.
-The runner pins the builder's multi-platform index `sha256:38622c6689cf703dd19231b4a1e4479887b100fdc926a2386dac5f67ba7ed3a1`, published by [builder run `39916120846`](https://github.com/ydixken/pgcopydb-operator/actions/runs/39916120846).
+The operator needs that command, so this image `COPY --from`s the binary out of [images/pgcopydb-builder](../pgcopydb-builder/README.md), which compiles it from [ydixken/pgcopydb](https://github.com/ydixken/pgcopydb) branch `v0.18-fixes`, pinned to commit [`b42f560a16d4ba2459b06f7200db5b244c74e5db`](https://github.com/ydixken/pgcopydb/commit/b42f560a16d4ba2459b06f7200db5b244c74e5db).
+The version string is `0.18.136.gb42f560`, derived from `git describe` (`v0.18-136-gb42f560`) by removing the leading `v` and replacing dashes with dots; the build canary and release smoke test both assert it.
+The Git distance from upstream v0.18 is one hundred and thirty-six commits, including merge commits.
+The runner pins the builder's multi-platform index `sha256:b756a4eac487454c576855b6d88af9097b252b51258336e38a780ffef5d7e52d`, published by [builder run `40057969988`](https://github.com/ydixken/pgcopydb-operator/actions/runs/40057969988).
 
 The five patches inherited from `e37d2bd` are:
 
@@ -170,8 +170,17 @@ A killed run's `ALTER TABLE` keeps running on the target and commits with the se
 When the two texts differ, the resume stops with an error that prints both.
 The merge commit passed [Run Tests `39909400610`](https://github.com/ydixken/pgcopydb/actions/runs/39909400610) and [Nightly Tests `39909403376`](https://github.com/ydixken/pgcopydb/actions/runs/39909403376).
 
-The manager and chart allow `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
-We keep all eighteen older versions so upgrading the operator does not suppress counters for existing workers.
+[Fork PR #39](https://github.com/ydixken/pgcopydb/pull/39), merged as `b42f560`, adds `--defer-indexes`: with it, `pgcopydb clone` copies the data of every table before it builds any index or constraint or runs any `VACUUM ANALYZE`.
+It then queues each table's indexes, or its `VACUUM` when it has none, largest table first.
+No index build then competes with a `COPY` on the target, and an attempt whose `COPY` fails builds no index.
+If the process that queues that work, or the index or `VACUUM` supervisor, dies while work is still queued, the run ends with an error instead of hanging.
+Without `--all-databases`, when a run with the option is killed after every index and constraint is built, the deferred phase of its resume builds no index and runs only the `VACUUM ANALYZE` that the killed run had not finished.
+With or without the option, an index or `VACUUM` supervisor that fails before its workers start now ends the run with an error instead of hanging it.
+The merge commit passed [Run Tests `40050472559`](https://github.com/ydixken/pgcopydb/actions/runs/40050472559) and [Nightly Tests `40050474613`](https://github.com/ydixken/pgcopydb/actions/runs/40050474613).
+
+The manager and chart allow `0.18.136.gb42f560`, `0.18.132.gd4a2db1`, `0.18.129.gd7547b5`, `0.18.112.g4c61e97`, `0.18.109.gbec4ebb`, `0.18.104.g362a559`, `0.18.98.g944abcc`, `0.18.94.gbaa94ee`, `0.18.76.gf9b328b`, `0.18.74.gc682dce`, `0.18.72.g2aa91e7`, `0.18.70.gbb8dbfc`, `0.18.39.g93eda1d`, `0.18.36.g972e221`, `0.18.34.g7fddd6f`, `0.18.22.g22e29c3`, `0.18.15.gea2dc96`, `0.18.13.g4873c18`, `0.18.10.gaadc4bf`, and `0.18.5.ge37d2bd` to run the catalog progress poll.
+We keep all nineteen older versions so upgrading the operator does not suppress counters for existing workers.
+Version `0.18.132.gd4a2db1` has the #38 constraint fix but not the #39 `--defer-indexes` option.
 Version `0.18.129.gd7547b5` has the fixes from #35, #36 and #37 but not the #38 constraint fix.
 Version `0.18.112.g4c61e97` has the #34 split-table resume fix but none of the fixes from #35, #36 and #37.
 Version `0.18.109.gbec4ebb` has the #33 target keepalives but not the #34 split-table resume fix.
