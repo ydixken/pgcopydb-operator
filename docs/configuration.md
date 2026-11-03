@@ -20,6 +20,21 @@ The operator defaults table jobs to the worker's CPU request and turns on same-t
 Size job counts against both endpoints; see [Performance tuning](operations/performance.md).
 Every `pgcopydb clone` flag maps to a spec field or a recorded exclusion; the [option coverage table](reference/coverage.md) lists them.
 
+### Deferred index builds
+
+Set `spec.clone.deferIndexes: true` to make pgcopydb copy every table before it builds any index or constraint or runs any `VACUUM ANALYZE`:
+
+```yaml
+spec:
+  clone:
+    deferIndexes: true   # build indexes after the whole copy
+```
+
+The copy then runs without index builds on the target, and the clone takes longer; [Deferring index builds](operations/performance.md#deferring-index-builds) lists the trade-offs.
+Admission rejects a change to `deferIndexes` on an existing Migration with `clone.deferIndexes is immutable: create a separate Migration`.
+Preflight probes the runner image before the first attempt: when its `pgcopydb clone --help` does not list the fork's `--defer-indexes`, preflight fails and names the image.
+A custom runner image needs pgcopydb `0.18.136.gb42f560` or later; see [Client tool versions](reference/prerequisites.md#client-tool-versions).
+
 ### Extension comments and skips
 
 `clone.skip: [extensionComments]` suppresses only extension comments.

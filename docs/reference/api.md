@@ -30,7 +30,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `allDatabases` _boolean_ | allDatabases clones the whole instance, including postgres, and creates missing target databases; roles are implied.<br />Both connections must name a maintenance database and use superuser roles.<br />Filters and skips apply to every database; job counts are global across databases.<br />Immutable: retries and compares reuse the work directory this mode lays out. |  | Optional: \{\} <br /> |
-| `tableJobs` _integer_ | tableJobs is the number of concurrent table COPY workers (pgcopydb<br />--table-jobs). Unset follows the worker's CPU request, minimum four. Each<br />job also gets a concurrent VACUUM ANALYZE backend on the target, so N<br />here means up to 2N target connections. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `tableJobs` _integer_ | tableJobs is the number of concurrent table COPY workers (pgcopydb<br />--table-jobs). Unset follows the worker's CPU request, minimum four. Each<br />job also gets a concurrent VACUUM ANALYZE backend on the target, so N<br />here means up to 2N target connections while the copy runs, unless<br />deferIndexes moves the vacuum pool after it. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `indexJobs` _integer_ | indexJobs is the number of concurrent CREATE INDEX workers (--index-jobs).<br />Unset leaves pgcopydb's default of four. Size it against the TARGET, not<br />the worker: pgcopydb sets maintenance_work_mem to 1GB per index worker,<br />overriding the server's own setting, so four jobs authorise 4GB there. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `restoreJobs` _integer_ | restoreJobs is pg_restore --jobs (--restore-jobs); 0 follows indexJobs. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `largeObjectsJobs` _integer_ | largeObjectsJobs is the number of concurrent large-object workers. |  | Minimum: 1 <br />Optional: \{\} <br /> |
@@ -47,6 +47,7 @@ _Appears in:_
 | `noTablespaces` _boolean_ | noTablespaces skips tablespace selection (--no-tablespaces). |  | Optional: \{\} <br /> |
 | `useCopyBinary` _boolean_ | useCopyBinary uses COPY WITH (FORMAT BINARY) (--use-copy-binary), on by<br />default. pgcopydb falls back to text for any table with a column whose<br />binary encoding is not safe, so the choice is per table. Set it false to<br />force text everywhere. See docs/operations/performance.md. | true | Optional: \{\} <br /> |
 | `failFast` _boolean_ | failFast stops the whole run on the first failed child (--fail-fast). |  | Optional: \{\} <br /> |
+| `deferIndexes` _boolean_ | deferIndexes builds indexes, constraints and VACUUM ANALYZE once every table is<br />copied (--defer-indexes), so the copy runs without index builds on the target and<br />the clone takes longer. Immutable. Preflight checks the runner's pgcopydb help<br />for the flag. See docs/operations/performance.md. |  | Optional: \{\} <br /> |
 | `skip` _[SkipOption](#skipoption) array_ | skip lists base-copy sections to skip. |  | Enum: [largeObjects extensions extensionComments collations vacuum analyze dbProperties ctidSplit] <br />Optional: \{\} <br /> |
 | `filters` _[Filters](#filters)_ | filters is rendered to the pgcopydb --filters INI file. |  | Optional: \{\} <br /> |
 
@@ -241,7 +242,7 @@ _Appears in:_
 | `Pending` | PhasePending is the first phase persisted by the controller for a new Migration.<br />API-server creation does not initialize status.<br /> |
 | `Validating` |  |
 | `Cloning` |  |
-| `Finalizing` | PhaseFinalizing is the tail of a base copy: data across, worker building<br />indexes, applying constraints and vacuuming, and on a clone-only migration<br />the ownerAfterRestore handover. The target stops growing, so size-based<br />estimates read as finished. See docs/operations/performance.md#the-vacuum-tail.<br /> |
+| `Finalizing` | PhaseFinalizing is the tail of a base copy: data across, worker building<br />indexes, applying constraints and vacuuming, and on a clone-only migration<br />the ownerAfterRestore handover. The target stops growing unless<br />clone.deferIndexes moved every index build here, so size-based estimates<br />read as finished early. See docs/operations/performance.md#the-vacuum-tail.<br /> |
 | `Streaming` |  |
 | `CutoverPending` |  |
 | `CuttingOver` |  |

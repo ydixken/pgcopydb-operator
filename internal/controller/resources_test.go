@@ -47,7 +47,7 @@ import (
 // pgoutputPlugin keeps the plugin literal in one place (and goconst quiet).
 const (
 	pgoutputPlugin           = "pgoutput"
-	patchedVersionForTest    = "0.18.132.gd4a2db1"
+	patchedVersionForTest    = "0.18.136.gb42f560"
 	featureRunOwner          = "run-owner"
 	extensionFixtureName     = "citext"
 	extensionBuiltin         = "plpgsql"
@@ -445,8 +445,8 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 	// The real renderer, so the assembled script is asserted as it ships: the
 	// counters block wraps this in $( ), where the pattern list needs its
 	// leading "(" (see TestGateScript).
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
-	if !strings.Contains(gate, "\n(0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	if !strings.Contains(gate, "\n(0.18.136.gb42f560|0.18.132.gd4a2db1|0.18.129.gd7547b5|0.18.112.g4c61e97|0.18.109.gbec4ebb|0.18.104.g362a559|0.18.98.g944abcc|0.18.94.gbaa94ee|0.18.76.gf9b328b|0.18.74.gc682dce|0.18.72.g2aa91e7|0.18.70.gbb8dbfc|0.18.39.g93eda1d|0.18.36.g972e221|0.18.34.g7fddd6f|0.18.22.g22e29c3|0.18.15.gea2dc96|0.18.13.g4873c18|0.18.10.gaadc4bf|0.18.5.ge37d2bd)") {
 		t.Fatalf("the gate embedded in a command substitution needs a parenthesised pattern list:\n%s", gate)
 	}
 	job, err := buildVerifyJob(passwordMigration(), "img", gate)
@@ -531,7 +531,7 @@ func TestBuildCatalogJob_ReadsTheCatalogItself(t *testing.T) {
 func TestJobScripts_ShellValid(t *testing.T) {
 	m := passwordMigration()
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
-	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
+	gate := progress.NewFromExec(nil, []string{patchedVersionForTest, "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd"}).GateScript()
 	scripts := map[string]func() (*batchv1.Job, error){
 		"extension ownership with drop and no comments": func() (*batchv1.Job, error) {
 			drop := passwordMigration()
@@ -837,6 +837,40 @@ func TestBuildPreflightJob_PluginAndAllowlist(t *testing.T) {
 	}
 	if got := envValue(c.Env, "PREFLIGHT_ALLOW_MISSING_RI"); got != "public.audit_log\nstats.rollup" {
 		t.Fatalf("allowlist env = %q", got)
+	}
+}
+
+// TestBuildPreflightJob_DeferIndexesImage pins the image the probe names: the
+// one the worker Jobs run, and only when the field asks for the probe.
+func TestBuildPreflightJob_DeferIndexesImage(t *testing.T) {
+	image := func(m *v1beta1.Migration) (string, bool) {
+		t.Helper()
+		job, err := buildPreflightJob(m, testRunnerImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := job.Spec.Template.Spec.Containers[0]
+		for _, e := range c.Env {
+			if e.Name == "PREFLIGHT_RUNNER_IMAGE" {
+				if e.Value != c.Image {
+					t.Fatalf("PREFLIGHT_RUNNER_IMAGE = %q, but the preflight runs %q", e.Value, c.Image)
+				}
+				return e.Value, true
+			}
+		}
+		return "", false
+	}
+	m := passwordMigration()
+	if got, ok := image(m); ok {
+		t.Fatalf("without deferIndexes the preflight env must lack PREFLIGHT_RUNNER_IMAGE, got %q", got)
+	}
+	m.Spec.Clone.DeferIndexes = true
+	if got, ok := image(m); !ok || got != testRunnerImage {
+		t.Fatalf("PREFLIGHT_RUNNER_IMAGE = %q (set %v), want the manager image %q", got, ok, testRunnerImage)
+	}
+	m.Spec.Runner.Image = "registry.example/runner:custom"
+	if got, ok := image(m); !ok || got != m.Spec.Runner.Image {
+		t.Fatalf("PREFLIGHT_RUNNER_IMAGE = %q (set %v), want spec.runner.image %q", got, ok, m.Spec.Runner.Image)
 	}
 }
 
@@ -1214,6 +1248,85 @@ func TestPreflightScript_SameMajorLive(t *testing.T) {
 	}
 }
 
+// TestPreflightScriptFor_DeferIndexes pins the opt-in probe on every path: after
+// the target connectivity check, before the pg_restore gate, and nothing else.
+func TestPreflightScriptFor_DeferIndexes(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		for _, dry := range []bool{false, true} {
+			m := passwordMigration()
+			m.Spec.Clone.AllDatabases = all
+			m.Spec.DryRun = dry
+			off := preflightScriptFor(m)
+			if strings.Contains(off, "--defer-indexes") {
+				t.Fatalf("allDatabases=%v dryRun=%v: the probe needs the field:\n%s", all, dry, off)
+			}
+			m.Spec.Clone.DeferIndexes = true
+			on := preflightScriptFor(m)
+			if !strings.Contains(on, deferIndexesBlock) {
+				t.Fatalf("allDatabases=%v dryRun=%v: probe missing:\n%s", all, dry, on)
+			}
+			mustPrecede(t, on, "echo \"ok: connectivity target\"", "--defer-indexes")
+			mustPrecede(t, on, "--defer-indexes", restoreMajorOK)
+			if strings.Replace(on, deferIndexesBlock, "", 1) != off {
+				t.Fatalf("allDatabases=%v dryRun=%v: the probe must be the only difference", all, dry)
+			}
+		}
+	}
+}
+
+// TestPreflightScript_DeferIndexes runs the probe against the help a runner's
+// pgcopydb prints; only our fork's help line passes.
+func TestPreflightScript_DeferIndexes(t *testing.T) {
+	run := followPreflightHarness(t)
+	m := passwordMigration()
+	m.Spec.Clone.DeferIndexes = true
+	script := preflightScriptFor(m)
+	// The extension probe stops on an earlier note, as on a pooler note; without it
+	// the script runs to the footer, which prints the note again.
+	m.Spec.Clone.Skip = []v1beta1.SkipOption{"extensions"}
+	toFooter := preflightScriptFor(m)
+	const (
+		accepted  = "ok: runner pgcopydb accepts --defer-indexes"
+		restoreOK = restoreMajorOK + "16 restores into target major 16"
+		before    = "  --skip-db-properties          Skip copying ALTER DATABASE SET properties\n"
+		after     = "  --requirements <filename>     List extensions requirements\n"
+		failure   = "preflight: spec.clone.deferIndexes needs pgcopydb 0.18.136.gb42f560 or later," +
+			" and runner image img:old does not list its --defer-indexes; recreate the Migration without deferIndexes," +
+			" or use a runner with pgcopydb 0.18.136.gb42f560 or later"
+	)
+	t.Run("the fork's help line passes", func(t *testing.T) {
+		help := before + "  --defer-indexes               Build indexes once all table data is copied\n" + after
+		for _, s := range []string{script, toFooter} {
+			out, code, _ := run(t, s, "", "PGCOPYDB_STUB_HELP="+help)
+			if code != 0 || !strings.Contains(out, accepted) || !strings.Contains(out, restoreOK) ||
+				!strings.Contains(out, preflightAllChecksPassed) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, help, exit string }{
+		{"a runner without the flag fails", before + after, "0"},
+		// A third-party fork ships a flag of the same name that vacuums during the copy.
+		{"the same flag with another description fails",
+			before + "  --defer-indexes               Defer index building until after COPY completes\n" + after, "0"},
+		{"a runner without pgcopydb fails", "", "127"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"PGCOPYDB_STUB_HELP=" + tc.help, "PGCOPYDB_STUB_EXIT=" + tc.exit, "PREFLIGHT_RUNNER_IMAGE=img:old"}
+			out, code, _ := run(t, script, "", env...)
+			if code != 1 || !strings.Contains(out, failure) || strings.Contains(out, accepted) ||
+				!strings.Contains(out, restoreOK) || !strings.Contains(out, extensionAvailableOK) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+			out, code, _ = run(t, toFooter, "", env...)
+			if code != 1 || !strings.Contains(out, "preflight failed:\n"+failure) || strings.Contains(out, accepted) ||
+				!strings.Contains(out, restoreOK) {
+				t.Fatalf("code=%d out:\n%s", code, out)
+			}
+		})
+	}
+}
+
 const (
 	restoreMajorOK     = "ok: runner pg_restore "
 	restoreMajorUnread = "preflight: cannot read the major version of the runner's pg_restore"
@@ -1577,6 +1690,17 @@ func writePgRestoreStub(t *testing.T, dir string) {
 	}
 }
 
+// writePgcopydbStub answers `pgcopydb clone --help` as pgcopydb does, on stderr:
+// PGCOPYDB_STUB_HELP is the help and PGCOPYDB_STUB_EXIT the exit status.
+func writePgcopydbStub(t *testing.T, dir string) {
+	t.Helper()
+	stub := "#!/bin/sh\n[ \"$1\" = clone ] && [ \"$2\" = --help ] || exit 2\n" +
+		"printf '%s\\n' \"${PGCOPYDB_STUB_HELP-}\" >&2\nexit \"${PGCOPYDB_STUB_EXIT:-0}\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "pgcopydb"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // followPreflightHarness writes the stateful follow-battery psql stub and
 // returns the runner TestPreflightScript_Remediation and
 // TestPreflightScript_Connectivity share; splitting keeps gocyclo quiet.
@@ -1664,6 +1788,7 @@ esac
 		t.Fatal(err)
 	}
 	writePgRestoreStub(t, dir)
+	writePgcopydbStub(t, dir)
 
 	return func(t *testing.T, script, mode string, extra ...string) (string, int, string) {
 		t.Helper()

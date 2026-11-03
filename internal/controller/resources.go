@@ -392,6 +392,19 @@ case "$temp_priv" in
 esac
 `
 
+// deferIndexesImageEnv carries the runner image into the probe's note, so the
+// image name never becomes script text.
+const deferIndexesImageEnv = "PREFLIGHT_RUNNER_IMAGE"
+
+// deferIndexesBlock matches our help line, not the flag name, which another fork ships for
+// other behaviour. 0.18.136.gb42f560 is the first build with it: a pin bump leaves it alone.
+const deferIndexesBlock = `if pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF '` + pgcopydb.DeferIndexesHelp + `'; then
+  echo "ok: runner pgcopydb accepts --defer-indexes"
+else
+  note "preflight: spec.clone.deferIndexes needs pgcopydb 0.18.136.gb42f560 or later, and runner image $` + deferIndexesImageEnv + ` does not list its --defer-indexes; recreate the Migration without deferIndexes, or use a runner with pgcopydb 0.18.136.gb42f560 or later"
+fi
+`
+
 // majorVersionBlock compares majors from server_version_num, because the
 // server_version text carries vendor suffixes. An unreadable side fails closed.
 const majorVersionBlock = `src_major=$(check "$PGCOPYDB_SOURCE_PGURI" "select current_setting('server_version_num')::int / 10000")
@@ -446,8 +459,8 @@ fi
 `
 
 // preflightPrelude is the header plus the pooler check on both sides, the target
-// checks and the opt-in gates that run on every path. A major mismatch stops the
-// script, so no later probe buries it.
+// checks, the deferIndexes runner probe and the opt-in gates that run on every
+// path. A major mismatch stops the script, so no later probe buries it.
 func preflightPrelude(m *v1beta1.Migration) string {
 	s := preflightHeader + `connect_retry "$PGCOPYDB_TARGET_PGURI" target "` + targetConnectFailure(m) + `"
 echo "ok: connectivity target"
@@ -456,6 +469,9 @@ echo "ok: connectivity target"
 		s += syncCommitBlock
 	}
 	s += temporaryPrivilegeBlock
+	if m.Spec.Clone.DeferIndexes {
+		s += deferIndexesBlock
+	}
 	if m.Spec.Preflight != nil && m.Spec.Preflight.RequireSameMajorVersion {
 		s += majorVersionBlock + preflightStopOnFailure
 	}
@@ -1368,6 +1384,10 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: reownPreflightOwnerEnv, Value: m.Spec.Clone.OwnerAfterRestore})
 	}
+	if m.Spec.Clone.DeferIndexes {
+		c := &job.Spec.Template.Spec.Containers[0]
+		c.Env = append(c.Env, corev1.EnvVar{Name: deferIndexesImageEnv, Value: runnerImageFor(m, runnerImage)})
+	}
 	if !m.Spec.Clone.AllDatabases {
 		c := &job.Spec.Template.Spec.Containers[0]
 		c.Env = append(c.Env, corev1.EnvVar{Name: tableScopeEnv, Value: tableScope(m.Spec.Clone.Filters)})
@@ -1468,6 +1488,15 @@ func addConnectTimeout(job *batchv1.Job) {
 	c.Env = append(c.Env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 }
 
+// runnerImageFor is the image every Job of m runs, which the preflight names
+// when its probe fails.
+func runnerImageFor(m *v1beta1.Migration, runnerImage string) string {
+	if m.Spec.Runner.Image != "" {
+		return m.Spec.Runner.Image
+	}
+	return runnerImage
+}
+
 // jobSkeleton builds the shared worker pod shape around the given argv. setup
 // is shell the prelude runs after the passfile is assembled (conn.PreludeScript).
 // extras are credential sets whose preludes run after the primary sides'.
@@ -1547,10 +1576,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 		})
 	}
 
-	image := runnerImage
-	if m.Spec.Runner.Image != "" {
-		image = m.Spec.Runner.Image
-	}
+	image := runnerImageFor(m, runnerImage)
 
 	uid := runnerUID
 	runAsNonRoot := true

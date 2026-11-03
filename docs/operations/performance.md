@@ -130,6 +130,7 @@ pgcopydb hardcodes that and applies it per worker, **overriding whatever the tar
 So the real cost of this number is roughly `indexJobs` GB of target memory, and pgcopydb's default of four asks for 4GB.
 
 Size it against the target: its core count, minus what the COPY workers are already using there, and no more than its memory can carry at 1GB each.
+With `clone.deferIndexes` the index builds start only once every table is copied, and only the vacuum pool shares the target with them, so do not subtract cores for COPY workers.
 On a small target, four is already too many, and lowering it to 2 makes the index phase faster.
 
 `clone.restoreJobs` follows `indexJobs` unless you set it.
@@ -138,14 +139,35 @@ Set it separately when they differ: `pg_restore` is a separate process and never
 ## Table jobs and the connections they cost
 
 Each table job holds one source connection and one target connection.
-pgcopydb also sizes its `VACUUM ANALYZE` pool from the same number and runs it alongside the copy, so N table jobs can mean up to 2N concurrent backends on the target.
+pgcopydb also sizes its `VACUUM ANALYZE` pool from the same number and runs it alongside the copy, so N table jobs can mean up to 2N concurrent backends on the target, unless `clone.deferIndexes` moves the pool after the copy.
 
 Check the target's `max_connections` before raising anything.
-The worst case is roughly `tableJobs * 2 + indexJobs + largeObjectsJobs + 1`: table jobs twice over because of the vacuum pool, then one per index worker, one per large-object worker, and one for its metadata pass.
+Without `clone.deferIndexes`, the worst case is roughly `tableJobs * 2 + indexJobs + largeObjectsJobs + 1`: table jobs twice over because of the vacuum pool, then one per index worker, one per large-object worker, and one for its metadata pass.
+With it, the vacuum pool and the index workers never run beside a copy or large-object worker, so the worst case drops to roughly the larger of `tableJobs + largeObjectsJobs + 1` and `tableJobs + indexJobs`.
 The source sees the same table and large-object connections, without the index and vacuum ones.
 `skip: [vacuum]` removes the vacuum half if the target will be analysed separately after cutover.
 
 `clone.largeObjectsJobs` costs four connection pairs by default, whether or not there is anything to move through them: see [`largeObjectsJobs`](#largeobjectsjobs).
+
+## Deferring index builds
+
+`spec.clone.deferIndexes: true` passes `--defer-indexes`: pgcopydb copies every table first, then builds the indexes and constraints and runs `VACUUM ANALYZE`.
+Without it, a table's indexes are built while other tables are still copying.
+[Deferred index builds](../configuration.md#deferred-index-builds) covers immutability and the preflight check.
+Weigh these before you set it:
+
+1. The clone takes longer.
+   Without the field, index builds overlap the copy, so the clone takes about as long as the longer of the two; with it, the clone takes about as long as both added together.
+   In exchange, the copy runs without index builds competing for the target's CPU and I/O.
+1. All index workers start together when the copy ends and take the largest tables first, each with `maintenance_work_mem` at 1GB, so the target's memory, temporary-file and WAL use arrive in one burst.
+1. With `spec.follow.enabled`, the receive backlog and the WAL that the replication slot holds on the source grow with the longer clone.
+1. It does not help against a proxy that cuts silent connections: a long `CREATE INDEX` still sends nothing until it ends.
+1. An attempt in which a table's copy fails builds no index, not even on the tables it copied.
+   The next attempt builds them after its own copy.
+1. A runner lost during the index builds can leave up to `indexJobs` sessions running `CREATE INDEX` on the target.
+   With the server default `client_connection_check_interval`, each stays until its statement ends, and the [retry gate](lifecycle.md#the-retry-gate) holds the next attempt until the last of them has ended (see [Retries and resume](lifecycle.md#retries-and-resume)).
+1. Without `clone.allDatabases`, the index builds start only after the large objects, the extension configuration rows and the sequences are copied, so the large-object copy no longer overlaps them.
+   With `clone.allDatabases`, pgcopydb copies large objects after every index build with or without the field, so the field changes nothing there.
 
 ## Binary COPY
 
@@ -217,13 +239,14 @@ CloudNativePG defaults `wal_log_hints` to `on`, which WAL-logs hint-bit full-pag
 
 ## The VACUUM tail
 
-pgcopydb runs `VACUUM ANALYZE` per table alongside the copy, with a worker pool sized from `tableJobs`.
+pgcopydb runs `VACUUM ANALYZE` per table with a worker pool sized from `tableJobs`, alongside the copy unless `clone.deferIndexes` moves the pool after it.
 A table's vacuum cannot start until that table's own copy finishes, and the largest table finishes last.
-So the end of a clone routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
+Without `clone.deferIndexes`, the end of a clone therefore routinely narrows to a single `VACUUM ANALYZE` on the biggest table, running alone while every other worker sits idle.
 
 On the e2e fixture, where one table holds 73% of the bytes, that tail measured roughly a third of the clone's wall clock: 19404ms with it against 13253ms without, in a clean pair with a fresh target database per arm.
-The operator reports it as the `Finalizing` phase because the target has stopped growing, so every size-derived estimate reads as finished while real work continues.
+The operator reports it as the `Finalizing` phase, where the target stops growing unless `clone.deferIndexes` moved every index build there, so size-derived estimates can read as finished while real work continues.
 [Conditions and reasons](../reference/conditions.md#phases) has the full phase table and what runs inside each one.
+With `clone.deferIndexes`, no vacuum starts before every table is copied, each table's vacuum follows its own index builds and constraints, and `Finalizing` holds every index build as well.
 
 Skipping the vacuum recovers that time:
 
@@ -236,7 +259,7 @@ spec:
 > [!important]
 > The target is then left without fresh statistics.
 > The planner will use whatever it had, which on a freshly restored database is nothing, so the first real queries after cutover can choose badly.
-> Run `ANALYZE` on the target yourself before pointing traffic at it: one bulk `ANALYZE` beats per-table vacuums competing with the copy.
+> Run `ANALYZE` on the target yourself before pointing traffic at it: one bulk `ANALYZE` beats per-table vacuums competing with the copy or the index builds.
 
 The operator does not skip it by default, because a target that silently lacks statistics is invisible until a query plan goes wrong in production.
 

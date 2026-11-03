@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 const (
@@ -220,6 +222,15 @@ func TestRunnerPullsThePinnedBuilder(t *testing.T) {
 	wantVersion := pin(t, builderDockerfile, "PGCOPYDB_VERSION")
 	if !strings.Contains(read(t, runnerDockerfile), "grep -qF '"+wantVersion+"'") {
 		t.Errorf("builder pins version %s, runner canary does not assert it", wantVersion)
+	}
+}
+
+// The preflight probe matches this help line before attempt 1; the canary fails
+// the image build when the bundled pgcopydb stops printing it.
+func TestRunnerCanaryMatchesDeferIndexesProbe(t *testing.T) {
+	want := "pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF '" + pgcopydb.DeferIndexesHelp + "'"
+	if !strings.Contains(read(t, runnerDockerfile), want) {
+		t.Errorf("the runner canary does not assert the help line the preflight probe matches:\n  %s", want)
 	}
 }
 
@@ -1158,11 +1169,11 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 
 	// Upgrading the manager must retain counters for workers on all previous pins.
 	for _, version := range []string{
-		want, "0.18.129.gd7547b5", "0.18.112.g4c61e97", "0.18.109.gbec4ebb",
-		"0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee", "0.18.76.gf9b328b",
-		"0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc", "0.18.39.g93eda1d",
-		"0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3", "0.18.15.gea2dc96",
-		"0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd",
+		want, "0.18.132.gd4a2db1", "0.18.129.gd7547b5", "0.18.112.g4c61e97",
+		"0.18.109.gbec4ebb", "0.18.104.g362a559", "0.18.98.g944abcc", "0.18.94.gbaa94ee",
+		"0.18.76.gf9b328b", "0.18.74.gc682dce", "0.18.72.g2aa91e7", "0.18.70.gbb8dbfc",
+		"0.18.39.g93eda1d", "0.18.36.g972e221", "0.18.34.g7fddd6f", "0.18.22.g22e29c3",
+		"0.18.15.gea2dc96", "0.18.13.g4873c18", "0.18.10.gaadc4bf", "0.18.5.ge37d2bd",
 	} {
 		if !slices.Contains(versions, version) {
 			t.Errorf("runner.progressPollVersions is %v, which does not allow %s; "+

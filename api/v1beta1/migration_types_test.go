@@ -88,7 +88,7 @@ func fullMigration() *Migration {
 				SplitTablesLargerThan: &split, SplitMaxParts: 8,
 				EstimateTableSizes: true, DropIfExists: true, Roles: true,
 				NoRolePasswords: true, NoOwner: true, NoACL: true, NoComments: true,
-				NoTablespaces: true, UseCopyBinary: &copyBinary, FailFast: true,
+				NoTablespaces: true, UseCopyBinary: &copyBinary, FailFast: true, DeferIndexes: true,
 				Skip: []SkipOption{"largeObjects", "analyze"},
 				Filters: &Filters{
 					IncludeOnlyTables:     []string{"public.a"},

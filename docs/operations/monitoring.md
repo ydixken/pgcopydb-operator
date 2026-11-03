@@ -153,10 +153,10 @@ A pass whose source row carried no confirmed position keeps the earlier replay a
 Apply backlog reads both operands from the same walsender row, so the order that holds there holds here.
 Without `pg_read_all_stats` both fall back to the slot's confirmed flush position and the difference reads zero, which means unknown rather than caught up.
 
-The bundled runner, pgcopydb `0.18.132.gd4a2db1`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
+The bundled runner, pgcopydb `0.18.136.gb42f560`, confirms target commits with `synchronous_commit=on` before reporting their replay progress.
 On a target with synchronous standbys, each of those commits waits for a standby, whatever [`spec.target.synchronousCommit`](../configuration.md#synchronous-commit-on-the-target) says, and the `CommitsBlocked` condition reports a wait that lasts.
 It writes that progress at most once a second, so the replay gauge can trail the target replication origin by about a second.
-It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/d4a2db114eaf29c675b6837529af5c48f06ceb2c/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
+It can also [certify genuine primary keepalive positions](https://github.com/ydixken/pgcopydb/blob/b42f560a16d4ba2459b06f7200db5b244c74e5db/src/bin/pgcopydb/ld_stream.c#L1628-L1653) from the current connection, advancing network feedback across filtered WAL.
 That feedback does not move the target replication origin or the sentinel's data replay cursor; see [Follow diagnostics](../design/follow-diagnostics.md) for the conditions.
 An advancing replay gauge on an idle publication therefore does not imply new target rows or measure applied-data throughput.
 Other supported runner versions differ; see [client tool versions](../reference/prerequisites.md#client-tool-versions).
@@ -253,6 +253,8 @@ The tiles read as follows:
   The counters beside it weigh only the tables in scope.
   **ETA By Size** divides the bytes left by the current growth rate of the target.
   It reads No ETA outside `Cloning`, because index builds, the cutover drain, and verification do not move bytes at a steady rate.
+  With `clone.deferIndexes` the indexes arrive only in `Finalizing`, so Percent enters that phase near the share of the source's size that is not indexes, rather than near 100.
+  In that mode ETA By Size overstates the time the copy has left, because the bytes left include indexes that the copy never writes.
 - **Tables**, **Indexes**, and **Bytes** are six tiles, one per side: a `(Source)` total beside the `(Target)` figure measured against it.
   They read N/A before the target has a schema to count, and for a migration whose worker never ran.
   **Bytes** compares table data on both sides (see [Why does the target show fewer bytes than the source?](#why-does-the-target-show-fewer-bytes-than-the-source)).
@@ -335,7 +337,7 @@ Thresholds and windows are defaults; the promtool unit tests under `test/alerts/
 | `PgcopydbMigrationReplicationLagHigh` | warning | Lag above 64Mi for 10m while `Streaming` or `CutoverPending` |
 | `PgcopydbMigrationCutoverStalled` | critical | The endpos is not reached for 15m in `CuttingOver` |
 
-`PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing` and leaves the target size flat while nothing is stalled.
+`PgcopydbMigrationCloneStalled` matches `Cloning` alone, because the index and vacuum tail reads as `Finalizing` and can leave the target size flat while nothing is stalled.
 `PgcopydbMigrationCommitsBlocked` reads the two conditions rather than the gauges, so the 30-second threshold lives in the operator alone.
 It keeps one series per Migration over both conditions, so a worker that waits on a commit, is cut by a proxy, and is then held at the retry gate runs on one 15-minute clock.
 Both conditions keep their last value while no worker runs, so the rule skips `Failed`, `Completed`, and `Suspended`.

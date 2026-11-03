@@ -482,4 +482,67 @@ var _ = Describe("Migration CRD validation", func() {
 		allDatabasesEntries(v1beta1.GroupVersion),
 		allDatabasesEntries(v1alpha1.GroupVersion),
 	)
+
+	// The rule sits on MigrationSpec, not CloneOptions: a transition rule on
+	// clone is skipped when either side of the update leaves spec.clone out.
+	deferIndexesEntries := func(gv schema.GroupVersion) []TableEntry {
+		on := map[string]any{"deferIndexes": true}
+		off := map[string]any{"deferIndexes": false}
+		entry := func(desc, name string, created, updated map[string]any, wantErr bool) TableEntry {
+			return Entry(gv.Version+": "+desc, gv, "cel-defer-"+name+"-"+gv.Version, created, updated, wantErr)
+		}
+		return []TableEntry{
+			entry("false to true", "on", off, on, true),
+			entry("true to false", "off", on, off, true),
+			entry("no clone to true", "add", nil, on, true),
+			entry("true to no clone", "drop", on, nil, true),
+			entry("true kept", "keep-on", on, on, false),
+			entry("false kept", "keep-off", off, off, false),
+			entry("no clone kept", "keep-none", nil, nil, false),
+			entry("no clone written back as {}", "typed", nil, map[string]any{}, false),
+		}
+	}
+	DescribeTable("pins clone.deferIndexes",
+		func(gv schema.GroupVersion, name string, created, updated map[string]any, wantErr bool) {
+			// A nil clone leaves spec.clone out.
+			setClone := func(u *unstructured.Unstructured, clone map[string]any) {
+				unstructured.RemoveNestedField(u.Object, "spec", "clone")
+				if clone != nil {
+					ExpectWithOffset(1, unstructured.SetNestedMap(u.Object, clone, "spec", "clone")).To(Succeed())
+				}
+			}
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration(name))
+			Expect(err).NotTo(HaveOccurred())
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(gv.WithKind("Migration"))
+			setClone(u, created)
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, u) })
+
+			// The "no clone" entries must store no spec.clone: a defaulted one would
+			// make them clone-to-clone updates, which a rule on CloneOptions catches too.
+			if created == nil {
+				stored := &unstructured.Unstructured{}
+				stored.SetGroupVersionKind(gv.WithKind("Migration"))
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, stored)).To(Succeed())
+				_, found, err := unstructured.NestedFieldNoCopy(stored.Object, "spec", "clone")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(found).To(BeFalse(), "stored spec: %v", stored.Object["spec"])
+			}
+
+			// suspend changes too, so an accepted case is a real update that
+			// leaves deferIndexes alone.
+			setClone(u, updated)
+			Expect(unstructured.SetNestedField(u.Object, true, "spec", "suspend")).To(Succeed())
+			err = k8sClient.Update(ctx, u)
+			if !wantErr {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+			Expect(err).To(MatchError(ContainSubstring("clone.deferIndexes is immutable: create a separate Migration")))
+		},
+		deferIndexesEntries(v1beta1.GroupVersion),
+		deferIndexesEntries(v1alpha1.GroupVersion),
+	)
 })
