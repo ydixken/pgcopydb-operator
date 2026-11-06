@@ -272,7 +272,7 @@ _Appears in:_
 | `clone` _[CloneOptions](#cloneoptions)_ | clone configures the base copy. |  | Optional: \{\} <br /> |
 | `follow` _[FollowOptions](#followoptions)_ | follow enables live migration (CDC after the base copy). Immutable:<br />a one-shot clone cannot become a live migration after the fact. |  | Optional: \{\} <br /> |
 | `cutover` _[CutoverSpec](#cutoverspec)_ | cutover controls how a live migration ends; ignored without follow. |  | Optional: \{\} <br /> |
-| `verification` _[VerificationOptions](#verificationoptions)_ | verification runs pgcopydb compare checks once the migration reaches<br />its success path (clone: after the copy; follow: after cutover drained<br />and replication state is cleaned up). |  | Optional: \{\} <br /> |
+| `verification` _[VerificationOptions](#verificationoptions)_ | verification runs pgcopydb compare checks. schema and data run once the<br />migration reaches its success path (clone: after the copy; follow: after<br />cutover drained and replication state is cleaned up); rehearsal runs a<br />data compare while a live migration streams. |  | Optional: \{\} <br /> |
 | `workVolume` _[WorkVolume](#workvolume)_ | workVolume configures the work-directory PVC. |  | Optional: \{\} <br /> |
 | `runner` _[RunnerSpec](#runnerspec)_ | runner configures the worker pod. |  | Optional: \{\} <br /> |
 | `suspend` _boolean_ | suspend stops the worker while preserving the work volume. |  | Optional: \{\} <br /> |
@@ -304,6 +304,7 @@ _Appears in:_
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
 | `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
+| `verificationRehearsal` _[VerificationRehearsalStatus](#verificationrehearsalstatus)_ | verificationRehearsal reports the latest spec.verification.rehearsal run. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
@@ -454,10 +455,12 @@ _Appears in:_
 
 
 
-VerificationOptions selects post-migration pgcopydb compare checks, both off
-by default because both are expensive. Results are information, not a gate: a
-mismatch sets Verified to False and emits a warning event, but the Migration
-still completes. Mutable until completion. See docs/operations/verification.md.
+VerificationOptions selects pgcopydb compare checks, all off by default because
+all are expensive. schema and data run on the success path, and their results
+are information, not a gate: a mismatch sets Verified to False and emits a
+warning event, but the Migration still completes. rehearsal runs while a live
+migration streams and reports only its own run. Mutable until completion.
+See docs/operations/verification.md.
 
 
 
@@ -468,6 +471,29 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `schema` _boolean_ | schema runs pgcopydb compare schema: tables, columns, indexes,<br />constraints, and sequence values as pgcopydb models them. Not a full<br />DDL diff (no functions, triggers, ACLs, defaults). |  | Optional: \{\} <br /> |
 | `data` _boolean_ | data runs pgcopydb compare data: per-table row counts and full-table<br />checksums. Expensive: budget a sequential scan of every table on both<br />sides. |  | Optional: \{\} <br /> |
+| `rehearsal` _boolean_ | rehearsal runs pgcopydb compare data once while a live migration streams,<br />to measure how long the compare in the cutover window takes. It needs<br />follow.enabled and cutover.mode Manual. Each change from false to true<br />starts one run; the run never sets Verified or the phase, and differing<br />tables are expected while the target still applies changes. |  | Optional: \{\} <br /> |
+
+
+#### VerificationRehearsalStatus
+
+
+
+VerificationRehearsalStatus records the latest spec.verification.rehearsal run.
+
+
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `armed` _boolean_ | armed is true from the start of a run until rehearsal is set back to<br />false and no pod of the run is left. A run starts only while it is false.<br />Always written, so a wait for false can match. |  | Optional: \{\} <br /> |
+| `run` _integer_ | run counts the runs. Run n is the Job named after the Migration plus -rehearsal-n. |  | Optional: \{\} <br /> |
+| `jobName` _string_ |  |  | Optional: \{\} <br /> |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
+| `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | completedAt is when the run completed, failed, or was canceled. |  | Optional: \{\} <br /> |
+| `outcome` _string_ | outcome is Completed when compare data wrote a report, whatever the<br />report says: tables differ while the target still applies changes. |  | Enum: [Running Completed Canceled Failed] <br />Optional: \{\} <br /> |
+| `message` _string_ |  |  | Optional: \{\} <br /> |
 
 
 #### VerificationResult

@@ -2065,15 +2065,24 @@ spec:
                 type: integer
               verification:
                 description: |-
-                  verification runs pgcopydb compare checks once the migration reaches
-                  its success path (clone: after the copy; follow: after cutover drained
-                  and replication state is cleaned up).
+                  verification runs pgcopydb compare checks. schema and data run once the
+                  migration reaches its success path (clone: after the copy; follow: after
+                  cutover drained and replication state is cleaned up); rehearsal runs a
+                  data compare while a live migration streams.
                 properties:
                   data:
                     description: |-
                       data runs pgcopydb compare data: per-table row counts and full-table
                       checksums. Expensive: budget a sequential scan of every table on both
                       sides.
+                    type: boolean
+                  rehearsal:
+                    description: |-
+                      rehearsal runs pgcopydb compare data once while a live migration streams,
+                      to measure how long the compare in the cutover window takes. It needs
+                      follow.enabled and cutover.mode Manual. Each change from false to true
+                      starts one run; the run never sets Verified or the phase, and differing
+                      tables are expected while the target still applies changes.
                     type: boolean
                   schema:
                     description: |-
@@ -2120,6 +2129,16 @@ spec:
             - message: 'clone.deferIndexes is immutable: create a separate Migration'
               rule: (has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes)
                 == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)
+            - message: 'verification.rehearsal requires follow.enabled: it compares
+                while a live migration streams'
+              rule: '!(has(self.verification) && has(self.verification.rehearsal)
+                && self.verification.rehearsal) || (has(self.follow) && has(self.follow.enabled)
+                && self.follow.enabled)'
+            - message: 'verification.rehearsal requires cutover.mode Manual: an Automatic
+                cutover starts at catch-up and cancels the rehearsal'
+              rule: '!(has(self.verification) && has(self.verification.rehearsal)
+                && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode)
+                && self.cutover.mode == ''Automatic'')'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2353,6 +2372,44 @@ spec:
                 x-kubernetes-list-map-keys:
                 - check
                 x-kubernetes-list-type: map
+              verificationRehearsal:
+                description: verificationRehearsal reports the latest spec.verification.rehearsal
+                  run.
+                properties:
+                  armed:
+                    description: |-
+                      armed is true from the start of a run until rehearsal is set back to
+                      false and no pod of the run is left. A run starts only while it is false.
+                      Always written, so a wait for false can match.
+                    type: boolean
+                  completedAt:
+                    description: completedAt is when the run completed, failed, or
+                      was canceled.
+                    format: date-time
+                    type: string
+                  jobName:
+                    type: string
+                  message:
+                    type: string
+                  outcome:
+                    description: |-
+                      outcome is Completed when compare data wrote a report, whatever the
+                      report says: tables differ while the target still applies changes.
+                    enum:
+                    - Running
+                    - Completed
+                    - Canceled
+                    - Failed
+                    type: string
+                  run:
+                    description: run counts the runs. Run n is the Job named after
+                      the Migration plus -rehearsal-n.
+                    format: int32
+                    type: integer
+                  startedAt:
+                    format: date-time
+                    type: string
+                type: object
             type: object
         required:
         - spec
@@ -4402,15 +4459,24 @@ spec:
                 type: integer
               verification:
                 description: |-
-                  verification runs pgcopydb compare checks once the migration reaches
-                  its success path (clone: after the copy; follow: after cutover drained
-                  and replication state is cleaned up).
+                  verification runs pgcopydb compare checks. schema and data run once the
+                  migration reaches its success path (clone: after the copy; follow: after
+                  cutover drained and replication state is cleaned up); rehearsal runs a
+                  data compare while a live migration streams.
                 properties:
                   data:
                     description: |-
                       data runs pgcopydb compare data: per-table row counts and full-table
                       checksums. Expensive: budget a sequential scan of every table on both
                       sides.
+                    type: boolean
+                  rehearsal:
+                    description: |-
+                      rehearsal runs pgcopydb compare data once while a live migration streams,
+                      to measure how long the compare in the cutover window takes. It needs
+                      follow.enabled and cutover.mode Manual. Each change from false to true
+                      starts one run; the run never sets Verified or the phase, and differing
+                      tables are expected while the target still applies changes.
                     type: boolean
                   schema:
                     description: |-
@@ -4457,6 +4523,16 @@ spec:
             - message: 'clone.deferIndexes is immutable: create a separate Migration'
               rule: (has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes)
                 == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)
+            - message: 'verification.rehearsal requires follow.enabled: it compares
+                while a live migration streams'
+              rule: '!(has(self.verification) && has(self.verification.rehearsal)
+                && self.verification.rehearsal) || (has(self.follow) && has(self.follow.enabled)
+                && self.follow.enabled)'
+            - message: 'verification.rehearsal requires cutover.mode Manual: an Automatic
+                cutover starts at catch-up and cancels the rehearsal'
+              rule: '!(has(self.verification) && has(self.verification.rehearsal)
+                && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode)
+                && self.cutover.mode == ''Automatic'')'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -4690,6 +4766,44 @@ spec:
                 x-kubernetes-list-map-keys:
                 - check
                 x-kubernetes-list-type: map
+              verificationRehearsal:
+                description: verificationRehearsal reports the latest spec.verification.rehearsal
+                  run.
+                properties:
+                  armed:
+                    description: |-
+                      armed is true from the start of a run until rehearsal is set back to
+                      false and no pod of the run is left. A run starts only while it is false.
+                      Always written, so a wait for false can match.
+                    type: boolean
+                  completedAt:
+                    description: completedAt is when the run completed, failed, or
+                      was canceled.
+                    format: date-time
+                    type: string
+                  jobName:
+                    type: string
+                  message:
+                    type: string
+                  outcome:
+                    description: |-
+                      outcome is Completed when compare data wrote a report, whatever the
+                      report says: tables differ while the target still applies changes.
+                    enum:
+                    - Running
+                    - Completed
+                    - Canceled
+                    - Failed
+                    type: string
+                  run:
+                    description: run counts the runs. Run n is the Job named after
+                      the Migration plus -rehearsal-n.
+                    format: int32
+                    type: integer
+                  startedAt:
+                    format: date-time
+                    type: string
+                type: object
             type: object
         required:
         - spec

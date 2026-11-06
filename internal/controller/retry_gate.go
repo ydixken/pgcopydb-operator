@@ -66,6 +66,12 @@ func (r *MigrationReconciler) retryGate(ctx context.Context, m, base *v1beta1.Mi
 	}
 	held := ctrl.Result{RequeueAfter: retryGateInterval}
 	pod, err := r.previousWorkerPod(ctx, m, attempt)
+	of := fmt.Sprintf("of attempt %d", attempt-1)
+	if err == nil && pod == nil {
+		// A rehearsal's compare sessions count in the census like the worker's.
+		pod, err = r.rehearsalPod(ctx, m)
+		of = "of the verification rehearsal"
+	}
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
@@ -75,8 +81,8 @@ func (r *MigrationReconciler) retryGate(ctx context.Context, m, base *v1beta1.Mi
 			node = "(none yet)"
 		}
 		r.setHold(m, reasonWorkerPodRemains, fmt.Sprintf(
-			"Pod %s of attempt %d is %s on node %s; attempt %d waits until it has ended, because it may still hold sessions",
-			pod.Name, attempt-1, podState(pod), node, attempt))
+			"Pod %s %s is %s on node %s; attempt %d waits until it has ended, because it may still hold sessions",
+			pod.Name, of, podState(pod), node, attempt))
 		return held, false, r.updateStatus(ctx, m, base)
 	}
 

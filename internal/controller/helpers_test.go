@@ -207,6 +207,7 @@ const (
 	jobKindCleanup   = "cleanup"
 	jobKindVerify    = "verify"
 	jobKindPreflight = "preflight"
+	jobKindRehearsal = "rehearsal"
 )
 
 // The worker default must not leak onto the other Jobs. buildJob, cleanup,
@@ -266,9 +267,10 @@ func TestBuildJob_RunnerImage(t *testing.T) {
 
 	m.Spec.Runner.Image = "custom/runner:v9"
 	for name, build := range map[string]func() (*batchv1.Job, error){
-		"worker":       func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
-		jobKindCleanup: func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
-		jobKindVerify:  func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img", "") },
+		"worker":         func() (*batchv1.Job, error) { return buildJob(m, "default:img", 1) },
+		jobKindCleanup:   func() (*batchv1.Job, error) { return buildCleanupJob(m, "default:img") },
+		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "default:img", "") },
+		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "default:img", 1) },
 	} {
 		job, err := build()
 		if err != nil {

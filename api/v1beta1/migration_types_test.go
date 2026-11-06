@@ -111,7 +111,7 @@ func fullMigration() *Migration {
 				MaxCatchupLag:               &lag,
 			},
 			Cutover:      CutoverSpec{Mode: CutoverAutomatic, Approved: true},
-			Verification: &VerificationOptions{Schema: true, Data: true},
+			Verification: &VerificationOptions{Schema: true, Data: true, Rehearsal: true},
 			WorkVolume:   WorkVolume{StorageClassName: &sc, Size: resource.MustParse("20Gi")},
 			Runner: RunnerSpec{
 				Image: "runner:test",
@@ -160,9 +160,13 @@ func fullMigration() *Migration {
 				Endpos: "0/30", LagBytes: &lagBytes,
 			},
 			Verification: []VerificationResult{{Check: "data", Passed: true, StartedAt: &now, CompletedAt: &now}},
-			JobName:      "full-run-2",
-			StartedAt:    &now,
-			CompletedAt:  &now,
+			VerificationRehearsal: &VerificationRehearsalStatus{
+				Armed: true, Run: 2, JobName: "full-rehearsal-2", StartedAt: &now, CompletedAt: &now,
+				Outcome: RehearsalCompleted, Message: "compare data finished",
+			},
+			JobName:     "full-run-2",
+			StartedAt:   &now,
+			CompletedAt: &now,
 		},
 	}
 }
@@ -185,7 +189,8 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		&m.Spec.Source, m.Spec.Source.TLS, &m.Spec.Clone, m.Spec.Clone.Filters,
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
-		m.Status.Progress, m.Status.Replication, m.Status.RetryGate, &m.Status.Verification[0],
+		m.Status.Progress, m.Status.Replication, m.Status.RetryGate, m.Status.VerificationRehearsal,
+		&m.Status.Verification[0],
 	}
 	for _, obj := range objs {
 		v := reflect.ValueOf(obj)
@@ -227,6 +232,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	c.Status.RetryGate.Failure = mutated
 	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
 	c.Status.Verification[0].CompletedAt.Time = time.Unix(1, 0)
+	c.Status.VerificationRehearsal.StartedAt.Time = time.Unix(1, 0)
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")
 	}

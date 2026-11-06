@@ -245,6 +245,9 @@ var _ = Describe("Migration lifecycle initialization", func() {
 			{name: "verification", mutate: func(s *v1beta1.MigrationStatus) {
 				s.Verification = []v1beta1.VerificationResult{{Check: "schema", Passed: true}}
 			}},
+			{name: "rehearsal", mutate: func(s *v1beta1.MigrationStatus) {
+				s.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{}
+			}},
 			{name: "job", mutate: func(s *v1beta1.MigrationStatus) { s.JobName = "recorded" }},
 			{name: "started", mutate: func(s *v1beta1.MigrationStatus) { s.StartedAt = &now }},
 			{name: "completed", mutate: func(s *v1beta1.MigrationStatus) { s.CompletedAt = &now }},

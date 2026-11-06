@@ -305,6 +305,7 @@ func TestJobs_SynchronousCommitOnlyOnWorkerPreflightAndGate(t *testing.T) {
 				"compare data":   {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareData) }, false},
 				"compare schema": {func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) }, false},
 				"reown":          {func() (*batchv1.Job, error) { return buildReownJob(m, "img") }, false},
+				jobKindRehearsal: {func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) }, false},
 			} {
 				job, err := tc.build()
 				if err != nil {
@@ -571,6 +572,12 @@ func TestJobScripts_ShellValid(t *testing.T) {
 		"verify":          func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", gate) },
 		"verify, no poll": func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		"catalog":         func() (*batchv1.Job, error) { return buildCatalogJob(m, "img", gate) },
+		jobKindRehearsal:  func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
+		"rehearsal, filters": func() (*batchv1.Job, error) {
+			filtered := passwordMigration()
+			filtered.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlySchemas: []string{"app"}}
+			return buildRehearsalJob(filtered, "img", 1)
+		},
 	}
 	shells := []string{}
 	for _, name := range []string{"sh", "dash", "bash"} {
@@ -1030,6 +1037,7 @@ func TestJobEnv_ConnectTimeout(t *testing.T) {
 		jobKindVerify:    func() (*batchv1.Job, error) { return buildVerifyJob(m, "img", "") },
 		jobKindPreflight: func() (*batchv1.Job, error) { return buildPreflightJob(m, "img") },
 		"compare":        func() (*batchv1.Job, error) { return buildCompareJob(m, "img", compareSchema) },
+		jobKindRehearsal: func() (*batchv1.Job, error) { return buildRehearsalJob(m, "img", 1) },
 	}
 	for name, build := range builders {
 		job, err := build()

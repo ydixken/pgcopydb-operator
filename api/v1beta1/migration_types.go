@@ -438,10 +438,12 @@ type PreflightOptions struct {
 	RequireSameMajorVersion bool `json:"requireSameMajorVersion,omitempty"`
 }
 
-// VerificationOptions selects post-migration pgcopydb compare checks, both off
-// by default because both are expensive. Results are information, not a gate: a
-// mismatch sets Verified to False and emits a warning event, but the Migration
-// still completes. Mutable until completion. See docs/operations/verification.md.
+// VerificationOptions selects pgcopydb compare checks, all off by default because
+// all are expensive. schema and data run on the success path, and their results
+// are information, not a gate: a mismatch sets Verified to False and emits a
+// warning event, but the Migration still completes. rehearsal runs while a live
+// migration streams and reports only its own run. Mutable until completion.
+// See docs/operations/verification.md.
 type VerificationOptions struct {
 	// schema runs pgcopydb compare schema: tables, columns, indexes,
 	// constraints, and sequence values as pgcopydb models them. Not a full
@@ -454,6 +456,14 @@ type VerificationOptions struct {
 	// sides.
 	// +optional
 	Data bool `json:"data,omitempty"`
+
+	// rehearsal runs pgcopydb compare data once while a live migration streams,
+	// to measure how long the compare in the cutover window takes. It needs
+	// follow.enabled and cutover.mode Manual. Each change from false to true
+	// starts one run; the run never sets Verified or the phase, and differing
+	// tables are expected while the target still applies changes.
+	// +optional
+	Rehearsal bool `json:"rehearsal,omitempty"`
 }
 
 // VerificationResult is one compare check's outcome.
@@ -472,6 +482,46 @@ type VerificationResult struct {
 	// completedAt is when the check's Job completed or failed.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+// The outcomes of a verification rehearsal.
+const (
+	RehearsalRunning   = "Running"
+	RehearsalCompleted = "Completed"
+	RehearsalCanceled  = "Canceled"
+	RehearsalFailed    = "Failed"
+)
+
+// VerificationRehearsalStatus records the latest spec.verification.rehearsal run.
+type VerificationRehearsalStatus struct {
+	// armed is true from the start of a run until rehearsal is set back to
+	// false and no pod of the run is left. A run starts only while it is false.
+	// Always written, so a wait for false can match.
+	// +optional
+	Armed bool `json:"armed"`
+
+	// run counts the runs. Run n is the Job named after the Migration plus -rehearsal-n.
+	// +optional
+	Run int32 `json:"run,omitempty"`
+
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// completedAt is when the run completed, failed, or was canceled.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// outcome is Completed when compare data wrote a report, whatever the
+	// report says: tables differ while the target still applies changes.
+	// +kubebuilder:validation:Enum=Running;Completed;Canceled;Failed
+	// +optional
+	Outcome string `json:"outcome,omitempty"`
+
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // CutoverMode picks who pulls the trigger.
@@ -529,6 +579,8 @@ type ReplicationStatus struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.dryRun) && self.dryRun) == (has(oldSelf.dryRun) && oldSelf.dryRun)",message="dryRun is immutable: create a separate Migration for the real run"
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.allDatabases) && self.clone.allDatabases) == (has(oldSelf.clone) && has(oldSelf.clone.allDatabases) && oldSelf.clone.allDatabases)",message="allDatabases is immutable: create a separate Migration"
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes) == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)",message="clone.deferIndexes is immutable: create a separate Migration"
+// +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal) || (has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="verification.rehearsal requires follow.enabled: it compares while a live migration streams"
+// +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode) && self.cutover.mode == 'Automatic')",message="verification.rehearsal requires cutover.mode Manual: an Automatic cutover starts at catch-up and cancels the rehearsal"
 type MigrationSpec struct {
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
@@ -557,9 +609,10 @@ type MigrationSpec struct {
 	// +optional
 	Cutover CutoverSpec `json:"cutover,omitempty"`
 
-	// verification runs pgcopydb compare checks once the migration reaches
-	// its success path (clone: after the copy; follow: after cutover drained
-	// and replication state is cleaned up).
+	// verification runs pgcopydb compare checks. schema and data run once the
+	// migration reaches its success path (clone: after the copy; follow: after
+	// cutover drained and replication state is cleaned up); rehearsal runs a
+	// data compare while a live migration streams.
 	// +optional
 	Verification *VerificationOptions `json:"verification,omitempty"`
 
@@ -741,6 +794,10 @@ type MigrationStatus struct {
 	// +listMapKey=check
 	// +optional
 	Verification []VerificationResult `json:"verification,omitempty"`
+
+	// verificationRehearsal reports the latest spec.verification.rehearsal run.
+	// +optional
+	VerificationRehearsal *VerificationRehearsalStatus `json:"verificationRehearsal,omitempty"`
 
 	// jobName is the current worker Job.
 	// +optional
