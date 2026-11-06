@@ -215,8 +215,8 @@ The fields mean this:
 While a Job runs, the operator reads the last 1000 lines of its log on each pass and keeps the newest sample.
 A window without a sample keeps the previous one.
 After the Job ends, the operator reads its log once more, and `final` turns true when the last line is there.
-The drain verify and the data compare print the last progress line again after their report, so a long report cannot push it out of what the operator reads.
-A run that ends without it, because it was canceled or its pod died, keeps its last sample with `final` false.
+A run that ends without the last line, because it was canceled or its pod died, keeps its last sample with `final` false.
+The drain verify and the data compare print the newest progress line again after their report, so a long report cannot push it out of what the operator reads.
 An item stays after its run ends, until the first sample of the next run of the same kind replaces it, so `jobName` names the run it describes.
 
 > [!note]
