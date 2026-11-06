@@ -141,9 +141,7 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 		}
 	}
 
-	if c.Filters != nil && !c.Filters.IsEmpty() {
-		args = append(args, "--filters", FiltersPath)
-	}
+	args = append(args, FiltersArgs(c.Filters)...)
 	if c.AllDatabases {
 		args = append(args, "--all-databases")
 	}
@@ -157,6 +155,15 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 		args = append(args, "--not-consistent")
 	}
 	return args
+}
+
+// FiltersArgs is --filters for every command that must see the Migration's
+// selection, or nil without filters: the INI is mounted only when it exists.
+func FiltersArgs(f *v1beta1.Filters) []string {
+	if f == nil || f.IsEmpty() {
+		return nil
+	}
+	return []string{"--filters", FiltersPath}
 }
 
 // RenderFilters produces the pgcopydb --filters INI, or "" when no filters are
