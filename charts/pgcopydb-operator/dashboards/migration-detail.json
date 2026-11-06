@@ -2779,7 +2779,32 @@
             "gradientMode": "none"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rehearsal differing"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "rehearsal differing (expected while streaming)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rehearsal failed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "rehearsal failed (expected while streaming)"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {

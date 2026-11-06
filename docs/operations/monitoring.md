@@ -307,7 +307,7 @@ The **Verification** row charts `status.verificationProgress` with one line for 
   A table counts only once it is finished, so both fall while a large table runs and jump when it ends.
 - **Compare Duration** stops rising when the run ends, and its last value in the legend is how long the run took.
 - **Differing And Failed Tables** counts both per kind.
-  For `rehearsal`, tables there are expected, because the source takes writes while it compares.
+  For `rehearsal`, tables there are expected, because the source takes writes while it compares, and the legend marks its two lines "expected while streaming".
   For `drain` and `data`, any table there fails that check.
 - **Tables In Flight** lists the tables of each run's latest sample, with the time spent on each.
   A run that ended without its last progress line keeps its last list there.
