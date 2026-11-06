@@ -284,9 +284,9 @@ const (
 	// rehearsalPGOptions makes a backend notice within 10s that the rehearsal pod
 	// is gone, because a deleted Job does not cancel its checksum queries.
 	rehearsalPGOptions = "-c client_connection_check_interval=10s"
-	// rehearsalAppNameLike names compare data and its workers but no session of
-	// the live worker, which shares client_addr with them behind a pooler.
-	rehearsalAppNameLike = "pgcopydb[%compare%"
+	// rehearsalAppNameLike matches the compare workers, which alone run checksums; the
+	// parent is "pgcopydb[pid] pgcopydb", and a copy title can name a table "compare".
+	rehearsalAppNameLike = "pgcopydb[%] compare worker"
 )
 
 // rehearsalScript compares in a scratch work dir: list tables seeds its catalog

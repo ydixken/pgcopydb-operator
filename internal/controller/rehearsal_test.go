@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -96,10 +97,22 @@ func TestBuildRehearsalJob(t *testing.T) {
 		`kill -TERM "-$pid"`,
 		"pg_cancel_backend(pid)",
 		"client_addr = inet_client_addr()",
-		"application_name like 'pgcopydb[%compare%'",
+		"application_name like '" + rehearsalAppNameLike + "'",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)
+		}
+	}
+	// pgcopydb names a session "pgcopydb[pid] " plus its process title; % is LIKE's only wildcard here.
+	like := regexp.MustCompile("^" + strings.ReplaceAll(regexp.QuoteMeta(rehearsalAppNameLike), "%", ".*") + "$")
+	for session, cancel := range map[string]bool{
+		"pgcopydb[41] compare worker":                true,
+		"pgcopydb[40] pgcopydb":                      false, // compare data's parent, and the live worker's
+		`pgcopydb[42] copy "public"."compare_audit"`: false,
+		"pgcopydb[43] follow apply":                  false,
+	} {
+		if like.MatchString(session) != cancel {
+			t.Errorf("the trap cancels %q: %t, want %t", session, !cancel, cancel)
 		}
 	}
 	// The INI is mounted only when filters are set, so the flag would name a missing file.

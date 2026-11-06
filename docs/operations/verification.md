@@ -134,7 +134,7 @@ The new run's Job replaces the previous one, and the operator deletes the previo
 A running rehearsal ends `Canceled` when `rehearsal` goes back to `false`, when the cutover starts, on a suspend, when a worker attempt fails, when the Migration ends `Completed` or `Failed`, and when the Migration is deleted.
 The operator deletes the Job in the foreground.
 pgcopydb checks for a stop only between tables, so the Job's TERM handler stops pgcopydb and cancels the compare's queries on both databases with `pg_cancel_backend`.
-It cancels only sessions of the migration role that come from the rehearsal pod's address and carry pgcopydb's compare names.
+It cancels the sessions of the migration role that come from the rehearsal pod's client address and are named `pgcopydb[<pid>] compare worker`, the processes that run the checksum queries.
 The Job also sets `client_connection_check_interval` to 10 seconds, so a backend notices within seconds when the pod is gone and ends its query.
 The [retry gate](lifecycle.md#the-retry-gate) and the drain verify both wait until the rehearsal pod has ended: its compare sessions count as leftovers on the target, and its scans would stretch the write-downtime window.
 
@@ -143,6 +143,13 @@ The [retry gate](lifecycle.md#the-retry-gate) and the drain verify both wait unt
 > An older server refuses the connection, as does a connection pooler that rejects startup options, and the rehearsal then ends `Failed`.
 
 A refused connection shows in the rehearsal's message, which quotes the last error from the Job's log.
+
+> [!warning]
+> The cancel finds sessions by client address, role, and name, so it cannot tell compare Jobs apart that share an address.
+> Behind a proxy or NAT that gives several pods one address, it also cancels the compare workers of other compare Jobs of the same role, such as another Migration's drain verify.
+> A connection string that sets `application_name` replaces pgcopydb's session names, and the cancel then matches nothing: only `client_connection_check_interval` ends the queries, once the pod is gone.
+
+Behind a shared address, start a rehearsal only while no other compare of the same role runs, and keep `application_name` out of the connection strings where you can.
 
 > [!warning]
 > Each checksum query holds an `ACCESS SHARE` lock on its table until it ends.
