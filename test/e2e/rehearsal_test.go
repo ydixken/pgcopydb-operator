@@ -108,17 +108,22 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 				"the rehearsal created Job %s", j.Name)
 		}
 
-		By("expecting replication to go on after the rehearsal")
+		By("expecting replication, and its sampling, to go on after the rehearsal")
+		before := cur.Status.Replication
+		Expect(before).NotTo(BeNil(), "no replication sample before the insert")
 		psql(sourceCluster, asSourceAppRole()+
 			fmt.Sprintf("INSERT INTO %s VALUES (%d, 'after the rehearsal')", table, rehearsalRows+1))
 		Eventually(func() string {
 			return psql(targetCluster, fmt.Sprintf("SELECT count(*) FROM %s WHERE id = %d", table, rehearsalRows+1))
 		}, 3*time.Minute, 2*time.Second).Should(Equal("1"), "a row written after the rehearsal did not reach the target")
+		// The insert moves the stream's positions, so positions that stand still mean no new sample.
 		Eventually(func(g Gomega) {
 			rep := get(g).Status.Replication
 			g.Expect(rep).NotTo(BeNil())
 			g.Expect(rep.LagBytes).NotTo(BeNil(), "the lag is no longer sampled")
-		}, time.Minute, 2*time.Second).Should(Succeed())
+			g.Expect([]string{rep.WriteLSN, rep.ReplayLSN}).NotTo(Equal([]string{before.WriteLSN, before.ReplayLSN}),
+				"the replication sample has not moved since the insert")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
 
 		By("cutting over: the rehearsal pod has ended before the verify Job starts")
