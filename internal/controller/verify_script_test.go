@@ -30,7 +30,7 @@ import (
 // The stand-in for the runner image's pgcopydb, dispatching on argv: the two
 // sentinel reads and the compare are the only calls the drain script makes.
 // The marker on stderr is how a case proves the content path was or was not
-// reached.
+// reached. The report ends in a newline, as pgcopydb's does.
 const stubVerifyPgcopydb = `#!/bin/sh
 case "$*" in
   *--endpos*) echo "$STUB_ENDPOS" ;;
@@ -42,7 +42,7 @@ case "$*" in
       echo "pgcopydb: could not open catalogs" >&2
       exit 12
     fi
-    cat "$STUB_REPORT" ;;
+    cat "$STUB_REPORT"; echo ;;
   *) echo "pgcopydb stub: unexpected call: $*" >&2; exit 9 ;;
 esac
 `

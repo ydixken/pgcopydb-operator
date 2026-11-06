@@ -45,14 +45,15 @@ const (
 )
 
 // The stand-in for the runner image's pgcopydb: it logs the case's lines,
-// then replays a canned report, or fails the way a broken catalog would.
+// then replays a canned report ending in the newline pgcopydb prints after it
+// (cli_compare.c), or fails the way a broken catalog would.
 const stubPgcopydb = `#!/bin/sh
 printf '%s' "${STUB_COMPARE_LOG:-}" >&2
 if [ -n "${STUB_PGCOPYDB_FAIL:-}" ]; then
   echo "pgcopydb: could not open catalogs" >&2
   exit 12
 fi
-cat "$STUB_REPORT"
+cat "$STUB_REPORT"; echo
 exit "${STUB_COMPARE_EXIT:-0}"
 `
 
