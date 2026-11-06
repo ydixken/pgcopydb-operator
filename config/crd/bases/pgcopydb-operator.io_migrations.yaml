@@ -2370,7 +2370,7 @@ spec:
               verificationProgress:
                 description: |-
                   verificationProgress holds the latest compare data progress sample of each
-                  kind of run. An item stays after its run ends, until a run of that kind replaces it.
+                  kind of run. An item stays after its run ends, until the next run of that kind starts.
                 items:
                   description: |-
                     VerificationProgress is the latest progress sample of one compare data run,
@@ -2445,8 +2445,8 @@ spec:
                       x-kubernetes-list-type: atomic
                     jobName:
                       description: |-
-                        jobName is the Job that logged the sample. The first sample of another
-                        Job of the same kind replaces the item.
+                        jobName is the Job that logged the sample. Creating the next Job of the
+                        same kind removes the item, and that Job's first sample adds it back.
                       type: string
                     kind:
                       description: |-
@@ -4879,7 +4879,7 @@ spec:
               verificationProgress:
                 description: |-
                   verificationProgress holds the latest compare data progress sample of each
-                  kind of run. An item stays after its run ends, until a run of that kind replaces it.
+                  kind of run. An item stays after its run ends, until the next run of that kind starts.
                 items:
                   description: |-
                     VerificationProgress is the latest progress sample of one compare data run,
@@ -4954,8 +4954,8 @@ spec:
                       x-kubernetes-list-type: atomic
                     jobName:
                       description: |-
-                        jobName is the Job that logged the sample. The first sample of another
-                        Job of the same kind replaces the item.
+                        jobName is the Job that logged the sample. Creating the next Job of the
+                        same kind removes the item, and that Job's first sample adds it back.
                       type: string
                     kind:
                       description: |-

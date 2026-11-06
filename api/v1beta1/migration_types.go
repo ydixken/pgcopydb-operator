@@ -540,8 +540,8 @@ type VerificationProgress struct {
 	// +kubebuilder:validation:Enum=rehearsal;drain;data
 	Kind string `json:"kind"`
 
-	// jobName is the Job that logged the sample. The first sample of another
-	// Job of the same kind replaces the item.
+	// jobName is the Job that logged the sample. Creating the next Job of the
+	// same kind removes the item, and that Job's first sample adds it back.
 	JobName string `json:"jobName"`
 
 	// observedAt is when the operator last read the sample from the Job's log.
@@ -873,7 +873,7 @@ type MigrationStatus struct {
 	VerificationRehearsal *VerificationRehearsalStatus `json:"verificationRehearsal,omitempty"`
 
 	// verificationProgress holds the latest compare data progress sample of each
-	// kind of run. An item stays after its run ends, until a run of that kind replaces it.
+	// kind of run. An item stays after its run ends, until the next run of that kind starts.
 	// +listType=map
 	// +listMapKey=kind
 	// +optional

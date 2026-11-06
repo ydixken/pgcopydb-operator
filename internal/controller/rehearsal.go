@@ -123,6 +123,7 @@ func (r *MigrationReconciler) startRehearsal(ctx context.Context, m *v1beta1.Mig
 	}); err != nil {
 		return err
 	}
+	dropCompareProgress(m, v1beta1.VerificationProgressRehearsal)
 	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
 		Armed: true, Run: run, JobName: name, Outcome: v1beta1.RehearsalRunning,
 		Message: "pgcopydb compare data runs as Job " + name + " while the migration streams",

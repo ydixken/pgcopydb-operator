@@ -2804,7 +2804,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "This table lists the tables that each compare data run was comparing at its latest sample, at most 64 per run, with the time spent on each in whole seconds. A table leaves the list once it is finished. A run that ended without its last progress line, because it was canceled or its pod died, keeps the list of its last sample until the next run of that kind replaces it.",
+      "description": "This table lists the tables that each compare data run was comparing at its latest sample, at most 64 per run, with the time spent on each in whole seconds. A table leaves the list once it is finished. A run that ended without its last progress line, because it was canceled or its pod died, keeps the list of its last sample until the next run of that kind starts.",
       "gridPos": {
         "h": 7,
         "w": 12,

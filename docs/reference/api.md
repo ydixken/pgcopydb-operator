@@ -305,7 +305,7 @@ _Appears in:_
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
 | `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
 | `verificationRehearsal` _[VerificationRehearsalStatus](#verificationrehearsalstatus)_ | verificationRehearsal reports the latest spec.verification.rehearsal run. |  | Optional: \{\} <br /> |
-| `verificationProgress` _[VerificationProgress](#verificationprogress) array_ | verificationProgress holds the latest compare data progress sample of each<br />kind of run. An item stays after its run ends, until a run of that kind replaces it. |  | Optional: \{\} <br /> |
+| `verificationProgress` _[VerificationProgress](#verificationprogress) array_ | verificationProgress holds the latest compare data progress sample of each<br />kind of run. An item stays after its run ends, until the next run of that kind starts. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
@@ -491,7 +491,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `kind` _string_ | kind is the run: rehearsal (spec.verification.rehearsal), drain (the<br />cutover's drain verify, only when it compares), or data (spec.verification.data). |  | Enum: [rehearsal drain data] <br /> |
-| `jobName` _string_ | jobName is the Job that logged the sample. The first sample of another<br />Job of the same kind replaces the item. |  |  |
+| `jobName` _string_ | jobName is the Job that logged the sample. Creating the next Job of the<br />same kind removes the item, and that Job's first sample adds it back. |  |  |
 | `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | observedAt is when the operator last read the sample from the Job's log. |  | Optional: \{\} <br /> |
 | `final` _boolean_ | final is true for the line pgcopydb logs after every table was compared.<br />false is a sample from a running compare, or the last one of a run that<br />ended before that line. |  | Optional: \{\} <br /> |
 | `plannedTables` _integer_ | plannedTables is the number of tables the run compares. |  | Optional: \{\} <br /> |

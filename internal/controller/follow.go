@@ -406,9 +406,12 @@ func jobFailedAt(job *batchv1.Job) time.Time {
 // ensureVerify creates and observes the drain-verification Job. Returns
 // (verified, refuted, err); (false, false, nil) means still running.
 func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migration) (bool, bool, error) {
-	job, _, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
+	job, created, err := r.ensureJob(ctx, m, verifyJobName(m), func() (*batchv1.Job, error) {
 		return buildVerifyJob(m, r.RunnerImage, r.progressGate())
 	})
+	if created {
+		dropCompareProgress(m, v1beta1.VerificationProgressDrain)
+	}
 	if err != nil || job == nil {
 		return false, false, err
 	}

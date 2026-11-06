@@ -264,6 +264,49 @@ func TestReconcileRehearsal_FailedRunReadsTheLogOnce(t *testing.T) {
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, job.Name, false, 2)))
 }
 
+// A run's start drops the item of its kind, so until its first sample no item shows the
+// previous run's counts as the new run's. The other kinds' items stay.
+func TestCompareStart_DropsTheItemOfItsKind(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	rehearsal, drain, data := v1beta1.VerificationProgressRehearsal, v1beta1.VerificationProgressDrain,
+		v1beta1.VerificationProgressData
+	stale := func(m *v1beta1.Migration) {
+		for _, kind := range []string{rehearsal, drain, data} {
+			m.Status.VerificationProgress = append(m.Status.VerificationProgress,
+				v1beta1.VerificationProgress{Kind: kind, JobName: "an-earlier-job", Final: true})
+		}
+	}
+	kinds := func(m *v1beta1.Migration) []string {
+		got := make([]string, 0, len(m.Status.VerificationProgress))
+		for _, p := range m.Status.VerificationProgress {
+			got = append(got, p.Kind)
+		}
+		return got
+	}
+
+	// spec.verification.rehearsal set back to true after run 1.
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal.Armed = false
+	m.Status.VerificationRehearsal.Outcome = v1beta1.RehearsalCompleted
+	stale(m)
+	g.Expect(failingReconciler(t, interceptor.Funcs{}, m).reconcileRehearsal(ctx, m)).To(Succeed())
+	g.Expect(m.Status.VerificationRehearsal.Run).To(Equal(int32(2)))
+	g.Expect(kinds(m)).To(Equal([]string{drain, data}))
+
+	m = followPasswordMigration()
+	stale(m)
+	_, _, err := failingReconciler(t, interceptor.Funcs{}, m).ensureVerify(ctx, m)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(kinds(m)).To(Equal([]string{rehearsal, data}))
+
+	m = passwordMigration()
+	m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+	stale(m)
+	g.Expect(failingReconciler(t, interceptor.Funcs{}, m).ensureVerification(ctx, m)).To(BeFalse())
+	g.Expect(kinds(m)).To(Equal([]string{rehearsal, drain}))
+}
+
 // The drain verify's progress comes from the read that also takes the copy
 // counters, so a finished verify Job's log is read once per pass.
 func TestEnsureVerify_RecordsDrainProgress(t *testing.T) {

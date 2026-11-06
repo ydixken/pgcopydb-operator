@@ -979,12 +979,12 @@ var _ = Describe("Verification rehearsal", func() {
 		Expect(m.Status.VerificationProgress[0].PlannedBytes.Value()).To(Equal(int64(131072)))
 		Expect(m.Status.VerificationProgress[0].Elapsed.Duration).To(Equal(20480 * time.Millisecond))
 
-		By("replacing it with run 2's first sample")
+		By("dropping it when run 2 starts, and adding run 2's first sample")
 		setRehearsal(name, false)
 		reconcileAndGet(ctx, r, name)
 		setRehearsal(name, true)
 		m = arm(r, name, 2)
-		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3)))
+		Expect(m.Status.VerificationProgress).To(BeEmpty())
 		logs.byJob[run2] = runningProgressLine
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run2, false, 2)))

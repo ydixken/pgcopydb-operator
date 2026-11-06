@@ -219,7 +219,8 @@ When that read fails, the operator retries it for up to 2 minutes, and the rehea
 A run that ends without the last line, because it was canceled or its pod died, keeps its last sample with `final` false.
 When the drain verify or the data compare retries a failed pod, or its Job is recreated under the same name, the operator reads the new pod's samples too.
 The drain verify and the data compare print the newest progress line again after their report, so a long report cannot push it out of what the operator reads.
-An item stays after its run ends, until the first sample of the next run of the same kind replaces it, so `jobName` names the run it describes.
+An item stays after its run ends.
+The operator removes it when it creates the next Job of the same kind, and that Job's first sample adds it back, so `jobName` names the run it describes.
 
 The operator exports each item's counts, sizes, and duration as gauges labeled with its `kind`, such as `pgcopydb_migration_verification_compared_tables`, and the time spent on each table in flight; see the [metric reference](monitoring.md#metric-reference).
 The Verification row of the Migration Detail dashboard charts them, with the average bytes and rows per second since the run started; see [Monitoring](monitoring.md#reading-migration-detail).

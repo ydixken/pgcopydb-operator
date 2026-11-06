@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -269,6 +270,9 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 			if created {
 				r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "VerificationStarted", "Verify",
 					"running pgcopydb compare %s", check)
+				if check == compareData {
+					dropCompareProgress(m, v1beta1.VerificationProgressData)
+				}
 			}
 			return false, nil
 		}
@@ -392,6 +396,13 @@ func compareProgressFinal(m *v1beta1.Migration, kind string, job *batchv1.Job) b
 		}
 	}
 	return false
+}
+
+// dropCompareProgress removes the item of kind when the next run of that kind starts:
+// until that run's first sample, the item would show the previous run's counts as its own.
+func dropCompareProgress(m *v1beta1.Migration, kind string) {
+	m.Status.VerificationProgress = slices.DeleteFunc(m.Status.VerificationProgress,
+		func(p v1beta1.VerificationProgress) bool { return p.Kind == kind })
 }
 
 func millis(ms int64) *metav1.Duration {
