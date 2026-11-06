@@ -110,8 +110,8 @@ The "Exists" column is the contract for when a series is present:
   Prometheus keeps their history, so the graphs still show the run.
 - **per progress item**: one series per item of `status.verificationProgress`, labeled with its `kind`: `rehearsal`, `drain`, or `data` (see [Progress](verification.md#progress)).
   It appears with the first progress sample of that kind of run.
-  It stays after the run ends, until the next Job of that kind is created and the item goes, so it describes the Job that the item's `jobName` names.
-  That Job's first sample brings it back.
+  It stays after the run ends, so it describes the Job that the item's `jobName` names.
+  Creating the next Job of that kind removes the item and its series, and that Job's first sample brings them back.
   `compare schema`, the exact-LSN drain path, and a runner that logs no compare progress leave no item and therefore no series.
 - **while in flight**: one series per table in the item's `inFlight` list, which a sample stops listing once the table is finished.
   A run that ended without its last progress line, because it was canceled or its pod died, keeps the list of its last sample, and the series with it, until the next run of that kind starts.
