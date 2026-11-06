@@ -432,7 +432,7 @@ func TestBuildVerifyJob_AuthAndPredicate(t *testing.T) {
 	}
 	// No poller wired, no counters asked for: the drain script stays exactly
 	// what it was.
-	if strings.Contains(c.Args[1], verifyProgressPrefix) {
+	if strings.Contains(c.Args[1], "clone_progress=$(") {
 		t.Fatalf("verify script must not ask for counters without a gate:\n%s", c.Args[1])
 	}
 }
@@ -470,8 +470,9 @@ func TestBuildVerifyJob_CloneCounters(t *testing.T) {
 			t.Fatalf("counters block missing %q:\n%s", want, script)
 		}
 	}
-	// Printed before the verdict, so the fast path's exit cannot skip it.
-	if strings.Index(script, verifyProgressPrefix) > strings.Index(script, `if [ "$endpos"`) {
+	// Printed before the verdict, so the fast path's exit cannot skip it. The
+	// last occurrence, because compare_data_strict, defined first, prints it again.
+	if strings.LastIndex(script, verifyProgressPrefix) > strings.Index(script, `if [ "$endpos"`) {
 		t.Fatalf("counters must be printed before the drain verdict:\n%s", script)
 	}
 	// The counters are read, never judged: no exit of any kind in the block.

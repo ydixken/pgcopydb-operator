@@ -233,9 +233,9 @@ func TestRehearsalScript_DecidesByTheReport(t *testing.T) {
 		want int
 		says string
 	}{
-		"tables differ":            {[]string{rehearsalDiffReport, "STUB_COMPARE_EXIT=12"}, 0, rehearsalReported},
+		"tables differ":            {[]string{rehearsalDiffReport, stubCompareExit12}, 0, rehearsalReported},
 		"tables match":             {[]string{rehearsalDiffReport}, 0, rehearsalReported},
-		"exit 12 and no report":    {[]string{"STUB_COMPARE_EXIT=12"}, 1, rehearsalNoReport},
+		"exit 12 and no report":    {[]string{stubCompareExit12}, 1, rehearsalNoReport},
 		"exit 0 and no report":     {nil, 1, rehearsalNoReport},
 		"output that is no report": {[]string{"STUB_REPORT=could not connect"}, 1, rehearsalNoReport},
 		"list tables fails":        {[]string{"STUB_LIST_EXIT=12"}, 1, "list tables could not read"},

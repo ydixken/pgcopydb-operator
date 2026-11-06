@@ -67,27 +67,41 @@ select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)
     or t->'source'->>'checksum' is null;
 `
 
+// compareLogPath keeps compare data's stderr, so the last progress line can be
+// printed again after the report. compareStatusPath carries its exit status
+// out of the pipe into tee, which sh, lacking pipefail, would lose.
+const (
+	compareLogPath    = "/tmp/compare.log"
+	compareStatusPath = "/tmp/compare.status"
+)
+
 // Validate the report even after exit 0: empty or incomplete output proves
 // no match, and some runner overrides exit 0 on content differences.
 // psql parses JSON because the runner image ships no jq or python.
+// The progress and clone-progress lines go last because the report can push
+// them out of the log window the operator reads.
 var compareDataStrict = `compare_data_strict() {
-  if ! pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + compareReportPath + `; then
-    echo "compare data could not run; refusing to read that as a match"
-    return 1
-  fi
-  cat ` + compareReportPath + `
-  if ! unmatched=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -f - <<'SQL'
+  { rc=0; pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` 2>&1 >` + compareReportPath + ` || rc=$?; echo "$rc" >` + compareStatusPath + `; } | tee ` + compareLogPath + ` >&2
+  rc=$(cat ` + compareStatusPath + `) || rc=
+  cat ` + compareReportPath + ` || :
+  verdict=1
+  if [ "$rc" != 0 ]; then
+    echo "compare data exited ${rc:-without a status}, so tables differ or it could not compare them; refusing to read that as a match"
+  elif ! unmatched=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -f - <<'SQL'
 ` + compareReportQuery + `SQL
   ); then
     echo "compare data report could not be evaluated; refusing to read that as a match"
-    return 1
-  fi
-  if [ -n "$unmatched" ]; then
+  elif [ -n "$unmatched" ]; then
     echo "compare data did not find every table matching between source and target:"
     echo "$unmatched"
-    return 1
+  else
+    verdict=0
   fi
-  return 0
+  grep -F '` + pgcopydb.CompareProgressPrefix + `' ` + compareLogPath + ` | tail -n 1
+  if [ -n "${clone_progress:-}" ]; then
+    printf '` + verifyProgressPrefix + `%s\n' "$clone_progress"
+  fi
+  return "$verdict"
 }
 `
 
