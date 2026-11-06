@@ -1,14 +1,14 @@
 # pgcopydb option coverage
 
-Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [upstream reference](https://pgcopydb.readthedocs.io/)) mapped to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion.
+This page maps every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [upstream reference](https://pgcopydb.readthedocs.io/)) to its `Migration` spec field, to operator-managed behavior, or to an explicit exclusion.
 
 ## `pgcopydb clone`
 
 | pgcopydb option | Migration spec | Notes |
 |---|---|---|
-| `--source` | `spec.source` | Rendered to `PGCOPYDB_SOURCE_PGURI`; credentials via passfile, never argv. |
+| `--source` | `spec.source` | Rendered to `PGCOPYDB_SOURCE_PGURI`. Credentials go through a passfile, never argv. |
 | `--target` | `spec.target` | Rendered to `PGCOPYDB_TARGET_PGURI`. |
-| `--dir` | operator-managed | Fixed to `/work/pgcopydb` on the work PVC; `spec.workVolume` sizes it. |
+| `--dir` | operator-managed | Fixed to `/work/pgcopydb` on the work PVC. `spec.workVolume` sizes it. |
 | `--table-jobs` | `spec.clone.tableJobs` | |
 | `--index-jobs` | `spec.clone.indexJobs` | |
 | `--restore-jobs` | `spec.clone.restoreJobs` | 0 follows indexJobs, as upstream. |
@@ -19,44 +19,45 @@ Every `pgcopydb clone` and `pgcopydb follow` option (pgcopydb 0.18, per the [ups
 | `--drop-if-exists` | `spec.clone.dropIfExists` | |
 | `--roles` | `spec.clone.roles` | |
 | `--no-role-passwords` | `spec.clone.noRolePasswords` | |
-| `--no-owner` | `spec.clone.noOwner` | `spec.clone.ownerAfterRestore` builds on it, an operator-level handover run after the worker exits; see [Ownership after restore](prerequisites.md#ownership-after-restore-cloneownerafterrestore). |
+| `--no-owner` | `spec.clone.noOwner` | `spec.clone.ownerAfterRestore` builds on it: an operator-level handover that runs after the worker exits. See [Ownership after restore](prerequisites.md#ownership-after-restore-cloneownerafterrestore). |
 | `--no-acl` | `spec.clone.noACL` | |
 | `--no-comments` | `spec.clone.noComments` | |
 | `--no-tablespaces` | `spec.clone.noTablespaces` | |
 | `--skip-large-objects` | `spec.clone.skip: largeObjects` | |
 | `--skip-extensions` | `spec.clone.skip: extensions` | |
-| `--skip-ext-comments` | `spec.clone.skip: extensionComments` | Already implied by `skip: extensions`; on its own it installs extensions without their COMMENTs. |
+| `--skip-ext-comments` | `spec.clone.skip: extensionComments` | Already implied by `skip: extensions`. On its own, it installs extensions without their COMMENTs. |
 | `--skip-collations` | `spec.clone.skip: collations` | |
 | `--skip-vacuum` | `spec.clone.skip: vacuum` | |
 | `--skip-analyze` | `spec.clone.skip: analyze` | |
 | `--skip-db-properties` | `spec.clone.skip: dbProperties` | |
 | `--skip-split-by-ctid` | `spec.clone.skip: ctidSplit` | |
 | `--requirements` | not exposed | Needs a file produced by `pgcopydb list extensions --requirements --json`, which has no declarative form in the spec. |
-| `--filters` | `spec.clone.filters` | Rendered to the INI, mounted from an operator-owned ConfigMap. All eight filter sections are covered. |
+| `--filters` | `spec.clone.filters` | Rendered to the INI, mounted from an operator-owned ConfigMap. The field covers all eight filter sections. |
 | `--fail-fast` | `spec.clone.failFast` | |
-| `--defer-indexes` | `spec.clone.deferIndexes` | Fork-only; preflight checks the runner. |
-| `--restart` | operator-managed | Attempt 1, which wipes any pre-existing work-dir state as foreign, and a live migration's retry that [starts over](../operations/lifecycle.md#retries-and-resume) after pgcopydb refuses its resume. |
+| `--defer-indexes` | `spec.clone.deferIndexes` | Fork-only. Preflight checks the runner. |
+| `--restart` | operator-managed | Attempt 1, which wipes any pre-existing work-dir state as foreign, and a live migration's retry that [starts again](../operations/lifecycle.md#retries-and-resume) after pgcopydb refuses its resume. |
 | `--resume` | operator-managed | Every other retry resumes from the work-dir catalogs. |
 | `--not-consistent` | operator-managed | Paired with `--resume`: the failed attempt's snapshot died with its process. |
 | `--snapshot` | not exposed | Needs a snapshot-holder sidecar to keep the exported snapshot alive for the whole clone. |
 | `--follow` | `spec.follow.enabled` | |
 | `--plugin` | `spec.follow.plugin` | |
 | `--publication` | `spec.follow.publication` | Empty lets pgcopydb create and drop its own. |
-| `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`; other plugins would silently ignore it. |
+| `--wal2json-numeric-as-string` | `spec.follow.wal2jsonNumericAsString` | CEL rejects it unless `follow.plugin` is `wal2json`. Other plugins would silently ignore it. |
 | `--replay-no-op-updates` | `spec.follow.replayNoOpUpdates` | |
-| `PGCOPYDB_APPLY_GROUP_TXNS` | `spec.follow.applyGroupTransactions` | An environment variable, not a flag; the worker Job sets it only when the field is set. |
-| `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name; a set name is pattern-restricted to PostgreSQL's slot charset. |
-| `--create-slot` | not exposed | `clone --follow` creates the slot during setup; nothing to configure. |
-| `--origin` | operator-managed | Always the same generated per-Migration name as the slot; unique, so fan-in stays safe. |
+| `PGCOPYDB_APPLY_GROUP_TXNS` | `spec.follow.applyGroupTransactions` | An environment variable, not a flag. The worker Job sets it only when you set the field. |
+| `--slot-name` | `spec.follow.slotName` | Empty generates a unique per-Migration name. A set name is pattern-restricted to PostgreSQL's slot charset. |
+| `--create-slot` | not exposed | `clone --follow` creates the slot during setup. There is nothing to configure. |
+| `--origin` | operator-managed | Always the same generated per-Migration name as the slot. The name is unique, so fan-in stays safe. |
 | `--endpos` | operator-managed | Cutover sets it at runtime via `stream sentinel set endpos --current`. |
-| `--use-copy-binary` | `spec.clone.useCopyBinary` | On by default. pgcopydb falls back to text per table when a column's binary encoding is unsafe. |
-| `--all-databases` | `spec.clone.allDatabases` | Needs superuser on both sides; see [All databases](../configuration.md#all-databases). |
+| `--use-copy-binary` | `spec.clone.useCopyBinary` | On by default. pgcopydb uses text instead, per table, when a column's binary encoding is unsafe. |
+| `--all-databases` | `spec.clone.allDatabases` | Needs superuser on both sides. See [All databases](../configuration.md#all-databases). |
 | `--host` / `--port` | not exposed | The operator drives the sentinel via `pods/exec`, not the TCP coordinator. |
-| `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed | Runner logs are structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level. |
+| `--verbose` / `--debug` / `--trace` / `--quiet` | not exposed | Runner logs use structured JSON (`PGCOPYDB_LOG_JSON=on`) at the default level. |
 
 ## `pgcopydb follow`
 
-The standalone `follow` command exposes a subset of the clone options with identical semantics; the rows above cover all of them.
+The standalone `follow` command exposes a subset of the clone options with identical semantics.
+The rows above cover all of them.
 The operator never runs standalone `follow`: it always runs `clone --follow`.
 The base copy and the replication slot then share one snapshot, which keeps the result consistent.
 
@@ -70,7 +71,8 @@ Admission rejects `verification.data` in this mode because pgcopydb produces no 
 `spec.verification.schema` and `spec.verification.data` run `pgcopydb compare schema` and `pgcopydb compare data` after completion, each in its own Job on the work PVC.
 Both take source, target, and `--dir` from the same operator-managed values as the rows above.
 `compare data` adds `--json` and runs inside a wrapper that takes its verdict from the report, not from the exit code.
-Stock pgcopydb 0.18 logs a differing table and still exits 0; the bundled runner's patched pgcopydb exits nonzero instead.
+Stock pgcopydb 0.18 logs a differing table and still exits 0.
+The patched pgcopydb of the bundled runner exits nonzero instead.
 The wrapper reads the report back through `psql`, the only JSON parser in the runner image.
 It fails the Job when a table differs on row count or checksum.
 A compare that could not run, or a report that could not be read, fails the Job too.
@@ -85,23 +87,34 @@ The Job succeeds whenever `compare data` wrote a report, so a table that differs
 Every release candidate migrates a catalog of PostgreSQL features and holds the target to the source.
 Each case is one SQL file under [`test/e2e/coverage/`](https://github.com/ydixken/pgcopydb-operator/tree/main/test/e2e/coverage), named `<area>/<case>` below.
 
-The clone group creates each clone case in its own schema on the source and clones all of them in one Migration filtered to those schemas, with `spec.verification.schema` and `spec.verification.data` set.
+The clone group creates each clone case in its own schema on the source.
+It clones all of them in one Migration filtered to those schemas, with `spec.verification.schema` and `spec.verification.data` set.
 A case passes when `Verified` is `True` and a fingerprint read on both sides matches.
-The fingerprint covers row data per table and per partition leaf, relation and partition layout, replica identity with its index, columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, types, sequence values, comments, owners, grants, and large object contents.
+The fingerprint covers row data per table and per partition leaf, relation and partition layout, and replica identity with its index.
+It also covers columns, constraints, indexes, triggers, functions, views, row-level security policies, statistics objects, and types.
+In addition, it covers sequence values, comments, owners, grants, and large object contents.
 Large objects belong to no schema, so a clone filtered by `includeOnlySchemas` still copies every large object in the database, with its OID.
-On the target the migration role owns them, without their grants and comments; see [Large objects](prerequisites.md#large-objects).
+On the target, the migration role owns them, without their grants and comments.
+See [Large objects](prerequisites.md#large-objects).
 
-The follow group sets up each follow case the same way and starts one follow Migration over those schemas with a Manual cutover.
-Once the Migration waits at `CutoverPending` with its lag converged, the spec runs every case's `@follow` statements on the source, then writes a marker row and waits until the target has it.
-It approves the cutover and, after `Completed`, requires `Verified` `True` and a matching fingerprint, as the clone group does.
-The fingerprint is read after the cutover, because the target's sequences keep their base-copy values until pgcopydb re-syncs them at the cutover.
+The follow group creates each follow case the same way and starts one follow Migration over those schemas with a Manual cutover.
+When the Migration waits at `CutoverPending` with its lag converged, the spec runs the `@follow` statements of every case on the source.
+Then it writes a marker row and waits until the target has that row.
+It approves the cutover.
+After `Completed`, it requires `Verified` `True` and a matching fingerprint, as the clone group does.
+The spec reads the fingerprint after the cutover, because the target's sequences keep their base-copy values until pgcopydb re-syncs them at the cutover.
 
 An own case pins a documented limitation instead of identity.
-It runs alone in a follow Migration of its own, set up like the follow group's, with `spec.backoffLimit: 1`, and its verdict names the outcome the spec requires:
+It runs alone in a follow Migration of its own.
+The spec configures that Migration like the Migration of the follow group, but with `spec.backoffLimit: 1`.
+The verdict of the own case names the outcome that the spec requires:
 
 - `preflight_refuses_rls`, `preflight_refuses_unlogged`: the Migration fails with `PreflightFailed` before any attempt, and the refusal names exactly the case's table.
-- `apply_fails_on_ddl`: after `@follow` adds a column on the source, the first attempt fails on the first change that uses it (SQLSTATE 42703), and the Migration fails with `SchemaDrift` without a retry.
-- `large_objects_not_replicated`: the Migration completes with `Verified` `True`, and the fingerprint differs only in the large objects `@follow` patched, unlinked or created, each still in its base-copy state on the target.
+- `apply_fails_on_ddl`: after `@follow` adds a column on the source, the first attempt fails on the first change that uses the column (SQLSTATE 42703).
+  The Migration then fails with `SchemaDrift` without a retry.
+- `large_objects_not_replicated`: the Migration completes with `Verified` `True`.
+  The fingerprint differs only in the large objects that `@follow` patched, unlinked or created.
+  Each of these large objects is still in its base-copy state on the target.
 
 [Prerequisites](prerequisites.md) states each of these limitations where it applies.
 
@@ -109,7 +122,7 @@ It runs alone in a follow Migration of its own, set up like the follow group's, 
 > When the source and target majors differ, the fingerprint skips constraints, indexes, triggers, functions, views, policies, and statistics objects.
 > Each server prints those definitions itself, and identical objects print differently across majors.
 > pgcopydb's schema compare still checks indexes and the constraints an index backs (primary key, unique, exclusion).
-> Check and foreign key constraints, triggers, functions, views, policies, and statistics objects go unchecked on such a pair.
+> On such a pair, CHECK and foreign key constraints, triggers, functions, views, policies, and statistics objects stay unchecked.
 
 The last column is the oldest source major the case runs on.
 A release candidate uses a PostgreSQL 17 source, so it skips the cases that need 18.

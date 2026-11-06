@@ -5,28 +5,36 @@ The operator's preflight covers only the items in the coverage notes below.
 A `Partial` or `Not checked` item remains an operator decision.
 
 Start with the [operator prerequisites](reference/prerequisites.md).
-When follow mode is enabled, read the [live migration runbook](operations/live-migration.md).
-Before the real run, create a [dry run](operations/lifecycle.md#dry-run): it runs the preflight against both databases and stops before pgcopydb starts.
+When you enable follow mode, read the [live migration runbook](operations/live-migration.md).
+Before the real run, create a [dry run](operations/lifecycle.md#dry-run).
+A dry run runs the preflight against both databases and stops before pgcopydb starts.
 When a preflight check fails, use the [troubleshooting guide](troubleshooting.md).
 
 pgcopydb is a migration tool, not a backup system.
 
 ## Migration checklist
 
-1. Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move, and which must stay behind?
-2. What are the source and target PostgreSQL versions, and is the target compatible with the extensions, types, collations, and locales you need?
+1. Which databases, schemas, tables, roles, ACLs, extensions, tablespaces, settings, and large objects must move, and which must not move?
+2. What are the source and target PostgreSQL versions?
+   Is the target compatible with the extensions, types, collations, and locales you need?
 3. What downtime, RPO, RTO, maintenance window, load impact, and acceptance criteria did you agree?
-4. Where does pgcopydb run, can it keep TLS-verified connections to both endpoints, and which roles and credential process does it use?
+4. Where does pgcopydb run?
+   Can it keep TLS-verified connections to both endpoints?
+   Which roles and which credential process does it use?
 5. What are the database size, largest relations, write and WAL rates, largest transaction, and growth?
    What connection, compute, I/O, network, and work-disk capacity is available?
-6. Does the agreed downtime justify follow mode, and did a plain clone rehearsal measure copy time and resource use?
-   Should index builds wait until all data is copied (see [Deferring index builds](operations/performance.md#deferring-index-builds))?
+6. Does the agreed downtime justify follow mode?
+   Did a plain clone rehearsal measure copy time and resource use?
+   Should index builds wait until pgcopydb copies all data (see [Deferring index builds](operations/performance.md#deferring-index-builds))?
 7. Is logical decoding ready: logical WAL, slot and WAL sender capacity, plugin availability, HBA access, retention limits, and slot behavior after failover?
-8. Who stops source writes, confirms quiescence, sets the end position, waits for replay, switches clients, and authorizes cutover?
-9. Which validation checks must pass, when is rollback still safe, who decides, and when do you clean up the replication resources?
-10. What backup system protects the source, and when was the last successful test restore or point-in-time recovery?
+8. Who stops source writes, checks quiescence, sets the end position, waits for replay, switches clients, and authorizes cutover?
+9. Which validation checks must pass, when is rollback still safe, and who decides?
+   When do you clean the replication resources?
+10. What backup system protects the source?
+    When was the last successful test restore or point-in-time recovery?
 11. Can you create an isolated rehearsal environment from representative production data?
-    Does it block every write path to production and apply approved controls for masked data, access, retention, and teardown?
+    Does it block every write path to production?
+    Does it apply approved controls for masked data, access, retention, and teardown?
 
 ## Operator preflight coverage
 
@@ -34,34 +42,45 @@ The controller exposes one aggregate gate through `Validated=Unknown` with `Pref
 Individual checks appear as `ok:` log lines.
 
 1. Partial.
-   The API validates the filters, but preflight does not check the declared scope against your intent.
+   The API checks the filters.
+   But preflight does not check the declared scope against your intent.
 2. Partial.
    Preflight checks the selected extensions and their target ownership.
    It fails when the runner's `pg_restore` is 17 or later and the target runs PostgreSQL 16 or older (see [`pg_restore` and the target major](reference/prerequisites.md#pg_restore-and-the-target-major)).
-   It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality (unless `spec.preflight.requireSameMajorVersion` is set, which compares major versions only), or wider source-to-target compatibility.
+   It does not check extension versions, package installation, installation privileges, collations, encodings, or wider source-to-target compatibility.
+   It does not check server-version equality, unless you set `spec.preflight.requireSameMajorVersion`.
+   That setting compares only the major versions.
 3. Partial outside preflight.
-   `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.
-   A [verification rehearsal](operations/verification.md#rehearsal) times the compare that sets most of a live cutover's write downtime.
+   `follow.maxCatchupLag` and `cutover.mode` configure behavior.
+   But preflight does not check downtime, RPO, RTO, or acceptance criteria.
+   A [verification rehearsal](operations/verification.md#rehearsal) measures how long the compare takes.
+   That compare sets most of the write downtime of a live cutover.
 4. Partial.
    Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
    With [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target), it also checks that the target connection reports `synchronous_commit=local`.
-   It fails when the source or target connection goes through PgBouncer, and it does not detect pgpool-II.
-   A migration role without `TEMPORARY` on the target database only raises a `PreflightWarning` event, but the retry gate's test commit needs that grant, so a retry that runs the test holds without it.
+   It fails when the source or target connection goes through PgBouncer.
+   It does not detect pgpool-II.
+   A migration role without `TEMPORARY` on the target database only raises a `PreflightWarning` event.
+   But the test commit of the retry gate needs that grant.
+   Without it, a retry that runs the test holds.
    See the [operator prerequisites](reference/prerequisites.md) for each check.
    Preflight does not audit TLS policy, every ownership and publication right, or whether the target schemas are empty.
-   A `superuserSecretRef` role without `rolsuper` only raises a `PreflightWarning` event, but an all-databases migration connection without `rolsuper` fails preflight.
+   A `superuserSecretRef` role without `rolsuper` only raises a `PreflightWarning` event.
+   But an all-databases migration connection without `rolsuper` fails preflight.
 5. Partial.
    A pending preflight pod can keep the status at `PreflightRunning`.
    Preflight does not measure data size, free space, throughput, connection headroom, compute, I/O, network, WAL growth, or work-disk capacity.
 6. Partial.
    `spec.follow.enabled` adds the follow checks.
-   The operator does not choose between clone and follow, and it does not verify that a rehearsal ran.
+   The operator does not choose between clone and follow.
+   It does not check that a rehearsal ran.
 7. Partial.
    Preflight covers logical WAL, replication slot headroom, and the source replication attribute.
    It does not check WAL sender headroom, plugin installation, WAL retention budget, or slot behavior after failover.
 8. Partial outside preflight.
    The API has cutover mode and approval fields.
-   Preflight does not name an owner, verify that source writes stopped, or check the maintenance window.
+   Preflight does not name an owner.
+   It does not check that source writes stopped, and it does not check the maintenance window.
 9. Not checked by preflight.
    The runtime can drain replay, run comparisons, and clean the replication resources.
    Preflight does not check acceptance tests, rollback criteria, or cleanup timing.
@@ -69,7 +88,8 @@ Individual checks appear as `ok:` log lines.
     Clone-right checks are not backup or restore-readiness checks.
     The operator does not check backup recency, PITR, or restore drills.
 11. Not checked.
-    The [E2E suite in external mode](operations/e2e-external.md) can show that the operator works against a database pair and network like yours, but it seeds its own fixtures.
+    The [E2E suite in external mode](operations/e2e-external.md) can show that the operator works against a database pair and network like yours.
+    But the suite seeds its own fixtures.
     It does not prove that your rehearsal used representative data or enough isolation controls.
 
 ## Official references
