@@ -414,12 +414,17 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 	}
 	done, ok := jobFinished(job)
 	if !done {
+		r.readCompareProgress(ctx, m, v1beta1.VerificationProgressDrain, job)
 		return false, false, nil
 	}
 	// A refuted drain carries the counters too: the Job ran, so the line is
 	// there, and a failed migration is exactly when someone wants to know how
-	// far the copy got.
-	r.recordCloneProgress(ctx, m, job.Name)
+	// far the copy got. The same read gives the drain compare's progress.
+	if r.Logs != nil {
+		tail := r.jobLogTail(ctx, m.Namespace, job.Name, verifyLogTail)
+		r.cloneProgressFromLog(ctx, m, job.Name, tail)
+		r.recordCompareProgress(m, v1beta1.VerificationProgressDrain, job.Name, tail)
+	}
 	return ok, !ok, nil
 }
 
@@ -442,7 +447,11 @@ func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta
 	if r.Logs == nil {
 		return false
 	}
-	tail := r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail)
+	return r.cloneProgressFromLog(ctx, m, jobName, r.jobLogTail(ctx, m.Namespace, jobName, verifyLogTail))
+}
+
+// cloneProgressFromLog is recordCloneProgress on a log the caller already read.
+func (r *MigrationReconciler) cloneProgressFromLog(ctx context.Context, m *v1beta1.Migration, jobName, tail string) bool {
 	for line := range strings.SplitSeq(tail, "\n") {
 		raw, found := strings.CutPrefix(line, verifyProgressPrefix)
 		if !found {

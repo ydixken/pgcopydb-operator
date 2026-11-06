@@ -62,6 +62,7 @@ The bundled runner pins its pgcopydb fork version in [the builder Dockerfile](ht
 
 The progress poll supports twenty-one pgcopydb versions, with different guarantees.
 The bundled runner, `0.18.144.g86bf908`, added the compare progress lines: `pgcopydb compare data` logs a `compare progress:` line of JSON counters when its workers start, then every 10 seconds, and one last line with `"final":true`.
+The operator reads these lines into [`status.verificationProgress`](../operations/verification.md#progress).
 It gives each `--json` report row a `status` of `match`, `differ`, `error` or `unchecked`, and goes on with the next table when a checksum query fails, where `0.18.136.gb42f560` stops that worker and prints no report.
 It still exits with code 12 when a table differs, failed, or was not compared.
 `0.18.136.gb42f560` added the deferred index builds: from `0.18.136.gb42f560` on, `pgcopydb clone` accepts `--defer-indexes`, which makes it copy every table before it builds any index or constraint or runs any `VACUUM ANALYZE`.

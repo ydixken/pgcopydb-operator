@@ -208,10 +208,13 @@ type fakeLogs struct {
 	// gotLines records the last requested tail budget, so tests can prove
 	// the success-path parse asks for the whole log.
 	gotLines int64
+	// calls counts JobLogs reads, so tests can prove a log is not read again.
+	calls int
 }
 
 func (f *fakeLogs) JobLogs(_ context.Context, _, jobName string, lines int64) ([]byte, error) {
 	f.gotLines = lines
+	f.calls++
 	if out, ok := f.byJob[jobName]; ok {
 		return []byte(out), f.err
 	}

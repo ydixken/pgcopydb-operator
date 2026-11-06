@@ -12,6 +12,7 @@ spec:
 Both are opt-in because both are expensive: schema refetches both catalogs, and data reads every selected row on both sides.
 A live migration can also run a data compare while it streams, to time the compare its cutover waits for; see [Rehearsal](#rehearsal).
 The phase is `Verifying` while the checks run.
+While the data check runs, `status.verificationProgress` shows how far it got; see [Progress](#progress).
 Each check reports separately in `status.verification`, with the `startedAt` and `completedAt` of its Job, and in the `pgcopydb_migration_verification_check` metric.
 The `Verified` condition and the `pgcopydb_migration_verified` metric collapse the checks into one verdict, which names only the first mismatch.
 The condition reason is `SchemaMismatch` or `DataMismatch`.
@@ -83,6 +84,7 @@ kubectl get pgm billing -o jsonpath='{.status.verificationRehearsal}' | jq
 ```
 
 `completedAt` minus `startedAt` is how long the run took under the load at that time, pod start and catalog read included.
+While the run goes on, its item in `status.verificationProgress` counts the tables and bytes compared so far; see [Progress](#progress).
 The outcome is one of these:
 
 - `Running`: the Job runs.
@@ -162,6 +164,63 @@ Behind a shared address, start a rehearsal only while no other compare of the sa
 > A `TRUNCATE` of that table on the source then waits for the rehearsal's scan, and so does the apply when it replays a `TRUNCATE` on the target, which stalls the stream.
 > We inferred this from PostgreSQL's lock rules and have not reproduced it.
 > Avoid `TRUNCATE` on selected tables while a rehearsal runs.
+
+## Progress
+
+The bundled runner's `pgcopydb compare data` logs a progress line at most 10 seconds apart, and one last line after every table was compared.
+The operator reads these lines from the Job's log into `status.verificationProgress`, which holds one item for each kind of run:
+
+- `rehearsal`: the [rehearsal](#rehearsal) Job.
+- `drain`: the drain verify Job `<name>-verify`, only when it compares; the exact-LSN fast path leaves no item.
+- `data`: the `<name>-compare-data` Job of `spec.verification.data`.
+
+`compare schema` logs no progress, and a runner older than `0.18.144.g86bf908` logs none for any compare, so these leave no item.
+
+```sh
+kubectl get pgm billing -o jsonpath='{.status.verificationProgress}' | jq
+```
+
+```json
+[
+  {
+    "kind": "rehearsal",
+    "jobName": "billing-rehearsal-1",
+    "observedAt": "2026-11-06T09:20:14Z",
+    "final": false,
+    "plannedTables": 412,
+    "comparedTables": 168,
+    "plannedBytes": "84Gi",
+    "comparedBytes": "21Gi",
+    "comparedRows": 96118342,
+    "differingTables": 3,
+    "elapsed": "8m10.448s",
+    "inFlight": [
+      { "schema": "public", "name": "orders", "bytes": "18Gi", "elapsed": "4m51s" }
+    ]
+  }
+]
+```
+
+The fields mean this:
+
+- `plannedTables` and `plannedBytes`: the tables the run compares, and their size on the source.
+- `comparedTables` and `comparedBytes`: the tables that are finished, whether they match, differ, or failed, and their size on the source.
+- `comparedRows`: the source rows of the finished tables that match or differ.
+- `differingTables`: tables whose row count or checksum differs.
+- `failedTables`: tables whose checksum query failed.
+- `elapsed`: the time since `compare data` started, its read of the source catalog included.
+- `inFlight`: the tables being compared, oldest first, at most 64, each with its source size and the time since it started, in whole seconds.
+- `observedAt`: when the operator last read the sample.
+
+While a Job runs, the operator reads the last 1000 lines of its log on each pass and keeps the newest sample.
+A window without a sample keeps the previous one.
+After the Job ends, the operator reads its log once more, and `final` turns true when the last line is there.
+A run that ends without it, because it was canceled or its pod died, keeps its last sample with `final` false.
+An item stays after its run ends, until the first sample of the next run of the same kind replaces it, so `jobName` names the run it describes.
+
+> [!note]
+> In a rehearsal, `differingTables` above 0 is expected: the source takes writes while the compare runs, and the target applies them later.
+> `failedTables` counts tables pgcopydb could not compare at all, such as a table created on the source after the clone.
 
 ## Partitioned tables
 

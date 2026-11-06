@@ -213,6 +213,7 @@ func (r *MigrationReconciler) cancelRecordedRehearsal(ctx context.Context, m *v1
 func (r *MigrationReconciler) recordRehearsal(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job) {
 	st := m.Status.VerificationRehearsal
 	st.StartedAt = job.Status.StartTime
+	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, job)
 	done, ok := jobFinished(job)
 	if !done {
 		return

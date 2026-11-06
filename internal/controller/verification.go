@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -254,6 +255,9 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 			return false, nil
 		}
 		done, ok := jobFinished(job)
+		if check == compareData {
+			r.readCompareProgress(ctx, m, v1beta1.VerificationProgressData, job)
+		}
 		if !done {
 			return false, nil
 		}
@@ -283,4 +287,78 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 	r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionFalse, reason, msg)
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "VerificationMismatch", "Verify", "%s", msg)
 	return true, nil
+}
+
+// compareProgressLogTail bounds the read of a running compare Job's log. Samples
+// come at most 10 s apart; between them sit only the lines of differing or
+// failed tables, and a window without a sample keeps the previous one.
+const compareProgressLogTail = 1000
+
+// readCompareProgress reads a compare Job's log for its newest progress sample:
+// a short tail while the Job runs, the whole verify window once it finished.
+// A final sample of that Job is never read again.
+func (r *MigrationReconciler) readCompareProgress(ctx context.Context, m *v1beta1.Migration, kind string, job *batchv1.Job) {
+	if r.Logs == nil || compareProgressFinal(m, kind, job.Name) {
+		return
+	}
+	lines := int64(compareProgressLogTail)
+	if done, _ := jobFinished(job); done {
+		lines = verifyLogTail
+	}
+	r.recordCompareProgress(m, kind, job.Name, r.jobLogTail(ctx, m.Namespace, job.Name, lines))
+}
+
+// recordCompareProgress puts the tail's newest sample in the item of kind. A tail
+// without one keeps the item as it is, and so does a final sample of that Job.
+func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind, jobName, tail string) {
+	if compareProgressFinal(m, kind, jobName) {
+		return
+	}
+	p, ok := pgcopydb.LastCompareProgress(tail)
+	if !ok {
+		return
+	}
+	item := v1beta1.VerificationProgress{
+		Kind:            kind,
+		JobName:         jobName,
+		ObservedAt:      &metav1.Time{Time: r.currentTime()},
+		Final:           p.Final,
+		PlannedTables:   p.PlannedTables,
+		ComparedTables:  p.ComparedTables,
+		PlannedBytes:    resource.NewQuantity(p.PlannedBytes, resource.BinarySI),
+		ComparedBytes:   resource.NewQuantity(p.ComparedBytes, resource.BinarySI),
+		ComparedRows:    p.ComparedRows,
+		DifferingTables: p.DifferingTables,
+		FailedTables:    p.FailedTables,
+		Elapsed:         millis(p.ElapsedMs),
+	}
+	for _, t := range p.InFlight {
+		item.InFlight = append(item.InFlight, v1beta1.VerificationTableProgress{
+			Schema:  t.Schema,
+			Name:    t.Name,
+			Bytes:   resource.NewQuantity(t.Bytes, resource.BinarySI),
+			Elapsed: millis(t.ElapsedMs),
+		})
+	}
+	for i := range m.Status.VerificationProgress {
+		if m.Status.VerificationProgress[i].Kind == kind {
+			m.Status.VerificationProgress[i] = item
+			return
+		}
+	}
+	m.Status.VerificationProgress = append(m.Status.VerificationProgress, item)
+}
+
+// compareProgressFinal reports whether the item of kind is the final sample of jobName.
+func compareProgressFinal(m *v1beta1.Migration, kind, jobName string) bool {
+	for _, p := range m.Status.VerificationProgress {
+		if p.Kind == kind {
+			return p.Final && p.JobName == jobName
+		}
+	}
+	return false
+}
+
+func millis(ms int64) *metav1.Duration {
+	return &metav1.Duration{Duration: time.Duration(ms) * time.Millisecond}
 }

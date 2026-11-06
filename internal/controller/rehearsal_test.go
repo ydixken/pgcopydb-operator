@@ -945,6 +945,47 @@ var _ = Describe("Verification rehearsal", func() {
 		Expect(jobAbsent(name + "-rehearsal-3")).To(BeTrue())
 	})
 
+	It("reports each run's compare progress, final once its Job has ended", func() {
+		const name = "mig-rehearsal-progress"
+		defer removeMigration(ctx, name)
+		r, _ := start(name)
+		arm(r, name, 1)
+		logs := r.Logs.(*fakeLogs)
+		run1, run2 := name+"-rehearsal-1", name+"-rehearsal-2"
+
+		By("adding no item before the compare logged a sample")
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(BeEmpty())
+
+		By("recording the running sample, and keeping it through a window without one")
+		logs.byJob = map[string]string{run1: runningProgressLine + "\n" + tableDiffersLine}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, false, 2)))
+		Expect(m.Status.VerificationProgress[0].InFlight).To(ConsistOf(HaveField("Name", "a")))
+		logs.byJob[run1] = tableDiffersLine
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, false, 2)))
+
+		By("marking it final from the whole log once the Job has ended")
+		logs.byJob[run1] = runningProgressLine + "\n" + finalProgressLine
+		finishJob(ctx, run1, true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(rehearsal(m).Outcome).To(Equal(v1beta1.RehearsalCompleted))
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3)))
+		Expect(m.Status.VerificationProgress[0].PlannedBytes.Value()).To(Equal(int64(131072)))
+		Expect(m.Status.VerificationProgress[0].Elapsed.Duration).To(Equal(20480 * time.Millisecond))
+
+		By("replacing it with run 2's first sample")
+		setRehearsal(name, false)
+		reconcileAndGet(ctx, r, name)
+		setRehearsal(name, true)
+		m = arm(r, name, 2)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3)))
+		logs.byJob[run2] = runningProgressLine
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run2, false, 2)))
+	})
+
 	It("records a run that wrote no report as Failed with the Job's error", func() {
 		const name = "mig-rehearsal-failed"
 		defer removeMigration(ctx, name)
