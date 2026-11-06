@@ -2439,6 +2439,443 @@
       },
       "description": "This tile shows the bytes that the target must still replay to reach the cutover endpos. Only the CutoverCompleted condition, not a value of 0, proves that the drain is complete.",
       "interval": "10s"
+    },
+    {
+      "id": 37,
+      "type": "row",
+      "title": "Verification",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Compare Progress",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * max by (kind) (pgcopydb_migration_verification_compared_tables{namespace=\"$namespace\", name=\"$name\"}) / max by (kind) (pgcopydb_migration_verification_planned_tables{namespace=\"$namespace\", name=\"$name\"} > 0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} tables"
+        },
+        {
+          "refId": "B",
+          "expr": "100 * max by (kind) (pgcopydb_migration_verification_compared_bytes{namespace=\"$namespace\", name=\"$name\"}) / max by (kind) (pgcopydb_migration_verification_planned_bytes{namespace=\"$namespace\", name=\"$name\"} > 0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} bytes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows how far each pgcopydb compare data run got, per kind: rehearsal, drain (the cutover's drain verify), and data (spec.verification.data). The tables line is the share of planned tables that are finished, and the bytes line is the finished tables' share of the planned source size. A table counts only once it is finished, so a large table holds both lines flat until it ends. pgcopydb logs a sample at most 10 seconds apart, and the operator reads it on its next pass.",
+      "interval": "10s"
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Compare Throughput",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind) (pgcopydb_migration_verification_compared_bytes{namespace=\"$namespace\", name=\"$name\"}) / max by (kind) (pgcopydb_migration_verification_duration_seconds{namespace=\"$namespace\", name=\"$name\"} > 0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "binBps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows the average rate of each compare data run since it started: the source size of its finished tables divided by its elapsed time. It is an average, not a slope, because the byte count steps up once per finished table. While a large table runs, the line falls, and it jumps when that table is finished.",
+      "interval": "10s"
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Compare Rows Per Second",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind) (pgcopydb_migration_verification_compared_rows{namespace=\"$namespace\", name=\"$name\"}) / max by (kind) (pgcopydb_migration_verification_duration_seconds{namespace=\"$namespace\", name=\"$name\"} > 0)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none",
+            "axisLabel": "rows/s"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows the average row rate of each compare data run since it started: the source rows of its finished tables that match or differ, divided by its elapsed time. Like Compare Throughput, it moves once per finished table.",
+      "interval": "10s"
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Compare Duration",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind) (pgcopydb_migration_verification_duration_seconds{namespace=\"$namespace\", name=\"$name\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows the time from the start of each compare data run to its latest sample, including its read of the source catalog. The line stops rising when the run ends, so the last value in the legend is how long the run took. status.verificationRehearsal times the whole rehearsal Job, pod start included.",
+      "interval": "10s"
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Differing And Failed Tables",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind) (pgcopydb_migration_verification_differing_tables{namespace=\"$namespace\", name=\"$name\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} differing"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (kind) (pgcopydb_migration_verification_failed_tables{namespace=\"$namespace\", name=\"$name\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} failed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "gradientMode": "none"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "This panel shows the finished tables whose row count or checksum differs, and the tables whose checksum query failed, per kind of compare data run. For kind rehearsal both are expected while the source takes writes: the target applies them later, and the checksum query of a table created on the source after the clone fails. For kind drain or data, any table here fails that check.",
+      "interval": "10s"
+    },
+    {
+      "id": 43,
+      "type": "table",
+      "title": "Tables In Flight",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "This table lists the tables that each compare data run was comparing at its latest sample, at most 64 per run, with the time spent on each in whole seconds. A table leaves the list once it is finished. A run that ended without its last progress line, because it was canceled or its pod died, keeps the list of its last sample until the next run of that kind replaces it.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (kind, table) (pgcopydb_migration_verification_table_elapsed_seconds{namespace=\"$namespace\", name=\"$name\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "kind": "Kind",
+              "table": "Table",
+              "Value": "Elapsed"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Elapsed",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Elapsed"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "interval": "10s"
     }
   ]
 }
