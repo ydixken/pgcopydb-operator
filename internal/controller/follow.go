@@ -423,7 +423,7 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 	if r.Logs != nil {
 		tail := r.jobLogTail(ctx, m.Namespace, job.Name, verifyLogTail)
 		r.cloneProgressFromLog(ctx, m, job.Name, tail)
-		r.recordCompareProgress(m, v1beta1.VerificationProgressDrain, job.Name, tail)
+		r.recordCompareProgress(m, v1beta1.VerificationProgressDrain, job, tail)
 	}
 	return ok, !ok, nil
 }

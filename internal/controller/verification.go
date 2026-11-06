@@ -313,22 +313,22 @@ const compareProgressLogTail = 1000
 
 // readCompareProgress reads a compare Job's log for its newest progress sample:
 // a short tail while the Job runs, the whole verify window once it finished.
-// A final sample of that Job is never read again.
+// A final sample read after the Job finished is never read again.
 func (r *MigrationReconciler) readCompareProgress(ctx context.Context, m *v1beta1.Migration, kind string, job *batchv1.Job) {
-	if r.Logs == nil || compareProgressFinal(m, kind, job.Name) {
+	if r.Logs == nil || compareProgressFinal(m, kind, job) {
 		return
 	}
 	lines := int64(compareProgressLogTail)
 	if done, _ := jobFinished(job); done {
 		lines = verifyLogTail
 	}
-	r.recordCompareProgress(m, kind, job.Name, r.jobLogTail(ctx, m.Namespace, job.Name, lines))
+	r.recordCompareProgress(m, kind, job, r.jobLogTail(ctx, m.Namespace, job.Name, lines))
 }
 
 // recordCompareProgress puts the tail's newest sample in the item of kind. A tail
 // without one keeps the item as it is, and so does a final sample of that Job.
-func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind, jobName, tail string) {
-	if compareProgressFinal(m, kind, jobName) {
+func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind string, job *batchv1.Job, tail string) {
+	if compareProgressFinal(m, kind, job) {
 		return
 	}
 	p, ok := pgcopydb.LastCompareProgress(tail)
@@ -337,7 +337,7 @@ func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind, 
 	}
 	item := v1beta1.VerificationProgress{
 		Kind:            kind,
-		JobName:         jobName,
+		JobName:         job.Name,
 		ObservedAt:      &metav1.Time{Time: r.currentTime()},
 		Final:           p.Final,
 		PlannedTables:   p.PlannedTables,
@@ -366,11 +366,16 @@ func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind, 
 	m.Status.VerificationProgress = append(m.Status.VerificationProgress, item)
 }
 
-// compareProgressFinal reports whether the item of kind is the final sample of jobName.
-func compareProgressFinal(m *v1beta1.Migration, kind, jobName string) bool {
+// compareProgressFinal reports whether the item of kind holds job's final sample, read
+// after job finished: a retry pod, or a Job recreated under the name, finishes later.
+// Strictly after, because status keeps whole seconds and a read in that second may precede it.
+func compareProgressFinal(m *v1beta1.Migration, kind string, job *batchv1.Job) bool {
+	if done, _ := jobFinished(job); !done {
+		return false
+	}
 	for _, p := range m.Status.VerificationProgress {
 		if p.Kind == kind {
-			return p.Final && p.JobName == jobName
+			return p.Final && p.JobName == job.Name && p.ObservedAt != nil && p.ObservedAt.After(jobFinishedAt(job))
 		}
 	}
 	return false

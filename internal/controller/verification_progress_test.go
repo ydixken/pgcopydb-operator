@@ -22,6 +22,7 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -115,6 +116,48 @@ func TestReadCompareProgress(t *testing.T) {
 	logs.byJob["m-rehearsal-2"] = runningProgressLine
 	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, namedJob("m-rehearsal-2"))
 	g.Expect(item()).To(progressItem(v1beta1.VerificationProgressRehearsal, "m-rehearsal-2", false, 2))
+}
+
+// The data and verify Jobs retry a failed pod and can be recreated under their name,
+// so a final sample read before the Job finished does not end the reads.
+func TestReadCompareProgress_SameJobNameRunsAgain(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	m := passwordMigration()
+	data, kind := compareJobName(m, compareData), v1beta1.VerificationProgressData
+	logs := &fakeLogs{out: runningProgressLine + "\n" + finalProgressLine}
+	r := &MigrationReconciler{Logs: logs, now: func() time.Time { return clock }}
+
+	// The first pod's final line, read while the Job waits to retry the pod.
+	r.readCompareProgress(ctx, m, kind, namedJob(data))
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, true, 3)))
+
+	clock = clock.Add(time.Minute)
+	logs.out = runningProgressLine
+	r.readCompareProgress(ctx, m, kind, namedJob(data))
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, false, 2)), "the retry pod's sample was not read")
+
+	clock = clock.Add(time.Minute)
+	finished := completedAt(data, clock.Add(-time.Second))
+	logs.out = finalProgressLine
+	r.readCompareProgress(ctx, m, kind, finished)
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, true, 3)))
+	reads := logs.calls
+	r.readCompareProgress(ctx, m, kind, finished)
+	g.Expect(logs.calls).To(Equal(reads), "a final sample read after the Job finished was read again")
+
+	clock = clock.Add(time.Hour)
+	r.readCompareProgress(ctx, m, kind, completedAt(data, clock.Add(-time.Second)))
+	g.Expect(logs.calls).To(Equal(reads+1), "a Job recreated under the name was not read")
+	g.Expect(m.Status.VerificationProgress[0].ObservedAt.Time).To(Equal(clock))
+}
+
+// completedAt is completeJob with its completion time at t.
+func completedAt(name string, t time.Time) *batchv1.Job {
+	job := completeJob(name)
+	job.Status.CompletionTime = &metav1.Time{Time: t}
+	return job
 }
 
 // Without a log reader there is nothing to read, and no item appears.
