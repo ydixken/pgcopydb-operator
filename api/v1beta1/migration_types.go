@@ -548,9 +548,11 @@ type VerificationProgress struct {
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 
-	// final is true for the line pgcopydb logs after every table was compared.
-	// false is a sample from a running compare, or the last one of a run that
-	// ended before that line.
+	// final is true for the line pgcopydb logs once every compare worker has
+	// exited. A worker that stopped leaves the tables it never reached
+	// uncompared, so comparedTables can be below plannedTables. false is a
+	// sample from a running compare, or the last one of a run that ended
+	// before that line.
 	// +optional
 	Final bool `json:"final"`
 

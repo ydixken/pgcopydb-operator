@@ -493,7 +493,7 @@ _Appears in:_
 | `kind` _string_ | kind is the run: rehearsal (spec.verification.rehearsal), drain (the<br />cutover's drain verify, only when it compares), or data (spec.verification.data). |  | Enum: [rehearsal drain data] <br /> |
 | `jobName` _string_ | jobName is the Job that logged the sample. Creating the next Job of the<br />same kind removes the item, and that Job's first sample adds it back. |  |  |
 | `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | observedAt is when the operator last read the sample from the Job's log. |  | Optional: \{\} <br /> |
-| `final` _boolean_ | final is true for the line pgcopydb logs after every table was compared.<br />false is a sample from a running compare, or the last one of a run that<br />ended before that line. |  | Optional: \{\} <br /> |
+| `final` _boolean_ | final is true for the line pgcopydb logs once every compare worker has<br />exited. A worker that stopped leaves the tables it never reached<br />uncompared, so comparedTables can be below plannedTables. false is a<br />sample from a running compare, or the last one of a run that ended<br />before that line. |  | Optional: \{\} <br /> |
 | `plannedTables` _integer_ | plannedTables is the number of tables the run compares. |  | Optional: \{\} <br /> |
 | `comparedTables` _integer_ | comparedTables counts the finished tables: matching, differing, and failed. |  | Optional: \{\} <br /> |
 | `plannedBytes` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | plannedBytes is the size of the planned tables on the source. |  | Optional: \{\} <br /> |

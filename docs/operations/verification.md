@@ -167,7 +167,9 @@ Behind a shared address, start a rehearsal only while no other compare of the sa
 
 ## Progress
 
-The bundled runner's `pgcopydb compare data` logs a progress line at most 10 seconds apart, and one last line after every table was compared.
+The bundled runner's `pgcopydb compare data` logs a progress line at most 10 seconds apart, and one last line once every compare worker has exited.
+A worker that stopped leaves the tables it never reached uncompared, so in that last line `comparedTables` can be below `plannedTables`.
+The drain verify and the data compare decide from the report, not from these lines.
 The operator reads these lines from the Job's log into `status.verificationProgress`, which holds one item for each kind of run:
 
 - `rehearsal`: the [rehearsal](#rehearsal) Job.
