@@ -148,7 +148,12 @@ func (r *MigrationReconciler) observeRehearsal(ctx context.Context, m *v1beta1.M
 		st.CompletedAt = statusTime(r.currentTime())
 		return nil
 	}
-	r.recordRehearsal(ctx, m, job)
+	// The outcome waits for a finished run's last sample while its read is retried.
+	tail, err := r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, job)
+	if err != nil {
+		return err
+	}
+	recordRehearsal(m, job, tail)
 	return nil
 }
 
@@ -191,7 +196,9 @@ func (r *MigrationReconciler) cancelRecordedRehearsal(ctx context.Context, m *v1
 	}
 	if job != nil {
 		if done, _ := jobFinished(job); done {
-			r.recordRehearsal(ctx, m, job)
+			// A cancel does not wait for the read, so its error costs only the last sample.
+			tail, _ := r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, job)
+			recordRehearsal(m, job, tail)
 			return nil
 		}
 		if job.DeletionTimestamp.IsZero() {
@@ -207,13 +214,12 @@ func (r *MigrationReconciler) cancelRecordedRehearsal(ctx context.Context, m *v1
 	return nil
 }
 
-// recordRehearsal copies a rehearsal Job's times and, once it finished, its
-// outcome. The script exits 0 whenever compare data wrote a report, so a Job
-// that failed produced none.
-func (r *MigrationReconciler) recordRehearsal(ctx context.Context, m *v1beta1.Migration, job *batchv1.Job) {
+// recordRehearsal copies a rehearsal Job's times and, once it finished, its outcome,
+// with the error from tail, the log readCompareProgress read. The script exits 0
+// whenever compare data wrote a report, so a Job that failed produced none.
+func recordRehearsal(m *v1beta1.Migration, job *batchv1.Job, tail string) {
 	st := m.Status.VerificationRehearsal
 	st.StartedAt = job.Status.StartTime
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, job)
 	done, ok := jobFinished(job)
 	if !done {
 		return
@@ -222,8 +228,8 @@ func (r *MigrationReconciler) recordRehearsal(ctx context.Context, m *v1beta1.Mi
 	if !ok {
 		st.Outcome = v1beta1.RehearsalFailed
 		st.Message = "rehearsal Job " + job.Name + " wrote no compare report: " + failureReason(job)
-		tail := r.jobLogTail(ctx, m.Namespace, job.Name, workerLogTail)
-		if detail := truncate(pgcopydb.LastErrorLine([]byte(tail)), maxDetailLen); detail != "" {
+		// The worker's window: further up, an ERROR may be a table that differed, not the cause.
+		if detail := truncate(pgcopydb.LastErrorLine([]byte(lastLines(tail, workerLogTail))), maxDetailLen); detail != "" {
 			st.Message += "; last error: " + detail
 		}
 		return
@@ -235,6 +241,12 @@ func (r *MigrationReconciler) recordRehearsal(ctx context.Context, m *v1beta1.Mi
 	}
 	st.Message = "pgcopydb compare data finished" + took + " while the migration streamed;" +
 		" tables that differ are expected then and are no verdict"
+}
+
+// lastLines is what a read of the last n lines of the log s would return.
+func lastLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	return strings.Join(lines[max(len(lines)-n, 0):], "\n")
 }
 
 // rehearsalJob returns the named rehearsal Job, or nil once the API server, not

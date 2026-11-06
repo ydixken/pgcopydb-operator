@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -273,7 +274,10 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 		}
 		done, ok := jobFinished(job)
 		if check == compareData {
-			r.readCompareProgress(ctx, m, v1beta1.VerificationProgressData, job)
+			// The pass that sees the Job finish completes the Migration, so it waits for the last sample.
+			if _, err := r.readCompareProgress(ctx, m, v1beta1.VerificationProgressData, job); err != nil {
+				return false, err
+			}
 		}
 		if !done {
 			return false, nil
@@ -311,18 +315,27 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 // failed tables, and a window without a sample keeps the previous one.
 const compareProgressLogTail = 1000
 
-// readCompareProgress reads a compare Job's log for its newest progress sample:
-// a short tail while the Job runs, the whole verify window once it finished.
-// A final sample read after the Job finished is never read again.
-func (r *MigrationReconciler) readCompareProgress(ctx context.Context, m *v1beta1.Migration, kind string, job *batchv1.Job) {
+// readCompareProgress reads a compare Job's log for its newest progress sample and returns
+// the log: a short tail while the Job runs, the whole verify window once it finished. A
+// finished Job's read error is returned for failedLogGrace, so the caller can wait for it.
+func (r *MigrationReconciler) readCompareProgress(ctx context.Context, m *v1beta1.Migration, kind string, job *batchv1.Job) (string, error) {
 	if r.Logs == nil || compareProgressFinal(m, kind, job) {
-		return
+		return "", nil
 	}
+	done, _ := jobFinished(job)
 	lines := int64(compareProgressLogTail)
-	if done, _ := jobFinished(job); done {
+	if done {
 		lines = verifyLogTail
 	}
-	r.recordCompareProgress(m, kind, job, r.jobLogTail(ctx, m.Namespace, job.Name, lines))
+	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, lines)
+	switch {
+	case err != nil && done && r.currentTime().Before(jobFinishedAt(job).Add(failedLogGrace)):
+		return "", fmt.Errorf("reading the compare progress of Job %s: %w", job.Name, err)
+	case err != nil:
+		logf.FromContext(ctx).V(1).Info("pod log fetch failed", "job", job.Name, "error", err)
+	}
+	r.recordCompareProgress(m, kind, job, tail)
+	return tail, nil
 }
 
 // recordCompareProgress puts the tail's newest sample in the item of kind. A tail

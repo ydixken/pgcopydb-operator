@@ -494,10 +494,14 @@ func TestReconcileRehearsal_PreviousJobDeleteFailure(t *testing.T) {
 }
 
 // A run that finished before the cancel keeps its outcome, and its Job stays as the record.
+// The cancel does not wait for a log it cannot read.
 func TestCancelRehearsal_KeepsAFinishedRun(t *testing.T) {
 	m := streamingRehearsal()
 	funcs, deleted := recordDeletes()
-	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1, jobCompleted))
+	job := rehearsalJobOf(m, 1, jobCompleted)
+	job.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+	r := failingReconciler(t, funcs, m, job)
+	r.Logs = &fakeLogs{err: errBoom}
 	if err := r.cancelRehearsal(context.Background(), m, "spec.suspend stopped the worker"); err != nil {
 		t.Fatal(err)
 	}

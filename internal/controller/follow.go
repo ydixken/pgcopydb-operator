@@ -414,7 +414,8 @@ func (r *MigrationReconciler) ensureVerify(ctx context.Context, m *v1beta1.Migra
 	}
 	done, ok := jobFinished(job)
 	if !done {
-		r.readCompareProgress(ctx, m, v1beta1.VerificationProgressDrain, job)
+		// Only a finished Job's read returns an error.
+		_, _ = r.readCompareProgress(ctx, m, v1beta1.VerificationProgressDrain, job)
 		return false, false, nil
 	}
 	// A refuted drain carries the counters too: the Job ran, so the line is

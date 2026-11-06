@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -70,7 +72,7 @@ func TestReadCompareProgress(t *testing.T) {
 		return m.Status.VerificationProgress[1]
 	}
 
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)).Error().NotTo(HaveOccurred())
 	g.Expect(logs.gotLines).To(Equal(int64(compareProgressLogTail)))
 	g.Expect(item()).To(Equal(v1beta1.VerificationProgress{
 		Kind: v1beta1.VerificationProgressRehearsal, JobName: run1, ObservedAt: &metav1.Time{Time: clock},
@@ -88,17 +90,17 @@ func TestReadCompareProgress(t *testing.T) {
 	// No sample in the window, or no log at all: the previous sample stays, observedAt included.
 	clock = clock.Add(time.Minute)
 	logs.byJob[run1] = tableDiffersLine
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)).Error().NotTo(HaveOccurred())
 	g.Expect(item()).To(Equal(sample))
 	logs.err = errBoom
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, running)).Error().NotTo(HaveOccurred())
 	g.Expect(item()).To(Equal(sample))
 	logs.err = nil
 
 	// Once the Job ended, the whole window decides, and the final line marks the item.
 	finished := completeJob(run1)
 	logs.byJob[run1] = runningProgressLine + "\n" + finalProgressLine
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, finished)
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, finished)).Error().NotTo(HaveOccurred())
 	g.Expect(logs.gotLines).To(Equal(int64(verifyLogTail)))
 	g.Expect(item()).To(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3))
 	g.Expect(item().FailedTables).To(Equal(int64(1)))
@@ -108,13 +110,13 @@ func TestReadCompareProgress(t *testing.T) {
 	// A final sample of that Job is never read again.
 	reads := logs.calls
 	logs.byJob[run1] = runningProgressLine
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, finished)
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, finished)).Error().NotTo(HaveOccurred())
 	g.Expect(logs.calls).To(Equal(reads))
 	g.Expect(item()).To(Equal(final))
 
 	// The next run's first sample replaces the item, final or not.
 	logs.byJob["m-rehearsal-2"] = runningProgressLine
-	r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, namedJob("m-rehearsal-2"))
+	g.Expect(r.readCompareProgress(ctx, m, v1beta1.VerificationProgressRehearsal, namedJob("m-rehearsal-2"))).Error().NotTo(HaveOccurred())
 	g.Expect(item()).To(progressItem(v1beta1.VerificationProgressRehearsal, "m-rehearsal-2", false, 2))
 }
 
@@ -130,27 +132,53 @@ func TestReadCompareProgress_SameJobNameRunsAgain(t *testing.T) {
 	r := &MigrationReconciler{Logs: logs, now: func() time.Time { return clock }}
 
 	// The first pod's final line, read while the Job waits to retry the pod.
-	r.readCompareProgress(ctx, m, kind, namedJob(data))
+	g.Expect(r.readCompareProgress(ctx, m, kind, namedJob(data))).Error().NotTo(HaveOccurred())
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, true, 3)))
 
 	clock = clock.Add(time.Minute)
 	logs.out = runningProgressLine
-	r.readCompareProgress(ctx, m, kind, namedJob(data))
+	g.Expect(r.readCompareProgress(ctx, m, kind, namedJob(data))).Error().NotTo(HaveOccurred())
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, false, 2)), "the retry pod's sample was not read")
 
 	clock = clock.Add(time.Minute)
 	finished := completedAt(data, clock.Add(-time.Second))
 	logs.out = finalProgressLine
-	r.readCompareProgress(ctx, m, kind, finished)
+	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).Error().NotTo(HaveOccurred())
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, true, 3)))
 	reads := logs.calls
-	r.readCompareProgress(ctx, m, kind, finished)
+	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).Error().NotTo(HaveOccurred())
 	g.Expect(logs.calls).To(Equal(reads), "a final sample read after the Job finished was read again")
 
 	clock = clock.Add(time.Hour)
-	r.readCompareProgress(ctx, m, kind, completedAt(data, clock.Add(-time.Second)))
+	g.Expect(r.readCompareProgress(ctx, m, kind, completedAt(data, clock.Add(-time.Second)))).Error().NotTo(HaveOccurred())
 	g.Expect(logs.calls).To(Equal(reads+1), "a Job recreated under the name was not read")
 	g.Expect(m.Status.VerificationProgress[0].ObservedAt.Time).To(Equal(clock))
+}
+
+// A failed read of a finished Job's log is an error while failedLogGrace lasts, so the
+// caller can wait for the last sample; after that the read gives up.
+func TestReadCompareProgress_FinishedReadFails(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	m := passwordMigration()
+	data, kind := compareJobName(m, compareData), v1beta1.VerificationProgressData
+	finished := completedAt(data, clock)
+	logs := &fakeLogs{err: errBoom}
+	r := &MigrationReconciler{Logs: logs, now: func() time.Time { return clock }}
+
+	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).Error().To(MatchError(errBoom))
+	g.Expect(m.Status.VerificationProgress).To(BeEmpty())
+
+	logs.err, logs.out = nil, finalProgressLine
+	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).To(Equal(finalProgressLine))
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(kind, data, true, 3)))
+
+	m.Status.VerificationProgress = nil
+	clock = clock.Add(failedLogGrace)
+	logs.err = errBoom
+	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).To(BeEmpty())
+	g.Expect(m.Status.VerificationProgress).To(BeEmpty())
 }
 
 // completedAt is completeJob with its completion time at t.
@@ -163,7 +191,11 @@ func completedAt(name string, t time.Time) *batchv1.Job {
 // Without a log reader there is nothing to read, and no item appears.
 func TestReadCompareProgress_NoReader(t *testing.T) {
 	m := streamingRehearsal()
-	(&MigrationReconciler{}).readCompareProgress(context.Background(), m, v1beta1.VerificationProgressRehearsal, namedJob(rehearsalJobName(m, 1)))
+	tail, err := (&MigrationReconciler{}).readCompareProgress(context.Background(), m, v1beta1.VerificationProgressRehearsal,
+		completeJob(rehearsalJobName(m, 1)))
+	if tail != "" || err != nil {
+		t.Fatalf("read without a reader: %q, %v", tail, err)
+	}
 	if m.Status.VerificationProgress != nil {
 		t.Fatalf("an item appeared without a log: %+v", m.Status.VerificationProgress)
 	}
@@ -187,6 +219,49 @@ func TestReconcileRehearsal_RecordsProgress(t *testing.T) {
 	g.Expect(r.reconcileRehearsal(ctx, m)).To(Succeed())
 	g.Expect(m.Status.VerificationRehearsal.Outcome).To(Equal(v1beta1.RehearsalCompleted))
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3)))
+}
+
+// The outcome of a finished run waits while a failed read of its log is retried, so
+// Completed comes with the run's last sample.
+func TestReconcileRehearsal_OutcomeWaitsForTheLog(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	m := streamingRehearsal()
+	job := rehearsalJobOf(m, 1, jobCompleted)
+	job.Status.CompletionTime = &metav1.Time{Time: clock}
+	r := failingReconciler(t, interceptor.Funcs{}, m, job)
+	logs := &fakeLogs{err: errBoom}
+	r.Logs, r.now = logs, func() time.Time { return clock }
+
+	g.Expect(r.reconcileRehearsal(ctx, m)).To(MatchError(errBoom))
+	g.Expect(m.Status.VerificationRehearsal.Outcome).To(Equal(v1beta1.RehearsalRunning))
+
+	logs.err, logs.out = nil, runningProgressLine+"\n"+finalProgressLine
+	g.Expect(r.reconcileRehearsal(ctx, m)).To(Succeed())
+	g.Expect(m.Status.VerificationRehearsal.Outcome).To(Equal(v1beta1.RehearsalCompleted))
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(
+		progressItem(v1beta1.VerificationProgressRehearsal, job.Name, true, 3)))
+}
+
+// One read of a failed run's log gives both its last sample and its cause, and the
+// cause comes from the end only: further up, an ERROR may be a table that differed.
+func TestReconcileRehearsal_FailedRunReadsTheLogOnce(t *testing.T) {
+	g := NewWithT(t)
+	m := streamingRehearsal()
+	job := rehearsalJobOf(m, 1, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue})
+	r := failingReconciler(t, interceptor.Funcs{}, m, job)
+	filler := strings.Repeat(`{"error_severity":"INFO","message":"waiting"}`+"\n", workerLogTail)
+	logs := &fakeLogs{out: tableDiffersLine + "\n" + filler + runningProgressLine}
+	r.Logs = logs
+
+	g.Expect(r.reconcileRehearsal(context.Background(), m)).To(Succeed())
+	st := m.Status.VerificationRehearsal
+	g.Expect(st.Outcome).To(Equal(v1beta1.RehearsalFailed))
+	g.Expect(st.Message).NotTo(ContainSubstring("last error"), "an ERROR outside the worker's window was taken as the cause")
+	g.Expect(logs.calls).To(Equal(1))
+	g.Expect(logs.gotLines).To(Equal(int64(verifyLogTail)))
+	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, job.Name, false, 2)))
 }
 
 // The drain verify's progress comes from the read that also takes the copy
@@ -263,8 +338,16 @@ func TestEnsureVerification_RecordsDataProgress(t *testing.T) {
 	g.Expect(done).To(BeFalse())
 	g.Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressData, data, false, 2)))
 
-	r = failingReconciler(t, interceptor.Funcs{}, m, completeJob(schema), completeJob(data))
-	r.Logs = logs
+	// The pass that would complete the Migration waits for the finished Job's log.
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	r = failingReconciler(t, interceptor.Funcs{}, m, completeJob(schema), completedAt(data, clock))
+	r.Logs, r.now = logs, func() time.Time { return clock }
+	logs.err = errBoom
+	done, err = r.ensureVerification(ctx, m)
+	g.Expect(err).To(MatchError(errBoom))
+	g.Expect(done).To(BeFalse())
+
+	logs.err = nil
 	logs.out = runningProgressLine + "\n" + finalProgressLine
 	done, err = r.ensureVerification(ctx, m)
 	g.Expect(err).NotTo(HaveOccurred())

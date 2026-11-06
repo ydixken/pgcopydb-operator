@@ -215,6 +215,7 @@ The fields mean this:
 While a Job runs, the operator reads the last 1000 lines of its log on each pass and keeps the newest sample.
 A window without a sample keeps the previous one.
 After the Job ends, the operator reads its log once more, and `final` turns true when the last line is there.
+When that read fails, the operator retries it for up to 2 minutes, and the rehearsal's outcome and the completion after `spec.verification.data` wait for it.
 A run that ends without the last line, because it was canceled or its pod died, keeps its last sample with `final` false.
 When the drain verify or the data compare retries a failed pod, or its Job is recreated under the same name, the operator reads the new pod's samples too.
 The drain verify and the data compare print the newest progress line again after their report, so a long report cannot push it out of what the operator reads.
