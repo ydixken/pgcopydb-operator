@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 // The lines a compare Job logs under PGCOPYDB_LOG_JSON=on: a running sample
@@ -179,6 +182,27 @@ func TestReadCompareProgress_FinishedReadFails(t *testing.T) {
 	logs.err = errBoom
 	g.Expect(r.readCompareProgress(ctx, m, kind, finished)).To(BeEmpty())
 	g.Expect(m.Status.VerificationProgress).To(BeEmpty())
+}
+
+// A runner from spec.runner may list more tables in flight than the bundled one's cap,
+// and status and the per-table series keep only the oldest 64.
+func TestRecordCompareProgress_CapsInFlight(t *testing.T) {
+	sample := pgcopydb.CompareProgress{PlannedTables: compareProgressMaxInFlight + 1}
+	for i := range compareProgressMaxInFlight + 1 {
+		sample.InFlight = append(sample.InFlight, pgcopydb.CompareInFlightTable{Schema: publicSchema, Name: fmt.Sprint("t", i)})
+	}
+	raw, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := passwordMigration()
+	(&MigrationReconciler{}).recordCompareProgress(m, v1beta1.VerificationProgressData,
+		namedJob(compareJobName(m, compareData)), pgcopydb.CompareProgressPrefix+string(raw))
+	g := NewWithT(t)
+	g.Expect(m.Status.VerificationProgress).To(HaveLen(1))
+	inFlight := m.Status.VerificationProgress[0].InFlight
+	g.Expect(inFlight).To(HaveLen(compareProgressMaxInFlight))
+	g.Expect(inFlight[compareProgressMaxInFlight-1].Name).To(Equal(fmt.Sprint("t", compareProgressMaxInFlight-1)))
 }
 
 // completedAt is completeJob with its completion time at t.

@@ -319,6 +319,10 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 // failed tables, and a window without a sample keeps the previous one.
 const compareProgressLogTail = 1000
 
+// compareProgressMaxInFlight is the bundled runner's cap on a sample's inFlight list. A
+// runner from spec.runner may log more, which would grow status and the table series.
+const compareProgressMaxInFlight = 64
+
 // readCompareProgress reads a compare Job's log for its newest progress sample and returns
 // the log: a short tail while the Job runs, the whole verify window once it finished. A
 // finished Job's read error is returned for failedLogGrace, so the caller can wait for it.
@@ -366,7 +370,7 @@ func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind s
 		FailedTables:    p.FailedTables,
 		Elapsed:         millis(p.ElapsedMs),
 	}
-	for _, t := range p.InFlight {
+	for _, t := range p.InFlight[:min(len(p.InFlight), compareProgressMaxInFlight)] {
 		item.InFlight = append(item.InFlight, v1beta1.VerificationTableProgress{
 			Schema:  t.Schema,
 			Name:    t.Name,
