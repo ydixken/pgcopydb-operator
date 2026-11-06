@@ -40,6 +40,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
 | [Phase `Failed`, reason `CloneIncomplete`](#phase-failed-with-reason-cloneincomplete) | Clone progress |
+| [`CutoverCompleted` is Unknown with reason `RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains) | Cutover and verification |
 | [The `<name>-verify` pod runs for a long time](#the-verify-pod-runs-for-a-long-time) | Cutover and verification |
 | [Phase `Failed`, reason `DrainIncomplete`](#phase-failed-with-reason-drainincomplete) | Cutover and verification |
 | [Phase `CutoverPending` and nothing happens](#phase-cutoverpending-and-nothing-happens) | Cutover and verification |
@@ -376,8 +377,9 @@ Every retry passes through it, within seconds when the failed worker's log was r
 After a worker pod that vanished it can last several minutes, because the operator first waits up to 2 minutes for the log and then requeues with backoff before it creates `<name>-gate-<n>`.
 A probe pod that cannot start turns it into `ProbeFailed` with the kubelet reason.
 
-`WorkerPodRemains` means a pod of the previous attempt's worker has not ended; the message names the pod and its node.
+`WorkerPodRemains` means a pod of the previous attempt's worker, or of a canceled verification rehearsal, has not ended; the message names the pod and its node.
 A pod on a lost node holds the retry until the pod object is gone.
+The drain verify waits for a rehearsal pod the same way, with [`RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains).
 
 > [!warning]
 > Force-delete the pod only once you have confirmed that its node is down.
@@ -539,6 +541,24 @@ Read `status.progress` and the worker log, then run a fresh Migration.
 
 ## Cutover and verification
 
+### `CutoverCompleted` is Unknown with reason `RehearsalPodRemains`
+
+The worker has drained, and no `<name>-verify` Job exists yet.
+The cutover canceled a [verification rehearsal](operations/verification.md#rehearsal), and the drain verify waits until the rehearsal pod has ended, because its scans would stretch the write-downtime window.
+The condition message names the pod and its node, and a `RehearsalPodRemains` Warning event marks the start of the wait.
+On a healthy node the pod ends seconds after the cancel.
+A pod on a lost node holds the drain verify until the pod object is gone, and nothing ends that wait.
+
+> [!warning]
+> Force-delete the pod only once you have confirmed that its node is down.
+> On a node that is only unreachable, the pod's checksum queries can still run beside the drain verify.
+
+To remove the pod of a node that is down:
+
+```sh
+kubectl delete pod <pod> --grace-period=0 --force
+```
+
 ### The verify pod runs for a long time
 
 The Migration sits in `CuttingOver` with the `<name>-verify` pod running for a long time.
@@ -548,6 +568,7 @@ Nearly every cutover therefore proves the drain by content instead.
 The Job logs `endpos`, `replay_lsn`, and `origin_progress` before the compare starts, so its log names the path it took.
 
 Wait for the scan, and plan the write-downtime window around it.
+A [verification rehearsal](operations/verification.md#rehearsal) times the same scan before a cutover.
 A verify Job that fails runs once more before the Migration fails, so a refusal pays for the scan twice.
 
 ### Phase `Failed` with reason `DrainIncomplete`

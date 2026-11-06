@@ -895,6 +895,195 @@ func TestReconcileDeletion_Errors(t *testing.T) {
 	}
 }
 
+// failListOf fails List for lists of type L only; everything else stays real.
+func failListOf[L client.ObjectList]() interceptor.Funcs {
+	return interceptor.Funcs{
+		List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(L); ok {
+				return errBoom
+			}
+			return cl.List(ctx, list, opts...)
+		},
+	}
+}
+
+// TestRehearsal_ErrorLegs: an API failure in a rehearsal step propagates, and a run the
+// operator could not observe or stop stays Running and armed, so the next pass tries again.
+func TestRehearsal_ErrorLegs(t *testing.T) {
+	ctx := context.Background()
+	stillRunning := func(t *testing.T, m *v1beta1.Migration) {
+		t.Helper()
+		if st := m.Status.VerificationRehearsal; st.Outcome != v1beta1.RehearsalRunning || !st.Armed {
+			t.Fatalf("rehearsal %+v, want run 1 still Running and armed", st)
+		}
+	}
+	unwanted := func(m *v1beta1.Migration) *v1beta1.Migration {
+		m.Spec.Verification.Rehearsal = false
+		return m
+	}
+
+	t.Run("observe: Job unreadable", func(t *testing.T) {
+		m := streamingRehearsal()
+		r := failingReconciler(t, failGetOf(rehearsalJobName(m, 1)), m)
+		if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("an unreadable rehearsal Job must propagate, got %v", err)
+		}
+		stillRunning(t, m)
+	})
+	t.Run("cancel: Job unreadable", func(t *testing.T) {
+		m := unwanted(streamingRehearsal())
+		r := failingReconciler(t, failGetOf(rehearsalJobName(m, 1)), m)
+		if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("an unreadable rehearsal Job must propagate, got %v", err)
+		}
+		stillRunning(t, m)
+	})
+	t.Run("cancel: Job delete fails", func(t *testing.T) {
+		m := unwanted(streamingRehearsal())
+		r := failingReconciler(t, interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return errBoom
+			},
+		}, m, rehearsalJobOf(m, 1))
+		if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed rehearsal Job delete must propagate, got %v", err)
+		}
+		stillRunning(t, m)
+	})
+	t.Run("cancel: Job list fails", func(t *testing.T) {
+		m := streamingRehearsal()
+		m.Status.Phase = v1beta1.PhaseCuttingOver
+		r := failingReconciler(t, failListOf[*batchv1.JobList](), m)
+		if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed list of the rehearsal Jobs must propagate, got %v", err)
+		}
+	})
+	t.Run("disarm: pod list fails", func(t *testing.T) {
+		m := unwanted(streamingRehearsal())
+		m.Status.VerificationRehearsal.Outcome = v1beta1.RehearsalCompleted
+		r := failingReconciler(t, failListOf[*corev1.PodList](), m)
+		if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed rehearsal pod list must propagate, got %v", err)
+		}
+		if !m.Status.VerificationRehearsal.Armed {
+			t.Fatal("disarmed without knowing that the rehearsal pod has ended")
+		}
+	})
+}
+
+// TestRehearsalCancelSites_ErrorLegs: every path that must stop a running rehearsal aborts
+// its pass when the stop fails, instead of moving on while the rehearsal still scans.
+func TestRehearsalCancelSites_ErrorLegs(t *testing.T) {
+	ctx := context.Background()
+	unreadable := func() (*v1beta1.Migration, interceptor.Funcs) {
+		m := streamingRehearsal()
+		return m, failGetOf(rehearsalJobName(m, 1))
+	}
+
+	t.Run("terminal", func(t *testing.T) {
+		m, fns := unreadable()
+		m.Status.Phase = v1beta1.PhaseFailed
+		m.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionFailed, Status: metav1.ConditionTrue, Reason: testInvalidSpec}}
+		r := failingReconciler(t, fns, m)
+		if _, err := r.reconcile(ctx, migrationRequest(m)); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed cancel on a terminal Migration must propagate, got %v", err)
+		}
+	})
+	t.Run("suspend", func(t *testing.T) {
+		m, fns := unreadable()
+		m.Spec.Suspend = true
+		r := failingReconciler(t, fns, m, namedJob(workerJob))
+		if _, err := r.reconcileSuspended(ctx, m, m.DeepCopy()); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed cancel on suspend must propagate, got %v", err)
+		}
+		if m.Status.Phase == v1beta1.PhaseSuspended || !jobExists(t, r, workerJob) {
+			t.Fatal("suspended beside a rehearsal that could not be stopped")
+		}
+	})
+	t.Run("next attempt", func(t *testing.T) {
+		m, fns := unreadable()
+		m.Spec.BackoffLimit = 2
+		r := failingReconciler(t, fns, m)
+		if _, err := r.nextAttempt(ctx, m, m.DeepCopy()); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed cancel before the next attempt must propagate, got %v", err)
+		}
+		if jobExists(t, r, gateJobName(m, 2)) || jobExists(t, r, jobName(m, 2)) {
+			t.Fatal("the next attempt went ahead beside a rehearsal that could not be stopped")
+		}
+	})
+	t.Run("failed worker", func(t *testing.T) {
+		m, fns := unreadable()
+		m.Spec.BackoffLimit = 2
+		failed := namedJob(workerJob, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue})
+		r := failingReconciler(t, fns, m, failed)
+		if _, err := r.handleFailedJob(ctx, m, m.DeepCopy(), failed); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed cancel after a worker failure must propagate, got %v", err)
+		}
+		if m.Status.RetryGate != nil || m.Status.JobName != workerJob {
+			t.Fatalf("the retry was scheduled beside a rehearsal that could not be stopped: %+v", m.Status)
+		}
+	})
+	t.Run("deletion", func(t *testing.T) {
+		m, fns := unreadable()
+		m.Finalizers = []string{finalizerName}
+		r := failingReconciler(t, fns, m, namedJob(workerJob))
+		if _, err := r.reconcileDeletion(ctx, m); !errors.Is(err, errBoom) {
+			t.Fatalf("a failed cancel on deletion must propagate, got %v", err)
+		}
+		if !jobExists(t, r, workerJob) {
+			t.Fatal("deletion went ahead beside a rehearsal that could not be stopped")
+		}
+	})
+
+	// The drain verify must not start in any of these legs.
+	finishLeg := func(t *testing.T, r *MigrationReconciler, m *v1beta1.Migration) {
+		t.Helper()
+		if _, err := r.finishFollow(ctx, m, m.DeepCopy()); !errors.Is(err, errBoom) {
+			t.Fatalf("finishFollow must propagate the failure, got %v", err)
+		}
+		if jobExists(t, r, verifyJobName(m)) {
+			t.Fatal("the drain verify started beside a rehearsal that may still scan")
+		}
+	}
+	t.Run("finish follow: cancel", func(t *testing.T) {
+		m, fns := unreadable()
+		finishLeg(t, failingReconciler(t, fns, m), m)
+	})
+	t.Run("finish follow: pod list", func(t *testing.T) {
+		m := streamingRehearsal()
+		finishLeg(t, failingReconciler(t, failListOf[*corev1.PodList](), m), m)
+	})
+	t.Run("finish follow: status write while waiting", func(t *testing.T) {
+		m := streamingRehearsal()
+		finishLeg(t, failingReconciler(t, failStatusPatch(), m, podOfJob(m, rehearsalJobName(m, 1), corev1.PodRunning)), m)
+	})
+}
+
+// TestObserveRunningJob_RehearsalStartFailureDegrades: a rehearsal that cannot start must not
+// stop the worker's observation, and its status says why it did not start.
+func TestObserveRunningJob_RehearsalStartFailureDegrades(t *testing.T) {
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal = nil
+	r := failingReconciler(t, interceptor.Funcs{
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			return errBoom
+		},
+	}, m)
+	r.Logs = &fakeLogs{tsErr: errBoom}
+	now := time.Unix(100, 0)
+	r.now = func() time.Time { return now }
+	if _, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob), now); err != nil {
+		t.Fatalf("a failed rehearsal start must not fail the worker's pass, got %v", err)
+	}
+	got := &v1beta1.Migration{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+		t.Fatal(err)
+	}
+	if st := got.Status.VerificationRehearsal; st == nil || st.Armed || !strings.Contains(st.Message, errBoom.Error()) {
+		t.Fatalf("persisted rehearsal %+v, want unarmed with the create error", st)
+	}
+}
+
 // TestMaxCatchupLag_Default pins the fallback for an unset
 // spec.follow.maxCatchupLag.
 func TestMaxCatchupLag_Default(t *testing.T) {

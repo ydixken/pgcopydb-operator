@@ -27,7 +27,7 @@ Automation should wait on conditions, not on phase strings.
 | `Streaming` | Applying changes from the replication slot (live migrations) | `CutoverPending`, or `Failed` |
 | `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
 | `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
-| `Verifying` | Running the requested `pgcopydb compare` checks | `Completed`, or `Failed` |
+| `Verifying` | Running the requested `pgcopydb compare` checks | `Completed` |
 | `Completed` | Finished, or a `spec.dryRun` preflight passed; terminal | |
 | `Failed` | Finished badly; terminal | |
 | `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
@@ -107,6 +107,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator needs a second consecutive one before it sets `CaughtUp` True. A single sample can land while the worker still confirms its raw receive position, where the lag reads near zero whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging` and the count starts over. |
+| `CutoverCompleted` | `Unknown` | `RehearsalPodRemains` | The worker has drained, and the drain verify waits until the pod of a canceled verification rehearsal has ended; the message names the pod and its node. The condition is removed when the pod has ended, and the verify's result sets it. |
 | `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. Any other reading is decided by content, which is the path nearly every cutover takes, because publication-filtered WAL and unapplied commits measure alike. Changes are applied and sequences are synced. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change: `pgcopydb compare data` found a difference or gave no verdict. The Migration fails with the same reason. |
 | `OwnershipApplied` | `Unknown` | `OwnershipRunning` | The `<name>-reown` Job is running: after the worker exited on a clone, after the drain is proven on a live migration. No worker restarts while it exists. |
@@ -124,7 +125,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CommitsBlocked` | `False` | `WorkerSucceeded` | The worker Job completed, so every commit it sent has returned. No sampler runs on the finish path, so this keeps a stale `True` out of it. |
 | `CommitsBlocked` | `Unknown` | `SyncRepUnobserved` | A sample could not read the count: the exec or the count query failed, or no worker pod was running. It replaces `False`, never `True`. |
 | `RetryHeld` | `True` | `GateProbing` | The first probe of a hold is pending, running, or not created yet. Every retry passes through it. |
-| `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker has not ended; the message names the pod and its node. No probe runs meanwhile. |
+| `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker, or of a verification rehearsal, has not ended; the message names the pod and its node. No probe runs meanwhile. |
 | `RetryHeld` | `True` | `SessionsRemain` | The probe's census found sessions of the migration role left on the target. The message lists up to ten with pid, state, wait event, age, backend start, and name. The operator never ends them. |
 | `RetryHeld` | `True` | `SyncCommitNotLocal` | With `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`: a pooler or proxy dropped the startup option. |
 | `RetryHeld` | `True` | `CommitBlocked` | The test commit waited for a synchronous standby until the probe cancelled it at 5 seconds, or it was skipped because a session, or an earlier probe, still waits for one. |
@@ -178,6 +179,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `DryRunSucceeded` | Normal | A dry run's preflight passed; the Migration completed without a worker Job. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
+| `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |
 | `CleanupFailed` | Warning | Cleanup exhausted its retries; the named slot may still hold WAL on the source and needs manual removal. |
 | `OwnershipStarted` | Normal | The `<name>-reown` handover Job was created. |

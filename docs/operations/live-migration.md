@@ -195,6 +195,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
     Any remaining distance is decided by content, never by its size.
     Nearly every cutover takes the compare path.
     Size the write-downtime window for `compare data` over the selected storage tables.
+    A [rehearsal](verification.md#rehearsal) times that compare while the migration still streams.
     Treat the exact-LSN pass as the exception.
 
     The Job runs `pgcopydb compare data` and validates the report `--json` prints, instead of the exit status alone.

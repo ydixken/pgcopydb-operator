@@ -278,6 +278,78 @@ func buildCatalogJob(m *v1beta1.Migration, runnerImage, progressGate string) (*b
 	return scriptJob(m, runnerImage, catalogJobName(m), "set -eu\n"+cloneCountersBlock(progressGate), false)
 }
 
+const (
+	// rehearsalReportPath is compare data's --json report; only the Job reads it.
+	rehearsalReportPath = "/tmp/rehearsal-report.json"
+	// rehearsalPGOptions makes a backend notice within 10s that the rehearsal pod
+	// is gone, because a deleted Job does not cancel its checksum queries.
+	rehearsalPGOptions = "-c client_connection_check_interval=10s"
+	// rehearsalAppNameLike matches the compare workers, which alone run checksums; the
+	// parent is "pgcopydb[pid] pgcopydb", and a copy title can name a table "compare".
+	rehearsalAppNameLike = "pgcopydb[%] compare worker"
+)
+
+// rehearsalScript compares in a scratch work dir: list tables seeds its catalog
+// with the Migration's selection, and compare data reuses that catalog. The TERM
+// trap ends the compare's queries on both sides, which pgcopydb alone does not.
+func rehearsalScript(m *v1beta1.Migration) string {
+	list := append([]string{"list", "tables", "--dir", pgcopydb.WorkDir}, pgcopydb.FiltersArgs(m.Spec.Clone.Filters)...)
+	return `set -u
+pid=
+stop() {
+  trap '' TERM
+  if [ -n "$pid" ]; then
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || :
+  fi
+  for uri in "$PGCOPYDB_SOURCE_PGURI" "$PGCOPYDB_TARGET_PGURI"; do
+    psql "$uri" -XAtq -c "select count(pg_cancel_backend(pid)) from pg_stat_activity where usename = session_user and application_name like '` + rehearsalAppNameLike + `' and client_addr = inet_client_addr() and pid <> pg_backend_pid()" >/dev/null || :
+  done
+  echo "rehearsal: canceled; pgcopydb stopped and its queries on both databases canceled"
+  exit 143
+}
+trap stop TERM
+if ! pgcopydb ` + strings.Join(list, " ") + ` >/dev/null; then
+  echo "rehearsal: pgcopydb list tables could not read the source catalog"
+  exit 1
+fi
+pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + rehearsalReportPath + ` &
+pid=$!
+wait "$pid" || :
+pid=
+first=
+IFS= read -r first <` + rehearsalReportPath + ` || :
+case $first in
+'['*)
+  echo "rehearsal: compare data wrote its report; tables that differ are expected while the target applies changes"
+  exit 0 ;;
+esac
+echo "rehearsal: compare data wrote no report, so it could not compare; see the lines above"
+exit 1
+`
+}
+
+// buildRehearsalJob runs one rehearsal beside the live worker, off the work volume
+// the worker holds. pgcopydb exits 12 on differing tables and on a failed run alike,
+// so the script decides by the report; backoffLimit 0 keeps a failure to one scan.
+func buildRehearsalJob(m *v1beta1.Migration, runnerImage string, run int32) (*batchv1.Job, error) {
+	job, err := scriptJob(m, runnerImage, rehearsalJobName(m, run), rehearsalScript(m), false)
+	if err != nil {
+		return nil, err
+	}
+	for i := range job.Spec.Template.Spec.Volumes {
+		if v := &job.Spec.Template.Spec.Volumes[i]; v.Name == workdirVolume {
+			v.VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+		}
+	}
+	backoff := int32(0)
+	job.Spec.BackoffLimit = &backoff
+	// The operator deletes the previous run's Job when it starts the next one.
+	job.Spec.TTLSecondsAfterFinished = nil
+	c := &job.Spec.Template.Spec.Containers[0]
+	c.Env = append(c.Env, corev1.EnvVar{Name: "PGOPTIONS", Value: rehearsalPGOptions})
+	return job, nil
+}
+
 // The preflight script is assembled per Migration by preflightScriptFor.
 // The session_replication_role probe is the silent-loss gate: without that SET,
 // pgcopydb 0.18 applies nothing while reporting success

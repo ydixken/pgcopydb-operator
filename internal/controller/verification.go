@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -31,10 +32,10 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
-// Verification (spec.verification) runs pgcopydb compare checks on the
-// migration's success path, one Job per enabled check. It reports rather than
-// gates: Verified goes True or False, a mismatch adds a warning event, and
-// Complete is set either way.
+// Verification (spec.verification.schema and data) runs pgcopydb compare checks
+// on the migration's success path, one Job per enabled check. It reports rather
+// than gates: Verified goes True or False, a mismatch adds a warning event, and
+// Complete is set either way. The rehearsal runs elsewhere (rehearsal.go).
 
 // compareSchema and compareData name the two checks; the names appear in Job
 // names and event messages.
@@ -92,6 +93,14 @@ var compareDataStrict = `compare_data_strict() {
 // compareDataScript is the whole program of the data compare Job: the
 // wrapper's return status is the last command's, so it becomes the Job's.
 var compareDataScript = "set -eu\n" + compareDataStrict + "compare_data_strict\n"
+
+// statusTime is t as a status field, nil when t is zero.
+func statusTime(t time.Time) *metav1.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &metav1.Time{Time: t}
+}
 
 func compareJobName(m *v1beta1.Migration, check string) string {
 	return m.Name + "-compare-" + check
@@ -216,8 +225,8 @@ func (r *MigrationReconciler) ensureCatalogCheck(ctx context.Context, m *v1beta1
 
 // ensureVerification drives the enabled compare Jobs one at a time (schema,
 // then data: sequential keeps both databases at one extra scan and both pods
-// off each other's RWO work volume) and reports done=false while one still
-// runs. Everything is re-derived from the persisted Jobs, never from memory.
+// off each other's RWO work volume; a rehearsal ends before cutover) and reports
+// done=false while one still runs. Everything is re-derived from the persisted Jobs.
 func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1.Migration) (bool, error) {
 	if !verificationRequested(m) {
 		return true, nil
@@ -248,8 +257,9 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 		if !done {
 			return false, nil
 		}
-		m.Status.Verification = append(m.Status.Verification,
-			v1beta1.VerificationResult{Check: check, Passed: ok})
+		m.Status.Verification = append(m.Status.Verification, v1beta1.VerificationResult{
+			Check: check, Passed: ok, StartedAt: job.Status.StartTime, CompletedAt: statusTime(jobFinishedAt(job)),
+		})
 		if !ok {
 			mismatched = append(mismatched, check)
 		}

@@ -14,7 +14,7 @@ Where to go:
 - [Installation](installation.md): the Helm chart and the CRD lifecycle.
 - [Configuration](configuration.md): clone tuning, filters, work volume, runner image, credentials.
 - [Live migration](operations/live-migration.md): follow mode, preflight, and the cutover runbook.
-- [Verification](operations/verification.md): `pgcopydb compare` after completion.
+- [Verification](operations/verification.md): `pgcopydb compare` after completion, and a timed rehearsal while a live migration streams.
 - [Dry run, suspend, retries, deletion](operations/lifecycle.md): checking a Migration before it runs, and its day-2 lifecycle.
 - [Monitoring](operations/monitoring.md): per-Migration metrics, the bundled Grafana dashboards, and alert rules.
 - [Migrating into CloudNativePG](operations/cloudnativepg.md): CNPG targets and sources.

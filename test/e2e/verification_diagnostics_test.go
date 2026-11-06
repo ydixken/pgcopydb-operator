@@ -189,8 +189,8 @@ func expectVerification(m *v1beta1.Migration, passed bool) {
 	expectConditionTrue(m, v1beta1.ConditionComplete)
 	Expect(apimeta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse())
 	Expect(m.Status.Verification).To(ConsistOf(
-		v1beta1.VerificationResult{Check: compareSchemaCheck, Passed: passed},
-		v1beta1.VerificationResult{Check: compareDataCheck, Passed: passed},
+		SatisfyAll(HaveField("Check", compareSchemaCheck), HaveField("Passed", passed)),
+		SatisfyAll(HaveField("Check", compareDataCheck), HaveField("Passed", passed)),
 	))
 	verified := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
 	Expect(verified).NotTo(BeNil())

@@ -214,6 +214,13 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// registry regains these series on its startup pass.
 	if meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionComplete) ||
 		meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed) {
+		// The one exception: a rehearsal still running would keep scanning both databases.
+		if st := m.Status.VerificationRehearsal; st != nil && st.Outcome == v1beta1.RehearsalRunning {
+			if err := r.cancelRehearsal(ctx, m, "the Migration ended"); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.updateStatus(ctx, m, base)
+		}
 		metrics.Record(m)
 		return ctrl.Result{}, nil
 	}
@@ -548,6 +555,13 @@ func (r *MigrationReconciler) observeRunningJob(
 		started = r.currentTime()
 		r.reconcileFollowRunning(ctx, m, job.Name, cloneDone)
 		record("follow_control", started)
+		// After the follow step, which may have started the cutover this pass. Best
+		// effort like the sample: a failed step must not stop the worker's observation.
+		started = r.currentTime()
+		if err := r.reconcileRehearsal(ctx, m); err != nil {
+			logf.FromContext(ctx).Info("verification rehearsal step failed, retrying next pass", "error", err)
+		}
+		record("rehearsal", started)
 	}
 	// A pass working from a stale cache can rewrite the conditions after this worker started.
 	r.endHold(m, reasonGatePassed, fmt.Sprintf("Attempt %d runs as Job %s", m.Status.Attempts, job.Name))
@@ -755,6 +769,9 @@ func (r *MigrationReconciler) deleteJobPods(ctx context.Context, namespace, jobN
 // reconcileSuspended deletes the active worker (keeping the PVC, so a later
 // resume continues from the catalogs) and any retry gate probe, and parks the Migration.
 func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	if err := r.cancelRehearsal(ctx, m, "spec.suspend stopped the worker"); err != nil {
+		return ctrl.Result{}, err
+	}
 	if m.Status.JobName != "" {
 		job := &batchv1.Job{}
 		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: m.Status.JobName}, job)
@@ -833,6 +850,10 @@ func (r *MigrationReconciler) reconcileSuspended(ctx context.Context, m, base *v
 // restart a vanished follow worker usually needs.
 func (r *MigrationReconciler) nextAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	// Every path to the next attempt, startAttempt included, runs through here.
+	if err := r.cancelRehearsal(ctx, m, "the worker Job is gone"); err != nil {
+		return ctrl.Result{}, err
+	}
 	exists, err := r.reownJobExists(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -964,6 +985,9 @@ func attemptPhase(m *v1beta1.Migration) v1beta1.MigrationPhase {
 // good. The Job's condition only says that the pod failed, so the pgcopydb
 // ERROR behind it is appended from the pod log when readable.
 func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (ctrl.Result, error) {
+	if err := r.cancelRehearsal(ctx, m, fmt.Sprintf("worker attempt %d failed", m.Status.Attempts)); err != nil {
+		return ctrl.Result{}, err
+	}
 	reason := failureReason(job)
 	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, workerLogTail)
 	switch {

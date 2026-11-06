@@ -1,0 +1,32 @@
+# Live migration with a verification rehearsal: once the stream runs, one
+# pgcopydb compare data run times the compare the cutover's drain verify
+# waits for, while writes continue. Its tables differ by design and it sets
+# no verdict; read status.verificationRehearsal for the duration.
+# Requires follow and a Manual cutover. Details: docs/operations/verification.md.
+apiVersion: pgcopydb-operator.io/v1beta1
+kind: Migration
+metadata:
+  name: billing
+spec:
+  source:
+    host: billing.example.com
+    database: billing
+    username: migrator  # MUST have the REPLICATION role attribute
+    passwordSecretRef: {name: billing-source, key: password}
+    sslMode: require
+  target:
+    host: billing-pg-rw.billing.svc
+    database: billing
+    username: app
+    passwordSecretRef: {name: billing-pg-app, key: password}
+  follow:
+    enabled: true
+  cutover:
+    mode: Manual  # required: an Automatic cutover would cancel the rehearsal
+  verification:
+    # Rehearses once per change from false to true. To run it again, set
+    # false, wait for status.verificationRehearsal.armed to read false, then
+    # set true.
+    rehearsal: true
+  workVolume:
+    size: 50Gi  # the rehearsal does not use it; it compares in a scratch dir

@@ -66,17 +66,19 @@ func (r *MigrationReconciler) retryGate(ctx context.Context, m, base *v1beta1.Mi
 	}
 	held := ctrl.Result{RequeueAfter: retryGateInterval}
 	pod, err := r.previousWorkerPod(ctx, m, attempt)
+	of := fmt.Sprintf("of attempt %d", attempt-1)
+	if err == nil && pod == nil {
+		// A rehearsal's compare sessions count in the census like the worker's.
+		pod, err = r.rehearsalPod(ctx, m)
+		of = "of the verification rehearsal"
+	}
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
 	if pod != nil {
-		node := pod.Spec.NodeName
-		if node == "" {
-			node = "(none yet)"
-		}
 		r.setHold(m, reasonWorkerPodRemains, fmt.Sprintf(
-			"Pod %s of attempt %d is %s on node %s; attempt %d waits until it has ended, because it may still hold sessions",
-			pod.Name, attempt-1, podState(pod), node, attempt))
+			"Pod %s %s is %s on node %s; attempt %d waits until it has ended, because it may still hold sessions",
+			pod.Name, of, podState(pod), podNode(pod), attempt))
 		return held, false, r.updateStatus(ctx, m, base)
 	}
 
@@ -117,7 +119,7 @@ func (r *MigrationReconciler) judgeProbe(ctx context.Context, m, base *v1beta1.M
 	_, ok := jobFinished(job)
 	in := gateInputsFor(m)
 	current := job.Annotations[annotationRetryGateInputs] == in.String()
-	finishedAt := gateFinishedAt(job)
+	finishedAt := jobFinishedAt(job)
 	if ok && (!current || now.After(finishedAt.Add(gatePassFreshness))) {
 		if err := r.deleteGateProbe(ctx, job); err != nil {
 			return ctrl.Result{}, false, err
@@ -182,6 +184,13 @@ func (r *MigrationReconciler) previousWorkerPod(ctx context.Context, m *v1beta1.
 	return nil, nil
 }
 
+func podNode(p *corev1.Pod) string {
+	if p.Spec.NodeName == "" {
+		return "(none yet)"
+	}
+	return p.Spec.NodeName
+}
+
 func podState(p *corev1.Pod) string {
 	state := strings.ToLower(string(p.Status.Phase))
 	if state == "" {
@@ -218,8 +227,9 @@ func (r *MigrationReconciler) gateLog(ctx context.Context, job *batchv1.Job) (st
 	return string(raw), err
 }
 
-// gateFinishedAt is when the probe failed or completed, zero when the Job records neither.
-func gateFinishedAt(job *batchv1.Job) time.Time {
+// jobFinishedAt is when the Job failed or completed, zero when it records neither.
+// Only a Job that succeeded gets a completionTime.
+func jobFinishedAt(job *batchv1.Job) time.Time {
 	if t := jobFailedAt(job); !t.IsZero() {
 		return t
 	}

@@ -57,6 +57,7 @@ For the real run, create a separate Migration without it.
 
 `spec.suspend: true` deletes the worker Job and keeps the work volume.
 The delete is in the foreground, so pgcopydb receives SIGTERM and shuts down cleanly.
+A running [verification rehearsal](verification.md#rehearsal) is canceled too, and a resume does not start it again.
 While the [retry gate](#the-retry-gate) holds a retry, there is no worker, and the suspend deletes the gate's probe Job instead, because its test commit writes to the target.
 The phase becomes `Suspended`.
 Set `spec.suspend` back to false to start the next attempt.
@@ -153,8 +154,8 @@ A new attempt would fail on those sessions or wait behind them.
 
 The gate checks two things in order:
 
-1. The previous attempt's worker pod has ended.
-   While it runs or terminates, `RetryHeld` is True with reason `WorkerPodRemains`, and no probe runs.
+1. The previous attempt's worker pod has ended, and so has the pod of a canceled [verification rehearsal](verification.md#rehearsal).
+   While one runs or terminates, `RetryHeld` is True with reason `WorkerPodRemains`, and no probe runs.
    We wait for the pod, because a terminating pod can still hold source connections that the target cannot show.
 2. A probe Job, `<name>-gate-<n>` for attempt n, passes.
    It connects as the migration role over the worker's own target connection.
@@ -200,7 +201,7 @@ Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
 - **Clone-only Migration**: deleting the CR garbage-collects everything it owns (Jobs, work PVC, filters ConfigMap).
   Nothing on either database needs cleaning; there is no finalizer in the way.
 - **Live Migration that ever started**: a finalizer routes deletion through cleanup, because a leaked replication slot retains WAL on the source forever.
-  The operator first stops the worker, then runs the cleanup Job (drops slot, auto-created publication, target origin), then releases the CR to garbage collection.
+  The operator first stops the worker and a running [verification rehearsal](verification.md#rehearsal), then runs the cleanup Job (drops slot, auto-created publication, target origin), then releases the CR to garbage collection.
   Deletion therefore takes a few reconcile cycles, not milliseconds.
 - **Cleanup that cannot finish**: if cleanup exhausts its retries, because the source is gone for instance, the operator emits a `CleanupFailed` warning naming the slot and releases the Migration anyway.
   An unreachable source should not block deletion forever.

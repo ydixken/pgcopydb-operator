@@ -41,6 +41,7 @@ Individual checks appear as `ok:` log lines.
    It does not check extension versions, package installation, installation privileges, collations, encodings, server-version equality (unless `spec.preflight.requireSameMajorVersion` is set, which compares major versions only), or wider source-to-target compatibility.
 3. Partial outside preflight.
    `follow.maxCatchupLag` and `cutover.mode` configure behavior, but preflight does not check downtime, RPO, RTO, or acceptance criteria.
+   A [verification rehearsal](operations/verification.md#rehearsal) times the compare that sets most of a live cutover's write downtime.
 4. Partial.
    Preflight probes connectivity, clone rights, superuser attributes, and the follow grants.
    With [`spec.target.synchronousCommit: local`](configuration.md#synchronous-commit-on-the-target), it also checks that the target connection reports `synchronous_commit=local`.

@@ -87,6 +87,12 @@ func TestReconcile_AllDatabasesDataVerificationAfterClone(t *testing.T) {
 	}
 }
 
+// checkResult matches one status.verification entry, which must carry both Job times.
+func checkResult(check string, passed bool) OmegaMatcher {
+	return SatisfyAll(HaveField("Check", check), HaveField("Passed", passed),
+		HaveField("StartedAt", Not(BeNil())), HaveField("CompletedAt", Not(BeNil())))
+}
+
 var _ = Describe("Migration Controller verification", func() {
 	ctx := context.Background()
 
@@ -156,10 +162,8 @@ var _ = Describe("Migration Controller verification", func() {
 		// data passed when it did not; the per-check results say otherwise.
 		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionVerified)
 		Expect(cond.Reason).To(Equal("SchemaMismatch"))
-		Expect(m.Status.Verification).To(ConsistOf(
-			v1beta1.VerificationResult{Check: "schema", Passed: false},
-			v1beta1.VerificationResult{Check: "data", Passed: false},
-		))
+		// A failed Job has no completionTime; completedAt comes from its Failed condition.
+		Expect(m.Status.Verification).To(ConsistOf(checkResult("schema", false), checkResult("data", false)))
 	})
 
 	It("records a per-check pass and drops the result when a check is not requested", func() {
@@ -177,9 +181,7 @@ var _ = Describe("Migration Controller verification", func() {
 
 		// Only what ran is reported: an unrequested check must be absent, not
 		// a false or a zero, or the dashboard would show it as failing.
-		Expect(m.Status.Verification).To(ConsistOf(
-			v1beta1.VerificationResult{Check: "data", Passed: true},
-		))
+		Expect(m.Status.Verification).To(ConsistOf(checkResult("data", true)))
 	})
 
 	It("reports a data mismatch without failing the migration", func() {

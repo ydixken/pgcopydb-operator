@@ -235,6 +235,22 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	}
 	m.Status.Phase = v1beta1.PhaseCuttingOver
 
+	// The drain verify runs inside the write-downtime window, so no rehearsal scan
+	// may run beside it.
+	if err := r.cancelRehearsal(ctx, m, "the cutover started"); err != nil {
+		return ctrl.Result{}, err
+	}
+	wait, err := r.drainWaitsForRehearsal(ctx, m)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if wait {
+		if err := r.updateStatus(ctx, m, base); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+
 	verified, failedVerify, err := r.ensureVerify(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -447,6 +463,10 @@ func (r *MigrationReconciler) recordCloneProgress(ctx context.Context, m *v1beta
 // finalizer keeps the CR (and thus the owned PVC with the catalogs) alive
 // until the slot is dropped; then garbage collection takes everything.
 func (r *MigrationReconciler) reconcileDeletion(ctx context.Context, m *v1beta1.Migration) (ctrl.Result, error) {
+	// Garbage collection would take the rehearsal only after cleanup; stop it now.
+	if err := r.cancelRehearsal(ctx, m, "the Migration is being deleted"); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !controllerutil.ContainsFinalizer(m, finalizerName) {
 		metrics.Forget(m.Namespace, m.Name)
 		return ctrl.Result{}, nil

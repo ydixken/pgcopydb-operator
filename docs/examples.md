@@ -13,6 +13,7 @@ Every example is a complete resource that applies as-is after you swap in your h
 | [07-verified](examples/07-verified.yaml) | Post-migration `pgcopydb compare` checks | You must prove the target matches the source |
 | [08-reference](examples/08-reference.yaml) | Every spec field, annotated | You are looking for a specific field |
 | [09-all-databases](examples/09-all-databases.yaml) | Clone-only whole-instance copy, roles implied | Both endpoints permit superuser access and target schemas are empty |
+| [10-live-rehearsal](examples/10-live-rehearsal.yaml) | A timed `compare data` run while a live migration streams | You must size the write-downtime window of the cutover |
 
 Alert rules ship in the Helm chart, not as an example here: set `metrics.prometheusRule.enabled=true` to install them.
 The [monitoring guide](operations/monitoring.md) documents them alongside the metrics and dashboards.

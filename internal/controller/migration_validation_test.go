@@ -81,6 +81,13 @@ var _ = Describe("Migration CRD validation", func() {
 	filters := func(f *v1beta1.Filters) func(*v1beta1.Migration) {
 		return func(m *v1beta1.Migration) { m.Spec.Clone.Filters = f }
 	}
+	rehearse := func(follow *v1beta1.FollowOptions, mode v1beta1.CutoverMode) func(*v1beta1.Migration) {
+		return func(m *v1beta1.Migration) {
+			m.Spec.Follow = follow
+			m.Spec.Cutover.Mode = mode
+			m.Spec.Verification = &v1beta1.VerificationOptions{Rehearsal: true}
+		}
+	}
 	owner := func(name string) func(*v1beta1.Migration) {
 		return func(m *v1beta1.Migration) {
 			m.Spec.Clone.NoOwner = true
@@ -242,7 +249,50 @@ var _ = Describe("Migration CRD validation", func() {
 		Entry("owner name over 63 bytes", "cel-owner-bytes", owner(strings.Repeat("é", 32)), "limited to 63 bytes"),
 		// The immutability rule references oldSelf, so create skips it.
 		Entry("dry run", "cel-dry-run", func(m *v1beta1.Migration) { m.Spec.DryRun = true }, ""),
+		Entry("rehearsal on a clone", "cel-rehearsal-clone", rehearse(nil, ""),
+			"verification.rehearsal requires follow.enabled"),
+		Entry("rehearsal with follow disabled", "cel-rehearsal-follow-off",
+			rehearse(&v1beta1.FollowOptions{Enabled: false}, ""), "verification.rehearsal requires follow.enabled"),
+		Entry("rehearsal with an Automatic cutover", "cel-rehearsal-automatic",
+			rehearse(&v1beta1.FollowOptions{Enabled: true}, v1beta1.CutoverAutomatic), "verification.rehearsal requires cutover.mode Manual"),
+		Entry("rehearsal with a Manual cutover", "cel-rehearsal-manual",
+			rehearse(&v1beta1.FollowOptions{Enabled: true}, v1beta1.CutoverManual), ""),
+		// The CRD default turns an unset mode into Manual.
+		Entry("rehearsal with the default cutover", "cel-rehearsal-default",
+			rehearse(&v1beta1.FollowOptions{Enabled: true}, ""), ""),
+		Entry("Automatic cutover with rehearsal off", "cel-rehearsal-off-automatic", func(m *v1beta1.Migration) {
+			rehearse(&v1beta1.FollowOptions{Enabled: true}, v1beta1.CutoverAutomatic)(m)
+			m.Spec.Verification.Rehearsal = false
+		}, ""),
 	)
+
+	It("keeps a rehearsing Migration from switching to an Automatic cutover", func() {
+		m := validMigration("cel-rehearsal-switch")
+		rehearse(&v1beta1.FollowOptions{Enabled: true}, v1beta1.CutoverManual)(m)
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, m) })
+
+		m.Spec.Cutover.Mode = v1beta1.CutoverAutomatic
+		Expect(k8sClient.Update(ctx, m)).To(MatchError(ContainSubstring("verification.rehearsal requires cutover.mode Manual")))
+
+		// Control: rehearsal off first, then the switch is admitted.
+		got := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: m.Name, Namespace: testNS}, got)).To(Succeed())
+		got.Spec.Verification.Rehearsal = false
+		got.Spec.Cutover.Mode = v1beta1.CutoverAutomatic
+		Expect(k8sClient.Update(ctx, got)).To(Succeed())
+	})
+
+	It("enforces the rehearsal rules on v1alpha1 too", func() {
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(validMigration("cel-rehearsal-alpha"))
+		Expect(err).NotTo(HaveOccurred())
+		u := &unstructured.Unstructured{Object: obj}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("Migration"))
+		Expect(unstructured.SetNestedField(u.Object, true, "spec", "verification", "rehearsal")).To(Succeed())
+		err = k8sClient.Create(ctx, u)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid, got: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("verification.rehearsal requires follow.enabled")))
+	})
 
 	// The CRD defaults are what Materialize relies on for partial keys; a bare
 	// secretRef keeps keys unset and the Go-side fallback covers it instead.
