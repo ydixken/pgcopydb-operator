@@ -387,6 +387,43 @@ func expectCanceled(t *testing.T, m *v1beta1.Migration, deleted map[string]metav
 	}
 }
 
+func TestStatusTime_ZeroIsUnset(t *testing.T) {
+	if got := statusTime(time.Time{}); got != nil {
+		t.Fatalf("statusTime(zero) = %v, want nil: a Job that records no finish has no completedAt", got)
+	}
+}
+
+func TestBuildRehearsalJob_InvalidSpec(t *testing.T) {
+	m := followPasswordMigration()
+	m.Spec.Source.Host, m.Spec.Source.Username = "", ""
+	if job, err := buildRehearsalJob(m, testRunnerImage, 1); err == nil {
+		t.Fatalf("a spec without a source connection built Job %v", job)
+	}
+}
+
+// Only a pod of this Migration's rehearsal holds the retry gate and the drain verify.
+func TestRehearsalPod_OnlyARehearsalPodHolds(t *testing.T) {
+	ctx := context.Background()
+	m := streamingRehearsal()
+	other := streamingRehearsal()
+	other.Name = "other"
+	r := failingReconciler(t, interceptor.Funcs{}, m,
+		podOfJob(m, gateJobName(m, 2), corev1.PodRunning),
+		podOfJob(m, verifyJobName(m), corev1.PodRunning),
+		podOfJob(m, jobName(m, 2), corev1.PodRunning),
+		podOfJob(m, rehearsalJobName(m, 1), corev1.PodSucceeded),
+		podOfJob(other, rehearsalJobName(other, 1), corev1.PodRunning))
+	if pod, err := r.rehearsalPod(ctx, m); err != nil || pod != nil {
+		t.Fatalf("rehearsalPod = (%v, %v), want none: no rehearsal pod of %s runs", pod, err, m.Name)
+	}
+	if err := r.Create(ctx, podOfJob(m, rehearsalJobName(m, 2), corev1.PodPending)); err != nil {
+		t.Fatal(err)
+	}
+	if pod, err := r.rehearsalPod(ctx, m); err != nil || pod == nil || pod.Name != rehearsalJobName(m, 2)+"-pod" {
+		t.Fatalf("rehearsalPod = (%v, %v), want run 2's pod", pod, err)
+	}
+}
+
 // CEL rejects rehearsal with an Automatic cutover; a fake API, like an older CRD, does not.
 func TestReconcileRehearsal_AutomaticStartsNoRun(t *testing.T) {
 	m := streamingRehearsal()
@@ -456,6 +493,22 @@ func TestReconcileRehearsal_PreviousJobDeleteFailure(t *testing.T) {
 	}
 }
 
+// A run that finished before the cancel keeps its outcome, and its Job stays as the record.
+func TestCancelRehearsal_KeepsAFinishedRun(t *testing.T) {
+	m := streamingRehearsal()
+	funcs, deleted := recordDeletes()
+	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1, jobCompleted))
+	if err := r.cancelRehearsal(context.Background(), m, "spec.suspend stopped the worker"); err != nil {
+		t.Fatal(err)
+	}
+	if st := m.Status.VerificationRehearsal; st.Outcome != v1beta1.RehearsalCompleted {
+		t.Fatalf("rehearsal %+v, want Completed: the run finished before the cancel", st)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted %v, want the finished run's Job kept", deleted)
+	}
+}
+
 // A run whose status write was lost is in no status, and the cancel stops it all the same.
 func TestCancelRehearsal_StopsAnUnrecordedRun(t *testing.T) {
 	m := streamingRehearsal()
@@ -476,6 +529,30 @@ func TestCancelRehearsal_StopsAnUnrecordedRun(t *testing.T) {
 	if st := m.Status.VerificationRehearsal; st.Outcome != v1beta1.RehearsalCompleted || st.Run != 1 {
 		t.Fatalf("rehearsal %+v, want run 1's record unchanged", st)
 	}
+}
+
+// Every path to the next attempt cancels, the Job vanishing included.
+func TestNextAttempt_CancelsTheRehearsal(t *testing.T) {
+	m := streamingRehearsal()
+	m.Spec.BackoffLimit = 2
+	funcs, deleted := recordDeletes()
+	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1))
+	if _, err := r.nextAttempt(context.Background(), m, m.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	expectCanceled(t, m, deleted, "the worker Job is gone")
+}
+
+// Garbage collection would reach the rehearsal only after the cleanup Job.
+func TestReconcileDeletion_CancelsTheRehearsal(t *testing.T) {
+	m := streamingRehearsal()
+	m.Finalizers = []string{finalizerName}
+	funcs, deleted := recordDeletes()
+	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1), namedJob(workerJob))
+	if _, err := r.reconcileDeletion(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	expectCanceled(t, m, deleted, "being deleted")
 }
 
 // The worker can exit 0 before any pass saw CuttingOver, so finishFollow cancels too, and the
