@@ -58,6 +58,12 @@ A value the operator does not know is absent, never zero: dashboards and alerts 
 | `pgcopydb_migration_condition_transition_timestamp_seconds` | `type`, `status` | Unix time of that condition's `lastTransitionTime` | per condition |
 | `pgcopydb_migration_verified` | | 1 when every requested compare check passed, 0 if any mismatched | after a verification result |
 | `pgcopydb_migration_verification_check` | `check`: `schema` or `data` | 1 when that check passed, 0 on mismatch, -1 when `spec.verification` does not request it | once the spec is read, except a requested check with no result yet |
+| `pgcopydb_migration_verification_planned_tables` / `_compared_tables` | `kind` | Tables a compare data run plans, and those it finished | per progress item |
+| `pgcopydb_migration_verification_planned_bytes` / `_compared_bytes` | `kind` | Source size of those tables | per progress item |
+| `pgcopydb_migration_verification_compared_rows` | `kind` | Source rows of the finished tables that match or differ | per progress item |
+| `pgcopydb_migration_verification_differing_tables` / `_failed_tables` | `kind` | Finished tables that differ, and tables whose checksum query failed | per progress item |
+| `pgcopydb_migration_verification_duration_seconds` | `kind` | Time from the start of compare data to its latest sample | per progress item |
+| `pgcopydb_migration_verification_table_elapsed_seconds` | `kind`, `table` (`schema.name`) | Time spent on a table the run is still comparing | while in flight |
 | `pgcopydb_migration_source_database_size_bytes` | | Source database size, summed over the instance with `allDatabases` | once sampled |
 | `pgcopydb_migration_target_database_size_bytes` | | Target database size, summed over the instance with `allDatabases` | once sampled |
 | `pgcopydb_migration_tables_done` / `_tables_total` | | Tables copied and tables planned | once sampled |
@@ -102,6 +108,12 @@ The "Exists" column is the contract for when a series is present:
   The worker samples them from `Cloning` through `CuttingOver`.
   In every other phase the operator removes them, the endpos gauge included, because the last sample is old and does not show the final drain.
   Prometheus keeps their history, so the graphs still show the run.
+- **per progress item**: one series per item of `status.verificationProgress`, labeled with its `kind`: `rehearsal`, `drain`, or `data` (see [Progress](verification.md#progress)).
+  It appears with the first progress sample of that kind of run.
+  It stays after the run ends, until the first sample of the next run of that kind replaces the item, so it describes the Job that the item's `jobName` names.
+  `compare schema`, the exact-LSN drain path, and a runner that logs no compare progress leave no item and therefore no series.
+- **while in flight**: one series per table in the item's `inFlight` list, which a sample stops listing once the table is finished.
+  A run that ended without its last progress line, because it was canceled or its pod died, keeps the list of its last sample, and the series with it, until the next run of that kind replaces the item.
 - **per condition**: one series per condition in `status.conditions`, labeled with the status it changed into.
   A flip retires the old `{type,status}` pair and stamps a new one, so the endpoint never carries more than one series per condition type.
   The retired pair keeps its samples in Prometheus, so query the timeline as `last_over_time(...[$__range])` rather than at the range end.
@@ -141,12 +153,13 @@ A phase shorter than the scrape interval is never sampled.
 A transition timestamp survives that, because the value stands for as long as the condition holds.
 A condition that changes twice inside one scrape interval publishes only the later transition, because the Migration keeps one `lastTransitionTime` per condition.
 
-Four quantities stay in PromQL and get no metric of their own:
+Five quantities stay in PromQL and get no metric of their own:
 
 - Receive lag is `source - write`.
 - Apply backlog is `write - replay`.
 - WAL generation is `rate(source_lsn_bytes)`.
 - Percent done divides the target size by the source size.
+- Compare throughput divides `verification_compared_bytes` or `verification_compared_rows` by `verification_duration_seconds`, an average since the run started.
 
 Receive lag reads high by one confirmation wherever `write` fell back to the slot's confirmed flush position.
 A pass whose source row carried no confirmed position keeps the earlier replay and lag values, so both read stale for one pass rather than wrong.
@@ -170,6 +183,7 @@ The chart ships three dashboards, linked to each other through their shared `pgc
   Two rows of stat tiles come first: state and timing, then progress and the compare check results.
   Below them are two timeline tables side by side, phases as sampled and condition transitions as stamped.
   The rest charts database sizes and copy throughput, synchronous replication waits, LSN positions with the lag split, WAL generation, and the cutover drain.
+  A Verification row at the bottom charts the progress of each compare data run.
 - **Fleet Overview** (uid `pgcopydb-fleet`): counts by phase, an all-migrations table whose name column links into the detail dashboard, and lag, throughput, and attempt churn per migration.
 - **Operator Health** (uid `pgcopydb-operator`): build and leader status, reconcile rate and duration percentiles, workqueue depth and latencies, and process CPU, memory, goroutines, and file descriptors.
 
@@ -284,6 +298,18 @@ The **Synchronous Replication Waits** panel, below the copy charts, plots the tw
 A gap means that a sample could not read the count, and both lines end when the worker pod does.
 Two samples in a row with a wait of 30 seconds or more set `CommitsBlocked`; see [Commits blocked on synchronous replication](../troubleshooting.md#commits-blocked-on-synchronous-replication).
 Healthy standbys can do that too while they catch up on the WAL of a bulk load ([measured](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/research/measurements.md#catch-up-waits-followed-a-bulk-load-with-both-standbys-attached)).
+
+The **Verification** row charts `status.verificationProgress` with one line for each kind of compare data run: `rehearsal`, `drain`, and `data` (see [Progress](verification.md#progress)).
+
+- **Compare Progress** is the share of the planned tables, and of their source size, that is finished.
+- **Compare Throughput** and **Compare Rows Per Second** divide the finished bytes and rows by the time since the run started, so they are averages.
+  A table counts only once it is finished, so both fall while a large table runs and jump when it ends.
+- **Compare Duration** stops rising when the run ends, and its last value in the legend is how long the run took.
+- **Differing And Failed Tables** counts both per kind.
+  For `rehearsal`, tables there are expected, because the source takes writes while it compares.
+  For `drain` and `data`, any table there fails that check.
+- **Tables In Flight** lists the tables of each run's latest sample, with the time spent on each.
+  A run that ended without its last progress line keeps its last list there.
 
 ### Why does the target show fewer bytes than the source?
 

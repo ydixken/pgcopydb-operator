@@ -219,6 +219,9 @@ A run that ends without the last line, because it was canceled or its pod died, 
 The drain verify and the data compare print the newest progress line again after their report, so a long report cannot push it out of what the operator reads.
 An item stays after its run ends, until the first sample of the next run of the same kind replaces it, so `jobName` names the run it describes.
 
+The operator exports each item's counts, sizes, and duration as gauges labeled with its `kind`, such as `pgcopydb_migration_verification_compared_tables`, and the time spent on each table in flight; see the [metric reference](monitoring.md#metric-reference).
+The Verification row of the Migration Detail dashboard charts them, with the average bytes and rows per second since the run started; see [Monitoring](monitoring.md#reading-migration-detail).
+
 > [!note]
 > In a rehearsal, `differingTables` above 0 is expected: the source takes writes while the compare runs, and the target applies them later.
 > `failedTables` counts tables pgcopydb could not compare at all, such as a table created on the source after the clone.
