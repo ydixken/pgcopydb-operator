@@ -87,7 +87,7 @@ kubectl get pgm billing -o jsonpath='{.status.verificationRehearsal}' | jq
 While the run goes on, its item in `status.verificationProgress` counts the tables and bytes compared so far; see [Progress](#progress).
 The outcome is one of these:
 
-- `Running`: the Job runs.
+- `Running`: the Job runs, or it has ended and the operator retries a failed read of its log (see [Progress](#progress)).
 - `Completed`: `compare data` wrote its report, whatever the report says.
 - `Canceled`: the run was stopped; the message names why.
 - `Failed`: `compare data` wrote no report, or someone deleted the Job before it finished; the message carries the last error from the Job's log.
