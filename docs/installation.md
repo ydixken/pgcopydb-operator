@@ -9,8 +9,8 @@ helm install pgcopydb-operator oci://ghcr.io/ydixken/pgcopydb-operator/charts/pg
 
 The chart installs the `Migration` CRD, the controller manager, and its RBAC.
 The [chart README](https://github.com/ydixken/pgcopydb-operator/blob/main/charts/pgcopydb-operator/README.md) is the full values reference.
-The chart's [Artifact Hub page](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator) renders it with the CRD and the example resources.
-Check the install:
+The [Artifact Hub page](https://artifacthub.io/packages/helm/pgcopydb-operator/pgcopydb-operator) of the chart shows this README together with the CRD and the example resources.
+Check the installation:
 
 ```sh
 kubectl get crd migrations.pgcopydb-operator.io
@@ -18,7 +18,7 @@ kubectl -n pgcopydb-system get deploy
 ```
 
 The chart can also install a ServiceMonitor for the scrape, alert rules, and Grafana dashboards.
-Each has its own value.
+Each of these parts has its own value.
 See [Monitoring](operations/monitoring.md).
 
 ## CRD lifecycle
@@ -27,7 +27,7 @@ The CRD renders as a regular chart template, so `helm upgrade` updates it in pla
 Two values control it:
 
 - `crds.install` (default `true`): render the CRD.
-  When something else owns the CRD, set it to `false`, for example a second operator install in another namespace.
+  When something else owns the CRD, for example a second operator install in another namespace, set it to `false`.
 
 > [!warning]
 > `crds.keep: false` lets `helm uninstall` delete the CRD and every `Migration` resource with it.
@@ -42,17 +42,18 @@ An operator release without the [retry gate](operations/lifecycle.md#the-retry-g
 `kubectl get pgm -A -o wide` shows the exempt attempts of every Migration in the `EXEMPT` column.
 
 > [!warning]
-> Before a downgrade, raise `spec.backoffLimit` to at least `status.attempts` on every Migration with exempt attempts.
-> Otherwise the older operator can fail such a Migration for good at its next retry.
-> An older release also ignores `spec.target.synchronousCommit` and runs no retry gate, so the copy's commits wait for a synchronous standby again and retries start without waiting for a cut worker's sessions.
-> After upgrading back, check that `spec.target.synchronousCommit` is still set, because the older CRD can drop the field.
+> Before a downgrade, increase `spec.backoffLimit` to at least `status.attempts` on every Migration with exempt attempts.
+> If you do not, the older operator can fail such a Migration permanently at its next retry.
+> An older release also ignores `spec.target.synchronousCommit`, so the commits of the copy wait for a synchronous standby again.
+> It also runs no retry gate, so retries start without a wait for the sessions of a cut worker.
+> After you upgrade again, check that `spec.target.synchronousCommit` is still set, because the older CRD can drop the field.
 
 ### API versions
 
 The CRD serves two versions: `v1beta1` and the deprecated `v1alpha1`.
 `v1beta1` is the storage version.
-The schemas are identical, so existing `v1alpha1` manifests keep working.
+The schemas are identical, so existing `v1alpha1` manifests continue to work.
 The API server answers them with a deprecation warning.
-Switch your manifests to `apiVersion: pgcopydb-operator.io/v1beta1`.
+Change your manifests to `apiVersion: pgcopydb-operator.io/v1beta1`.
 
 Next: [Quickstart](quickstart.md).
