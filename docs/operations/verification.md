@@ -90,6 +90,9 @@ The outcome is one of these:
 - `Canceled`: the run was stopped; the message names why.
 - `Failed`: `compare data` wrote no report, or someone deleted the Job before it finished; the message carries the last error from the Job's log.
 
+A run that cannot start, for example because a ResourceQuota or an admission webhook refuses its Job, leaves `armed` false and puts the reason in `message`.
+The operator tries again on each pass.
+
 > [!important]
 > A rehearsal reports a duration, not a verdict.
 > While the migration streams, the source takes writes and the target is still applying them, so tables that differ are expected.

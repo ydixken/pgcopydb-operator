@@ -895,6 +895,31 @@ func TestReconcileDeletion_Errors(t *testing.T) {
 	}
 }
 
+// TestObserveRunningJob_RehearsalStartFailureDegrades: a rehearsal that cannot start must not
+// stop the worker's observation, and its status says why it did not start.
+func TestObserveRunningJob_RehearsalStartFailureDegrades(t *testing.T) {
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal = nil
+	r := failingReconciler(t, interceptor.Funcs{
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			return errBoom
+		},
+	}, m)
+	r.Logs = &fakeLogs{tsErr: errBoom}
+	now := time.Unix(100, 0)
+	r.now = func() time.Time { return now }
+	if _, err := r.observeRunningJob(context.Background(), m, m.DeepCopy(), namedJob(workerJob), now); err != nil {
+		t.Fatalf("a failed rehearsal start must not fail the worker's pass, got %v", err)
+	}
+	got := &v1beta1.Migration{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+		t.Fatal(err)
+	}
+	if st := got.Status.VerificationRehearsal; st == nil || st.Armed || !strings.Contains(st.Message, errBoom.Error()) {
+		t.Fatalf("persisted rehearsal %+v, want unarmed with the create error", st)
+	}
+}
+
 // TestMaxCatchupLag_Default pins the fallback for an unset
 // spec.follow.maxCatchupLag.
 func TestMaxCatchupLag_Default(t *testing.T) {

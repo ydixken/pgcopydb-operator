@@ -355,6 +355,84 @@ func recordDeletes() (interceptor.Funcs, map[string]metav1.DeletionPropagation) 
 	}, deleted
 }
 
+func jobExists(t *testing.T, r *MigrationReconciler, name string) bool {
+	t.Helper()
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: name}, &batchv1.Job{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
+// CEL rejects rehearsal with an Automatic cutover; a fake API, like an older CRD, does not.
+func TestReconcileRehearsal_AutomaticStartsNoRun(t *testing.T) {
+	m := streamingRehearsal()
+	m.Spec.Cutover.Mode = v1beta1.CutoverAutomatic
+	m.Status.VerificationRehearsal = nil
+	r := failingReconciler(t, interceptor.Funcs{}, m)
+	if err := r.reconcileRehearsal(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	if jobExists(t, r, rehearsalJobName(m, 1)) {
+		t.Fatal("a rehearsal started beside an Automatic cutover, which would cancel it at catch-up")
+	}
+	if st := m.Status.VerificationRehearsal; st == nil || st.Armed || !strings.Contains(st.Message, "cutover.mode Manual") {
+		t.Fatalf("rehearsal status %+v, want unarmed with a message naming cutover.mode Manual", st)
+	}
+}
+
+// A start that fails says why in status and stays unarmed, so the next pass starts the run.
+func TestReconcileRehearsal_FailedStartIsInStatus(t *testing.T) {
+	ctx := context.Background()
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
+		Run: 1, JobName: rehearsalJobName(m, 1), Outcome: v1beta1.RehearsalCompleted,
+	}
+	failing := true
+	r := failingReconciler(t, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if failing {
+				return errBoom
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	}, m)
+	if err := r.reconcileRehearsal(ctx, m); !errors.Is(err, errBoom) {
+		t.Fatalf("a failed Job create must propagate, got %v", err)
+	}
+	st := m.Status.VerificationRehearsal
+	if st.Armed || st.Run != 1 || !strings.Contains(st.Message, "did not start") || !strings.Contains(st.Message, errBoom.Error()) {
+		t.Fatalf("rehearsal status %+v, want run 1's record, unarmed, with the create error", st)
+	}
+
+	failing = false
+	if err := r.reconcileRehearsal(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	if st := m.Status.VerificationRehearsal; !st.Armed || st.Run != 2 || !jobExists(t, r, rehearsalJobName(m, 2)) {
+		t.Fatalf("rehearsal status %+v, want run 2 started on the next pass", st)
+	}
+}
+
+// The previous run's Job goes first: a run created before a failed delete would run unrecorded.
+func TestReconcileRehearsal_PreviousJobDeleteFailure(t *testing.T) {
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
+		Run: 1, JobName: rehearsalJobName(m, 1), Outcome: v1beta1.RehearsalCompleted,
+	}
+	r := failingReconciler(t, interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return errBoom
+		},
+	}, m, rehearsalJobOf(m, 1, jobCompleted))
+	if err := r.reconcileRehearsal(context.Background(), m); !errors.Is(err, errBoom) {
+		t.Fatalf("a failed delete of the previous run's Job must propagate, got %v", err)
+	}
+	if jobExists(t, r, rehearsalJobName(m, 2)) || m.Status.VerificationRehearsal.Armed {
+		t.Fatalf("run 2 started although run 1's Job could not be deleted: %+v", m.Status.VerificationRehearsal)
+	}
+}
+
 // A run whose status write was lost is in no status, and the cancel stops it all the same.
 func TestCancelRehearsal_StopsAnUnrecordedRun(t *testing.T) {
 	m := streamingRehearsal()

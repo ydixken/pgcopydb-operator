@@ -73,15 +73,32 @@ func (r *MigrationReconciler) reconcileRehearsal(ctx context.Context, m *v1beta1
 		return r.cancelRehearsal(ctx, m, "the cutover started")
 	case armed:
 		return r.observeRehearsal(ctx, m)
-	case m.Status.Phase != v1beta1.PhaseStreaming && m.Status.Phase != v1beta1.PhaseCutoverPending,
+	case m.Status.Phase != v1beta1.PhaseStreaming && m.Status.Phase != v1beta1.PhaseCutoverPending:
+		return nil
+	case m.Spec.Cutover.Mode == v1beta1.CutoverAutomatic:
 		// CEL rejects Automatic, an older CRD may not: its cutover starts at catch-up.
-		m.Spec.Cutover.Mode == v1beta1.CutoverAutomatic:
+		rehearsalNotStarted(m, "no run starts: a rehearsal needs spec.cutover.mode Manual, "+
+			"because an Automatic cutover starts at catch-up and cancels it")
 		return nil
 	}
-	return r.startRehearsal(ctx, m)
+	if err := r.startRehearsal(ctx, m); err != nil {
+		rehearsalNotStarted(m, "the next run did not start, the operator retries: "+truncate(err.Error(), maxDetailLen))
+		return err
+	}
+	return nil
 }
 
-// startRehearsal creates the next run's Job and deletes the previous run's.
+// rehearsalNotStarted says in status why no run started. armed stays false, so the
+// next pass tries again.
+func rehearsalNotStarted(m *v1beta1.Migration, why string) {
+	if m.Status.VerificationRehearsal == nil {
+		m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{}
+	}
+	m.Status.VerificationRehearsal.Message = why
+}
+
+// startRehearsal deletes the previous run's Job and creates the next run's. In that
+// order, a failed delete starts no run that status cannot record.
 func (r *MigrationReconciler) startRehearsal(ctx context.Context, m *v1beta1.Migration) error {
 	prev := m.Status.VerificationRehearsal
 	run := int32(1)
@@ -89,17 +106,17 @@ func (r *MigrationReconciler) startRehearsal(ctx context.Context, m *v1beta1.Mig
 		run = prev.Run + 1
 	}
 	name := rehearsalJobName(m, run)
-	if _, _, err := r.ensureJob(ctx, m, name, func() (*batchv1.Job, error) {
-		return buildRehearsalJob(m, r.RunnerImage, run)
-	}); err != nil {
-		return err
-	}
 	if prev != nil && prev.JobName != "" && prev.JobName != name {
 		if err := r.deleteRehearsalJob(ctx, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 			Namespace: m.Namespace, Name: prev.JobName,
 		}}); err != nil {
 			return err
 		}
+	}
+	if _, _, err := r.ensureJob(ctx, m, name, func() (*batchv1.Job, error) {
+		return buildRehearsalJob(m, r.RunnerImage, run)
+	}); err != nil {
+		return err
 	}
 	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
 		Armed: true, Run: run, JobName: name, Outcome: v1beta1.RehearsalRunning,
