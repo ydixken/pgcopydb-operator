@@ -27,7 +27,7 @@ Automation should wait on conditions, not on phase strings.
 | `Streaming` | Applying changes from the replication slot (live migrations) | `CutoverPending`, or `Failed` |
 | `CutoverPending` | Caught up and waiting for approval (`cutover.mode: Manual`) | `CuttingOver` |
 | `CuttingOver` | Setting the end position, draining, proving the drain | `Verifying`, `Completed`, or `Failed` |
-| `Verifying` | Running the requested `pgcopydb compare` checks | `Completed`, or `Failed` |
+| `Verifying` | Running the requested `pgcopydb compare` checks | `Completed` |
 | `Completed` | Finished, or a `spec.dryRun` preflight passed; terminal | |
 | `Failed` | Finished badly; terminal | |
 | `Suspended` | Holding, because `spec.suspend` is true | whatever it was doing |
@@ -124,7 +124,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CommitsBlocked` | `False` | `WorkerSucceeded` | The worker Job completed, so every commit it sent has returned. No sampler runs on the finish path, so this keeps a stale `True` out of it. |
 | `CommitsBlocked` | `Unknown` | `SyncRepUnobserved` | A sample could not read the count: the exec or the count query failed, or no worker pod was running. It replaces `False`, never `True`. |
 | `RetryHeld` | `True` | `GateProbing` | The first probe of a hold is pending, running, or not created yet. Every retry passes through it. |
-| `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker has not ended; the message names the pod and its node. No probe runs meanwhile. |
+| `RetryHeld` | `True` | `WorkerPodRemains` | A pod of the previous attempt's worker, or of a verification rehearsal, has not ended; the message names the pod and its node. No probe runs meanwhile. |
 | `RetryHeld` | `True` | `SessionsRemain` | The probe's census found sessions of the migration role left on the target. The message lists up to ten with pid, state, wait event, age, backend start, and name. The operator never ends them. |
 | `RetryHeld` | `True` | `SyncCommitNotLocal` | With `spec.target.synchronousCommit: local`, the probe's target connection reports another `synchronous_commit`: a pooler or proxy dropped the startup option. |
 | `RetryHeld` | `True` | `CommitBlocked` | The test commit waited for a synchronous standby until the probe cancelled it at 5 seconds, or it was skipped because a session, or an earlier probe, still waits for one. |

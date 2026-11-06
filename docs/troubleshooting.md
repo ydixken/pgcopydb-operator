@@ -376,7 +376,7 @@ Every retry passes through it, within seconds when the failed worker's log was r
 After a worker pod that vanished it can last several minutes, because the operator first waits up to 2 minutes for the log and then requeues with backoff before it creates `<name>-gate-<n>`.
 A probe pod that cannot start turns it into `ProbeFailed` with the kubelet reason.
 
-`WorkerPodRemains` means a pod of the previous attempt's worker has not ended; the message names the pod and its node.
+`WorkerPodRemains` means a pod of the previous attempt's worker, or of a canceled verification rehearsal, has not ended; the message names the pod and its node.
 A pod on a lost node holds the retry until the pod object is gone.
 
 > [!warning]
@@ -548,6 +548,7 @@ Nearly every cutover therefore proves the drain by content instead.
 The Job logs `endpos`, `replay_lsn`, and `origin_progress` before the compare starts, so its log names the path it took.
 
 Wait for the scan, and plan the write-downtime window around it.
+A [verification rehearsal](operations/verification.md#rehearsal) times the same scan before a cutover.
 A verify Job that fails runs once more before the Migration fails, so a refusal pays for the scan twice.
 
 ### Phase `Failed` with reason `DrainIncomplete`

@@ -99,6 +99,7 @@ spec:
   verification:
     schema: true                # pgcopydb compare schema after completion
     data: true                  # full-table checksums on both sides; enable deliberately
+    rehearsal: false            # follow + Manual: times one compare data run while streaming
   workVolume:
     size: 100Gi                 # dumps, catalogs, and (follow) the change stream
     storageClassName: fast-ssd  # empty uses the cluster default

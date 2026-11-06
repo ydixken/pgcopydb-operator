@@ -148,7 +148,8 @@ Budget the clone's needs plus write rate times the expected migration window.
 
 ### Which node the Jobs prefer
 
-A Migration runs its Jobs one after another, and every Job except the checks that run before an attempt mounts the work volume.
+A Migration runs its Jobs one after another, except a [verification rehearsal](operations/verification.md#rehearsal), which runs beside the worker.
+Every Job mounts the work volume except the checks that run before an attempt and the rehearsal.
 A ReadWriteOnce volume attaches to one node at a time.
 A Job pod on a different node must wait until the volume detaches from the previous node.
 To prevent this wait, the operator writes the node of the newest Job pod that mounts the work volume to the Migration annotation `pgcopydb-operator.io/work-volume-node`.
