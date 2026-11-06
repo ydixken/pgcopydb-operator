@@ -35,6 +35,10 @@ import (
 // rehearsalRows sizes the rehearsed table, so the compare scans more than a page.
 const rehearsalRows = 20000
 
+// verifyLogLines keeps the whole verify Job log: the drain path is decided near
+// its start, and the compare output follows.
+const verifyLogLines = 100000
+
 // The rehearsal's filtered selection is one stamped schema; outside it, the source
 // holds the pair's seed tables, so a compare that lost the filters would not complete.
 var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
@@ -76,9 +80,10 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 		// deleteFixtureMigration refuses a Migration whose verification differs from m's.
 		m.Spec.Verification = cur.Spec.Verification.DeepCopy()
 		var st *v1beta1.VerificationRehearsalStatus
+		var rehearsed *v1beta1.Migration
 		Eventually(func(g Gomega) {
-			cur := get(g)
-			st = cur.Status.VerificationRehearsal
+			rehearsed = get(g)
+			st = rehearsed.Status.VerificationRehearsal
 			g.Expect(st).NotTo(BeNil(), "no rehearsal has started")
 			if st.Outcome == v1beta1.RehearsalFailed || st.Outcome == v1beta1.RehearsalCanceled {
 				StopTrying(fmt.Sprintf("the rehearsal ended %s: %s\nlog:\n%s", st.Outcome, st.Message,
@@ -92,6 +97,8 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 		Expect(st.CompletedAt).NotTo(BeNil())
 		Expect(st.CompletedAt.Sub(st.StartedAt.Time)).To(BeNumerically(">", 0), "a rehearsal took no time")
 		Expect(jobLogs(st.JobName, 40)).To(ContainSubstring("rehearsal: compare data wrote its report"))
+		// The pass that records the outcome reads the finished Job's log, so the final sample is already there.
+		expectFinalProgress(rehearsed, v1beta1.VerificationProgressRehearsal, st.JobName)
 
 		By("expecting the same worker pod, no compare or verify Job, and no verdict")
 		cur = get(Default)
@@ -155,6 +162,50 @@ var _ = Describe("Verification rehearsal", SpecPriority(2), func() {
 			HaveField("StartedAt", Not(BeNil())), HaveField("CompletedAt", Not(BeNil())),
 		)))
 		Expect(done.Status.VerificationRehearsal.Outcome).To(Equal(v1beta1.RehearsalCompleted))
+
+		By("expecting a progress item for each compare: the rehearsal's kept, the drain's, and the data check's")
+		expectFinalProgress(done, v1beta1.VerificationProgressRehearsal, st.JobName)
+		expectDrainProgress(done)
+		expectFinalProgress(done, v1beta1.VerificationProgressData, name+"-compare-"+compareDataCheck)
 		Expect(psql(targetCluster, "SELECT count(*) FROM "+table)).To(Equal(fmt.Sprint(rehearsalRows + 1)))
 	})
 })
+
+// verificationProgress returns the item of kind in status.verificationProgress, or nil.
+func verificationProgress(m *v1beta1.Migration, kind string) *v1beta1.VerificationProgress {
+	for i := range m.Status.VerificationProgress {
+		if m.Status.VerificationProgress[i].Kind == kind {
+			return &m.Status.VerificationProgress[i]
+		}
+	}
+	return nil
+}
+
+// expectFinalProgress asserts that job left the final sample of kind, with every planned table compared.
+func expectFinalProgress(m *v1beta1.Migration, kind, job string) {
+	GinkgoHelper()
+	p := verificationProgress(m, kind)
+	Expect(p).NotTo(BeNil(), "%s has no %s item in status.verificationProgress", m.Name, kind)
+	Expect(p.JobName).To(Equal(job), "the %s item of %s describes another Job", kind, m.Name)
+	Expect(p.Final).To(BeTrue(), "the %s item of %s holds no final sample of Job %s", kind, m.Name, job)
+	Expect(p.PlannedTables).To(BeNumerically(">", 0), "the %s run of %s planned no table", kind, m.Name)
+	Expect(p.ComparedTables).To(Equal(p.PlannedTables), "the %s run of %s left tables uncompared", kind, m.Name)
+	Expect(p.InFlight).To(BeEmpty(), "the final %s sample of %s still lists tables in flight", kind, m.Name)
+}
+
+// expectDrainProgress holds the drain item to the verify Job's log: a drain decided by
+// content leaves a final sample, and the exact-LSN fast path, which compares nothing, none.
+func expectDrainProgress(m *v1beta1.Migration) {
+	GinkgoHelper()
+	job := m.Name + "-verify"
+	log := jobLogs(job, verifyLogLines)
+	switch {
+	case strings.Contains(log, "Deciding by content"):
+		expectFinalProgress(m, v1beta1.VerificationProgressDrain, job)
+	case strings.Contains(log, "drain verified: origin progress"):
+		Expect(verificationProgress(m, v1beta1.VerificationProgressDrain)).To(BeNil(),
+			"the exact-LSN drain of %s compared nothing, yet left a drain item", m.Name)
+	default:
+		Fail("the log of " + job + " shows neither drain path:\n" + logTail(log, 40))
+	}
+}

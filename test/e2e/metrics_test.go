@@ -204,6 +204,12 @@ func e2eSeries(metric string) string {
 	return fmt.Sprintf("%s{job=%q, namespace=%q, name=%q}", metric, metricsJob(), nsE2E, metricsMigration)
 }
 
+// e2eKindSeries is e2eSeries for one kind of compare data run.
+func e2eKindSeries(metric, kind string) string {
+	return fmt.Sprintf("%s{job=%q, namespace=%q, name=%q, kind=%q}",
+		metric, metricsJob(), nsE2E, metricsMigration, kind)
+}
+
 // panelKey identifies one panel target for the emptyOK allowlist.
 type panelKey struct{ uid, title, ref string }
 
@@ -234,6 +240,8 @@ var emptyOK = map[panelKey]bool{
 	// The e2e install runs with leaderElection.enabled=false, so the
 	// leader-election gauge never gets a series.
 	{uid: uidOperator, title: "Leader Elected", ref: "A"}: true,
+	// The sweep runs after every compare ended, and a final sample lists no table in flight.
+	{uid: uidDetail, title: "Tables In Flight", ref: "A"}: true,
 }
 
 // streamPanels read series that leave with the stream or the sampler run, so the sweep
@@ -270,10 +278,11 @@ func panelFailure(title, expr string, mayBeEmpty bool) string {
 }
 
 // The metrics specs prove the whole export path against a real Prometheus:
-// scrape health, the live series of a streaming migration, the terminal
-// series after cutover, every dashboard panel query, and series removal on
-// deletion. They need a Prometheus that scrapes the suite's operator install
-// (the chart's ServiceMonitor, which BeforeSuite enables).
+// scrape health, the live series of a streaming migration, a rehearsal's
+// progress series, the terminal series after cutover, every dashboard panel
+// query, and series removal on deletion. They need a Prometheus that scrapes
+// the suite's operator install (the chart's ServiceMonitor, which BeforeSuite
+// enables).
 var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(2), func() {
 	BeforeAll(func() {
 		urlEnv := os.Getenv("E2E_PROMETHEUS_URL")
@@ -388,6 +397,44 @@ var _ = Describe("Migration metrics", Ordered, Label("metrics"), SpecPriority(2)
 				e2eSeries("pgcopydb_migration_write_lsn_bytes"))).
 				To(BeNumerically(">=", 0), "negative receive lag")
 		}, 5*time.Minute, 2*time.Second).Should(Succeed())
+	})
+
+	It("exports the progress of a rehearsal", func() {
+		key := client.ObjectKey{Namespace: nsE2E, Name: metricsMigration}
+		cur := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, key, cur)).To(Succeed())
+		patch := client.MergeFrom(cur.DeepCopy())
+		cur.Spec.Verification.Rehearsal = true
+		Expect(k8sClient.Patch(ctx, cur, patch)).To(Succeed())
+
+		By("waiting for the rehearsal to complete")
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, key, cur)).To(Succeed())
+			st := cur.Status.VerificationRehearsal
+			g.Expect(st).NotTo(BeNil(), "no rehearsal has started")
+			if st.Outcome == v1beta1.RehearsalFailed || st.Outcome == v1beta1.RehearsalCanceled {
+				StopTrying(fmt.Sprintf("the rehearsal ended %s: %s", st.Outcome, st.Message)).Now()
+			}
+			g.Expect(st.Outcome).To(Equal(v1beta1.RehearsalCompleted), "rehearsal %s: %s", st.Outcome, st.Message)
+		}, migrationTimeout, time.Second).Should(Succeed())
+		kind := v1beta1.VerificationProgressRehearsal
+		expectFinalProgress(cur, kind, cur.Status.VerificationRehearsal.JobName)
+		p := verificationProgress(cur, kind)
+
+		By("asserting the rehearsal's series carry its status item")
+		Eventually(func(g Gomega) {
+			planned := promValue(g, e2eKindSeries("pgcopydb_migration_verification_planned_tables", kind))
+			g.Expect(planned).To(Equal(float64(p.PlannedTables)))
+			g.Expect(promValue(g, e2eKindSeries("pgcopydb_migration_verification_compared_tables", kind))).
+				To(Equal(planned))
+			g.Expect(promValue(g, e2eKindSeries("pgcopydb_migration_verification_planned_bytes", kind))).
+				To(Equal(float64(p.PlannedBytes.Value())))
+			g.Expect(promValue(g, e2eKindSeries("pgcopydb_migration_verification_duration_seconds", kind))).
+				To(BeNumerically(">", 0))
+			// The final sample lists no table in flight, so no table keeps a series.
+			g.Expect(promVector(g, e2eKindSeries("pgcopydb_migration_verification_table_elapsed_seconds", kind))).
+				To(BeEmpty(), "a table of the finished rehearsal still has an in-flight series")
+		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 
 	It("records the terminal series after cutover", func() {
