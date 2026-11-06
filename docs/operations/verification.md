@@ -132,7 +132,7 @@ The new run's Job replaces the previous one, and the operator deletes the previo
 ### What cancels a rehearsal
 
 A running rehearsal ends `Canceled` when `rehearsal` goes back to `false`, when the cutover starts, on a suspend, when a worker attempt fails, when the Migration ends `Completed` or `Failed`, and when the Migration is deleted.
-The operator deletes the Job in the foreground.
+The operator deletes every unfinished rehearsal Job of the Migration in the foreground, so a run whose start it failed to record stops too.
 pgcopydb checks for a stop only between tables, so the Job's TERM handler stops pgcopydb and cancels the compare's queries on both databases with `pg_cancel_backend`.
 It cancels the sessions of the migration role that come from the rehearsal pod's client address and are named `pgcopydb[<pid>] compare worker`, the processes that run the checksum queries.
 The Job also sets `client_connection_check_interval` to 10 seconds, so a backend notices within seconds when the pod is gone and ends its query.

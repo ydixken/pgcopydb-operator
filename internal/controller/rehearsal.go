@@ -134,6 +134,31 @@ func (r *MigrationReconciler) observeRehearsal(ctx context.Context, m *v1beta1.M
 // its sessions count in the retry gate's census and its scans compete with the drain
 // verify. The foreground delete sends the pod TERM, and the script cancels its queries.
 func (r *MigrationReconciler) cancelRehearsal(ctx context.Context, m *v1beta1.Migration, reason string) error {
+	if err := r.cancelRecordedRehearsal(ctx, m, reason); err != nil {
+		return err
+	}
+	// A run whose status write was lost is recorded nowhere; it must not outlive the worker either.
+	jobs := &batchv1.JobList{}
+	if err := r.uncached().List(ctx, jobs, client.InNamespace(m.Namespace),
+		client.MatchingLabels{labelMigration: m.Name}); err != nil {
+		return err
+	}
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		if done, _ := jobFinished(job); done || !job.DeletionTimestamp.IsZero() ||
+			!strings.HasPrefix(job.Name, m.Name+"-rehearsal-") {
+			continue
+		}
+		if err := r.deleteRehearsalJob(ctx, job); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cancelRecordedRehearsal ends the run status records as Running: Canceled, or what its
+// Job says when the Job finished first.
+func (r *MigrationReconciler) cancelRecordedRehearsal(ctx context.Context, m *v1beta1.Migration, reason string) error {
 	st := m.Status.VerificationRehearsal
 	if st == nil || st.Outcome != v1beta1.RehearsalRunning {
 		return nil

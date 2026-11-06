@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -40,6 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -311,6 +313,67 @@ func TestRehearsalScript_TermCancelsQueries(t *testing.T) {
 		if !strings.Contains(call, "pg_cancel_backend(pid)") || !strings.Contains(call, "client_addr = inet_client_addr()") {
 			t.Errorf("call %q cancels no query of this pod", call)
 		}
+	}
+}
+
+// streamingRehearsal is a streaming follow Migration whose status records run 1 as running.
+func streamingRehearsal() *v1beta1.Migration {
+	m := followPasswordMigration()
+	m.Spec.Cutover.Mode = v1beta1.CutoverManual
+	m.Spec.Verification = &v1beta1.VerificationOptions{Rehearsal: true}
+	m.Status.Phase = v1beta1.PhaseStreaming
+	m.Status.Attempts = 1
+	m.Status.JobName = workerJob
+	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
+		Armed: true, Run: 1, JobName: rehearsalJobName(m, 1), Outcome: v1beta1.RehearsalRunning,
+	}
+	return m
+}
+
+// rehearsalJobOf is run n's Job, labelled as scriptJob labels it.
+func rehearsalJobOf(m *v1beta1.Migration, run int32, conds ...batchv1.JobCondition) *batchv1.Job {
+	job := namedJob(rehearsalJobName(m, run), conds...)
+	job.Labels = map[string]string{labelMigration: m.Name}
+	return job
+}
+
+var jobCompleted = batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
+
+// recordDeletes passes every Delete through and records each name's propagation policy.
+func recordDeletes() (interceptor.Funcs, map[string]metav1.DeletionPropagation) {
+	deleted := map[string]metav1.DeletionPropagation{}
+	return interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			o := &client.DeleteOptions{}
+			o.ApplyOptions(opts)
+			deleted[obj.GetName()] = ""
+			if o.PropagationPolicy != nil {
+				deleted[obj.GetName()] = *o.PropagationPolicy
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	}, deleted
+}
+
+// A run whose status write was lost is in no status, and the cancel stops it all the same.
+func TestCancelRehearsal_StopsAnUnrecordedRun(t *testing.T) {
+	m := streamingRehearsal()
+	m.Status.VerificationRehearsal = &v1beta1.VerificationRehearsalStatus{
+		Run: 1, JobName: rehearsalJobName(m, 1), Outcome: v1beta1.RehearsalCompleted,
+	}
+	worker := namedJob(workerJob)
+	worker.Labels = map[string]string{labelMigration: m.Name}
+	funcs, deleted := recordDeletes()
+	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1, jobCompleted), rehearsalJobOf(m, 2), worker)
+	if err := r.cancelRehearsal(context.Background(), m, "the cutover started"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]metav1.DeletionPropagation{rehearsalJobName(m, 2): metav1.DeletePropagationForeground}
+	if !maps.Equal(deleted, want) {
+		t.Fatalf("deleted %v, want only the unrecorded run, in the foreground", deleted)
+	}
+	if st := m.Status.VerificationRehearsal; st.Outcome != v1beta1.RehearsalCompleted || st.Run != 1 {
+		t.Fatalf("rehearsal %+v, want run 1's record unchanged", st)
 	}
 }
 
