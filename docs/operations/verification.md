@@ -105,7 +105,8 @@ Run it when both databases can take a full read of the selected tables next to t
 
 The rehearsal reads the source catalog as it is when the run starts.
 A table created on the source after the clone is missing on the target, because DDL is not replicated.
-Its compare fails, and with the bundled runner the run then writes no report and ends `Failed`.
+Its checksum query fails, and the bundled runner records that table as an `error` row, compares the rest, and writes its report, so the run ends `Completed`.
+With `0.18.136.gb42f560` or older, the run writes no report and ends `Failed`.
 
 ### Run it again
 
