@@ -76,6 +76,10 @@ It fails the Job when a table differs on row count or checksum.
 A compare that could not run, or a report that could not be read, fails the Job too.
 The wrapper prints the report it evaluates, so the Job log keeps the per-table detail.
 
+`spec.verification.rehearsal` runs `pgcopydb list tables`, with `--filters` when the Migration sets filters, and then `pgcopydb compare data --json`.
+Both take `--dir` on a scratch emptyDir, because the live worker holds the work PVC.
+The Job succeeds whenever `compare data` wrote a report, so a table that differs does not fail it.
+
 ## PostgreSQL feature coverage
 
 Every release candidate migrates a catalog of PostgreSQL features and holds the target to the source.

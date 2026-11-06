@@ -100,6 +100,7 @@ The operator tries again on each pass.
 
 The drain verify runs with source writes stopped, and the rehearsal competes with live writes and the apply.
 Its duration is therefore an estimate of the compare in the cutover window, not a measurement of it.
+Each table's checksum query holds a snapshot on both databases for its whole scan, so until a large table's scan ends, vacuum on either side cannot remove rows that died after it started.
 Run it when both databases can take a full read of the selected tables next to the live traffic.
 
 The rehearsal reads the source catalog as it is when the run starts.
@@ -121,7 +122,7 @@ A `true` that arrives while `armed` is still true starts nothing, so a quick tog
 2. Wait until `armed` is false.
 
     ```sh
-    kubectl wait pgm/billing --for=jsonpath='{.status.verificationRehearsal.armed}'=false
+    kubectl wait pgm/billing --for=jsonpath='{.status.verificationRehearsal.armed}'=false --timeout=10m
     ```
 
 3. Set `rehearsal` to `true`.
