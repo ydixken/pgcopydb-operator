@@ -164,6 +164,17 @@ func fullMigration() *Migration {
 				Armed: true, Run: 2, JobName: "full-rehearsal-2", StartedAt: &now, CompletedAt: &now,
 				Outcome: RehearsalCompleted, Message: "compare data finished",
 			},
+			VerificationProgress: []VerificationProgress{{
+				Kind: VerificationProgressRehearsal, JobName: "full-rehearsal-2", ObservedAt: &now, Final: true,
+				PlannedTables: 3, ComparedTables: 2, ComparedRows: 20, DifferingTables: 1, FailedTables: 1,
+				PlannedBytes:  resource.NewQuantity(131072, resource.BinarySI),
+				ComparedBytes: resource.NewQuantity(24576, resource.BinarySI),
+				Elapsed:       &metav1.Duration{Duration: 10 * time.Second},
+				InFlight: []VerificationTableProgress{{
+					Schema: "public", Name: "a", Bytes: resource.NewQuantity(106496, resource.BinarySI),
+					Elapsed: &metav1.Duration{Duration: 10 * time.Second},
+				}},
+			}},
 			JobName:     "full-run-2",
 			StartedAt:   &now,
 			CompletedAt: &now,
@@ -190,7 +201,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
 		m.Status.Progress, m.Status.Replication, m.Status.RetryGate, m.Status.VerificationRehearsal,
-		&m.Status.Verification[0],
+		&m.Status.Verification[0], &m.Status.VerificationProgress[0], &m.Status.VerificationProgress[0].InFlight[0],
 	}
 	for _, obj := range objs {
 		v := reflect.ValueOf(obj)
@@ -233,6 +244,10 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
 	c.Status.Verification[0].CompletedAt.Time = time.Unix(1, 0)
 	c.Status.VerificationRehearsal.StartedAt.Time = time.Unix(1, 0)
+	c.Status.VerificationProgress[0].Elapsed.Duration = time.Hour
+	*c.Status.VerificationProgress[0].PlannedBytes = resource.MustParse("9Gi")
+	c.Status.VerificationProgress[0].InFlight[0].Name = mutated
+	c.Status.VerificationProgress[0].InFlight[0].Elapsed.Duration = time.Hour
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")
 	}
