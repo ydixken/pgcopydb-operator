@@ -76,13 +76,9 @@ func (r *MigrationReconciler) retryGate(ctx context.Context, m, base *v1beta1.Mi
 		return ctrl.Result{}, false, err
 	}
 	if pod != nil {
-		node := pod.Spec.NodeName
-		if node == "" {
-			node = "(none yet)"
-		}
 		r.setHold(m, reasonWorkerPodRemains, fmt.Sprintf(
 			"Pod %s %s is %s on node %s; attempt %d waits until it has ended, because it may still hold sessions",
-			pod.Name, of, podState(pod), node, attempt))
+			pod.Name, of, podState(pod), podNode(pod), attempt))
 		return held, false, r.updateStatus(ctx, m, base)
 	}
 
@@ -186,6 +182,13 @@ func (r *MigrationReconciler) previousWorkerPod(ctx context.Context, m *v1beta1.
 		}
 	}
 	return nil, nil
+}
+
+func podNode(p *corev1.Pod) string {
+	if p.Spec.NodeName == "" {
+		return "(none yet)"
+	}
+	return p.Spec.NodeName
 }
 
 func podState(p *corev1.Pod) string {

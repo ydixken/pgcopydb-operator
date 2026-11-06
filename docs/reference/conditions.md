@@ -107,6 +107,7 @@ Every reason the controller sets, spelled exactly as it appears on the wire.
 | `CaughtUp` | `True` | `LagBelowThreshold` | Two consecutive samples measured the replication lag at or below `spec.follow.maxCatchupLag`. |
 | `CaughtUp` | `False` | `Lagging` | Lag is above the threshold, or no replication sample is available yet. |
 | `CaughtUp` | `False` | `ConfirmingCatchUp` | One sample measured the lag at or below `spec.follow.maxCatchupLag`, and the operator needs a second consecutive one before it sets `CaughtUp` True. A single sample can land while the worker still confirms its raw receive position, where the lag reads near zero whatever the apply backlog is. A sample above the threshold returns the condition to `Lagging` and the count starts over. |
+| `CutoverCompleted` | `Unknown` | `RehearsalPodRemains` | The worker has drained, and the drain verify waits until the pod of a canceled verification rehearsal has ended; the message names the pod and its node. The condition is removed when the pod has ended, and the verify's result sets it. |
 | `CutoverCompleted` | `True` | `DrainVerified` | The verify Job proved the drain: the target's origin progress sits exactly on the cutover LSN, or `pgcopydb compare data` found every migrated table matching. Any other reading is decided by content, which is the path nearly every cutover takes, because publication-filtered WAL and unapplied commits measure alike. Changes are applied and sequences are synced. |
 | `CutoverCompleted` | `False` | `DrainIncomplete` | Drain verification did not show the target holding every change: `pgcopydb compare data` found a difference or gave no verdict. The Migration fails with the same reason. |
 | `OwnershipApplied` | `Unknown` | `OwnershipRunning` | The `<name>-reown` Job is running: after the worker exited on a clone, after the drain is proven on a live migration. No worker restarts while it exists. |
@@ -178,6 +179,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `DryRunSucceeded` | Normal | A dry run's preflight passed; the Migration completed without a worker Job. |
 | `CutoverStarted` | Normal | The cutover LSN is set; the stream is frozen and draining. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently; retried on the next pass. |
+| `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The cleanup Job (slot, publication, origin) was created. |
 | `CleanupFailed` | Warning | Cleanup exhausted its retries; the named slot may still hold WAL on the source and needs manual removal. |
 | `OwnershipStarted` | Normal | The `<name>-reown` handover Job was created. |

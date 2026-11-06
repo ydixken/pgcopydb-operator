@@ -240,12 +240,11 @@ func (r *MigrationReconciler) finishFollow(ctx context.Context, m, base *v1beta1
 	if err := r.cancelRehearsal(ctx, m, "the cutover started"); err != nil {
 		return ctrl.Result{}, err
 	}
-	pod, err := r.rehearsalPod(ctx, m)
+	wait, err := r.drainWaitsForRehearsal(ctx, m)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if pod != nil {
-		logf.FromContext(ctx).Info("drain verification waits for the rehearsal pod to end", "pod", pod.Name)
+	if wait {
 		if err := r.updateStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err
 		}

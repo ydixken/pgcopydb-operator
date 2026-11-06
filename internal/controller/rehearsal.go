@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,8 +36,12 @@ import (
 
 // The verification rehearsal (spec.verification.rehearsal) runs compare data once
 // while a live migration streams, so the drain verify's duration can be sized
-// before the cutover. It writes status.verificationRehearsal and nothing else: no
-// phase, no Verified, no status.verification, and no compare or verify Job.
+// before the cutover. It writes status.verificationRehearsal, never the phase,
+// Verified, status.verification, or a compare or verify Job; only the drain
+// verify's wait for its pod shows, in CutoverCompleted.
+
+// reasonRehearsalPodRemains is CutoverCompleted Unknown while the drain verify waits for a rehearsal pod.
+const reasonRehearsalPodRemains = "RehearsalPodRemains"
 
 // rehearsalJobName is run n's Job. A name per run keeps ensureJob from adopting
 // a finished run as the next one.
@@ -256,6 +261,35 @@ func (r *MigrationReconciler) deleteRehearsalJob(ctx context.Context, job *batch
 		return err
 	}
 	return nil
+}
+
+// drainWaitsForRehearsal holds the drain verify while a rehearsal pod has not ended and
+// says so in CutoverCompleted. Once the drain is proven, a rehearsal pod holds nothing.
+func (r *MigrationReconciler) drainWaitsForRehearsal(ctx context.Context, m *v1beta1.Migration) (bool, error) {
+	cur := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)
+	if cur != nil && cur.Status == metav1.ConditionTrue {
+		return false, nil
+	}
+	pod, err := r.rehearsalPod(ctx, m)
+	if err != nil {
+		return false, err
+	}
+	waited := cur != nil && cur.Reason == reasonRehearsalPodRemains
+	if pod == nil {
+		if waited {
+			// The verify's result sets the condition; until then it would name a pod that is gone.
+			meta.RemoveStatusCondition(&m.Status.Conditions, v1beta1.ConditionCutoverComplete)
+		}
+		return false, nil
+	}
+	msg := fmt.Sprintf("The drain verification waits for pod %s of the canceled verification rehearsal, "+
+		"which is %s on node %s, because its scans would stretch the write-downtime window",
+		pod.Name, podState(pod), podNode(pod))
+	if !waited {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, reasonRehearsalPodRemains, "Cutover", "%s", msg)
+	}
+	r.setCondition(m, v1beta1.ConditionCutoverComplete, metav1.ConditionUnknown, reasonRehearsalPodRemains, msg)
+	return true, nil
 }
 
 // rehearsalPod returns a rehearsal pod of m that has not ended, or nil. Like the

@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -339,6 +340,16 @@ func rehearsalJobOf(m *v1beta1.Migration, run int32, conds ...batchv1.JobConditi
 
 var jobCompleted = batchv1.JobCondition{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}
 
+// podOfJob is the pod the Job controller would run for Job owner, on node-a.
+func podOfJob(m *v1beta1.Migration, owner string, phase corev1.PodPhase) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: owner + "-pod", Namespace: m.Namespace,
+			Labels: map[string]string{labelMigration: m.Name, jobNameLabel: owner}},
+		Spec:   corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{Phase: phase},
+	}
+}
+
 // recordDeletes passes every Delete through and records each name's propagation policy.
 func recordDeletes() (interceptor.Funcs, map[string]metav1.DeletionPropagation) {
 	deleted := map[string]metav1.DeletionPropagation{}
@@ -362,6 +373,18 @@ func jobExists(t *testing.T, r *MigrationReconciler, name string) bool {
 		t.Fatal(err)
 	}
 	return err == nil
+}
+
+// expectCanceled fails unless m's run 1 ended Canceled for reason and its Job was deleted in the foreground.
+func expectCanceled(t *testing.T, m *v1beta1.Migration, deleted map[string]metav1.DeletionPropagation, reason string) {
+	t.Helper()
+	st := m.Status.VerificationRehearsal
+	if st.Outcome != v1beta1.RehearsalCanceled || !strings.Contains(st.Message, reason) || st.CompletedAt == nil {
+		t.Fatalf("rehearsal %+v, want Canceled because %s", st, reason)
+	}
+	if got, ok := deleted[st.JobName]; !ok || got != metav1.DeletePropagationForeground {
+		t.Fatalf("Job %s deleted %t with policy %q, want a foreground delete", st.JobName, ok, got)
+	}
 }
 
 // CEL rejects rehearsal with an Automatic cutover; a fake API, like an older CRD, does not.
@@ -452,6 +475,70 @@ func TestCancelRehearsal_StopsAnUnrecordedRun(t *testing.T) {
 	}
 	if st := m.Status.VerificationRehearsal; st.Outcome != v1beta1.RehearsalCompleted || st.Run != 1 {
 		t.Fatalf("rehearsal %+v, want run 1's record unchanged", st)
+	}
+}
+
+// The worker can exit 0 before any pass saw CuttingOver, so finishFollow cancels too, and the
+// drain verify waits for the rehearsal pod with the wait in CutoverCompleted.
+func TestFinishFollow_CancelsAndWaitsForTheRehearsalPod(t *testing.T) {
+	ctx := context.Background()
+	m := streamingRehearsal()
+	m.Status.Phase = v1beta1.PhaseCutoverPending
+	pod := podOfJob(m, rehearsalJobName(m, 1), corev1.PodRunning)
+	funcs, deleted := recordDeletes()
+	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1), pod)
+	rec := r.Recorder.(*events.FakeRecorder)
+
+	for pass := range 2 {
+		res, err := r.finishFollow(ctx, m, m.DeepCopy())
+		if err != nil || res.RequeueAfter != pollInterval {
+			t.Fatalf("pass %d: (%+v, %v), want a requeue at the poll interval", pass, res, err)
+		}
+		cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)
+		if cond == nil || cond.Status != metav1.ConditionUnknown || cond.Reason != reasonRehearsalPodRemains ||
+			!strings.Contains(cond.Message, pod.Name) || !strings.Contains(cond.Message, "node-a") {
+			t.Fatalf("pass %d: CutoverCompleted %+v, want Unknown/%s naming the pod and its node", pass, cond, reasonRehearsalPodRemains)
+		}
+		if jobExists(t, r, verifyJobName(m)) {
+			t.Fatalf("pass %d: the drain verify started beside a running rehearsal pod", pass)
+		}
+	}
+	expectCanceled(t, m, deleted, "the cutover started")
+	if got := drainEvents(rec); len(got) != 1 || !strings.Contains(got[0], "Warning "+reasonRehearsalPodRemains) {
+		t.Fatalf("events %q, want one %s Warning for the whole wait", got, reasonRehearsalPodRemains)
+	}
+
+	ended := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(pod), ended); err != nil {
+		t.Fatal(err)
+	}
+	ended.Status.Phase = corev1.PodSucceeded
+	if err := r.Status().Update(ctx, ended); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.finishFollow(ctx, m, m.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	if !jobExists(t, r, verifyJobName(m)) {
+		t.Fatal("the drain verify did not start once the rehearsal pod ended")
+	}
+	if cond := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete); cond != nil {
+		t.Fatalf("CutoverCompleted %+v still names the ended pod", cond)
+	}
+}
+
+// Once the drain is proven, a rehearsal pod must not turn CutoverCompleted back to Unknown.
+func TestDrainWaitsForRehearsal_NotAfterTheDrainIsProven(t *testing.T) {
+	m := streamingRehearsal()
+	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+		Type: v1beta1.ConditionCutoverComplete, Status: metav1.ConditionTrue, Reason: "DrainVerified",
+	})
+	r := failingReconciler(t, interceptor.Funcs{}, m, podOfJob(m, rehearsalJobName(m, 1), corev1.PodRunning))
+	if wait, err := r.drainWaitsForRehearsal(context.Background(), m); err != nil || wait {
+		t.Fatalf("drainWaitsForRehearsal = (%t, %v), want no wait after DrainVerified", wait, err)
+	}
+	if !meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCutoverComplete) {
+		t.Fatal("CutoverCompleted is no longer True")
 	}
 }
 
@@ -650,15 +737,20 @@ var _ = Describe("Verification rehearsal", func() {
 		Expect(rehearsal(m).Message).To(ContainSubstring("the cutover started"))
 		Expect(jobDeleted(name + "-rehearsal-1")).To(BeTrue())
 
-		By("creating no verify Job while the rehearsal pod runs")
+		By("creating no verify Job while the rehearsal pod runs, and saying so in CutoverCompleted")
 		finishJob(ctx, name+"-run-1", true)
 		m = reconcileAndGet(ctx, r, name)
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCuttingOver))
 		Expect(jobAbsent(name + "-verify")).To(BeTrue())
+		waiting := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)
+		Expect(waiting).NotTo(BeNil())
+		Expect(waiting.Reason).To(Equal(reasonRehearsalPodRemains))
+		Expect(waiting.Message).To(ContainSubstring(pod.Name))
 
 		setPodPhase(pod, corev1.PodSucceeded)
-		reconcileAndGet(ctx, r, name)
+		m = reconcileAndGet(ctx, r, name)
 		Expect(fetchJob(ctx, name+"-verify")).NotTo(BeNil())
+		Expect(meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)).To(BeNil())
 	})
 
 	It("cancels on suspend and starts no run on resume", func() {

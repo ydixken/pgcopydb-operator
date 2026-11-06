@@ -40,6 +40,7 @@ It falls back to the bare Job message when the pod is already gone.
 | [`status.progress` stands still while a large table copies](#progress-stops-moving-while-a-large-table-copies) | Clone progress |
 | [`CloneCompleted` is `False` with reason `TablesEmptyOnTarget`](#clonecompleted-is-false-with-reason-tablesemptyontarget) | Clone progress |
 | [Phase `Failed`, reason `CloneIncomplete`](#phase-failed-with-reason-cloneincomplete) | Clone progress |
+| [`CutoverCompleted` is Unknown with reason `RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains) | Cutover and verification |
 | [The `<name>-verify` pod runs for a long time](#the-verify-pod-runs-for-a-long-time) | Cutover and verification |
 | [Phase `Failed`, reason `DrainIncomplete`](#phase-failed-with-reason-drainincomplete) | Cutover and verification |
 | [Phase `CutoverPending` and nothing happens](#phase-cutoverpending-and-nothing-happens) | Cutover and verification |
@@ -378,6 +379,7 @@ A probe pod that cannot start turns it into `ProbeFailed` with the kubelet reaso
 
 `WorkerPodRemains` means a pod of the previous attempt's worker, or of a canceled verification rehearsal, has not ended; the message names the pod and its node.
 A pod on a lost node holds the retry until the pod object is gone.
+The drain verify waits for a rehearsal pod the same way, with [`RehearsalPodRemains`](#cutovercompleted-is-unknown-with-reason-rehearsalpodremains).
 
 > [!warning]
 > Force-delete the pod only once you have confirmed that its node is down.
@@ -538,6 +540,24 @@ Do not use the target as a complete copy.
 Read `status.progress` and the worker log, then run a fresh Migration.
 
 ## Cutover and verification
+
+### `CutoverCompleted` is Unknown with reason `RehearsalPodRemains`
+
+The worker has drained, and no `<name>-verify` Job exists yet.
+The cutover canceled a [verification rehearsal](operations/verification.md#rehearsal), and the drain verify waits until the rehearsal pod has ended, because its scans would stretch the write-downtime window.
+The condition message names the pod and its node, and a `RehearsalPodRemains` Warning event marks the start of the wait.
+On a healthy node the pod ends seconds after the cancel.
+A pod on a lost node holds the drain verify until the pod object is gone, and nothing ends that wait.
+
+> [!warning]
+> Force-delete the pod only once you have confirmed that its node is down.
+> On a node that is only unreachable, the pod's checksum queries can still run beside the drain verify.
+
+To remove the pod of a node that is down:
+
+```sh
+kubectl delete pod <pod> --grace-period=0 --force
+```
 
 ### The verify pod runs for a long time
 

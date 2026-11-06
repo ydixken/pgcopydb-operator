@@ -140,6 +140,7 @@ pgcopydb checks for a stop only between tables, so the Job's TERM handler stops 
 It cancels the sessions of the migration role that come from the rehearsal pod's client address and are named `pgcopydb[<pid>] compare worker`, the processes that run the checksum queries.
 The Job also sets `client_connection_check_interval` to 10 seconds, so a backend notices within seconds when the pod is gone and ends its query.
 The [retry gate](lifecycle.md#the-retry-gate) and the drain verify both wait until the rehearsal pod has ended: its compare sessions count as leftovers on the target, and its scans would stretch the write-downtime window.
+While the drain verify waits, `CutoverCompleted` is `Unknown` with reason [`RehearsalPodRemains`](../troubleshooting.md#cutovercompleted-is-unknown-with-reason-rehearsalpodremains), and the message names the pod and its node.
 
 > [!note]
 > `client_connection_check_interval` exists from PostgreSQL 14 on, and the Job sets it as a startup option on both connections.
