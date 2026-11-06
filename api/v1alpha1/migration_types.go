@@ -524,6 +524,81 @@ type VerificationRehearsalStatus struct {
 	Message string `json:"message,omitempty"`
 }
 
+// The kinds of compare data run whose progress status.verificationProgress reports.
+const (
+	VerificationProgressRehearsal = "rehearsal"
+	VerificationProgressDrain     = "drain"
+	VerificationProgressData      = "data"
+)
+
+// VerificationProgress is the latest progress sample of one compare data run,
+// read from the compare progress lines its Job logs. Runners older than
+// 0.18.144.g86bf908 log none, so they leave no item.
+type VerificationProgress struct {
+	// kind is the run: rehearsal (spec.verification.rehearsal), drain (the
+	// cutover's drain verify, only when it compares), or data (spec.verification.data).
+	// +kubebuilder:validation:Enum=rehearsal;drain;data
+	Kind string `json:"kind"`
+
+	// jobName is the Job that logged the sample. Creating the next Job of the
+	// same kind removes the item, and that Job's first sample adds it back.
+	JobName string `json:"jobName"`
+
+	// observedAt is when the operator last read the sample from the Job's log.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+
+	// final is true for the line pgcopydb logs once every compare worker has
+	// exited. A worker that stopped leaves the tables it never reached
+	// uncompared, so comparedTables can be below plannedTables. false is a
+	// sample from a running compare, or the last one of a run that ended
+	// before that line.
+	// +optional
+	Final bool `json:"final"`
+
+	// plannedTables is the number of tables the run compares.
+	// +optional
+	PlannedTables int64 `json:"plannedTables,omitempty"`
+	// comparedTables counts the finished tables: matching, differing, and failed.
+	// +optional
+	ComparedTables int64 `json:"comparedTables,omitempty"`
+	// plannedBytes is the size of the planned tables on the source.
+	// +optional
+	PlannedBytes *resource.Quantity `json:"plannedBytes,omitempty"`
+	// comparedBytes is the source size of the finished tables.
+	// +optional
+	ComparedBytes *resource.Quantity `json:"comparedBytes,omitempty"`
+	// comparedRows sums the source rows of the tables that match or differ.
+	// +optional
+	ComparedRows int64 `json:"comparedRows,omitempty"`
+	// differingTables counts the tables whose row count or checksum differs.
+	// +optional
+	DifferingTables int64 `json:"differingTables,omitempty"`
+	// failedTables counts the tables whose checksum query failed.
+	// +optional
+	FailedTables int64 `json:"failedTables,omitempty"`
+	// elapsed is the time since compare data started, its schema read included.
+	// +optional
+	Elapsed *metav1.Duration `json:"elapsed,omitempty"`
+
+	// inFlight lists the tables being compared, oldest first, at most 64.
+	// +listType=atomic
+	// +optional
+	InFlight []VerificationTableProgress `json:"inFlight,omitempty"`
+}
+
+// VerificationTableProgress is one table a compare data run is on.
+type VerificationTableProgress struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	// bytes is the table's size on the source.
+	// +optional
+	Bytes *resource.Quantity `json:"bytes,omitempty"`
+	// elapsed is how long the table has been compared, in whole seconds.
+	// +optional
+	Elapsed *metav1.Duration `json:"elapsed,omitempty"`
+}
+
 // CutoverMode picks who pulls the trigger.
 // +kubebuilder:validation:Enum=Manual;Automatic
 type CutoverMode string
@@ -798,6 +873,13 @@ type MigrationStatus struct {
 	// verificationRehearsal reports the latest spec.verification.rehearsal run.
 	// +optional
 	VerificationRehearsal *VerificationRehearsalStatus `json:"verificationRehearsal,omitempty"`
+
+	// verificationProgress holds the latest compare data progress sample of each
+	// kind of run. An item stays after its run ends, until the next run of that kind starts.
+	// +listType=map
+	// +listMapKey=kind
+	// +optional
+	VerificationProgress []VerificationProgress `json:"verificationProgress,omitempty"`
 
 	// jobName is the current worker Job.
 	// +optional

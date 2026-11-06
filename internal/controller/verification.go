@@ -19,14 +19,17 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
@@ -50,43 +53,60 @@ const compareReportPath = "/tmp/compare-data.json"
 
 // compareReportQuery names every table the report does not show as matching.
 // An absent source side and an empty array count as unmatched, since NULL
-// against NULL would read as a clean match. psql reads the report from the
-// file, not through -v: Linux caps one argv string at 128 KiB, which a
-// pretty-printed report crosses at about 480 tables.
+// against NULL would read as a clean match. A row's status, which the bundled
+// runner adds and older runners lack, fails it unless it is match. psql reads
+// the report from the file, not through -v: Linux caps one argv string at
+// 128 KiB, which a pretty-printed report crosses at about 480 tables.
 var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select 'the report lists no table, so nothing was compared'
  where json_array_length(:'r'::json) = 0;
-select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)',
+select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)%s',
               t->>'schema', t->>'name',
               t->'source'->>'rowcount', t->'source'->>'checksum',
-              t->'target'->>'rowcount', t->'target'->>'checksum')
+              t->'target'->>'rowcount', t->'target'->>'checksum',
+              ', status ' || (t->>'status'))
   from json_array_elements(:'r'::json) as report(t)
  where t->'source'->>'rowcount' is distinct from t->'target'->>'rowcount'
     or t->'source'->>'checksum' is distinct from t->'target'->>'checksum'
     or t->'source'->>'rowcount' is null
-    or t->'source'->>'checksum' is null;
+    or t->'source'->>'checksum' is null
+    or (t->'status' is not null and t->>'status' is distinct from 'match');
 `
+
+// compareLogPath keeps compare data's stderr, so the last progress line can be
+// printed again after the report. compareStatusPath carries its exit status
+// out of the pipe into tee, which sh, lacking pipefail, would lose.
+const (
+	compareLogPath    = "/tmp/compare.log"
+	compareStatusPath = "/tmp/compare.status"
+)
 
 // Validate the report even after exit 0: empty or incomplete output proves
 // no match, and some runner overrides exit 0 on content differences.
 // psql parses JSON because the runner image ships no jq or python.
+// The progress and clone-progress lines go last because the report can push
+// them out of the log window the operator reads.
 var compareDataStrict = `compare_data_strict() {
-  if ! pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + compareReportPath + `; then
-    echo "compare data could not run; refusing to read that as a match"
-    return 1
-  fi
-  cat ` + compareReportPath + `
-  if ! unmatched=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -f - <<'SQL'
+  { rc=0; pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` 2>&1 >` + compareReportPath + ` || rc=$?; echo "$rc" >` + compareStatusPath + `; } | tee ` + compareLogPath + ` >&2
+  rc=$(cat ` + compareStatusPath + `) || rc=
+  cat ` + compareReportPath + ` || :
+  verdict=1
+  if [ "$rc" != 0 ]; then
+    echo "compare data exited ${rc:-without a status}, so tables differ or it could not compare them; refusing to read that as a match"
+  elif ! unmatched=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -f - <<'SQL'
 ` + compareReportQuery + `SQL
   ); then
     echo "compare data report could not be evaluated; refusing to read that as a match"
-    return 1
-  fi
-  if [ -n "$unmatched" ]; then
+  elif [ -n "$unmatched" ]; then
     echo "compare data did not find every table matching between source and target:"
     echo "$unmatched"
-    return 1
+  else
+    verdict=0
   fi
-  return 0
+  grep -F '` + pgcopydb.CompareProgressPrefix + `' ` + compareLogPath + ` | tail -n 1
+  if [ -n "${clone_progress:-}" ]; then
+    printf '` + verifyProgressPrefix + `%s\n' "$clone_progress"
+  fi
+  return "$verdict"
 }
 `
 
@@ -250,10 +270,19 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 			if created {
 				r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "VerificationStarted", "Verify",
 					"running pgcopydb compare %s", check)
+				if check == compareData {
+					dropCompareProgress(m, v1beta1.VerificationProgressData)
+				}
 			}
 			return false, nil
 		}
 		done, ok := jobFinished(job)
+		if check == compareData {
+			// The pass that sees the Job finish completes the Migration, so it waits for the last sample.
+			if _, err := r.readCompareProgress(ctx, m, v1beta1.VerificationProgressData, job); err != nil {
+				return false, err
+			}
+		}
 		if !done {
 			return false, nil
 		}
@@ -283,4 +312,103 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 	r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionFalse, reason, msg)
 	r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, "VerificationMismatch", "Verify", "%s", msg)
 	return true, nil
+}
+
+// compareProgressLogTail bounds the read of a running compare Job's log. Samples
+// come at most 10 s apart; between them sit only the lines of differing or
+// failed tables, and a window without a sample keeps the previous one.
+const compareProgressLogTail = 1000
+
+// compareProgressMaxInFlight is the bundled runner's cap on a sample's inFlight list. A
+// runner from spec.runner may log more, which would grow status and the table series.
+const compareProgressMaxInFlight = 64
+
+// readCompareProgress reads a compare Job's log for its newest progress sample and returns
+// the log: a short tail while the Job runs, the whole verify window once it finished. A
+// finished Job's read error is returned for failedLogGrace, so the caller can wait for it.
+func (r *MigrationReconciler) readCompareProgress(ctx context.Context, m *v1beta1.Migration, kind string, job *batchv1.Job) (string, error) {
+	if r.Logs == nil || compareProgressFinal(m, kind, job) {
+		return "", nil
+	}
+	done, _ := jobFinished(job)
+	lines := int64(compareProgressLogTail)
+	if done {
+		lines = verifyLogTail
+	}
+	tail, err := r.readJobLog(ctx, m.Namespace, job.Name, lines)
+	switch {
+	case err != nil && done && r.currentTime().Before(jobFinishedAt(job).Add(failedLogGrace)):
+		return "", fmt.Errorf("reading the compare progress of Job %s: %w", job.Name, err)
+	case err != nil:
+		logf.FromContext(ctx).V(1).Info("pod log fetch failed", "job", job.Name, "error", err)
+	}
+	r.recordCompareProgress(m, kind, job, tail)
+	return tail, nil
+}
+
+// recordCompareProgress puts the tail's newest sample in the item of kind. A tail
+// without one keeps the item as it is, and so does a final sample of that Job.
+func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind string, job *batchv1.Job, tail string) {
+	if compareProgressFinal(m, kind, job) {
+		return
+	}
+	p, ok := pgcopydb.LastCompareProgress(tail)
+	if !ok {
+		return
+	}
+	item := v1beta1.VerificationProgress{
+		Kind:            kind,
+		JobName:         job.Name,
+		ObservedAt:      &metav1.Time{Time: r.currentTime()},
+		Final:           p.Final,
+		PlannedTables:   p.PlannedTables,
+		ComparedTables:  p.ComparedTables,
+		PlannedBytes:    resource.NewQuantity(p.PlannedBytes, resource.BinarySI),
+		ComparedBytes:   resource.NewQuantity(p.ComparedBytes, resource.BinarySI),
+		ComparedRows:    p.ComparedRows,
+		DifferingTables: p.DifferingTables,
+		FailedTables:    p.FailedTables,
+		Elapsed:         millis(p.ElapsedMs),
+	}
+	for _, t := range p.InFlight[:min(len(p.InFlight), compareProgressMaxInFlight)] {
+		item.InFlight = append(item.InFlight, v1beta1.VerificationTableProgress{
+			Schema:  t.Schema,
+			Name:    t.Name,
+			Bytes:   resource.NewQuantity(t.Bytes, resource.BinarySI),
+			Elapsed: millis(t.ElapsedMs),
+		})
+	}
+	for i := range m.Status.VerificationProgress {
+		if m.Status.VerificationProgress[i].Kind == kind {
+			m.Status.VerificationProgress[i] = item
+			return
+		}
+	}
+	m.Status.VerificationProgress = append(m.Status.VerificationProgress, item)
+}
+
+// compareProgressFinal reports whether the item of kind holds job's final sample, read
+// after job finished: a retry pod, or a Job recreated under the name, finishes later.
+// Strictly after, because status keeps whole seconds and a read in that second may precede it.
+func compareProgressFinal(m *v1beta1.Migration, kind string, job *batchv1.Job) bool {
+	if done, _ := jobFinished(job); !done {
+		return false
+	}
+	for _, p := range m.Status.VerificationProgress {
+		if p.Kind == kind {
+			return p.Final && p.JobName == job.Name && p.ObservedAt != nil && p.ObservedAt.After(jobFinishedAt(job))
+		}
+	}
+	return false
+}
+
+// dropCompareProgress removes the item of kind when the next run of that kind starts:
+// until that run's first sample, the item would show the previous run's counts as its own.
+func dropCompareProgress(m *v1beta1.Migration, kind string) {
+	m.Status.VerificationProgress = slices.DeleteFunc(m.Status.VerificationProgress,
+		func(p v1beta1.VerificationProgress) bool { return p.Kind == kind })
+}
+
+func millis(ms int64) *metav1.Duration {
+	return &metav1.Duration{Duration: time.Duration(ms) * time.Millisecond}
 }

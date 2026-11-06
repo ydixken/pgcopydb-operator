@@ -233,9 +233,9 @@ func TestRehearsalScript_DecidesByTheReport(t *testing.T) {
 		want int
 		says string
 	}{
-		"tables differ":            {[]string{rehearsalDiffReport, "STUB_COMPARE_EXIT=12"}, 0, rehearsalReported},
+		"tables differ":            {[]string{rehearsalDiffReport, stubCompareExit12}, 0, rehearsalReported},
 		"tables match":             {[]string{rehearsalDiffReport}, 0, rehearsalReported},
-		"exit 12 and no report":    {[]string{"STUB_COMPARE_EXIT=12"}, 1, rehearsalNoReport},
+		"exit 12 and no report":    {[]string{stubCompareExit12}, 1, rehearsalNoReport},
 		"exit 0 and no report":     {nil, 1, rehearsalNoReport},
 		"output that is no report": {[]string{"STUB_REPORT=could not connect"}, 1, rehearsalNoReport},
 		"list tables fails":        {[]string{"STUB_LIST_EXIT=12"}, 1, "list tables could not read"},
@@ -494,10 +494,14 @@ func TestReconcileRehearsal_PreviousJobDeleteFailure(t *testing.T) {
 }
 
 // A run that finished before the cancel keeps its outcome, and its Job stays as the record.
+// The cancel does not wait for a log it cannot read.
 func TestCancelRehearsal_KeepsAFinishedRun(t *testing.T) {
 	m := streamingRehearsal()
 	funcs, deleted := recordDeletes()
-	r := failingReconciler(t, funcs, m, rehearsalJobOf(m, 1, jobCompleted))
+	job := rehearsalJobOf(m, 1, jobCompleted)
+	job.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+	r := failingReconciler(t, funcs, m, job)
+	r.Logs = &fakeLogs{err: errBoom}
 	if err := r.cancelRehearsal(context.Background(), m, "spec.suspend stopped the worker"); err != nil {
 		t.Fatal(err)
 	}
@@ -943,6 +947,47 @@ var _ = Describe("Verification rehearsal", func() {
 		m = reconcileAndGet(ctx, r, name)
 		Expect(rehearsal(m).Outcome).To(Equal(v1beta1.RehearsalCompleted))
 		Expect(jobAbsent(name + "-rehearsal-3")).To(BeTrue())
+	})
+
+	It("reports each run's compare progress, final once its Job has ended", func() {
+		const name = "mig-rehearsal-progress"
+		defer removeMigration(ctx, name)
+		r, _ := start(name)
+		arm(r, name, 1)
+		logs := r.Logs.(*fakeLogs)
+		run1, run2 := name+"-rehearsal-1", name+"-rehearsal-2"
+
+		By("adding no item before the compare logged a sample")
+		m := reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(BeEmpty())
+
+		By("recording the running sample, and keeping it through a window without one")
+		logs.byJob = map[string]string{run1: runningProgressLine + "\n" + tableDiffersLine}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, false, 2)))
+		Expect(m.Status.VerificationProgress[0].InFlight).To(ConsistOf(HaveField("Name", "a")))
+		logs.byJob[run1] = tableDiffersLine
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, false, 2)))
+
+		By("marking it final from the whole log once the Job has ended")
+		logs.byJob[run1] = runningProgressLine + "\n" + finalProgressLine
+		finishJob(ctx, run1, true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(rehearsal(m).Outcome).To(Equal(v1beta1.RehearsalCompleted))
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run1, true, 3)))
+		Expect(m.Status.VerificationProgress[0].PlannedBytes.Value()).To(Equal(int64(131072)))
+		Expect(m.Status.VerificationProgress[0].Elapsed.Duration).To(Equal(20480 * time.Millisecond))
+
+		By("dropping it when run 2 starts, and adding run 2's first sample")
+		setRehearsal(name, false)
+		reconcileAndGet(ctx, r, name)
+		setRehearsal(name, true)
+		m = arm(r, name, 2)
+		Expect(m.Status.VerificationProgress).To(BeEmpty())
+		logs.byJob[run2] = runningProgressLine
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressRehearsal, run2, false, 2)))
 	})
 
 	It("records a run that wrote no report as Failed with the Job's error", func() {

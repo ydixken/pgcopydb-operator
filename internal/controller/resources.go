@@ -263,7 +263,7 @@ if compare_data_strict; then
   echo "drain verified: pgcopydb compare data found all migrated tables matching"
   exit 0
 fi
-echo "drain refuted: pgcopydb compare data did not show the target matching the source (see the line above for whether it found a difference or could not produce a verdict); do not switch applications to the target (the replication slot is kept)"
+echo "drain refuted: pgcopydb compare data did not show the target matching the source (the compare lines above say whether it found a difference or could not produce a verdict); do not switch applications to the target (the replication slot is kept)"
 exit 1`
 	// scriptJob keeps the worker pod's passfile prelude: running this under
 	// bare /bin/sh once shipped verification that failed auth and falsely

@@ -34,6 +34,8 @@ import (
 const (
 	labelNamespace = "namespace"
 	labelName      = "name"
+	// labelKind is the kind of compare data run: rehearsal, drain, or data.
+	labelKind = "kind"
 )
 
 // verificationDeactivated is the pgcopydb_migration_verification_check value
@@ -140,7 +142,42 @@ var (
 
 	info = gauge("pgcopydb_migration_info",
 		"Always 1; the mode label carries clone or follow.", "mode")
+
+	verificationPlannedTables = gauge("pgcopydb_migration_verification_planned_tables",
+		"Tables the latest compare data run of that kind plans to compare.", labelKind)
+
+	verificationComparedTables = gauge("pgcopydb_migration_verification_compared_tables",
+		"Tables that run has finished: matching, differing, or failed.", labelKind)
+
+	verificationPlannedBytes = gauge("pgcopydb_migration_verification_planned_bytes",
+		"Source size of the tables that run plans to compare.", labelKind)
+
+	verificationComparedBytes = gauge("pgcopydb_migration_verification_compared_bytes",
+		"Source size of the tables that run has finished.", labelKind)
+
+	verificationComparedRows = gauge("pgcopydb_migration_verification_compared_rows",
+		"Source rows of the finished tables that match or differ.", labelKind)
+
+	verificationDifferingTables = gauge("pgcopydb_migration_verification_differing_tables",
+		"Finished tables whose row count or checksum differs.", labelKind)
+
+	verificationFailedTables = gauge("pgcopydb_migration_verification_failed_tables",
+		"Finished tables whose checksum query failed.", labelKind)
+
+	verificationDurationSeconds = gauge("pgcopydb_migration_verification_duration_seconds",
+		"Seconds since that run's compare data started, at its latest sample.", labelKind)
+
+	verificationTableElapsedSeconds = gauge("pgcopydb_migration_verification_table_elapsed_seconds",
+		"Seconds that run has spent on a table it is still comparing (absent once the table is done).",
+		labelKind, "table")
 )
+
+// verificationProgress holds the vecs Record rebuilds from status.verificationProgress.
+var verificationProgress = []*prometheus.GaugeVec{
+	verificationPlannedTables, verificationComparedTables, verificationPlannedBytes,
+	verificationComparedBytes, verificationComparedRows, verificationDifferingTables,
+	verificationFailedTables, verificationDurationSeconds, verificationTableElapsedSeconds,
+}
 
 // buildInfo is operator-wide, not per-Migration, so it stays out of
 // perMigration and Forget.
@@ -198,6 +235,7 @@ func Record(m *v1beta1.Migration) {
 	}
 	info.WithLabelValues(m.Namespace, m.Name, mode).Set(1)
 	recordConditionTransitions(m)
+	recordVerificationProgress(m)
 	// Verified maps the condition: True is 1, False is 0, and no series while
 	// there is no result yet (a 0 before the compare ran would read as a
 	// mismatch on a dashboard).
@@ -254,6 +292,42 @@ func recordConditionTransitions(m *v1beta1.Migration) {
 		conditionTransitionSeconds.
 			WithLabelValues(m.Namespace, m.Name, c.Type, string(c.Status)).
 			Set(float64(c.LastTransitionTime.Unix()))
+	}
+}
+
+// recordVerificationProgress publishes one series per status.verificationProgress
+// item and per in-flight table. It drops the previous set first, so a table that
+// finished, or an item that left status, leaves no series behind.
+func recordVerificationProgress(m *v1beta1.Migration) {
+	l := prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name}
+	for _, g := range verificationProgress {
+		g.DeletePartialMatch(l)
+	}
+	for _, p := range m.Status.VerificationProgress {
+		set := func(g *prometheus.GaugeVec, v float64) { g.WithLabelValues(m.Namespace, m.Name, p.Kind).Set(v) }
+		// An item comes only from a parsed sample, which carries every count, so 0 is a reading.
+		set(verificationPlannedTables, float64(p.PlannedTables))
+		set(verificationComparedTables, float64(p.ComparedTables))
+		set(verificationComparedRows, float64(p.ComparedRows))
+		set(verificationDifferingTables, float64(p.DifferingTables))
+		set(verificationFailedTables, float64(p.FailedTables))
+		if p.PlannedBytes != nil {
+			set(verificationPlannedBytes, float64(p.PlannedBytes.Value()))
+		}
+		if p.ComparedBytes != nil {
+			set(verificationComparedBytes, float64(p.ComparedBytes.Value()))
+		}
+		if p.Elapsed != nil {
+			set(verificationDurationSeconds, p.Elapsed.Seconds())
+		}
+		for _, t := range p.InFlight {
+			if t.Elapsed == nil {
+				continue
+			}
+			verificationTableElapsedSeconds.
+				WithLabelValues(m.Namespace, m.Name, p.Kind, t.Schema+"."+t.Name).
+				Set(t.Elapsed.Seconds())
+		}
 	}
 }
 

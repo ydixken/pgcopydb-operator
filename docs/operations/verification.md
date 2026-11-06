@@ -12,6 +12,7 @@ spec:
 Both are opt-in because both are expensive: schema refetches both catalogs, and data reads every selected row on both sides.
 A live migration can also run a data compare while it streams, to time the compare its cutover waits for; see [Rehearsal](#rehearsal).
 The phase is `Verifying` while the checks run.
+While the data check runs, `status.verificationProgress` shows how far it got; see [Progress](#progress).
 Each check reports separately in `status.verification`, with the `startedAt` and `completedAt` of its Job, and in the `pgcopydb_migration_verification_check` metric.
 The `Verified` condition and the `pgcopydb_migration_verified` metric collapse the checks into one verdict, which names only the first mismatch.
 The condition reason is `SchemaMismatch` or `DataMismatch`.
@@ -83,9 +84,10 @@ kubectl get pgm billing -o jsonpath='{.status.verificationRehearsal}' | jq
 ```
 
 `completedAt` minus `startedAt` is how long the run took under the load at that time, pod start and catalog read included.
+While the run goes on, its item in `status.verificationProgress` counts the tables and bytes compared so far; see [Progress](#progress).
 The outcome is one of these:
 
-- `Running`: the Job runs.
+- `Running`: the Job runs, or it has ended and the operator retries a failed read of its log (see [Progress](#progress)).
 - `Completed`: `compare data` wrote its report, whatever the report says.
 - `Canceled`: the run was stopped; the message names why.
 - `Failed`: `compare data` wrote no report, or someone deleted the Job before it finished; the message carries the last error from the Job's log.
@@ -105,7 +107,8 @@ Run it when both databases can take a full read of the selected tables next to t
 
 The rehearsal reads the source catalog as it is when the run starts.
 A table created on the source after the clone is missing on the target, because DDL is not replicated.
-Its compare fails, and with the bundled runner the run then writes no report and ends `Failed`.
+Its checksum query fails, and the bundled runner records that table as an `error` row, compares the rest, and writes its report, so the run ends `Completed`.
+With `0.18.136.gb42f560` or older, the run writes no report and ends `Failed`.
 
 ### Run it again
 
@@ -162,6 +165,73 @@ Behind a shared address, start a rehearsal only while no other compare of the sa
 > We inferred this from PostgreSQL's lock rules and have not reproduced it.
 > Avoid `TRUNCATE` on selected tables while a rehearsal runs.
 
+## Progress
+
+The bundled runner's `pgcopydb compare data` logs a progress line at most 10 seconds apart, and one last line once every compare worker has exited.
+A worker that stopped leaves the tables it never reached uncompared, so in that last line `comparedTables` can be below `plannedTables`.
+The drain verify and the data compare decide from the report, not from these lines.
+The operator reads these lines from the Job's log into `status.verificationProgress`, which holds one item for each kind of run:
+
+- `rehearsal`: the [rehearsal](#rehearsal) Job.
+- `drain`: the drain verify Job `<name>-verify`, only when it compares; the exact-LSN fast path leaves no item.
+- `data`: the `<name>-compare-data` Job of `spec.verification.data`.
+
+`compare schema` logs no progress, and a runner older than `0.18.144.g86bf908` logs none for any compare, so these leave no item.
+
+```sh
+kubectl get pgm billing -o jsonpath='{.status.verificationProgress}' | jq
+```
+
+```json
+[
+  {
+    "kind": "rehearsal",
+    "jobName": "billing-rehearsal-1",
+    "observedAt": "2026-11-06T09:20:14Z",
+    "final": false,
+    "plannedTables": 412,
+    "comparedTables": 168,
+    "plannedBytes": "84Gi",
+    "comparedBytes": "21Gi",
+    "comparedRows": 96118342,
+    "differingTables": 3,
+    "elapsed": "8m10.448s",
+    "inFlight": [
+      { "schema": "public", "name": "orders", "bytes": "18Gi", "elapsed": "4m51s" }
+    ]
+  }
+]
+```
+
+The fields mean this:
+
+- `plannedTables` and `plannedBytes`: the tables the run compares, and their size on the source.
+- `comparedTables` and `comparedBytes`: the tables that are finished, whether they match, differ, or failed, and their size on the source.
+- `comparedRows`: the source rows of the finished tables that match or differ.
+- `differingTables`: tables whose row count or checksum differs.
+- `failedTables`: tables whose checksum query failed.
+- `elapsed`: the time since `compare data` started, its read of the source catalog included.
+- `inFlight`: the tables being compared, oldest first, at most 64, each with its source size and the time since it started, in whole seconds.
+- `observedAt`: when the operator last read the sample.
+
+While a Job runs, the operator reads the last 1000 lines of its log on each pass and keeps the newest sample.
+A window without a sample keeps the previous one.
+After the Job ends, the operator reads its log once more, and `final` turns true when the last line is there.
+When that read fails, the operator retries it for up to 2 minutes.
+Until a read succeeds, the rehearsal's outcome stays `Running`, and a Migration with `spec.verification.data` stays in `Verifying`.
+A run that ends without the last line, because it was canceled or its pod died, keeps its last sample with `final` false.
+When the drain verify or the data compare retries a failed pod, or its Job is recreated under the same name, the operator reads the new pod's samples too.
+The drain verify and the data compare print the newest progress line again after their report, so a long report cannot push it out of what the operator reads.
+An item stays after its run ends.
+The operator removes it when it creates the next Job of the same kind, and that Job's first sample adds it back, so `jobName` names the run it describes.
+
+The operator exports each item's counts, sizes, and duration as gauges labeled with its `kind`, such as `pgcopydb_migration_verification_compared_tables`, and the time spent on each table in flight; see the [metric reference](monitoring.md#metric-reference).
+The Verification row of the Migration Detail dashboard charts them, with the average bytes and rows per second since the run started; see [Monitoring](monitoring.md#reading-migration-detail).
+
+> [!note]
+> In a rehearsal, `differingTables` above 0 is expected: the source takes writes while the compare runs, and the target applies them later.
+> `failedTables` counts tables pgcopydb could not compare at all, such as a table created on the source after the clone.
+
 ## Partitioned tables
 
 Both checks compare the current source and target partition catalogs before comparing schema definitions or row contents.
@@ -186,4 +256,5 @@ Selecting only a parent checks its metadata without adding leaves to the copy or
 
 The bundled data comparator returns a nonzero exit code on a mismatch.
 The operator also validates the JSON report and rejects missing reports, malformed reports, empty arrays, and absent row-count or checksum fields.
+The bundled runner gives each report row a `status`, and the operator rejects a row whose `status` is anything but `match`; rows from an older runner carry none and are checked as before.
 This report check also covers runner overrides whose comparator does not return a nonzero code on content differences.

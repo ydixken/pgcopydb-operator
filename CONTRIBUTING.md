@@ -214,7 +214,7 @@ The floor is there because WAL, indexes and the change spool need headroom that 
 Source and target sizes are per instance, so raising `E2E_CNPG_INSTANCES` multiplies those volumes; the work volume is one per migration and does not multiply.
 Fixed WAL-noise fixtures remain unscaled because they must exceed the default `16Mi` lag allowance.
 
-The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the terminal series after cutover, every dashboard panel query, and series removal on deletion.
+The metrics specs (`test/e2e/metrics_test.go`, Ginkgo label `metrics`) replay the whole monitoring path against a real Prometheus: scrape health, the live series of a streaming migration, the compare progress series of a rehearsal, the terminal series after cutover, every dashboard panel query, and series removal on deletion.
 They need a Prometheus that scrapes the suite's operator install; the chart's ServiceMonitor (always enabled by the suite, inert without the Prometheus Operator CRDs) provides the target.
 Set `E2E_PROMETHEUS_URL` when the suite can reach Prometheus directly, or `E2E_PROMETHEUS_PORT_FORWARD` (for example `monitoring/kube-prometheus-stack-prometheus:9090`) to have the suite tunnel through kubectl.
 With neither knob the specs Skip; with a knob that points nowhere they fail, because a misconfigured gate must be red.

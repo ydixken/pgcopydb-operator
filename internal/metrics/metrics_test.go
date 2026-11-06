@@ -22,6 +22,7 @@ package metrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -150,6 +151,26 @@ func loadMigration(m *v1beta1.Migration) {
 	// series per vec, and a check the spec skips would publish its own -1.
 	m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 	m.Status.Verification = []v1beta1.VerificationResult{{Check: checkSchema, Passed: true}}
+	// One item with one table in flight, so each progress vec gets exactly one series.
+	m.Status.VerificationProgress = []v1beta1.VerificationProgress{rehearsalSample()}
+}
+
+const publicSchema = "public"
+
+// rehearsalSample is a running rehearsal with every field set and one table in flight.
+func rehearsalSample() v1beta1.VerificationProgress {
+	return v1beta1.VerificationProgress{
+		Kind: v1beta1.VerificationProgressRehearsal, JobName: "m-rehearsal-1",
+		PlannedTables: 12, ComparedTables: 5, ComparedRows: 9000, DifferingTables: 2, FailedTables: 1,
+		PlannedBytes:  resource.NewQuantity(1<<30, resource.BinarySI),
+		ComparedBytes: resource.NewQuantity(1<<20, resource.BinarySI),
+		Elapsed:       &metav1.Duration{Duration: 90 * time.Second},
+		InFlight: []v1beta1.VerificationTableProgress{{
+			Schema: publicSchema, Name: "orders",
+			Bytes:   resource.NewQuantity(1<<29, resource.BinarySI),
+			Elapsed: &metav1.Duration{Duration: 42 * time.Second},
+		}},
+	}
 }
 
 func TestForget(t *testing.T) {
@@ -488,5 +509,80 @@ func TestNames(t *testing.T) {
 	got[0] = "clobbered"
 	if Names()[0] == "clobbered" {
 		t.Fatal("Names() returned the internal slice, want a copy")
+	}
+}
+
+func TestRecordVerificationProgress(t *testing.T) {
+	m := newMigration("ns1", "compare-progress")
+	t.Cleanup(func() { Forget(m.Namespace, m.Name) })
+
+	// A drain sample with no byte or duration fields, and an in-flight table
+	// with no elapsed time: absent, never a fake zero.
+	drain := v1beta1.VerificationProgress{
+		Kind: v1beta1.VerificationProgressDrain, JobName: "m-verify", Final: true, PlannedTables: 3, ComparedTables: 3,
+		InFlight: []v1beta1.VerificationTableProgress{{Schema: publicSchema, Name: "stuck"}},
+	}
+	m.Status.VerificationProgress = []v1beta1.VerificationProgress{rehearsalSample(), drain}
+	Record(m)
+
+	rehearsal := v1beta1.VerificationProgressRehearsal
+	for _, tc := range []struct {
+		metric string
+		g      *prometheus.GaugeVec
+		want   float64
+	}{
+		{"planned_tables", verificationPlannedTables, 12},
+		{"compared_tables", verificationComparedTables, 5},
+		{"planned_bytes", verificationPlannedBytes, 1 << 30},
+		{"compared_bytes", verificationComparedBytes, 1 << 20},
+		{"compared_rows", verificationComparedRows, 9000},
+		{"differing_tables", verificationDifferingTables, 2},
+		{"failed_tables", verificationFailedTables, 1},
+		{"duration_seconds", verificationDurationSeconds, 90},
+	} {
+		if got := testutil.ToFloat64(tc.g.WithLabelValues("ns1", "compare-progress", rehearsal)); got != tc.want {
+			t.Errorf("rehearsal %s = %v, want %v", tc.metric, got, tc.want)
+		}
+	}
+	if got := testutil.ToFloat64(verificationPlannedTables.WithLabelValues("ns1", "compare-progress", drain.Kind)); got != 3 {
+		t.Errorf("drain planned_tables = %v, want 3", got)
+	}
+	// Only the rehearsal carries bytes, a duration, and a table with a time.
+	for metric, g := range map[string]*prometheus.GaugeVec{
+		"planned_bytes": verificationPlannedBytes, "compared_bytes": verificationComparedBytes,
+		"duration_seconds": verificationDurationSeconds, "table_elapsed_seconds": verificationTableElapsedSeconds,
+	} {
+		if got := testutil.CollectAndCount(g); got != 1 {
+			t.Errorf("%s series = %d, want 1 (the rehearsal's)", metric, got)
+		}
+	}
+	if got := testutil.ToFloat64(verificationTableElapsedSeconds.
+		WithLabelValues("ns1", "compare-progress", rehearsal, "public.orders")); got != 42 {
+		t.Errorf("public.orders elapsed = %v, want 42", got)
+	}
+
+	// orders finished and items started: the orders series must go. Count only;
+	// WithLabelValues on orders would resurrect it.
+	next := rehearsalSample()
+	next.InFlight = []v1beta1.VerificationTableProgress{{
+		Schema: publicSchema, Name: "items", Elapsed: &metav1.Duration{Duration: 7 * time.Second},
+	}}
+	m.Status.VerificationProgress = []v1beta1.VerificationProgress{next, drain}
+	Record(m)
+	if got := testutil.CollectAndCount(verificationTableElapsedSeconds); got != 1 {
+		t.Fatalf("in-flight series after orders finished = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(verificationTableElapsedSeconds.
+		WithLabelValues("ns1", "compare-progress", rehearsal, "public.items")); got != 7 {
+		t.Errorf("public.items elapsed = %v, want 7", got)
+	}
+
+	// An item that left status takes its series along.
+	m.Status.VerificationProgress = nil
+	Record(m)
+	for i, g := range verificationProgress {
+		if got := testutil.CollectAndCount(g); got != 0 {
+			t.Errorf("progress vec %d: series without items = %d, want 0", i, got)
+		}
 	}
 }

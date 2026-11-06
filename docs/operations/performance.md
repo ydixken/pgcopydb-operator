@@ -310,6 +310,7 @@ pgcopydb's own summary, printed at the end of every clone, is the accurate sourc
 The operator exports `pgcopydb_migration_start_time_seconds` and `pgcopydb_migration_completion_time_seconds`.
 Subtracting them gives the duration, which is the number to compare.
 `pgcopydb_migration_clone_copied_bytes` and `pgcopydb_migration_source_database_size_bytes` give you a rate to divide it into.
+For `pgcopydb compare data`, `pgcopydb_migration_verification_duration_seconds` and `pgcopydb_migration_verification_compared_bytes` are the same pair, per kind of run (see [Progress](verification.md#progress)).
 [Monitoring](monitoring.md) has the full metric reference.
 
 For per-table detail, run `pgcopydb list progress --summary --json` against a finished Migration's work PVC (`<name>-work`) from a short-lived pod that mounts it.

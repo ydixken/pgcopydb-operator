@@ -227,6 +227,56 @@ var _ = Describe("Migration Controller verification", func() {
 		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
 	})
 
+	It("reports the drain verify's and the data compare's progress", func() {
+		const name = "mig-verify-progress"
+		defer removeMigration(ctx, name)
+		fake := &fakeSentinel{}
+		r := newReconciler()
+		r.Sentinel = fake
+		logs := cloneDoneLogs()
+		r.Logs = logs
+
+		m := validMigration(name)
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: v1beta1.CutoverAutomatic}
+		m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		reconcileAndGet(ctx, r, name)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-preflight", true)
+		fake.state = &sentinel.State{WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN, Endpos: sentinel.ZeroLSN}
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-run-1", true)
+		reconcileAndGet(ctx, r, name)
+
+		By("recording the drain verify's running sample, then its final one")
+		verify, data := name+"-verify", name+"-compare-data"
+		logs.byJob = map[string]string{verify: runningProgressLine}
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.VerificationProgress).To(ConsistOf(progressItem(v1beta1.VerificationProgressDrain, verify, false, 2)))
+		logs.byJob[verify] = runningProgressLine + "\n" + finalProgressLine
+		finishJob(ctx, verify, true)
+		reconcileAndGet(ctx, r, name)
+		finishJob(ctx, name+"-cleanup", true)
+		reconcileAndGet(ctx, r, name)
+
+		By("adding the data compare's item beside the drain's")
+		logs.byJob[data] = runningProgressLine
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseVerifying))
+		Expect(m.Status.VerificationProgress).To(ConsistOf(
+			progressItem(v1beta1.VerificationProgressDrain, verify, true, 3),
+			progressItem(v1beta1.VerificationProgressData, data, false, 2)))
+
+		logs.byJob[data] = runningProgressLine + "\n" + finalProgressLine
+		finishJob(ctx, data, true)
+		m = reconcileAndGet(ctx, r, name)
+		Expect(m.Status.Phase).To(Equal(v1beta1.PhaseCompleted))
+		Expect(m.Status.VerificationProgress).To(ConsistOf(
+			progressItem(v1beta1.VerificationProgressDrain, verify, true, 3),
+			progressItem(v1beta1.VerificationProgressData, data, true, 3)))
+	})
+
 	It("verifies a follow migration only after drain and cleanup", func() {
 		const name = "mig-verify-follow"
 		defer removeMigration(ctx, name)

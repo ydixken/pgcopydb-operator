@@ -2372,6 +2372,123 @@ spec:
                 x-kubernetes-list-map-keys:
                 - check
                 x-kubernetes-list-type: map
+              verificationProgress:
+                description: |-
+                  verificationProgress holds the latest compare data progress sample of each
+                  kind of run. An item stays after its run ends, until the next run of that kind starts.
+                items:
+                  description: |-
+                    VerificationProgress is the latest progress sample of one compare data run,
+                    read from the compare progress lines its Job logs. Runners older than
+                    0.18.144.g86bf908 log none, so they leave no item.
+                  properties:
+                    comparedBytes:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: comparedBytes is the source size of the finished
+                        tables.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    comparedRows:
+                      description: comparedRows sums the source rows of the tables
+                        that match or differ.
+                      format: int64
+                      type: integer
+                    comparedTables:
+                      description: 'comparedTables counts the finished tables: matching,
+                        differing, and failed.'
+                      format: int64
+                      type: integer
+                    differingTables:
+                      description: differingTables counts the tables whose row count
+                        or checksum differs.
+                      format: int64
+                      type: integer
+                    elapsed:
+                      description: elapsed is the time since compare data started,
+                        its schema read included.
+                      type: string
+                    failedTables:
+                      description: failedTables counts the tables whose checksum query
+                        failed.
+                      format: int64
+                      type: integer
+                    final:
+                      description: |-
+                        final is true for the line pgcopydb logs once every compare worker has
+                        exited. A worker that stopped leaves the tables it never reached
+                        uncompared, so comparedTables can be below plannedTables. false is a
+                        sample from a running compare, or the last one of a run that ended
+                        before that line.
+                      type: boolean
+                    inFlight:
+                      description: inFlight lists the tables being compared, oldest
+                        first, at most 64.
+                      items:
+                        description: VerificationTableProgress is one table a compare
+                          data run is on.
+                        properties:
+                          bytes:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: bytes is the table's size on the source.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          elapsed:
+                            description: elapsed is how long the table has been compared,
+                              in whole seconds.
+                            type: string
+                          name:
+                            type: string
+                          schema:
+                            type: string
+                        required:
+                        - name
+                        - schema
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    jobName:
+                      description: |-
+                        jobName is the Job that logged the sample. Creating the next Job of the
+                        same kind removes the item, and that Job's first sample adds it back.
+                      type: string
+                    kind:
+                      description: |-
+                        kind is the run: rehearsal (spec.verification.rehearsal), drain (the
+                        cutover's drain verify, only when it compares), or data (spec.verification.data).
+                      enum:
+                      - rehearsal
+                      - drain
+                      - data
+                      type: string
+                    observedAt:
+                      description: observedAt is when the operator last read the sample
+                        from the Job's log.
+                      format: date-time
+                      type: string
+                    plannedBytes:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: plannedBytes is the size of the planned tables
+                        on the source.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    plannedTables:
+                      description: plannedTables is the number of tables the run compares.
+                      format: int64
+                      type: integer
+                  required:
+                  - jobName
+                  - kind
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - kind
+                x-kubernetes-list-type: map
               verificationRehearsal:
                 description: verificationRehearsal reports the latest spec.verification.rehearsal
                   run.
@@ -4765,6 +4882,123 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - check
+                x-kubernetes-list-type: map
+              verificationProgress:
+                description: |-
+                  verificationProgress holds the latest compare data progress sample of each
+                  kind of run. An item stays after its run ends, until the next run of that kind starts.
+                items:
+                  description: |-
+                    VerificationProgress is the latest progress sample of one compare data run,
+                    read from the compare progress lines its Job logs. Runners older than
+                    0.18.144.g86bf908 log none, so they leave no item.
+                  properties:
+                    comparedBytes:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: comparedBytes is the source size of the finished
+                        tables.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    comparedRows:
+                      description: comparedRows sums the source rows of the tables
+                        that match or differ.
+                      format: int64
+                      type: integer
+                    comparedTables:
+                      description: 'comparedTables counts the finished tables: matching,
+                        differing, and failed.'
+                      format: int64
+                      type: integer
+                    differingTables:
+                      description: differingTables counts the tables whose row count
+                        or checksum differs.
+                      format: int64
+                      type: integer
+                    elapsed:
+                      description: elapsed is the time since compare data started,
+                        its schema read included.
+                      type: string
+                    failedTables:
+                      description: failedTables counts the tables whose checksum query
+                        failed.
+                      format: int64
+                      type: integer
+                    final:
+                      description: |-
+                        final is true for the line pgcopydb logs once every compare worker has
+                        exited. A worker that stopped leaves the tables it never reached
+                        uncompared, so comparedTables can be below plannedTables. false is a
+                        sample from a running compare, or the last one of a run that ended
+                        before that line.
+                      type: boolean
+                    inFlight:
+                      description: inFlight lists the tables being compared, oldest
+                        first, at most 64.
+                      items:
+                        description: VerificationTableProgress is one table a compare
+                          data run is on.
+                        properties:
+                          bytes:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: bytes is the table's size on the source.
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          elapsed:
+                            description: elapsed is how long the table has been compared,
+                              in whole seconds.
+                            type: string
+                          name:
+                            type: string
+                          schema:
+                            type: string
+                        required:
+                        - name
+                        - schema
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    jobName:
+                      description: |-
+                        jobName is the Job that logged the sample. Creating the next Job of the
+                        same kind removes the item, and that Job's first sample adds it back.
+                      type: string
+                    kind:
+                      description: |-
+                        kind is the run: rehearsal (spec.verification.rehearsal), drain (the
+                        cutover's drain verify, only when it compares), or data (spec.verification.data).
+                      enum:
+                      - rehearsal
+                      - drain
+                      - data
+                      type: string
+                    observedAt:
+                      description: observedAt is when the operator last read the sample
+                        from the Job's log.
+                      format: date-time
+                      type: string
+                    plannedBytes:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: plannedBytes is the size of the planned tables
+                        on the source.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    plannedTables:
+                      description: plannedTables is the number of tables the run compares.
+                      format: int64
+                      type: integer
+                  required:
+                  - jobName
+                  - kind
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - kind
                 x-kubernetes-list-type: map
               verificationRehearsal:
                 description: verificationRehearsal reports the latest spec.verification.rehearsal

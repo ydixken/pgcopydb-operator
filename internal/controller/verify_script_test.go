@@ -30,18 +30,19 @@ import (
 // The stand-in for the runner image's pgcopydb, dispatching on argv: the two
 // sentinel reads and the compare are the only calls the drain script makes.
 // The marker on stderr is how a case proves the content path was or was not
-// reached.
+// reached. The report ends in a newline, as pgcopydb's does.
 const stubVerifyPgcopydb = `#!/bin/sh
 case "$*" in
   *--endpos*) echo "$STUB_ENDPOS" ;;
   *--replay-lsn*) echo "$STUB_REPLAY" ;;
   *"compare data"*)
     echo "` + verifyCompareMarker + `" >&2
+    printf '%s' "${STUB_COMPARE_LOG:-}" >&2
     if [ -n "${STUB_PGCOPYDB_FAIL:-}" ]; then
       echo "pgcopydb: could not open catalogs" >&2
       exit 12
     fi
-    cat "$STUB_REPORT" ;;
+    cat "$STUB_REPORT"; echo ;;
   *) echo "pgcopydb stub: unexpected call: $*" >&2; exit 9 ;;
 esac
 `
@@ -68,10 +69,18 @@ const verifyCompareMarker = "stub: compare data ran"
 // turns into DrainIncomplete.
 const wantRefused = "drain refuted"
 
+// The pass a content check that found every table matching ends with.
+const wantContentPass = "drain verified: pgcopydb compare data found all migrated tables matching"
+
 // runVerifyScript executes the shipped drain script under a real shell with
-// both stubs on PATH. compareReportPath is rewritten into the test's own
-// directory, because the Job's emptyDir has no counterpart here.
+// both stubs on PATH, with the wrapper's files in the test's own directory.
 func runVerifyScript(t *testing.T, report string, env ...string) (string, int) {
+	t.Helper()
+	return runGatedVerifyScript(t, "", report, env...)
+}
+
+// runGatedVerifyScript is runVerifyScript for a verify Job built with a progress gate.
+func runGatedVerifyScript(t *testing.T, gate, report string, env ...string) (string, int) {
 	t.Helper()
 	dir := t.TempDir()
 	// The worker container is named after the binary, so the constant doubles
@@ -86,13 +95,11 @@ func runVerifyScript(t *testing.T, report string, env ...string) (string, int) {
 		t.Fatal(err)
 	}
 
-	job, err := buildVerifyJob(passwordMigration(), testRunnerImage, "")
+	job, err := buildVerifyJob(passwordMigration(), testRunnerImage, gate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := strings.ReplaceAll(job.Spec.Template.Spec.Containers[0].Args[1],
-		compareReportPath, filepath.Join(dir, "compare-data.json"))
-	cmd := exec.Command(shellPath, "-c", script)
+	cmd := exec.Command(shellPath, "-c", inDir(job.Spec.Template.Spec.Containers[0].Args[1], dir))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
 		"PGCOPYDB_TARGET_PGURI=tgt",
@@ -149,7 +156,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 		{
 			name:        "a gap inside the old tolerance, on an active source",
 			report:      reportRowcount,
-			env:         []string{"STUB_PROGRESS=0/92E17E78", "STUB_GAP=56", "STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"},
+			env:         []string{"STUB_PROGRESS=0/92E17E78", "STUB_GAP=56", stubRowcountDiffers},
 			code:        1,
 			wantLog:     wantRefused,
 			wantCompare: true,
@@ -159,7 +166,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			report:      reportMatching,
 			env:         []string{"STUB_PROGRESS=0/92D00000", "STUB_GAP=1186480"},
 			code:        0,
-			wantLog:     "drain verified: pgcopydb compare data found all migrated tables matching",
+			wantLog:     wantContentPass,
 			wantCompare: true,
 		},
 		{
@@ -169,7 +176,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			report:      reportMatching,
 			env:         []string{"STUB_PROGRESS=0/92E17EC0", "STUB_GAP=-16"},
 			code:        0,
-			wantLog:     "drain verified: pgcopydb compare data found all migrated tables matching",
+			wantLog:     wantContentPass,
 			wantCompare: true,
 		},
 		{
@@ -222,5 +229,44 @@ func TestVerifyScript_ComparePathIsFailurePath(t *testing.T) {
 	}
 	if !strings.Contains(out, wantRefused) {
 		t.Fatalf("the refusal must name the drain:\n%s", out)
+	}
+}
+
+// The drain read takes the copy counters and the compare progress from one
+// window, so on the content path both lines come again right before the verdict.
+func TestVerifyScript_ProgressStaysAtTheEnd(t *testing.T) {
+	const counters = `{"tables":{"total":2,"done":2}}`
+	gate := "echo '" + counters + "'\n"
+	for name, tc := range map[string]struct {
+		report  string
+		env     []string
+		code    int
+		verdict string
+	}{
+		"the compare passes": {reportMatching, nil, 0, wantContentPass},
+		"the compare refutes": {reportRowcount, []string{
+			stubRowcountDiffers,
+		}, 1, wantRefused},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, code := runGatedVerifyScript(t, gate, tc.report, append(tc.env,
+				"STUB_ENDPOS=0/92E17EB0", "STUB_REPLAY=0/92E17EB0", "STUB_PROGRESS=0/92E17AA0", "STUB_GAP=1040",
+				"STUB_COMPARE_LOG="+runningProgressLine+"\n"+finalProgressLine+"\n")...)
+			if code != tc.code {
+				t.Fatalf("exit %d, want %d:\n%s", code, tc.code, out)
+			}
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			if len(lines) < 3 {
+				t.Fatalf("too few lines:\n%s", out)
+			}
+			got := lines[len(lines)-3:]
+			want := []string{finalProgressLine, verifyProgressPrefix + counters}
+			if got[0] != want[0] || got[1] != want[1] || !strings.HasPrefix(got[2], tc.verdict) {
+				t.Fatalf("the log ends %q, want the final progress line, the counters and %q:\n%s", got, tc.verdict, out)
+			}
+			if n := strings.Count(out, verifyProgressPrefix); n != 2 {
+				t.Fatalf("the counters line appears %d times, want 2: before the verdict logic, and again last:\n%s", n, out)
+			}
+		})
 	}
 }

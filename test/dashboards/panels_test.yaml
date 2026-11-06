@@ -129,3 +129,48 @@ tests:
       - expr: *syncrepOldest
         eval_time: 4m
         exp_samples: []
+
+  # Compare Progress, Compare Throughput, and Compare Rows Per Second. A run
+  # with no planned tables, or at its first sample with no elapsed time yet,
+  # has no share or rate to draw, rather than a division by zero.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_verification_planned_tables{namespace="ns", name="m", kind="rehearsal"}'
+        values: "10x5"
+      - series: 'pgcopydb_migration_verification_compared_tables{namespace="ns", name="m", kind="rehearsal"}'
+        values: "4x5"
+      - series: 'pgcopydb_migration_verification_planned_tables{namespace="ns", name="m", kind="drain"}'
+        values: "0x5"
+      - series: 'pgcopydb_migration_verification_compared_tables{namespace="ns", name="m", kind="drain"}'
+        values: "0x5"
+      - series: 'pgcopydb_migration_verification_compared_bytes{namespace="ns", name="m", kind="data"}'
+        values: "0 1000 4000"
+      - series: 'pgcopydb_migration_verification_compared_rows{namespace="ns", name="m", kind="data"}'
+        values: "0 500 1000"
+      - series: 'pgcopydb_migration_verification_duration_seconds{namespace="ns", name="m", kind="data"}'
+        values: "0 50 100"
+    promql_expr_test:
+      - expr: >-
+          100 * max by (kind) (pgcopydb_migration_verification_compared_tables{namespace="ns", name="m"}) / max by (kind)
+          (pgcopydb_migration_verification_planned_tables{namespace="ns", name="m"} > 0)
+        eval_time: 2m
+        exp_samples:
+          - labels: '{kind="rehearsal"}'
+            value: 40
+      - expr: &compareBytesRate >-
+          max by (kind) (pgcopydb_migration_verification_compared_bytes{namespace="ns", name="m"}) / max by (kind)
+          (pgcopydb_migration_verification_duration_seconds{namespace="ns", name="m"} > 0)
+        eval_time: 0m
+        exp_samples: []
+      - expr: *compareBytesRate
+        eval_time: 2m
+        exp_samples:
+          - labels: '{kind="data"}'
+            value: 40
+      - expr: >-
+          max by (kind) (pgcopydb_migration_verification_compared_rows{namespace="ns", name="m"}) / max by (kind)
+          (pgcopydb_migration_verification_duration_seconds{namespace="ns", name="m"} > 0)
+        eval_time: 2m
+        exp_samples:
+          - labels: '{kind="data"}'
+            value: 10

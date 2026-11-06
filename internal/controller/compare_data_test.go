@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
 // Keep report fixtures small so the wrapper contract is visible.
@@ -36,14 +38,23 @@ const (
 		`"source":{"rowcount":338,"checksum":"a1"},"target":{"rowcount":338,"checksum":"b2"}}]`
 )
 
-// The stand-in for the runner image's pgcopydb: it replays a canned report,
-// or fails the way a broken catalog would.
+// The verdict a case asks the psql stub for, and the exit status of pgcopydb on a difference.
+const (
+	stubRowcountDiffers = "STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"
+	stubCompareExit12   = "STUB_COMPARE_EXIT=12"
+)
+
+// The stand-in for the runner image's pgcopydb: it logs the case's lines,
+// then replays a canned report ending in the newline pgcopydb prints after it
+// (cli_compare.c), or fails the way a broken catalog would.
 const stubPgcopydb = `#!/bin/sh
+printf '%s' "${STUB_COMPARE_LOG:-}" >&2
 if [ -n "${STUB_PGCOPYDB_FAIL:-}" ]; then
   echo "pgcopydb: could not open catalogs" >&2
   exit 12
 fi
-cat "$STUB_REPORT"
+cat "$STUB_REPORT"; echo
+exit "${STUB_COMPARE_EXIT:-0}"
 `
 
 // The stand-in for the server. It checks that the wrapper wrote the report
@@ -67,10 +78,19 @@ fi
 printf '%s' "${STUB_DIFFERING:-}"
 `
 
+// inDir moves the wrapper's /tmp files into dir: they are absolute paths, and
+// the Job's emptyDir has no counterpart here.
+func inDir(script, dir string) string {
+	return strings.NewReplacer(
+		compareReportPath, filepath.Join(dir, "compare-data.json"),
+		compareLogPath, filepath.Join(dir, "compare.log"),
+		compareStatusPath, filepath.Join(dir, "compare.status"),
+	).Replace(script)
+}
+
 // runCompareScript executes the shipped compare data script under a real
 // shell with both stubs on PATH, and reports its combined output and exit
-// code. compareReportPath is rewritten into the test's own directory: it is
-// an absolute path, and the Job's emptyDir has no counterpart here.
+// code, with the wrapper's files in the test's own directory.
 func runCompareScript(t *testing.T, report string, env ...string) (string, int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -84,8 +104,7 @@ func runCompareScript(t *testing.T, report string, env ...string) (string, int) 
 		t.Fatal(err)
 	}
 
-	script := strings.ReplaceAll(compareDataScript, compareReportPath, filepath.Join(dir, "compare-data.json"))
-	cmd := exec.Command(shellPath, "-c", script)
+	cmd := exec.Command(shellPath, "-c", inDir(compareDataScript, dir))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
 		"PGCOPYDB_TARGET_PGURI=tgt",
@@ -124,7 +143,7 @@ func TestCompareDataScript_Verdict(t *testing.T) {
 		{
 			name:    "a row count differs",
 			report:  reportRowcount,
-			env:     []string{"STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"},
+			env:     []string{stubRowcountDiffers},
 			code:    1,
 			wantLog: "public.orders: source 338 rows",
 		},
@@ -140,7 +159,7 @@ func TestCompareDataScript_Verdict(t *testing.T) {
 			report:  reportMatching,
 			env:     []string{"STUB_PGCOPYDB_FAIL=1"},
 			code:    1,
-			wantLog: "could not run",
+			wantLog: "compare data exited 12",
 		},
 		{
 			name:    "the report cannot be evaluated",
@@ -169,6 +188,44 @@ func TestCompareDataScript_ReportIsLogged(t *testing.T) {
 	out, code := runCompareScript(t, reportMatching)
 	if code != 0 || !strings.Contains(out, reportMatching) {
 		t.Fatalf("the passing run must still print the whole report (exit %d):\n%s", code, out)
+	}
+}
+
+// The report and the verdict can push compare data's final progress line out
+// of the log window the operator reads, so the wrapper prints it again last.
+// The tee that keeps the line must not lose compare data's exit status.
+func TestCompareDataScript_ProgressStaysAtTheEnd(t *testing.T) {
+	compareLog := "STUB_COMPARE_LOG=" + runningProgressLine + "\n" + tableDiffersLine + "\n" + finalProgressLine + "\n"
+	for name, tc := range map[string]struct {
+		report string
+		env    []string
+		code   int
+		says   string
+	}{
+		"the tables match": {reportMatching, nil, 0, `"rowcount":338`},
+		"a table differs": {reportRowcount, []string{
+			stubRowcountDiffers,
+		}, 1, "did not find every table matching"},
+		// psql would pass this report, so only the kept status fails the check.
+		"compare data exits 12 after a matching report": {reportMatching, []string{stubCompareExit12}, 1, "compare data exited 12"},
+		"the report cannot be evaluated":                {reportMatching, []string{"STUB_PSQL_FAIL=1"}, 1, "could not be evaluated"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, code := runCompareScript(t, tc.report, append(tc.env, compareLog)...)
+			if code != tc.code || !strings.Contains(out, tc.says) || !strings.Contains(out, tc.report) {
+				t.Fatalf("exit %d, want %d, with %q and the report:\n%s", code, tc.code, tc.says, out)
+			}
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			if last := lines[len(lines)-1]; last != finalProgressLine {
+				t.Fatalf("the last line is %q, want the final progress line:\n%s", last, out)
+			}
+			if n := strings.Count(out, finalProgressLine); n != 2 {
+				t.Fatalf("the final progress line appears %d times, want 2: as logged, and again last:\n%s", n, out)
+			}
+			if p, ok := pgcopydb.LastCompareProgress(out); !ok || !p.Final {
+				t.Fatalf("the log yields (%+v, %t), want the final sample", p, ok)
+			}
+		})
 	}
 }
 
@@ -212,6 +269,16 @@ func TestCompareDataQuery(t *testing.T) {
 			report: `[{"schema":"public","name":"orders","source":{"rows":338},"target":{"rows":333}}]`,
 			want:   "public.orders: source  rows (checksum ), target  rows (checksum )",
 		},
+		// The bundled runner's rows carry a status, and only match passes:
+		// status alone fails a row whose counts and checksums agree.
+		{"a status of match", statusReport(`"match"`), ""},
+		{"a status of differ", statusReport(`"differ"`), fmt.Sprintf(line, "338", "a1") + ", status differ"},
+		{"a null status", statusReport("null"), fmt.Sprintf(line, "338", "a1")},
+		{
+			name:   "a table the runner could not compare",
+			report: `[{"schema":"public","name":"orders","source":{"rowcount":338,"checksum":null},"target":{"rowcount":0,"checksum":null},"status":"error"}]`,
+			want:   "public.orders: source 338 rows (checksum ), target 0 rows (checksum ), status error",
+		},
 		// The report reaches psql off argv, which caps one string at 128 KiB
 		// on Linux; through -v this many tables failed to exec at all.
 		{"a report past the argv cap", bigMatchingReport(1000), ""},
@@ -233,6 +300,12 @@ func TestCompareDataQuery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// statusReport is one table whose counts and checksums match, with the given status JSON.
+func statusReport(status string) string {
+	return `[{"schema":"public","name":"orders","source":{"rowcount":338,"checksum":"a1"},` +
+		`"target":{"rowcount":338,"checksum":"a1"},"status":` + status + `}]`
 }
 
 // bigMatchingReport renders n matching tables the way pgcopydb pretty-prints

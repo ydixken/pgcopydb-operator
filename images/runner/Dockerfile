@@ -12,7 +12,7 @@
 # it would copy an amd64 ELF into the arm64 image, and the canary cannot catch
 # that because binfmt runs the amd64 binary natively on the build host.
 # renovate: datasource=docker depName=ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder
-FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:b42f560a16d4ba2459b06f7200db5b244c74e5db@sha256:b756a4eac487454c576855b6d88af9097b252b51258336e38a780ffef5d7e52d AS pgcopydb
+FROM ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:86bf908adca02d87063849dae775a02c1659c829@sha256:ef596ea105604ef128244057dd34411f433d4c40fdf897bcaa8b33793df9fec8 AS pgcopydb
 
 # Pinned by tag and digest; Renovate's dockerfile manager bumps this line.
 # renovate: datasource=docker depName=debian
@@ -72,8 +72,10 @@ ENV PATH=/usr/lib/postgresql/18/bin:$PATH
 # Run the worker, credential escaping, and sampler timeout after purging so
 # a missing runtime capability fails the image build.
 RUN set -eux; \
-    pgcopydb --version | grep -qF '0.18.136.gb42f560'; \
+    pgcopydb --version | grep -qF '0.18.144.g86bf908'; \
     pgcopydb clone --help 2>&1 | grep -F -- '--defer-indexes' | grep -qF 'Build indexes once all table data is copied'; \
+    # No flag or help text shows the compare data progress lines, so look for their text.
+    grep -qF 'compare progress: ' "$(command -v pgcopydb)"; \
     pg_dump --version | grep -qE ' 18\.'; \
     pg_restore --version >/dev/null; \
     psql --version >/dev/null; \

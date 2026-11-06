@@ -273,6 +273,8 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectCleanupSucceeded(name)
+		expectDrainProgress(m)
+		expectFinalProgress(m, v1beta1.VerificationProgressData, name+"-compare-"+compareDataCheck)
 
 		By("checking every committed row arrived, with no gaps")
 		// last is the source maximum after the psql child exits. Keep the count
@@ -523,6 +525,7 @@ var _ = Describe("Migration", func() {
 		// scenario gets the follow budget, not the clone one.
 		m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
 		expectConditionTrue(m, v1beta1.ConditionVerified)
+		expectFinalProgress(m, v1beta1.VerificationProgressData, name+"-compare-"+compareDataCheck)
 
 		By("checking both compare Jobs succeeded")
 		for _, check := range []string{compareSchemaCheck, compareDataCheck} {
