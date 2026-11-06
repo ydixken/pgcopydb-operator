@@ -159,9 +159,10 @@ func fullMigration() *Migration {
 				SlotName: "slot_1", WriteLSN: "0/20", ReplayLSN: "0/10",
 				Endpos: "0/30", LagBytes: &lagBytes,
 			},
-			JobName:     "full-run-2",
-			StartedAt:   &now,
-			CompletedAt: &now,
+			Verification: []VerificationResult{{Check: "data", Passed: true, StartedAt: &now, CompletedAt: &now}},
+			JobName:      "full-run-2",
+			StartedAt:    &now,
+			CompletedAt:  &now,
 		},
 	}
 }
@@ -184,7 +185,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 		&m.Spec.Source, m.Spec.Source.TLS, &m.Spec.Clone, m.Spec.Clone.Filters,
 		m.Spec.Follow, &m.Spec.Cutover, m.Spec.Verification,
 		&m.Spec.WorkVolume, &m.Spec.Runner,
-		m.Status.Progress, m.Status.Replication, m.Status.RetryGate,
+		m.Status.Progress, m.Status.Replication, m.Status.RetryGate, &m.Status.Verification[0],
 	}
 	for _, obj := range objs {
 		v := reflect.ValueOf(obj)
@@ -225,6 +226,7 @@ func TestDeepCopy_EqualAndUnaliased(t *testing.T) {
 	*c.Status.Replication.LagBytes = 9
 	c.Status.RetryGate.Failure = mutated
 	c.Status.RetryGate.FailedAt.Time = time.Unix(1, 0)
+	c.Status.Verification[0].CompletedAt.Time = time.Unix(1, 0)
 	if !apiequality.Semantic.DeepEqual(m, fullMigration()) {
 		t.Error("mutating the copy changed the original: DeepCopy aliases memory")
 	}

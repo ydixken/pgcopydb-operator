@@ -11,7 +11,7 @@ spec:
 
 Both are opt-in because both are expensive: schema refetches both catalogs, and data reads every selected row on both sides.
 The phase is `Verifying` while the checks run.
-Each check reports separately in `status.verification` and in the `pgcopydb_migration_verification_check` metric.
+Each check reports separately in `status.verification`, with the `startedAt` and `completedAt` of its Job, and in the `pgcopydb_migration_verification_check` metric.
 The `Verified` condition and the `pgcopydb_migration_verified` metric collapse the checks into one verdict, which names only the first mismatch.
 The condition reason is `SchemaMismatch` or `DataMismatch`.
 

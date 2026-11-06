@@ -485,6 +485,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `check` _string_ | check is the pgcopydb compare subcommand: schema or data. |  | Enum: [schema data] <br /> |
 | `passed` _boolean_ | passed is false when that compare reported differences. |  |  |
+| `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | startedAt is when the check's Job started. |  | Optional: \{\} <br /> |
+| `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | completedAt is when the check's Job completed or failed. |  | Optional: \{\} <br /> |
 
 
 #### WorkVolume

@@ -2333,9 +2333,18 @@ spec:
                       - schema
                       - data
                       type: string
+                    completedAt:
+                      description: completedAt is when the check's Job completed or
+                        failed.
+                      format: date-time
+                      type: string
                     passed:
                       description: passed is false when that compare reported differences.
                       type: boolean
+                    startedAt:
+                      description: startedAt is when the check's Job started.
+                      format: date-time
+                      type: string
                   required:
                   - check
                   - passed
@@ -4661,9 +4670,18 @@ spec:
                       - schema
                       - data
                       type: string
+                    completedAt:
+                      description: completedAt is when the check's Job completed or
+                        failed.
+                      format: date-time
+                      type: string
                     passed:
                       description: passed is false when that compare reported differences.
                       type: boolean
+                    startedAt:
+                      description: startedAt is when the check's Job started.
+                      format: date-time
+                      type: string
                   required:
                   - check
                   - passed

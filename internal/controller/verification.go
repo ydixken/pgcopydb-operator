@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -92,6 +93,14 @@ var compareDataStrict = `compare_data_strict() {
 // compareDataScript is the whole program of the data compare Job: the
 // wrapper's return status is the last command's, so it becomes the Job's.
 var compareDataScript = "set -eu\n" + compareDataStrict + "compare_data_strict\n"
+
+// statusTime is t as a status field, nil when t is zero.
+func statusTime(t time.Time) *metav1.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &metav1.Time{Time: t}
+}
 
 func compareJobName(m *v1beta1.Migration, check string) string {
 	return m.Name + "-compare-" + check
@@ -248,8 +257,9 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 		if !done {
 			return false, nil
 		}
-		m.Status.Verification = append(m.Status.Verification,
-			v1beta1.VerificationResult{Check: check, Passed: ok})
+		m.Status.Verification = append(m.Status.Verification, v1beta1.VerificationResult{
+			Check: check, Passed: ok, StartedAt: job.Status.StartTime, CompletedAt: statusTime(jobFinishedAt(job)),
+		})
 		if !ok {
 			mismatched = append(mismatched, check)
 		}

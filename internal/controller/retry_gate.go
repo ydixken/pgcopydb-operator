@@ -117,7 +117,7 @@ func (r *MigrationReconciler) judgeProbe(ctx context.Context, m, base *v1beta1.M
 	_, ok := jobFinished(job)
 	in := gateInputsFor(m)
 	current := job.Annotations[annotationRetryGateInputs] == in.String()
-	finishedAt := gateFinishedAt(job)
+	finishedAt := jobFinishedAt(job)
 	if ok && (!current || now.After(finishedAt.Add(gatePassFreshness))) {
 		if err := r.deleteGateProbe(ctx, job); err != nil {
 			return ctrl.Result{}, false, err
@@ -218,8 +218,9 @@ func (r *MigrationReconciler) gateLog(ctx context.Context, job *batchv1.Job) (st
 	return string(raw), err
 }
 
-// gateFinishedAt is when the probe failed or completed, zero when the Job records neither.
-func gateFinishedAt(job *batchv1.Job) time.Time {
+// jobFinishedAt is when the Job failed or completed, zero when it records neither.
+// Only a Job that succeeded gets a completionTime.
+func jobFinishedAt(job *batchv1.Job) time.Time {
 	if t := jobFailedAt(job); !t.IsZero() {
 		return t
 	}

@@ -464,6 +464,14 @@ type VerificationResult struct {
 
 	// passed is false when that compare reported differences.
 	Passed bool `json:"passed"`
+
+	// startedAt is when the check's Job started.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
+	// completedAt is when the check's Job completed or failed.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
 
 // CutoverMode picks who pulls the trigger.
