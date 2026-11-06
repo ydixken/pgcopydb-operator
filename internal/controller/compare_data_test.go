@@ -268,6 +268,16 @@ func TestCompareDataQuery(t *testing.T) {
 			report: `[{"schema":"public","name":"orders","source":{"rows":338},"target":{"rows":333}}]`,
 			want:   "public.orders: source  rows (checksum ), target  rows (checksum )",
 		},
+		// The bundled runner's rows carry a status, and only match passes:
+		// status alone fails a row whose counts and checksums agree.
+		{"a status of match", statusReport(`"match"`), ""},
+		{"a status of differ", statusReport(`"differ"`), fmt.Sprintf(line, "338", "a1") + ", status differ"},
+		{"a null status", statusReport("null"), fmt.Sprintf(line, "338", "a1")},
+		{
+			name:   "a table the runner could not compare",
+			report: `[{"schema":"public","name":"orders","source":{"rowcount":338,"checksum":null},"target":{"rowcount":0,"checksum":null},"status":"error"}]`,
+			want:   "public.orders: source 338 rows (checksum ), target 0 rows (checksum ), status error",
+		},
 		// The report reaches psql off argv, which caps one string at 128 KiB
 		// on Linux; through -v this many tables failed to exec at all.
 		{"a report past the argv cap", bigMatchingReport(1000), ""},
@@ -289,6 +299,12 @@ func TestCompareDataQuery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// statusReport is one table whose counts and checksums match, with the given status JSON.
+func statusReport(status string) string {
+	return `[{"schema":"public","name":"orders","source":{"rowcount":338,"checksum":"a1"},` +
+		`"target":{"rowcount":338,"checksum":"a1"},"status":` + status + `}]`
 }
 
 // bigMatchingReport renders n matching tables the way pgcopydb pretty-prints

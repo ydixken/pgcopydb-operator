@@ -200,6 +200,7 @@ Approval does not stop source writes or freeze the stream while catch-up is pend
 
     The Job runs `pgcopydb compare data` and validates the report `--json` prints, instead of the exit status alone.
     The compare passes only when the report accounts for every migrated table, and each one matches on row count and checksum.
+    With the bundled runner, each row's `status` must also be `match`.
     A compare that could not run, and a report the Job cannot read, refuse rather than pass.
 
 6. A cleanup Job (`<name>-cleanup`) drops the replication slot, the auto-created publication, and the target origin.

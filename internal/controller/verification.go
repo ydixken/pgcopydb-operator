@@ -51,20 +51,23 @@ const compareReportPath = "/tmp/compare-data.json"
 
 // compareReportQuery names every table the report does not show as matching.
 // An absent source side and an empty array count as unmatched, since NULL
-// against NULL would read as a clean match. psql reads the report from the
-// file, not through -v: Linux caps one argv string at 128 KiB, which a
-// pretty-printed report crosses at about 480 tables.
+// against NULL would read as a clean match. A row's status, which the bundled
+// runner adds and older runners lack, fails it unless it is match. psql reads
+// the report from the file, not through -v: Linux caps one argv string at
+// 128 KiB, which a pretty-printed report crosses at about 480 tables.
 var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select 'the report lists no table, so nothing was compared'
  where json_array_length(:'r'::json) = 0;
-select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)',
+select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)%s',
               t->>'schema', t->>'name',
               t->'source'->>'rowcount', t->'source'->>'checksum',
-              t->'target'->>'rowcount', t->'target'->>'checksum')
+              t->'target'->>'rowcount', t->'target'->>'checksum',
+              ', status ' || (t->>'status'))
   from json_array_elements(:'r'::json) as report(t)
  where t->'source'->>'rowcount' is distinct from t->'target'->>'rowcount'
     or t->'source'->>'checksum' is distinct from t->'target'->>'checksum'
     or t->'source'->>'rowcount' is null
-    or t->'source'->>'checksum' is null;
+    or t->'source'->>'checksum' is null
+    or (t->'status' is not null and t->>'status' is distinct from 'match');
 `
 
 // compareLogPath keeps compare data's stderr, so the last progress line can be

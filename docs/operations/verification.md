@@ -247,4 +247,5 @@ Selecting only a parent checks its metadata without adding leaves to the copy or
 
 The bundled data comparator returns a nonzero exit code on a mismatch.
 The operator also validates the JSON report and rejects missing reports, malformed reports, empty arrays, and absent row-count or checksum fields.
+The bundled runner gives each report row a `status`, and the operator rejects a row whose `status` is anything but `match`; rows from an older runner carry none and are checked as before.
 This report check also covers runner overrides whose comparator does not return a nonzero code on content differences.
