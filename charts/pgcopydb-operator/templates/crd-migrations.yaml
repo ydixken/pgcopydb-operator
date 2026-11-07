@@ -325,6 +325,15 @@ spec:
                   would apply are reported, not applied. Unrelated to kubectl --dry-run.
                   Immutable: the real run is a separate Migration.
                 type: boolean
+              engine:
+                default: pgcopydb
+                description: |-
+                  engine defaults to pgcopydb; rpgmigrate requires explicit selection.
+                  The effective engine is immutable, including for existing Migrations that omit it.
+                enum:
+                - pgcopydb
+                - rpgmigrate
+                type: string
               follow:
                 description: |-
                   follow enables live migration (CDC after the base copy). Immutable:
@@ -2139,6 +2148,9 @@ spec:
               rule: '!(has(self.verification) && has(self.verification.rehearsal)
                 && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode)
                 && self.cutover.mode == ''Automatic'')'
+            - message: 'engine is immutable: create a separate Migration'
+              rule: '(has(self.engine) ? self.engine : ''pgcopydb'') == (has(oldSelf.engine)
+                ? oldSelf.engine : ''pgcopydb'')'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2836,6 +2848,15 @@ spec:
                   would apply are reported, not applied. Unrelated to kubectl --dry-run.
                   Immutable: the real run is a separate Migration.
                 type: boolean
+              engine:
+                default: pgcopydb
+                description: |-
+                  engine defaults to pgcopydb; rpgmigrate requires explicit selection.
+                  The effective engine is immutable, including for existing Migrations that omit it.
+                enum:
+                - pgcopydb
+                - rpgmigrate
+                type: string
               follow:
                 description: |-
                   follow enables live migration (CDC after the base copy). Immutable:
@@ -4650,6 +4671,9 @@ spec:
               rule: '!(has(self.verification) && has(self.verification.rehearsal)
                 && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode)
                 && self.cutover.mode == ''Automatic'')'
+            - message: 'engine is immutable: create a separate Migration'
+              rule: '(has(self.engine) ? self.engine : ''pgcopydb'') == (has(oldSelf.engine)
+                ? oldSelf.engine : ''pgcopydb'')'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.

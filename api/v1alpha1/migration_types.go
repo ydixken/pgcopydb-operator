@@ -646,6 +646,15 @@ type ReplicationStatus struct {
 	LagBytes *int64 `json:"lagBytes,omitempty"`
 }
 
+// MigrationEngine selects the migration implementation.
+// +kubebuilder:validation:Enum=pgcopydb;rpgmigrate
+type MigrationEngine string
+
+const (
+	MigrationEnginePGCopyDB   MigrationEngine = "pgcopydb"
+	MigrationEngineRPGMigrate MigrationEngine = "rpgmigrate"
+)
+
 // MigrationSpec is the desired state of a Migration. source and target are
 // immutable after creation (a migration is a one-shot job, like batch/v1 Job),
 // except target.synchronousCommit.
@@ -656,7 +665,14 @@ type ReplicationStatus struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.clone) && has(self.clone.deferIndexes) && self.clone.deferIndexes) == (has(oldSelf.clone) && has(oldSelf.clone.deferIndexes) && oldSelf.clone.deferIndexes)",message="clone.deferIndexes is immutable: create a separate Migration"
 // +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal) || (has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="verification.rehearsal requires follow.enabled: it compares while a live migration streams"
 // +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode) && self.cutover.mode == 'Automatic')",message="verification.rehearsal requires cutover.mode Manual: an Automatic cutover starts at catch-up and cancels the rehearsal"
+// +kubebuilder:validation:XValidation:rule="(has(self.engine) ? self.engine : 'pgcopydb') == (has(oldSelf.engine) ? oldSelf.engine : 'pgcopydb')",message="engine is immutable: create a separate Migration"
 type MigrationSpec struct {
+	// engine defaults to pgcopydb; rpgmigrate requires explicit selection.
+	// The effective engine is immutable, including for existing Migrations that omit it.
+	// +kubebuilder:default=pgcopydb
+	// +optional
+	Engine MigrationEngine `json:"engine,omitempty"`
+
 	// source is the PostgreSQL endpoint to migrate from. Immutable.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="source is immutable"
 	// +kubebuilder:validation:XValidation:rule="!has(self.synchronousCommit)",message="synchronousCommit applies to the target only"
