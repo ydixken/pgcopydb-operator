@@ -202,6 +202,18 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	// base is the object as fetched; every status write patches against it.
 	base := m.DeepCopy()
+	// Dispatch before lifecycle handling so an unavailable engine cannot reach legacy effects.
+	if engine, err := backendFor(m); err != nil || engine != v1beta1.MigrationEnginePGCopyDB {
+		msg := "rpgmigrate backend is not implemented or qualified"
+		if err != nil {
+			msg = err.Error()
+		} else if err := validateNativeConfig(m, nil); err != nil {
+			msg += ": " + err.Error()
+		}
+		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "UnsupportedEngine", msg)
+		r.fail(m, "UnsupportedEngine", "Validate", msg)
+		return ctrl.Result{}, r.updateStatus(ctx, m, base)
+	}
 	if !m.DeletionTimestamp.IsZero() {
 		r.stopSampling(req.NamespacedName)
 		// Live migrations route through slot cleanup (finalizer); everything

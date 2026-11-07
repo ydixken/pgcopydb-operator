@@ -3,6 +3,15 @@
 The [CRD reference](reference/api.md) lists every field, with its default and its validation.
 Complete resources with comments are in the [examples index](examples.md).
 
+## Migration engine
+
+Omit `spec.engine` or set it to `pgcopydb` to use the pgcopydb backend.
+The effective engine is immutable for each Migration.
+The controller rejects `rpgmigrate` until a native backend is implemented and qualified.
+It sets `Validated=False` and `Failed=True` with reason `UnsupportedEngine` before it creates resources or executes commands.
+It also rejects unknown engine values if admission does not reject them first.
+The rejection does not delete, adopt, or clean up existing Jobs, PVCs, or replication resources.
+
 ## Clone tuning
 
 The `clone` block holds parallelism, same-table splitting, and skips.

@@ -223,6 +223,24 @@ optionally following changes until cutover.
 | `status` _[MigrationStatus](#migrationstatus)_ | status reports progress. Conditions are authoritative; phase summarizes them. |  | Optional: \{\} <br /> |
 
 
+#### MigrationEngine
+
+_Underlying type:_ _string_
+
+MigrationEngine selects the migration implementation.
+
+_Validation:_
+- Enum: [pgcopydb rpgmigrate]
+
+_Appears in:_
+- [MigrationSpec](#migrationspec)
+
+| Field | Description |
+| --- | --- |
+| `pgcopydb` |  |
+| `rpgmigrate` |  |
+
+
 #### MigrationPhase
 
 _Underlying type:_ _string_
@@ -267,6 +285,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `engine` _[MigrationEngine](#migrationengine)_ | engine defaults to pgcopydb; rpgmigrate requires explicit selection.<br />The effective engine is immutable, including for existing Migrations that omit it. | pgcopydb | Enum: [pgcopydb rpgmigrate] <br />Optional: \{\} <br /> |
 | `source` _[PostgresConnection](#postgresconnection)_ | source is the PostgreSQL endpoint to migrate from. Immutable. |  | Required: \{\} <br /> |
 | `target` _[PostgresConnection](#postgresconnection)_ | target is the PostgreSQL endpoint to migrate to. Immutable except<br />synchronousCommit, which applies from the next attempt. |  | Required: \{\} <br /> |
 | `clone` _[CloneOptions](#cloneoptions)_ | clone configures the base copy. |  | Optional: \{\} <br /> |
