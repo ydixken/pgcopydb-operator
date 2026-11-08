@@ -1,0 +1,3532 @@
+{
+  "protocol_version": 1,
+  "support_files": [
+    "payloads/filters.ini"
+  ],
+  "cases": [
+    {
+      "id": "version-empty-capabilities",
+      "kind": "version",
+      "payload": "payloads/version-empty-capabilities.json",
+      "accept": true
+    },
+    {
+      "id": "version-future-protocol",
+      "kind": "version",
+      "payload": "payloads/version-future-protocol.json",
+      "accept": false
+    },
+    {
+      "id": "version-unknown-capability",
+      "kind": "version",
+      "payload": "payloads/version-unknown-capability.json",
+      "accept": false
+    },
+    {
+      "id": "version-duplicate-capability",
+      "kind": "version",
+      "payload": "payloads/version-duplicate-capability.json",
+      "accept": false
+    },
+    {
+      "id": "version-null-capabilities",
+      "kind": "version",
+      "payload": "payloads/version-null-capabilities.json",
+      "accept": false
+    },
+    {
+      "id": "version-identity-forbidden",
+      "kind": "version",
+      "payload": "payloads/version-identity-forbidden.json",
+      "accept": false
+    },
+    {
+      "id": "version-empty-engine",
+      "kind": "version",
+      "payload": "payloads/version-empty-engine.json",
+      "accept": false
+    },
+    {
+      "id": "version-missing-capabilities",
+      "kind": "version",
+      "payload": "payloads/version-missing-capabilities.json",
+      "accept": false
+    },
+    {
+      "id": "version-duplicate-key",
+      "kind": "version",
+      "payload": "payloads/version-duplicate-key.json",
+      "accept": false
+    },
+    {
+      "id": "version-array",
+      "kind": "version",
+      "payload": "payloads/version-array.json",
+      "accept": false
+    },
+    {
+      "id": "version-truncated",
+      "kind": "version",
+      "payload": "payloads/version-truncated.json",
+      "accept": false
+    },
+    {
+      "id": "version-fraction",
+      "kind": "version",
+      "payload": "payloads/version-fraction.json",
+      "accept": false
+    },
+    {
+      "id": "progress-copying",
+      "kind": "report",
+      "payload": "payloads/progress-copying.json",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "clone-copying",
+      "kind": "report",
+      "payload": "payloads/clone-copying.json",
+      "accept": true,
+      "binding": {
+        "command": "clone",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "progress-unknown-metrics",
+      "kind": "report",
+      "payload": "payloads/progress-unknown-metrics.json",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "progress-integer-range",
+      "kind": "report",
+      "payload": "payloads/progress-integer-range.json",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-protocol",
+      "kind": "report",
+      "payload": "payloads/report-missing-protocol.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-future-protocol",
+      "kind": "report",
+      "payload": "payloads/report-future-protocol.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-case-protocol",
+      "kind": "report",
+      "payload": "payloads/report-case-protocol.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-null-protocol",
+      "kind": "report",
+      "payload": "payloads/report-null-protocol.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-engine",
+      "kind": "report",
+      "payload": "payloads/report-missing-engine.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-empty-engine",
+      "kind": "report",
+      "payload": "payloads/report-empty-engine.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-command",
+      "kind": "report",
+      "payload": "payloads/report-missing-command.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-wrong-command",
+      "kind": "report",
+      "payload": "payloads/report-wrong-command.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-capabilities",
+      "kind": "report",
+      "payload": "payloads/report-missing-capabilities.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-unknown-capability",
+      "kind": "report",
+      "payload": "payloads/report-unknown-capability.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-duplicate-capability",
+      "kind": "report",
+      "payload": "payloads/report-duplicate-capability.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-required-capability",
+      "kind": "report",
+      "payload": "payloads/report-missing-required-capability.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-null-capabilities",
+      "kind": "report",
+      "payload": "payloads/report-null-capabilities.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-work",
+      "kind": "report",
+      "payload": "payloads/report-missing-work.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-migration",
+      "kind": "report",
+      "payload": "payloads/report-missing-migration.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-wrong-migration",
+      "kind": "report",
+      "payload": "payloads/report-wrong-migration.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-wrong-run",
+      "kind": "report",
+      "payload": "payloads/report-wrong-run.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-wrong-workdir",
+      "kind": "report",
+      "payload": "payloads/report-wrong-workdir.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-workdir-path",
+      "kind": "report",
+      "payload": "payloads/report-workdir-path.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-uppercase-identity",
+      "kind": "report",
+      "payload": "payloads/report-uppercase-identity.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-generation",
+      "kind": "report",
+      "payload": "payloads/report-missing-generation.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-stale-generation",
+      "kind": "report",
+      "payload": "payloads/report-stale-generation.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-future-generation",
+      "kind": "report",
+      "payload": "payloads/report-future-generation.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-null-generation",
+      "kind": "report",
+      "payload": "payloads/report-null-generation.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-overflow-generation",
+      "kind": "report",
+      "payload": "payloads/report-overflow-generation.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-phase",
+      "kind": "report",
+      "payload": "payloads/report-missing-phase.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-unknown-phase",
+      "kind": "report",
+      "payload": "payloads/report-unknown-phase.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-missing-payload",
+      "kind": "report",
+      "payload": "payloads/report-missing-payload.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-null-payload",
+      "kind": "report",
+      "payload": "payloads/report-null-payload.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-negative-total",
+      "kind": "report",
+      "payload": "payloads/report-negative-total.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-negative-done",
+      "kind": "report",
+      "payload": "payloads/report-negative-done.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-done-exceeds-total",
+      "kind": "report",
+      "payload": "payloads/report-done-exceeds-total.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-overflow",
+      "kind": "report",
+      "payload": "payloads/report-overflow.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-float",
+      "kind": "report",
+      "payload": "payloads/report-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-exponent",
+      "kind": "report",
+      "payload": "payloads/report-exponent.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-boolean",
+      "kind": "report",
+      "payload": "payloads/report-boolean.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-string-integer",
+      "kind": "report",
+      "payload": "payloads/report-string-integer.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-duplicate-header",
+      "kind": "report",
+      "payload": "payloads/report-duplicate-header.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-duplicate-nested",
+      "kind": "report",
+      "payload": "payloads/report-duplicate-nested.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-case-folded-nested",
+      "kind": "report",
+      "payload": "payloads/report-case-folded-nested.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-escaped-duplicate",
+      "kind": "report",
+      "payload": "payloads/report-escaped-duplicate.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-unknown-payload-key",
+      "kind": "report",
+      "payload": "payloads/report-unknown-payload-key.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-empty",
+      "kind": "report",
+      "payload": "payloads/report-empty.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-array",
+      "kind": "report",
+      "payload": "payloads/report-array.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-null",
+      "kind": "report",
+      "payload": "payloads/report-null.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-multiple",
+      "kind": "report",
+      "payload": "payloads/report-multiple.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-trailing",
+      "kind": "report",
+      "payload": "payloads/report-trailing.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-nesting",
+      "kind": "report",
+      "payload": "payloads/report-nesting.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "report-utf8",
+      "kind": "report",
+      "payload": "payloads/report-utf8.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "endpos-ack",
+      "kind": "report",
+      "payload": "payloads/endpos-ack.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-missing-end",
+      "kind": "report",
+      "payload": "payloads/endpos-missing-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-unpersisted",
+      "kind": "report",
+      "payload": "payloads/endpos-unpersisted.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-wrong-end",
+      "kind": "report",
+      "payload": "payloads/endpos-wrong-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-zero-end",
+      "kind": "report",
+      "payload": "payloads/endpos-zero-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-missing-certified",
+      "kind": "report",
+      "payload": "payloads/endpos-missing-certified.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "endpos-no-caller-boundary",
+      "kind": "report",
+      "payload": "payloads/endpos-no-caller-boundary.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "drain-keepalive",
+      "kind": "report",
+      "payload": "payloads/drain-keepalive.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/30",
+          "durable_replay_lsn": "0/30",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "keepalive",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-later_begin",
+      "kind": "report",
+      "payload": "payloads/drain-later_begin.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      },
+      "producer_context": {
+        "applied_lsn": "0/10",
+        "certified_lsn": "0/10",
+        "copy_anchor_lsn": "0/8",
+        "end_lsn": "0/20",
+        "begin_final_lsn": "0/30",
+        "durable_replay_lsn": "0/10"
+      }
+    },
+    {
+      "id": "drain-no-proof",
+      "kind": "report",
+      "payload": "payloads/drain-no-proof.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-uncommitted",
+      "kind": "report",
+      "payload": "payloads/drain-uncommitted.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-false-drained",
+      "kind": "report",
+      "payload": "payloads/drain-false-drained.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-promoted-durable",
+      "kind": "report",
+      "payload": "payloads/drain-promoted-durable.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-promoted-certified",
+      "kind": "report",
+      "payload": "payloads/drain-promoted-certified.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-wrong-token",
+      "kind": "report",
+      "payload": "payloads/drain-wrong-token.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-wrong-witness",
+      "kind": "report",
+      "payload": "payloads/drain-wrong-witness.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-wrong-proof-end",
+      "kind": "report",
+      "payload": "payloads/drain-wrong-proof-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-wrong-kind",
+      "kind": "report",
+      "payload": "payloads/drain-wrong-kind.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-witness-at-end",
+      "kind": "report",
+      "payload": "payloads/drain-witness-at-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-foreign-proof",
+      "kind": "report",
+      "payload": "payloads/drain-foreign-proof.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-missing-certified",
+      "kind": "report",
+      "payload": "payloads/drain-missing-certified.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-malformed-lsn",
+      "kind": "report",
+      "payload": "payloads/drain-malformed-lsn.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-missing-row",
+      "kind": "report",
+      "payload": "payloads/drain-missing-row.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20"
+      }
+    },
+    {
+      "id": "drain-unconfirmed-barrier",
+      "kind": "report",
+      "payload": "payloads/drain-unconfirmed-barrier.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": false
+        }
+      }
+    },
+    {
+      "id": "drain-stale-row-token",
+      "kind": "report",
+      "payload": "payloads/drain-stale-row-token.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:2",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-different-row-end",
+      "kind": "report",
+      "payload": "payloads/drain-different-row-end.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/21",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-different-row-witness",
+      "kind": "report",
+      "payload": "payloads/drain-different-row-witness.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/31",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-different-row-kind",
+      "kind": "report",
+      "payload": "payloads/drain-different-row-kind.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "keepalive",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-93",
+      "kind": "report",
+      "payload": "payloads/drain-token-93.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:0",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-94",
+      "kind": "report",
+      "payload": "payloads/drain-token-94.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "0:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-95",
+      "kind": "report",
+      "payload": "payloads/drain-token-95.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "2:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-96",
+      "kind": "report",
+      "payload": "payloads/drain-token-96.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "01:0:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-97",
+      "kind": "report",
+      "payload": "payloads/drain-token-97.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:00:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-98",
+      "kind": "report",
+      "payload": "payloads/drain-token-98.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:01",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-99",
+      "kind": "report",
+      "payload": "payloads/drain-token-99.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:-1:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-100",
+      "kind": "report",
+      "payload": "payloads/drain-token-100.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:18446744073709551616:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-101",
+      "kind": "report",
+      "payload": "payloads/drain-token-101.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:18446744073709551616",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-102",
+      "kind": "report",
+      "payload": "payloads/drain-token-102.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-token-103",
+      "kind": "report",
+      "payload": "payloads/drain-token-103.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1:1",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "drain-keepalive-beyond-certified",
+      "kind": "report",
+      "payload": "payloads/drain-keepalive-beyond-certified.json",
+      "accept": false,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:1",
+          "certified_lsn": "0/30",
+          "durable_replay_lsn": "0/30",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/40",
+          "drain_kind": "keepalive",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "cleanup-complete",
+      "kind": "report",
+      "payload": "payloads/cleanup-complete.json",
+      "accept": true,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-empty-inventory",
+      "kind": "report",
+      "payload": "payloads/cleanup-empty-inventory.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-omitted-slot",
+      "kind": "report",
+      "payload": "payloads/cleanup-omitted-slot.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-duplicate",
+      "kind": "report",
+      "payload": "payloads/cleanup-duplicate.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-extra",
+      "kind": "report",
+      "payload": "payloads/cleanup-extra.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-unremoved-slot",
+      "kind": "report",
+      "payload": "payloads/cleanup-unremoved-slot.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-removed-workdir",
+      "kind": "report",
+      "payload": "payloads/cleanup-removed-workdir.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-owned-origin",
+      "kind": "report",
+      "payload": "payloads/cleanup-owned-origin.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-removed-origin",
+      "kind": "report",
+      "payload": "payloads/cleanup-removed-origin.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-missing-complete",
+      "kind": "report",
+      "payload": "payloads/cleanup-missing-complete.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-unknown-owned",
+      "kind": "report",
+      "payload": "payloads/cleanup-unknown-owned.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-unknown-removed",
+      "kind": "report",
+      "payload": "payloads/cleanup-unknown-removed.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "cleanup-incomplete",
+      "kind": "report",
+      "payload": "payloads/cleanup-incomplete.json",
+      "accept": true,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      },
+      "expect": {
+        "complete": false
+      }
+    },
+    {
+      "id": "compare-data-array",
+      "kind": "compare_array",
+      "payload": "payloads/compare-data-array.json",
+      "accept": true
+    },
+    {
+      "id": "compare-array-is-not-report",
+      "kind": "report",
+      "payload": "payloads/compare-array-is-not-report.json",
+      "accept": false,
+      "binding": {
+        "command": "compare data",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "compare-verdict-is-not-report",
+      "kind": "report",
+      "payload": "payloads/compare-verdict-is-not-report.json",
+      "accept": false,
+      "binding": {
+        "command": "compare data",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "compare-progress",
+      "kind": "compare_progress",
+      "payload": "payloads/compare-progress.txt",
+      "accept": true,
+      "expect": {
+        "plannedTables": 3,
+        "comparedTables": 2,
+        "plannedBytes": 131072,
+        "comparedBytes": 24576,
+        "comparedRows": 20,
+        "differingTables": 0,
+        "failedTables": 0,
+        "elapsedMs": 10059,
+        "final": false,
+        "inFlightCount": 1,
+        "inFlight": [
+          {
+            "schema": "public",
+            "name": "a",
+            "bytes": 106496,
+            "elapsedMs": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "transport-one",
+      "kind": "transport",
+      "payload": "payloads/transport-one.txt",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "transport-absent",
+      "kind": "transport",
+      "payload": "payloads/transport-absent.txt",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "transport-truncated",
+      "kind": "transport",
+      "payload": "payloads/transport-truncated.txt",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "transport-malformed",
+      "kind": "transport",
+      "payload": "payloads/transport-malformed.txt",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "transport-multiple",
+      "kind": "transport",
+      "payload": "payloads/transport-multiple.txt",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "transport-wrong-prefix",
+      "kind": "transport",
+      "payload": "payloads/transport-wrong-prefix.txt",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "argv-option-dir",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--dir",
+        "/work/pgcopydb"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-restart",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--restart"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-resume",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--resume"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-not-consistent",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--not-consistent"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-table-jobs",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--table-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-index-jobs",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--index-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-restore-jobs",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--restore-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-large-objects-jobs",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--large-objects-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-split-tables-larger-than",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--split-tables-larger-than",
+        "512MB"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-split-max-parts",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--split-max-parts",
+        "8"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-estimate-table-sizes",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--estimate-table-sizes"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-use-copy-binary",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--use-copy-binary"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-fail-fast",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--fail-fast"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-defer-indexes",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--defer-indexes"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-drop-if-exists",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--drop-if-exists"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-roles",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--roles"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-no-role-passwords",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--no-role-passwords"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-no-owner",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--no-owner"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-no-acl",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--no-acl"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-no-comments",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--no-comments"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-no-tablespaces",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--no-tablespaces"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-filters",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--filters",
+        "payloads/filters.ini"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-all-databases",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--all-databases"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-large-objects",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-large-objects"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-extensions",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-extensions"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-ext-comments",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-ext-comments"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-collations",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-collations"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-vacuum",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-vacuum"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-analyze",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-analyze"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-db-properties",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-db-properties"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-skip-split-by-ctid",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--skip-split-by-ctid"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-follow",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--follow"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-slot-name",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--slot-name",
+        "native_slot"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-origin",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--origin",
+        "recorded_origin"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-plugin",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--plugin",
+        "pgoutput"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-publication",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--publication",
+        "native_publication"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-wal2json-numeric-as-string",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--wal2json-numeric-as-string",
+        "--plugin",
+        "wal2json"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-replay-no-op-updates",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--replay-no-op-updates"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-current",
+      "kind": "argv",
+      "argv": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--current"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-source",
+      "kind": "argv",
+      "argv": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--source",
+        "dbname=source",
+        "0/20"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-endpos",
+      "kind": "argv",
+      "argv": [
+        "stream",
+        "sentinel",
+        "get",
+        "--endpos"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-replay-lsn",
+      "kind": "argv",
+      "argv": [
+        "stream",
+        "sentinel",
+        "get",
+        "--replay-lsn"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-option-json",
+      "kind": "argv",
+      "argv": [
+        "list",
+        "progress",
+        "--json"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-connection-override",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--source",
+        "dbname=cli_source",
+        "--target",
+        "dbname=cli_target"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "not a conninfo",
+        "PGCOPYDB_TARGET_PGURI": "not a conninfo"
+      },
+      "accept": true,
+      "expect": {
+        "effective_source": "dbname=cli_source",
+        "effective_target": "dbname=cli_target",
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-table-jobs-override",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--table-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_TABLE_JOBS": "2"
+      },
+      "accept": true,
+      "expect": {
+        "table_jobs": "4",
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-invalid-numeric-env-before-override",
+      "kind": "argv",
+      "argv": [
+        "clone",
+        "--table-jobs",
+        "4"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_TABLE_JOBS": "invalid"
+      },
+      "accept": false,
+      "expect": {
+        "error_kind": "BadConfig"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-on",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "on"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": true,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-off",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "off"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": false,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-1",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "1"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": true,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-0",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "0"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": false,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-true",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "true"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": true,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-log-json-false",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "false"
+      },
+      "accept": true,
+      "expect": {
+        "log_json": false,
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-invalid-log-json",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGCOPYDB_LOG_JSON": "maybe"
+      },
+      "accept": false,
+      "expect": {
+        "error_kind": "BadConfig"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-passfile-delegated",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "PGPASSFILE": "/nonexistent/synthetic-passfile"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-identity-valid",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "RPGMIGRATE_MIGRATION_UID": "00112233-4455-6677-8899-aabbccddeeff",
+        "RPGMIGRATE_RUN_ID": "00112233445566778899aabbccddeeff",
+        "RPGMIGRATE_WORKDIR_ID": "11112222-3333-4444-aaaa-bbbbccccdddd",
+        "RPGMIGRATE_CHECKPOINT_GENERATION": "1"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "unsupported"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-identity-partial",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "RPGMIGRATE_RUN_ID": "00112233445566778899aabbccddeeff"
+      },
+      "accept": false,
+      "expect": {
+        "error_kind": "BadConfig"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-identity-mismatch",
+      "kind": "argv",
+      "argv": [
+        "clone"
+      ],
+      "env": {
+        "PGCOPYDB_SOURCE_PGURI": "dbname=source",
+        "PGCOPYDB_TARGET_PGURI": "dbname=target",
+        "RPGMIGRATE_MIGRATION_UID": "00112233-4455-6677-8899-aabbccddeeff",
+        "RPGMIGRATE_RUN_ID": "00112233445566778899aabbccddee00",
+        "RPGMIGRATE_WORKDIR_ID": "11112222-3333-4444-aaaa-bbbbccccdddd",
+        "RPGMIGRATE_CHECKPOINT_GENERATION": "1"
+      },
+      "accept": false,
+      "expect": {
+        "error_kind": "BadConfig"
+      },
+      "stage": "configuration"
+    },
+    {
+      "id": "argv-version-identity-free",
+      "kind": "argv",
+      "argv": [
+        "version",
+        "--json"
+      ],
+      "env": {
+        "RPGMIGRATE_RUN_ID": "malformed"
+      },
+      "accept": true,
+      "expect": {
+        "runtime": "version"
+      },
+      "stage": "configuration"
+    }
+  ]
+}

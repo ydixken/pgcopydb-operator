@@ -1,0 +1,1 @@
+compare progress: {"plannedTables":3,"comparedTables":2,"plannedBytes":131072,"comparedBytes":24576,"comparedRows":20,"differingTables":0,"failedTables":0,"elapsedMs":10059,"final":false,"inFlightCount":1,"inFlight":[{"schema":"public","name":"a","bytes":106496,"elapsedMs":10000}]}

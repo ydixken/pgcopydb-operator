@@ -34,7 +34,7 @@ func TestBackendForNormalizesOnlyEngine(t *testing.T) {
 }
 
 func cloneCapabilities() []native.Capability {
-	return []native.Capability{native.CapCloneSingleDB, native.CapLargeObjects, native.CapBinaryFallback, native.CapSplit}
+	return []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapLargeObjects, native.CapBinaryFallback, native.CapSplit}
 }
 
 func nativeMigration() *v1beta1.Migration {
@@ -83,6 +83,10 @@ func TestValidateNativeConfigRejectsUnqualifiedOptions(t *testing.T) {
 		{"large object jobs", func(m *v1beta1.Migration) { m.Spec.Clone.LargeObjectsJobs = 2 }},
 		{"negative jobs", func(m *v1beta1.Migration) { m.Spec.Clone.TableJobs = -1 }},
 		{"negative part cap", func(m *v1beta1.Migration) { m.Spec.Clone.SplitMaxParts = -1 }},
+		{"negative split size", func(m *v1beta1.Migration) {
+			size := resource.MustParse("-1")
+			m.Spec.Clone.SplitTablesLargerThan = &size
+		}},
 		{"source startup override", func(m *v1beta1.Migration) { m.Spec.Source.SynchronousCommit = "local" }},
 		{"apply grouping", func(m *v1beta1.Migration) {
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, ApplyGroupTransactions: 2}
@@ -103,7 +107,7 @@ func TestValidateNativeConfigRejectsUnqualifiedOptions(t *testing.T) {
 			m := nativeMigration()
 			tc.mutate(m)
 			before := m.DeepCopy()
-			caps := append(cloneCapabilities(), native.CapPGOutput, native.CapProgress, native.CapCutover, native.CapVerify, native.CapCleanup)
+			caps := append(cloneCapabilities(), native.CapPGOutput, native.CapCutover, native.CapVerify, native.CapCleanup)
 			if err := validateNativeConfig(m, caps); err == nil {
 				t.Fatal("accepted unqualified configuration")
 			}
@@ -119,15 +123,15 @@ func TestValidateNativeConfigAllowsQualifiedCopyControls(t *testing.T) {
 	no := false
 	zero := resource.MustParse("0")
 	m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 8, SplitMaxParts: 4, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{"largeObjects"}}
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB}); err != nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress}); err != nil {
 		t.Fatalf("disabled optional copy features still required capabilities: %v", err)
 	}
 	threshold := resource.MustParse("1Gi")
 	m.Spec.Clone.SplitTablesLargerThan = &threshold
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB}); err == nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress}); err == nil {
 		t.Fatal("enabled splitting without qualification")
 	}
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapSplit}); err != nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapSplit}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -148,5 +152,34 @@ func TestValidateNativeConfigGatesFollowAndVerification(t *testing.T) {
 	}
 	if err := validateNativeConfig(m, append(caps, native.CapVerify)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateNativeConfigRequiresEachFollowCapability(t *testing.T) {
+	m := nativeMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
+	for _, omitted := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {
+		caps := cloneCapabilities()
+		for _, c := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {
+			if c != omitted {
+				caps = append(caps, c)
+			}
+		}
+		if err := validateNativeConfig(m, caps); err == nil {
+			t.Fatalf("accepted follow without %s", omitted)
+		}
+	}
+}
+
+func TestValidateNativeConfigRejectsInvalidDiscoveryCapabilities(t *testing.T) {
+	for _, caps := range [][]native.Capability{
+		nil,
+		{},
+		append(cloneCapabilities(), "unknown"),
+		append(cloneCapabilities(), native.CapProgress),
+	} {
+		if err := validateNativeConfig(nativeMigration(), caps); err == nil {
+			t.Fatalf("accepted invalid discovery capabilities: %v", caps)
+		}
 	}
 }

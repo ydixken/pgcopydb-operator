@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -17,16 +18,17 @@ import (
 type Capability string
 
 const (
-	CapCloneSingleDB  Capability = "clone.single_db"
-	CapLargeObjects   Capability = "copy.large_objects"
-	CapBinaryFallback Capability = "copy.binary_fallback"
-	CapSplit          Capability = "copy.split"
-	CapPGOutput       Capability = "cdc.pgoutput"
-	CapProgress       Capability = "progress.v1"
-	CapCutover        Capability = "cutover.v1"
-	CapVerify         Capability = "verify.v1"
-	CapCleanup        Capability = "cleanup.v1"
-	commandSetEndpos             = "stream sentinel set endpos"
+	CapCloneSingleDB    Capability = "clone.single_db"
+	CapLargeObjects     Capability = "copy.large_objects"
+	CapBinaryFallback   Capability = "copy.binary_fallback"
+	CapSplit            Capability = "copy.split"
+	CapPGOutput         Capability = "cdc.pgoutput"
+	CapProgress         Capability = "progress.v1"
+	CapCutover          Capability = "cutover.v1"
+	CapVerify           Capability = "verify.v1"
+	CapCleanup          Capability = "cleanup.v1"
+	commandSetEndpos               = "stream sentinel set endpos"
+	resourceKindWorkdir            = "workdir"
 )
 
 type WorkIdentity struct {
@@ -38,9 +40,34 @@ type WorkIdentity struct {
 
 // Binding comes from the caller's owned state, never from the report being checked.
 type Binding struct {
-	Command string
-	Work    WorkIdentity
-	EndLSN  string
+	Command    string
+	Work       WorkIdentity
+	EndLSN     string
+	Checkpoint *CheckpointEvidence
+	Resources  []ResourceObligation
+}
+
+type CheckpointEvidence struct {
+	CheckpointID     string
+	CertifiedLSN     string
+	DurableReplayLSN string
+	DrainEndLSN      string
+	DrainReplayLSN   string
+	DrainKind        string
+	BarrierConfirmed bool
+}
+
+type ResourceObligation struct {
+	Kind   string
+	Name   string
+	Owned  bool
+	Retain bool
+}
+
+type Version struct {
+	ProtocolVersion int64        `json:"protocol_version"`
+	EngineVersion   string       `json:"engine_version"`
+	Capabilities    []Capability `json:"capabilities"`
 }
 
 type Report struct {
@@ -52,7 +79,6 @@ type Report struct {
 	Phase           string        `json:"phase"`
 	Copy            *CopyProgress `json:"copy,omitempty"`
 	Replication     *Replication  `json:"replication,omitempty"`
-	Verification    *Verification `json:"verification,omitempty"`
 	Cleanup         *Cleanup      `json:"cleanup,omitempty"`
 }
 
@@ -70,6 +96,7 @@ type CopyProgress struct {
 type Replication struct {
 	SourceDurableHeadLSN *string     `json:"source_durable_head_lsn,omitempty"`
 	ReceivedLSN          *string     `json:"received_lsn,omitempty"`
+	CertifiedLSN         *string     `json:"certified_lsn"`
 	DurableReplayLSN     *string     `json:"durable_replay_lsn,omitempty"`
 	EndLSN               *string     `json:"end_lsn,omitempty"`
 	EndPersisted         *bool       `json:"end_persisted,omitempty"`
@@ -79,15 +106,12 @@ type Replication struct {
 }
 
 type DrainProof struct {
+	Kind         string        `json:"kind"`
 	Work         *WorkIdentity `json:"work"`
 	CheckpointID string        `json:"checkpoint_id"`
 	Committed    *bool         `json:"committed"`
 	EndLSN       string        `json:"end_lsn"`
 	ReplayLSN    string        `json:"replay_lsn"`
-}
-
-type Verification struct {
-	Outcome string `json:"outcome"`
 }
 
 type Cleanup struct {
@@ -129,8 +153,6 @@ func commandCapability(command string) Capability {
 		return CapCloneSingleDB
 	case "list progress":
 		return CapProgress
-	case "compare schema", "compare data":
-		return CapVerify
 	case "stream sentinel get", commandSetEndpos:
 		return CapCutover
 	case "stream cleanup":
@@ -145,8 +167,33 @@ func validLabel(s string) bool {
 }
 
 func validIdentity(w WorkIdentity) bool {
-	return validLabel(w.MigrationUID) && validLabel(w.RunID) && validLabel(w.WorkdirID) &&
-		!strings.ContainsAny(w.WorkdirID, `/\`) && w.CheckpointGeneration > 0
+	if len(w.MigrationUID) != 36 || w.MigrationUID[8] != '-' || w.MigrationUID[13] != '-' ||
+		w.MigrationUID[18] != '-' || w.MigrationUID[23] != '-' || w.CheckpointGeneration != 1 {
+		return false
+	}
+	run := strings.ReplaceAll(w.MigrationUID, "-", "")
+	return len(run) == 32 && !strings.ContainsFunc(run, func(c rune) bool {
+		return (c < '0' || c > '9') && (c < 'a' || c > 'f')
+	}) && w.RunID == run && validLabel(w.WorkdirID) && !strings.ContainsAny(w.WorkdirID, `/\`)
+}
+
+func ParseVersion(raw []byte) (*Version, error) {
+	if !strictJSON(raw) {
+		return nil, errors.New("invalid native JSON document")
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	var v Version
+	if err := d.Decode(&v); err != nil {
+		return nil, errors.New("invalid native version fields")
+	}
+	if v.ProtocolVersion != 1 || !validLabel(v.EngineVersion) || v.Capabilities == nil {
+		return nil, errors.New("unsupported native version")
+	}
+	if err := RequireCapabilities(v.Capabilities); err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 // ParseReport does not infer success from exit status or from absent measurements.
@@ -191,10 +238,6 @@ func validatePayload(r *Report, want Binding) error {
 		if r.Copy == nil {
 			return errors.New("native copy report is absent")
 		}
-	case "compare schema", "compare data":
-		if r.Verification == nil {
-			return errors.New("native verification verdict is absent")
-		}
 	case "stream sentinel get", commandSetEndpos:
 		if r.Replication == nil {
 			return errors.New("native replication report is absent")
@@ -217,22 +260,32 @@ func validatePayload(r *Report, want Binding) error {
 			return err
 		}
 	}
-	if r.Verification != nil && !slices.Contains([]string{"match", "difference", "failure"}, r.Verification.Outcome) {
-		return errors.New("invalid native verification verdict")
-	}
 	if r.Cleanup != nil {
-		return validateCleanup(r.Cleanup)
+		return validateCleanup(r.Cleanup, want.Resources)
 	}
 	return nil
 }
 
 func validateReplication(r *Replication, want Binding) error {
-	for _, lsn := range []*string{r.SourceDurableHeadLSN, r.ReceivedLSN, r.DurableReplayLSN, r.EndLSN} {
+	if r.CertifiedLSN == nil {
+		return errors.New("native certified LSN measurement is absent")
+	}
+	for _, lsn := range []*string{r.SourceDurableHeadLSN, r.ReceivedLSN, r.CertifiedLSN, r.DurableReplayLSN, r.EndLSN} {
 		if lsn != nil {
 			if _, err := sentinel.ParseLSN(*lsn); err != nil {
 				return errors.New("invalid native replication LSN")
 			}
 		}
+	}
+	if r.DurableReplayLSN != nil {
+		certified, _ := sentinel.ParseLSN(*r.CertifiedLSN)
+		durable, _ := sentinel.ParseLSN(*r.DurableReplayLSN)
+		if certified > durable {
+			return errors.New("native certified LSN exceeds durable replay")
+		}
+	}
+	if r.CheckpointID != "" && !validCheckpointID(r.CheckpointID, want.Work.CheckpointGeneration) {
+		return errors.New("invalid native checkpoint token")
 	}
 	if want.EndLSN == "" && (want.Command == commandSetEndpos || (r.Drained != nil && *r.Drained)) {
 		return errors.New("native safety acknowledgement requires the caller's end LSN")
@@ -251,13 +304,17 @@ func validateReplication(r *Replication, want Binding) error {
 		}
 		return nil
 	}
-	return validateDrainProof(r, want.Work)
+	return validateDrainProof(r, want)
 }
 
-func validateDrainProof(r *Replication, work WorkIdentity) error {
+func validateDrainProof(r *Replication, want Binding) error {
 	p := r.DrainProof
-	if p == nil || p.Work == nil || *p.Work != work || !validLabel(r.CheckpointID) || p.CheckpointID != r.CheckpointID ||
-		p.Committed == nil || !*p.Committed || r.DurableReplayLSN == nil || !sameLSN(p.EndLSN, *r.EndLSN) || !sameLSN(p.ReplayLSN, *r.DurableReplayLSN) {
+	c := want.Checkpoint
+	if p == nil || p.Work == nil || *p.Work != want.Work || !validCheckpointID(r.CheckpointID, want.Work.CheckpointGeneration) ||
+		p.CheckpointID != r.CheckpointID || p.Committed == nil || !*p.Committed || r.DurableReplayLSN == nil ||
+		c == nil || !c.BarrierConfirmed || c.CheckpointID != r.CheckpointID || c.DrainKind != p.Kind ||
+		!sameLSN(c.CertifiedLSN, *r.CertifiedLSN) || !sameLSN(c.DurableReplayLSN, *r.DurableReplayLSN) ||
+		!sameLSN(c.DrainEndLSN, p.EndLSN) || !sameLSN(c.DrainReplayLSN, p.ReplayLSN) || !sameLSN(p.EndLSN, *r.EndLSN) {
 		return errors.New("native drain lacks a bound committed checkpoint")
 	}
 	end, err := sentinel.ParseLSN(p.EndLSN)
@@ -265,10 +322,34 @@ func validateDrainProof(r *Replication, work WorkIdentity) error {
 		return errors.New("invalid native drain end LSN")
 	}
 	replay, err := sentinel.ParseLSN(p.ReplayLSN)
-	if err != nil || replay < end {
+	if err != nil {
+		return errors.New("invalid native drain witness LSN")
+	}
+	certified, _ := sentinel.ParseLSN(*r.CertifiedLSN)
+	if (p.Kind != "keepalive" && p.Kind != "later_begin") ||
+		(p.Kind == "keepalive" && (replay < end || replay > certified)) ||
+		(p.Kind == "later_begin" && replay <= end) {
 		return errors.New("native committed checkpoint does not cover cutover")
 	}
 	return nil
+}
+
+func validCheckpointID(id string, generation int64) bool {
+	parts := strings.SplitN(id, ":", 4)
+	if len(parts) != 3 {
+		return false
+	}
+	g, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || g <= 0 || g != generation || strconv.FormatInt(g, 10) != parts[0] {
+		return false
+	}
+	for i, part := range parts[1:] {
+		value, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || (i == 1 && value == 0) || strconv.FormatUint(value, 10) != part {
+			return false
+		}
+	}
+	return true
 }
 
 func sameLSN(a, b string) bool {
@@ -277,18 +358,32 @@ func sameLSN(a, b string) bool {
 	return err1 == nil && err2 == nil && x == y
 }
 
-func validateCleanup(c *Cleanup) error {
-	if c.Complete == nil || c.Resources == nil {
+func validateCleanup(c *Cleanup, obligations []ResourceObligation) error {
+	if c.Complete == nil || c.Resources == nil || len(c.Resources) != len(obligations) || (*c.Complete && len(obligations) == 0) {
 		return errors.New("native cleanup outcome or inventory is absent")
 	}
-	seen := make(map[string]bool, len(c.Resources))
+	want := make(map[[2]string]ResourceObligation, len(obligations))
+	for _, r := range obligations {
+		key := [2]string{r.Kind, r.Name}
+		if !slices.Contains([]string{"replication_slot", "publication", "replication_origin", resourceKindWorkdir}, r.Kind) || !validLabel(r.Name) ||
+			(r.Kind == "replication_origin" && r.Owned) || (r.Kind == resourceKindWorkdir && r.Owned && !r.Retain) ||
+			(r.Owned && r.Retain && r.Kind != resourceKindWorkdir) {
+			return errors.New("invalid native cleanup obligations")
+		}
+		if _, exists := want[key]; exists {
+			return errors.New("duplicate native cleanup obligation")
+		}
+		want[key] = r
+	}
 	for _, r := range c.Resources {
-		key := r.Kind + ":" + r.Name
-		if !slices.Contains([]string{"replication_slot", "publication", "replication_origin", "workdir"}, r.Kind) || !validLabel(r.Name) ||
-			r.Owned == nil || r.Removed == nil || (!*r.Owned && *r.Removed) || (*c.Complete && *r.Owned && !*r.Removed) || seen[key] {
+		key := [2]string{r.Kind, r.Name}
+		expected, exists := want[key]
+		if !exists || r.Owned == nil || r.Removed == nil || *r.Owned != expected.Owned ||
+			((!expected.Owned || expected.Retain) && *r.Removed) ||
+			(*c.Complete && expected.Owned && !expected.Retain && !*r.Removed) {
 			return errors.New("unsafe or incomplete native cleanup ownership")
 		}
-		seen[key] = true
+		delete(want, key)
 	}
 	return nil
 }
@@ -340,10 +435,10 @@ func uniqueValue(d *json.Decoder, depth int) bool {
 // encoding/json also matches case variants, so enforce the v1 spellings before decoding.
 func canonicalMember(name string) bool {
 	switch name {
-	case "protocol_version", "engine_version", "command", "capabilities", "work", "phase", "copy", "replication", "verification", "cleanup",
+	case "protocol_version", "engine_version", "command", "capabilities", "work", "phase", "copy", "replication", "cleanup",
 		"migration_uid", "run_id", "workdir_id", "checkpoint_generation", "tables", "indexes", "bytes", "total", "done",
-		"source_durable_head_lsn", "received_lsn", "durable_replay_lsn", "end_lsn", "end_persisted", "drained", "checkpoint_id", "drain_proof",
-		"committed", "replay_lsn", "outcome", "complete", "resources", "kind", "name", "owned", "removed":
+		"source_durable_head_lsn", "received_lsn", "certified_lsn", "durable_replay_lsn", "end_lsn", "end_persisted", "drained", "checkpoint_id", "drain_proof",
+		"committed", "replay_lsn", "complete", "resources", "kind", "name", "owned", "removed":
 		return true
 	default:
 		return false

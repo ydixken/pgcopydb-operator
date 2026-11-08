@@ -1,0 +1,717 @@
+{
+  "protocol_version": 1,
+  "fixture_scope": "Synthetic pure contract evidence; no runtime capability qualification.",
+  "operator_commit": "0267c787a900f37702181810c37ec313085e1287",
+  "parser_baseline": "86bf908adca02d87063849dae775a02c1659c829",
+  "capabilities": [
+    "clone.single_db",
+    "copy.large_objects",
+    "copy.binary_fallback",
+    "copy.split",
+    "cdc.pgoutput",
+    "progress.v1",
+    "cutover.v1",
+    "verify.v1",
+    "cleanup.v1"
+  ],
+  "m1_capabilities": [],
+  "report_prefix": "native-report: ",
+  "compare_progress_prefix": "compare progress: ",
+  "identity_environment": [
+    "RPGMIGRATE_MIGRATION_UID",
+    "RPGMIGRATE_RUN_ID",
+    "RPGMIGRATE_WORKDIR_ID",
+    "RPGMIGRATE_CHECKPOINT_GENERATION"
+  ],
+  "environment": [
+    "PGCOPYDB_SOURCE_PGURI",
+    "PGCOPYDB_TARGET_PGURI",
+    "PGPASSFILE",
+    "PGCOPYDB_LOG_JSON",
+    "PGCOPYDB_APPLY_GROUP_TXNS"
+  ],
+  "apply_group_default": 100,
+  "exit_codes": {
+    "BadArgs": 1,
+    "BadConfig": 2,
+    "BadState": 3,
+    "Pgsql": 4,
+    "Pgctl": 5,
+    "Source": 6,
+    "Target": 7,
+    "Reload": 9,
+    "Internal": 12,
+    "Fatal": 122
+  },
+  "options": [
+    {
+      "name": "--dir",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--dir",
+        "/work/pgcopydb"
+      ]
+    },
+    {
+      "name": "--restart",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--restart"
+      ]
+    },
+    {
+      "name": "--resume",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--resume"
+      ]
+    },
+    {
+      "name": "--not-consistent",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--not-consistent"
+      ]
+    },
+    {
+      "name": "--table-jobs",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_TABLE_JOBS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--table-jobs",
+        "4"
+      ]
+    },
+    {
+      "name": "--index-jobs",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_INDEX_JOBS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--index-jobs",
+        "4"
+      ]
+    },
+    {
+      "name": "--restore-jobs",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_RESTORE_JOBS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--restore-jobs",
+        "4"
+      ]
+    },
+    {
+      "name": "--large-objects-jobs",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_LARGE_OBJECTS_JOBS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--large-objects-jobs",
+        "4"
+      ]
+    },
+    {
+      "name": "--split-tables-larger-than",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_SPLIT_TABLES_LARGER_THAN",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--split-tables-larger-than",
+        "512MB"
+      ]
+    },
+    {
+      "name": "--split-max-parts",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_SPLIT_MAX_PARTS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--split-max-parts",
+        "8"
+      ]
+    },
+    {
+      "name": "--estimate-table-sizes",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_ESTIMATE_TABLE_SIZES",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--estimate-table-sizes"
+      ]
+    },
+    {
+      "name": "--use-copy-binary",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_USE_COPY_BINARY",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--use-copy-binary"
+      ]
+    },
+    {
+      "name": "--fail-fast",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_FAIL_FAST",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--fail-fast"
+      ]
+    },
+    {
+      "name": "--defer-indexes",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--defer-indexes"
+      ]
+    },
+    {
+      "name": "--drop-if-exists",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_DROP_IF_EXISTS",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--drop-if-exists"
+      ]
+    },
+    {
+      "name": "--roles",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--roles"
+      ]
+    },
+    {
+      "name": "--no-role-passwords",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--no-role-passwords"
+      ]
+    },
+    {
+      "name": "--no-owner",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--no-owner"
+      ]
+    },
+    {
+      "name": "--no-acl",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--no-acl"
+      ]
+    },
+    {
+      "name": "--no-comments",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--no-comments"
+      ]
+    },
+    {
+      "name": "--no-tablespaces",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_SKIP_TABLESPACES",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--no-tablespaces"
+      ]
+    },
+    {
+      "name": "--filters",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--filters",
+        "payloads/filters.ini"
+      ]
+    },
+    {
+      "name": "--all-databases",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--all-databases"
+      ]
+    },
+    {
+      "name": "--skip-large-objects",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-large-objects"
+      ]
+    },
+    {
+      "name": "--skip-extensions",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-extensions"
+      ]
+    },
+    {
+      "name": "--skip-ext-comments",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-ext-comments"
+      ]
+    },
+    {
+      "name": "--skip-collations",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-collations"
+      ]
+    },
+    {
+      "name": "--skip-vacuum",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_SKIP_VACUUM",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-vacuum"
+      ]
+    },
+    {
+      "name": "--skip-analyze",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_SKIP_ANALYZE",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-analyze"
+      ]
+    },
+    {
+      "name": "--skip-db-properties",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_SKIP_DB_PROPERTIES",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-db-properties"
+      ]
+    },
+    {
+      "name": "--skip-split-by-ctid",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_SKIP_CTID_SPLIT",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--skip-split-by-ctid"
+      ]
+    },
+    {
+      "name": "--follow",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--follow"
+      ]
+    },
+    {
+      "name": "--slot-name",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--slot-name",
+        "native_slot"
+      ]
+    },
+    {
+      "name": "--origin",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--origin",
+        "recorded_origin"
+      ]
+    },
+    {
+      "name": "--plugin",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_OUTPUT_PLUGIN",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--plugin",
+        "pgoutput"
+      ]
+    },
+    {
+      "name": "--publication",
+      "command": [
+        "clone"
+      ],
+      "syntax": "value",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--publication",
+        "native_publication"
+      ]
+    },
+    {
+      "name": "--wal2json-numeric-as-string",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_WAL2JSON_NUMERIC_AS_STRING",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--wal2json-numeric-as-string",
+        "--plugin",
+        "wal2json"
+      ]
+    },
+    {
+      "name": "--replay-no-op-updates",
+      "command": [
+        "clone"
+      ],
+      "syntax": "flag",
+      "environment": "PGCOPYDB_REPLAY_NO_OP_UPDATES",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "clone",
+        "--replay-no-op-updates"
+      ]
+    },
+    {
+      "name": "--current",
+      "command": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--current"
+      ]
+    },
+    {
+      "name": "--source",
+      "command": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos"
+      ],
+      "syntax": "value",
+      "environment": "PGCOPYDB_SOURCE_PGURI",
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "stream",
+        "sentinel",
+        "set",
+        "endpos",
+        "--source",
+        "dbname=source",
+        "0/20"
+      ]
+    },
+    {
+      "name": "--endpos",
+      "command": [
+        "stream",
+        "sentinel",
+        "get"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "stream",
+        "sentinel",
+        "get",
+        "--endpos"
+      ]
+    },
+    {
+      "name": "--replay-lsn",
+      "command": [
+        "stream",
+        "sentinel",
+        "get"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "stream",
+        "sentinel",
+        "get",
+        "--replay-lsn"
+      ]
+    },
+    {
+      "name": "--json",
+      "command": [
+        "list",
+        "progress"
+      ],
+      "syntax": "flag",
+      "environment": null,
+      "native_stage": "unsupported",
+      "refusal_kind": "BadConfig",
+      "argv": [
+        "list",
+        "progress",
+        "--json"
+      ]
+    }
+  ],
+  "application_name": {
+    "format": "rpgmigrate[<pid>] <role>",
+    "roles": [
+      "copy",
+      "apply",
+      "receive",
+      "compare"
+    ],
+    "sql_like_prefix": "rpgmigrate[%"
+  },
+  "layout": {
+    "schema": "_rpgmigrate_<run_id>",
+    "table": "checkpoint",
+    "workdir": "/work/pgcopydb",
+    "control": [
+      "control/lock",
+      "control/endpos.json",
+      "control/.endpos.tmp"
+    ],
+    "executable": "/usr/local/bin/rpgmigrate",
+    "tools": [
+      "/usr/lib/postgresql/16/bin",
+      "/usr/lib/postgresql/18/bin"
+    ],
+    "psql_major": 18,
+    "runner_flag": "--rpgmigrate-runner-image",
+    "runner_chart_value": "rpgmigrateRunnerImage",
+    "runner_default": ""
+  }
+}

@@ -28,14 +28,20 @@ func validateNativeConfig(m *v1beta1.Migration, capabilities []native.Capability
 	if err != nil || engine == v1beta1.MigrationEnginePGCopyDB {
 		return err
 	}
-	if err := native.RequireCapabilities(capabilities, native.CapCloneSingleDB); err != nil {
+	required, err := nativeConfigCapabilities(m)
+	if err != nil {
 		return err
 	}
+	return native.RequireCapabilities(capabilities, required...)
+}
+
+func nativeConfigCapabilities(m *v1beta1.Migration) ([]native.Capability, error) {
 	c := m.Spec.Clone
 	if c.TableJobs < 0 || c.SplitMaxParts < 0 || (c.SplitTablesLargerThan != nil && c.SplitTablesLargerThan.Sign() < 0) {
-		return errors.New("invalid native clone parallelism")
+		return nil, errors.New("invalid native clone parallelism")
 	}
-	required := []native.Capability{}
+	// Catalog admission and progress sampling both use list progress, never staged list tables.
+	required := []native.Capability{native.CapCloneSingleDB, native.CapProgress}
 	if c.UseCopyBinary == nil || *c.UseCopyBinary {
 		required = append(required, native.CapBinaryFallback)
 	}
@@ -45,7 +51,7 @@ func validateNativeConfig(m *v1beta1.Migration, capabilities []native.Capability
 	largeObjects := true
 	for _, skip := range c.Skip {
 		if skip != "largeObjects" {
-			return errors.New("unsupported native clone skip")
+			return nil, errors.New("unsupported native clone skip")
 		}
 		largeObjects = false
 	}
@@ -58,20 +64,20 @@ func validateNativeConfig(m *v1beta1.Migration, capabilities []native.Capability
 	if !reflect.ValueOf(c).IsZero() || m.Spec.DryRun || (m.Spec.Preflight != nil && m.Spec.Preflight.RequireSameMajorVersion) ||
 		m.Spec.Source.SuperuserSecretRef != nil || m.Spec.Target.SuperuserSecretRef != nil ||
 		m.Spec.Source.SynchronousCommit != "" || m.Spec.Target.SynchronousCommit != "" {
-		return errors.New("unsupported native migration configuration")
+		return nil, errors.New("unsupported native migration configuration")
 	}
 	if err := nativeFollowConfig(m, &required); err != nil {
-		return err
+		return nil, err
 	}
 	if v := m.Spec.Verification; v != nil {
 		if v.Rehearsal {
-			return errors.New("native verification rehearsal is not qualified")
+			return nil, errors.New("native verification rehearsal is not qualified")
 		}
 		if v.Schema || v.Data {
 			required = append(required, native.CapVerify)
 		}
 	}
-	return native.RequireCapabilities(capabilities, required...)
+	return required, nil
 }
 
 func nativeFollowConfig(m *v1beta1.Migration, required *[]native.Capability) error {
