@@ -3,22 +3,86 @@ package podexec
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 )
+
+func TestNativeExecutionSpecSHA256(t *testing.T) {
+	const passwordEnvName = "PASSWORD"
+	const originalCanary = "synthetic-private-env-canary"
+	const changedCanary = "synthetic-rotated-env-canary"
+	base := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"credential-note": originalCanary}, Annotations: map[string]string{"credential-note": originalCanary}},
+		Spec: corev1.PodSpec{
+			Containers:          []corev1.Container{{Name: "main", Command: []string{nativeOutputExecutable}, Args: []string{nativeOutputVersionArg, nativeOutputJSONArg}, Env: []corev1.EnvVar{{Name: passwordEnvName, Value: originalCanary}, {Name: "CONTROL", Value: originalCanary}}}},
+			InitContainers:      []corev1.Container{{Name: "prepare", Env: []corev1.EnvVar{{Name: passwordEnvName, Value: originalCanary}}}},
+			EphemeralContainers: []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "diagnostic", Env: []corev1.EnvVar{{Name: passwordEnvName, Value: originalCanary}}}}},
+		},
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*corev1.PodTemplateSpec)
+		same   bool
+	}{
+		{"main credential value", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Env[0].Value = changedCanary }, true},
+		{"control value", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Env[1].Value = changedCanary }, true},
+		{"init credential value", func(p *corev1.PodTemplateSpec) { p.Spec.InitContainers[0].Env[0].Value = changedCanary }, true},
+		{"ephemeral credential value", func(p *corev1.PodTemplateSpec) { p.Spec.EphemeralContainers[0].Env[0].Value = changedCanary }, true},
+		{"label credential value", func(p *corev1.PodTemplateSpec) { p.Labels["credential-note"] = changedCanary }, true},
+		{"annotation credential value", func(p *corev1.PodTemplateSpec) { p.Annotations["credential-note"] = changedCanary }, true},
+		{"metadata identity", func(p *corev1.PodTemplateSpec) {
+			p.ObjectMeta = metav1.ObjectMeta{Name: nativeFixtureOther, UID: nativeFixtureOther}
+		}, true},
+		{"env name", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Env[0].Name = nativeFixtureOther }, false},
+		{"secret selector", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].Env[0].ValueFrom = &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "credential-ref"}, Key: "password"}}
+		}, false},
+		{"argv", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Args = []string{nativeFixtureOther} }, false},
+		{"command", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Command = []string{nativeFixtureOther} }, false},
+		{"security", func(p *corev1.PodTemplateSpec) {
+			value := true
+			p.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: &value}
+		}, false},
+		{"mount", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: nativeFixtureOther, MountPath: "/tmp"}}
+		}, false},
+		{"volume", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Volumes = []corev1.Volume{{Name: nativeFixtureOther, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+		}, false},
+		{"resources", func(p *corev1.PodTemplateSpec) {
+			p.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}
+		}, false},
+		{"scheduling", func(p *corev1.PodTemplateSpec) { p.Spec.NodeSelector = map[string]string{"pool": nativeFixtureOther} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := base.DeepCopy()
+			changed := base.DeepCopy()
+			tc.change(changed)
+			changedBeforeHash := changed.DeepCopy()
+			same := NativeExecutionSHA256(base) == NativeExecutionSHA256(*changed)
+			if same != tc.same {
+				t.Fatal("execution-spec projection changed the wrong fields")
+			}
+			if !reflect.DeepEqual(original, &base) || !reflect.DeepEqual(changedBeforeHash, changed) {
+				t.Fatal("execution-spec projection mutated caller inputs")
+			}
+		})
+	}
+}
 
 const (
 	nativeOutputExecutable    = "/usr/local/bin/rpgmigrate"
@@ -74,11 +138,7 @@ func newNativeOutputAPI(t *testing.T) (*nativeAPI, NativeContainerBinding) {
 	s.job.Spec.Template.Spec.Containers[0].Command = []string{nativeOutputExecutable}
 	s.job.Spec.Template.Spec.Containers[0].Args = []string{nativeOutputVersionArg, nativeOutputJSONArg}
 	s.pod.Spec = *s.job.Spec.Template.Spec.DeepCopy()
-	raw, err := json.Marshal(s.job.Spec.Template)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want.ExecutionSHA256 = sha256.Sum256(raw)
+	want.ExecutionSHA256 = NativeExecutionSHA256(s.job.Spec.Template)
 	previous := s.Server
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/pods") {
@@ -167,6 +227,9 @@ func testNativeOutputAdmission(t *testing.T) {
 		}},
 		{"changed literal env", func(s *nativeAPI, _ *NativeContainerBinding) {
 			s.pod.Spec.Containers[0].Env[0].Value = nativeFixtureOther
+		}},
+		{"changed job literal env", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.job.Spec.Template.Spec.Containers[0].Env[0].Value = nativeFixtureOther
 		}},
 		{"unexpected restart", func(s *nativeAPI, _ *NativeContainerBinding) { s.pod.Status.ContainerStatuses[0].RestartCount = 1 }},
 		{"bound restart", func(s *nativeAPI, w *NativeContainerBinding) {
@@ -267,6 +330,11 @@ func testNativeOutputFinalRead(t *testing.T) {
 		{"job annotation", func(s *nativeAPI) { s.job.Annotations = map[string]string{nativeFixtureOther: nativeFixtureWrong} }},
 		{"pod command", func(s *nativeAPI) { s.pod.Spec.Containers[0].Command = []string{nativeFixtureOther} }},
 		{"job command", func(s *nativeAPI) { s.job.Spec.Template.Spec.Containers[0].Command = []string{nativeFixtureOther} }},
+		{"pod literal env", func(s *nativeAPI) { s.pod.Spec.Containers[0].Env[0].Value = nativeFixtureOther }},
+		{"matching literal env substitution", func(s *nativeAPI) {
+			s.pod.Spec.Containers[0].Env[0].Value = nativeFixtureOther
+			s.job.Spec.Template.Spec.Containers[0].Env[0].Value = nativeFixtureOther
+		}},
 		{"pod status", func(s *nativeAPI) { s.pod.Status.Message = nativeFixtureWrong }},
 		{"job status", func(s *nativeAPI) { s.job.Status.CompletedIndexes = "0" }},
 		{"container id", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].ContainerID = nativeFixtureOther }},
@@ -339,7 +407,6 @@ func testNativeExecutionBinding(t *testing.T) {
 	}{
 		{"command", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Command = []string{nativeFixtureOther} }},
 		{"args", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Args = []string{nativeFixtureOther} }},
-		{"literal env", func(p *corev1.PodTemplateSpec) { p.Spec.Containers[0].Env[0].Value = nativeFixtureOther }},
 		{"mount", func(p *corev1.PodTemplateSpec) {
 			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
 		}},
@@ -354,8 +421,6 @@ func testNativeExecutionBinding(t *testing.T) {
 			uid := int64(1)
 			p.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsUser: &uid}
 		}},
-		{"label", func(p *corev1.PodTemplateSpec) { p.Labels = map[string]string{"role": nativeFixtureOther} }},
-		{"annotation", func(p *corev1.PodTemplateSpec) { p.Annotations = map[string]string{"role": nativeFixtureOther} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, want := newNativeOutputAPI(t)
@@ -385,11 +450,7 @@ func testNativeVersionCommand(t *testing.T) {
 			c := &s.job.Spec.Template.Spec.Containers[0]
 			c.Command, c.Args = tc.command, tc.args
 			s.pod.Spec = *s.job.Spec.Template.Spec.DeepCopy()
-			raw, err := json.Marshal(s.job.Spec.Template)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want.ExecutionSHA256 = sha256.Sum256(raw)
+			want.ExecutionSHA256 = NativeExecutionSHA256(s.job.Spec.Template)
 			out, err := newExec(t, s.URL).JobVersionNative(context.Background(), "ns", nativeFixtureJobUID, want)
 			nativeRefused(t, out, err)
 			if s.effects != 0 {

@@ -15,9 +15,26 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// NativeExecutionSHA256 binds exact content only after the caller independently admits the template.
+// NativeExecutionSHA256 correlates an admitted spec without literal env values or template metadata.
+// Callers compare omitted fields directly in memory; the hash cannot admit an execution.
+// Commands and arguments must be credential-free under the canonical builder contract.
 func NativeExecutionSHA256(template corev1.PodTemplateSpec) [32]byte {
-	raw, err := json.Marshal(template)
+	spec := template.Spec.DeepCopy()
+	projectEnv := func(env []corev1.EnvVar) {
+		for i := range env {
+			env[i].Value = ""
+		}
+	}
+	for i := range spec.Containers {
+		projectEnv(spec.Containers[i].Env)
+	}
+	for i := range spec.InitContainers {
+		projectEnv(spec.InitContainers[i].Env)
+	}
+	for i := range spec.EphemeralContainers {
+		projectEnv(spec.EphemeralContainers[i].Env)
+	}
+	raw, err := json.Marshal(spec)
 	if err != nil {
 		return [32]byte{}
 	}

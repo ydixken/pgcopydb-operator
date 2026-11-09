@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
@@ -865,4 +867,174 @@ func testProbeCapabilityOmissions(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestNativePreflightCanonicalProjection(t *testing.T) {
+	t.Run("legitimate inline profile", testProbeInlineProjection)
+	for _, stage := range []string{probeBeforeCapture, probeDuringCapture} {
+		for _, field := range []string{probeCredentialLiteral, probeControlLiteral, probeTemplateAnnotation, probeTemplateLabel} {
+			t.Run(stage+"/"+field, func(t *testing.T) {
+				f := newCanonicalProjectionFixture(t)
+				changed := false
+				substitute := func() {
+					if changed {
+						return
+					}
+					changed = true
+					substituteProbeProjection(t, f, field)
+				}
+				if stage == probeBeforeCapture {
+					f.onRead = func(obj client.Object) {
+						if _, ok := obj.(*batchv1.Job); ok && f.creates == 2 {
+							substitute()
+						}
+					}
+				} else {
+					f.onLog = func(job *batchv1.Job) {
+						if strings.HasPrefix(job.Name, probeDB) {
+							substitute()
+						}
+					}
+				}
+				v, passed, failure, err := f.run()
+				f.assertNoAuthority(v, passed, failure, err)
+				wantLogs := int32(1)
+				if stage == probeDuringCapture {
+					wantLogs = 2
+				}
+				if !changed || f.creates != 2 || f.deletes != 2 || f.logs.Load() != wantLogs {
+					t.Fatal("canonical substitution reached an unexpected helper/output boundary")
+				}
+			})
+		}
+	}
+}
+
+const (
+	probeInlineSourceEnv             = "PGCOPYDB_SOURCE_PGURI"
+	probeInlineTargetEnv             = "PGCOPYDB_TARGET_PGURI"
+	probeBeforeCapture               = "before checked capture"
+	probeDuringCapture               = "during checked capture"
+	probeCredentialLiteral           = "inline credential literal"
+	probeControlLiteral              = "fixed control literal"
+	probeTemplateAnnotation          = "template annotation"
+	probeTemplateLabel               = "template label"
+	probeProjectionMetadataKey       = "canonical-regression"
+	probeProjectionReplacementValue  = "substituted"
+	probeProjectionFollowEnvironment = "RPGMIGRATE_NATIVE_PREFLIGHT_FOLLOW"
+)
+
+func mutateProbeProjection(t *testing.T, job *batchv1.Job, pod *corev1.Pod, field string) {
+	t.Helper()
+	if field == probeTemplateAnnotation {
+		job.Spec.Template.Annotations = maps.Clone(job.Spec.Template.Annotations)
+		if job.Spec.Template.Annotations == nil {
+			job.Spec.Template.Annotations = map[string]string{}
+		}
+		pod.Annotations = maps.Clone(pod.Annotations)
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		job.Spec.Template.Annotations[probeProjectionMetadataKey] = probeProjectionReplacementValue
+		pod.Annotations[probeProjectionMetadataKey] = probeProjectionReplacementValue
+		return
+	}
+	if field == probeTemplateLabel {
+		job.Spec.Template.Labels = maps.Clone(job.Spec.Template.Labels)
+		pod.Labels = maps.Clone(pod.Labels)
+		job.Spec.Template.Labels[probeProjectionMetadataKey] = probeProjectionReplacementValue
+		pod.Labels[probeProjectionMetadataKey] = probeProjectionReplacementValue
+		return
+	}
+	name, value := probeInlineSourceEnv, probeCanary
+	if field == probeControlLiteral {
+		name = probeProjectionFollowEnvironment
+		value = "1"
+	}
+	for _, env := range []*[]corev1.EnvVar{&job.Spec.Template.Spec.Containers[0].Env, &pod.Spec.Containers[0].Env} {
+		index := slices.IndexFunc(*env, func(v corev1.EnvVar) bool { return v.Name == name })
+		if index < 0 || (*env)[index].ValueFrom != nil || (*env)[index].Value == value {
+			t.Fatal("fixture has no distinct canonical literal to substitute")
+		}
+		(*env)[index].Value = value
+	}
+}
+
+func testProbeInlineProjection(t *testing.T) {
+	t.Helper()
+
+	f := newCanonicalProjectionFixture(t)
+	checked := false
+	f.onCreate = func(job *batchv1.Job) {
+		if !strings.HasPrefix(job.Name, probeDB) {
+			return
+		}
+		checked = true
+		for _, name := range []string{probeInlineSourceEnv, probeInlineTargetEnv} {
+			index := slices.IndexFunc(job.Spec.Template.Spec.Containers[0].Env, func(env corev1.EnvVar) bool { return env.Name == name })
+			if index < 0 || job.Spec.Template.Spec.Containers[0].Env[index].Value == "" || job.Spec.Template.Spec.Containers[0].Env[index].ValueFrom != nil {
+				t.Fatal("legitimate inline profile lost canonical materialization")
+			}
+		}
+	}
+	v, passed, failure, err := f.run()
+	if !checked || v == nil || !passed || failure != "" || err != nil || f.creates != 2 || f.deletes != 2 || f.logs.Load() != 2 {
+		t.Fatal("legitimate canonical inline execution was refused")
+	}
+
+}
+
+func substituteProbeProjection(t *testing.T, f *preflightFixture, field string) {
+	t.Helper()
+	jobs, pods := &batchv1.JobList{}, &corev1.PodList{}
+	if err := f.store.List(context.Background(), jobs, client.InNamespace(f.m.Namespace)); err != nil {
+		t.Fatal("cannot inspect owned fixture Job")
+	}
+	if err := f.store.List(context.Background(), pods, client.InNamespace(f.m.Namespace)); err != nil {
+		t.Fatal("cannot inspect owned fixture Pod")
+	}
+	if len(jobs.Items) != 1 || len(pods.Items) != 1 || !strings.HasPrefix(jobs.Items[0].Name, probeDB) {
+		t.Fatal("substitution did not target the original fixed role")
+	}
+	job, pod := &jobs.Items[0], &pods.Items[0]
+	canonical, err := buildNativePreflightJob(f.m, f.r.RPGMigrateRunnerImage, job.Name, strings.TrimPrefix(job.Name, probeDB))
+	if err != nil || controllerutil.SetControllerReference(f.m, canonical, f.r.Scheme) != nil {
+		t.Fatal("cannot construct independent canonical expectation")
+	}
+	canonical.UID = job.UID
+	if !nativePreflightJobMatches(canonical, job) || !nativePreflightPodMatches(canonical, pod) {
+		t.Fatal("original fixture was not independently canonical")
+	}
+	beforeTemplate := job.Spec.Template.DeepCopy()
+	originalUID, originalContainerID := pod.UID, pod.Status.ContainerStatuses[0].ContainerID
+	mutateProbeProjection(t, job, pod, field)
+	if pod.UID != originalUID || pod.Status.ContainerStatuses[0].ContainerID != originalContainerID || pod.Status.ContainerStatuses[0].RestartCount != 0 {
+		t.Fatal("substitution changed original incarnation instead of canonical literals or metadata")
+	}
+	if podexec.NativeExecutionSHA256(*beforeTemplate) != podexec.NativeExecutionSHA256(job.Spec.Template) {
+		t.Fatal("fixture did not preserve projected execution correlation")
+	}
+	if !nativePreflightPodMatches(job, pod) {
+		t.Fatal("fixture did not make matching observed Job and Pod facts")
+	}
+	if nativePreflightJobMatches(canonical, job) || nativePreflightPodMatches(canonical, pod) {
+		t.Fatal("independent canonical comparison accepted substituted values")
+	}
+	if err := f.store.Update(context.Background(), job); err != nil {
+		t.Fatal("cannot install fixture Job substitution")
+	}
+	if err := f.store.Update(context.Background(), pod); err != nil {
+		t.Fatal("cannot install fixture Pod substitution")
+	}
+}
+
+func newCanonicalProjectionFixture(t *testing.T) *preflightFixture {
+	t.Helper()
+	f := newPreflightFixture(t)
+	f.m.Spec.Source.PasswordSecretRef = nil
+	f.m.Spec.Target.PasswordSecretRef = nil
+	if err := f.store.Update(context.Background(), f.m); err != nil {
+		t.Fatal("cannot install inline-only fixture configuration")
+	}
+	return f
 }
