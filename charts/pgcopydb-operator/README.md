@@ -20,6 +20,7 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `image.pullPolicy` | `IfNotPresent` | Manager pull policy. |
 | `runner.image.repository` | `ghcr.io/ydixken/pgcopydb-operator/runner` | Worker Job image, passed as `--runner-image`. |
 | `runner.image.tag` | `""` | Runner tag; empty uses the chart appVersion. |
+| `runner.rpgmigrateImage` | `""` | Native helper image, passed as `--rpgmigrate-runner-image` when nonempty. |
 | `runner.progressPollVersions` | `["0.18.144.g86bf908", ...]` | The twenty-one pgcopydb builds allowed to run the progress poll; `[]` disables it. |
 | `imagePullSecrets` | `[]` | Pull secrets for the manager pod. |
 | `nameOverride` | `""` | Overrides the chart name in resource names. |
@@ -62,6 +63,10 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `otel.headersSecret.key` | `headers` | Key of the headers in that Secret. |
 | `extraEnv` | `[]` | Extra env vars for the manager container. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
+
+The native image setting does not enable `spec.engine: rpgmigrate`, which still fails with `UnsupportedEngine`.
+Use a qualified immutable single-platform manifest pin.
+See [Native helper image](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/configuration.md#native-helper-image) for environment precedence and qualification requirements.
 
 ## RBAC and ServiceAccounts
 

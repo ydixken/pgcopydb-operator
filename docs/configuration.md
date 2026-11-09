@@ -209,6 +209,30 @@ The allowlist fails closed: an unlisted version, such as a custom image with sto
 Single-database clones keep their psql-based estimates, and all-databases clones report summed database sizes whatever the allowlist holds.
 The [monitoring guide](operations/monitoring.md) lists the metrics this affects.
 
+### Native helper image
+
+The chart value `runner.rpgmigrateImage` sets `--rpgmigrate-runner-image` only when it is nonempty.
+The flag defaults to `RPGMIGRATE_RUNNER_IMAGE`, which you can set through `extraEnv` in the chart.
+An explicit flag takes priority over the environment, including an explicit empty value.
+The default is empty.
+Without a per-Migration image override, the empty default leaves native helpers unavailable.
+The native image never defaults to `runner.image` or `--runner-image`.
+`spec.runner.image` still overrides the image per Migration.
+We preserve image values exactly, without trimming or normalization.
+
+> [!important]
+> This setting does not enable the native backend.
+> `spec.engine: rpgmigrate` still fails with `UnsupportedEngine` before the controller creates resources or executes commands.
+
+A native helper image MUST use an immutable, canonical single-platform manifest reference with `@sha256:` and 64 lowercase hexadecimal characters.
+A tag, image index digest, or image configuration digest does not satisfy this requirement.
+The configured reference MUST match the original Pod's raw `imageID` exactly under the qualified runtime profile.
+Image syntax alone does not prove the manifest type or runtime identity.
+The profile requires accepted archive/import identity and packaged Python/libpq validation.
+It also requires file/TLS/passfile, resolver, checked transport, process limits, and owned PVC validation.
+Native activation also requires the worker report, identical-end-position acknowledgment, exact owned cleanup, and full lifecycle validation.
+These requirements remain separate from configuration and Reader wiring.
+
 ## Credentials
 
 Passwords never appear in the Migration resource, the Job spec, or the logs.

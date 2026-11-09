@@ -95,6 +95,10 @@ func parseFlags(t *testing.T, args ...string) *flags {
 }
 
 func TestRegisterFlagsDefaults(t *testing.T) {
+	t.Setenv("RPGMIGRATE_RUNNER_IMAGE", "")
+	if err := os.Unsetenv("RPGMIGRATE_RUNNER_IMAGE"); err != nil {
+		t.Fatal(err)
+	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	f := registerFlags(fs)
 	if err := fs.Parse(nil); err != nil {
@@ -125,10 +129,12 @@ func TestRegisterFlagsDefaults(t *testing.T) {
 }
 
 func TestRegisterFlagsParsesValues(t *testing.T) {
+	t.Setenv("RPGMIGRATE_RUNNER_IMAGE", "")
 	f := parseFlags(t,
 		"--metrics-bind-address=:8443",
 		"--health-probe-bind-address=:9091",
 		"--runner-image=example.test/runner:v1",
+		"--rpgmigrate-runner-image=example.test/native@sha256:"+strings.Repeat("a", 64),
 		"--watch-namespaces=default,team-a",
 		"--progress-poll-versions=1.2.3,4.5.6",
 		"--leader-elect",
@@ -142,23 +148,51 @@ func TestRegisterFlagsParsesValues(t *testing.T) {
 		"--enable-http2",
 	)
 	want := flags{
-		metricsAddr:          ":8443",
-		probeAddr:            ":9091",
-		runnerImage:          "example.test/runner:v1",
-		watchNamespaces:      "default,team-a",
-		progressPollVersions: "1.2.3,4.5.6",
-		enableLeaderElection: true,
-		secureMetrics:        false,
-		webhookCertPath:      "/tmp/wh",
-		webhookCertName:      "wh.crt",
-		webhookCertKey:       "wh.key",
-		metricsCertPath:      "/tmp/m",
-		metricsCertName:      testCertName,
-		metricsCertKey:       testCertKey,
-		enableHTTP2:          true,
+		metricsAddr:           ":8443",
+		probeAddr:             ":9091",
+		runnerImage:           "example.test/runner:v1",
+		rpgmigrateRunnerImage: "example.test/native@sha256:" + strings.Repeat("a", 64),
+		watchNamespaces:       "default,team-a",
+		progressPollVersions:  "1.2.3,4.5.6",
+		enableLeaderElection:  true,
+		secureMetrics:         false,
+		webhookCertPath:       "/tmp/wh",
+		webhookCertName:       "wh.crt",
+		webhookCertKey:        "wh.key",
+		metricsCertPath:       "/tmp/m",
+		metricsCertName:       testCertName,
+		metricsCertKey:        testCertKey,
+		enableHTTP2:           true,
 	}
 	if got := withoutZap(*f); !reflect.DeepEqual(got, want) {
 		t.Errorf("parsed = %+v, want %+v", got, want)
+	}
+}
+
+func TestRPGMigrateRunnerImage(t *testing.T) {
+	const rawImage = " native image "
+	for _, tc := range []struct {
+		name string
+		env  string
+		args []string
+		want string
+	}{
+		{name: "empty has no legacy fallback", args: []string{"--runner-image=example.test/legacy:v1"}},
+		{name: "environment", env: "example.test/native@sha256:" + strings.Repeat("a", 64),
+			want: "example.test/native@sha256:" + strings.Repeat("a", 64)},
+		{name: "explicit flag overrides environment", env: "example.test/environment:v1",
+			args: []string{"--rpgmigrate-runner-image=example.test/flag:v2"}, want: "example.test/flag:v2"},
+		{name: "explicit empty overrides environment", env: "example.test/environment:v1",
+			args: []string{"--rpgmigrate-runner-image="}},
+		{name: "preserve raw environment", env: rawImage, want: rawImage},
+		{name: "preserve raw flag", args: []string{"--rpgmigrate-runner-image=" + rawImage}, want: rawImage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RPGMIGRATE_RUNNER_IMAGE", tc.env)
+			if got := parseFlags(t, tc.args...).rpgmigrateRunnerImage; got != tc.want {
+				t.Errorf("native image = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -424,6 +458,7 @@ func TestBuildManager(t *testing.T) {
 			"--metrics-bind-address=0",
 			"--metrics-secure=false",
 			"--runner-image=example.test/runner:v1",
+			"--rpgmigrate-runner-image=example.test/native@sha256:" + strings.Repeat("a", 64),
 			"--watch-namespaces=default",
 			"--progress-poll-versions=1.2.3",
 			probeDisabled,

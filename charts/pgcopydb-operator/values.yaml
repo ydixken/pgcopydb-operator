@@ -8,6 +8,8 @@ image:
 
 # Image the manager spawns as per-Migration worker Jobs (passed as --runner-image).
 runner:
+  # Use a qualified single-platform manifest pin; empty supplies no native default.
+  rpgmigrateImage: ""
   image:
     repository: ghcr.io/ydixken/pgcopydb-operator/runner
     # Empty tag falls back to the chart appVersion.

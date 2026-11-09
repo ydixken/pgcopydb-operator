@@ -34,6 +34,9 @@ spec:
             - --leader-elect
             {{- end }}
             - --runner-image={{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Chart.AppVersion }}
+            {{- with .Values.runner.rpgmigrateImage }}
+            - {{ printf "--rpgmigrate-runner-image=%s" . | quote }}
+            {{- end }}
             - --progress-poll-versions={{ join "," .Values.runner.progressPollVersions }}
             {{- with .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," . }}

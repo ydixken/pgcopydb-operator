@@ -44,6 +44,7 @@ import (
 	pgcopydboperatoriov1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/controller"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
@@ -84,21 +85,22 @@ func init() {
 // flags carries the parsed command line. The chart's deployment template
 // renders these exact flag names; the surface is frozen.
 type flags struct {
-	metricsAddr          string
-	probeAddr            string
-	runnerImage          string
-	watchNamespaces      string
-	progressPollVersions string
-	enableLeaderElection bool
-	secureMetrics        bool
-	webhookCertPath      string
-	webhookCertName      string
-	webhookCertKey       string
-	metricsCertPath      string
-	metricsCertName      string
-	metricsCertKey       string
-	enableHTTP2          bool
-	zapOpts              zap.Options
+	metricsAddr           string
+	probeAddr             string
+	runnerImage           string
+	rpgmigrateRunnerImage string
+	watchNamespaces       string
+	progressPollVersions  string
+	enableLeaderElection  bool
+	secureMetrics         bool
+	webhookCertPath       string
+	webhookCertName       string
+	webhookCertKey        string
+	metricsCertPath       string
+	metricsCertName       string
+	metricsCertKey        string
+	enableHTTP2           bool
+	zapOpts               zap.Options
 }
 
 func registerFlags(fs *flag.FlagSet) *flags {
@@ -108,6 +110,9 @@ func registerFlags(fs *flag.FlagSet) *flags {
 	fs.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	fs.StringVar(&f.runnerImage, "runner-image", "ghcr.io/ydixken/pgcopydb-operator/runner:latest",
 		"Default image for migration worker Jobs; spec.runner.image overrides per Migration.")
+	fs.StringVar(&f.rpgmigrateRunnerImage, "rpgmigrate-runner-image", os.Getenv("RPGMIGRATE_RUNNER_IMAGE"),
+		"Default native helper image pinned to a qualified single-platform manifest. "+
+			"spec.runner.image overrides per Migration.")
 	fs.StringVar(&f.watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to watch; empty watches the whole cluster.")
 	fs.StringVar(&f.progressPollVersions,
@@ -236,15 +241,17 @@ func setupRunnables(mgr ctrl.Manager, f *flags) error {
 		return fmt.Errorf("add progress sampler: %w", err)
 	}
 	if err := (&controller.MigrationReconciler{
-		Client:      mgr.GetClient(),
-		APIReader:   mgr.GetAPIReader(),
-		Scheme:      mgr.GetScheme(),
-		Recorder:    mgr.GetEventRecorder("pgcopydb-operator"),
-		RunnerImage: f.runnerImage,
-		Sentinel:    sentinel.New(podExec),
-		Logs:        podExec,
-		Progress:    poller,
-		Sampler:     sampler,
+		Client:                mgr.GetClient(),
+		APIReader:             mgr.GetAPIReader(),
+		Scheme:                mgr.GetScheme(),
+		Recorder:              mgr.GetEventRecorder("pgcopydb-operator"),
+		RunnerImage:           f.runnerImage,
+		RPGMigrateRunnerImage: f.rpgmigrateRunnerImage,
+		NativeEvidence:        native.NewReader(mgr.GetAPIReader(), podExec),
+		Sentinel:              sentinel.New(podExec),
+		Logs:                  podExec,
+		Progress:              poller,
+		Sampler:               sampler,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create migration controller: %w", err)
 	}
