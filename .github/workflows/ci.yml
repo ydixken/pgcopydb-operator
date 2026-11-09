@@ -69,7 +69,9 @@ jobs:
           for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
                       "$HOME/.cache/go-build:/cache/go-build"; do
             src=${pair%:*} dst=${pair#*:}
-            [ -n "$src" ] && [ -d "$src" ] || continue
+            if [ -z "$src" ] || [ ! -d "$src" ]; then
+              continue
+            fi
             [ -z "$(ls -A "$dst" 2>/dev/null)" ] || continue
             echo "Seeding $dst from the image's $src." >> "$GITHUB_STEP_SUMMARY"
             cp -a "$src/." "$dst/" 2>/dev/null || true
@@ -193,7 +195,9 @@ jobs:
           for pair in "$(go env GOMODCACHE 2>/dev/null):/cache/go-mod" \
                       "$HOME/.cache/go-build:/cache/go-build"; do
             src=${pair%:*} dst=${pair#*:}
-            [ -n "$src" ] && [ -d "$src" ] || continue
+            if [ -z "$src" ] || [ ! -d "$src" ]; then
+              continue
+            fi
             [ -z "$(ls -A "$dst" 2>/dev/null)" ] || continue
             echo "Seeding $dst from the image's $src." >> "$GITHUB_STEP_SUMMARY"
             cp -a "$src/." "$dst/" 2>/dev/null || true
