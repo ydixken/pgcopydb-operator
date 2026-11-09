@@ -26,12 +26,13 @@ var errNativeTransport = errors.New("native transport refused")
 
 // NativeContainerBinding correlates a caller's independently admitted incarnation.
 type NativeContainerBinding struct {
-	PodUID         types.UID
-	ContainerName  string
-	ContainerID    string
-	RestartCount   int32
-	ImageID        string
-	TemplateSHA256 [32]byte
+	PodUID          types.UID
+	ContainerName   string
+	ContainerID     string
+	RestartCount    int32
+	ImageID         string
+	TemplateSHA256  [32]byte
+	ExecutionSHA256 [32]byte
 }
 
 type nativeTemplateEnv struct {
