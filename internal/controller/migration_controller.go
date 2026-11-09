@@ -889,9 +889,15 @@ func (r *MigrationReconciler) nextAttempt(ctx context.Context, m, base *v1beta1.
 	return r.startAttempt(ctx, m, base)
 }
 
-// startAttempt creates the next worker Job. Every attempt after the first waits for the
-// retry gate (see retry_gate.go), and only a settled budget lets the worker start.
+// Legacy retries wait for their gate and settled budget; native retries require separate qualification.
 func (r *MigrationReconciler) startAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
+	engine, err := backendFor(m)
+	if err != nil {
+		return ctrl.Result{}, errNativeWorkerAdmission
+	}
+	if engine == v1beta1.MigrationEngineRPGMigrate {
+		return r.startNativeAttempt(ctx, m, base)
+	}
 	attempt := m.Status.Attempts + 1
 	if attempt > 1 {
 		// A pass that crashed between creating this worker and recording it left a live worker
@@ -969,10 +975,21 @@ func (r *MigrationReconciler) recordAttempt(ctx context.Context, m, base *v1beta
 		r.setCondition(m, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, reasonGatePassed,
 			fmt.Sprintf("Attempt %d runs as Job %s", attempt, job.Name))
 	}
-	if announce {
+	nativeAttempt := m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate
+	if announce && !nativeAttempt {
 		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "%s", note)
 	}
-	if err := r.updateStatus(ctx, m, base); err != nil {
+	if nativeAttempt {
+		// A fresh read cannot exclude a replacement between admission and the status write.
+		m.Status.ObservedGeneration = m.Generation
+		if err := r.Status().Patch(ctx, m, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, nativeWorkerError(err)
+		}
+		metrics.Record(m)
+		if announce {
+			r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "AttemptStarted", "StartAttempt", "%s", note)
+		}
+	} else if err := r.updateStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
 	}
 	if attempt > 1 {
