@@ -43,6 +43,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/progress"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
@@ -138,6 +139,10 @@ type MigrationReconciler struct {
 
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
+
+	// Native evidence requires an uncached Reader and an explicit native image.
+	NativeEvidence        *native.Reader
+	RPGMigrateRunnerImage string
 
 	// Sentinel drives follow migrations; nil disables follow handling.
 	Sentinel SentinelOps
