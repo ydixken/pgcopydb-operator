@@ -12,6 +12,7 @@ import sys
 import binascii
 import resource
 import errno
+import subprocess
 CAP = 65536
 CAP_ERR='capability'
 RESULT='result'
@@ -1232,11 +1233,163 @@ def run_completed_evidence(operation_id: str,program_sha256: str) -> int:
    try: channel.finish(output)
    except BaseException: pass
   return 1
+def preflight_capture(program, argument, deadline, diag):
+ deadline=min(deadline,time.monotonic()+10); process=None; failure=None; output=bytearray()
+ try:
+  need(time.monotonic()<deadline,'timeout'); diag.check()
+  environment={key:os.environ[key] for key in ('LANG','LC_ALL','PATH') if key in os.environ}
+  process=subprocess.Popen([program,argument],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=environment,close_fds=True)
+  streams={process.stdout.fileno():False,process.stderr.fileno():True}
+  for fd in streams: os.set_blocking(fd,False)
+  while streams:
+   remaining=deadline-time.monotonic(); need(remaining>0,'timeout'); diag.check()
+   ready,_,_=select.select(list(streams),[],[],min(remaining,0.05))
+   for fd in ready:
+    raw=os.read(fd,4097)
+    if not raw: del streams[fd]; continue
+    need(not streams[fd],'diagnostic'); output.extend(raw); need(len(output)<=4096,RESULT)
+  remaining=deadline-time.monotonic(); need(remaining>0,'timeout')
+  need(process.wait(timeout=remaining)==0,RESULT); diag.check()
+ except BaseException as error:
+  failure=error if isinstance(error,Refusal) else Refusal(RESULT)
+ finally:
+  if process is not None:
+   try:
+    if process.poll() is None: process.kill()
+    process.wait(timeout=1)
+   except BaseException: failure=Refusal(CLOSE)
+   for stream in (process.stdout,process.stderr):
+    if stream is not None:
+     try: stream.close()
+     except BaseException: failure=Refusal(CLOSE)
+ if failure: raise failure
+ return bytes(output)
+
+def preflight_tools(major, deadline, diag):
+ need(type(major) is int and major in (16,18),CAP_ERR)
+ if 'PG_BINDIR' in os.environ:
+  directory=os.environ['PG_BINDIR']; need(bool(directory),CAP_ERR); directories=[directory]
+ elif 'PG_CONFIG' in os.environ:
+  raw=preflight_capture(os.environ['PG_CONFIG'],'--bindir',deadline,diag)
+  try: directory=raw.decode('utf-8').rstrip('\r\n')
+  except UnicodeError: raise Refusal(RESULT) from None
+  need(directory and '\n' not in directory and '\r' not in directory and '\0' not in directory,RESULT); directories=[directory]
+ else:
+  packaged='/usr/lib/postgresql/%d/bin'%major
+  directories=[packaged] if os.path.exists(packaged) else os.environ.get('PATH','').split(os.pathsep)
+ for directory in directories:
+  paths=[os.path.join(directory,name) for name in ('pg_dump','pg_restore')]
+  if not all(os.path.isfile(path) for path in paths): continue
+  versions=[]
+  for path,name in zip(paths,('pg_dump','pg_restore')):
+   raw=preflight_capture(path,'--version',deadline,diag)
+   need(raw.endswith(b'\n') and raw.count(b'\n')==1 and b'\r' not in raw and all(32<=c<127 for c in raw[:-1]),RESULT)
+   prefix=(name+' (PostgreSQL) ').encode(); need(raw.startswith(prefix),RESULT)
+   fields=raw[len(prefix):-1].split(); need(bool(fields),RESULT); parts=fields[0].split(b'.')
+   need(len(parts)==2 and all(part and all(48<=c<=57 for c in part) for part in parts),RESULT)
+   actual=int(parts[0]); need(actual==major,RESULT); versions.append(actual)
+  return tuple(versions)
+ raise Refusal(CAP_ERR)
+
+def preflight_identity(session):
+ session.check(); session_role(session)
+ rows=session.query("SELECT @pg_backend_pid(),d.oid,r.oid,u.oid,@current_setting('server_version_num'),NOT @pg_is_in_recovery(),@current_setting('transaction_read_only') FROM @pg_database d CROSS JOIN @pg_roles r CROSS JOIN @pg_roles u WHERE d.datname=@current_database() AND r.rolname=CURRENT_USER AND u.rolname=SESSION_USER;",width=7)
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==7,RESULT)
+ row=rows[0]; values=[]
+ for cell in row[:5]:
+  need(type(cell) is bytes and cell and all(48<=c<=57 for c in cell),RESULT)
+  value=int(cell); need(str(value).encode()==cell and 0<value<=(1<<32)-1,RESULT); values.append(value)
+ need(values[0]==session.backend and row[5] in (b't',b'f') and row[6] in (b'on',b'off'),CONN)
+ session.check()
+ return tuple(values)+tuple(row[5:])
+
+def preflight_names(rows, extensions=False):
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==1,RESULT)
+ value=strict_json(rows[0][0],CAP); need(type(value) is list and len(value)<=1024,RESULT)
+ names=[]; owned=[]
+ for entry in value:
+  if extensions:
+   need(type(entry) is list and len(entry)==2 and type(entry[1]) is bool,RESULT)
+   item=entry[0]
+  else: item=entry
+  text(item,63); need(item not in names,RESULT); names.append(item)
+  if extensions and entry[1]: owned.append(item)
+ return (names,owned) if extensions else names
+
+def preflight_checks(source, target, source_major, target_major, follow, deadline, diag):
+ checks=['connections','identity','source_primary','target_writable','versions']
+ dump,restore=preflight_tools(target_major,deadline,diag); need((dump,restore)==(target_major,target_major),RESULT); checks.append('tools')
+ exact_true(target.query("SELECT @has_database_privilege(@current_database(),'TEMP');")); checks.append('temporary_privilege')
+ extensions,owned=preflight_names(source.query("SELECT COALESCE(@jsonb_agg(@jsonb_build_array(extname,oid>=16384) ORDER BY extname),'[]'::jsonb) FROM @pg_extension;"),True)
+ exact_true(target.query("SELECT NOT EXISTS (SELECT 1 FROM @jsonb_array_elements_text($1::jsonb) selected(name) LEFT JOIN @pg_extension installed ON installed.extname::text COLLATE \"C\"=selected.name LEFT JOIN @pg_available_extensions available ON available.name::text COLLATE \"C\"=selected.name WHERE NOT (installed.extname IS NOT NULL OR available.default_version IS NOT NULL)) AND NOT EXISTS (SELECT 1 FROM @jsonb_array_elements_text($2::jsonb) selected(name) JOIN @pg_extension installed ON installed.extname::text COLLATE \"C\"=selected.name WHERE NOT (@pg_has_role(CURRENT_USER,installed.extowner,'USAGE') OR (SELECT rolsuper FROM @pg_roles WHERE rolname=CURRENT_USER)));",(json.dumps(extensions),json.dumps(owned)))); checks.append('extensions')
+ schemas=preflight_names(source.query("SELECT COALESCE(@jsonb_agg(n.nspname ORDER BY n.nspname),'[]'::jsonb) FROM @pg_namespace n WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema';"))
+ exact_true(target.query("SELECT @has_database_privilege(CURRENT_USER,@current_database(),'CREATE') AND (@pg_has_role(CURRENT_USER,(SELECT datdba FROM @pg_database WHERE datname=@current_database()),'USAGE') OR (SELECT rolsuper FROM @pg_roles WHERE rolname=CURRENT_USER)) AND NOT EXISTS (SELECT 1 FROM @pg_namespace n WHERE n.nspname IN (SELECT @jsonb_array_elements_text($1::jsonb)) AND NOT @has_schema_privilege(CURRENT_USER,n.oid,'CREATE'));",(json.dumps(schemas),))); checks.append('clone_rights')
+ exact_true(source.query("SELECT NOT EXISTS (SELECT 1 FROM @pg_class c JOIN @pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind='r' AND c.relrowsecurity AND NOT EXISTS (SELECT 1 FROM @pg_depend d WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=c.oid AND d.deptype='e') AND (c.relforcerowsecurity OR NOT @pg_has_role(CURRENT_USER,c.relowner,'USAGE')) AND NOT (SELECT rolsuper OR rolbypassrls FROM @pg_roles WHERE rolname=CURRENT_USER));")); checks.append('rls')
+ if follow:
+  exact_true(source.query("SELECT @current_setting('wal_level')='logical' AND EXISTS (SELECT 1 FROM @pg_settings WHERE name='wal_sender_timeout' AND (setting::bigint=0 OR setting::bigint>=60000));")); checks.append('wal')
+  exact_true(source.query("SELECT @has_database_privilege(CURRENT_USER,@current_database(),'CREATE') AND NOT EXISTS (SELECT 1 FROM @pg_class c JOIN @pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p') AND NOT @pg_has_role(CURRENT_USER,c.relowner,'USAGE'));")); checks.append('publication')
+  exact_true(source.query("SELECT @current_setting('max_replication_slots')::int-(SELECT @count(*) FROM @pg_replication_slots)>=1;")); checks.append('slots')
+  exact_true(source.query('SELECT rolreplication OR rolsuper FROM @pg_roles WHERE rolname=CURRENT_USER;')); checks.append('replication')
+  target.query('BEGIN READ ONLY;',tag='BEGIN',state=2,rows=0,width=0)
+  target.query("SET LOCAL session_replication_role TO 'replica';",tag='SET',state=2,rows=0,width=0)
+  target.query('ROLLBACK;',tag='ROLLBACK',rows=0,width=0); checks.append('replica_role')
+  exact_true(source.query("SELECT NOT EXISTS (SELECT 1 FROM @pg_class c JOIN @pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p') AND c.relpersistence='u');")); checks.append('unlogged')
+  exact_true(source.query("SELECT NOT EXISTS (SELECT 1 FROM @pg_class c JOIN @pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind='r' AND c.relpersistence='p' AND (c.relreplident='n' OR (c.relreplident='d' AND NOT EXISTS (SELECT 1 FROM @pg_index i WHERE i.indrelid=c.oid AND i.indisprimary))));")); checks.append('replica_identity')
+ return dump,restore,checks
+
+def run_native_preflight(operation_id: str, program_sha256: str) -> int:
+ start=time.monotonic(); deadline=start+60; close_deadline=start+90
+ diag=None; materials=None; source=None; target=None
+ try:
+  hextext(operation_id,32); hextext(program_sha256,64)
+  resource.setrlimit(resource.RLIMIT_CORE,(0,0)); validate_environment(os.environ)
+  need(os.environ.get('PGCONNECT_TIMEOUT')=='10',CAP_ERR)
+  follow=os.environ.get('RPGMIGRATE_NATIVE_PREFLIGHT_FOLLOW'); need(follow in ('0','1'),CAP_ERR)
+  diag=Diagnostics(); need(os.geteuid()==65532,'admission'); materials=Materialization(os.environ)
+  resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver)
+  resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy()
+  source=Session(library,materials.connection('source'),min(deadline,time.monotonic()+10),diag); source.deadline=deadline
+  target=Session(library,materials.connection('target'),min(deadline,time.monotonic()+10),diag); target.deadline=deadline
+  for session in (source,target):
+   for setting,milliseconds in (('statement_timeout',4000),('lock_timeout',1000),('idle_in_transaction_session_timeout',6000)):
+    remaining=int((deadline-time.monotonic())*1000); need(remaining>0,'timeout')
+    session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
+   session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
+   need(session.query('SELECT 1;')==[[b'1']],RESULT)
+  source_identity=preflight_identity(source); target_identity=preflight_identity(target)
+  need(source_identity[5]==b't' and target_identity[5:]==(b't',b'off'),CONN)
+  source_major=source_identity[4]//10000; target_major=target_identity[4]//10000
+  need((source_major,target_major) in ((16,16),(18,18),(16,18)),CAP_ERR)
+  dump,restore,checks=preflight_checks(source,target,source_major,target_major,follow=='1',deadline,diag)
+  need(preflight_identity(source)==source_identity and preflight_identity(target)==target_identity,CONN)
+  resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  source.close(); source=None; target.close(); target=None
+  materials.check(); materials.close(); materials=None; diag.close(); diag=None
+  need(time.monotonic()<close_deadline,'timeout')
+  result=dict(version=1,kind='native_preflight',operation_id=operation_id,program_sha256=program_sha256,source_major=source_major,target_major=target_major,pg_dump_major=dump,pg_restore_major=restore,checks=checks,source_closed=True,target_closed=True,materialization_closed=True,diagnostics_clean=True)
+  output=json.dumps(result,separators=(',',':'),ensure_ascii=True).encode()+b'\n'; need(len(output)<=CAP,RESULT)
+  os.set_blocking(1,False)
+  offset=0
+  while offset<len(output):
+   need(time.monotonic()<close_deadline,'timeout')
+   try: written=os.write(1,output[offset:])
+   except BlockingIOError:
+    wait_fd(1,True,close_deadline); continue
+   need(0<written<=len(output)-offset,RESULT); offset+=written
+  return 0
+ except BaseException:
+  for item in (source,target,materials,diag):
+   if item is not None:
+    try: item.close(False) if isinstance(item,Session) else item.close()
+    except BaseException: pass
+  return 1
+
 def main(argv: list[str]) -> int:
- if len(argv)!=4 or argv[1]!='completed_evidence': return 1
+ if len(argv)!=4 or argv[1] not in ('completed_evidence','native_preflight'): return 1
  try:
   hextext(argv[2],32); hextext(argv[3],64)
  except BaseException: return 1
- return run_completed_evidence(argv[2],argv[3])
+ return run_native_preflight(argv[2],argv[3]) if argv[1]=='native_preflight' else run_completed_evidence(argv[2],argv[3])
 if __name__=='__main__':
  raise SystemExit(main(sys.argv))

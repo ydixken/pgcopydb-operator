@@ -322,6 +322,7 @@ func lowerHex(s string, n int) bool {
 }
 
 var nativeWireKeys = map[string]string{
+	"native_preflight":       "version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean",
 	"request":                "version kind operation_id program_sha256 execution pod_name container saved_e",
 	"request.execution":      "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
 	"request.execution.work": "migration_uid run_id workdir_id checkpoint_generation",

@@ -124,3 +124,22 @@ func TestNativePythonFileKernelOpen(t *testing.T) { pythonMechanismCase(t, "test
 func TestNativePythonFileMaterialization(t *testing.T) {
 	pythonMechanismCase(t, "test_FileMaterialization")
 }
+
+func TestNativePythonNativePreflightDispatch(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightDispatch")
+}
+func TestNativePythonNativePreflightClosedResult(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightClosedResult")
+}
+func TestNativePythonNativePreflightRefusals(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightRefusals")
+}
+func TestNativePythonNativePreflightResolverClosed(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightResolverClosed")
+}
+func TestNativePythonNativePreflightTools(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightTools")
+}
+func TestNativePythonNativePreflightBounds(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightBounds")
+}

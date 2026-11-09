@@ -139,9 +139,261 @@ class FakeMemfd:
         raise AssertionError('unexpected fake seal operation')
 
 
+class PreflightFixture:
+    # These doubles exercise orchestration, not packaged runtime or database qualification.
+    def __init__(self, case, follow='0', source=16, target=18, fault=None, rows=None):
+        self.case=case;self.follow=follow;self.source=source;self.target=target
+        self.fault=fault;self.rows=rows or {};self.events=[];self.queries=[];self.output=[];self.sessions=[]
+        self.deadlines=[];self.clock=100.;self.closes=[]
+    def event(self, name):
+        self.events.append(name)
+        if self.fault=='late-'+name:self.clock=161.
+        if self.fault=='cleanup-last-'+name:self.clock=189.
+        if self.fault=='cleanup-expire-'+name:self.clock=191.
+        if self.fault==name:raise P.Refusal('closure' if name.endswith('close') else 'result','42501')
+    def __enter__(self):
+        from contextlib import ExitStack
+        from types import SimpleNamespace
+        self.stack=ExitStack();outer=self
+        class Material:
+            def __init__(self, env):self.files=[];outer.event('material-open')
+            def prepare(self, library, deadline):outer.deadlines.append(deadline);outer.event('prepare')
+            def connection(self, role):outer.event(role+'-input');return role
+            def check(self):outer.event('material-check')
+            def close(self):
+                failure=None
+                for file in self.files:
+                    try:file.close()
+                    except P.Refusal as error:failure=error
+                outer.closes.append('material');outer.event('material-close')
+                if failure:raise failure
+        class Resolver:
+            raw=b'nameserver 127.0.0.1\n'
+            def __init__(self,*args):outer.event('resolver-open')
+            def check(self):outer.event('resolver-check')
+            def close(self):outer.closes.append('resolver');outer.event('resolver-close')
+        class Diagnostics:
+            def __init__(self):outer.event('diagnostics-open')
+            def check(self):outer.event('diagnostics-check')
+            def close(self):outer.closes.append('diagnostics');outer.event('diagnostics-close')
+        class Session:
+            def __init__(self, library, role, deadline, diag):
+                outer.event(role+'-open');outer.deadlines.append(deadline);self.role=role;self.deadline=deadline
+                self.backend=23 if role=='source' else 24;self.props={'PQuser':b'private-role','PQdb':b'private-db','ssl':1}
+                self.state=0;outer.sessions.append(self)
+            def check(self):outer.event(self.role+'-check');P.need(outer.clock<self.deadline,'timeout')
+            def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
+                self.check();outer.queries.append((self.role,sql,params,tag,state,rows,width,commit))
+                outer.event('query-'+str(len(outer.queries)));outer.event(self.role+'-query')
+                if outer.fault=='expire':outer.clock=161.
+                outer.case.assertFalse(commit)
+                if tag=='BEGIN':outer.case.assertEqual(self.state,0)
+                else:outer.case.assertEqual(self.state,2 if tag=='ROLLBACK' else state)
+                self.state=state
+                if rows==0:return []
+                if 'CURRENT_USER, SESSION_USER' in sql:return [[b'private-role',b'private-role',b'private-db',b't']]
+                if "'server_version_num'" in sql:
+                    key=self.role+'-identity';major=outer.source if self.role=='source' else outer.target
+                    row=[str(self.backend).encode(),b'11',b'33',b'33',str(major*10000+6).encode(),b't',b'off']
+                    count=sum(1 for role,query,*_ in outer.queries if role==self.role and "'server_version_num'" in query)
+                    return copy.deepcopy(outer.rows.get(key+'-'+str(count),outer.rows.get(key,[row])))
+                if 'jsonb_build_array' in sql:key='extensions-source';value=[[b'[["plpgsql",false],["example",true]]']]
+                elif 'jsonb_agg(n.nspname' in sql:key='schemas';value=[[b'["public"]']]
+                elif 'pg_available_extensions' in sql:key='extensions';value=[[b't']]
+                elif "'TEMP'" in sql:key='temporary_privilege';value=[[b't']]
+                elif 'has_schema_privilege' in sql:key='clone_rights';value=[[b't']]
+                elif 'relrowsecurity' in sql:key='rls';value=[[b't']]
+                elif "'wal_level'" in sql:key='wal';value=[[b't']]
+                elif 'max_replication_slots' in sql:key='slots';value=[[b't']]
+                elif 'rolreplication' in sql:key='replication';value=[[b't']]
+                elif 'relpersistence' in sql and "'u'" in sql:key='unlogged';value=[[b't']]
+                elif 'relreplident' in sql:key='replica_identity';value=[[b't']]
+                elif 'relowner' in sql and 'has_database_privilege' in sql:key='publication';value=[[b't']]
+                elif sql=='SELECT 1;':key='connections';value=[[b'1']]
+                else:raise AssertionError('unexpected fixed query')
+                return copy.deepcopy(outer.rows.get(key,value))
+            def close(self,healthy=True):
+                if healthy:outer.case.assertEqual(self.state,0)
+                outer.closes.append(self.role);outer.event(self.role+'-close')
+        env={'LANG':'C','LC_ALL':'C','PGCONNECT_TIMEOUT':'10','RPGMIGRATE_NATIVE_PREFLIGHT_FOLLOW':self.follow,
+             'PGCOPYDB_SOURCE_PGURI':'postgresql://private-role:secret-sentinel@private-host/private-db',
+             'PGCOPYDB_TARGET_PGURI':"host=private-host dbname=private-db password='secret-sentinel'"}
+        self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
+        for name,value in [('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)]:self.stack.enter_context(mock.patch.object(P,name,value))
+        self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')))
+        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P,'preflight_tools',side_effect=lambda major,deadline,diag:(self.event('tools') or (major,major))))
+        self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532))
+        self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'))
+        self.stack.enter_context(mock.patch.object(P.os,'set_blocking'))
+        self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock))
+        def write(fd,raw):
+            outer.case.assertEqual(fd,1)
+            for name in ('source','target','material','diagnostics'):outer.case.assertIn(name,outer.closes)
+            outer.event('write');outer.output.append(bytes(raw));return len(raw)
+        self.stack.enter_context(mock.patch.object(P.os,'write',side_effect=write))
+        for name in ('InputChannel','PrivateState','observe','validate_request'):
+            self.stack.enter_context(mock.patch.object(P,name,side_effect=AssertionError('evidence boundary entered')))
+        return self
+    def __exit__(self,*args):return self.stack.__exit__(*args)
+    def run(self):return P.run_native_preflight('5'*32,hashlib.sha256((HERE/'evidence_program.py').read_bytes()).hexdigest())
+
+
 class NativePythonTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(P, 'reviewed evidence program is absent')
+
+    def test_NativePreflightDispatch(self):
+        self.assertIsNotNone(getattr(P,'run_native_preflight',None),'fixed native preflight role is absent')
+        self.assertEqual(getattr(P,'run_native_preflight',None).__annotations__,{'operation_id':str,'program_sha256':str,'return':int})
+        with mock.patch.object(P,'run_native_preflight',return_value=7) as preflight,mock.patch.object(P,'run_completed_evidence',return_value=8) as evidence:
+            self.assertEqual(P.main(['program','native_preflight','5'*32,'6'*64]),7)
+            self.assertEqual(P.main(['program','completed_evidence','5'*32,'6'*64]),8)
+            for argv in (['program'],['program','native_preflight','5'*32,'6'*64,'SQL'],['program','other','5'*32,'6'*64],['program','native_preflight','A'*32,'6'*64],['program','native_preflight','5'*32,'G'*64]):self.assertEqual(P.main(argv),1)
+            preflight.assert_called_once_with('5'*32,'6'*64);evidence.assert_called_once_with('5'*32,'6'*64)
+        for follow in ('','true','01','2','0\n'):
+            with PreflightFixture(self,follow=follow) as fixture:
+                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+
+    def test_NativePreflightClosedResult(self):
+        clone='connections identity source_primary target_writable versions tools temporary_privilege extensions clone_rights rls'.split()
+        for source,target,follow in ((16,16,'0'),(18,18,'0'),(16,18,'0'),(16,18,'1')):
+            with self.subTest(source=source,target=target,follow=follow),PreflightFixture(self,follow,source,target) as fixture:
+                self.assertEqual(fixture.run(),0)
+                raw=b''.join(fixture.output);result=json.loads(raw)
+                self.assertEqual(set(result),set('version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean'.split()))
+                self.assertEqual(result['version'],1);self.assertEqual(result['kind'],'native_preflight');self.assertEqual(result['operation_id'],'5'*32)
+                self.assertEqual(result['program_sha256'],hashlib.sha256((HERE/'evidence_program.py').read_bytes()).hexdigest())
+                self.assertEqual((result['source_major'],result['target_major'],result['pg_dump_major'],result['pg_restore_major']),(source,target,target,target))
+                self.assertEqual(result['checks'],clone+('wal publication slots replication replica_role unlogged replica_identity'.split() if follow=='1' else []))
+                for key in ('source_closed','target_closed','materialization_closed','diagnostics_clean'):self.assertIs(result[key],True)
+                for role in ('source','target'):
+                    self.assertEqual(sum(1 for r,sql,*_ in fixture.queries if r==role and "'server_version_num'" in sql),2)
+                    self.assertEqual(sum(1 for r,sql,*_ in fixture.queries if r==role and 'CURRENT_USER, SESSION_USER' in sql),2)
+                    self.assertEqual(fixture.events.count(role+'-open'),1)
+                self.assertEqual(fixture.deadlines,[160.,110.,110.]);self.assertLessEqual(len(raw),65536);self.assertTrue(raw.endswith(b'\n'))
+                for canary in (b'private-role',b'private-db',b'private-host',b'secret-sentinel'):self.assertNotIn(canary,raw)
+                predicates={
+                    'pg_available_extensions':('installed.extname IS NOT NULL OR available.default_version IS NOT NULL',"@pg_has_role(CURRENT_USER,installed.extowner,'USAGE')",'SELECT rolsuper'),
+                    'has_schema_privilege':("@has_database_privilege(CURRENT_USER,@current_database(),'CREATE')","@pg_has_role(CURRENT_USER,(SELECT datdba", "@has_schema_privilege(CURRENT_USER,n.oid,'CREATE')"),
+                    'relrowsecurity':("c.relkind='r' AND c.relrowsecurity","d.deptype='e'","c.relforcerowsecurity OR NOT @pg_has_role(CURRENT_USER,c.relowner,'USAGE')",'SELECT rolsuper OR rolbypassrls'),
+                }
+                if follow=='1':predicates.update({
+                    "'wal_level'":("='logical'","name='wal_sender_timeout'",'setting::bigint=0 OR setting::bigint>=60000'),
+                    'max_replication_slots':('SELECT @count(*) FROM @pg_replication_slots',')>=1'),
+                    'rolreplication':('rolreplication OR rolsuper',),
+                    "c.relpersistence='u'":("c.relkind IN ('r','p')",'SELECT NOT EXISTS'),
+                    'relreplident':("c.relreplident='n'", "c.relreplident='d' AND NOT EXISTS",'i.indrelid=c.oid AND i.indisprimary'),
+                })
+                for selector,required in predicates.items():
+                    queries=[sql for _,sql,*_ in fixture.queries if selector in sql];self.assertEqual(len(queries),1)
+                    for predicate in required:self.assertIn(predicate,queries[0])
+                for role,sql,params,*_ in fixture.queries:
+                    self.assertIn(sql.split()[0].rstrip(';'),('SELECT','SET','BEGIN','ROLLBACK'))
+                    self.assertNotIn('replication_origin',sql);self.assertNotIn('wal2json',sql);self.assertNotIn('pgcopydb',sql)
+                    self.assertNotIn('secret-sentinel',repr(params))
+                    if 'pg_available_extensions' in sql:self.assertEqual([json.loads(value) for value in params],[['plpgsql','example'],['example']])
+                    if 'has_schema_privilege' in sql:self.assertEqual([json.loads(value) for value in params],[['public']])
+
+    def test_NativePreflightRefusals(self):
+        with PreflightFixture(self,follow='1') as fixture:self.assertEqual(fixture.run(),0);count=len(fixture.queries)
+        faults=['query-'+str(i) for i in range(1,count+1)]+['runtime','prepare','source-open','target-open','material-check','source-check','target-check','resolver-policy','resolver-check','diagnostics-check','source-close','target-close','resolver-close','material-close','diagnostics-close','tools','expire','late-query-'+str(count),'cleanup-expire-source-close']
+        for fault in faults:
+            with self.subTest(fault=fault),PreflightFixture(self,follow='1',fault=fault) as fixture:
+                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+                if 'material-open' in fixture.events:self.assertIn('material-close',fixture.events)
+        for key in ('connections','temporary_privilege','extensions','clone_rights','rls','wal','publication','slots','replication','unlogged','replica_identity'):
+            for bad in ([],[[None]],[[b'f']],[[b't',b't']],[[b't'],[b't']]):
+                with self.subTest(key=key,bad=bad),PreflightFixture(self,follow='1',rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        identity=[b'23',b'11',b'33',b'33',b'160006',b't',b'off']
+        for index,bad in ((0,b'24'),(1,b'0'),(2,b'0'),(3,None),(4,b'160000.0'),(4,b'0170000'),(4,b'170006'),(5,b'f')):
+            row=identity.copy();row[index]=bad
+            with self.subTest(index=index,bad=bad),PreflightFixture(self,rows={'source-identity':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        target=[b'24',b'11',b'33',b'33',b'180006',b't',b'on']
+        with PreflightFixture(self,rows={'target-identity':[target]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for index in range(7):
+            row=identity.copy();row[index]=b'180006' if index==4 else b'99'
+            with self.subTest(recheck=index),PreflightFixture(self,rows={'source-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            row=identity.copy();row[0]=b'24';row[4]=b'180006';row[index]=b'160006' if index==4 else b'99'
+            with self.subTest(target_recheck=index),PreflightFixture(self,rows={'target-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for bad in ([],None,[[None]*7],[identity,identity],[identity[:-1]],[identity+[b'1']]):
+            with PreflightFixture(self,rows={'source-identity':bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for source,target in ((18,16),(17,18),(16,17),(15,16),(18,19)):
+            with PreflightFixture(self,source=source,target=target) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for key,bad in (('schemas',[[b'null']]),('schemas',[[b'["x","x"]']]),('extensions-source',[[b'[["x",1]]']]),('extensions-source',[[b'[["x",true],["x",false]]']])):
+            with PreflightFixture(self,rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+
+    def test_NativePreflightResolverClosed(self):
+        with PreflightFixture(self) as fixture,mock.patch.object(P,'qualified_resolver_policy',side_effect=P.Refusal('capability')):
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+        with self.assertRaises(P.Refusal):P.qualified_resolver_policy()
+
+    def test_NativePreflightTools(self):
+        from types import SimpleNamespace
+        diag=SimpleNamespace(check=lambda:None)
+        for major in (16,18):
+            seen=[]
+            def capture(path,arg,deadline,diagnostics):seen.append((path,arg));return (os.path.basename(path)+' (PostgreSQL) '+str(major)+'.6 (package)\n').encode()
+            with mock.patch.dict(os.environ,{'LANG':'C','LC_ALL':'C','PATH':'/other'},clear=True),mock.patch.object(P.os.path,'exists',return_value=True),mock.patch.object(P.os.path,'isfile',return_value=True),mock.patch.object(P,'preflight_capture',side_effect=capture):
+                self.assertEqual(P.preflight_tools(major,time.monotonic()+5,diag),(major,major))
+            self.assertEqual(seen,[(f'/usr/lib/postgresql/{major}/bin/pg_dump','--version'),(f'/usr/lib/postgresql/{major}/bin/pg_restore','--version')])
+        for output in (b'',b'pg_restore (PostgreSQL) 18.6\n',b'pg_dump (PostgreSQL) 17.6\n',b'pg_dump (PostgreSQL) 18\n',b'pg_dump (PostgreSQL) 18.6',b'pg_dump (PostgreSQL) 18.6\nextra\n',b'pg_dump (PostgreSQL) 18.6\n\n',b'\xff\n'):
+            with mock.patch.dict(os.environ,{'PG_BINDIR':'/explicit'},clear=True),mock.patch.object(P.os.path,'isfile',return_value=True),mock.patch.object(P,'preflight_capture',return_value=output):
+                with self.assertRaises(P.Refusal):P.preflight_tools(18,time.monotonic()+3,diag)
+        with mock.patch.dict(os.environ,{'PG_BINDIR':'','PG_CONFIG':'/ignored'},clear=True),mock.patch.object(P,'preflight_capture') as capture:
+            with self.assertRaises(P.Refusal):P.preflight_tools(18,time.monotonic()+3,diag)
+            capture.assert_not_called()
+        seen=[]
+        def configured(path,arg,deadline,diagnostics):
+            seen.append((path,arg));return b'/explicit\n' if arg=='--bindir' else (os.path.basename(path)+' (PostgreSQL) 16.6\n').encode()
+        with mock.patch.dict(os.environ,{'PG_CONFIG':'/config','PATH':'/wrong'},clear=True),mock.patch.object(P.os.path,'isfile',return_value=True),mock.patch.object(P,'preflight_capture',side_effect=configured):
+            self.assertEqual(P.preflight_tools(16,time.monotonic()+3,diag),(16,16))
+        self.assertEqual(seen,[('/config','--bindir'),('/explicit/pg_dump','--version'),('/explicit/pg_restore','--version')])
+        for dump,restore in ((16,18),(18,16)):
+            def mismatched(path,*args):return (os.path.basename(path)+' (PostgreSQL) '+str(dump if path.endswith('pg_dump') else restore)+'.6\n').encode()
+            with mock.patch.dict(os.environ,{'PG_BINDIR':'/explicit'},clear=True),mock.patch.object(P.os.path,'isfile',return_value=True),mock.patch.object(P,'preflight_capture',side_effect=mismatched):
+                with self.assertRaises(P.Refusal):P.preflight_tools(16,time.monotonic()+3,diag)
+        seen=[]
+        def from_path(path,*args):seen.append(path);return (os.path.basename(path)+' (PostgreSQL) 16.6\n').encode()
+        with mock.patch.dict(os.environ,{'PATH':'/incomplete:/selected'},clear=True),mock.patch.object(P.os.path,'exists',return_value=False),mock.patch.object(P.os.path,'isfile',side_effect=lambda path:not path.startswith('/incomplete')),mock.patch.object(P,'preflight_capture',side_effect=from_path):
+            self.assertEqual(P.preflight_tools(16,time.monotonic()+3,diag),(16,16))
+        self.assertEqual(seen,['/selected/pg_dump','/selected/pg_restore'])
+        for body in ('print("safe")','import sys;sys.stderr.write("secret-sentinel")','print("x"*4097)','raise SystemExit(1)'):
+            with tempfile.TemporaryDirectory() as directory:
+                tool=Path(directory)/'tool';tool.write_text('#!'+sys.executable+'\n'+body+'\n');tool.chmod(0o700)
+                if body=='print("safe")':self.assertEqual(P.preflight_capture(str(tool),'--version',time.monotonic()+3,diag),b'safe\n')
+                else:
+                    with self.assertRaises(P.Refusal) as failure:P.preflight_capture(str(tool),'--version',time.monotonic()+3,diag)
+                    self.assertNotIn('secret-sentinel',str(failure.exception))
+
+    def test_NativePreflightBounds(self):
+        source=(HERE/'evidence_program.py').read_bytes()
+        self.assertLessEqual(len(source),122880)
+        prefix=b'exec /usr/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH /usr/bin/python3 -I -c '
+        import shlex
+        main=prefix+shlex.quote(source.decode()).encode()+b' native_preflight '+b'5'*32+b' '+hashlib.sha256(source).hexdigest().encode()+b'\0'
+        self.assertLessEqual(len(main),126976)
+        with PreflightFixture(self) as fixture,mock.patch.object(P.os,'write',side_effect=OSError('secret-sentinel')):
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        with PreflightFixture(self) as fixture:
+            calls=[]
+            def partial(fd,raw):
+                calls.append(bytes(raw))
+                if len(calls)==1:raise BlockingIOError()
+                fixture.output.append(bytes(raw[:7]));return min(7,len(raw))
+            with mock.patch.object(P.os,'write',side_effect=partial),mock.patch.object(P,'wait_fd',return_value=True) as wait:
+                self.assertEqual(fixture.run(),0)
+                result=json.loads(b''.join(fixture.output));self.assertEqual(result['kind'],'native_preflight')
+                wait.assert_called_once_with(1,True,190.)
+        with PreflightFixture(self) as fixture,mock.patch.object(P.os,'set_blocking',side_effect=OSError('secret-sentinel')):
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        with PreflightFixture(self,fault='cleanup-last-source-close') as fixture:
+            self.assertEqual(fixture.run(),0);self.assertEqual(fixture.clock,189.)
+            self.assertEqual(len(fixture.queries),24)
+        with PreflightFixture(self) as fixture:
+            def stalled(*args):fixture.clock=191.;return False
+            with mock.patch.object(P.os,'write',side_effect=BlockingIOError()),mock.patch.object(P,'wait_fd',side_effect=stalled):
+                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
 
     def test_RequestWire(self):
         value = request()
