@@ -40,7 +40,7 @@ func TestBackendForNormalizesOnlyEngine(t *testing.T) {
 }
 
 func cloneCapabilities() []native.Capability {
-	return []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapLargeObjects, native.CapBinaryFallback, native.CapSplit}
+	return []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapLargeObjects, native.CapBinaryFallback, native.CapSplit}
 }
 
 func nativeMigration() *v1beta1.Migration {
@@ -129,15 +129,15 @@ func TestValidateNativeConfigAllowsQualifiedCopyControls(t *testing.T) {
 	no := false
 	zero := resource.MustParse("0")
 	m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 8, SplitMaxParts: 4, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress}); err != nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles}); err != nil {
 		t.Fatalf("disabled optional copy features still required capabilities: %v", err)
 	}
 	threshold := resource.MustParse("1Gi")
 	m.Spec.Clone.SplitTablesLargerThan = &threshold
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress}); err == nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles}); err == nil {
 		t.Fatal("enabled splitting without qualification")
 	}
-	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapSplit}); err != nil {
+	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapSplit}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -191,7 +191,7 @@ func TestValidateNativeConfigRejectsInvalidDiscoveryCapabilities(t *testing.T) {
 }
 
 func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
-	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-profile.json")
+	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-linux-profile.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cloneRequired := []native.Capability{native.CapCloneSingleDB, native.CapProgress}
+	cloneRequired := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles}
 	followRequired := append([]native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup}, cloneRequired...)
 	for _, tc := range []struct {
 		name         string
@@ -260,5 +260,23 @@ func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
 	}
 	if err := validateNativeConfig(nativeMigration(), version.Capabilities); err == nil {
 		t.Fatal("qualified discovery admitted the default clone profile")
+	}
+}
+
+func TestNativeConfigRefusesHistoricalSixCapabilityProfile(t *testing.T) {
+	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-profile.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := native.ParseVersion(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := nativeMigration()
+	no := false
+	zero := resource.MustParse("0")
+	m.Spec.Clone = v1beta1.CloneOptions{SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
+	if err := validateNativeConfig(m, version.Capabilities); err == nil {
+		t.Fatal("historical six-capability producer passed the sealed-file native profile")
 	}
 }

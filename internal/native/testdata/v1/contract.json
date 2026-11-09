@@ -12,7 +12,8 @@
     "progress.v1",
     "cutover.v1",
     "verify.v1",
-    "cleanup.v1"
+    "cleanup.v1",
+    "verify.sealed_files.v1"
   ],
   "m1_capabilities": [],
   "qualified_capabilities": [
@@ -721,5 +722,14 @@
     "runner_flag": "--rpgmigrate-runner-image",
     "runner_chart_value": "rpgmigrateRunnerImage",
     "runner_default": ""
-  }
+  },
+  "qualified_linux_capabilities": [
+    "clone.single_db",
+    "cdc.pgoutput",
+    "progress.v1",
+    "cutover.v1",
+    "verify.v1",
+    "cleanup.v1",
+    "verify.sealed_files.v1"
+  ]
 }

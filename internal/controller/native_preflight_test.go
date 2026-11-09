@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -52,8 +53,8 @@ const (
 	probeVersion                        = "rpgmigrate-version-"
 	probeDB                             = "rpgmigrate-preflight-"
 	probeReplacement          types.UID = "replacement-execution"
-	probeCaps                           = `"capabilities":["clone.single_db","progress.v1"]`
-	probeVersionLine                    = `{"protocol_version":1,"engine_version":"rpgmigrate-test","capabilities":["clone.single_db","progress.v1"]}` + "\n"
+	probeCaps                           = `"capabilities":["clone.single_db","progress.v1","verify.sealed_files.v1"]`
+	probeVersionLine                    = `{"protocol_version":1,"engine_version":"rpgmigrate-test","capabilities":["clone.single_db","progress.v1","verify.sealed_files.v1"]}` + "\n"
 )
 
 type preflightFixture struct {
@@ -287,7 +288,7 @@ func TestNativePreflightDiscovery(t *testing.T) {
 			f := newPreflightFixture(t)
 			if follow {
 				f.m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
-				f.version = []byte(strings.Replace(probeVersionLine, probeCaps, `"capabilities":["clone.single_db","progress.v1","cdc.pgoutput","cutover.v1","cleanup.v1"]`, 1))
+				f.version = []byte(strings.Replace(probeVersionLine, probeCaps, `"capabilities":["clone.single_db","progress.v1","verify.sealed_files.v1","cdc.pgoutput","cutover.v1","cleanup.v1"]`, 1))
 				if err := f.store.Update(context.Background(), f.m); err != nil {
 					t.Fatal(err)
 				}
@@ -835,9 +836,9 @@ func (f *preflightFixture) deleteJob(ctx context.Context, c client.WithWatch, ob
 func testProbeCapabilityOmissions(t *testing.T) {
 	t.Helper()
 	for _, profile := range []string{"default clone", probeFollowCase} {
-		caps := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapBinaryFallback, native.CapSplit, native.CapLargeObjects}
+		caps := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapBinaryFallback, native.CapSplit, native.CapLargeObjects}
 		if profile == probeFollowCase {
-			caps = []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapPGOutput, native.CapCutover, native.CapCleanup}
+			caps = []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapPGOutput, native.CapCutover, native.CapCleanup}
 		}
 		for omit := range caps {
 			t.Run(profile+"/"+string(caps[omit]), func(t *testing.T) {
@@ -1037,4 +1038,47 @@ func newCanonicalProjectionFixture(t *testing.T) *preflightFixture {
 		t.Fatal("cannot install inline-only fixture configuration")
 	}
 	return f
+}
+
+func TestNativePreflightRefusesHistoricalSixBeforeCredentials(t *testing.T) {
+	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-profile.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := native.ParseVersion(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newPreflightFixture(t)
+	f.version = append(payload, '\n')
+	v, p, failure, err := f.run()
+	f.assertNoAuthority(v, p, failure, err)
+	if err != nil || failure == "" || f.creates != 1 || f.deletes != 1 || f.logs.Load() != 1 {
+		t.Fatal("historical producer reached credential projection or lacked discovery cleanup")
+	}
+}
+
+func TestNativePreflightAcceptsLinuxSealedFileDiscovery(t *testing.T) {
+	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-linux-profile.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := native.ParseVersion(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newPreflightFixture(t)
+	f.version = append(payload, '\n')
+	v, passed, failure, err := f.run()
+	if err != nil || failure != "" || !passed || v == nil || f.creates != 2 || f.deletes != 2 || f.logs.Load() != 2 {
+		t.Fatal("Linux sealed-file discovery failed checked preflight", failure, err)
+	}
 }

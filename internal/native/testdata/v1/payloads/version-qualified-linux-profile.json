@@ -1,0 +1,13 @@
+{
+  "protocol_version": 1,
+  "engine_version": "0.1.0",
+  "capabilities": [
+    "clone.single_db",
+    "cdc.pgoutput",
+    "progress.v1",
+    "cutover.v1",
+    "verify.v1",
+    "cleanup.v1",
+    "verify.sealed_files.v1"
+  ]
+}

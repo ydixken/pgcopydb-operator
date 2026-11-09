@@ -621,3 +621,18 @@ func TestParseRejectsForeignCanonicalWork(t *testing.T) {
 		t.Fatal("accepted a different canonical proof work identity")
 	}
 }
+
+func TestSealedFileVersionCapability(t *testing.T) {
+	raw := []byte(`{"protocol_version":1,"engine_version":"0.1.0","capabilities":["verify.sealed_files.v1"]}`)
+	if _, err := ParseVersion(raw); err != nil {
+		t.Fatalf("sealed-file discovery capability refused: %v", err)
+	}
+	for _, bad := range []string{
+		strings.Replace(string(raw), `"verify.sealed_files.v1"`, `"verify.sealed_files.v1","verify.sealed_files.v1"`, 1),
+		strings.Replace(string(raw), `verify.sealed_files.v1`, `verify.sealed_files.v2`, 1),
+	} {
+		if _, err := ParseVersion([]byte(bad)); err == nil {
+			t.Fatal("accepted duplicate or unknown sealed-file capability")
+		}
+	}
+}

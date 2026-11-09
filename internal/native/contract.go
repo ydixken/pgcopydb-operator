@@ -18,17 +18,18 @@ import (
 type Capability string
 
 const (
-	CapCloneSingleDB    Capability = "clone.single_db"
-	CapLargeObjects     Capability = "copy.large_objects"
-	CapBinaryFallback   Capability = "copy.binary_fallback"
-	CapSplit            Capability = "copy.split"
-	CapPGOutput         Capability = "cdc.pgoutput"
-	CapProgress         Capability = "progress.v1"
-	CapCutover          Capability = "cutover.v1"
-	CapVerify           Capability = "verify.v1"
-	CapCleanup          Capability = "cleanup.v1"
-	commandSetEndpos               = "stream sentinel set endpos"
-	resourceKindWorkdir            = "workdir"
+	CapCloneSingleDB     Capability = "clone.single_db"
+	CapLargeObjects      Capability = "copy.large_objects"
+	CapBinaryFallback    Capability = "copy.binary_fallback"
+	CapSplit             Capability = "copy.split"
+	CapPGOutput          Capability = "cdc.pgoutput"
+	CapProgress          Capability = "progress.v1"
+	CapCutover           Capability = "cutover.v1"
+	CapVerify            Capability = "verify.v1"
+	CapCleanup           Capability = "cleanup.v1"
+	CapVerifySealedFiles Capability = "verify.sealed_files.v1"
+	commandSetEndpos                = "stream sentinel set endpos"
+	resourceKindWorkdir             = "workdir"
 )
 
 type WorkIdentity struct {
@@ -130,7 +131,7 @@ func RequireCapabilities(got []Capability, required ...Capability) error {
 	seen := make(map[Capability]bool, len(got))
 	for _, c := range got {
 		switch c {
-		case CapCloneSingleDB, CapLargeObjects, CapBinaryFallback, CapSplit, CapPGOutput, CapProgress, CapCutover, CapVerify, CapCleanup:
+		case CapCloneSingleDB, CapLargeObjects, CapBinaryFallback, CapSplit, CapPGOutput, CapProgress, CapCutover, CapVerify, CapCleanup, CapVerifySealedFiles:
 		default:
 			return errors.New("unknown native capability")
 		}

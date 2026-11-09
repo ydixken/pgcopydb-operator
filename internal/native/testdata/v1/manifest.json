@@ -3,11 +3,11 @@
   "files": [
     {
       "path": "cases.json",
-      "sha256": "2af09b7dff64476dcd6d1b931c08d05092d33e09357858e91ac441d6227efabb"
+      "sha256": "5b5305ff0720c2da82b7f70fa92d63decec7fea88fc9c9c83021d590b6b5d932"
     },
     {
       "path": "contract.json",
-      "sha256": "4776461daf1e22b10405c4b8886b84716d265e834daa924d578d449081fa9675"
+      "sha256": "af1b23cb633ed388cdabcb01a1785f23b353c1b7be159c48d9ffbb1329a6677c"
     },
     {
       "path": "payloads/cleanup-complete.json",
@@ -516,6 +516,10 @@
     {
       "path": "payloads/version-null-capabilities.json",
       "sha256": "31d62430797faca6dba5aaf0f0d0dd4d0c6fd5517c1c75c6fd06c73fb2c3ce50"
+    },
+    {
+      "path": "payloads/version-qualified-linux-profile.json",
+      "sha256": "ee9603440da07985c896c9a4ca35f181827eb861be64b3f87a6d664aa6dae707"
     },
     {
       "path": "payloads/version-qualified-profile.json",

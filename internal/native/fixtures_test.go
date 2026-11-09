@@ -255,7 +255,7 @@ func TestSharedNativeFixtures(t *testing.T) {
 			}
 		})
 	}
-	if !slices.Equal(acceptedVersions, []string{"version-empty-capabilities", "version-qualified-profile"}) {
+	if !slices.Equal(acceptedVersions, []string{"version-empty-capabilities", "version-qualified-profile", "version-qualified-linux-profile"}) {
 		t.Fatalf("accepted discovery fixtures differ: %v", acceptedVersions)
 	}
 	for _, kind := range []string{fixtureVersionKind, fixtureReportKind, fixtureTransportKind, fixtureCompareArrayKind, fixtureCompareProgressKind, fixtureArgvKind} {

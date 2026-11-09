@@ -40,8 +40,9 @@ func nativeConfigCapabilities(m *v1beta1.Migration) ([]native.Capability, error)
 	if c.TableJobs < 0 || c.SplitMaxParts < 0 || (c.SplitTablesLargerThan != nil && c.SplitTablesLargerThan.Sign() < 0) {
 		return nil, errors.New("invalid native clone parallelism")
 	}
-	// Catalog admission and progress sampling both use list progress, never staged list tables.
-	required := []native.Capability{native.CapCloneSingleDB, native.CapProgress}
+	// Catalog admission and progress sampling use list progress, never staged list tables.
+	// Every native profile can reach helpers that bind sealed comparison files.
+	required := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles}
 	if c.UseCopyBinary == nil || *c.UseCopyBinary {
 		required = append(required, native.CapBinaryFallback)
 	}

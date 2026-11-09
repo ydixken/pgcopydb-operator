@@ -17,6 +17,12 @@
       "accept": true
     },
     {
+      "id": "version-qualified-linux-profile",
+      "kind": "version",
+      "payload": "payloads/version-qualified-linux-profile.json",
+      "accept": true
+    },
+    {
       "id": "version-future-protocol",
       "kind": "version",
       "payload": "payloads/version-future-protocol.json",
