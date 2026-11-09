@@ -76,6 +76,29 @@ func TestNativeWorkIdentity(t *testing.T) {
 	}
 }
 
+func TestNativeWorkIdentityRejectsZeroRun(t *testing.T) {
+	m, pvc := nativeIdentityObjects()
+	m.UID = "00000000-0000-0000-0000-000000000000"
+	pvc.OwnerReferences[0].UID = m.UID
+	beforeM, beforePVC := m.DeepCopy(), pvc.DeepCopy()
+	work, err := nativeWorkIdentity(m, pvc)
+	if err == nil || err.Error() != "native Migration UID must be nonzero" || work != (native.WorkIdentity{}) {
+		t.Fatalf("zero run identity = %+v, %v", work, err)
+	}
+	if !reflect.DeepEqual(beforeM, m) || !reflect.DeepEqual(beforePVC, pvc) {
+		t.Fatal("zero identity refusal mutated an object")
+	}
+	m.UID = "00000000-0000-0000-0000-000000000001"
+	pvc.OwnerReferences[0].UID = m.UID
+	want := native.WorkIdentity{
+		MigrationUID: string(m.UID), RunID: "00000000000000000000000000000001",
+		WorkdirID: string(pvc.UID), CheckpointGeneration: 1,
+	}
+	if work, err := nativeWorkIdentity(m, pvc); err != nil || work != want {
+		t.Fatalf("nonzero boundary identity = %+v, %v", work, err)
+	}
+}
+
 func TestNativeWorkIdentityRejectsUnboundObjects(t *testing.T) {
 	const otherNamespace = "other"
 	for _, tc := range []struct {
@@ -155,6 +178,11 @@ func TestNativeIdentityEnv(t *testing.T) {
 
 func TestNativeCloneArgs(t *testing.T) {
 	defaults := "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary"
+	narrow := "clone --dir /work/pgcopydb --table-jobs 4 --skip-large-objects"
+	narrowProfile := func(m *v1beta1.Migration) {
+		no, zero := false, resource.MustParse("0")
+		m.Spec.Clone = v1beta1.CloneOptions{SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
+	}
 	for _, tc := range []struct {
 		name    string
 		attempt int32
@@ -163,6 +191,32 @@ func TestNativeCloneArgs(t *testing.T) {
 	}{
 		{"first attempt", 1, nil, defaults + " --restart"},
 		{"retry", 2, nil, defaults + " --resume --not-consistent"},
+		{"narrow first", 1, narrowProfile, narrow + " --restart"},
+		{"narrow retry", 2, narrowProfile, narrow + " --resume --not-consistent"},
+		{"narrow follow first", 1, func(m *v1beta1.Migration) {
+			narrowProfile(m)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+		}, narrow + " --restart --follow --plugin pgoutput"},
+		{"narrow follow retry", 2, func(m *v1beta1.Migration) {
+			narrowProfile(m)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		}, narrow + " --resume --not-consistent --follow --plugin pgoutput"},
+		{"effective zero", 1, func(m *v1beta1.Migration) {
+			narrowProfile(m)
+			zero := resource.MustParse("0m")
+			m.Spec.Clone.SplitTablesLargerThan = &zero
+		}, narrow + " --restart"},
+		{"explicit zero retains other defaults", 1, func(m *v1beta1.Migration) {
+			zero := resource.MustParse("0")
+			m.Spec.Clone.SplitTablesLargerThan = &zero
+		}, "clone --dir /work/pgcopydb --table-jobs 4 --use-copy-binary --restart"},
+		{"positive split", 1, func(m *v1beta1.Migration) {
+			size := resource.MustParse("1Gi")
+			m.Spec.Clone.SplitTablesLargerThan, m.Spec.Clone.SplitMaxParts = &size, 3
+		}, strings.Replace(defaults, "536870912 --split-max-parts 8", "1073741824 --split-max-parts 3", 1) + " --restart"},
+		{"default split explicit parts", 1, func(m *v1beta1.Migration) {
+			m.Spec.Clone.SplitMaxParts = 3
+		}, strings.Replace(defaults, "--split-max-parts 8", "--split-max-parts 3", 1) + " --restart"},
 		{"follow", 1, func(m *v1beta1.Migration) { m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true} }, defaults + " --restart --follow --plugin pgoutput"},
 		{"explicit pgoutput", 2, func(m *v1beta1.Migration) {
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
@@ -173,7 +227,7 @@ func TestNativeCloneArgs(t *testing.T) {
 		{"explicit controls", 1, func(m *v1beta1.Migration) {
 			no, zero := false, resource.MustParse("0")
 			m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 7, SplitMaxParts: 3, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
-		}, "clone --dir /work/pgcopydb --table-jobs 7 --split-tables-larger-than 0 --split-max-parts 3 --skip-large-objects --restart"},
+		}, "clone --dir /work/pgcopydb --table-jobs 7 --skip-large-objects --restart"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := nativeMigration()
@@ -202,6 +256,14 @@ func TestNativeCloneArgsRejectsUnsupportedProfile(t *testing.T) {
 		{"legacy", 1, func(m *v1beta1.Migration) { m.Spec.Engine = "" }},
 		{"instance", 1, func(m *v1beta1.Migration) { m.Spec.Clone.AllDatabases = true }},
 		{"legacy drop", 2, func(m *v1beta1.Migration) { m.Spec.Clone.DropIfExists = true }},
+		{"negative split parts", 1, func(m *v1beta1.Migration) {
+			zero := resource.MustParse("0")
+			m.Spec.Clone.SplitTablesLargerThan, m.Spec.Clone.SplitMaxParts = &zero, -1
+		}},
+		{"negative split threshold", 1, func(m *v1beta1.Migration) {
+			size := resource.MustParse("-1")
+			m.Spec.Clone.SplitTablesLargerThan = &size
+		}},
 		{"custom slot", 1, func(m *v1beta1.Migration) {
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: testExternalResourceName}
 		}},

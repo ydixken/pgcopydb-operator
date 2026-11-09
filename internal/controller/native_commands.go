@@ -43,6 +43,9 @@ func nativeWorkIdentity(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim)
 	}) {
 		return native.WorkIdentity{}, errors.New("native Migration UID is not a canonical UUID")
 	}
+	if run == "00000000000000000000000000000000" {
+		return native.WorkIdentity{}, errors.New("native Migration UID must be nonzero")
+	}
 	if pvc == nil || pvc.Namespace != m.Namespace || pvc.Name != workPVCName(m) || !pvc.DeletionTimestamp.IsZero() {
 		return native.WorkIdentity{}, errors.New("native work PVC is absent, foreign, or deleting")
 	}
@@ -81,6 +84,17 @@ func nativeCloneArgs(m *v1beta1.Migration, attempt int32) ([]string, error) {
 	}
 	fresh := attempt == 1
 	args := pgcopydb.CloneArgs(&m.Spec, fresh, !fresh, !fresh)
+	if split := m.Spec.Clone.SplitTablesLargerThan; split != nil && split.IsZero() {
+		// Native admission permits only table-jobs before these paired legacy split selectors.
+		if len(args) < 9 || args[5] != "--split-tables-larger-than" || args[6] != "0" || args[7] != "--split-max-parts" {
+			return nil, errors.New("native clone split arguments are invalid")
+		}
+		parts, err := strconv.ParseInt(args[8], 10, 32)
+		if err != nil || parts < 1 {
+			return nil, errors.New("native clone split arguments are invalid")
+		}
+		args = append(args[:5], args[9:]...)
+	}
 	if followEnabled(m) {
 		// The native engine persists its own resource identities; legacy names grant no ownership.
 		args = append(args, "--follow", "--plugin", "pgoutput")
