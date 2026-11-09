@@ -1,0 +1,69 @@
+{
+  "metadata": {
+    "name": "rpgmigrate-version-0123456789abcdef0123456789abcdef",
+    "namespace": "namespace",
+    "labels": {
+      "app.kubernetes.io/managed-by": "pgcopydb-operator",
+      "pgcopydb-operator.io/feature-e2e-run": "run-owner",
+      "pgcopydb-operator.io/migration": "migration"
+    }
+  },
+  "spec": {
+    "parallelism": 1,
+    "completions": 1,
+    "activeDeadlineSeconds": 90,
+    "backoffLimit": 0,
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "pgcopydb-operator",
+          "pgcopydb-operator.io/feature-e2e-run": "run-owner",
+          "pgcopydb-operator.io/migration": "migration"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "pgcopydb",
+            "image": "registry.example/native@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "command": [
+              "/usr/local/bin/rpgmigrate"
+            ],
+            "args": [
+              "version",
+              "--json"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "4",
+                "memory": "4Gi"
+              }
+            },
+            "securityContext": {
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "allowPrivilegeEscalation": false
+            }
+          }
+        ],
+        "restartPolicy": "Never",
+        "dnsPolicy": "ClusterFirst",
+        "automountServiceAccountToken": false,
+        "securityContext": {
+          "runAsUser": 65532,
+          "runAsGroup": 65532,
+          "runAsNonRoot": true,
+          "fsGroup": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      }
+    }
+  },
+  "status": {}
+}

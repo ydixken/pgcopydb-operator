@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1580,6 +1581,71 @@ func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, syncCommi
 	cmd := job.Spec.Template.Spec.Containers[0].Command
 	cmd[len(cmd)-1] = shellPath
 	addConnectTimeout(job)
+	return job, nil
+}
+
+func buildNativeVersionJob(m *v1beta1.Migration, runnerImage, name string) (*batchv1.Job, error) {
+	operation, prefixed := strings.CutPrefix(name, "rpgmigrate-version-")
+	_, hexErr := hex.DecodeString(operation)
+	executable, engineErr := engineExecutable(m)
+	if m == nil || engineErr != nil || m.Spec.Engine != v1beta1.MigrationEngineRPGMigrate || !prefixed || len(operation) != 32 || hexErr != nil || operation != strings.ToLower(operation) || len(validation.IsDNS1123Subdomain(m.Name)) != 0 || len(validation.IsDNS1123Label(m.Namespace)) != 0 || !nativeEvidenceDirectImage(runnerImageFor(m, runnerImage)) {
+		return nil, errors.New("native version job configuration invalid")
+	}
+	uid, one, backoff, deadline := runnerUID, int32(1), int32(0), int64(90)
+	nonroot, deny, readonly := true, false, true
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: m.Namespace, Labels: labels(m)},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoff, Completions: &one, Parallelism: &one,
+			ActiveDeadlineSeconds: &deadline, TTLSecondsAfterFinished: m.Spec.TTLSecondsAfterFinished,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels(m)},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &deny,
+					DNSPolicy: corev1.DNSClusterFirst,
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+					},
+					NodeSelector: m.Spec.Runner.NodeSelector, Tolerations: m.Spec.Runner.Tolerations,
+					Affinity: runnerAffinity(m),
+					Containers: []corev1.Container{{
+						Name: workerContainer, Image: runnerImageFor(m, runnerImage),
+						Command: []string{executable}, Args: []string{"version", "--json"},
+						Resources: pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources),
+						SecurityContext: &corev1.SecurityContext{
+							AllowPrivilegeEscalation: &deny, ReadOnlyRootFilesystem: &readonly,
+							Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+						},
+					}},
+				},
+			},
+		},
+	}
+	if len(validation.IsValidLabelValue(m.Name)) != 0 {
+		delete(job.Labels, labelMigration)
+		delete(job.Spec.Template.Labels, labelMigration)
+	}
+	return job, nil
+}
+
+func buildNativePreflightJob(m *v1beta1.Migration, runnerImage, name, operationID string) (*batchv1.Job, error) {
+	if name != "rpgmigrate-preflight-"+operationID {
+		return nil, errors.New("native preflight job configuration invalid")
+	}
+	job, err := buildNativeVersionJob(m, runnerImage, "rpgmigrate-version-"+operationID)
+	if err != nil {
+		return nil, errors.New("native preflight job configuration invalid")
+	}
+	command, args, env, volumes, mounts, err := native.PreflightMaterialization(m, operationID)
+	if err != nil {
+		return nil, errors.New("native preflight job materialization invalid")
+	}
+	job.Name = name
+	pod := &job.Spec.Template.Spec
+	pod.Volumes = volumes
+	container := &pod.Containers[0]
+	container.Command, container.Args, container.Env, container.VolumeMounts = command, args, env, mounts
 	return job, nil
 }
 
