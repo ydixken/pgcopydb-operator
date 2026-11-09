@@ -728,7 +728,7 @@ func readerFreshOperationRetry(t *testing.T) {
 	fresh.pod.UID = "fresh-pod"
 	fresh.pod.OwnerReferences[0].UID = fresh.want.JobUID
 	fresh.pod.Labels = map[string]string{batchv1.ControllerUidLabel: string(fresh.want.JobUID)}
-	command, args, _, _, _, err := expectedEvidenceMaterialization(fresh.m, fresh.want)
+	command, args, _, _, _, err := EvidenceMaterialization(fresh.m, fresh.want)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,6 +19,10 @@ import (
 )
 
 const (
+	admissionCaseRole       = "role"
+	admissionCaseProgram    = "program"
+	admissionCaseOperation  = "operation"
+	admissionDisplayImage   = "runner:display-tag"
 	admissionURIKey         = "uri"
 	admissionSizePaddingKey = "size-padding"
 )
@@ -47,7 +53,7 @@ func newAdmissionFixture(t *testing.T) admissionFixture {
 	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Name: w.MigrationName, Namespace: w.Namespace, UID: w.MigrationUID, Generation: w.MigrationGeneration}, Spec: v1beta1.MigrationSpec{Engine: v1beta1.MigrationEngineRPGMigrate, Source: v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "source"}, Key: admissionURIKey}}, Target: v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "target"}, Key: admissionURIKey}}, Follow: &v1beta1.FollowOptions{Enabled: true}}, Status: v1beta1.MigrationStatus{Attempts: 1, JobName: "migration-run-1", Replication: &v1beta1.ReplicationStatus{Endpos: fixtureEndLSN}}}
 	owner := admissionOwner("Migration", m.Name, m.UID)
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: w.PVCName, Namespace: w.Namespace, UID: w.PVCUID, OwnerReferences: []metav1.OwnerReference{owner}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
-	command, args, env, volumes, mounts, err := expectedEvidenceMaterialization(m, w)
+	command, args, env, volumes, mounts, err := EvidenceMaterialization(m, w)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +64,7 @@ func newAdmissionFixture(t *testing.T) admissionFixture {
 	worker.Spec.Template.Spec.Containers[0].Args = []string{nativeCloneCommand, "--follow", "--plugin", "pgoutput"}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: readerPodName, Namespace: w.Namespace, UID: "pod-test", OwnerReferences: []metav1.OwnerReference{admissionOwner("Job", job.Name, job.UID)}}, Spec: *job.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: nativeContainerName, ContainerID: "containerd://test", Image: w.ImageRef, ImageID: w.PlatformImageID, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}
 	w.TemplateSHA256 = podexec.NativeTemplateSHA256(job.Spec.Template)
-	w.ConnectionReferenceSHA256, err = connectionReferenceSHA(m, w)
+	w.ConnectionReferenceSHA256, err = ConnectionReferenceSHA256(m, w)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +90,8 @@ func TestNativeAdmissionObjects(t *testing.T) {
 		{"worker_replaced", func(f *admissionFixture) { f.worker.UID = readerReplacementUID }},
 		{"worker_not_complete", func(f *admissionFixture) { f.worker.Status.Conditions = nil }},
 		{"attempt", func(f *admissionFixture) { f.m.Status.Attempts++ }},
-		{"role", func(f *admissionFixture) { f.want.Role = JobRoleCleanup }},
-		{"program", func(f *admissionFixture) { f.want.ProgramSHA256 = sha256.Sum256([]byte("other")) }},
+		{admissionCaseRole, func(f *admissionFixture) { f.want.Role = JobRoleCleanup }},
+		{admissionCaseProgram, func(f *admissionFixture) { f.want.ProgramSHA256 = sha256.Sum256([]byte("other")) }},
 		{"image", func(f *admissionFixture) { f.pod.Status.ContainerStatuses[0].ImageID = "other" }},
 		{"restart", func(f *admissionFixture) { f.pod.Status.ContainerStatuses[0].RestartCount = 1 }},
 		{"mount", func(f *admissionFixture) { f.pod.Spec.Containers[0].VolumeMounts[0].MountPath = "/other" }},
@@ -150,12 +156,12 @@ func TestNativeConnectionReferencePrivacy(t *testing.T) {
 	f.m.Spec.Source.Host = "example.invalid"
 	f.m.Spec.Source.Database = "database"
 	f.m.Spec.Source.Username = "private-one"
-	first, err := connectionReferenceSHA(f.m, f.want)
+	first, err := ConnectionReferenceSHA256(f.m, f.want)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.m.Spec.Source.Username = "private-two"
-	second, err := connectionReferenceSHA(f.m, f.want)
+	second, err := ConnectionReferenceSHA256(f.m, f.want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,12 +169,12 @@ func TestNativeConnectionReferencePrivacy(t *testing.T) {
 		t.Fatal("inline connection value changed public structural hash")
 	}
 	f.m.Spec.Source.URISecretRef = &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "source"}, Key: admissionURIKey}
-	first, err = connectionReferenceSHA(f.m, f.want)
+	first, err = ConnectionReferenceSHA256(f.m, f.want)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.m.Spec.Source.URISecretRef.Key = "rotated-reference"
-	second, err = connectionReferenceSHA(f.m, f.want)
+	second, err = ConnectionReferenceSHA256(f.m, f.want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,13 +325,13 @@ func evidenceJobAtSize(t *testing.T, job *batchv1.Job, size int) *batchv1.Job {
 func evidenceJobJSONBounds(t *testing.T) {
 	f := newAdmissionFixture(t)
 	t.Run("nil", func(t *testing.T) {
-		if admittedEvidenceJobSize(nil) {
+		if ValidateEvidenceJobSize(nil) == nil {
 			t.Fatal("nil Job accepted")
 		}
 	})
 	t.Run("exact_limit", func(t *testing.T) {
 		job := evidenceJobAtSize(t, f.job, EvidenceJobJSONLimit)
-		if !admittedEvidenceJobSize(job) {
+		if ValidateEvidenceJobSize(job) != nil {
 			t.Fatal("Job at exact byte cap refused")
 		}
 		if job.APIVersion != "" || job.Kind != "" {
@@ -333,7 +339,7 @@ func evidenceJobJSONBounds(t *testing.T) {
 		}
 	})
 	t.Run("limit_plus_one", func(t *testing.T) {
-		if admittedEvidenceJobSize(evidenceJobAtSize(t, f.job, EvidenceJobJSONLimit+1)) {
+		if ValidateEvidenceJobSize(evidenceJobAtSize(t, f.job, EvidenceJobJSONLimit+1)) == nil {
 			t.Fatal("oversize Job accepted")
 		}
 	})
@@ -344,7 +350,7 @@ func evidenceJobJSONBounds(t *testing.T) {
 		if len(padding) >= EvidenceJobJSONLimit || len(evidenceJobJSON(t, job)) <= EvidenceJobJSONLimit {
 			t.Fatal("escaping fault did not cross JSON byte cap")
 		}
-		if admittedEvidenceJobSize(job) {
+		if ValidateEvidenceJobSize(job) == nil {
 			t.Fatal("escaped JSON inflation ignored")
 		}
 	})
@@ -364,7 +370,7 @@ func evidenceJobJSONBounds(t *testing.T) {
 			if len(evidenceJobJSON(t, job)) <= EvidenceJobJSONLimit {
 				t.Fatal("decoration did not cross JSON byte cap")
 			}
-			if admittedEvidenceJobSize(job) {
+			if ValidateEvidenceJobSize(job) == nil {
 				t.Fatal("complete observed Job overhead ignored")
 			}
 		})
@@ -372,7 +378,7 @@ func evidenceJobJSONBounds(t *testing.T) {
 	t.Run("marshal_failure", func(t *testing.T) {
 		job := f.job.DeepCopy()
 		job.ManagedFields = []metav1.ManagedFieldsEntry{{FieldsV1: metav1.NewFieldsV1("invalid-json")}}
-		if admittedEvidenceJobSize(job) {
+		if ValidateEvidenceJobSize(job) == nil {
 			t.Fatal("unserializable Job accepted")
 		}
 	})
@@ -391,4 +397,277 @@ func TestNativeImmutableAbsenceMountShadow(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNativeDirectImageProfile(t *testing.T) {
+	t.Run("checked_display_alias", func(t *testing.T) {
+		api, reader := newReaderAPI(t)
+		configured := api.fixture.want.ImageRef
+		api.fixture.want.PlatformImageID = configured
+		api.fixture.pod.Status.ContainerStatuses[0].ImageID = configured
+		api.fixture.pod.Status.ContainerStatuses[0].Image = admissionDisplayImage
+		observation, err := reader.ReadCompleted(context.Background(), api.fixture.want, fixtureEndLSN)
+		if err != nil || observation == nil {
+			t.Fatal("display alias refused despite exact configured spec and imageID")
+		}
+	})
+	for _, display := range []string{admissionDisplayImage, "sha256:" + strings.Repeat("5", 64)} {
+		t.Run("display_"+display[:6], func(t *testing.T) {
+			f := directImageFixture(t)
+			f.pod.Status.ContainerStatuses[0].Image = display
+			if _, err := validateAdmissionObjects(f.want, f.m, f.pvc, f.job, f.worker, f.pod, false); err != nil {
+				t.Fatal("display-only alias changed immutable admission")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*admissionFixture)
+	}{
+		{"job_spec", func(f *admissionFixture) {
+			f.job.Spec.Template.Spec.Containers[0].Image = admissionDisplayImage
+			f.want.TemplateSHA256 = podexec.NativeTemplateSHA256(f.job.Spec.Template)
+		}},
+		{"pod_spec", func(f *admissionFixture) { f.pod.Spec.Containers[0].Image = admissionDisplayImage }},
+		{"runtime_prefix", func(f *admissionFixture) {
+			f.pod.Status.ContainerStatuses[0].ImageID = "docker-pullable://" + f.want.ImageRef
+		}},
+		{"image_alias", func(f *admissionFixture) { f.pod.Status.ContainerStatuses[0].ImageID = admissionDisplayImage }},
+		{"different_manifest", func(f *admissionFixture) {
+			f.pod.Status.ContainerStatuses[0].ImageID = "runner@sha256:" + strings.Repeat("2", 64)
+		}},
+		{"config_id", func(f *admissionFixture) {
+			f.pod.Status.ContainerStatuses[0].ImageID = "sha256:" + strings.Repeat("3", 64)
+		}},
+		{"changed_expectation", func(f *admissionFixture) { f.want.PlatformImageID = "runner@sha256:" + strings.Repeat("4", 64) }},
+		{"empty_display", func(f *admissionFixture) { f.pod.Status.ContainerStatuses[0].Image = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := directImageFixture(t)
+			tc.change(&f)
+			if _, err := validateAdmissionObjects(f.want, f.m, f.pvc, f.job, f.worker, f.pod, false); err == nil {
+				t.Fatal("changed spec or independently expected raw imageID was admitted")
+			}
+		})
+	}
+
+}
+
+func preCreateEvidenceWant(f admissionFixture) ExecutionRequest {
+	w := f.want
+	w.JobUID = ""
+	w.TemplateSHA256 = [32]byte{}
+	w.ConnectionReferenceSHA256 = [32]byte{}
+	return w
+}
+
+func TestNativeEvidencePreCreateMaterialization(t *testing.T) {
+	f := newAdmissionFixture(t)
+	want := preCreateEvidenceWant(f)
+	t.Run("unset_postcreate_fields", func(t *testing.T) {
+		if validExecutionRequest(want) {
+			t.Fatal("precreate expectation became full execution admission")
+		}
+		command, args, env, volumes, mounts, err := EvidenceMaterialization(f.m, want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, err := ConnectionReferenceSHA256(f.m, want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		completeCommand, completeArgs, completeEnv, completeVolumes, completeMounts, err := EvidenceMaterialization(f.m, f.want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		completeHash, err := ConnectionReferenceSHA256(f.m, f.want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(command, completeCommand) || !reflect.DeepEqual(args, completeArgs) || !reflect.DeepEqual(env, completeEnv) || !reflect.DeepEqual(volumes, completeVolumes) || !reflect.DeepEqual(mounts, completeMounts) || hash != completeHash {
+			t.Fatal("unconsumed postcreate fields changed canonical policy")
+		}
+	})
+	t.Run("unconsumed_request_fields", func(t *testing.T) {
+		w := want
+		w.Namespace = ""
+		w.MigrationName = ""
+		w.MigrationGeneration = 0
+		w.Attempt = 0
+		w.WorkerJobUID = ""
+		w.JobName = ""
+		w.ImageRef = ""
+		w.PlatformImageID = ""
+		if _, _, _, _, _, err := EvidenceMaterialization(f.m, w); err != nil {
+			t.Fatal("renderer performed whole-request admission")
+		}
+		if _, err := ConnectionReferenceSHA256(f.m, w); err != nil {
+			t.Fatal("reference policy performed whole-request admission")
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		mutate func(**v1beta1.Migration, *ExecutionRequest)
+	}{
+		{"nil_migration", func(m **v1beta1.Migration, _ *ExecutionRequest) { *m = nil }},
+		{"missing_migration_uid", func(m **v1beta1.Migration, _ *ExecutionRequest) { (*m).UID = "" }},
+		{"migration_uid", func(m **v1beta1.Migration, _ *ExecutionRequest) { (*m).UID = "11223344-5566-7788-99aa-bbccddeeff00" }},
+		{"request_migration_uid", func(_ **v1beta1.Migration, w *ExecutionRequest) {
+			w.MigrationUID = "11223344-5566-7788-99aa-bbccddeeff00"
+		}},
+		{"work", func(_ **v1beta1.Migration, w *ExecutionRequest) { w.Work.RunID = "invalid" }},
+		{"pvc_uid", func(_ **v1beta1.Migration, w *ExecutionRequest) { w.PVCUID = "another-pvc" }},
+		{"pvc_name", func(_ **v1beta1.Migration, w *ExecutionRequest) { w.PVCName = "../work" }},
+		{"foreign_pvc_name", func(_ **v1beta1.Migration, w *ExecutionRequest) { w.PVCName = "foreign-work" }},
+		{admissionCaseRole, func(_ **v1beta1.Migration, w *ExecutionRequest) { w.Role = JobRoleWorker }},
+		{admissionCaseOperation, func(_ **v1beta1.Migration, w *ExecutionRequest) { w.OperationID = "a';exit 1" }},
+		{"operation_case", func(_ **v1beta1.Migration, w *ExecutionRequest) { w.OperationID = strings.Repeat("A", 32) }},
+		{admissionCaseProgram, func(_ **v1beta1.Migration, w *ExecutionRequest) { w.ProgramSHA256[0] ^= 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := f.m.DeepCopy()
+			w := want
+			tc.mutate(&m, &w)
+			command, args, env, volumes, mounts, err := EvidenceMaterialization(m, w)
+			if err == nil || command != nil || args != nil || env != nil || volumes != nil || mounts != nil {
+				t.Fatal("invalid consumed input produced materialization")
+			}
+			if hash, err := ConnectionReferenceSHA256(m, w); err == nil || hash != ([32]byte{}) {
+				t.Fatal("invalid consumed input produced a structural digest")
+			}
+		})
+	}
+}
+
+func policySecret(name, key string) *corev1.SecretKeySelector {
+	return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Key: key}
+}
+
+func TestNativeEvidenceConstructionPolicy(t *testing.T) {
+	forms := []struct {
+		name string
+		make func(string) v1beta1.PostgresConnection
+	}{
+		{"inline", func(role string) v1beta1.PostgresConnection {
+			return v1beta1.PostgresConnection{Host: "example.invalid", Username: role, Database: "fixture=db", PasswordSecretRef: policySecret(role+"-password", "pw")}
+		}},
+		{"secret", func(role string) v1beta1.PostgresConnection {
+			return v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: role + "-connection"}}
+		}},
+		{"opaque", func(role string) v1beta1.PostgresConnection {
+			return v1beta1.PostgresConnection{URISecretRef: policySecret(role+"-uri", admissionURIKey)}
+		}},
+	}
+	for _, source := range forms {
+		for _, target := range forms {
+			t.Run(source.name+"_"+target.name, func(t *testing.T) {
+				f := newAdmissionFixture(t)
+				w := preCreateEvidenceWant(f)
+				m := f.m.DeepCopy()
+				m.Spec.Source = source.make("source-role")
+				m.Spec.Target = target.make("target-role")
+				for _, connection := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
+					connection.TLS = &v1beta1.TLSSecretRefs{RootCA: policySecret("tls-secret", "ca"), Cert: policySecret("tls-secret", "cert"), Key: policySecret("tls-secret", "key")}
+				}
+				checkConstructionPolicy(t, m, w)
+			})
+		}
+	}
+	t.Run("target_settings", func(t *testing.T) {
+		f := newAdmissionFixture(t)
+		m := f.m.DeepCopy()
+		m.Spec.Target = forms[0].make("target-role")
+		m.Spec.Target.SynchronousCommit = v1beta1.SynchronousCommitLocal
+		checkConstructionPolicy(t, m, preCreateEvidenceWant(f))
+	})
+	t.Run("selector_structure", func(t *testing.T) {
+		f := newAdmissionFixture(t)
+		w := preCreateEvidenceWant(f)
+		first, err := ConnectionReferenceSHA256(f.m, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.m.Spec.Source.URISecretRef.Key = "another-key"
+		second, err := ConnectionReferenceSHA256(f.m, w)
+		if err != nil || first == second {
+			t.Fatal("changed Secret selector did not change structural reference")
+		}
+		f.m.Spec.Source = forms[0].make("source-role")
+		f.m.Spec.Source.TLS = &v1beta1.TLSSecretRefs{RootCA: policySecret("ca-one", "ca")}
+		first, err = ConnectionReferenceSHA256(f.m, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.m.Spec.Source.TLS.RootCA.Name = "ca-two"
+		second, err = ConnectionReferenceSHA256(f.m, w)
+		if err != nil || first == second {
+			t.Fatal("changed projected reference did not change structural digest")
+		}
+	})
+}
+
+func checkConstructionPolicy(t *testing.T, m *v1beta1.Migration, w ExecutionRequest) {
+	t.Helper()
+	command, args, env, volumes, mounts, err := EvidenceMaterialization(m, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := conn.Materialize(conn.Source, &m.Spec.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedEnv := append(append([]corev1.EnvVar{}, source.Env...), target.Env...)
+	if len(env) < len(expectedEnv) || !reflect.DeepEqual(env[:len(expectedEnv)], expectedEnv) {
+		t.Fatal("role-specific connection environment changed")
+	}
+	expectedVolumes := append(append([]corev1.Volume{}, source.Volumes...), target.Volumes...)
+	expectedMounts := append(append([]corev1.VolumeMount{}, source.Mounts...), target.Mounts...)
+	if len(volumes) != 2+len(expectedVolumes) || len(mounts) != 2+len(expectedMounts) {
+		t.Fatal("connection volume/mount inventory changed")
+	}
+	for i, v := range expectedVolumes {
+		if !reflect.DeepEqual(volumes[i+2], v) {
+			t.Fatal("connection projection changed")
+		}
+	}
+	for i, v := range expectedMounts {
+		if !reflect.DeepEqual(mounts[i+2], v) {
+			t.Fatal("connection mount changed")
+		}
+	}
+	var preludes []string
+	var passfiles []conn.Passfile
+	for _, material := range []*conn.Materialized{source, target} {
+		if material.Prelude != "" {
+			preludes = append(preludes, material.Prelude)
+		}
+		if material.Passfile != nil {
+			passfiles = append(passfiles, *material.Passfile)
+		}
+	}
+	if len(command) != 4 || command[0] != nativeShellPath || command[1] != "-c" || command[2] != conn.PreludeScript(preludes, passfiles, "") || command[3] != nativeShellPath || len(args) != 2 || args[0] != "-c" || !strings.Contains(args[1], string(EvidenceProgram())) {
+		t.Fatal("canonical prelude/main delivery changed")
+	}
+	launch := strings.Join(append(command, args...), "\n")
+	for _, e := range expectedEnv {
+		if e.Value != "" && strings.Contains(launch, e.Value) {
+			t.Fatal("connection URI moved from environment to launcher")
+		}
+		if e.ValueFrom != nil && e.Value != "" {
+			t.Fatal("opaque credential reference gained controller-resolved bytes")
+		}
+	}
+}
+
+func directImageFixture(t *testing.T) admissionFixture {
+	t.Helper()
+	f := newAdmissionFixture(t)
+	configured := f.want.ImageRef
+	f.want.PlatformImageID = configured
+	f.pod.Status.ContainerStatuses[0].ImageID = configured
+	return f
 }

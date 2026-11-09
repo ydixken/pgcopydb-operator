@@ -140,7 +140,7 @@ func validateAdmissionObjects(w ExecutionRequest, m *v1beta1.Migration, pvc *cor
 	if !validExecutionRequest(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil {
 		return refuse()
 	}
-	if !admittedEvidenceJobSize(job) {
+	if ValidateEvidenceJobSize(job) != nil {
 		return refuse()
 	}
 	if !admittedMigration(w, m, worker) || !admittedPVC(w, m, pvc) || !admittedHelperJob(w, m, job) || !admittedWorkerJob(w, m, worker) || !admittedPodIdentity(w, job, pod) {
@@ -150,7 +150,7 @@ func validateAdmissionObjects(w ExecutionRequest, m *v1beta1.Migration, pvc *cor
 	if template != w.TemplateSHA256 {
 		return refuse()
 	}
-	references, err := connectionReferenceSHA(m, w)
+	references, err := ConnectionReferenceSHA256(m, w)
 	if err != nil || references != w.ConnectionReferenceSHA256 {
 		return refuse()
 	}
@@ -163,7 +163,7 @@ func validateAdmissionObjects(w ExecutionRequest, m *v1beta1.Migration, pvc *cor
 }
 
 func admittedEvidenceSpecs(m *v1beta1.Migration, w ExecutionRequest, job *batchv1.Job, pod *corev1.Pod) bool {
-	command, args, env, volumes, mounts, err := expectedEvidenceMaterialization(m, w)
+	command, args, env, volumes, mounts, err := EvidenceMaterialization(m, w)
 	if err != nil {
 		return false
 	}
@@ -184,7 +184,8 @@ func admittedCompletionState(w ExecutionRequest, job *batchv1.Job, pod *corev1.P
 		return false
 	}
 	status := pod.Status.ContainerStatuses[0]
-	if status.Name != nativeContainerName || status.RestartCount != 0 || status.ContainerID == "" || status.ImageID != w.PlatformImageID || status.Image != w.ImageRef || status.State.Waiting != nil || status.LastTerminationState != (corev1.ContainerState{}) {
+	// The display can be a runtime alias; exact spec images and raw imageID bind execution.
+	if status.Name != nativeContainerName || status.RestartCount != 0 || status.ContainerID == "" || status.ImageID != w.PlatformImageID || status.Image == "" || status.State.Waiting != nil || status.LastTerminationState != (corev1.ContainerState{}) {
 		return false
 	}
 	if completed {
@@ -275,7 +276,11 @@ func identityEnv(w WorkIdentity) []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "RPGMIGRATE_MIGRATION_UID", Value: w.MigrationUID}, {Name: "RPGMIGRATE_RUN_ID", Value: w.RunID}, {Name: "RPGMIGRATE_WORKDIR_ID", Value: w.WorkdirID}, {Name: "RPGMIGRATE_CHECKPOINT_GENERATION", Value: strconv.FormatInt(w.CheckpointGeneration, 10)}}
 }
 
-func expectedEvidenceMaterialization(m *v1beta1.Migration, w ExecutionRequest) ([]string, []string, []corev1.EnvVar, []corev1.Volume, []corev1.VolumeMount, error) {
+// EvidenceMaterialization keeps pre-create expectations separate from live execution admission.
+func EvidenceMaterialization(m *v1beta1.Migration, w ExecutionRequest) ([]string, []string, []corev1.EnvVar, []corev1.Volume, []corev1.VolumeMount, error) {
+	if m == nil || m.UID == "" || w.Role != JobRoleEvidence || !validIdentity(w.Work) || w.MigrationUID != m.UID || w.Work.MigrationUID != string(m.UID) || w.Work.WorkdirID != string(w.PVCUID) || len(validation.IsDNS1123Subdomain(w.PVCName)) != 0 || w.PVCName != m.Name+"-work" || !lowerHex(w.OperationID, 32) || w.ProgramSHA256 != EvidenceProgramSHA256() {
+		return nil, nil, nil, nil, nil, errors.New("native evidence materialization refused")
+	}
 	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, nil, nil, nil, nil, errors.New("native connection materialization invalid")
@@ -326,18 +331,23 @@ func renderEvidenceScripts(program []byte, w ExecutionRequest, prelude string) (
 	return []string{nativeShellPath, "-c", prelude, nativeShellPath}, []string{"-c", main}, nil
 }
 
-func admittedEvidenceJobSize(job *batchv1.Job) bool {
+// ValidateEvidenceJobSize includes metadata and status because API decoration can exceed the builder's size.
+func ValidateEvidenceJobSize(job *batchv1.Job) error {
 	if job == nil {
-		return false
+		return errors.New("native evidence Job unavailable")
 	}
 	observed := job.DeepCopy()
 	observed.TypeMeta = metav1.TypeMeta{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job"}
 	raw, err := json.Marshal(observed)
-	return err == nil && len(raw) <= EvidenceJobJSONLimit
+	if err != nil || len(raw) > EvidenceJobJSONLimit {
+		return errors.New("native evidence Job size refused")
+	}
+	return nil
 }
 
-func connectionReferenceSHA(m *v1beta1.Migration, w ExecutionRequest) ([32]byte, error) {
-	_, _, env, volumes, mounts, err := expectedEvidenceMaterialization(m, w)
+// ConnectionReferenceSHA256 excludes inline values so correlation cannot expose credential bytes.
+func ConnectionReferenceSHA256(m *v1beta1.Migration, w ExecutionRequest) ([32]byte, error) {
+	_, _, env, volumes, mounts, err := EvidenceMaterialization(m, w)
 	if err != nil {
 		return [32]byte{}, err
 	}
