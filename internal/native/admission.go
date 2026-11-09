@@ -33,10 +33,11 @@ const (
 type JobRole string
 
 const (
-	JobRoleWorker   JobRole = "worker"
-	JobRoleEvidence JobRole = "evidence"
-	JobRoleEndpos   JobRole = "endpos"
-	JobRoleCleanup  JobRole = "cleanup"
+	JobRoleWorker    JobRole = "worker"
+	JobRoleEvidence  JobRole = "evidence"
+	JobRoleEndpos    JobRole = "endpos"
+	JobRoleCleanup   JobRole = "cleanup"
+	JobRoleRetryGate JobRole = "retry_gate"
 )
 
 type ExecutionRequest struct {

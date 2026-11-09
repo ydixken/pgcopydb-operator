@@ -321,20 +321,32 @@ func lowerHex(s string, n int) bool {
 	return len(s) == n && !strings.ContainsFunc(s, func(c rune) bool { return (c < '0' || c > '9') && (c < 'a' || c > 'f') })
 }
 
+const (
+	nativeExecutionWireKeys = "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256"
+	nativeContainerWireKeys = "pod_uid container_name container_id restart_count image_id template_sha256"
+)
+
 var nativeWireKeys = map[string]string{
+	"retry_request":                 "version kind operation_id program_sha256 execution pod_name container inputs",
+	"retry_request.execution":       nativeExecutionWireKeys,
+	"retry_request.execution.work":  sourceWorkWireKeys,
+	"retry_request.container":       nativeContainerWireKeys,
+	"retry_request.inputs":          "commit_test expect_local",
+	"target_retry":                  "version kind operation_id program_sha256 request_sha256 execution_sha256 work observed_at_unix census_known total syncrep gate_waiting oldest_syncrep_wait_unix application_attribution_known target_synchronous_commit synchronous_commit_admitted probe_attempted probe_committed target_closed materialization_closed diagnostics_clean",
+	"target_retry.work":             sourceWorkWireKeys,
 	"source_request":                "version kind operation_id program_sha256 execution pod_name container",
-	"source_request.execution":      "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
+	"source_request.execution":      nativeExecutionWireKeys,
 	"source_request.execution.work": sourceWorkWireKeys,
-	"source_request.container":      "pod_uid container_name container_id restart_count image_id template_sha256",
+	"source_request.container":      nativeContainerWireKeys,
 	"source_head":                   "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 head_lsn source_closed private_closed diagnostics_clean",
 	"source_head.work":              sourceWorkWireKeys,
 	"active_lag":                    "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 lag_bytes source_closed private_closed diagnostics_clean",
 	"active_lag.work":               sourceWorkWireKeys,
 	"native_preflight":              "version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean",
 	"request":                       "version kind operation_id program_sha256 execution pod_name container saved_e",
-	"request.execution":             "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
+	"request.execution":             nativeExecutionWireKeys,
 	"request.execution.work":        "migration_uid run_id workdir_id checkpoint_generation",
-	"request.container":             "pod_uid container_name container_id restart_count image_id template_sha256",
+	"request.container":             nativeContainerWireKeys,
 	"result":                        "version kind operation_id request_sha256 program_sha256 execution_sha256 work checkpoint resources guards source_closed target_closed private_closed diagnostics_clean",
 	"result.work":                   "migration_uid run_id workdir_id checkpoint_generation",
 	"result.checkpoint":             "checkpoint_id certified_lsn durable_replay_lsn drain_end_lsn drain_replay_lsn drain_kind barrier_confirmed",
