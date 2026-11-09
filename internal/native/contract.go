@@ -1,4 +1,4 @@
-// Package native validates the operator's rpgmigrate JSON contract without running commands.
+// Package native validates rpgmigrate contracts and runs checked commands while keeping execution data separate from independent completion proof.
 package native
 
 import (

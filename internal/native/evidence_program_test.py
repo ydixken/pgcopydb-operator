@@ -30,6 +30,17 @@ def request():
     return dict(version=1, kind='completed_evidence', operation_id='5'*32, program_sha256='6'*64, execution=execution, pod_name='evidence-pod', container=container, saved_e='0/20')
 
 
+def source_request(kind='source_head'):
+    value=request();del value['saved_e'];value['kind']=kind
+    value['program_sha256']=hashlib.sha256((HERE/'evidence_program.py').read_bytes()).hexdigest()
+    execution=value['execution'];execution['role']='worker';execution['attempt']=1
+    execution['pvc_uid']='11112222-3333-4444-aaaa-bbbbccccdddd';execution['work']['workdir_id']=execution['pvc_uid']
+    execution['job_uid']=execution['worker_job_uid']='22223333-4444-5555-aaaa-bbbbccccdddd'
+    value['container']['pod_uid']='33334444-5555-6666-aaaa-bbbbccccdddd'
+    value['container']['container_id']='containerd://sha256:'+'7'*64
+    value['pod_name']='worker-pod';return value
+
+
 def private_fixture(directory_info):
     req=request(); work=req['execution']['work']; run=list(bytes.fromhex(work['run_id']))
     stream=dict(run=run,source=dict(system_identifier=123,database_oid=11),generation=1)
@@ -239,9 +250,281 @@ class PreflightFixture:
     def run(self):return P.run_native_preflight('5'*32,hashlib.sha256((HERE/'evidence_program.py').read_bytes()).hexdigest())
 
 
+class SourceFixture:
+    # SQL and runtime doubles establish private-role shape, not live continuity or durability.
+    def __init__(self,case,kind='source_head',rows=None,fault=None,major=16):
+        self.case=case;self.kind=kind;self.rows=rows or {};self.fault=fault;self.events=[];self.queries=[];self.closes=[];self.output=[];self.clock=100.
+        self.major=major;self.req=source_request(kind);self.raw=json.dumps(self.req,indent=1).encode();self.parts=[self.raw,b''];self.deadlines=[]
+    def event(self,name):
+        self.events.append(name)
+        if self.fault=='late-'+name:self.clock=126.
+        if self.fault=='overrun-'+name:self.clock=131.
+        if self.fault==name:raise P.Refusal('result','57014')
+    def __enter__(self):
+        from contextlib import ExitStack
+        self.stack=ExitStack();outer=self
+        class State:
+            def __init__(self,req):
+                outer.event('private-open');outer.case.assertEqual(req,outer.req)
+                self.binding=({'identity':{'system_identifier':123,'database_oid':11},'timeline':1,'major':outer.major},
+                    {'intent':{'binding':{'slot_name':'native_slot'}},'consistent_point':8},
+                    {'name':'native_publication','oid':88,'owner_oid':33},'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59' if outer.major==16 else 'd0ef0c78791e7cc83b77e0c95e7c4415a356ed61b404fa20fb90a2544ae9ae20')
+            def revalidate(self):outer.event('private-check')
+            def close(self,recheck=True):outer.closes.append('private');outer.event('private-close')
+        class Material:
+            def __init__(self,env,source_only=False):outer.case.assertIs(source_only,True);self.files=[];outer.event('material-open')
+            def prepare(self,library,deadline):outer.deadlines.append(deadline);outer.event('prepare')
+            def connection(self,role):outer.case.assertEqual(role,'source');outer.event('source-input');return role
+            def check(self):outer.event('material-check')
+            def close(self):
+                failure=None
+                for file in self.files:
+                    try:file.close()
+                    except P.Refusal as error:failure=error
+                outer.closes.append('material');outer.event('material-close')
+                if failure:raise failure
+        class Resolver:
+            raw=b'nameserver 127.0.0.1\n'
+            def __init__(self,*args):outer.event('resolver-open')
+            def check(self):outer.event('resolver-check')
+            def close(self):outer.closes.append('resolver');outer.event('resolver-close')
+        class Diagnostics:
+            def __init__(self):outer.event('diagnostics-open')
+            def check(self):outer.event('diagnostics-check')
+            def close(self):outer.closes.append('diagnostics');outer.event('diagnostics-close')
+        class Session:
+            def __init__(self,library,role,deadline,diag):
+                outer.case.assertEqual(role,'source');outer.event('source-open');outer.deadlines.append(deadline);self.deadline=deadline
+                self.backend=23;self.props={'PQuser':b'private-user','PQdb':b'private-db','ssl':1}
+            def check(self):outer.event('source-check');P.need(outer.clock<self.deadline,'timeout')
+            def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
+                self.check();outer.case.assertFalse(commit);outer.case.assertEqual(state,0)
+                outer.queries.append((sql,params,tag,rows,width));outer.event('query-'+str(len(outer.queries)))
+                if rows==0:outer.case.assertEqual(tag,'SET');return []
+                if 'CURRENT_USER, SESSION_USER' in sql:key='role';value=[[b'private-user',b'private-user',b'private-db',b't']]
+                elif 'pg_control_system' in sql:
+                    count=sum(1 for q,*_ in outer.queries if 'pg_control_system' in q);key='identity-'+str(count)
+                    value=[[b'123',b'11',b'1',str(outer.major*10000+6).encode(),b'23',b'33',b'33',b't',b'off']]
+                elif 'pg_publication' in sql:
+                    outer.case.assertEqual(params,('native_publication',));key='publication-'+str(sum(1 for q,*_ in outer.queries if 'pg_publication' in q));value=outer.rows.get('publication',[[b'88',b'33']])
+                elif 'pg_replication_slots' in sql:
+                    outer.case.assertEqual(params,('native_slot',));key='slot';value=[[b'pgoutput',b'logical',b'11',b'f',b't',b'1234',b'reserved',b'0/8',b'0/20',b'f',b'',b'false',b'false',b'0/30']]
+                elif 'max_slot_wal_keep_size' in sql:key='retention';value=[[b'logical',b'-1',b'-1',None]] if outer.major==16 else [[b'logical',b'-1',None,b'0']]
+                elif sql=='SELECT @pg_current_wal_insert_lsn();':key='head';value=[[b'0/30']]
+                else:raise AssertionError('unexpected source-only SQL')
+                return copy.deepcopy(outer.rows.get(key,value))
+            def close(self,healthy=True):outer.closes.append('source');outer.event('source-close')
+        work=self.req['execution']['work']
+        env={'LANG':'C','LC_ALL':'C','PGCONNECT_TIMEOUT':'10','PGCOPYDB_SOURCE_PGURI':'opaque-source','PGCOPYDB_TARGET_PGURI':'target-secret-sentinel',
+             'RPGMIGRATE_MIGRATION_UID':work['migration_uid'],'RPGMIGRATE_RUN_ID':work['run_id'],'RPGMIGRATE_WORKDIR_ID':work['workdir_id'],'RPGMIGRATE_CHECKPOINT_GENERATION':'1'}
+        self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
+        for name,value in (('SourceState',State),('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)):self.stack.enter_context(mock.patch.object(P,name,value))
+        self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')))
+        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532));self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'))
+        self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock));self.stack.enter_context(mock.patch.object(P.os,'set_blocking'))
+        def read(fd,cap):outer.case.assertEqual(fd,0);part=outer.parts.pop(0);outer.case.assertLessEqual(len(part),cap);return part
+        def write(fd,raw):
+            outer.case.assertEqual(fd,1)
+            for name in ('source','material','private','diagnostics'):outer.case.assertIn(name,outer.closes)
+            outer.output.append(bytes(raw));return len(raw)
+        self.stack.enter_context(mock.patch.object(P.os,'read',side_effect=read));self.stack.enter_context(mock.patch.object(P.os,'write',side_effect=write))
+        for name in ('InputChannel','PrivateState','observe','run_completed_evidence','run_native_preflight'):self.stack.enter_context(mock.patch.object(P,name,side_effect=AssertionError('non-source boundary entered')))
+        return self
+    def __exit__(self,*args):return self.stack.__exit__(*args)
+    def run(self):return P.run_source_observation(self.kind,self.req['operation_id'],self.req['program_sha256'])
+
+
 class NativePythonTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(P, 'reviewed evidence program is absent')
+
+    def test_SourceObservationWire(self):
+        self.assertIsNotNone(getattr(P,'run_source_observation',None),'fixed source observation role is absent')
+        self.assertEqual(P.run_source_observation.__annotations__,{'kind':str,'operation_id':str,'program_sha256':str,'return':int})
+        for kind in ('source_head','active_lag'):
+            value=source_request(kind);raw=json.dumps(value).encode();sha=value['program_sha256']
+            self.assertEqual(P.validate_source_request(raw,kind,'5'*32,sha),value)
+            variants=[b'',b'\xff',raw+b'{}',b'\xef\xbb\xbf'+raw,raw[:-1]+b',"version":1}',b'['*33+b'0'+b']'*33,b' '*65537]
+            for path,bad in ((('version',),True),(('kind',),'completed_evidence'),(('kind',),'SQL'),(('operation_id',),'A'*32),(('program_sha256',),'0'*64),(('execution','attempt'),0),(('execution','attempt'),True),(('execution','job_uid'),'other'),(('execution','role'),'evidence'),(('execution','template_sha256'),'0'*64),(('execution','connection_reference_sha256'),'0'*64),(('container','pod_uid'),'0'*36),(('container','restart_count'),1),(('container','restart_count'),False),(('container','template_sha256'),'4'*64),(('container','image_id'),'other')):
+                v=copy.deepcopy(value);target=v
+                for key in path[:-1]:target=target[key]
+                target[path[-1]]=bad;variants.append(json.dumps(v).encode())
+            for field in value:
+                v=copy.deepcopy(value);del v[field];variants.append(json.dumps(v).encode())
+                v=copy.deepcopy(value);v[field]=None;variants.append(json.dumps(v).encode())
+            for section in ('execution','container'):
+                for field in value[section]:
+                    v=copy.deepcopy(value);del v[section][field];variants.append(json.dumps(v).encode())
+                    v=copy.deepcopy(value);v[section][field]=None;variants.append(json.dumps(v).encode())
+            for bad in variants:
+                with self.subTest(kind=kind,bad=variants.index(bad)),self.assertRaises(P.Refusal):P.validate_source_request(bad,kind,'5'*32,sha)
+        with mock.patch.object(P,'run_source_observation') as source:
+            self.assertEqual(P.main(['program','source_head','5'*32,'6'*64]),1);source.assert_not_called()
+
+    def test_SourceObservationState(self):
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'work';root.mkdir(mode=0o700);owned=root/'pgcopydb';owned.mkdir(mode=0o700)
+            req=source_request();_,manifest,_,_=private_fixture(owned.stat());manifest['operator']['workdir_id']=req['execution']['work']['workdir_id'];manifest['clone_state']['phase']='copying'
+            file=owned/'manifest.json';file.write_text(json.dumps(manifest));file.chmod(0o600)
+            control=owned/'control';control.mkdir(mode=0o700);(control/'endpos.json').write_bytes(b'not E');(owned/'data').mkdir(mode=0o700)
+            actual_open=P.fdopen;actual_stat=os.stat;events=[]
+            def opened(path,directory=False,parent=None):events.append(path);return actual_open(str(root) if path=='/work' else path,directory,parent)
+            def stated(path,*args,**kwargs):return actual_stat(str(root) if path=='/work' else path,*args,**kwargs)
+            env={key:str(req['execution']['work'][field]) for key,field in (('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation'))}
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ,env,clear=True));stack.enter_context(mock.patch.object(P,'fdopen',side_effect=opened));stack.enter_context(mock.patch.object(P.os,'stat',side_effect=stated))
+                stack.enter_context(mock.patch.object(P.fcntl,'flock',side_effect=AssertionError('lifetime or control lock acquired')))
+                state=P.SourceState(req);self.assertEqual(state.binding[3],'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59');state.revalidate()
+                self.assertNotIn('control',events);self.assertNotIn('endpos.json',events);self.assertNotIn('lock',events)
+                self.assertEqual((control/'endpos.json').read_bytes(),b'not E');self.assertTrue((owned/'data').is_dir())
+                replacement=owned/'new';replacement.write_bytes(file.read_bytes());replacement.chmod(0o600);os.replace(replacement,file)
+                with self.assertRaises(P.Refusal):state.revalidate()
+                state.close(False)
+                state=P.SourceState(req);os.environ['RPGMIGRATE_WORKDIR_ID']='foreign'
+                with self.assertRaises(P.Refusal):state.revalidate()
+                os.environ['RPGMIGRATE_WORKDIR_ID']=req['execution']['work']['workdir_id'];state.close(False)
+                state=P.SourceState(req);previous=root/'previous';owned.rename(previous);owned.mkdir(mode=0o700)
+                with self.assertRaises(P.Refusal):state.revalidate()
+                state.close(False);owned.rmdir();previous.rename(owned)
+            same=copy.deepcopy(manifest);same['target_provenance'][0]['record']['intent']['binding']['target_system_identifier']=999
+            self.assertEqual(P.validate_source_manifest(same,req,owned.stat())[3],'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59')
+            newer=json.loads(json.dumps(manifest));newer['clone_state']['plan']['source']['major']=18;newer['clone_state']['ticket']['source']['major']=18
+            self.assertEqual(P.validate_source_manifest(newer,req,owned.stat())[3],'d0ef0c78791e7cc83b77e0c95e7c4415a356ed61b404fa20fb90a2544ae9ae20')
+            for path,bad in ((('format_version',),7),(('operator','workdir_id'),'other'),(('source_slot','phase'),'provisioning'),(('source_slot','record','intent','nonce'),[0]*16),(('source_slot','record','intent','binding','catalog_epoch'),2),(('clone_state','ticket','token'),'other'),(('clone_state','plan','generation'),2),(('follow_state','restart'),{}),(('follow_state','cleanup'),{}),(('follow_state','binding','publication','oid'),999)):
+                changed=json.loads(json.dumps(manifest));at=changed
+                for key in path[:-1]:at=at[key]
+                at[path[-1]]=bad
+                with self.subTest(path=path),self.assertRaises(P.Refusal):P.validate_source_manifest(changed,req,owned.stat())
+
+    def test_SourceObservationMaterialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            uri=Path(directory)/'uri';mixed=Path(directory)/'pass';raw=b"host=source dbname='opaque' password='' passfile='/tmp/mixed' sslmode=disable\n"
+            uri.write_bytes(raw);uri.chmod(0o600);mixed_bytes=b'source:5432:db:app:source-secret\ntarget:5432:db:app:unrelated-secret\n';mixed.write_bytes(mixed_bytes);mixed.chmod(0o600)
+            before={path:(path.read_bytes(),path.stat().st_mode,path.stat().st_ino) for path in (uri,mixed)};opened=[]
+            def open_file(path,fd):
+                opened.append(path)
+                if path==b'/tmp/pgm-source-uri':return os.open(uri,os.O_RDONLY|os.O_NONBLOCK)
+                if path==b'/tmp/mixed':return os.open(mixed,os.O_RDONLY|os.O_NONBLOCK)
+                raise AssertionError('unselected credential consumed')
+            env={'PGCOPYDB_SOURCE_PGURI':'env-source','PGCOPYDB_TARGET_PGURI':'poisoned-target'}
+            poisoned=dict(env,PGCOPYDB_TARGET_PGURI=object(),PGCOPYDB_TARGET_SUPER_PGURI=object())
+            library=FileOptionsLibrary({raw:{b'password':b'',b'passfile':b'/tmp/mixed',b'sslmode':b'disable'}})
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'open_connection_file',side_effect=open_file),mock.patch.object(P.os,'walk',side_effect=AssertionError('credential tree scanned')),FakeMemfd() as kernel:
+                material=P.Materialization(poisoned,source_only=True)
+                try:
+                    self.assertEqual(material.roles,{'source':raw});material.prepare(library,time.monotonic()+3)
+                    self.assertEqual(set(material.inputs),{'source'});self.assertEqual(material.connection('source').raw,raw)
+                    self.assertEqual(material.connection('source').snapshots[0].raw,mixed_bytes)
+                    with self.assertRaises(P.Refusal):material.connection('target')
+                    self.assertFalse(any(key.startswith(b'PGCOPYDB_TARGET_') for key in material.envb));material.check()
+                    os.environ['PGCOPYDB_TARGET_PGURI']='different-poisoned-target';material.check()
+                finally:material.close()
+                self.assertEqual(kernel.live(),[])
+            self.assertEqual({path:(path.read_bytes(),path.stat().st_mode,path.stat().st_ino) for path in (uri,mixed)},before)
+            self.assertEqual(set(opened),{b'/tmp/pgm-source-uri',b'/tmp/mixed'})
+            def missing(path,fd):self.assertEqual(path,b'/tmp/pgm-source-uri');raise FileNotFoundError(2,'not provisioned')
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'open_connection_file',side_effect=missing):
+                material=P.Materialization(env,source_only=True)
+                try:self.assertEqual(material.roles,{'source':b'env-source'});material.check()
+                finally:material.close()
+            service=Path(directory)/'service';service.write_bytes(b'[source]\npassword=source-secret\n[target]\npassword=unrelated-secret\n');service.chmod(0o600)
+            service_before=(service.read_bytes(),service.stat().st_ino,service.stat().st_mode);env['PGSERVICEFILE']=str(service)
+            library=FileOptionsLibrary({b'env-source':{b'service':b'source',b'sslmode':b'disable'}})
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'open_connection_file',side_effect=missing):
+                material=P.Materialization(env,source_only=True)
+                try:
+                    with self.assertRaises(P.Refusal):material.prepare(library,time.monotonic()+3)
+                finally:material.close()
+            self.assertEqual((service.read_bytes(),service.stat().st_ino,service.stat().st_mode),service_before)
+
+    def test_SourceObservationClosedResult(self):
+        for kind in ('source_head','active_lag'):
+            with self.subTest(kind=kind),SourceFixture(self,kind) as fixture:
+                self.assertEqual(fixture.run(),0);raw=b''.join(fixture.output);result=json.loads(raw)
+                self.assertEqual(set(result),set('version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 source_closed private_closed diagnostics_clean'.split())|{'head_lsn' if kind=='source_head' else 'lag_bytes'})
+                self.assertEqual(result['kind'],kind);self.assertEqual(result['version'],1);self.assertEqual(result['operation_id'],'5'*32)
+                self.assertEqual(result['program_sha256'],fixture.req['program_sha256']);self.assertEqual(result['work'],fixture.req['execution']['work'])
+                digest=hashlib.sha256(fixture.raw).digest();self.assertEqual(result['request_sha256'],digest.hex());self.assertEqual(result['execution_sha256'],hashlib.sha256(b'rpgmigrate.native.execution.v1\0'+digest).hexdigest())
+                self.assertEqual(result['source_binding_sha256'],'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59')
+                for field in ('source_closed','private_closed','diagnostics_clean'):self.assertIs(result[field],True)
+                self.assertEqual(fixture.events.count('source-open'),1);self.assertEqual(fixture.deadlines,[125.,110.]);self.assertEqual(fixture.parts,[])
+                self.assertEqual(sum(1 for sql,*_ in fixture.queries if 'pg_control_system' in sql),2)
+                self.assertLessEqual(len(raw),65536);self.assertTrue(raw.endswith(b'\n'))
+                for field in ('checkpoint','end_lsn','saved_e','certified_lsn','durable_replay_lsn','drained','resources','owned','target_closed'):self.assertNotIn(field,result)
+                for sentinel in (b'target-secret-sentinel',b'private-user',b'private-db',b'native_slot',b'native_publication'):self.assertNotIn(sentinel,raw)
+                if kind=='source_head':self.assertEqual(result['head_lsn'],'0/30')
+                else:self.assertEqual(result['lag_bytes'],16)
+        zero=[[b'pgoutput',b'logical',b'11',b'f',b't',b'1234',b'extended',b'0/8',b'0/30',b'f',b'',b'false',b'false',b'0/30']]
+        with SourceFixture(self,'active_lag',{'slot':zero}) as fixture:self.assertEqual(fixture.run(),0);self.assertEqual(json.loads(b''.join(fixture.output))['lag_bytes'],0)
+        for kind in ('source_head','active_lag'):
+            with SourceFixture(self,kind,major=18) as fixture:
+                self.assertEqual(fixture.run(),0);result=json.loads(b''.join(fixture.output))
+                self.assertEqual(result['source_binding_sha256'],'d0ef0c78791e7cc83b77e0c95e7c4415a356ed61b404fa20fb90a2544ae9ae20')
+                self.assertEqual(result['head_lsn' if kind=='source_head' else 'lag_bytes'],'0/30' if kind=='source_head' else 16)
+
+    def test_SourceObservationRefusals(self):
+        for kind in ('source_head','active_lag'):
+            with SourceFixture(self,kind) as fixture:self.assertEqual(fixture.run(),0);count=len(fixture.queries)
+            faults=['query-'+str(i) for i in range(1,count+1)]+['private-open','private-check','material-open','prepare','source-open','source-check','resolver-open','runtime','resolver-check','material-check','diagnostics-check','resolver-policy','source-close','material-close','private-close','resolver-close','diagnostics-close','late-query-'+str(count),'overrun-source-close']
+            for fault in faults:
+                with self.subTest(kind=kind,fault=fault),SourceFixture(self,kind,fault=fault) as fixture:
+                    self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for key in ('head','identity-1','identity-2','publication','role','retention','slot'):
+            for bad in ([],[[None]],None,[[b'0/0']],[[b'0/30'],[b'0/30']]):
+                with self.subTest(key=key,bad=bad),SourceFixture(self,'active_lag' if key in ('slot','retention') else 'source_head',{key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        slot=[b'pgoutput',b'logical',b'11',b'f',b't',b'1234',b'reserved',b'0/8',b'0/20',b'f',b'',b'false',b'false',b'0/30']
+        for index,bad in ((0,b'wal2json'),(1,b'physical'),(2,b'12'),(3,b't'),(4,b'f'),(5,None),(5,b'0'),(6,b'lost'),(7,b'0/21'),(7,None),(7,b'0/0'),(8,b'0/7'),(8,b'0/31'),(8,None),(8,b'0/0'),(9,b't'),(10,b'wal_removed'),(11,b'true'),(12,b'true'),(13,b'80000000/20'),(13,None),(13,b'0/0')):
+            changed=slot.copy();changed[index]=bad
+            with self.subTest(slot=index,bad=bad),SourceFixture(self,'active_lag',{'slot':[changed]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        identity=[b'123',b'11',b'1',b'160006',b'23',b'33',b'33',b't',b'off']
+        for index in range(9):
+            changed=identity.copy();changed[index]=b'f' if index==7 else b'99'
+            with self.subTest(identity=index),SourceFixture(self,rows={'identity-2':[changed]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        with SourceFixture(self) as fixture,mock.patch.object(P,'qualified_resolver_policy',side_effect=P.Refusal('capability')):
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+        with SourceFixture(self,rows={'publication-2':[[b'89',b'33']]}) as fixture:
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        for major,row in ((16,[b'logical',b'-1',None,None]),(16,[b'logical',b'0',b'-1',None]),(18,[b'logical',b'-1',None,None]),(18,[b'logical',b'-1',None,b'60']),(18,[b'replica',b'-1',None,b'0'])):
+            with SourceFixture(self,'active_lag',rows={'retention':[row]},major=major) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        with SourceFixture(self,rows={'head':[[b'0/7']]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+
+    def test_SourceObservationIO(self):
+        for mode in ('empty','truncated','extra','overflow','read-failure','read-stall','bad-work'):
+            with self.subTest(mode=mode),SourceFixture(self) as fixture:
+                if mode=='empty':fixture.parts=[b'']
+                elif mode=='truncated':fixture.parts=[fixture.raw[:-5],b'']
+                elif mode=='extra':fixture.parts=[fixture.raw,b'{}',b'']
+                elif mode=='overflow':fixture.parts=[b' '*8192]*8+[b' ',b'']
+                elif mode=='bad-work':os.environ['RPGMIGRATE_WORKDIR_ID']='foreign'
+                if mode=='read-failure':
+                    with mock.patch.object(P.os,'read',side_effect=OSError('secret-sentinel')):self.assertEqual(fixture.run(),1)
+                elif mode=='read-stall':
+                    def stalled(*args):fixture.clock=126.;return False
+                    with mock.patch.object(P.os,'read',side_effect=BlockingIOError()),mock.patch.object(P,'wait_fd',side_effect=stalled):self.assertEqual(fixture.run(),1)
+                else:self.assertEqual(fixture.run(),1)
+                self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+        with SourceFixture(self) as fixture:
+            first=True
+            def reading(fd,cap):
+                nonlocal first
+                if first:first=False;raise BlockingIOError()
+                return fixture.parts.pop(0)
+            with mock.patch.object(P.os,'read',side_effect=reading),mock.patch.object(P,'wait_fd',return_value=True) as wait:
+                self.assertEqual(fixture.run(),0);self.assertEqual(wait.call_count,1);self.assertEqual(wait.call_args.args[:3],(0,False,125.))
+        with SourceFixture(self) as fixture:
+            first=True
+            def writing(fd,raw):
+                nonlocal first
+                if first:first=False;raise BlockingIOError()
+                fixture.output.append(bytes(raw[:7]));return min(7,len(raw))
+            with mock.patch.object(P.os,'write',side_effect=writing),mock.patch.object(P,'wait_fd',return_value=True) as wait:
+                self.assertEqual(fixture.run(),0);self.assertEqual(json.loads(b''.join(fixture.output))['kind'],'source_head');wait.assert_called_once_with(1,True,130.)
+        with SourceFixture(self) as fixture:
+            def stopped(*args):fixture.clock=131.;return False
+            with mock.patch.object(P.os,'write',side_effect=BlockingIOError()),mock.patch.object(P,'wait_fd',side_effect=stopped):self.assertEqual(fixture.run(),1)
+            self.assertEqual(fixture.output,[])
 
     def test_NativePreflightDispatch(self):
         self.assertIsNotNone(getattr(P,'run_native_preflight',None),'fixed native preflight role is absent')
@@ -1243,7 +1526,7 @@ class NativePythonTests(unittest.TestCase):
         self.require_file_api()
         from types import SimpleNamespace
         raw_source=b'source';raw_target=b'target';events=[];created=[]
-        material=P.Materialization.__new__(P.Materialization)
+        material=P.Materialization.__new__(P.Materialization);material.source_only=False
         material.inputs={};material.prepared=False;material.roles={'source':raw_source,'target':raw_target};material.envb={};material.check=lambda:None
         def prepare(library,raw,envb,owner,deadline):
             events.append(raw)
@@ -1257,7 +1540,7 @@ class NativePythonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory);file=path/'file';file.write_bytes(b'original');file.chmod(0o600);(path/'projection').symlink_to('file')
             cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY)
-            material=P.Materialization.__new__(P.Materialization);material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.paths={};material.absences=set();material.files=[];material.inputs={}
+            material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.paths={};material.absences=set();material.files=[];material.inputs={}
             def open_file(raw,fd):return os.open(raw,os.O_RDONLY|os.O_NONBLOCK,dir_fd=fd)
             try:
                 with mock.patch.object(P,'open_connection_file',side_effect=open_file):
@@ -1266,7 +1549,7 @@ class NativePythonTests(unittest.TestCase):
                     with self.assertRaises(P.Refusal):material.check()
             finally:material.close()
         cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY)
-        material=P.Materialization.__new__(P.Materialization);material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.files=[];material.absences=set()
+        material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.files=[];material.absences=set()
         dead=SimpleNamespace(check=lambda:(_ for _ in ()).throw(AssertionError('closed source snapshot reopened')))
         live=mock.Mock()
         material.inputs={'source':SimpleNamespace(closed=True,absent=False,snapshots=[dead]),'target':SimpleNamespace(closed=False,absent=False,snapshots=[live])}

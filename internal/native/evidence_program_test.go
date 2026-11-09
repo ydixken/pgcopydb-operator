@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -142,4 +143,32 @@ func TestNativePythonNativePreflightTools(t *testing.T) {
 }
 func TestNativePythonNativePreflightBounds(t *testing.T) {
 	pythonMechanismCase(t, "test_NativePreflightBounds")
+}
+
+func TestNativePythonSourceObservation(t *testing.T) {
+	for _, method := range []string{"test_SourceObservationWire", "test_SourceObservationState", "test_SourceObservationMaterialization", "test_SourceObservationClosedResult", "test_SourceObservationRefusals", "test_SourceObservationIO"} {
+		t.Run(method, func(t *testing.T) { pythonMechanismCase(t, method) })
+	}
+}
+
+func TestNativePythonSourceObservationRequired(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("required Python interpreter is absent")
+	}
+	source, err := os.ReadFile("evidence_program_test.py")
+	if err != nil {
+		t.Fatal("required Python source tests are absent")
+	}
+	path := filepath.Join(t.TempDir(), "evidence_program_test.py")
+	if os.WriteFile(path, source, 0o600) != nil {
+		t.Fatal("cannot prepare missing-module control")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path, "NativePythonTests.test_SourceObservationWire")
+	output, err := command.CombinedOutput()
+	if err == nil || bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("skipped")) {
+		t.Fatal("missing source module passed the required gate")
+	}
 }

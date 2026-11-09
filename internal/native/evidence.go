@@ -322,15 +322,23 @@ func lowerHex(s string, n int) bool {
 }
 
 var nativeWireKeys = map[string]string{
-	"native_preflight":       "version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean",
-	"request":                "version kind operation_id program_sha256 execution pod_name container saved_e",
-	"request.execution":      "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
-	"request.execution.work": "migration_uid run_id workdir_id checkpoint_generation",
-	"request.container":      "pod_uid container_name container_id restart_count image_id template_sha256",
-	"result":                 "version kind operation_id request_sha256 program_sha256 execution_sha256 work checkpoint resources guards source_closed target_closed private_closed diagnostics_clean",
-	"result.work":            "migration_uid run_id workdir_id checkpoint_generation",
-	"result.checkpoint":      "checkpoint_id certified_lsn durable_replay_lsn drain_end_lsn drain_replay_lsn drain_kind barrier_confirmed",
-	"result.resources[]":     "kind name owned retain",
+	"source_request":                "version kind operation_id program_sha256 execution pod_name container",
+	"source_request.execution":      "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
+	"source_request.execution.work": sourceWorkWireKeys,
+	"source_request.container":      "pod_uid container_name container_id restart_count image_id template_sha256",
+	"source_head":                   "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 head_lsn source_closed private_closed diagnostics_clean",
+	"source_head.work":              sourceWorkWireKeys,
+	"active_lag":                    "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 lag_bytes source_closed private_closed diagnostics_clean",
+	"active_lag.work":               sourceWorkWireKeys,
+	"native_preflight":              "version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean",
+	"request":                       "version kind operation_id program_sha256 execution pod_name container saved_e",
+	"request.execution":             "namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256",
+	"request.execution.work":        "migration_uid run_id workdir_id checkpoint_generation",
+	"request.container":             "pod_uid container_name container_id restart_count image_id template_sha256",
+	"result":                        "version kind operation_id request_sha256 program_sha256 execution_sha256 work checkpoint resources guards source_closed target_closed private_closed diagnostics_clean",
+	"result.work":                   "migration_uid run_id workdir_id checkpoint_generation",
+	"result.checkpoint":             "checkpoint_id certified_lsn durable_replay_lsn drain_end_lsn drain_replay_lsn drain_kind barrier_confirmed",
+	"result.resources[]":            "kind name owned retain",
 }
 
 func decodeNativeWire(raw []byte, out any, root string) bool {

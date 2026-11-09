@@ -1001,23 +1001,31 @@ def catalog_sql(marker,major):
  else: need(major==16,CAP_ERR)
  return sql.replace('@','pg_catalog.')
 class Materialization:
-    def __init__(self, env):
-        self.env = dict(env)
-        self.envb = {os.fsencode(key): os.fsencode(value) for key, value in env.items()}
+    def __init__(self, env, source_only=False):
+        need(type(source_only) is bool, CAP_ERR)
+        self.source_only = source_only
+        self.env = self.selected_environment(env)
+        self.envb = {os.fsencode(key): os.fsencode(value) for key, value in self.env.items()}
         self.files = []
         self.paths = {}
         self.absences = set()
         self.inputs = {}
         self.prepared = False
         self.cwd = None
-        self.roles = {role: os.fsencode(env.get('PGCOPYDB_' + role.upper() + '_PGURI', ''))
-                      for role in ('source', 'target')}
-        need(all(self.roles.values()) and not any(b'\0' in value for value in self.roles.values()), CONN)
+        self.roles = {role: os.fsencode(self.env.get('PGCOPYDB_' + role.upper() + '_PGURI', ''))
+                      for role in (('source',) if source_only else ('source', 'target'))}
         try:
             self.cwd = fdopen('.', True)
             self.cwd_id = identity(os.fstat(self.cwd))
-            paths = ['/tmp/pgm-source-uri', '/tmp/pgm-target-uri', '/tmp/pgpass']
-            for root in ('/etc/pgcopydb/creds', '/etc/pgcopydb/tls'):
+            if source_only:
+                try:
+                    self.roles['source'] = self.pin('/tmp/pgm-source-uri').raw
+                except OSError as error:
+                    if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+                        raise Refusal(CONN) from None
+            need(all(self.roles.values()) and not any(b'\0' in value for value in self.roles.values()), CONN)
+            paths = [] if source_only else ['/tmp/pgm-source-uri', '/tmp/pgm-target-uri', '/tmp/pgpass']
+            for root in (() if source_only else ('/etc/pgcopydb/creds', '/etc/pgcopydb/tls')):
                 if os.path.isdir(root):
                     for directory, _, names in os.walk(root, followlinks=False):
                         for filename in names:
@@ -1033,6 +1041,10 @@ class Materialization:
         except BaseException:
             self.close()
             raise
+
+    def selected_environment(self, env):
+        return {key:value for key,value in env.items()
+                if not self.source_only or not key.startswith('PGCOPYDB_TARGET_')}
 
     def pin(self, path) -> StableFile:
         path = os.fsencode(path)
@@ -1059,7 +1071,7 @@ class Materialization:
     def prepare(self, library, deadline: float) -> None:
         need(not self.prepared and not self.inputs, CAP_ERR)
         try:
-            for role in ('source', 'target'):
+            for role in self.roles:
                 self.inputs[role] = ConnectionInput(library, self.roles[role], self.envb, self, deadline)
             self.prepared = True
             self.check()
@@ -1079,7 +1091,7 @@ class Materialization:
         return self.inputs[role]
 
     def check(self):
-        need(dict(os.environ) == self.env and self.cwd is not None and
+        need(self.selected_environment(os.environ) == self.env and self.cwd is not None and
              identity(os.fstat(self.cwd)) == self.cwd_id and
              identity(os.stat('.')) == self.cwd_id, CONN)
         for file in self.files:
@@ -1382,6 +1394,176 @@ def run_native_preflight(operation_id: str, program_sha256: str) -> int:
   for item in (source,target,materials,diag):
    if item is not None:
     try: item.close(False) if isinstance(item,Session) else item.close()
+    except BaseException: pass
+  return 1
+
+def validate_source_request(raw, kind, op, sha):
+ need(kind in ('source_head','active_lag'),INPUT); hextext(op,32); hextext(sha,64)
+ value=strict_json(raw,CAP); keys(value,'version kind operation_id program_sha256 execution pod_name container')
+ need(uint(value['version'],1,True)==1 and value['kind']==kind,INPUT)
+ need(hextext(value['operation_id'],32)==op and hextext(value['program_sha256'],64)==sha,INPUT)
+ execution=value['execution']; keys(execution,'namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256')
+ for field in ('namespace','migration_name','pvc_name','job_name'):
+  label=text(execution[field],253); need(label[0].isalnum() and label[-1].isalnum() and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789-.' for c in label),INPUT)
+ for field in ('migration_uid','pvc_uid','job_uid','worker_job_uid'):
+  label=text(execution[field],256); need(label.strip()==label and not any(ord(c)<33 or ord(c)>126 or c in '/\\' for c in label) and bool(label.strip('0-')),INPUT)
+ need(execution['role']=='worker' and execution['job_uid']==execution['worker_job_uid'],INPUT)
+ uint(execution['migration_generation'],(1<<63)-1,True); uint(execution['attempt'],(1<<31)-1,True)
+ work=execution['work']; keys(work,'migration_uid run_id workdir_id checkpoint_generation')
+ uid=text(work['migration_uid'],36); run=hextext(work['run_id'],32)
+ need(len(uid)==36 and [i for i,c in enumerate(uid) if c=='-']==[8,13,18,23] and uid.replace('-','')==run and any(c!='0' for c in run),INPUT)
+ need(uid==execution['migration_uid'] and text(work['workdir_id'],256)==execution['pvc_uid'],INPUT)
+ uint(work['checkpoint_generation'],(1<<63)-1,True)
+ for field in ('template_sha256','connection_reference_sha256'):
+  need(hextext(execution[field],64)!='0'*64,INPUT)
+ image=text(execution['image_ref'],1024).split('@sha256:'); need(len(image)==2 and bool(image[0]),INPUT); hextext(image[1],64)
+ image=text(execution['platform_image_id'],1024).split('sha256:'); need(len(image)==2,INPUT); hextext(image[1],64)
+ label=text(value['pod_name'],253); need(label[0].isalnum() and label[-1].isalnum() and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789-.' for c in label),INPUT)
+ container=value['container']; keys(container,'pod_uid container_name container_id restart_count image_id template_sha256')
+ for field in ('pod_uid','container_name','container_id','image_id'): text(container[field],1024)
+ label=container['pod_uid']; need(len(label)<=256 and label.strip()==label and not any(ord(c)<33 or ord(c)>126 or c in '/\\' for c in label) and bool(label.strip('0-')),INPUT)
+ need(uint(container['restart_count'],0)==0 and container['container_name']=='pgcopydb' and container['image_id']==execution['platform_image_id'] and hextext(container['template_sha256'],64)==execution['template_sha256'],INPUT)
+ return value
+
+def source_work_environment(req):
+ work=req['execution']['work']
+ for key,field in (('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation')):
+  need(os.environ.get(key)==str(work[field]),INPUT)
+
+def validate_source_manifest(m, req, directory):
+ keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
+ work=req['execution']['work']; need(m['magic']=='RPGMIGRATE' and uint(m['format_version'],8)==8 and m['canonical_path']=='/work/pgcopydb')
+ run=nonce(m['run']); need(run.hex()==work['run_id'] and (uint(m['directory_device']),uint(m['directory_inode']))==identity(directory))
+ keys(m['operator'],'migration_uid run workdir_id checkpoint_generation'); need(work['checkpoint_generation']==1)
+ need(same(m['operator'],dict(migration_uid=work['migration_uid'],run=list(run),workdir_id=work['workdir_id'],checkpoint_generation=1)))
+ clone=m['clone_state']; keys(clone,'plan ticket phase owned_objects owned_tables completion')
+ need(clone['phase'] in ('fresh','pre_data_pending','copying','post_data_pending','post_data_complete','sequences_pending','sequences_complete','analyzing','complete'))
+ plan=clone['plan']; keys(plan,'source target generation tables sequences policy'); source=plan['source']; keys(source,'identity timeline major')
+ source_identity(source['identity']); uint(source['timeline'],(1<<32)-1,True); need(uint(source['major'],18,True) in (16,18)); generation=uint(plan['generation'],U64,True)
+ slot=m['source_slot']; keys(slot,'phase record'); need(slot['phase']=='confirmed'); slot=slot['record']; slot_record(slot)
+ stream_id=slot['intent']['binding']['stream']; need(stream_id['run']==m['run'] and stream_id['source']==source['identity'] and slot['intent']['binding']['catalog_epoch']==generation)
+ ticket=clone['ticket']; keys(ticket,'token source generation'); text(ticket['token'],1024)
+ need(same(ticket['source'],source) and uint(ticket['generation'],U64,True)==generation and ticket['token']==slot['snapshot_token'])
+ follow=m['follow_state']; keys(follow,'cleanup origin_name publication binding restart preliminary')
+ need(follow['cleanup'] is None and follow['restart'] is None and follow['preliminary'] is None)
+ binding=follow['binding']; keys(binding,'slot publication source_timeline copy_generation source_types')
+ need(same(binding['slot'],slot) and uint(binding['copy_generation'],U64,True)==generation and uint(binding['source_timeline'],(1<<32)-1,True)==source['timeline'])
+ publication(binding['publication']); pub=follow['publication']; keys(pub,'phase intent receipt'); need(pub['phase']=='confirmed')
+ keys(pub['intent'],'run name nonce'); nonce(pub['intent']['nonce'])
+ need(pub['intent']['run']==m['run'] and pub['intent']['name']==binding['publication']['name'] and same(pub['receipt'],binding['publication']))
+ seen=set()
+ for item in bounded_array(binding['source_types'],16384):
+  keys(item,'oid schema name'); oid=uint(item['oid'],(1<<32)-1,True); need(oid not in seen); seen.add(oid); name(item['schema']); name(item['name'])
+ need(len(json.dumps(binding,separators=(',',':'),ensure_ascii=False).encode())<=262144)
+ # Fixed order: source system/database/timeline/major, run/stream/COPY, slot nonce/epoch/floor, publication OID/owner.
+ values=[source['identity']['system_identifier'],source['identity']['database_oid'],source['timeline'],source['major'],run.hex(),stream_id['generation'],generation,bytes(slot['intent']['nonce']).hex(),slot['intent']['binding']['catalog_epoch'],slot['consistent_point'],binding['publication']['oid'],binding['publication']['owner_oid']]
+ fingerprint=hashlib.sha256(json.dumps(values,separators=(',',':'),ensure_ascii=True).encode('ascii')).hexdigest()
+ return source,slot,binding['publication'],fingerprint
+
+class SourceState:
+ def __init__(self,req):
+  self.req=req; self.fds=[]; self.files=[]
+  try:
+   self.parent=self.open('/work',True); self.root=self.open('pgcopydb',True,self.parent)
+   self.manifest=StableFile('manifest.json',1048576,True,self.root); self.files.append(self.manifest)
+   self.binding=validate_source_manifest(strict_json(self.manifest.raw,1048576),req,os.fstat(self.root)); self.revalidate()
+  except BaseException:
+   self.close(False); raise
+ def open(self,path,directory,parent=None):
+  fd=fdopen(path,directory,parent); self.fds.append(fd); private_type(fd,directory); return fd
+ def revalidate(self):
+  source_work_environment(self.req)
+  need(identity(private_type(self.parent,True))==identity(os.stat('/work',follow_symlinks=False)))
+  need(identity(private_type(self.root,True))==identity(os.stat('pgcopydb',dir_fd=self.parent,follow_symlinks=False)))
+  self.manifest.check()
+  need(same(validate_source_manifest(strict_json(self.manifest.raw,1048576),self.req,os.fstat(self.root)),self.binding))
+ def close(self,recheck=True):
+  failed=False
+  if recheck and self.fds:
+   try: self.revalidate()
+   except BaseException: failed=True
+  for item in reversed(self.files):
+   try: item.close()
+   except BaseException: failed=True
+  self.files=[]
+  for fd in reversed(self.fds):
+   try: checked_close(fd)
+   except BaseException: failed=True
+  self.fds=[]; need(not failed,CLOSE)
+
+def source_session_identity(session, source):
+ session_role(session)
+ rows=session.query("SELECT c.system_identifier::@text,d.oid,k.timeline_id,@current_setting('server_version_num'),@pg_backend_pid(),r.oid,u.oid,NOT @pg_is_in_recovery(),@current_setting('transaction_read_only') FROM @pg_control_system() c CROSS JOIN @pg_control_checkpoint() k CROSS JOIN @pg_database d CROSS JOIN @pg_roles r CROSS JOIN @pg_roles u WHERE d.datname=@current_database() AND r.rolname=CURRENT_USER AND u.rolname=SESSION_USER;",width=9)
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==9,RESULT); row=rows[0]; values=[]
+ for index,cell in enumerate(row[:7]):
+  need(type(cell) is bytes,RESULT)
+  try: value=decimal(cell.decode('ascii'),U64 if index==0 else (1<<32)-1,True)
+  except UnicodeError: raise Refusal(RESULT) from None
+  values.append(value)
+ need(values[:3]==[source['identity']['system_identifier'],source['identity']['database_oid'],source['timeline']] and values[3]//10000==source['major'] and values[4]==session.backend and row[7]==b't' and row[8] in (b'on',b'off'),CONN)
+ return tuple(values)+tuple(row[7:])
+
+def source_publication(session, pub):
+ rows=session.query('SELECT oid,pubowner FROM @pg_publication WHERE pubname=$1::name;',(pub['name'],),width=2)
+ need(rows==[[str(pub['oid']).encode(),str(pub['owner_oid']).encode()]],CONN)
+
+def source_position(session, kind, binding):
+ source,slot,pub,_=binding; source_publication(session,pub)
+ if kind=='source_head':
+  rows=session.query('SELECT @pg_current_wal_insert_lsn();'); need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==1 and type(rows[0][0]) is bytes,RESULT)
+  value=lsn(rows[0][0].decode('ascii')); need(value>=slot['consistent_point']>0,RESULT); return lsn_text(value)
+ rows=session.query("SELECT @current_setting('wal_level'),@current_setting('max_slot_wal_keep_size'),@current_setting('old_snapshot_threshold',true),@current_setting('idle_replication_slot_timeout',true);",width=4)
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==4,RESULT)
+ need(rows[0][:2]==[b'logical',b'-1'] and (rows[0][2]==b'-1' if source['major']==16 else rows[0][3]==b'0'),RESULT)
+ rows=session.query("SELECT s.plugin,s.slot_type,s.datoid,s.temporary,s.active,s.active_pid,s.wal_status,s.restart_lsn,s.confirmed_flush_lsn,COALESCE(s.conflicting,false),COALESCE(@to_jsonb(s)->>'invalidation_reason',''),COALESCE(@to_jsonb(s)->>'failover','false'),COALESCE(@to_jsonb(s)->>'synced','false'),@pg_current_wal_insert_lsn() FROM @pg_replication_slots s WHERE s.slot_name=$1::name;",(slot['intent']['binding']['slot_name'],),width=14)
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==14,RESULT); row=rows[0]
+ need(row[:5]==[b'pgoutput',b'logical',str(source['identity']['database_oid']).encode(),b'f',b't'] and row[6] in (b'reserved',b'extended') and row[9:13]==[b'f',b'',b'false',b'false'],RESULT)
+ need(type(row[5]) is bytes,RESULT); decimal(row[5].decode('ascii'),(1<<31)-1,True)
+ positions=[]
+ for index in (7,8,13):
+  need(type(row[index]) is bytes,RESULT); value=lsn(row[index].decode('ascii')); need(value>0,RESULT); positions.append(value)
+ restart,confirmed,insert=positions; need(restart<=confirmed<=insert and confirmed>=slot['consistent_point'],RESULT)
+ # This active position snapshot cannot prove slot incarnation, ownership or target progress.
+ return uint(insert-confirmed,(1<<63)-1)
+
+def run_source_observation(kind: str, operation_id: str, program_sha256: str) -> int:
+ start=time.monotonic(); deadline=start+25; closing=start+30; diag=None; state=None; materials=None; session=None
+ try:
+  need(kind in ('source_head','active_lag'),INPUT); hextext(operation_id,32); hextext(program_sha256,64)
+  resource.setrlimit(resource.RLIMIT_CORE,(0,0)); validate_environment(os.environ); need(os.environ.get('PGCONNECT_TIMEOUT')=='10',CAP_ERR)
+  diag=Diagnostics(); need(os.geteuid()==65532,'admission'); os.set_blocking(0,False); raw=bytearray()
+  while True:
+   need(time.monotonic()<deadline,'timeout'); diag.check()
+   try: part=os.read(0,min(8192,CAP+1-len(raw)))
+   except BlockingIOError: wait_fd(0,False,deadline,diag); continue
+   if not part: break
+   raw.extend(part); need(len(raw)<=CAP,INPUT)
+  raw=bytes(raw); req=validate_source_request(raw,kind,operation_id,program_sha256); source_work_environment(req)
+  state=SourceState(req); materials=Materialization(os.environ,source_only=True)
+  resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(); state.revalidate()
+  session=Session(library,materials.connection('source'),min(deadline,time.monotonic()+10),diag); session.deadline=deadline
+  for setting,milliseconds in (('statement_timeout',4000),('lock_timeout',1000),('idle_in_transaction_session_timeout',6000)):
+   remaining=int((deadline-time.monotonic())*1000); need(remaining>0,'timeout')
+   session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
+  session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
+  fingerprint=state.binding[3]; pinned=source_session_identity(session,state.binding[0]); position=source_position(session,kind,state.binding)
+  need(source_session_identity(session,state.binding[0])==pinned,CONN); source_publication(session,state.binding[2]); state.revalidate(); materials.check(); resolver.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  session.close(); session=None; materials.check(); materials.close(); materials=None; state.close(); state=None; diag.close(); diag=None
+  need(time.monotonic()<closing,'timeout'); request_sha,execution_sha=request_digests(raw)
+  result=dict(version=1,kind=kind,operation_id=operation_id,program_sha256=program_sha256,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],source_binding_sha256=fingerprint,source_closed=True,private_closed=True,diagnostics_clean=True)
+  result['head_lsn' if kind=='source_head' else 'lag_bytes']=position
+  output=json.dumps(result,separators=(',',':'),ensure_ascii=True).encode()+b'\n'; need(len(output)<=CAP,RESULT); os.set_blocking(1,False); offset=0
+  while offset<len(output):
+   need(time.monotonic()<closing,'timeout')
+   try: written=os.write(1,output[offset:])
+   except BlockingIOError: wait_fd(1,True,closing); continue
+   need(0<written<=len(output)-offset,RESULT); offset+=written
+  return 0
+ except BaseException:
+  for item in (session,materials,state,diag):
+   if item is not None:
+    try: item.close(False) if item is session or item is state else item.close()
     except BaseException: pass
   return 1
 
