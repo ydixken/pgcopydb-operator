@@ -351,19 +351,7 @@ func ConnectionReferenceSHA256(m *v1beta1.Migration, w ExecutionRequest) ([32]by
 	if err != nil {
 		return [32]byte{}, err
 	}
-	for i := range env {
-		env[i].Value = ""
-	}
-	structural := struct {
-		Env     []corev1.EnvVar
-		Volumes []corev1.Volume
-		Mounts  []corev1.VolumeMount
-	}{env, volumes, mounts}
-	raw, err := json.Marshal(structural)
-	if err != nil {
-		return [32]byte{}, errors.New("native connection references invalid")
-	}
-	return sha256.Sum256(raw), nil
+	return StructuralConnectionReferenceSHA256(env, volumes, mounts)
 }
 
 func sameEnvironment(a, b []corev1.EnvVar) bool {
