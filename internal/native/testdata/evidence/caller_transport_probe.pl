@@ -1,0 +1,12 @@
+use strict;
+use warnings;
+use lib '/probe';
+use EvidencePrototype;
+use JSON::PP ();
+use Digest::SHA qw(sha256_hex);
+use Encode qw(encode);
+my $raw=shift;defined($raw)or die "caller\n";
+my $caller=eval{EvidencePrototype::strict_json($raw,4096)};
+my $digest=$caller?sha256_hex(encode('UTF-8',$caller->{helper}{endpoint_binding})):'';
+my $sample='"'.chr(0x1f600).'"';my(undef,$used)=JSON::PP->new->allow_nonref->decode_prefix($sample);
+print JSON::PP->new->canonical->encode({accepted=>$caller?JSON::PP::true:JSON::PP::false,bytes=>length($raw),digest=>$digest,stock_prefix_uses_bytes=>$used==length(encode('UTF-8',$sample))&&$used!=length($sample)?JSON::PP::true:JSON::PP::false}),"\n";

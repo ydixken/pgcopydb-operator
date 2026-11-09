@@ -1,0 +1,16 @@
+{
+  "files": {
+    "native_catalog_16.sql": "ba0e495f3b4d41937cfe4c44ee97156aea56818f8091ceeaff467260b543fa2e",
+    "native_catalog_18.sql": "6446b8bd5e49e8a5e0e85009ee4ab9fd0bdbd2f9fb269bf55f13a358ce827a56",
+    "native_checkpoint_ddl.sql": "1cbc9f974dfcd14b8ae60e18fc0107aeea947c94fcfdffab765ab16de0729991",
+    "native_columns.json": "6778f4e9a2dcd122f2147d3a92df61ba145eea80778797d007cc1306832833f9",
+    "native_marker_catalog_16.sql": "4da2592bb06c53fee480fcb33553f2fc257b003aee9543d9fa09da1f41579952",
+    "native_marker_catalog_18.sql": "2f36ba0affbebaba1fe71db5eaf2172b3225a7ee07dd2c35021b146d82694e32",
+    "native_marker_ddl.sql": "76e9475251a28119cace3c6ef19d647f40ab4eee51935b4d8ddf835e6c1286c8"
+  },
+  "frozen_candidate_manifest_sha256": "31b9345d81e276b4ee8b2a247d236a7de01f71ff89b6382b6ffe3920a31bbf4c",
+  "generated": true,
+  "runtime_qualified": false,
+  "source": "src/apply/metadata.rs",
+  "source_sha256": "ebef9685b217811281233b8f116a69a000acf1ff86982d1c155461007ee53aa2"
+}

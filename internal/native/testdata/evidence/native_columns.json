@@ -1,0 +1,286 @@
+{
+  "checkpoint": [
+    {
+      "modifier": -1,
+      "name": "magic",
+      "oid": 25,
+      "required": true,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "version",
+      "oid": 23,
+      "required": true,
+      "type": "int4"
+    },
+    {
+      "modifier": -1,
+      "name": "run_id",
+      "oid": 17,
+      "required": true,
+      "type": "bytea"
+    },
+    {
+      "modifier": -1,
+      "name": "nonce",
+      "oid": 17,
+      "required": true,
+      "type": "bytea"
+    },
+    {
+      "modifier": 1310724,
+      "name": "source_system",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "source_database",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": 1310724,
+      "name": "generation",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": 1310724,
+      "name": "target_system",
+      "oid": 1700,
+      "required": false,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "target_database",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": -1,
+      "name": "owner_oid",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": -1,
+      "name": "schema_oid",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": -1,
+      "name": "table_oid",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": 1310724,
+      "name": "applied_order",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "last_xid",
+      "oid": 26,
+      "required": false,
+      "type": "oid"
+    },
+    {
+      "modifier": 1310724,
+      "name": "begin_ordinal",
+      "oid": 1700,
+      "required": false,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "source_commit_lsn",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": -1,
+      "name": "source_end_lsn",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": 1310724,
+      "name": "barrier_epoch",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": 1310724,
+      "name": "barrier_counter",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "copy_snapshot_token",
+      "oid": 25,
+      "required": false,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "copy_consistent_point",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": -1,
+      "name": "copy_plan_nonce",
+      "oid": 17,
+      "required": false,
+      "type": "bytea"
+    },
+    {
+      "modifier": -1,
+      "name": "clone_state",
+      "oid": 25,
+      "required": false,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "certified_lsn",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": -1,
+      "name": "follow_binding",
+      "oid": 25,
+      "required": false,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "drain_end_lsn",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": -1,
+      "name": "drain_witness_lsn",
+      "oid": 3220,
+      "required": false,
+      "type": "pg_lsn"
+    },
+    {
+      "modifier": -1,
+      "name": "drain_kind",
+      "oid": 25,
+      "required": false,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "follow_completed",
+      "oid": 16,
+      "required": true,
+      "type": "bool"
+    }
+  ],
+  "marker": [
+    {
+      "modifier": -1,
+      "name": "magic",
+      "oid": 25,
+      "required": true,
+      "type": "text"
+    },
+    {
+      "modifier": -1,
+      "name": "version",
+      "oid": 23,
+      "required": true,
+      "type": "int4"
+    },
+    {
+      "modifier": -1,
+      "name": "run_id",
+      "oid": 17,
+      "required": true,
+      "type": "bytea"
+    },
+    {
+      "modifier": -1,
+      "name": "nonce",
+      "oid": 17,
+      "required": true,
+      "type": "bytea"
+    },
+    {
+      "modifier": -1,
+      "name": "source_table",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": -1,
+      "name": "target_table",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": 1310724,
+      "name": "copy_generation",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": 1310724,
+      "name": "rows",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": 1310724,
+      "name": "bytes",
+      "oid": 1700,
+      "required": true,
+      "type": "numeric"
+    },
+    {
+      "modifier": -1,
+      "name": "target_namespace",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    },
+    {
+      "modifier": -1,
+      "name": "target_owner",
+      "oid": 26,
+      "required": true,
+      "type": "oid"
+    }
+  ]
+}

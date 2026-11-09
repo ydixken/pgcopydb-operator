@@ -46,20 +46,20 @@ func replace(t *testing.T, raw []byte, old, next string) []byte {
 
 func TestParseCommandReports(t *testing.T) {
 	for _, tc := range []struct{ command, payload string }{
-		{"clone", `"copy":{"tables":{"total":3,"done":2}}`},
+		{evidenceCloneCommand, `"copy":{"tables":{"total":3,"done":2}}`},
 		{"list tables", `"copy":{}`},
 		{fixtureProgressCommand, `"copy":{"tables":{"total":3,"done":2},"indexes":{"total":1,"done":0},"bytes":{"total":1024,"done":512}}`},
 		{"stream sentinel get", `"replication":{"certified_lsn":"0/10","source_durable_head_lsn":"0/30","received_lsn":"0/20","durable_replay_lsn":"0/10"}`},
 		{"stream sentinel set endpos", `"replication":{"certified_lsn":"0/0","end_lsn":"0/20","end_persisted":true}`},
-		{"stream cleanup", `"cleanup":{"complete":true,"resources":[{"kind":"replication_slot","name":"native_slot","owned":true,"removed":true},{"kind":"publication","name":"provided","owned":false,"removed":false}]}`},
+		{evidenceCleanupCommand, `"cleanup":{"complete":true,"resources":[{"kind":"replication_slot","name":"native_slot","owned":true,"removed":true},{"kind":"publication","name":"provided","owned":false,"removed":false}]}`},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			want := binding(tc.command)
 			if tc.command == commandSetEndpos {
 				want.EndLSN = fixtureEndLSN
 			}
-			if tc.command == "stream cleanup" {
-				want.Resources = []ResourceObligation{{Kind: "replication_slot", Name: "native_slot", Owned: true}, {Kind: "publication", Name: "provided"}}
+			if tc.command == evidenceCleanupCommand {
+				want.Resources = []ResourceObligation{{Kind: evidenceReplicationSlotKind, Name: "native_slot", Owned: true}, {Kind: evidencePublicationKind, Name: "provided"}}
 			}
 			got, err := ParseReport(fixture(tc.command, tc.payload), want)
 			if err != nil {
@@ -296,7 +296,7 @@ func TestParseCleanupFailsClosed(t *testing.T) {
 		`"cleanup":{"complete":true,"resources":[{"kind":"publication","name":"native","owned":true,"removed":false}]}`,
 		`"cleanup":{"complete":true,"resources":[{"kind":"publication","name":"native","owned":true,"removed":true},{"kind":"publication","name":"native","owned":true,"removed":true}]}`,
 	} {
-		if _, err := ParseReport(fixture("stream cleanup", payload), binding("stream cleanup")); err == nil {
+		if _, err := ParseReport(fixture(evidenceCleanupCommand, payload), binding(evidenceCleanupCommand)); err == nil {
 			t.Fatal("accepted unsafe or unproven cleanup")
 		}
 	}
@@ -307,14 +307,14 @@ func TestParseUnknownReplicationAndCleanupStayUnknown(t *testing.T) {
 	if err != nil || r == nil || r.Replication.Drained != nil || r.Replication.DurableReplayLSN != nil {
 		t.Fatalf("unknown replication became a proof: %v", err)
 	}
-	r, err = ParseReport(fixture("stream cleanup", `"cleanup":{"complete":false,"resources":[]}`), binding("stream cleanup"))
+	r, err = ParseReport(fixture(evidenceCleanupCommand, `"cleanup":{"complete":false,"resources":[]}`), binding(evidenceCleanupCommand))
 	if err != nil || r == nil || r.Cleanup.Complete == nil || *r.Cleanup.Complete {
 		t.Fatalf("incomplete cleanup became complete: %v", err)
 	}
 }
 
 func TestParseRejectsInvalidBindingWithoutLeakingInput(t *testing.T) {
-	for _, want := range []Binding{{}, {Command: fixtureProgressCommand}, {Command: "new command", Work: binding("clone").Work}} {
+	for _, want := range []Binding{{}, {Command: fixtureProgressCommand}, {Command: "new command", Work: binding(evidenceCloneCommand).Work}} {
 		if _, err := ParseReport(fixture(fixtureProgressCommand, `"copy":{}`), want); err == nil {
 			t.Fatal("accepted incomplete binding")
 		}
@@ -399,13 +399,13 @@ func TestParseVersion(t *testing.T) {
 func drainBinding() Binding {
 	want := binding("stream sentinel get")
 	want.EndLSN = fixtureEndLSN
-	want.Checkpoint = &CheckpointEvidence{CheckpointID: "1:0:7", CertifiedLSN: fixtureWitnessLSN, DurableReplayLSN: fixtureWitnessLSN, DrainEndLSN: fixtureEndLSN, DrainReplayLSN: fixtureWitnessLSN, DrainKind: "keepalive", BarrierConfirmed: true}
+	want.Checkpoint = &CheckpointEvidence{CheckpointID: "1:0:7", CertifiedLSN: fixtureWitnessLSN, DurableReplayLSN: fixtureWitnessLSN, DrainEndLSN: fixtureEndLSN, DrainReplayLSN: fixtureWitnessLSN, DrainKind: evidenceKeepalive, BarrierConfirmed: true}
 	return want
 }
 
 func TestParseLaterBeginKeepsDurableAuthoritySeparate(t *testing.T) {
 	want := drainBinding()
-	want.Checkpoint.CertifiedLSN, want.Checkpoint.DurableReplayLSN, want.Checkpoint.DrainKind = fixtureEarlierLSN, fixtureEarlierLSN, "later_begin"
+	want.Checkpoint.CertifiedLSN, want.Checkpoint.DurableReplayLSN, want.Checkpoint.DrainKind = fixtureEarlierLSN, fixtureEarlierLSN, evidenceLaterBegin
 	raw := strings.NewReplacer(`"certified_lsn":"0/30"`, `"certified_lsn":"0/10"`, jsonDurableReplay, `"durable_replay_lsn":"0/10"`, `"kind":"keepalive"`, `"kind":"later_begin"`).Replace(string(drainFixture()))
 	got, err := ParseReport([]byte(raw), want)
 	if err != nil {
@@ -440,14 +440,14 @@ func TestParseDrainRequiresIndependentSameRowEvidence(t *testing.T) {
 		name   string
 		change func(*Binding)
 	}{
-		{"absent", func(w *Binding) { w.Checkpoint = nil }},
+		{evidenceAbsent, func(w *Binding) { w.Checkpoint = nil }},
 		{"unconfirmed", func(w *Binding) { w.Checkpoint.BarrierConfirmed = false }},
 		{"stale token", func(w *Binding) { w.Checkpoint.CheckpointID = "1:0:6" }},
 		{"different certified", func(w *Binding) { w.Checkpoint.CertifiedLSN = fixtureLaterLSN }},
 		{"different durable", func(w *Binding) { w.Checkpoint.DurableReplayLSN = fixtureLaterLSN }},
 		{"different end", func(w *Binding) { w.Checkpoint.DrainEndLSN = "0/21" }},
 		{"different witness", func(w *Binding) { w.Checkpoint.DrainReplayLSN = fixtureLaterLSN }},
-		{"different kind", func(w *Binding) { w.Checkpoint.DrainKind = "later_begin" }},
+		{"different kind", func(w *Binding) { w.Checkpoint.DrainKind = evidenceLaterBegin }},
 		{"missing certified", func(w *Binding) { w.Checkpoint.CertifiedLSN = "" }},
 		{"missing durable", func(w *Binding) { w.Checkpoint.DurableReplayLSN = "" }},
 	} {
@@ -490,13 +490,13 @@ func TestParseDrainRequiresIndependentSameRowEvidence(t *testing.T) {
 }
 
 func cleanupBinding() Binding {
-	want := binding("stream cleanup")
-	want.Resources = []ResourceObligation{{Kind: "replication_slot", Name: "native_slot", Owned: true}, {Kind: "publication", Name: "native_publication", Owned: true}, {Kind: "workdir", Name: fixtureWorkdirID, Owned: true, Retain: true}, {Kind: "replication_origin", Name: "recorded_origin"}}
+	want := binding(evidenceCleanupCommand)
+	want.Resources = []ResourceObligation{{Kind: evidenceReplicationSlotKind, Name: "native_slot", Owned: true}, {Kind: evidencePublicationKind, Name: "native_publication", Owned: true}, {Kind: "workdir", Name: fixtureWorkdirID, Owned: true, Retain: true}, {Kind: "replication_origin", Name: "recorded_origin"}}
 	return want
 }
 
 func cleanupFixture() []byte {
-	return fixture("stream cleanup", `"cleanup":{"complete":true,"resources":[{"kind":"replication_slot","name":"native_slot","owned":true,"removed":true},{"kind":"publication","name":"native_publication","owned":true,"removed":true},{"kind":"workdir","name":"work-1","owned":true,"removed":false},{"kind":"replication_origin","name":"recorded_origin","owned":false,"removed":false}]}`)
+	return fixture(evidenceCleanupCommand, `"cleanup":{"complete":true,"resources":[{"kind":"replication_slot","name":"native_slot","owned":true,"removed":true},{"kind":"publication","name":"native_publication","owned":true,"removed":true},{"kind":"workdir","name":"work-1","owned":true,"removed":false},{"kind":"replication_origin","name":"recorded_origin","owned":false,"removed":false}]}`)
 }
 
 func TestParseCleanupRequiresExactObligations(t *testing.T) {
@@ -522,7 +522,7 @@ func TestParseCleanupRequiresExactObligations(t *testing.T) {
 			}
 		})
 	}
-	if _, err := ParseReport(fixture("stream cleanup", `"cleanup":{"complete":true,"resources":[]}`), cleanupBinding()); err == nil {
+	if _, err := ParseReport(fixture(evidenceCleanupCommand, `"cleanup":{"complete":true,"resources":[]}`), cleanupBinding()); err == nil {
 		t.Fatal("empty inventory proved cleanup")
 	}
 	want := cleanupBinding()
@@ -550,7 +550,7 @@ func TestParseCleanupRequiresTrustedNonemptyInventory(t *testing.T) {
 		{"empty obligations", []ResourceObligation{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want := binding("stream cleanup")
+			want := binding(evidenceCleanupCommand)
 			want.Resources = tc.resources
 			if _, err := ParseReport(fixture(want.Command, `"cleanup":{"complete":true,"resources":[]}`), want); err == nil {
 				t.Fatal("empty trusted inventory proved cleanup completion")

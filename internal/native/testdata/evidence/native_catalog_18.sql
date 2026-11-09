@@ -1,0 +1,89 @@
+-- Generated test fixture from native-8 src/apply/metadata.rs.
+-- Source SHA-256: ebef9685b217811281233b8f116a69a000acf1ff86982d1c155461007ee53aa2
+SELECT
+        n.nspowner = $4::pg_catalog.oid AND c.relowner = $4::pg_catalog.oid
+        AND n.nspname = $5::pg_catalog.text AND c.relname = $6::pg_catalog.text
+        AND EXISTS (SELECT 1 FROM pg_catalog.pg_database d
+            WHERE d.datname = pg_catalog.current_database() AND d.oid = $3::pg_catalog.oid)
+        AND c.relkind = 'r' AND c.relpersistence = 'p' AND EXISTS (SELECT 1 FROM pg_catalog.pg_am am WHERE am.oid = c.relam AND am.amname = 'heap' AND am.oid < 16384) AND NOT c.relispartition
+        AND NOT c.relrowsecurity AND NOT c.relforcerowsecurity
+        AND NOT c.relisshared AND c.reloftype = 0 AND c.relnatts = 29 AND c.relchecks = 0
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy policy WHERE policy.polrelid = c.oid)
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid)
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid)
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid = c.oid OR h.inhparent = c.oid)
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_foreign_table f WHERE f.ftrelid = c.oid)
+        AND pg_catalog.has_schema_privilege(n.oid, 'USAGE')
+        AND pg_catalog.has_table_privilege(c.oid, 'SELECT')
+        AND pg_catalog.has_table_privilege(c.oid, 'INSERT')
+        AND pg_catalog.has_table_privilege(c.oid, 'UPDATE')
+        AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) acl
+            WHERE acl.grantor <> n.nspowner OR (acl.grantee <> n.nspowner AND
+                (acl.grantee <> writer.oid
+                    OR acl.privilege_type <> 'USAGE' OR acl.is_grantable)))
+        AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl
+            WHERE acl.grantor <> c.relowner OR (acl.grantee <> c.relowner AND
+                (acl.grantee <> writer.oid
+                    OR acl.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE') OR acl.is_grantable)))
+        AND (SELECT count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0) = 29
+        AND NOT EXISTS (
+            SELECT 1 FROM (VALUES (1, 'magic', 25, -1, true), (2, 'version', 23, -1, true), (3, 'run_id', 17, -1, true), (4, 'nonce', 17, -1, true), (5, 'source_system', 1700, 1310724, true), (6, 'source_database', 26, -1, true), (7, 'generation', 1700, 1310724, true), (8, 'target_system', 1700, 1310724, false), (9, 'target_database', 26, -1, true), (10, 'owner_oid', 26, -1, true), (11, 'schema_oid', 26, -1, true), (12, 'table_oid', 26, -1, true), (13, 'applied_order', 1700, 1310724, true), (14, 'last_xid', 26, -1, false), (15, 'begin_ordinal', 1700, 1310724, false), (16, 'source_commit_lsn', 3220, -1, false), (17, 'source_end_lsn', 3220, -1, false), (18, 'barrier_epoch', 1700, 1310724, true), (19, 'barrier_counter', 1700, 1310724, true), (20, 'copy_snapshot_token', 25, -1, false), (21, 'copy_consistent_point', 3220, -1, false), (22, 'copy_plan_nonce', 17, -1, false), (23, 'clone_state', 25, -1, false), (24, 'certified_lsn', 3220, -1, false), (25, 'follow_binding', 25, -1, false), (26, 'drain_end_lsn', 3220, -1, false), (27, 'drain_witness_lsn', 3220, -1, false), (28, 'drain_kind', 25, -1, false), (29, 'follow_completed', 16, -1, true)) expected(num, name, type_oid, modifier, required)
+            LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = expected.num
+            WHERE NOT COALESCE(a.attname = expected.name AND a.atttypid = expected.type_oid::pg_catalog.oid
+                AND a.atttypmod = expected.modifier AND a.attnotnull = expected.required
+                AND NOT a.attisdropped AND NOT a.atthasdef AND a.attislocal AND a.attinhcount = 0
+                AND a.attndims = 0 AND a.attacl IS NULL AND a.attoptions IS NULL AND a.attfdwoptions IS NULL
+                AND a.attcollation = CASE WHEN a.atttypid = 25
+                    THEN 'pg_catalog."C"'::pg_catalog.regcollation::pg_catalog.oid ELSE 0 END
+                AND a.attidentity = '' AND a.attgenerated = '', false))
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attrdef a WHERE a.adrelid = c.oid)
+        AND p.contype = 'p' AND p.connamespace = n.oid AND NOT p.condeferrable AND NOT p.condeferred
+        AND p.convalidated AND p.conislocal AND p.coninhcount = 0 AND p.contypid = 0
+        AND p.confrelid = 0 AND p.conbin IS NULL AND p.conkey = ARRAY[3,5,6,7]::pg_catalog.int2[] AND p.conenforced AND NOT p.conperiod
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con
+            WHERE con.conrelid = c.oid AND NOT (con.oid = p.oid OR (con.contype = 'n' AND con.conenforced AND con.convalidated
+            AND NOT con.condeferrable AND NOT con.condeferred
+            AND con.conislocal AND con.coninhcount = 0 AND con.conindid = 0
+            AND con.conbin IS NULL AND pg_catalog.cardinality(con.conkey) = 1
+            AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a
+                WHERE a.attrelid = c.oid AND a.attnum = con.conkey[1] AND a.attnotnull))))
+        AND (SELECT count(*) FROM pg_catalog.pg_index ix WHERE ix.indrelid = c.oid) = 1
+        AND idx.relkind = 'i' AND idx.relpersistence = 'p' AND idx.relnamespace = n.oid
+        AND idx.relowner = c.relowner AND idx.relacl IS NULL
+        AND EXISTS (SELECT 1 FROM pg_catalog.pg_am am WHERE am.oid = idx.relam AND am.amname = 'btree' AND am.oid < 16384)
+        AND i.indisunique AND i.indisprimary AND NOT i.indisexclusion AND i.indimmediate
+        AND i.indisvalid AND i.indisready AND i.indislive AND i.indnatts = 4 AND i.indnkeyatts = 4
+        AND i.indexprs IS NULL AND i.indpred IS NULL
+        AND i.indkey = '3 5 6 7'::pg_catalog.int2vector
+        AND i.indcollation = '0 0 0 0'::pg_catalog.oidvector
+        AND i.indoption = '0 0 0 0'::pg_catalog.int2vector
+        AND pg_catalog.cardinality(i.indclass::pg_catalog.oid[]) = 4
+        AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY key(opclass, position)
+            LEFT JOIN pg_catalog.pg_opclass op ON op.oid = key.opclass
+            WHERE NOT COALESCE(op.oid < 16384 AND op.opcnamespace = 'pg_catalog'::pg_catalog.regnamespace
+                AND op.opcmethod = idx.relam AND op.opcdefault AND op.opckeytype = 0
+                AND op.opcname = CASE key.position WHEN 1 THEN 'bytea_ops' WHEN 3 THEN 'oid_ops' ELSE 'numeric_ops' END
+                AND op.opcintype = CASE key.position WHEN 1 THEN 17 WHEN 3 THEN 26 ELSE 1700 END::pg_catalog.oid, false))
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class other
+            WHERE other.relnamespace = n.oid AND other.oid NOT IN (c.oid, idx.oid, $7::oid, $8::oid))
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+            WHERE dep.refclassid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND dep.refobjid = n.oid
+            AND NOT ((dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid, $7::oid, $8::oid))
+                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND (dep.objid IN (c.reltype, rowtype.typarray) OR dep.objid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typrelid=$7::oid OR t.oid IN (SELECT typarray FROM pg_catalog.pg_type WHERE typrelid=$7::oid))))
+                OR (dep.classid = 'pg_catalog.pg_constraint'::pg_catalog.regclass
+                    AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.oid = dep.objid AND con.conrelid IN (c.oid,$7::oid)))))
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+            WHERE dep.deptype = 'e' AND ((dep.classid = 'pg_catalog.pg_namespace'::pg_catalog.regclass AND dep.objid = n.oid)
+                OR (dep.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND dep.objid IN (c.oid, idx.oid, $7::oid, $8::oid))
+                OR (dep.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND (dep.objid IN (c.reltype, rowtype.typarray) OR dep.objid IN (SELECT t.oid FROM pg_catalog.pg_type t WHERE t.typrelid=$7::oid OR t.oid IN (SELECT typarray FROM pg_catalog.pg_type WHERE typrelid=$7::oid))))))
+        FROM pg_catalog.pg_namespace n
+        JOIN pg_catalog.pg_roles writer ON writer.rolname = CURRENT_USER
+        JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+        JOIN pg_catalog.pg_type rowtype ON rowtype.oid = c.reltype
+        JOIN pg_catalog.pg_constraint p ON p.conrelid = c.oid AND p.contype = 'p'
+        JOIN pg_catalog.pg_index i ON i.indexrelid = p.conindid AND i.indrelid = c.oid
+        JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid
+        WHERE n.oid = $1::pg_catalog.oid AND c.oid = $2::pg_catalog.oid;

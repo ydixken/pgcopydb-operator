@@ -1,0 +1,10 @@
+use strict;
+use warnings;
+use lib '/probe';
+use PSQLEvidencePrototype;
+use JSON::PP ();
+$SIG{ALRM}=sub {die "probe_timeout\n"};alarm 28;
+my $session=PSQLEvidencePrototype->new(4096);
+my $accepted=$session->finish();
+alarm 0;
+print JSON::PP->new->canonical->encode({accepted=>$accepted?JSON::PP::true:JSON::PP::false,exit=>$session->{exit},signal=>$session->{signal},stderr_bytes=>length($session->{errors}),result_eof=>$session->{eof}{result}?JSON::PP::true:JSON::PP::false,stderr_eof=>$session->{eof}{errors}?JSON::PP::true:JSON::PP::false}),"\n";
