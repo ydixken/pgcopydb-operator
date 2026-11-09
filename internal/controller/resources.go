@@ -18,6 +18,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -27,9 +28,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/conn"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
@@ -1549,6 +1552,34 @@ func scriptJob(m *v1beta1.Migration, runnerImage, name, script string, syncCommi
 	cmd := job.Spec.Template.Spec.Containers[0].Command
 	cmd[len(cmd)-1] = shellPath
 	addConnectTimeout(job)
+	return job, nil
+}
+
+func buildNativeEvidenceJob(m *v1beta1.Migration, runnerImage string, want native.ExecutionRequest) (*batchv1.Job, error) {
+	if m == nil || m.Spec.Engine != v1beta1.MigrationEngineRPGMigrate || m.Namespace != want.Namespace || m.Name != want.MigrationName || want.JobName != "rpgmigrate-evidence-"+want.OperationID || runnerImageFor(m, runnerImage) != want.ImageRef || want.ImageRef == "" {
+		return nil, errors.New("native evidence job configuration invalid")
+	}
+	command, args, env, volumes, mounts, err := native.EvidenceMaterialization(m, want)
+	if err != nil {
+		return nil, errors.New("native evidence job materialization invalid")
+	}
+	job, err := jobSkeleton(m, runnerImage, want.JobName, nil, "", 0, true)
+	if err != nil {
+		return nil, errors.New("native evidence job materialization invalid")
+	}
+	// Long names remain bound by the controller reference, without an invalid name label.
+	if len(validation.IsValidLabelValue(m.Name)) != 0 {
+		delete(job.Labels, labelMigration)
+		delete(job.Spec.Template.Labels, labelMigration)
+	}
+	deadline, automount := int64(90), false
+	job.Spec.ActiveDeadlineSeconds = &deadline
+	pod := &job.Spec.Template.Spec
+	pod.AutomountServiceAccountToken = &automount
+	pod.DNSPolicy = corev1.DNSClusterFirst
+	pod.Volumes = volumes
+	container := &pod.Containers[0]
+	container.Command, container.Args, container.Env, container.VolumeMounts = command, args, env, mounts
 	return job, nil
 }
 
