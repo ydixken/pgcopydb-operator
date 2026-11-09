@@ -140,6 +140,8 @@ type MigrationReconciler struct {
 	// RunnerImage is the default worker image; spec.runner.image overrides.
 	RunnerImage string
 
+	NativePreflight NativePreflightReader
+
 	// Native evidence requires an uncached Reader and an explicit native image.
 	NativeEvidence        *native.Reader
 	RPGMigrateRunnerImage string
