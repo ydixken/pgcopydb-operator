@@ -130,8 +130,58 @@ func TestDockerBuildxDoesNotReinjectPlatform(t *testing.T) {
 	}
 }
 
-func TestGolangCILintDoesNotRebuildBakedCustomBinary(t *testing.T) {
-	localBin := t.TempDir()
+func lintFixture(t *testing.T) (string, string, string, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	localBin := filepath.Join(dir, "bin")
+	fakeBin := filepath.Join(dir, "fake-bin")
+	trace := filepath.Join(dir, "trace")
+	for _, path := range []string{localBin, fakeBin} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"Makefile", ".custom-gcl.yml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(read(t, "../../"+name)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linter := filepath.Join(dir, "fake-linter")
+	scripts := map[string]string{
+		linter: `#!/bin/sh
+set -eu
+printf '%s %s %s\n' "$1" "$GOTOOLCHAIN" "$GOLANGCI_LINT_CACHE" >> "$LINT_TRACE"
+mkdir -p "$GOLANGCI_LINT_CACHE"
+if [ "$1" = custom ]; then
+  cp "$FAKE_LINTER" "$3/golangci-lint-custom"
+fi
+`,
+		filepath.Join(fakeBin, "go"): `#!/bin/sh
+set -eu
+case "$*" in
+  'env GOBIN') printf '\n' ;;
+  'env GOPATH') printf '%s\n' "$FAKE_GOPATH" ;;
+  'env GOOS GOARCH') printf 'linux\namd64\n' ;;
+  install\ *)
+    printf 'bootstrap %s %s\n' "$GOTOOLCHAIN" "$GOLANGCI_LINT_CACHE" >> "$LINT_TRACE"
+    cp "$FAKE_LINTER" "$GOBIN/golangci-lint"
+    ;;
+  *) exit 90 ;;
+esac
+`,
+	}
+	for path, script := range scripts {
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GOTOOLCHAIN=local", "LINT_TRACE="+trace, "FAKE_LINTER="+linter, "FAKE_GOPATH="+dir)
+	return dir, localBin, trace, env
+}
+
+func TestGolangCILintRebuildsBakedCustomBinaryWithoutBootstrap(t *testing.T) {
+	dir, localBin, _, env := lintFixture(t)
 	linter := filepath.Join(localBin, "golangci-lint")
 	if err := os.WriteFile(linter, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -146,34 +196,143 @@ func TestGolangCILintDoesNotRebuildBakedCustomBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("make", "-n", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin)
-	cmd.Dir = "../.."
+	cmd := exec.Command("make", "-n", "golangci-lint", "LOCALBIN="+localBin)
+	cmd.Dir, cmd.Env = dir, env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dry-run golangci-lint: %v\n%s", err, out)
 	}
-	if strings.Contains(string(out), "go install") {
-		t.Fatalf("golangci-lint rebuilds because LOCALBIN is newer:\n%s", out)
+	if strings.Contains(string(out), "go install") || !strings.Contains(string(out), "custom --destination") {
+		t.Fatalf("expected custom rebuild without bootstrap download:\n%s", out)
 	}
 }
 
 func TestGolangCILintCustomBuildFailsClosed(t *testing.T) {
-	localBin := t.TempDir()
+	dir, localBin, _, env := lintFixture(t)
 	version := "test-version"
 	versioned := filepath.Join(localBin, "golangci-lint-"+version)
 	script := "#!/bin/sh\n[ \"${1:-}\" != custom ]\n"
 	if err := os.WriteFile(versioned, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(versioned, filepath.Join(localBin, "golangci-lint")); err != nil {
+	linter := filepath.Join(localBin, "golangci-lint")
+	if err := os.Symlink(versioned, linter); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(localBin, "golangci-lint-custom")
+	if err := os.WriteFile(stale, []byte("stale output"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("make", "-B", "-f", "Makefile", "golangci-lint", "LOCALBIN="+localBin,
+	cmd := exec.Command("make", "-B", "golangci-lint", "LOCALBIN="+localBin,
 		"GOLANGCI_LINT_VERSION="+version)
-	cmd.Dir = "../.."
+	cmd.Dir, cmd.Env = dir, env
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("golangci-lint ignored a failed custom build:\n%s", out)
+	}
+	original, err := os.Stat(versioned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, err := os.Stat(linter); err != nil || !os.SameFile(original, current) {
+		t.Fatalf("failed custom build replaced the original tool: %v", err)
+	}
+	if data, err := os.ReadFile(stale); err != nil || string(data) != "stale output" {
+		t.Fatalf("failed custom build moved stale output: %q, %v", data, err)
+	}
+}
+
+func TestGolangCILintCompilerAndCacheIdentity(t *testing.T) {
+	dir, localBin, trace, env := lintFixture(t)
+	cacheRoot := filepath.Join(dir, "analysis")
+	env = append(env, "GOLANGCI_LINT_CACHE="+cacheRoot)
+	run := func(target string) []string {
+		t.Helper()
+		cmd := exec.Command("make", target, "LOCALBIN="+localBin, "GOTOOLCHAIN=local")
+		cmd.Dir, cmd.Env = dir, env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("make %s: %v\n%s", target, err, out)
+		}
+		data, err := os.ReadFile(trace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) != 3 || fields[1] != "go1.27.3" {
+				t.Fatalf("tool invocation did not inherit the pinned compiler: %q", line)
+			}
+		}
+		return lines
+	}
+	first := run("lint")
+	if len(first) != 3 || !strings.HasPrefix(first[0], "bootstrap ") ||
+		!strings.HasPrefix(first[1], "custom ") || !strings.HasPrefix(first[2], "run ") {
+		t.Fatalf("missing bootstrap/custom/analysis proof: %v", first)
+	}
+	cache := strings.Fields(first[0])[2]
+	if !strings.HasPrefix(cache, cacheRoot+"/go1.27.3-v2.14.0-linux-amd64-") {
+		t.Fatalf("cache is not namespaced beneath caller root: %q", cache)
+	}
+	for _, line := range run("lint") {
+		if strings.Fields(line)[2] != cache {
+			t.Fatalf("same tool identity changed cache: %q", line)
+		}
+	}
+	config := filepath.Join(dir, ".custom-gcl.yml")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(strings.ReplaceAll(string(data), "v0.10.1", "v0.10.2")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed := run("lint-config")
+	if strings.Fields(changed[len(changed)-1])[2] == cache {
+		t.Fatal("changed plugin input reused the analysis namespace")
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatalf("old cache was removed: %v", err)
+	}
+	for _, target := range []string{"lint-fix", "golangci-lint"} {
+		run(target)
+	}
+}
+
+func TestGolangCILintCacheDefaultAndNonLintScope(t *testing.T) {
+	dir, localBin, trace, env := lintFixture(t)
+	env = append(env, "GOLANGCI_LINT_CACHE=")
+	cmd := exec.Command("make", "golangci-lint", "LOCALBIN="+localBin)
+	cmd.Dir, cmd.Env = dir, env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("make golangci-lint: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if fields := strings.Fields(line); len(fields) != 3 || !strings.HasPrefix(fields[2], localBin+"/golangci-cache/") {
+			t.Fatalf("default analysis root escaped LOCALBIN: %q", line)
+		}
+	}
+	makefile := filepath.Join(dir, "Makefile")
+	file, err := os.OpenFile(makefile, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("\nprint-caller-env:\n" +
+		"\t@printf '%s|%s' \"$$GOTOOLCHAIN\" \"$$GOLANGCI_LINT_CACHE\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("make", "print-caller-env")
+	cmd.Dir, cmd.Env = dir, env
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "local|" {
+		t.Fatalf("lint variables leaked into an unrelated target: %q, %v", out, err)
 	}
 }
 

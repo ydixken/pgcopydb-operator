@@ -97,6 +97,11 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# Maintained scaffold exception: lint needs its own pinned compiler.
+export GOTOOLCHAIN GOLANGCI_LINT_CACHE
+lint lint-fix lint-config golangci-lint: override GOTOOLCHAIN = $(GOLANGCI_LINT_GO_VERSION)
+lint lint-fix lint-config golangci-lint: override GOLANGCI_LINT_CACHE = $(GOLANGCI_LINT_CACHE_ROOT)/$(GOLANGCI_LINT_CACHE_ID)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
@@ -207,7 +212,13 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
+GOLANGCI_LINT_GO_VERSION := go1.27.3
+# Capture the caller's root before the target-specific cache value is exported.
+GOLANGCI_LINT_CACHE_ROOT := $(or $(GOLANGCI_LINT_CACHE),$(LOCALBIN)/golangci-cache)
+GOLANGCI_LINT_PLATFORM = $(or $(shell GOTOOLCHAIN=$(GOLANGCI_LINT_GO_VERSION) go env GOOS GOARCH | paste -sd- -),$(error Cannot identify the lint tool platform))
+GOLANGCI_LINT_CONFIG_HASH = $(or $(shell git hash-object .custom-gcl.yml),$(error Cannot hash .custom-gcl.yml))
+GOLANGCI_LINT_CACHE_ID = $(GOLANGCI_LINT_GO_VERSION)-$(GOLANGCI_LINT_VERSION)-$(GOLANGCI_LINT_PLATFORM)-$(GOLANGCI_LINT_CONFIG_HASH)
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -232,14 +243,14 @@ $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
 
 .PHONY: golangci-lint
-golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): | $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+golangci-lint: $(GOLANGCI_LINT) ## Build the configured custom golangci-lint.
 	@if test -f .custom-gcl.yml; then \
 		echo "Building custom golangci-lint with plugins..."; \
-		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom; \
-		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
+		"$(GOLANGCI_LINT)" custom --destination "$(LOCALBIN)" --name golangci-lint-custom || exit $$?; \
+		mv -f "$(LOCALBIN)/golangci-lint-custom" "$(GOLANGCI_LINT)"; \
 	fi
+$(GOLANGCI_LINT): | $(LOCALBIN)
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

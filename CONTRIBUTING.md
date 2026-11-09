@@ -6,10 +6,10 @@ The keywords MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are to be interpreted a
 
 ## Requirements
 
-- [go](https://go.dev): the operator's language and test toolchain.
+- [go](https://go.dev) 1.27.0 or newer: the operator's language and test toolchain.
 - [task](https://taskfile.dev): task runner, the entrypoint for everything.
 - [yamllint](https://yamllint.readthedocs.io): lints all YAML.
-- [golangci-lint](https://golangci-lint.run) v2: Go linting.
+- [golangci-lint](https://golangci-lint.run): Makefile builds v2.14.0 with the configured logcheck plugin under Go1.27.3.
 - [kubectl](https://kubernetes.io/docs/reference/kubectl/): only needed for `task e2e`.
 - [gh](https://cli.github.com): PRs happen on GitHub.
 - Docker MAY be installed for local image builds; CI builds the published image.
@@ -105,17 +105,24 @@ Versions are pinned so the image is reproducible and Renovate can see them, exce
 Merging a Renovate bump rebuilds the image; the weekly schedule is for the apt packages, which move on their own.
 
 No job runs `actions/setup-go`.
-The image carries Go, and `GOTOOLCHAIN` is left at its default so a `go.mod` that has moved ahead of the image fetches the toolchain it asks for rather than failing.
-Pinning it to `local` deadlocks: the image rebuilds only once a bump is on `main`, so the pull request making the bump would be red with no way through, and a push to main races its own rebuild.
+The image carries Go, and non-lint targets retain the caller's toolchain selection.
+We keep the operator minimum at Go1.27.0 and pin the linter compiler separately to Go1.27.3 in Makefile because its importer must decode that compiler's export format.
+`make lint`, `make lint-fix`, `make lint-config` and `make golangci-lint` override inherited `GOTOOLCHAIN=local` for bootstrap, custom build and analysis.
+Each invocation rebuilds the configured custom linter, including on runners with a baked executable, so an older binary cannot bypass the selected compiler or plugin configuration.
+A failed custom build leaves the original executable in place and fails the target.
+We maintain this narrow exception to the scaffold-owned Makefile; generator refreshes must preserve these linter rules.
 
-`setup-helm` and `setup-python` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner, and `ubuntu-latest` has neither Helm nor a guaranteed Python.
+`setup-helm` and `setup-python` run for fork pull requests and the native qualification branch in [ci.yml](.github/workflows/ci.yml), because those jobs use hosted runners without the baked tools.
 
 The CI `lint` job runs [actionlint](https://github.com/rhysd/actionlint) on all workflows; yamllint alone cannot detect a step that lost its `uses:`.
 If the runner lacks actionlint, CI installs the version pinned in `images/github-runner/Dockerfile` and fails if installation or linting fails.
 Local `task lint` runs actionlint when installed and prints a skip message otherwise.
 [`.github/actionlint.yaml`](.github/actionlint.yaml) declares the two self-hosted runner labels.
 
-The Go build cache, the module cache, golangci-lint's analysis cache and the buildx layer cache live on the node under `/cache`, mounted by the scale set.
+The Go build cache, module cache, linter analysis cache root and buildx layer cache live on the node under `/cache`, mounted by the scale set.
+The lint targets append the compiler pin, linter version, GOOS/GOARCH and `.custom-gcl.yml` Git blob hash to the caller's `GOLANGCI_LINT_CACHE` root, so different tool inputs cannot share analysis facts.
+Without an explicit root, lint uses `LOCALBIN/golangci-cache`, which is ignored under the default `bin/` directory.
+Existing namespaces and Go/module caches remain intact.
 Nothing goes through GitHub's cache service: a round trip to it cost more than it returned ([measured](docs/research/measurements.md#a-github-cache-round-trip-for-the-runner-image)), and buildx would have done the same with the image layers.
 
 ## E2e tests
