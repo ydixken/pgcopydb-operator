@@ -311,7 +311,7 @@ func nativeControlSourceReply(t *testing.T, body []byte, head string) []byte {
 
 func TestNativeControlAdmission(t *testing.T) {
 	t.Run("pre E original worker data", testNativeControlBeforeEnd)
-	for _, field := range []string{"Job UID", "PVC UID", "Pod UID during admission", nativeControlRestartCase, "terminal worker", "wrong image", "literal environment", "namespace duplicate"} {
+	for _, field := range []string{"Job UID", "PVC UID", "Pod UID during admission", nativeControlRestartCase, "terminal worker", probeImageCase, "literal environment", "namespace duplicate"} {
 		t.Run(field, func(t *testing.T) {
 			f := newNativeControlFixture(t)
 			switch field {
@@ -332,7 +332,7 @@ func TestNativeControlAdmission(t *testing.T) {
 				if f.store.Status().Update(context.Background(), p) != nil {
 					t.Fatal("terminal fixture failed")
 				}
-			case "wrong image":
+			case probeImageCase:
 				p := f.pod.DeepCopy()
 				p.Status.ContainerStatuses[0].ImageID = testRunnerImage
 				if f.store.Status().Update(context.Background(), p) != nil {

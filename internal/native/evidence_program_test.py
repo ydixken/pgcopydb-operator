@@ -41,6 +41,13 @@ def source_request(kind='source_head'):
     value['pod_name']='worker-pod';return value
 
 
+def retry_request(commit=True, local=False):
+    value=source_request('target_retry');value['inputs']={'commit_test':commit,'expect_local':local}
+    value['execution']['role']='retry_gate';value['execution']['job_uid']='44445555-6666-7777-aaaa-bbbbccccdddd'
+    value['container']['pod_uid']='55556666-7777-8888-aaaa-bbbbccccdddd';value['pod_name']='retry-pod'
+    return value
+
+
 def private_fixture(directory_info):
     req=request(); work=req['execution']['work']; run=list(bytes.fromhex(work['run_id']))
     stream=dict(run=run,source=dict(system_identifier=123,database_oid=11),generation=1)
@@ -335,9 +342,197 @@ class SourceFixture:
     def run(self):return P.run_source_observation(self.kind,self.req['operation_id'],self.req['program_sha256'])
 
 
+class RetryFixture:
+    # Doubles verify fixed probe control flow and failure handling, not target durability.
+    def __init__(self,case,commit=True,local=False,census=Ellipsis,fault=None,major=16):
+        self.case=case;self.req=retry_request(commit,local);self.raw=json.dumps(self.req,indent=1).encode();self.fault=fault
+        self.census=census if census is not Ellipsis else [b'0',b'0',b't',b'0',b'0',b'on',b'1760000200',b'pgm-retry-gate']
+        self.major=major;self.events=[];self.queries=[];self.closes=[];self.docs=[];self.clock=100.;self.deadlines=[]
+    def event(self,name):
+        self.events.append(name)
+        if self.fault=='late-'+name:self.clock=161.
+        if self.fault=='overrun-'+name:self.clock=191.
+        if self.fault==name:raise P.Refusal('closure' if name.endswith('close') else 'result','57014')
+    def __enter__(self):
+        from contextlib import ExitStack
+        self.stack=ExitStack();outer=self
+        class Channel:
+            def __init__(self,op,deadline):outer.case.assertEqual(op,'5'*32);outer.deadlines.append(deadline);outer.event('channel-open')
+            def route(self):outer.event('route')
+            def consume(self):outer.event('consume');return outer.raw
+            def finish(self,payload=None,deadline=None):
+                if payload is not None:
+                    for item in ('target','material','diagnostics'):outer.case.assertIn(item,outer.closes)
+                    outer.case.assertEqual(deadline,190.);outer.docs.append(bytes(payload));outer.event('channel-close')
+                else:outer.event('channel-empty')
+        class Material:
+            def __init__(self,env,source_only=False,target_only=False):
+                outer.case.assertIs(source_only,False);outer.case.assertIs(target_only,True);self.files=[];outer.event('material-open')
+            def prepare(self,library,deadline):outer.deadlines.append(deadline);outer.event('prepare')
+            def connection(self,role):outer.case.assertEqual(role,'target');outer.event('target-input');return role
+            def check(self):outer.event('material-check')
+            def close(self):
+                failed=False
+                for file in self.files:
+                    try:file.close()
+                    except P.Refusal:failed=True
+                outer.closes.append('material');outer.event('material-close');P.need(not failed,'closure')
+        class Resolver:
+            raw=b'nameserver 127.0.0.1\n'
+            def __init__(self,*args):outer.event('resolver-open')
+            def check(self):outer.event('resolver-check')
+            def close(self):outer.closes.append('resolver');outer.event('resolver-close')
+        class Diagnostics:
+            def __init__(self):outer.event('diagnostics-open')
+            def check(self):outer.event('diagnostics-check')
+            def close(self):outer.closes.append('diagnostics');outer.event('diagnostics-close')
+        class Session:
+            def __init__(self,library,role,deadline,diag):
+                outer.case.assertEqual(role,'target');outer.deadlines.append(deadline);outer.event('target-open');self.deadline=deadline
+                self.backend=24;self.props={'PQuser':b'private-role','PQdb':b'private-db','ssl':1};self.state=0;self.commit_ack=False
+            def check(self):outer.event('target-check');P.need(outer.clock<self.deadline,'timeout')
+            def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
+                self.check();outer.case.assertEqual(self.state,0 if tag=='BEGIN' else 2 if commit else state)
+                outer.queries.append((sql,params,tag,state,rows,width,commit,self.deadline));outer.event('query-'+str(len(outer.queries)))
+                if commit:
+                    outer.case.assertEqual(sql,'COMMIT;');outer.case.assertEqual(self.deadline,105.)
+                    if outer.fault=='unknown-commit':raise P.Refusal('unknown_commit','57014')
+                    if outer.fault=='late-commit':outer.clock=106.
+                    self.commit_ack=outer.fault!='missing-ack'
+                self.state=state
+                if rows==0:return []
+                if 'CURRENT_USER, SESSION_USER' in sql:return [[b'private-role',b'private-role',b'private-db',b't']]
+                if "'server_version_num'" in sql:
+                    count=sum(1 for query,*_ in outer.queries if "'server_version_num'" in query)
+                    return [[b'24',b'22',b'33',b'33',str((17 if outer.fault=='major17' else outer.major)*10000+6).encode(),b'f' if outer.fault=='standby' else b't',b'off' if not (outer.fault=='identity-change' and count==2) else b'on']]
+                if '@pg_stat_activity' in sql:return copy.deepcopy(outer.census)
+                if sql=="SELECT @current_setting('synchronous_commit'),@current_setting('application_name');":
+                    return [[b'local' if outer.fault=='setting-change' else outer.census[0][5],b'foreign' if outer.fault=='app-change' else outer.census[0][7]]]
+                raise AssertionError('unexpected retry SQL')
+            def close(self,healthy=True):
+                if healthy:outer.case.assertEqual(self.state,0)
+                outer.closes.append('target');outer.event('target-close')
+        if type(self.census) is list and self.census and type(self.census[0]) is bytes:self.census=[self.census]
+        work=self.req['execution']['work']
+        env={'LANG':'C','LC_ALL':'C','PGCONNECT_TIMEOUT':'10','PGAPPNAME':'pgm-retry-gate','PGCOPYDB_TARGET_PGURI':'target-opaque','PGCOPYDB_SOURCE_PGURI':'source-secret-sentinel',
+             'RPGMIGRATE_MIGRATION_UID':work['migration_uid'],'RPGMIGRATE_RUN_ID':work['run_id'],'RPGMIGRATE_WORKDIR_ID':work['workdir_id'],'RPGMIGRATE_CHECKPOINT_GENERATION':'1'}
+        self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
+        for name,value in (('InputChannel',Channel),('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)):self.stack.enter_context(mock.patch.object(P,name,value))
+        self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')));self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532));self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'));self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock))
+        for name in ('SourceState','PrivateState','observe','run_completed_evidence','run_source_observation','run_native_preflight'):self.stack.enter_context(mock.patch.object(P,name,side_effect=AssertionError('foreign role or authority path entered')))
+        return self
+    def __exit__(self,*args):return self.stack.__exit__(*args)
+    def run(self):return P.run_target_retry(self.req['operation_id'],self.req['program_sha256'])
+
+
 class NativePythonTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(P, 'reviewed evidence program is absent')
+
+    def test_TargetRetryWire(self):
+        self.assertIsNotNone(getattr(P,'run_target_retry',None),'fixed target retry role is absent')
+        self.assertEqual(P.run_target_retry.__annotations__,{'operation_id':str,'program_sha256':str,'return':int})
+        value=retry_request();raw=json.dumps(value).encode();sha=value['program_sha256']
+        self.assertEqual(P.validate_target_retry_request(raw,'5'*32,sha),value)
+        variants=[b'',b'\xff',raw+b' {}',raw[:-1]+b',"version":1}',b'['*33+b'0'+b']'*33,b' '*65537]
+        for path,bad in ((('kind',),'completed_evidence'),(('version',),True),(('operation_id',),'A'*32),(('program_sha256',),'0'*64),(('execution','role'),'evidence'),(('execution','role'),'worker'),(('execution','job_uid'),value['execution']['worker_job_uid']),(('execution','attempt'),0),(('inputs','commit_test'),1),(('inputs','expect_local'),'false')):
+            changed=copy.deepcopy(value);at=changed
+            for key in path[:-1]:at=at[key]
+            at[path[-1]]=bad;variants.append(json.dumps(changed).encode())
+        for section in (None,'execution','container','inputs'):
+            for field in (value if section is None else value[section]):
+                changed=copy.deepcopy(value);at=changed if section is None else changed[section];del at[field];variants.append(json.dumps(changed).encode())
+                changed=copy.deepcopy(value);at=changed if section is None else changed[section];at[field]=None;variants.append(json.dumps(changed).encode())
+            changed=copy.deepcopy(value);at=changed if section is None else changed[section];at['extra']=True;variants.append(json.dumps(changed).encode())
+        for bad in variants:
+            with self.subTest(bad=variants.index(bad)),self.assertRaises(P.Refusal):P.validate_target_retry_request(bad,'5'*32,sha)
+        with self.assertRaises(P.Refusal):P.validate_request(raw,'5'*32,sha)
+        with self.assertRaises(P.Refusal):P.validate_source_request(raw,'source_head','5'*32,sha)
+        with mock.patch.object(P,'run_target_retry',return_value=7) as retry:
+            self.assertEqual(P.main(['program','target_retry','5'*32,sha]),7);retry.assert_called_once_with('5'*32,sha)
+
+    def test_TargetRetryData(self):
+        cases=[(True,False,[b'0',b'0',b't',b'0',b'0',b'on',b'1760000200',b'pgm-retry-gate'],True,True),
+               (True,False,[b'2',b'1',b't',b'1760000000',b'0',b'on',b'1760000200',b'pgm-retry-gate'],False,True),
+               (True,False,[b'0',b'0',b't',b'0',b'1',b'on',b'1760000200',b'pgm-retry-gate'],False,True),
+               (True,False,[b'1',b'0',b'f',b'0',b'0',b'off',b'1760000200',b'pinned-app'],True,True),
+               (True,True,[b'0',b'0',b't',b'0',b'0',b'local',b'1760000200',b'pgm-retry-gate'],True,True),
+               (False,True,[b'0',b'0',b't',b'0',b'0',b'local',b'1760000200',b'pgm-retry-gate'],False,True),
+               (False,True,[b'0',b'0',b't',b'0',b'0',b'on',b'1760000200',b'pgm-retry-gate'],False,False)]
+        for commit,local,census,attempted,admitted in cases:
+            with self.subTest(commit=commit,local=local,census=census),RetryFixture(self,commit,local,census) as fixture:
+                self.assertEqual(fixture.run(),0);self.assertEqual(len(fixture.docs),1);raw=fixture.docs[0];value=json.loads(raw)
+                self.assertEqual(set(value),set('version kind operation_id program_sha256 request_sha256 execution_sha256 work observed_at_unix census_known total syncrep gate_waiting oldest_syncrep_wait_unix application_attribution_known target_synchronous_commit synchronous_commit_admitted probe_attempted probe_committed target_closed materialization_closed diagnostics_clean'.split()))
+                self.assertEqual(value['version'],1);self.assertEqual(value['kind'],'target_retry');self.assertEqual(value['operation_id'],'5'*32);self.assertEqual(value['program_sha256'],fixture.req['program_sha256']);self.assertEqual(value['work'],fixture.req['execution']['work'])
+                digest=hashlib.sha256(fixture.raw).digest();self.assertEqual(value['request_sha256'],digest.hex());self.assertEqual(value['execution_sha256'],hashlib.sha256(b'rpgmigrate.native.execution.v1\0'+digest).hexdigest())
+                self.assertIs(value['probe_attempted'],attempted);self.assertIs(value['probe_committed'],attempted);self.assertIs(value['synchronous_commit_admitted'],admitted)
+                self.assertEqual([value[key] for key in ('total','syncrep','oldest_syncrep_wait_unix','gate_waiting','observed_at_unix')],[int(census[index]) for index in (0,1,3,4,6)])
+                self.assertIs(value['application_attribution_known'],census[2]==b't');self.assertEqual(value['target_synchronous_commit'],census[5].decode())
+                for key in ('census_known','target_closed','materialization_closed','diagnostics_clean'):self.assertIs(value[key],True)
+                self.assertEqual(fixture.deadlines,[130.,160.,110.]);self.assertEqual(fixture.events.count('target-open'),1)
+                mutations=[(sql,tag,state,commit_flag) for sql,_,tag,state,_,_,commit_flag,_ in fixture.queries if tag in ('BEGIN','CREATE TABLE','COMMIT') or sql.startswith('SET LOCAL')]
+                self.assertEqual(mutations,[('BEGIN READ WRITE;','BEGIN',2,False),("SET LOCAL synchronous_commit TO 'on';",'SET',2,False),('CREATE TEMP TABLE pgm_commit_probe () ON COMMIT DROP;','CREATE TABLE',2,False),('COMMIT;','COMMIT',0,True)] if attempted else [])
+                sql=next(sql for sql,*_ in fixture.queries if '@pg_stat_activity' in sql)
+                for predicate in ("a.usename=SESSION_USER","a.pid<>@pg_backend_pid()","a.datname=@current_database()","a.application_name LIKE 'pgcopydb%' OR a.application_name LIKE 'rpgmigrate%'","@current_setting('application_name')<>'pgm-retry-gate'","g.application_name='pgm-retry-gate'","g.wait_event_type='IPC' AND g.wait_event='SyncRep'"):self.assertIn(predicate,sql)
+                self.assertNotIn('client_addr',sql);self.assertNotIn('backend_type',sql)
+                for forbidden in ('ready','checkpoint','saved_e','end_lsn','token','resources','owned','acknowledged','durable'):self.assertNotIn(forbidden,value)
+                for sentinel in (b'source-secret-sentinel',b'private-role',b'private-db',b'pinned-app'):self.assertNotIn(sentinel,raw)
+                self.assertTrue(raw.endswith(b'\n'));self.assertLessEqual(len(raw),65536)
+        for setting in (b'on',b'off',b'local',b'remote_write',b'remote_apply'):
+            census=[b'0',b'0',b't',b'0',b'0',setting,b'1760000200',b'pgm-retry-gate']
+            with RetryFixture(self,census=census,major=18) as fixture:
+                self.assertEqual(fixture.run(),0);value=json.loads(fixture.docs[0]);self.assertIs(value['probe_committed'],True);self.assertEqual(value['target_synchronous_commit'],setting.decode())
+
+    def test_TargetRetryRefusals(self):
+        with RetryFixture(self) as fixture:self.assertEqual(fixture.run(),0);queries=len(fixture.queries)
+        faults=['query-'+str(i) for i in range(1,queries+1)]+['channel-open','route','consume','diagnostics-open','material-open','prepare','runtime','resolver-open','resolver-policy','target-open','target-check','resolver-check','material-check','diagnostics-check','target-close','resolver-close','material-close','diagnostics-close','unknown-commit','missing-ack','late-commit','major17','standby','identity-change','setting-change','app-change','late-query-'+str(queries),'overrun-target-close']
+        for fault in faults:
+            with self.subTest(fault=fault),RetryFixture(self,fault=fault) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.docs,[])
+        with RetryFixture(self,fault='channel-close') as fixture:
+            self.assertEqual(fixture.run(),1);self.assertEqual(len(fixture.docs),1)
+            self.assertNotIn('ready',json.loads(fixture.docs[0]))
+        with RetryFixture(self) as fixture,mock.patch.object(P,'qualified_resolver_policy',side_effect=P.Refusal('capability')):
+            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.docs,[]);self.assertNotIn('target-open',fixture.events)
+        good=[b'0',b'0',b't',b'0',b'0',b'on',b'1760000200',b'pgm-retry-gate']
+        bad_rows=[[],None,[[None]*8],[good,good],[good[:-1]],[good+[b'extra']]]
+        for index,bad in ((0,b'-1'),(0,b'9223372036854775808'),(1,b'1'),(2,b'f'),(3,b'1'),(4,b'-1'),(5,b'unknown'),(6,b'0'),(7,None)):
+            changed=good.copy();changed[index]=bad;bad_rows.append([changed])
+        bad_rows.append([[b'1',b'1',b't',b'1760000300',b'0',b'on',b'1760000200',b'pgm-retry-gate']])
+        for rows in bad_rows:
+            with self.subTest(rows=rows),RetryFixture(self,census=rows) as fixture:
+                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.docs,[]);self.assertFalse(any(sql.startswith('BEGIN') for sql,*_ in fixture.queries))
+
+    def test_TargetRetryMaterialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            uri=Path(directory)/'uri';password=Path(directory)/'pass';raw=b"host=target dbname='opaque' password='' passfile='/tmp/mixed' sslmode=disable\n"
+            uri.write_bytes(raw);uri.chmod(0o600);mixed=b'target:5432:db:app:target-secret\nsource:5432:db:app:unrelated-source-secret\n';password.write_bytes(mixed);password.chmod(0o600)
+            before={p:(p.read_bytes(),p.stat().st_mode,p.stat().st_ino) for p in (uri,password)};opened=[]
+            def open_file(path,fd):
+                opened.append(path)
+                if path==b'/tmp/pgm-target-uri':return os.open(uri,os.O_RDONLY|os.O_NONBLOCK)
+                if path==b'/tmp/mixed':return os.open(password,os.O_RDONLY|os.O_NONBLOCK)
+                raise AssertionError('unselected source or credential file read')
+            env={'PGCOPYDB_TARGET_PGURI':'env-target','PGCOPYDB_SOURCE_PGURI':'poisoned-source'}
+            poisoned=dict(env,PGCOPYDB_SOURCE_PGURI=object(),PGCOPYDB_SOURCE_SUPER_PGURI=object())
+            library=FileOptionsLibrary({raw:{b'password':b'',b'passfile':b'/tmp/mixed',b'sslmode':b'disable'}})
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'open_connection_file',side_effect=open_file),mock.patch.object(P.os,'walk',side_effect=AssertionError('credential tree scan')),FakeMemfd() as kernel:
+                material=P.Materialization(poisoned,target_only=True)
+                try:
+                    self.assertEqual(material.roles,{'target':raw});material.prepare(library,time.monotonic()+3)
+                    self.assertEqual(set(material.inputs),{'target'});self.assertEqual(material.connection('target').raw,raw);self.assertEqual(material.connection('target').snapshots[0].raw,mixed)
+                    with self.assertRaises(P.Refusal):material.connection('source')
+                    self.assertFalse(any(key.startswith(b'PGCOPYDB_SOURCE_') for key in material.envb));os.environ['PGCOPYDB_SOURCE_PGURI']='different-poison';material.check()
+                finally:material.close()
+                self.assertEqual(kernel.live(),[])
+            self.assertEqual({p:(p.read_bytes(),p.stat().st_mode,p.stat().st_ino) for p in (uri,password)},before)
+            self.assertEqual(set(opened),{b'/tmp/pgm-target-uri',b'/tmp/mixed'})
+            with self.assertRaises(P.Refusal):P.Materialization(env,source_only=True,target_only=True)
+            def missing(path,fd):self.assertEqual(path,b'/tmp/pgm-target-uri');raise FileNotFoundError(2,'not provisioned')
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'open_connection_file',side_effect=missing):
+                material=P.Materialization(env,target_only=True)
+                try:self.assertEqual(material.roles,{'target':b'env-target'});material.check()
+                finally:material.close()
 
     def test_SourceObservationWire(self):
         self.assertIsNotNone(getattr(P,'run_source_observation',None),'fixed source observation role is absent')
@@ -652,10 +847,13 @@ class NativePythonTests(unittest.TestCase):
     def test_NativePreflightBounds(self):
         source=(HERE/'evidence_program.py').read_bytes()
         self.assertLessEqual(len(source),122880)
-        prefix=b'exec /usr/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH /usr/bin/python3 -I -c '
-        import shlex
-        main=prefix+shlex.quote(source.decode()).encode()+b' native_preflight '+b'5'*32+b' '+hashlib.sha256(source).hexdigest().encode()+b'\0'
-        self.assertLessEqual(len(main),126976)
+        prefix=b'exec /usr/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH /usr/bin/python3 -I -B - '
+        delimiter=b'RPGMIGRATE_NATIVE_EVIDENCE_PY'
+        for role in (b'native_preflight',b'completed_evidence',b'target_retry'):
+            main=prefix+role+b' '+b'5'*32+b' '+hashlib.sha256(source).hexdigest().encode()+b" <<'"+delimiter+b"'\n"+source+delimiter+b'\n'
+            self.assertLessEqual(len(main)+1,126976)
+            result=P.subprocess.run(['/bin/sh','-n','-c',main.decode()],capture_output=True,timeout=3)
+            self.assertEqual((result.returncode,result.stdout,result.stderr),(0,b'',b''))
         with PreflightFixture(self) as fixture,mock.patch.object(P.os,'write',side_effect=OSError('secret-sentinel')):
             self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
         with PreflightFixture(self) as fixture:
@@ -1526,7 +1724,7 @@ class NativePythonTests(unittest.TestCase):
         self.require_file_api()
         from types import SimpleNamespace
         raw_source=b'source';raw_target=b'target';events=[];created=[]
-        material=P.Materialization.__new__(P.Materialization);material.source_only=False
+        material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.target_only=False
         material.inputs={};material.prepared=False;material.roles={'source':raw_source,'target':raw_target};material.envb={};material.check=lambda:None
         def prepare(library,raw,envb,owner,deadline):
             events.append(raw)
@@ -1540,7 +1738,7 @@ class NativePythonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory);file=path/'file';file.write_bytes(b'original');file.chmod(0o600);(path/'projection').symlink_to('file')
             cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY)
-            material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.paths={};material.absences=set();material.files=[];material.inputs={}
+            material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.target_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.paths={};material.absences=set();material.files=[];material.inputs={}
             def open_file(raw,fd):return os.open(raw,os.O_RDONLY|os.O_NONBLOCK,dir_fd=fd)
             try:
                 with mock.patch.object(P,'open_connection_file',side_effect=open_file):
@@ -1549,7 +1747,7 @@ class NativePythonTests(unittest.TestCase):
                     with self.assertRaises(P.Refusal):material.check()
             finally:material.close()
         cwd=os.open('.',os.O_RDONLY|os.O_DIRECTORY)
-        material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.files=[];material.absences=set()
+        material=P.Materialization.__new__(P.Materialization);material.source_only=False;material.target_only=False;material.env=dict(os.environ);material.cwd=cwd;material.cwd_id=P.identity(os.fstat(cwd));material.files=[];material.absences=set()
         dead=SimpleNamespace(check=lambda:(_ for _ in ()).throw(AssertionError('closed source snapshot reopened')))
         live=mock.Mock()
         material.inputs={'source':SimpleNamespace(closed=True,absent=False,snapshots=[dead]),'target':SimpleNamespace(closed=False,absent=False,snapshots=[live])}

@@ -279,6 +279,22 @@ func TestNativeRetryProgramDelivery(t *testing.T) {
 	if !strings.HasSuffix(args[1], framed) {
 		t.Fatal("canonical program bytes changed during framing")
 	}
+	for role, original := range map[string]*batchv1.Job{
+		completedEvidenceKind: newAdmissionFixture(t).job,
+		"target_retry":        newRetryFixture(t).base.job,
+	} {
+		job := original.DeepCopy()
+		job.TypeMeta = metav1.TypeMeta{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job"}
+		raw, err := json.Marshal(job)
+		if err != nil || len(raw) > EvidenceJobJSONLimit || ValidateEvidenceJobSize(job) != nil {
+			t.Fatal("canonical helper exceeds its Job JSON limit")
+		}
+		container := job.Spec.Template.Spec.Containers[0]
+		if len(container.Args[1])+1 > EvidenceMainArgumentLimit || len(container.Command[2])+1 > EvidencePreludeArgumentLimit {
+			t.Fatal("canonical helper exceeds its argument limits")
+		}
+		t.Logf("%s canonical=%d main_with_NUL=%d prelude_with_NUL=%d Job_JSON=%d", role, len(EvidenceProgram()), len(container.Args[1])+1, len(container.Command[2])+1, len(raw))
+	}
 	program[0] ^= 1
 	if _, _, err := renderRetryScripts(program, w.OperationID, w.ProgramSHA256, ""); err == nil {
 		t.Fatal("program mutation accepted")

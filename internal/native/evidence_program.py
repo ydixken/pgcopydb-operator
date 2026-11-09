@@ -1001,9 +1001,10 @@ def catalog_sql(marker,major):
  else: need(major==16,CAP_ERR)
  return sql.replace('@','pg_catalog.')
 class Materialization:
-    def __init__(self, env, source_only=False):
-        need(type(source_only) is bool, CAP_ERR)
+    def __init__(self, env, source_only=False, target_only=False):
+        need(type(source_only) is bool and type(target_only) is bool and not (source_only and target_only), CAP_ERR)
         self.source_only = source_only
+        self.target_only = target_only
         self.env = self.selected_environment(env)
         self.envb = {os.fsencode(key): os.fsencode(value) for key, value in self.env.items()}
         self.files = []
@@ -1013,19 +1014,20 @@ class Materialization:
         self.prepared = False
         self.cwd = None
         self.roles = {role: os.fsencode(self.env.get('PGCOPYDB_' + role.upper() + '_PGURI', ''))
-                      for role in (('source',) if source_only else ('source', 'target'))}
+                      for role in (('source',) if source_only else ('target',) if target_only else ('source', 'target'))}
         try:
             self.cwd = fdopen('.', True)
             self.cwd_id = identity(os.fstat(self.cwd))
-            if source_only:
+            if source_only or target_only:
+                role = 'source' if source_only else 'target'
                 try:
-                    self.roles['source'] = self.pin('/tmp/pgm-source-uri').raw
+                    self.roles[role] = self.pin('/tmp/pgm-' + role + '-uri').raw
                 except OSError as error:
                     if error.errno not in (errno.ENOENT, errno.ENOTDIR):
                         raise Refusal(CONN) from None
             need(all(self.roles.values()) and not any(b'\0' in value for value in self.roles.values()), CONN)
-            paths = [] if source_only else ['/tmp/pgm-source-uri', '/tmp/pgm-target-uri', '/tmp/pgpass']
-            for root in (() if source_only else ('/etc/pgcopydb/creds', '/etc/pgcopydb/tls')):
+            paths = [] if source_only or target_only else ['/tmp/pgm-source-uri', '/tmp/pgm-target-uri', '/tmp/pgpass']
+            for root in (() if source_only or target_only else ('/etc/pgcopydb/creds', '/etc/pgcopydb/tls')):
                 if os.path.isdir(root):
                     for directory, _, names in os.walk(root, followlinks=False):
                         for filename in names:
@@ -1044,7 +1046,8 @@ class Materialization:
 
     def selected_environment(self, env):
         return {key:value for key,value in env.items()
-                if not self.source_only or not key.startswith('PGCOPYDB_TARGET_')}
+                if (not self.source_only or not key.startswith('PGCOPYDB_TARGET_')) and
+                (not self.target_only or not key.startswith('PGCOPYDB_SOURCE_'))}
 
     def pin(self, path) -> StableFile:
         path = os.fsencode(path)
@@ -1397,17 +1400,12 @@ def run_native_preflight(operation_id: str, program_sha256: str) -> int:
     except BaseException: pass
   return 1
 
-def validate_source_request(raw, kind, op, sha):
- need(kind in ('source_head','active_lag'),INPUT); hextext(op,32); hextext(sha,64)
- value=strict_json(raw,CAP); keys(value,'version kind operation_id program_sha256 execution pod_name container')
- need(uint(value['version'],1,True)==1 and value['kind']==kind,INPUT)
- need(hextext(value['operation_id'],32)==op and hextext(value['program_sha256'],64)==sha,INPUT)
+def execution_data_fields(value):
  execution=value['execution']; keys(execution,'namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256')
  for field in ('namespace','migration_name','pvc_name','job_name'):
   label=text(execution[field],253); need(label[0].isalnum() and label[-1].isalnum() and all(c in 'abcdefghijklmnopqrstuvwxyz0123456789-.' for c in label),INPUT)
  for field in ('migration_uid','pvc_uid','job_uid','worker_job_uid'):
   label=text(execution[field],256); need(label.strip()==label and not any(ord(c)<33 or ord(c)>126 or c in '/\\' for c in label) and bool(label.strip('0-')),INPUT)
- need(execution['role']=='worker' and execution['job_uid']==execution['worker_job_uid'],INPUT)
  uint(execution['migration_generation'],(1<<63)-1,True); uint(execution['attempt'],(1<<31)-1,True)
  work=execution['work']; keys(work,'migration_uid run_id workdir_id checkpoint_generation')
  uid=text(work['migration_uid'],36); run=hextext(work['run_id'],32)
@@ -1423,9 +1421,29 @@ def validate_source_request(raw, kind, op, sha):
  for field in ('pod_uid','container_name','container_id','image_id'): text(container[field],1024)
  label=container['pod_uid']; need(len(label)<=256 and label.strip()==label and not any(ord(c)<33 or ord(c)>126 or c in '/\\' for c in label) and bool(label.strip('0-')),INPUT)
  need(uint(container['restart_count'],0)==0 and container['container_name']=='pgcopydb' and container['image_id']==execution['platform_image_id'] and hextext(container['template_sha256'],64)==execution['template_sha256'],INPUT)
+ return execution
+
+def validate_source_request(raw, kind, op, sha):
+ need(kind in ('source_head','active_lag'),INPUT); hextext(op,32); hextext(sha,64)
+ value=strict_json(raw,CAP); keys(value,'version kind operation_id program_sha256 execution pod_name container')
+ need(uint(value['version'],1,True)==1 and value['kind']==kind,INPUT)
+ need(hextext(value['operation_id'],32)==op and hextext(value['program_sha256'],64)==sha,INPUT)
+ execution=execution_data_fields(value)
+ need(execution['role']=='worker' and execution['job_uid']==execution['worker_job_uid'],INPUT)
  return value
 
-def source_work_environment(req):
+def validate_target_retry_request(raw, op, sha):
+ hextext(op,32); hextext(sha,64); value=strict_json(raw,CAP)
+ keys(value,'version kind operation_id program_sha256 execution pod_name container inputs')
+ need(uint(value['version'],1,True)==1 and value['kind']=='target_retry',INPUT)
+ need(hextext(value['operation_id'],32)==op and hextext(value['program_sha256'],64)==sha,INPUT)
+ execution=execution_data_fields(value)
+ need(execution['role']=='retry_gate' and execution['job_uid']!=execution['worker_job_uid'],INPUT)
+ keys(value['inputs'],'commit_test expect_local')
+ for flag in value['inputs'].values(): boolean(flag)
+ return value
+
+def work_environment(req):
  work=req['execution']['work']
  for key,field in (('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation')):
   need(os.environ.get(key)==str(work[field]),INPUT)
@@ -1472,7 +1490,7 @@ class SourceState:
  def open(self,path,directory,parent=None):
   fd=fdopen(path,directory,parent); self.fds.append(fd); private_type(fd,directory); return fd
  def revalidate(self):
-  source_work_environment(self.req)
+  work_environment(self.req)
   need(identity(private_type(self.parent,True))==identity(os.stat('/work',follow_symlinks=False)))
   need(identity(private_type(self.root,True))==identity(os.stat('pgcopydb',dir_fd=self.parent,follow_symlinks=False)))
   self.manifest.check()
@@ -1538,7 +1556,7 @@ def run_source_observation(kind: str, operation_id: str, program_sha256: str) ->
    except BlockingIOError: wait_fd(0,False,deadline,diag); continue
    if not part: break
    raw.extend(part); need(len(raw)<=CAP,INPUT)
-  raw=bytes(raw); req=validate_source_request(raw,kind,operation_id,program_sha256); source_work_environment(req)
+  raw=bytes(raw); req=validate_source_request(raw,kind,operation_id,program_sha256); work_environment(req)
   state=SourceState(req); materials=Materialization(os.environ,source_only=True)
   resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
   library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(); state.revalidate()
@@ -1567,11 +1585,66 @@ def run_source_observation(kind: str, operation_id: str, program_sha256: str) ->
     except BaseException: pass
   return 1
 
+def target_retry_census(session):
+ rows=session.query("SELECT @count(*),@count(*) FILTER (WHERE a.wait_event_type='IPC' AND a.wait_event='SyncRep'),@current_setting('application_name')='pgm-retry-gate',COALESCE(@floor(EXTRACT(epoch FROM @min(a.query_start) FILTER (WHERE a.wait_event_type='IPC' AND a.wait_event='SyncRep')))::bigint,0),(SELECT @count(*) FROM @pg_stat_activity g WHERE g.usename=SESSION_USER AND g.pid<>@pg_backend_pid() AND g.datname=@current_database() AND g.application_name='pgm-retry-gate' AND g.wait_event_type='IPC' AND g.wait_event='SyncRep'),@current_setting('synchronous_commit'),@floor(EXTRACT(epoch FROM @clock_timestamp()))::bigint,@current_setting('application_name') FROM @pg_stat_activity a WHERE a.usename=SESSION_USER AND a.pid<>@pg_backend_pid() AND a.datname=@current_database() AND (a.application_name LIKE 'pgcopydb%' OR a.application_name LIKE 'rpgmigrate%' OR @current_setting('application_name')<>'pgm-retry-gate');",width=8)
+ need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==8,RESULT); row=rows[0]; values=[]
+ for index in (0,1,3,4,6):
+  need(type(row[index]) is bytes,RESULT); values.append(decimal(row[index].decode('ascii'),(1<<63)-1,index==6))
+ total,syncrep,oldest,waiting,observed=values
+ need(syncrep<=total and ((syncrep==0 and oldest==0) or (syncrep>0 and 0<oldest<=observed)),RESULT)
+ need(row[2] in (b't',b'f') and type(row[7]) is bytes and len(row[7])<=1024 and (row[2]==b't')==(row[7]==b'pgm-retry-gate'),RESULT)
+ need(row[5] in (b'on',b'off',b'local',b'remote_write',b'remote_apply'),RESULT)
+ return dict(census_known=True,total=total,syncrep=syncrep,gate_waiting=waiting,oldest_syncrep_wait_unix=oldest,observed_at_unix=observed,application_attribution_known=row[2]==b't',target_synchronous_commit=row[5].decode('ascii')),row[7]
+
+def run_target_retry(operation_id: str, program_sha256: str) -> int:
+ start=time.monotonic(); deadline=start+60; closing=start+90; channel=None; diag=None; materials=None; session=None
+ try:
+  hextext(operation_id,32); hextext(program_sha256,64); resource.setrlimit(resource.RLIMIT_CORE,(0,0)); validate_environment(os.environ)
+  need(os.environ.get('PGCONNECT_TIMEOUT')=='10' and os.environ.get('PGAPPNAME')=='pgm-retry-gate',CAP_ERR)
+  channel=InputChannel(operation_id,start+30); channel.route(); raw=channel.consume()
+  req=validate_target_retry_request(raw,operation_id,program_sha256); work_environment(req)
+  diag=Diagnostics(); need(os.geteuid()==65532,'admission'); materials=Materialization(os.environ,target_only=True)
+  resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy()
+  session=Session(library,materials.connection('target'),min(deadline,time.monotonic()+10),diag); session.deadline=deadline
+  for setting,milliseconds in (('statement_timeout',4000),('lock_timeout',1000),('idle_in_transaction_session_timeout',6000)):
+   remaining=int((deadline-time.monotonic())*1000); need(remaining>0,'timeout')
+   session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
+  session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
+  pinned=preflight_identity(session); need(pinned[4]//10000 in (16,18) and pinned[5]==b't',CONN)
+  census,application=target_retry_census(session); inputs=req['inputs']
+  attempted=inputs['commit_test'] and census['syncrep']==0 and census['gate_waiting']==0
+  if attempted:
+   session.query('BEGIN READ WRITE;',tag='BEGIN',state=2,rows=0,width=0)
+   session.query("SET LOCAL synchronous_commit TO 'on';",tag='SET',state=2,rows=0,width=0)
+   session.query('CREATE TEMP TABLE pgm_commit_probe () ON COMMIT DROP;',tag='CREATE TABLE',state=2,rows=0,width=0)
+   commit_limit=min(deadline,time.monotonic()+5); session.deadline=commit_limit
+   session.query('COMMIT;',tag='COMMIT',rows=0,width=0,commit=True)
+   need(time.monotonic()<commit_limit,'timeout'); need(session.commit_ack is True,RESULT); session.deadline=deadline
+  need(preflight_identity(session)==pinned,CONN)
+  need(session.query("SELECT @current_setting('synchronous_commit'),@current_setting('application_name');",width=2)==[[census['target_synchronous_commit'].encode('ascii'),application]],CONN)
+  work_environment(req); resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  session.close(); session=None; materials.check(); materials.close(); materials=None; diag.close(); diag=None; need(time.monotonic()<closing,'timeout')
+  request_sha,execution_sha=request_digests(raw)
+  result=dict(version=1,kind='target_retry',operation_id=operation_id,program_sha256=program_sha256,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],**census,synchronous_commit_admitted=not inputs['expect_local'] or census['target_synchronous_commit']=='local',probe_attempted=attempted,probe_committed=attempted,target_closed=True,materialization_closed=True,diagnostics_clean=True)
+  output=json.dumps(result,separators=(',',':'),ensure_ascii=True).encode()+b'\n'; need(len(output)<=CAP,RESULT)
+  channel.finish(output,closing); channel=None; return 0
+ except BaseException:
+  for item in (session,materials,diag):
+   if item is not None:
+    try: item.close(False) if item is session else item.close()
+    except BaseException: pass
+  if channel is not None:
+   try: channel.finish()
+   except BaseException: pass
+  return 1
+
 def main(argv: list[str]) -> int:
- if len(argv)!=4 or argv[1] not in ('completed_evidence','native_preflight'): return 1
+ if len(argv)!=4 or argv[1] not in ('completed_evidence','native_preflight','target_retry'): return 1
  try:
   hextext(argv[2],32); hextext(argv[3],64)
  except BaseException: return 1
+ if argv[1]=='target_retry': return run_target_retry(argv[2],argv[3])
  return run_native_preflight(argv[2],argv[3]) if argv[1]=='native_preflight' else run_completed_evidence(argv[2],argv[3])
 if __name__=='__main__':
  raise SystemExit(main(sys.argv))

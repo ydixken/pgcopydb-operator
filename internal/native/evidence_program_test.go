@@ -4,9 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,4 +178,105 @@ func TestNativePythonSourceObservationRequired(t *testing.T) {
 	if err == nil || bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("skipped")) {
 		t.Fatal("missing source module passed the required gate")
 	}
+}
+
+func TestNativePythonTargetRetry(t *testing.T) {
+	for _, method := range []string{"test_TargetRetryWire", "test_TargetRetryData", "test_TargetRetryRefusals", "test_TargetRetryMaterialization"} {
+		t.Run(method, func(t *testing.T) { pythonMechanismCase(t, method) })
+	}
+}
+
+func TestNativePythonTargetRetryRequired(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("required Python interpreter is absent")
+	}
+	source, err := os.ReadFile("evidence_program_test.py")
+	if err != nil {
+		t.Fatal("required Python retry tests are absent")
+	}
+	path := filepath.Join(t.TempDir(), "evidence_program_test.py")
+	if os.WriteFile(path, source, 0o600) != nil {
+		t.Fatal("cannot prepare missing-module control")
+	}
+	for _, method := range []string{"test_TargetRetryWire", "test_TargetRetryData", "test_TargetRetryRefusals", "test_TargetRetryMaterialization"} {
+		t.Run(method, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path, "NativePythonTests."+method)
+			output, err := command.CombinedOutput()
+			if err == nil || bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("skipped")) {
+				t.Fatal("missing canonical module passed the required retry gate")
+			}
+		})
+	}
+}
+
+func TestNativePythonMechanismInventory(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "evidence_program_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("cannot read the registered Go mechanism tests")
+	}
+	var registered []string
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || !strings.HasPrefix(function.Name.Name, "TestNativePython") {
+			continue
+		}
+		callsMechanism := false
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "pythonMechanismCase" {
+					callsMechanism = true
+				}
+			}
+			return true
+		})
+		if !callsMechanism {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				value, err := strconv.Unquote(literal.Value)
+				if err == nil && strings.HasPrefix(value, "test_") {
+					registered = append(registered, value)
+				}
+			}
+			return true
+		})
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("required Python interpreter is absent")
+	}
+	path, err := filepath.Abs("evidence_program_test.py")
+	if err != nil {
+		t.Fatal("cannot locate the private Python tests")
+	}
+	const inventory = `import importlib.util,json,sys,unittest
+s=importlib.util.spec_from_file_location('native_mechanism_inventory',sys.argv[1])
+m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+if m.P is None: raise RuntimeError('canonical module absent')
+print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests)))
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
+	var actual []string
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 54 || len(registered) != 54 {
+		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
+	}
+	slices.Sort(registered)
+	slices.Sort(actual)
+	if !slices.Equal(registered, actual) {
+		t.Fatal("registered Go mechanisms differ from the actual Python TestCase methods")
+	}
+}
+
+func TestNativePythonPrivateInputTimeout(t *testing.T) {
+	pythonMechanismCase(t, "test_PrivateInputTimeout")
+}
+
+func TestNativePythonPrivateInputTrailing(t *testing.T) {
+	pythonMechanismCase(t, "test_PrivateInputTrailing")
 }
