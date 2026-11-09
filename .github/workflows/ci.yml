@@ -1,17 +1,16 @@
 name: CI
 
-# Lint, test and build the docs on every push and pull request: these three
-# jobs are the required checks on main. Not here are the image build, which
+# Lint, test and build docs on main and native qualification branch pushes
+# and every pull request. These three jobs are the required checks on main. Not here are the image build, which
 # release.yml owns, and e2e, which runs against a release candidate because it
 # needs published images and drives real workloads on a shared cluster. Actions
 # has no YAML anchors, so all three jobs repeat the same runs-on expression and
 # the same cache steps; each rule below is stated here once instead.
 #
 # Runner selection.
-# Self-hosted for our own runs, hosted for a fork's: code from a fork must
-# never reach the cluster runner, and runner-smoke.yml states the same rule.
-# A push has no pull_request payload, so the expression falls through to the
-# cluster runner there.
+# The native qualification branch uses hosted amd64 runners for test-only CI.
+# Fork pull requests stay hosted so their code cannot reach the cluster runner.
+# Other same-repository events keep the cluster runner.
 #
 # The cache volume. /cache is a directory on the node the runner landed on, so
 # it is warm per node rather than per scale set; a fork's pull request lands on
@@ -29,7 +28,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, test/m4-closing-m6-composed-20261109]
   pull_request:
 
 permissions:
@@ -38,7 +37,9 @@ permissions:
 jobs:
   lint:
     # Runner selection: see the header.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
+    runs-on: >-
+      ${{ github.ref == 'refs/heads/test/m4-closing-m6-composed-20261109' && 'ubuntu-24.04'
+          || github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
       - name: Review dependency changes
@@ -78,10 +79,11 @@ jobs:
             echo "GOMODCACHE=/cache/go-mod"
             echo "GOLANGCI_LINT_CACHE=/cache/golangci"
           } >> "$GITHUB_ENV"
-      # The runner image carries Helm. Only a fork's pull request, which lands
-      # on a hosted runner, still needs this.
+      # Hosted jobs need Helm because they do not boot the runner image.
       - uses: azure/setup-helm@v5
-        if: ${{ github.event.pull_request.head.repo.fork }}
+        if: >-
+          ${{ github.ref == 'refs/heads/test/m4-closing-m6-composed-20261109'
+              || github.event.pull_request.head.repo.fork }}
       # The runner image carries these; a hosted runner, which is what a fork's
       # pull request gets, does not. The check makes this a no-op on ours.
       - name: Install what the runner lacks
@@ -140,7 +142,9 @@ jobs:
 
   test:
     # Runner selection: see the header.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
+    runs-on: >-
+      ${{ github.ref == 'refs/heads/test/m4-closing-m6-composed-20261109' && 'ubuntu-24.04'
+          || github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     services:
       # The compare-data gate decides its verdict in SQL, and a server is the
       # only place that logic can be exercised. Without one TestCompareDataQuery
@@ -245,7 +249,9 @@ jobs:
       # as a skipped step rather than a green job that uploaded nothing; when
       # the secret is set, a failed upload fails the job.
       - name: Upload coverage
-        if: env.CODECOV_TOKEN != ''
+        if: >-
+          github.ref != 'refs/heads/test/m4-closing-m6-composed-20261109'
+          && env.CODECOV_TOKEN != ''
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@v7
@@ -256,12 +262,16 @@ jobs:
 
   docs:
     # Runner selection: see the header.
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
+    runs-on: >-
+      ${{ github.ref == 'refs/heads/test/m4-closing-m6-composed-20261109' && 'ubuntu-24.04'
+          || github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'github-runner-pgcopydb-operator' }}
     steps:
       - uses: actions/checkout@v7
-      # The image carries python3 and mkdocs-material at the pin below.
+      # Hosted jobs need an isolated Python for the mkdocs install below.
       - uses: actions/setup-python@v7
-        if: ${{ github.event.pull_request.head.repo.fork }}
+        if: >-
+          ${{ github.ref == 'refs/heads/test/m4-closing-m6-composed-20261109'
+              || github.event.pull_request.head.repo.fork }}
         with:
           python-version: "3.x"
       - name: mkdocs build --strict
@@ -269,7 +279,7 @@ jobs:
         # bumps both together.
         run: |
           # The runner image carries mkdocs-material at this pin, and a system
-          # python refuses a system-wide install under PEP 668 anyway. Only a
-          # fork's pull request, on a hosted runner with setup-python, installs.
+          # python refuses a system-wide install under PEP 668 anyway. Hosted
+          # jobs install into the Python selected by setup-python.
           command -v mkdocs >/dev/null || pip install mkdocs-material==9.7.7
           mkdocs build --strict
