@@ -3,11 +3,11 @@
   "files": [
     {
       "path": "cases.json",
-      "sha256": "970f6395cec133aa7528203131986ee8c2214f35fd62f1f172b8b9ee8bd0984e"
+      "sha256": "2af09b7dff64476dcd6d1b931c08d05092d33e09357858e91ac441d6227efabb"
     },
     {
       "path": "contract.json",
-      "sha256": "ea0f51478a5c4011d8295fbaae7c9e8a537831a382b4359273e54fb37a050684"
+      "sha256": "4776461daf1e22b10405c4b8886b84716d265e834daa924d578d449081fa9675"
     },
     {
       "path": "payloads/cleanup-complete.json",
@@ -516,6 +516,10 @@
     {
       "path": "payloads/version-null-capabilities.json",
       "sha256": "31d62430797faca6dba5aaf0f0d0dd4d0c6fd5517c1c75c6fd06c73fb2c3ce50"
+    },
+    {
+      "path": "payloads/version-qualified-profile.json",
+      "sha256": "103d3dc6de6b66f963fd5aaf47c18f07f093f2a91637100f99e1cae33f11209a"
     },
     {
       "path": "payloads/version-truncated.json",

@@ -207,8 +207,12 @@ func fixtureTransport(raw []byte, binding Binding) bool {
 
 func TestSharedNativeFixtures(t *testing.T) {
 	kinds := make(map[string]int)
+	var acceptedVersions []string
 	for _, c := range sharedCases(t) {
 		kinds[c.Kind]++
+		if c.Kind == fixtureVersionKind && c.Accept {
+			acceptedVersions = append(acceptedVersions, c.ID)
+		}
 		if c.Kind == fixtureArgvKind {
 			continue // The engine's parser oracle executes these inputs.
 		}
@@ -250,6 +254,9 @@ func TestSharedNativeFixtures(t *testing.T) {
 				t.Fatalf("fixture acceptance = %t, want %t", accepted, c.Accept)
 			}
 		})
+	}
+	if !slices.Equal(acceptedVersions, []string{"version-empty-capabilities", "version-qualified-profile"}) {
+		t.Fatalf("accepted discovery fixtures differ: %v", acceptedVersions)
 	}
 	for _, kind := range []string{fixtureVersionKind, fixtureReportKind, fixtureTransportKind, fixtureCompareArrayKind, fixtureCompareProgressKind, fixtureArgvKind} {
 		if kinds[kind] == 0 {

@@ -11,6 +11,12 @@
       "accept": true
     },
     {
+      "id": "version-qualified-profile",
+      "kind": "version",
+      "payload": "payloads/version-qualified-profile.json",
+      "accept": true
+    },
+    {
       "id": "version-future-protocol",
       "kind": "version",
       "payload": "payloads/version-future-protocol.json",

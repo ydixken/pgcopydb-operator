@@ -15,6 +15,14 @@
     "cleanup.v1"
   ],
   "m1_capabilities": [],
+  "qualified_capabilities": [
+    "clone.single_db",
+    "cdc.pgoutput",
+    "progress.v1",
+    "cutover.v1",
+    "verify.v1",
+    "cleanup.v1"
+  ],
   "report_prefix": "native-report: ",
   "compare_progress_prefix": "compare progress: ",
   "identity_environment": [

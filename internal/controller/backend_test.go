@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
@@ -186,5 +187,78 @@ func TestValidateNativeConfigRejectsInvalidDiscoveryCapabilities(t *testing.T) {
 		if err := validateNativeConfig(nativeMigration(), caps); err == nil {
 			t.Fatalf("accepted invalid discovery capabilities: %v", caps)
 		}
+	}
+}
+
+func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
+	raw, err := os.ReadFile("../native/testdata/v1/payloads/version-qualified-profile.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := native.ParseVersion(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloneRequired := []native.Capability{native.CapCloneSingleDB, native.CapProgress}
+	followRequired := append([]native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup}, cloneRequired...)
+	for _, tc := range []struct {
+		name         string
+		follow       bool
+		verification *v1beta1.VerificationOptions
+		required     []native.Capability
+	}{
+		{name: "narrowed clone", required: cloneRequired},
+		{name: "follow", follow: true, required: followRequired},
+		{name: "schema verification", verification: &v1beta1.VerificationOptions{Schema: true}, required: append(cloneRequired, native.CapVerify)},
+		{name: "data verification", verification: &v1beta1.VerificationOptions{Data: true}, required: append(cloneRequired, native.CapVerify)},
+		{name: "verified follow", follow: true, verification: &v1beta1.VerificationOptions{Schema: true, Data: true}, required: append(followRequired, native.CapVerify)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := nativeMigration()
+			no := false
+			zero := resource.MustParse("0")
+			m.Spec.Clone = v1beta1.CloneOptions{SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
+			if tc.follow {
+				m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+			}
+			m.Spec.Verification = tc.verification
+			before := m.DeepCopy()
+			if err := validateNativeConfig(m, version.Capabilities); err != nil {
+				t.Fatalf("qualified discovery refused narrowed profile: %v", err)
+			}
+			for _, omitted := range tc.required {
+				caps := make([]native.Capability, 0, len(version.Capabilities)-1)
+				for _, capability := range version.Capabilities {
+					if capability != omitted {
+						caps = append(caps, capability)
+					}
+				}
+				if err := validateNativeConfig(m, caps); err == nil {
+					t.Fatalf("accepted profile without %s", omitted)
+				}
+			}
+			for _, control := range []struct {
+				name   string
+				mutate func(*v1beta1.Migration)
+			}{
+				{"default binary COPY", func(m *v1beta1.Migration) { m.Spec.Clone.UseCopyBinary = nil }},
+				{"default splitting", func(m *v1beta1.Migration) { m.Spec.Clone.SplitTablesLargerThan = nil }},
+				{"default large objects", func(m *v1beta1.Migration) { m.Spec.Clone.Skip = nil }},
+			} {
+				t.Run(control.name, func(t *testing.T) {
+					candidate := m.DeepCopy()
+					control.mutate(candidate)
+					if err := validateNativeConfig(candidate, version.Capabilities); err == nil {
+						t.Fatal("qualified discovery admitted unqualified default")
+					}
+				})
+			}
+			if !reflect.DeepEqual(m, before) {
+				t.Fatal("validation mutated Migration")
+			}
+		})
+	}
+	if err := validateNativeConfig(nativeMigration(), version.Capabilities); err == nil {
+		t.Fatal("qualified discovery admitted the default clone profile")
 	}
 }
