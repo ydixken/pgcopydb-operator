@@ -94,7 +94,7 @@ func inDir(script, dir string) string {
 func runCompareScript(t *testing.T, report string, env ...string) (string, int) {
 	t.Helper()
 	dir := t.TempDir()
-	for name, body := range map[string]string{"pgcopydb": stubPgcopydb, "psql": stubPsql} {
+	for name, body := range map[string]string{workerContainer: stubPgcopydb, "psql": stubPsql} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}

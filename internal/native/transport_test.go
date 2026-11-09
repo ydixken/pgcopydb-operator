@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseReportLineFraming(t *testing.T) {
-	report := string(fixture("list progress", `"copy":{"tables":{"total":3,"done":2}}`))
+	report := string(fixture(fixtureProgressCommand, `"copy":{"tables":{"total":3,"done":2}}`))
 	line := "native-report: " + report + "\n"
 	for _, tc := range []struct {
 		name string
@@ -18,7 +18,7 @@ func TestParseReportLineFraming(t *testing.T) {
 		{"JSON whitespace", "native-report: \t" + report + " \t\n", true},
 		{"CRLF", "native-report: " + report + "\r\n", true},
 		{"blank log lines", "\n" + line + "\n", true},
-		{"empty", "", false},
+		{fixtureEmptyCase, "", false},
 		{"logs only", "ordinary log\n", false},
 		{"unframed JSON", report + "\n", false},
 		{"missing final newline", strings.TrimSuffix(line, "\n"), false},
@@ -42,16 +42,16 @@ func TestParseReportLineFraming(t *testing.T) {
 		{"invalid UTF-8", "native-report: " + strings.Replace(report, "rpgmigrate-dev", string([]byte{0xff}), 1) + "\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseReportLine([]byte(tc.raw), binding("list progress"))
+			got, err := ParseReportLine([]byte(tc.raw), binding(fixtureProgressCommand))
 			if (err == nil) != tc.want || (got != nil) != tc.want {
 				t.Fatalf("report acceptance = %t, want %t: %v", err == nil, tc.want, err)
 			}
-			if got != nil && (got.Command != "list progress" || got.Work == nil || got.Work.RunID != fixtureRunID || got.Copy.Tables.Done == nil || *got.Copy.Tables.Done != 2) {
+			if got != nil && (got.Command != fixtureProgressCommand || got.Work == nil || got.Work.RunID != fixtureRunID || got.Copy.Tables.Done == nil || *got.Copy.Tables.Done != 2) {
 				t.Fatalf("unexpected parsed report: %#v", got)
 			}
 		})
 	}
-	for _, want := range []Binding{{}, binding("clone"), {Command: "list progress", Work: WorkIdentity{MigrationUID: fixtureMigrationID, RunID: fixtureRunID, WorkdirID: "replacement-pvc", CheckpointGeneration: 1}}} {
+	for _, want := range []Binding{{}, binding("clone"), {Command: fixtureProgressCommand, Work: WorkIdentity{MigrationUID: fixtureMigrationID, RunID: fixtureRunID, WorkdirID: "replacement-pvc", CheckpointGeneration: 1}}} {
 		if got, err := ParseReportLine([]byte(line), want); err == nil || got != nil {
 			t.Fatal("accepted report without the expected command and work")
 		}
@@ -68,7 +68,7 @@ func TestParseVersionLineFraming(t *testing.T) {
 		{"one record", version + "\n", true},
 		{"JSON whitespace", " \t" + version + " \t\n", true},
 		{"CRLF", version + "\r\n", true},
-		{"empty", "", false},
+		{fixtureEmptyCase, "", false},
 		{"blank line", "\n", false},
 		{"missing final newline", version, false},
 		{"extra blank line", version + "\n\n", false},

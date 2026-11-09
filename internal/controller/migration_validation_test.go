@@ -201,7 +201,7 @@ var _ = Describe("Migration CRD validation", func() {
 			"supported values"),
 		Entry("skip entries from the allowlist", "cel-skip-ok",
 			func(m *v1beta1.Migration) {
-				m.Spec.Clone.Skip = []v1beta1.SkipOption{"largeObjects", "analyze"}
+				m.Spec.Clone.Skip = []v1beta1.SkipOption{testSkipLargeObjects, "analyze"}
 			}, ""),
 		Entry("unknown logical decoding plugin", "cel-plugin-unknown",
 			func(m *v1beta1.Migration) {
@@ -329,6 +329,7 @@ var _ = Describe("Migration CRD validation", func() {
 	})
 
 	It("enforces source/target/follow immutability while clone stays tunable", func() {
+		const otherDatabase = "other"
 		const name = "cel-immutable"
 		m := validMigration(name)
 		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "fixed_slot"}
@@ -347,7 +348,7 @@ var _ = Describe("Migration CRD validation", func() {
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring("source is immutable")))
 
 		changed = fresh()
-		changed.Spec.Target.Database = "other"
+		changed.Spec.Target.Database = otherDatabase
 		Expect(k8sClient.Update(ctx, changed)).To(MatchError(ContainSubstring(
 			"target is immutable except synchronousCommit")))
 

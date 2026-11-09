@@ -9,6 +9,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const (
+	testExternalResourceName                    = "external"
+	testSkipLargeObjects     v1beta1.SkipOption = "largeObjects"
+)
+
 func TestBackendForNormalizesOnlyEngine(t *testing.T) {
 	for _, tc := range []struct {
 		engine v1beta1.MigrationEngine
@@ -28,7 +33,7 @@ func TestBackendForNormalizesOnlyEngine(t *testing.T) {
 	if _, err := backendFor(nil); err == nil {
 		t.Fatal("nil Migration selected a backend")
 	}
-	if _, err := backendFor(&v1beta1.Migration{Spec: v1beta1.MigrationSpec{Engine: "unknown"}}); err == nil {
+	if _, err := backendFor(&v1beta1.Migration{Spec: v1beta1.MigrationSpec{Engine: testUnrecognizedEngine}}); err == nil {
 		t.Fatal("unknown engine selected a backend")
 	}
 }
@@ -92,7 +97,7 @@ func TestValidateNativeConfigRejectsUnqualifiedOptions(t *testing.T) {
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, ApplyGroupTransactions: 2}
 		}},
 		{"custom publication", func(m *v1beta1.Migration) {
-			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: "external"}
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: testExternalResourceName}
 		}},
 		{"no-op updates", func(m *v1beta1.Migration) {
 			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, ReplayNoOpUpdates: true}
@@ -122,7 +127,7 @@ func TestValidateNativeConfigAllowsQualifiedCopyControls(t *testing.T) {
 	m := nativeMigration()
 	no := false
 	zero := resource.MustParse("0")
-	m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 8, SplitMaxParts: 4, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{"largeObjects"}}
+	m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 8, SplitMaxParts: 4, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
 	if err := validateNativeConfig(m, []native.Capability{native.CapCloneSingleDB, native.CapProgress}); err != nil {
 		t.Fatalf("disabled optional copy features still required capabilities: %v", err)
 	}
@@ -157,7 +162,7 @@ func TestValidateNativeConfigGatesFollowAndVerification(t *testing.T) {
 
 func TestValidateNativeConfigRequiresEachFollowCapability(t *testing.T) {
 	m := nativeMigration()
-	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 	for _, omitted := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {
 		caps := cloneCapabilities()
 		for _, c := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {

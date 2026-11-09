@@ -190,7 +190,7 @@ func TestReconcileEngineDispatchPreservesLegacy(t *testing.T) {
 				t.Fatal(err)
 			}
 			container := job.Spec.Template.Spec.Containers[0]
-			if len(container.Command) == 0 || container.Command[len(container.Command)-1] != "pgcopydb" || len(container.Args) == 0 || container.Args[0] != "clone" {
+			if len(container.Command) == 0 || container.Command[len(container.Command)-1] != workerContainer || len(container.Args) == 0 || container.Args[0] != "clone" {
 				t.Fatal("legacy worker lost pgcopydb clone command")
 			}
 			claims := &corev1.PersistentVolumeClaimList{}

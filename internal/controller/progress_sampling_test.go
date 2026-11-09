@@ -103,9 +103,11 @@ func (f *fakeProgress) counts() (sizes int) {
 	return f.sizeCalls
 }
 
+const testNamespaceLabel = "namespace"
+
 // migLabels selects one test Migration's series.
 func migLabels(name string) map[string]string {
-	return map[string]string{"namespace": testNS, "name": name}
+	return map[string]string{testNamespaceLabel: testNS, "name": name}
 }
 
 // gaugeValue reads one series from the controller-runtime registry, the same

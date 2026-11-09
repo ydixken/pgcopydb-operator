@@ -126,7 +126,7 @@ func migrationPhaseMetricPresent(namespace, name string) (bool, error) {
 			for _, label := range sample.GetLabel() {
 				labels[label.GetName()] = label.GetValue()
 			}
-			if labels["namespace"] == namespace && labels["name"] == name && labels["phase"] == string(v1beta1.PhasePending) {
+			if labels[testNamespaceLabel] == namespace && labels["name"] == name && labels["phase"] == string(v1beta1.PhasePending) {
 				return true, nil
 			}
 		}
@@ -440,7 +440,7 @@ func TestActiveWorkerObservationTiming(t *testing.T) {
 					t.Errorf("timing invents unreached operation %q: %#v", name, fields)
 				}
 			}
-			for _, forbidden := range []string{"sql", "command", "connection", "job", "namespace", "name", "error"} {
+			for _, forbidden := range []string{"sql", "command", "connection", "job", testNamespaceLabel, "name", "error"} {
 				if _, ok := fields[forbidden]; ok {
 					t.Errorf("timing leaks forbidden field %q: %#v", forbidden, fields)
 				}

@@ -14,15 +14,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+const (
+	nativeTestNamespace = "namespace"
+	nativeTestRunID     = "0123456789abcdef0123456789abcdef"
+)
+
 func TestEngineExecutable(t *testing.T) {
 	for _, tc := range []struct {
 		engine v1beta1.MigrationEngine
 		want   string
 	}{
-		{"", "pgcopydb"},
-		{v1beta1.MigrationEnginePGCopyDB, "pgcopydb"},
+		{"", workerContainer},
+		{v1beta1.MigrationEnginePGCopyDB, workerContainer},
 		{v1beta1.MigrationEngineRPGMigrate, "/usr/local/bin/rpgmigrate"},
-		{"unknown", ""},
+		{testUnrecognizedEngine, ""},
 	} {
 		m := &v1beta1.Migration{Spec: v1beta1.MigrationSpec{Engine: tc.engine}}
 		got, err := engineExecutable(m)
@@ -37,7 +42,7 @@ func TestEngineExecutable(t *testing.T) {
 
 func nativeIdentityObjects() (*v1beta1.Migration, *corev1.PersistentVolumeClaim) {
 	m := nativeMigration()
-	m.Name, m.Namespace = "migration", "namespace"
+	m.Name, m.Namespace = "migration", nativeTestNamespace
 	m.UID = "01234567-89ab-cdef-0123-456789abcdef"
 	controller := true
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
@@ -53,7 +58,7 @@ func nativeIdentityObjects() (*v1beta1.Migration, *corev1.PersistentVolumeClaim)
 func TestNativeWorkIdentity(t *testing.T) {
 	m, pvc := nativeIdentityObjects()
 	want := native.WorkIdentity{
-		MigrationUID: string(m.UID), RunID: "0123456789abcdef0123456789abcdef",
+		MigrationUID: string(m.UID), RunID: nativeTestRunID,
 		WorkdirID: string(pvc.UID), CheckpointGeneration: 1,
 	}
 	beforeM, beforePVC := m.DeepCopy(), pvc.DeepCopy()
@@ -72,6 +77,7 @@ func TestNativeWorkIdentity(t *testing.T) {
 }
 
 func TestNativeWorkIdentityRejectsUnboundObjects(t *testing.T) {
+	const otherNamespace = "other"
 	for _, tc := range []struct {
 		name   string
 		mutate func(**v1beta1.Migration, **corev1.PersistentVolumeClaim)
@@ -84,7 +90,7 @@ func TestNativeWorkIdentityRejectsUnboundObjects(t *testing.T) {
 			(*m).UID = types.UID(strings.ToUpper(string((*m).UID)))
 		}},
 		{"compact uuid", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) {
-			(*m).UID = "0123456789abcdef0123456789abcdef"
+			(*m).UID = nativeTestRunID
 		}},
 		{"bad uuid digit", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) {
 			(*m).UID = "g1234567-89ab-cdef-0123-456789abcdef"
@@ -101,7 +107,7 @@ func TestNativeWorkIdentityRejectsUnboundObjects(t *testing.T) {
 		{"pvc uid path", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).UID = "pvc/uid" }},
 		{"pvc uid backslash", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).UID = `pvc\uid` }},
 		{"pvc uid invalid utf8", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).UID = types.UID("pvc\xff") }},
-		{"wrong namespace", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).Namespace = "other" }},
+		{"wrong namespace", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).Namespace = otherNamespace }},
 		{"wrong pvc name", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).Name = "foreign-work" }},
 		{"missing owner", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) { (*pvc).OwnerReferences = nil }},
 		{"wrong owner uid", func(_ **v1beta1.Migration, pvc **corev1.PersistentVolumeClaim) {
@@ -135,7 +141,7 @@ func TestNativeWorkIdentityRejectsUnboundObjects(t *testing.T) {
 }
 
 func TestNativeIdentityEnv(t *testing.T) {
-	w := native.WorkIdentity{MigrationUID: "01234567-89ab-cdef-0123-456789abcdef", RunID: "0123456789abcdef0123456789abcdef", WorkdirID: "pvc-owned", CheckpointGeneration: 1}
+	w := native.WorkIdentity{MigrationUID: "01234567-89ab-cdef-0123-456789abcdef", RunID: nativeTestRunID, WorkdirID: "pvc-owned", CheckpointGeneration: 1}
 	want := []corev1.EnvVar{
 		{Name: "RPGMIGRATE_MIGRATION_UID", Value: w.MigrationUID},
 		{Name: "RPGMIGRATE_RUN_ID", Value: w.RunID},
@@ -158,13 +164,15 @@ func TestNativeCloneArgs(t *testing.T) {
 		{"first attempt", 1, nil, defaults + " --restart"},
 		{"retry", 2, nil, defaults + " --resume --not-consistent"},
 		{"follow", 1, func(m *v1beta1.Migration) { m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true} }, defaults + " --restart --follow --plugin pgoutput"},
-		{"explicit pgoutput", 2, func(m *v1beta1.Migration) { m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"} }, defaults + " --resume --not-consistent --follow --plugin pgoutput"},
+		{"explicit pgoutput", 2, func(m *v1beta1.Migration) {
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
+		}, defaults + " --resume --not-consistent --follow --plugin pgoutput"},
 		{"runner cpu", 1, func(m *v1beta1.Migration) {
 			m.Spec.Runner.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8500m")}
 		}, strings.Replace(defaults, "--table-jobs 4", "--table-jobs 9", 1) + " --restart"},
 		{"explicit controls", 1, func(m *v1beta1.Migration) {
 			no, zero := false, resource.MustParse("0")
-			m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 7, SplitMaxParts: 3, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{"largeObjects"}}
+			m.Spec.Clone = v1beta1.CloneOptions{TableJobs: 7, SplitMaxParts: 3, SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
 		}, "clone --dir /work/pgcopydb --table-jobs 7 --split-tables-larger-than 0 --split-max-parts 3 --skip-large-objects --restart"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,10 +203,10 @@ func TestNativeCloneArgsRejectsUnsupportedProfile(t *testing.T) {
 		{"instance", 1, func(m *v1beta1.Migration) { m.Spec.Clone.AllDatabases = true }},
 		{"legacy drop", 2, func(m *v1beta1.Migration) { m.Spec.Clone.DropIfExists = true }},
 		{"custom slot", 1, func(m *v1beta1.Migration) {
-			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: "external"}
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, SlotName: testExternalResourceName}
 		}},
 		{"custom publication", 1, func(m *v1beta1.Migration) {
-			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: "external"}
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Publication: testExternalResourceName}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

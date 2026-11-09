@@ -403,10 +403,11 @@ func TestBuildRehearsalJob_InvalidSpec(t *testing.T) {
 
 // Only a pod of this Migration's rehearsal holds the retry gate and the drain verify.
 func TestRehearsalPod_OnlyARehearsalPodHolds(t *testing.T) {
+	const otherMigrationName = "other"
 	ctx := context.Background()
 	m := streamingRehearsal()
 	other := streamingRehearsal()
-	other.Name = "other"
+	other.Name = otherMigrationName
 	r := failingReconciler(t, interceptor.Funcs{}, m,
 		podOfJob(m, gateJobName(m, 2), corev1.PodRunning),
 		podOfJob(m, verifyJobName(m), corev1.PodRunning),

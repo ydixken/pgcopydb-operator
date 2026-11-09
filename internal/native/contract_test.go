@@ -6,6 +6,9 @@ import (
 	"testing"
 )
 
+const fixtureProgressCommand = "list progress"
+const fixtureEmptyCase = "empty"
+
 const (
 	fixtureWork        = `{"migration_uid":"00112233-4455-6677-8899-aabbccddeeff","run_id":"00112233445566778899aabbccddeeff","workdir_id":"work-1","checkpoint_generation":1}`
 	fixtureMigrationID = "00112233-4455-6677-8899-aabbccddeeff"
@@ -45,7 +48,7 @@ func TestParseCommandReports(t *testing.T) {
 	for _, tc := range []struct{ command, payload string }{
 		{"clone", `"copy":{"tables":{"total":3,"done":2}}`},
 		{"list tables", `"copy":{}`},
-		{"list progress", `"copy":{"tables":{"total":3,"done":2},"indexes":{"total":1,"done":0},"bytes":{"total":1024,"done":512}}`},
+		{fixtureProgressCommand, `"copy":{"tables":{"total":3,"done":2},"indexes":{"total":1,"done":0},"bytes":{"total":1024,"done":512}}`},
 		{"stream sentinel get", `"replication":{"certified_lsn":"0/10","source_durable_head_lsn":"0/30","received_lsn":"0/20","durable_replay_lsn":"0/10"}`},
 		{"stream sentinel set endpos", `"replication":{"certified_lsn":"0/0","end_lsn":"0/20","end_persisted":true}`},
 		{"stream cleanup", `"cleanup":{"complete":true,"resources":[{"kind":"replication_slot","name":"native_slot","owned":true,"removed":true},{"kind":"publication","name":"provided","owned":false,"removed":false}]}`},
@@ -70,7 +73,7 @@ func TestParseCommandReports(t *testing.T) {
 }
 
 func TestParseUnknownMetricsRemainAbsent(t *testing.T) {
-	got, err := ParseReport(fixture("list progress", `"copy":{"tables":{"total":3},"bytes":null}`), binding("list progress"))
+	got, err := ParseReport(fixture(fixtureProgressCommand, `"copy":{"tables":{"total":3},"bytes":null}`), binding(fixtureProgressCommand))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +83,7 @@ func TestParseUnknownMetricsRemainAbsent(t *testing.T) {
 }
 
 func TestParseRejectsMalformedOrUnboundReports(t *testing.T) {
-	raw := fixture("list progress", `"copy":{"tables":{"total":3,"done":2}}`)
+	raw := fixture(fixtureProgressCommand, `"copy":{"tables":{"total":3,"done":2}}`)
 	for _, tc := range []struct{ name, old, next string }{
 		{"missing protocol", `"protocol_version":1,`, ""},
 		{"future protocol", jsonProtocol, `"protocol_version":2`},
@@ -125,26 +128,26 @@ func TestParseRejectsMalformedOrUnboundReports(t *testing.T) {
 		{"unknown payload member", jsonDone, `"done":2,"exit_code":0`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ParseReport(replace(t, raw, tc.old, tc.next), binding("list progress")); err == nil {
+			if _, err := ParseReport(replace(t, raw, tc.old, tc.next), binding(fixtureProgressCommand)); err == nil {
 				t.Fatal("accepted invalid report")
 			}
 		})
 	}
 	for _, bad := range [][]byte{nil, []byte(`[]`), []byte(`null`), append(append([]byte(nil), raw...), raw...), append(append([]byte(nil), raw...), 'x')} {
-		if _, err := ParseReport(bad, binding("list progress")); err == nil {
+		if _, err := ParseReport(bad, binding(fixtureProgressCommand)); err == nil {
 			t.Fatal("accepted malformed document")
 		}
 	}
-	if _, err := ParseReport(replace(t, raw, `rpgmigrate-dev`, string([]byte{0xff})), binding("list progress")); err == nil {
+	if _, err := ParseReport(replace(t, raw, `rpgmigrate-dev`, string([]byte{0xff})), binding(fixtureProgressCommand)); err == nil {
 		t.Fatal("accepted invalid UTF-8")
 	}
-	if _, err := ParseReport([]byte(`{"nested":`+strings.Repeat(`[`, 33)+`0`+strings.Repeat(`]`, 33)+`}`), binding("list progress")); err == nil {
+	if _, err := ParseReport([]byte(`{"nested":`+strings.Repeat(`[`, 33)+`0`+strings.Repeat(`]`, 33)+`}`), binding(fixtureProgressCommand)); err == nil {
 		t.Fatal("accepted excessive JSON nesting")
 	}
 }
 
 func TestParseCountersPreserveExactRange(t *testing.T) {
-	got, err := ParseReport(fixture("list progress", `"copy":{"bytes":{"total":9223372036854775807,"done":9007199254740993}}`), binding("list progress"))
+	got, err := ParseReport(fixture(fixtureProgressCommand, `"copy":{"bytes":{"total":9223372036854775807,"done":9007199254740993}}`), binding(fixtureProgressCommand))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +239,7 @@ func TestParseSafetyAcknowledgementsRequireCallerEndLSN(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, bad := range []struct{ name, end string }{
-				{"empty", ""},
+				{fixtureEmptyCase, ""},
 				{"whitespace", " "},
 				{"malformed", "not-an-lsn"},
 				{"zero", "0/0"},
@@ -311,13 +314,13 @@ func TestParseUnknownReplicationAndCleanupStayUnknown(t *testing.T) {
 }
 
 func TestParseRejectsInvalidBindingWithoutLeakingInput(t *testing.T) {
-	for _, want := range []Binding{{}, {Command: "list progress"}, {Command: "new command", Work: binding("clone").Work}} {
-		if _, err := ParseReport(fixture("list progress", `"copy":{}`), want); err == nil {
+	for _, want := range []Binding{{}, {Command: fixtureProgressCommand}, {Command: "new command", Work: binding("clone").Work}} {
+		if _, err := ParseReport(fixture(fixtureProgressCommand, `"copy":{}`), want); err == nil {
 			t.Fatal("accepted incomplete binding")
 		}
 	}
-	raw := fixture("list progress", `"copy":{"bytes":{"total":"customer-secret"}}`)
-	if _, err := ParseReport(raw, binding("list progress")); err == nil || strings.Contains(err.Error(), "customer-secret") {
+	raw := fixture(fixtureProgressCommand, `"copy":{"bytes":{"total":"customer-secret"}}`)
+	if _, err := ParseReport(raw, binding(fixtureProgressCommand)); err == nil || strings.Contains(err.Error(), "customer-secret") {
 		t.Fatalf("invalid or unsafe error: %v", err)
 	}
 }
@@ -335,7 +338,7 @@ func TestParseCanonicalOperatorIdentity(t *testing.T) {
 		{"future generation", fixtureMigrationID, fixtureRunID, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want := binding("list progress")
+			want := binding(fixtureProgressCommand)
 			want.Work.MigrationUID, want.Work.RunID, want.Work.CheckpointGeneration = tc.migration, tc.run, tc.generation
 			raw := strings.NewReplacer(fixtureMigrationID, tc.migration, fixtureRunID, tc.run, jsonGeneration, fmt.Sprintf(`"checkpoint_generation":%d`, tc.generation)).Replace(string(fixture(want.Command, `"copy":{}`)))
 			if _, err := ParseReport([]byte(raw), want); err == nil {
@@ -501,7 +504,7 @@ func TestParseCleanupRequiresExactObligations(t *testing.T) {
 		t.Fatalf("retained workdir and unowned origin rejected: %v", err)
 	}
 	for _, tc := range []struct{ name, old, next string }{
-		{"empty", jsonResources, `"resources_missing":[`},
+		{fixtureEmptyCase, jsonResources, `"resources_missing":[`},
 		{"missing publication", `{"kind":"publication","name":"native_publication","owned":true,"removed":true},`, ""},
 		{"missing workdir", `{"kind":"workdir","name":"work-1","owned":true,"removed":false},`, ""},
 		{"wrong name", `"name":"native_slot"`, `"name":"other_slot"`},
@@ -589,14 +592,14 @@ func TestParseKeepaliveWitnessBoundaries(t *testing.T) {
 
 func TestParseWorkdirIdentitySafeLabel(t *testing.T) {
 	for _, workdir := range []string{"", " leading", "trailing ", "nested/path", `nested\path`, "tab\tlabel", strings.Repeat("x", 257)} {
-		want := binding("list progress")
+		want := binding(fixtureProgressCommand)
 		want.Work.WorkdirID = workdir
 		raw := replace(t, fixture(want.Command, `"copy":{}`), `"workdir_id":"work-1"`, fmt.Sprintf(`"workdir_id":%q`, workdir))
 		if _, err := ParseReport(raw, want); err == nil {
 			t.Fatal("accepted unsafe workdir identity")
 		}
 	}
-	want := binding("list progress")
+	want := binding(fixtureProgressCommand)
 	want.Work.WorkdirID = strings.Repeat("x", 256)
 	raw := replace(t, fixture(want.Command, `"copy":{}`), `"workdir_id":"work-1"`, fmt.Sprintf(`"workdir_id":%q`, want.Work.WorkdirID))
 	if _, err := ParseReport(raw, want); err != nil {
@@ -606,7 +609,7 @@ func TestParseWorkdirIdentitySafeLabel(t *testing.T) {
 
 func TestParseRejectsForeignCanonicalWork(t *testing.T) {
 	foreign := WorkIdentity{MigrationUID: "ffeeddcc-bbaa-9988-7766-554433221100", RunID: "ffeeddccbbaa99887766554433221100", WorkdirID: fixtureWorkdirID, CheckpointGeneration: 1}
-	want := binding("list progress")
+	want := binding(fixtureProgressCommand)
 	want.Work = foreign
 	if _, err := ParseReport(fixture(want.Command, `"copy":{}`), want); err == nil {
 		t.Fatal("accepted a different canonical caller work identity")

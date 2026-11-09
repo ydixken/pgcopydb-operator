@@ -251,7 +251,7 @@ var _ = Describe("Migration Controller follow mode", func() {
 
 	followMigration := func(name string, mode v1beta1.CutoverMode) *v1beta1.Migration {
 		m := validMigration(name)
-		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: "pgoutput"}
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
 		m.Spec.Cutover = v1beta1.CutoverSpec{Mode: mode}
 		return m
 	}
