@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,8 +14,11 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -235,5 +241,326 @@ func assertNativeEvidenceContainerIsolation(t *testing.T, c corev1.Container, im
 	security := &corev1.SecurityContext{AllowPrivilegeEscalation: &deny, ReadOnlyRootFilesystem: &readonly, Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}
 	if !reflect.DeepEqual(c.SecurityContext, security) || c.Name != workerContainer || c.Image != image || len(c.EnvFrom) != 0 || len(c.VolumeDevices) != 0 || c.Lifecycle != nil || c.StartupProbe != nil || c.LivenessProbe != nil || c.ReadinessProbe != nil || c.Stdin || c.TTY {
 		t.Fatal("evidence helper changed native container security")
+	}
+}
+
+const (
+	nativeWorkerSecretForm       = "secretref"
+	nativeWorkerURISecretForm    = "urisecretref"
+	nativeWorkerTestExecutable   = "/usr/local/bin/rpgmigrate"
+	nativeWorkerTestMigrationUID = "01234567-89ab-cdef-0123-456789abcdef"
+	nativeWorkerTLSSecret        = "worker-tls"
+)
+
+func nativeWorkerJobInputs() (*v1beta1.Migration, *corev1.PersistentVolumeClaim) {
+	m, pvc := nativeIdentityObjects()
+	m.Generation = 1
+	m.Spec.Source, m.Spec.Target = passwordMigration().Spec.Source, passwordMigration().Spec.Target
+	m.Labels = map[string]string{labelFeatureE2ERun: featureRunOwner}
+	return m, pvc
+}
+
+func narrowNativeWorker(m *v1beta1.Migration) {
+	no, zero := false, resource.MustParse("0")
+	m.Spec.Clone.UseCopyBinary = &no
+	m.Spec.Clone.SplitTablesLargerThan = &zero
+	m.Spec.Clone.Skip = []v1beta1.SkipOption{testSkipLargeObjects}
+}
+
+func TestNativeWorkerJobProgram(t *testing.T) {
+	m, pvc := nativeWorkerJobInputs()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	ttl := int32(120)
+	m.Spec.TTLSecondsAfterFinished = &ttl
+	m.Spec.Runner.NodeSelector = map[string]string{"worker-test-pool": "native"}
+	m.Spec.Runner.Tolerations = []corev1.Toleration{{Key: "worker-test", Operator: corev1.TolerationOpExists}}
+	m.Spec.Runner.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{}}
+	before, beforePVC := m.DeepCopy(), pvc.DeepCopy()
+	job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(m, before) || !reflect.DeepEqual(pvc, beforePVC) || job.Name != "migration-run-1" || job.Namespace != m.Namespace || job.UID != "" || len(job.OwnerReferences) != 0 || !job.CreationTimestamp.IsZero() {
+		t.Fatal("worker construction changed inputs or claimed allocated ownership")
+	}
+	pod, c := job.Spec.Template.Spec, job.Spec.Template.Spec.Containers[0]
+	assertNativeEvidencePodIsolation(t, pod)
+	assertNativeEvidencePodSecurity(t, pod)
+	assertNativeEvidenceContainerIsolation(t, c, nativeEvidenceTestImage)
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 || job.Spec.ActiveDeadlineSeconds != nil || !reflect.DeepEqual(job.Spec.TTLSecondsAfterFinished, &ttl) {
+		t.Fatal("worker inherited retries or a bounded helper deadline")
+	}
+	if !reflect.DeepEqual(c.Resources, pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || !reflect.DeepEqual(pod.Affinity, m.Spec.Runner.Affinity) {
+		t.Fatal("worker lost resource defaults or scheduling configuration")
+	}
+	if len(c.Command) != 4 || c.Command[0] != shellPath || c.Command[1] != "-c" || c.Command[3] != nativeWorkerTestExecutable {
+		t.Fatal("native worker did not exec the native program through the credential prelude")
+	}
+	for _, forbidden := range []string{"pgcopydb stream", "publication_retry", "DROP PUBLICATION", "--current", "set endpos"} {
+		if strings.Contains(c.Command[2], forbidden) || strings.Contains(strings.Join(c.Args, " "), forbidden) {
+			t.Fatal("native worker inherited a legacy or cutover effect")
+		}
+	}
+	assertNativeWorkerIdentity(t, c.Env, pvc.UID)
+	for _, labels := range []map[string]string{job.Labels, job.Spec.Template.Labels} {
+		if labels[labelMigration] != m.Name || labels[labelManagedBy] != managerName || labels[labelFeatureE2ERun] != featureRunOwner {
+			t.Fatal("native worker lost existing ownership labels")
+		}
+	}
+	if slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool {
+		return e.Name == "PGCONNECT_TIMEOUT" || e.Name == "PGCOPYDB_APPLY_GROUP_TXNS"
+	}) {
+		t.Fatal("worker inherited a control-Job timeout or unqualified apply override")
+	}
+}
+
+func assertNativeWorkerIdentity(t *testing.T, env []corev1.EnvVar, pvcUID types.UID) {
+	t.Helper()
+	want := []corev1.EnvVar{
+		{Name: "RPGMIGRATE_MIGRATION_UID", Value: nativeWorkerTestMigrationUID},
+		{Name: "RPGMIGRATE_RUN_ID", Value: "0123456789abcdef0123456789abcdef"},
+		{Name: "RPGMIGRATE_WORKDIR_ID", Value: string(pvcUID)},
+		{Name: "RPGMIGRATE_CHECKPOINT_GENERATION", Value: "1"},
+	}
+	for _, expected := range want {
+		count := 0
+		for _, actual := range env {
+			if actual.Name == expected.Name {
+				count++
+				if !reflect.DeepEqual(actual, expected) {
+					t.Fatalf("worker changed identity variable %s", expected.Name)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("worker identity variable %s occurs %d times", expected.Name, count)
+		}
+	}
+}
+
+func TestNativeWorkerJobConnections(t *testing.T) {
+	forms := map[string]v1beta1.PostgresConnection{
+		nativeEvidenceInlineForm:  passwordMigration().Spec.Source,
+		nativeWorkerSecretForm:    secretRefTarget(),
+		nativeWorkerURISecretForm: uriSecretRefTarget(),
+	}
+	for sourceName, source := range forms {
+		for targetName, target := range forms {
+			t.Run(sourceName+"/"+targetName, func(t *testing.T) {
+				m, pvc := nativeWorkerJobInputs()
+				m.Spec.Source, m.Spec.Target = source, target
+				if sourceName == nativeEvidenceInlineForm {
+					m.Spec.Source.Host = "worker-private-host-canary.example"
+					m.Spec.Source.Username = "worker-private-user-canary"
+				}
+				for _, c := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
+					if c.URISecretRef == nil {
+						c.TLS = &v1beta1.TLSSecretRefs{
+							RootCA: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: nativeWorkerTLSSecret}, Key: "worker-ca.pem"},
+							Cert:   &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: nativeWorkerTLSSecret}, Key: "cert.pem"},
+							Key:    &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: nativeWorkerTLSSecret}, Key: "key.pem"},
+						}
+					}
+				}
+				m.Spec.Runner.Image = nativeEvidenceTestImage
+				job, err := buildNativeWorkerJob(m, pvc, "unused-worker-image-default", 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				canonical, err := jobSkeleton(m, nativeEvidenceTestImage, jobName(m, 1), nil, "", 0, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c, base := job.Spec.Template.Spec.Containers[0], canonical.Spec.Template.Spec.Containers[0]
+				if c.Command[2] != base.Command[2] || !reflect.DeepEqual(c.Env[:len(base.Env)], base.Env) || !reflect.DeepEqual(job.Spec.Template.Spec.Volumes, canonical.Spec.Template.Spec.Volumes) || !reflect.DeepEqual(c.VolumeMounts, base.VolumeMounts) {
+					t.Fatal("native worker changed canonical credentials, TLS or prelude")
+				}
+				assertNativeWorkerIdentity(t, c.Env, pvc.UID)
+				if c.Image != nativeEvidenceTestImage || job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim == nil || job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != pvc.Name {
+					t.Fatal("worker lost image precedence or exact owned claim")
+				}
+				metadata, err := json.Marshal(job.ObjectMeta)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, private := range []string{"worker-private-host-canary.example", "worker-private-user-canary"} {
+					if strings.Contains(strings.Join(c.Args, " "), private) || strings.Contains(string(metadata), private) {
+						t.Fatal("worker disclosed connection data outside the credential channel")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestNativeWorkerJobProfiles(t *testing.T) {
+	const defaults = "clone --dir /work/pgcopydb --table-jobs 4 --split-tables-larger-than 536870912 --split-max-parts 8 --use-copy-binary"
+	const narrow = "clone --dir /work/pgcopydb --table-jobs 4 --skip-large-objects"
+	for _, tc := range []struct {
+		name      string
+		attempt   int32
+		configure func(*v1beta1.Migration)
+		want      string
+	}{
+		{"default first", 1, nil, defaults + " --restart"},
+		{"default retry construction", 2, nil, defaults + " --resume --not-consistent"},
+		{"narrow first", 1, narrowNativeWorker, narrow + " --restart"},
+		{"narrow retry construction", 2, narrowNativeWorker, narrow + " --resume --not-consistent"},
+		{"narrow follow", 1, func(m *v1beta1.Migration) {
+			narrowNativeWorker(m)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+		}, narrow + " --restart --follow --plugin pgoutput"},
+		{"narrow follow retry construction", 2, func(m *v1beta1.Migration) {
+			narrowNativeWorker(m)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+		}, narrow + " --resume --not-consistent --follow --plugin pgoutput"},
+		{"resource table jobs", 1, func(m *v1beta1.Migration) {
+			m.Spec.Runner.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8500m")}
+		}, strings.Replace(defaults, "--table-jobs 4", "--table-jobs 9", 1) + " --restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, pvc := nativeWorkerJobInputs()
+			if tc.configure != nil {
+				tc.configure(m)
+			}
+			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, tc.attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ") != tc.want {
+				t.Fatal("native worker changed its approved argument profile")
+			}
+			assertNativeWorkerIdentity(t, job.Spec.Template.Spec.Containers[0].Env, pvc.UID)
+		})
+	}
+	for _, phase := range []corev1.PersistentVolumeClaimPhase{corev1.ClaimPending, corev1.ClaimBound} {
+		t.Run("claim "+string(phase), func(t *testing.T) {
+			m, pvc := nativeWorkerJobInputs()
+			pvc.Status.Phase = phase
+			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNativeWorkerIdentity(t, job.Spec.Template.Spec.Containers[0].Env, pvc.UID)
+		})
+	}
+	t.Run("replacement claim changes binding", func(t *testing.T) {
+		m, pvc := nativeWorkerJobInputs()
+		pvc.UID = "replacement-owned-pvc"
+		job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNativeWorkerIdentity(t, job.Spec.Template.Spec.Containers[0].Env, pvc.UID)
+	})
+	t.Run("longest worker name", func(t *testing.T) {
+		m, pvc := nativeWorkerJobInputs()
+		m.Name = strings.Repeat("a", 57)
+		pvc.Name, pvc.OwnerReferences[0].Name = workPVCName(m), m.Name
+		job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+		if err != nil || len(job.Name) != 63 {
+			t.Fatalf("valid name boundary refused: %v", err)
+		}
+	})
+}
+
+func TestNativeWorkerJobRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(**v1beta1.Migration, **corev1.PersistentVolumeClaim)
+		image   string
+		attempt int32
+	}{
+		{"nil migration", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) { *m = nil }, nativeEvidenceTestImage, 1},
+		{"pgcopydb selection", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) { (*m).Spec.Engine = "" }, nativeEvidenceTestImage, 1},
+		{"nil claim", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) { *p = nil }, nativeEvidenceTestImage, 1},
+		{"foreign claim", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) {
+			(*p).OwnerReferences[0].UID = "foreign-migration"
+		}, nativeEvidenceTestImage, 1},
+		{"claim name", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) { (*p).Name = "other-work" }, nativeEvidenceTestImage, 1},
+		{"claim namespace", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) { (*p).Namespace = "other-namespace" }, nativeEvidenceTestImage, 1},
+		{"malformed namespace", func(m **v1beta1.Migration, p **corev1.PersistentVolumeClaim) {
+			(*m).Namespace, (*p).Namespace = "bad namespace", "bad namespace"
+		}, nativeEvidenceTestImage, 1},
+		{"claim uid", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) { (*p).UID = "" }, nativeEvidenceTestImage, 1},
+		{"deleting claim", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim) {
+			now := metav1.Now()
+			(*p).DeletionTimestamp = &now
+		}, nativeEvidenceTestImage, 1},
+		{"zero uuid", func(m **v1beta1.Migration, p **corev1.PersistentVolumeClaim) {
+			(*m).UID = "00000000-0000-0000-0000-000000000000"
+			(*p).OwnerReferences[0].UID = (*m).UID
+		}, nativeEvidenceTestImage, 1},
+		{"missing image", nil, "", 1},
+		{"mutable image", nil, "registry.example/native:latest", 1},
+		{"malformed pin", nil, "registry.example/native@sha256:worker-image-canary", 1},
+		{"override mutable image", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) {
+			(*m).Spec.Runner.Image = "worker-image-canary:latest"
+		}, nativeEvidenceTestImage, 1},
+		{"invalid attempt", nil, nativeEvidenceTestImage, 0},
+		{"negative attempt", nil, nativeEvidenceTestImage, -1},
+		{"clone selection", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) {
+			(*m).Spec.Clone.Filters = &v1beta1.Filters{ExcludeSchemas: []string{"worker_filter_canary"}}
+		}, nativeEvidenceTestImage, 1},
+		{"legacy drop", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) { (*m).Spec.Clone.DropIfExists = true }, nativeEvidenceTestImage, 2},
+		{"connection error", func(m **v1beta1.Migration, _ **corev1.PersistentVolumeClaim) { (*m).Spec.Source.Host = "" }, nativeEvidenceTestImage, 1},
+		{"oversized worker name", func(m **v1beta1.Migration, p **corev1.PersistentVolumeClaim) {
+			(*m).Name = strings.Repeat("a", 58)
+			(*p).Name = workPVCName(*m)
+			(*p).OwnerReferences[0].Name = (*m).Name
+		}, nativeEvidenceTestImage, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, pvc := nativeWorkerJobInputs()
+			if tc.mutate != nil {
+				tc.mutate(&m, &pvc)
+			}
+			job, err := buildNativeWorkerJob(m, pvc, tc.image, tc.attempt)
+			if err == nil || job != nil {
+				t.Fatal("unsupported worker returned usable output")
+			}
+			for _, private := range []string{"worker-image-canary", "worker_filter_canary"} {
+				if strings.Contains(err.Error(), private) {
+					t.Fatal("worker error disclosed refused input")
+				}
+			}
+		})
+	}
+}
+
+func TestNativeWorkerJobGolden(t *testing.T) {
+	for name, target := range map[string]v1beta1.PostgresConnection{
+		nativeEvidenceInlineForm:  passwordMigration().Spec.Target,
+		nativeWorkerSecretForm:    secretRefTarget(),
+		nativeWorkerURISecretForm: uriSecretRefTarget(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, pvc := nativeWorkerJobInputs()
+			narrowNativeWorker(m)
+			m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+			m.Spec.Target = target
+			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := json.MarshalIndent(job, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, '\n')
+			file := filepath.Join("testdata", "native-worker-job-"+name+".json")
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				if err := os.WriteFile(file, got, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatal("native worker golden drifted; review before updating")
+			}
+		})
 	}
 }

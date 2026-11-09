@@ -170,6 +170,34 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	return job, nil
 }
 
+func buildNativeWorkerJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, runnerImage string, attempt int32) (*batchv1.Job, error) {
+	args, err := nativeCloneArgs(m, attempt)
+	if err != nil {
+		return nil, errors.New("native worker configuration invalid")
+	}
+	work, err := nativeWorkIdentity(m, pvc)
+	if err != nil {
+		return nil, errors.New("native worker identity invalid")
+	}
+	name := jobName(m, attempt)
+	if len(name) > 63 || len(validation.IsDNS1123Subdomain(name)) != 0 || len(validation.IsValidLabelValue(m.Name)) != 0 || len(validation.IsDNS1123Label(m.Namespace)) != 0 || !nativeEvidenceDirectImage(runnerImageFor(m, runnerImage)) {
+		return nil, errors.New("native worker job configuration invalid")
+	}
+	job, err := jobSkeleton(m, runnerImage, name, args, "", 0, true)
+	if err != nil {
+		return nil, errors.New("native worker connection materialization invalid")
+	}
+	pod := &job.Spec.Template.Spec
+	automount := false
+	pod.AutomountServiceAccountToken = &automount
+	pod.DNSPolicy = corev1.DNSClusterFirst
+	container := &pod.Containers[0]
+	container.Command[len(container.Command)-1] = "/usr/local/bin/rpgmigrate"
+	container.Env = append(container.Env, nativeIdentityEnv(work)...)
+	container.Resources = pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)
+	return job, nil
+}
+
 // publicationRetryDollarTag is named, not bare $$: kubelet's Command/Args
 // expansion reduces "$$" to "$", which corrupts an anonymous DO $$ block.
 const publicationRetryDollarTag = "$publication_retry$"
