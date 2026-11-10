@@ -141,6 +141,7 @@ type MigrationReconciler struct {
 	RunnerImage string
 
 	NativePreflight NativePreflightReader
+	NativeStop      NativeStopRequester
 
 	// Native evidence requires an uncached Reader and an explicit native image.
 	NativeEvidence        *native.Reader
