@@ -1345,7 +1345,11 @@ class Guard:
     def source_identity(self):
         if self.call(['git', 'status', '--porcelain=v1', '--untracked-files=all']).strip():
             raise Refusal('qualification requires a clean tracked source checkout')
-        identity = {'repository': self.call(['git', 'remote', 'get-url', 'origin']).strip().removesuffix('.git'),
+        origin = self.call(['git', 'remote', 'get-url', 'origin']).removesuffix('\n')
+        repository = 'https://github.com/ydixken/pgcopydb-operator'
+        if origin not in {repository, repository + '.git', 'git@github.com:ydixken/pgcopydb-operator.git'}:
+            raise Refusal('source origin is not an approved operator repository')
+        identity = {'repository': repository,
             'commit': self.call(['git', 'rev-parse', 'HEAD']).strip(),
             'git_tree': self.call(['git', 'rev-parse', 'HEAD^{tree}']).strip(),
             'payload_inventory_sha256': self.source_tree()}

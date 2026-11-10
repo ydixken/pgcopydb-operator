@@ -1800,16 +1800,23 @@ class RegistrySourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp).resolve(); directory.chmod(0o700)
             guard = MODULE.Guard(directory, environ={})
-            for origin in ('https://github.com/ydixken/pgcopydb-operator', 'https://github.com/ydixken/pgcopydb-operator.git'):
-                def command(args, **kwargs):
-                    if args[1] == 'status': return ''
-                    if args[1] == 'remote': return origin + '\n'
-                    return ('a' if args[-1] == 'HEAD' else 'b') * 40 + '\n'
-                guard.command = command
-                guard.source_tree = lambda: 'd' * 64
-                self.assertEqual(guard.source_identity()['repository'], 'https://github.com/ydixken/pgcopydb-operator')
-            for origin in ('git@github.com:ydixken/pgcopydb-operator.git', 'https://user:secret@github.com/ydixken/pgcopydb-operator.git',
-                    'https://github.com/unknown/pgcopydb-operator.git', 'https://github.com/ydixken/pgcopydb-operator.git.git'):
+            expected = {'repository': 'https://github.com/ydixken/pgcopydb-operator', 'commit': 'a' * 40,
+                'git_tree': 'b' * 40, 'payload_inventory_sha256': 'd' * 64}
+            def command(args, **kwargs):
+                if args[1] == 'status': return ''
+                if args[1] == 'remote': return origin + '\n'
+                return ('a' if args[-1] == 'HEAD' else 'b') * 40 + '\n'
+            guard.command = command
+            guard.source_tree = lambda: 'd' * 64
+            for origin in ('https://github.com/ydixken/pgcopydb-operator', 'https://github.com/ydixken/pgcopydb-operator.git',
+                    'git@github.com:ydixken/pgcopydb-operator.git'):
+                with self.subTest(origin=origin): self.assertEqual(guard.source_identity(), expected)
+            for origin in ('https://user:secret@github.com/ydixken/pgcopydb-operator.git',
+                    'https://github.com/unknown/pgcopydb-operator.git', 'https://github.com/ydixken/pgcopydb-operator.git.git',
+                    'git@github.com:unknown/pgcopydb-operator.git', 'git@unknown.invalid:ydixken/pgcopydb-operator.git',
+                    'other@github.com:ydixken/pgcopydb-operator.git', 'git@github.com.evil.invalid:ydixken/pgcopydb-operator.git',
+                    'ssh://git@github.com/ydixken/pgcopydb-operator.git', 'git@github.com:ydixken/pgcopydb-operator',
+                    'git@github.com:ydixken/rpgmigrate.git', 'git@github.com:ydixken/pgcopydb-operator.git '):
                 with self.subTest(origin=origin), self.assertRaises(MODULE.Refusal): guard.source_identity()
             guard.command = lambda *args, **kwargs: '?? untracked-input\n'
             with self.assertRaises(MODULE.Refusal): guard.source_identity()
