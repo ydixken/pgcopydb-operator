@@ -49,6 +49,7 @@ func (r *MigrationReconciler) persistNativeEnd(ctx context.Context, m *v1beta1.M
 		desired.Status.Replication = &v1beta1.ReplicationStatus{}
 	}
 	desired.Status.Replication.Endpos = end
+	desired.Status.Phase = v1beta1.PhaseCuttingOver
 	if err := r.patchNativeControlStatus(ctx, desired, base); err != nil {
 		return ctrl.Result{}, err
 	}

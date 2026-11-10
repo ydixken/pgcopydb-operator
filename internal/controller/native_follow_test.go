@@ -67,6 +67,33 @@ func TestNativePersistedEndOrdering(t *testing.T) {
 	}
 }
 
+func TestNativeEndPersistencePublishesCuttingOver(t *testing.T) {
+	f := newNativeControlFixture(t)
+	before := f.m.DeepCopy()
+	expected := before.DeepCopy()
+	expected.Status.Replication = &v1beta1.ReplicationStatus{Endpos: nativeControlTestEnd}
+	expected.Status.Phase = v1beta1.PhaseCuttingOver
+	expected.Status.ObservedGeneration = expected.Generation
+	f.patch = func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+		m, ok := obj.(*v1beta1.Migration)
+		if !ok || nativeControlEnd(m) != nativeControlTestEnd || m.Status.Phase != v1beta1.PhaseCuttingOver {
+			t.Fatal("E and CuttingOver were not submitted in the same status patch")
+		}
+		return c.Status().Patch(ctx, obj, p)
+	}
+	res, err := f.r.persistNativeEnd(context.Background(), f.m, f.worker, f.pvc, f.control)
+	if err != nil || res.RequeueAfter != pollInterval || f.heads != 1 || f.sets != 0 || f.patches != 1 || !slices.Equal(f.trace, []string{"source sample", "optimistic status patch"}) {
+		t.Fatal("E persistence did not return immediately after one status patch", err)
+	}
+	saved := f.current()
+	if !apiequality.Semantic.DeepEqual(saved.Status, expected.Status) {
+		t.Fatal("atomic E display patch changed unrelated status or gained completion authority")
+	}
+	if !apiequality.Semantic.DeepEqual(f.m, before) || saved.ResourceVersion == before.ResourceVersion {
+		t.Fatal("persistence changed the caller snapshot or failed to advance the saved resourceVersion")
+	}
+}
+
 func TestNativeClientPersistedEndRetry(t *testing.T) {
 	for _, fault := range []string{nativeControlRefusalFault, nativeControlDisconnectFault, nativeControlWarningFault} {
 		t.Run(fault, func(t *testing.T) {
