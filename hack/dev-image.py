@@ -36,8 +36,36 @@ MAX_JSON = 1048576
 MAX_BLOB = 536870912
 
 
+FAILURE_REASONS = {
+    'VALIDATION_REFUSED', 'SOURCE_NOT_CLEAN', 'ACTIONS_CONTEXT_INVALID', 'NATIVE_PLATFORM_INVALID',
+    'PODMAN_RETRY_UNSUPPORTED', 'WORKFLOW_CREDENTIAL_MISSING', 'COMMAND_UNAVAILABLE_OR_TIMEOUT',
+    'COMMAND_FAILED_OR_OUTPUT_LIMIT', 'REGISTRY_AUTHORIZATION_UNAVAILABLE', 'PACKAGE_UNAUTHORIZED',
+    'PACKAGE_FORBIDDEN', 'PACKAGE_NOT_FOUND', 'PACKAGE_RATE_LIMITED', 'PACKAGE_HTTP_FAILURE',
+    'IO_FAILURE', 'INVALID_TEXT', 'INVALID_VALUE', 'MISSING_FIELD', 'INVALID_TYPE',
+}
+FAILURE_STAGES = {
+    'startup', 'source-validation', 'evidence-directory', 'retained-receipt', 'local-verification',
+    'trusted-context-and-tools', 'workflow-credential', 'registry-authorization', 'package-and-namespace',
+    'tag-lookup', 'retained-graph', 'anonymous-graph', 'retained-identity', 'build-context', 'build',
+    'smoke', 'source-recheck', 'tag-recheck', 'push', 'published-graph', 'anonymous-pull-smoke', 'receipt-write',
+}
+REFUSAL_REASONS = {
+    'publication requires a clean complete source checkout': 'SOURCE_NOT_CLEAN',
+    'source must remain clean during inventory': 'SOURCE_NOT_CLEAN',
+    'publisher requires the exact trusted feature-branch Actions source': 'ACTIONS_CONTEXT_INVALID',
+    'publication and executable verification require the native Linux architecture': 'NATIVE_PLATFORM_INVALID',
+    'Podman lacks explicit no-retry publication support': 'PODMAN_RETRY_UNSUPPORTED',
+    'repository workflow publication credential unavailable': 'WORKFLOW_CREDENTIAL_MISSING',
+    'command unavailable or timed out': 'COMMAND_UNAVAILABLE_OR_TIMEOUT',
+    'command failed or output exceeded bound': 'COMMAND_FAILED_OR_OUTPUT_LIMIT',
+    'registry authorization unavailable': 'REGISTRY_AUTHORIZATION_UNAVAILABLE',
+}
+
+
 class Refusal(Exception):
-    pass
+    def __init__(self, message, *, reason=None):
+        self.reason = reason if reason in FAILURE_REASONS else REFUSAL_REASONS.get(message, 'VALIDATION_REFUSED')
+        super().__init__(message)
 
 
 def canonical(value):
@@ -255,6 +283,10 @@ def require_owner(user_status, user, repo_status, repository):
 
 
 def require_package(status, payload):
+    if status != 200:
+        reason = {401: 'PACKAGE_UNAUTHORIZED', 403: 'PACKAGE_FORBIDDEN', 404: 'PACKAGE_NOT_FOUND',
+                  429: 'PACKAGE_RATE_LIMITED'}.get(status, 'PACKAGE_HTTP_FAILURE')
+        raise Refusal('exact manager package metadata request failed', reason=reason)
     package = decode(payload)
     if (status != 200 or not isinstance(package, dict) or package.get('name') != 'pgcopydb-operator' or
             package.get('package_type') != 'container' or package.get('visibility') != 'public' or
@@ -504,31 +536,44 @@ def anonymous_smoke(receipt, source, architecture, directory):
         return smoke(receipt['graph']['config_digest'], source, architecture, directory, env=env)
 
 
-def publish(args):
+def publish(args, *, state=None):
+    state = state if state is not None else {}
+    state['stage'] = 'source-validation'
     root = Path(__file__).resolve().parents[1]
     source = source_identity(root)
     architecture = args.architecture
     tag = tag_for(source, architecture)
+    state['stage'] = 'evidence-directory'
     directory = Path(args.output_dir).absolute()
     private_directory(directory, root)
     build_input = build_input_sha(source, architecture)
     labels = build_labels(source, build_input)
+    state['stage'] = 'retained-receipt'
     retained = read_private(Path(args.retained_receipt)) if args.retained_receipt else None
     local_verification = args.verify_only and os.environ.get('GITHUB_ACTIONS') != 'true'
     if local_verification:
+        state['stage'] = 'local-verification'
         registry = local_verification_registry(source, architecture, retained, root)
     else:
+        state['stage'] = 'trusted-context-and-tools'
         trusted_context(source, architecture)
+        state['stage'] = 'workflow-credential'
         token = os.environ.get('GITHUB_TOKEN')
         actor = os.environ.get('GITHUB_ACTOR')
         if not token or not actor:
             raise Refusal('repository workflow publication credential unavailable')
+        state['stage'] = 'registry-authorization'
         registry = Registry(actor, token)
+    state['stage'] = 'package-and-namespace'
     registry.namespace()
+    state['stage'] = 'tag-lookup'
     existing = tag_state(registry, tag)
     if existing is not None:
+        state['stage'] = 'retained-graph'
         graph = read_graph(registry, existing, architecture, labels)
+        state['stage'] = 'anonymous-graph'
         public = read_graph(Registry(), existing, architecture, labels, blobs=True)
+        state['stage'] = 'retained-identity'
         require_reusable(retained, source, architecture, public, allow_pending=args.verify_only)
         observed = retained['smoke_receipt'] if local_verification else anonymous_smoke(public, source, architecture, directory)
         if (observed['executable_sha256'] != retained['executable_sha256'] or sha(canonical(observed)) != retained['smoke_receipt_sha256'] or
@@ -550,18 +595,23 @@ def publish(args):
             '--cpu-period=100000', '--cpu-quota=300000', '--memory=5g', '--memory-swap=5g', '--jobs=1', '--iidfile', str(iid_file)]
     for key, value in sorted(labels.items()):
         argv += ['--label', key + '=' + value]
+    state['stage'] = 'build-context'
     with tempfile.TemporaryDirectory(prefix='build-context-', dir=directory) as temporary:
         context = Path(temporary)
         copy_build_context(root, context)
+        state['stage'] = 'build'
         command(argv + [str(context)], cwd=root, timeout=2400)
+    state['stage'] = 'smoke'
     image_id = iid_file.read_text().strip()
     observed = smoke(image_id, source, architecture, directory)
     smoke_sha = sha(canonical(observed))
     write_private(directory / 'smoke-receipt.json', observed)
     write_private(directory / 'build-receipt.json', dict(source=source, architecture=architecture, image_id=image_id,
                   build_input_sha256=build_input, executable_sha256=observed['executable_sha256'], smoke_receipt_sha256=smoke_sha))
+    state['stage'] = 'source-recheck'
     if source_identity(root) != source:
         raise Refusal('source changed after build and smoke')
+    state['stage'] = 'tag-recheck'
     if tag_state(registry, tag) is not None:
         raise Refusal('development tag appeared before push; overwrite refused')
     with tempfile.TemporaryDirectory(prefix='publish-auth-', dir=directory) as temporary:
@@ -587,22 +637,48 @@ def publish(args):
             if not re.fullmatch(DIGEST, pushed):
                 raise Refusal('push digest is invalid')
             return pushed
+        state['stage'] = 'push'
         pushed = push_once(push_command, readback)
     if not re.fullmatch(DIGEST, pushed) or tag_state(registry, tag) != pushed:
         raise Refusal('published development tag readback differs from returned digest')
+    state['stage'] = 'published-graph'
     graph = read_graph(registry, pushed, architecture, labels)
     if graph['config_digest'] != image_id:
         raise Refusal('published config differs from built and smoked immutable image')
     pending = publication_receipt(source, architecture, build_input, observed['executable_sha256'], observed, graph, None)
     write_private(directory / 'publication-receipt.json', pending)
+    state['stage'] = 'anonymous-graph'
     public = read_graph(Registry(), pushed, architecture, labels, blobs=True)
+    state['stage'] = 'anonymous-pull-smoke'
     public_smoke = anonymous_smoke(public, source, architecture, directory)
     if public_smoke != observed:
         raise Refusal('anonymous digest executable or smoke differs from retained immutable image')
     receipt = publication_receipt(source, architecture, build_input, observed['executable_sha256'], observed, graph, public)
     if source_identity(root) != source or tag_state(registry, tag) != pushed:
         raise Refusal('source or exact development tag changed during public verification')
+    state['stage'] = 'receipt-write'
     write_private(directory / 'publication-receipt.json', receipt)
+
+
+def report_failure(args, state, error):
+    reasons = {OSError: 'IO_FAILURE', UnicodeError: 'INVALID_TEXT', ValueError: 'INVALID_VALUE',
+               KeyError: 'MISSING_FIELD', TypeError: 'INVALID_TYPE'}
+    reason = error.reason if isinstance(error, Refusal) else next(
+        (code for kind, code in reasons.items() if isinstance(error, kind)), 'VALIDATION_REFUSED')
+    stage = state.get('stage', 'startup')
+    receipt = dict(schema_version=1, status='REFUSED', role='manager', architecture=args.architecture,
+                   stage=stage if stage in FAILURE_STAGES else 'startup',
+                   reason=reason if reason in FAILURE_REASONS else 'VALIDATION_REFUSED')
+    try:
+        root = Path(__file__).resolve().parents[1]
+        directory = Path(args.output_dir).absolute()
+        if directory.parent.resolve() != directory.parent:
+            raise Refusal('failure evidence parent contains a symbolic link')
+        private_directory(directory, root)
+        write_private(directory / 'publication-failure.json', receipt)
+    except (Refusal, OSError, ValueError):
+        pass
+    print(canonical(receipt).decode())
 
 
 def main():
@@ -612,10 +688,11 @@ def main():
     parser.add_argument('--retained-receipt')
     parser.add_argument('--verify-only', action='store_true')
     args = parser.parse_args()
+    state = {'stage': 'startup'}
     try:
-        publish(args)
-    except (Refusal, OSError, UnicodeError, ValueError, KeyError, TypeError):
-        print('{"status":"REFUSED","detail":"publication failed; inspect sanitized retained receipts"}')
+        publish(args, state=state)
+    except (Refusal, OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        report_failure(args, state, error)
         return 1
     print('{"status":"PUBLIC","role":"manager"}')
     return 0

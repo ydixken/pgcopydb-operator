@@ -2,10 +2,12 @@
 import base64
 import copy
 import hashlib
+import io
 import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -381,6 +383,75 @@ class PublicationTests(unittest.TestCase):
             self.assertIn(('client', True), events)
             self.assertEqual(json.loads(retained.read_bytes())['status'], 'PUBLICITY_PENDING')
 
+    def test_preflight_failures_keep_fixed_private_evidence_without_image_effects(self):
+        cases = [
+            ('source', 'source-validation', OSError('private-canary'), 'IO_FAILURE'),
+            ('context', 'trusted-context-and-tools', M.Refusal('publisher requires the exact trusted feature-branch Actions source'), 'ACTIONS_CONTEXT_INVALID'),
+            ('tool', 'trusted-context-and-tools', M.Refusal('command unavailable or timed out'), 'COMMAND_UNAVAILABLE_OR_TIMEOUT'),
+            ('token', 'registry-authorization', M.Refusal('registry authorization unavailable'), 'REGISTRY_AUTHORIZATION_UNAVAILABLE'),
+            ('api', 'package-and-namespace', M.Refusal('package lookup denied', reason='PACKAGE_FORBIDDEN'), 'PACKAGE_FORBIDDEN'),
+        ]
+        for target, stage, error, reason in cases:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary).resolve() / 'output'
+                stdout = io.StringIO()
+                registry = unittest.mock.Mock()
+                with patch.object(sys, 'argv', ['dev-image.py', '--architecture', 'arm64', '--output-dir', str(output)]), \
+                     patch.object(M, 'source_identity', side_effect=error if target == 'source' else None, return_value=self.source), \
+                     patch.object(M, 'trusted_context', side_effect=error if target in ('context', 'tool') else None), \
+                     patch.object(M, 'Registry', side_effect=error if target == 'token' else None, return_value=registry), \
+                     patch.object(M, 'command') as command, patch.object(M, 'smoke') as smoke, \
+                     patch.object(M, 'tag_state') as tag_state, patch.object(sys, 'stdout', stdout), \
+                     patch.dict(M.os.environ, {'GITHUB_TOKEN': 'credential-canary', 'GITHUB_ACTOR': 'actor'}):
+                    if target == 'api': registry.namespace.side_effect = error
+                    self.assertEqual(M.main(), 1)
+                    command.assert_not_called(); smoke.assert_not_called(); tag_state.assert_not_called()
+                receipt_path = output / 'publication-failure.json'
+                receipt = json.loads(receipt_path.read_bytes())
+                self.assertEqual(receipt, json.loads(stdout.getvalue()))
+                self.assertEqual(set(receipt), {'schema_version', 'status', 'role', 'architecture', 'stage', 'reason'})
+                self.assertEqual(receipt['stage'], stage)
+                self.assertEqual(receipt['reason'], reason)
+                self.assertEqual(receipt['status'], 'REFUSED')
+                self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn('private-canary', stdout.getvalue())
+                self.assertNotIn('credential-canary', stdout.getvalue())
+                self.assertNotIn(str(output), stdout.getvalue())
+
+    def test_failure_evidence_is_invariant_to_exception_content(self):
+        outputs = []
+        for canary in ('token-canary-one https://provider.invalid/private', 'another-canary /private/path'):
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary).resolve() / 'output'
+                stdout = io.StringIO()
+                with patch.object(sys, 'argv', ['dev-image.py', '--architecture', 'amd64', '--output-dir', str(output)]), \
+                     patch.object(M, 'source_identity', side_effect=OSError(canary)), patch.object(sys, 'stdout', stdout):
+                    self.assertEqual(M.main(), 1)
+                outputs.append((stdout.getvalue(), (output / 'publication-failure.json').read_bytes()))
+        self.assertEqual(outputs[0], outputs[1])
+
+    def test_failure_evidence_refuses_symlinked_or_source_output_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            target = root / 'target'; target.mkdir(mode=0o700)
+            link = root / 'link'; link.symlink_to(target, target_is_directory=True)
+            source_path = Path(__file__).resolve().parents[1] / 'publication-failure-must-not-exist'
+            for output in (link, link / 'child', source_path):
+                with self.subTest(output=output), patch.object(sys, 'argv', ['dev-image.py', '--architecture', 'amd64', '--output-dir', str(output)]), \
+                     patch.object(M, 'source_identity', side_effect=OSError('private-canary')), patch.object(sys, 'stdout', io.StringIO()) as stdout:
+                    self.assertEqual(M.main(), 1)
+                    self.assertEqual(json.loads(stdout.getvalue())['reason'], 'IO_FAILURE')
+                self.assertFalse((output / 'publication-failure.json').exists())
+            self.assertFalse(source_path.exists())
+            self.assertFalse((target / 'child').exists())
+
+    def test_package_http_reason_never_uses_provider_body(self):
+        for status, reason in ((401, 'PACKAGE_UNAUTHORIZED'), (403, 'PACKAGE_FORBIDDEN'),
+                               (404, 'PACKAGE_NOT_FOUND'), (429, 'PACKAGE_RATE_LIMITED'), (500, 'PACKAGE_HTTP_FAILURE')):
+            with self.subTest(status=status), self.assertRaises(M.Refusal) as error:
+                M.require_package(status, b'provider-canary https://private.invalid/token')
+            self.assertEqual(error.exception.reason, reason)
+
     def test_workflow_has_exact_trusted_branch_and_serialized_native_jobs(self):
         text = Path(__file__).parents[1].joinpath('.github/workflows/dev-manager-image.yml').read_text()
         self.assertIn('feat/rpgmigrate-native-operator', text)
@@ -396,6 +467,8 @@ class PublicationTests(unittest.TestCase):
         self.assertNotIn('self-hosted', text)
         import re
         for action in re.findall(r'uses: ([^\s]+)', text): self.assertRegex(action, r'@[0-9a-f]{40}$')
+        self.assertIn('/publication-failure.json', text)
+        self.assertIn('if-no-files-found: error', text)
         self.assertIn('persist-credentials: false', text)
         self.assertIn('GITHUB_TOKEN:', text)
         self.assertNotIn('docker/login', text)

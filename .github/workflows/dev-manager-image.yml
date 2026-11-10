@@ -65,6 +65,7 @@ jobs:
         with:
           name: manager-publication-${{ matrix.architecture }}
           path: |
+            ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/publication-failure.json
             ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/publication-receipt.json
             ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/smoke-receipt.json
             ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/build-receipt.json
