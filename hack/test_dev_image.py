@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import base64
 import copy
+from contextlib import contextmanager
 import hashlib
 import io
 import importlib.util
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +35,54 @@ def raw(value):
 
 def digest(value):
     return 'sha256:' + hashlib.sha256(value).hexdigest()
+
+
+@contextmanager
+def committed_source_fixture():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        for argv in (['git', 'init', '-q'], ['git', 'config', 'user.email', 'fixture@example.invalid'],
+                     ['git', 'config', 'user.name', 'Fixture']):
+            subprocess.run(argv, cwd=root, check=True)
+        path = root / 'a'
+        path.write_bytes(b'committed')
+        subprocess.run(['git', 'add', 'a'], cwd=root, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'fixture'], cwd=root, check=True)
+        subprocess.run(['git', 'update-index', '--assume-unchanged', 'a'], cwd=root, check=True)
+        yield root, path
+
+
+def changed_stat(info, **changes):
+    fields = ('st_mode', 'st_ino', 'st_dev', 'st_nlink', 'st_uid', 'st_gid', 'st_size',
+              'st_atime', 'st_mtime', 'st_ctime')
+    values = list(info)
+    timestamps = {name: getattr(info, name) for name in
+                  ('st_atime', 'st_mtime', 'st_ctime', 'st_atime_ns', 'st_mtime_ns', 'st_ctime_ns')}
+    for name, value in changes.items():
+        if name in fields:
+            values[fields.index(name)] = int(value) if name.endswith('time') else value
+        if name in timestamps:
+            timestamps[name] = value
+    return os.stat_result(values, timestamps)
+
+
+@contextmanager
+def source_read_stats(path, before, after, *, replacement=None):
+    original_stat, original_read = Path.stat, Path.read_bytes
+    read = []
+    def observed_stat(candidate, *args, **kwargs):
+        if candidate == path:
+            return after if read else before
+        return original_stat(candidate, *args, **kwargs)
+    def observed_read(candidate):
+        if candidate == path and replacement is not None:
+            candidate.write_bytes(replacement)
+        payload = original_read(candidate)
+        if candidate == path:
+            read.append(True)
+        return payload
+    with patch.object(Path, 'stat', observed_stat), patch.object(Path, 'read_bytes', observed_read):
+        yield read
 
 
 class PublicationTests(unittest.TestCase):
@@ -160,6 +211,42 @@ class PublicationTests(unittest.TestCase):
                 M.command(['podman', 'push', 'credential-canary'])
         self.assertNotIn('credential-canary', str(error.exception))
         self.assertNotIn('private-path', str(error.exception))
+
+    def test_source_read_allows_atime_only_change_in_unchanged_committed_payload(self):
+        with committed_source_fixture() as (root, path):
+            before = path.stat()
+            after = changed_stat(before, st_atime=before.st_atime + 10, st_atime_ns=before.st_atime_ns + 10_000_000_000)
+            stable = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+            self.assertTrue(all(getattr(before, name) == getattr(after, name) for name in stable))
+            self.assertNotEqual(before, after)
+            self.assertFalse(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root))
+            with source_read_stats(path, before, after) as reads:
+                source = M.source_identity(root)
+            self.assertEqual(len(reads), 1)
+            expected = hashlib.sha256(raw([['a', 420, hashlib.sha256(b'committed').hexdigest()]])).hexdigest()
+            self.assertEqual(source['payload_inventory_sha256'], expected)
+            self.assertEqual(source['commit'], subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root).decode().strip())
+            self.assertEqual(source['git_tree'], subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=root).decode().strip())
+            self.assertFalse(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root))
+
+    def test_source_read_rejects_stable_metadata_and_committed_payload_changes(self):
+        for name in ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_size',
+                     'st_mtime_ns', 'st_ctime_ns', 'content'):
+            with self.subTest(field=name), committed_source_fixture() as (root, path):
+                before = path.stat()
+                if name == 'content':
+                    after = before
+                else:
+                    value = before.st_mode ^ stat.S_IXUSR if name == 'st_mode' else getattr(before, name) + 1
+                    after = changed_stat(before, **{name: value})
+                if name in ('st_mtime_ns', 'st_ctime_ns'):
+                    self.assertEqual(before, after)
+                    self.assertNotEqual(getattr(before, name), getattr(after, name))
+                with source_read_stats(path, before, after, replacement=b'modified!' if name == 'content' else None) as reads:
+                    with self.assertRaises(M.Refusal):
+                        M.source_identity(root)
+                self.assertEqual(len(reads), 1)
+                self.assertFalse(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root))
 
     def test_clean_complete_source_inventory_matches_guard_encoding(self):
         with tempfile.TemporaryDirectory() as tmp:

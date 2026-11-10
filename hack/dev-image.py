@@ -106,6 +106,12 @@ def command(argv, *, cwd=None, timeout=120, env=None, combined=False):
     return result.stdout + result.stderr if combined else result.stdout
 
 
+def _source_metadata(info):
+    # Reading source can update access time without changing its identity or contents.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def source_identity(root):
     if command(['git', 'status', '--porcelain=v1', '--untracked-files=all'], cwd=root):
         raise Refusal('publication requires a clean complete source checkout')
@@ -144,7 +150,8 @@ def source_identity(root):
         blob_id = hashlib.sha1(b'blob ' + str(len(payload)).encode() + b'\0' + payload).hexdigest()
         if committed.get(name) != (mode, blob_id):
             raise Refusal('source payload differs from exact committed Git tree')
-        if total > 128 * MAX_JSON or len(payload) != info.st_size or path.stat() != info:
+        after = path.stat()
+        if total > 128 * MAX_JSON or len(payload) != info.st_size or _source_metadata(after) != _source_metadata(info):
             raise Refusal('source inventory changed or exceeded bound')
         inventory.append([name, mode, sha(payload)])
     if not inventory or {item[0] for item in inventory} != set(committed):
