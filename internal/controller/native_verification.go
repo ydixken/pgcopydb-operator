@@ -25,7 +25,8 @@ type nativeVerificationCapture struct {
 
 // A changed ResourceVersion means a new helper receipt was persisted; the caller must return immediately.
 func (r *MigrationReconciler) ensureNativeVerification(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Discovery needs its cleanup reservation before the bounded comparison capture.
+	ctx, cancel := context.WithTimeout(ctx, nativePreflightTotal+30*time.Second)
 	defer cancel()
 	if m == nil || m.Spec.Verification != nil && m.Spec.Verification.Rehearsal {
 		return false, native.ErrNativeComparisonUnavailable
@@ -37,11 +38,7 @@ func (r *MigrationReconciler) ensureNativeVerification(ctx context.Context, m *v
 		return false, native.ErrNativeComparisonUnavailable
 	}
 	entry := m.DeepCopy()
-	image := runnerImageFor(entry, r.RPGMigrateRunnerImage)
-	if _, err := r.nativePreflightMigration(ctx, entry, image); err != nil {
-		return false, native.ErrNativeComparisonUnavailable
-	}
-	original, err := r.nativeQuiescentWorker(ctx, entry, worker, pvc)
+	_, original, err := r.nativeCompletionCurrent(ctx, entry, worker, pvc, nil)
 	if err != nil {
 		return false, native.ErrNativeComparisonUnavailable
 	}
@@ -166,6 +163,9 @@ func (r *MigrationReconciler) readNativeVerificationCheck(ctx context.Context, m
 }
 
 func (r *MigrationReconciler) createNativeVerificationCheck(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod, expected *batchv1.Job, check string) error {
+	if err := r.nativeCleanupPreflight(ctx, m, worker, pvc, original); err != nil || native.ValidateEvidenceJobSize(expected) != nil {
+		return native.ErrNativeComparisonUnavailable
+	}
 	if !r.nativeVerificationOriginalUnchanged(ctx, m, worker, pvc, original) {
 		return native.ErrNativeComparisonUnavailable
 	}

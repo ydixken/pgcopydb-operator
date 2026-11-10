@@ -12,10 +12,151 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+type nativeRetryAdmission struct {
+	migration      *v1beta1.Migration
+	worker         *batchv1.Job
+	pvc            *corev1.PersistentVolumeClaim
+	pod            *corev1.Pod
+	readiness      *native.RetryReadiness
+	closed         *nativeClosedCompareHelpers
+	used, recorded bool
+}
+
+func nativeRetryPolicyValid(m *v1beta1.Migration) bool {
+	return m != nil && m.Status.NativeFinalizedJobUID == "" && m.Status.Attempts > 0 && m.Status.Attempts < int32(1<<31-1) && m.Spec.BackoffLimit >= 0 && m.Spec.BackoffLimit < int32(1<<31-1) &&
+		m.Status.ExemptAttempts >= 0 && m.Status.ExemptAttempts <= m.Status.Attempts
+}
+
+func nativeRetryObservationPassed(o native.RetryGateObservation, in native.RetryInputs, now time.Time) bool {
+	observed := time.Unix(o.ObservedAtUnix, 0)
+	return o.ObservedAtUnix > 0 && !observed.After(now) && !now.After(observed.Add(gatePassFreshness)) && o.Total == 0 && o.SyncRep == 0 && o.GateWaiting == 0 &&
+		o.SynchronousCommitAdmitted && (!in.ExpectLocal || o.TargetSynchronousCommit == v1beta1.SynchronousCommitLocal) && (!in.CommitTest || o.ProbeAttempted && o.ProbeCommitted)
+}
+
+func nativeRetryInputs(m *v1beta1.Migration) native.RetryInputs {
+	in := gateInputsFor(m)
+	return native.RetryInputs{CommitTest: in.CommitTest, ExpectLocal: in.ExpectLocal}
+}
+
+func (r *MigrationReconciler) nativeRetryCurrent(ctx context.Context, expected *v1beta1.Migration, a *nativeRetryAdmission) (*v1beta1.Migration, *corev1.PersistentVolumeClaim, error) {
+	if a == nil || a.migration == nil || a.readiness == nil || a.closed == nil || expected == nil || !nativeRetryPolicyValid(expected) || expected.Spec.Suspend || !expected.DeletionTimestamp.IsZero() ||
+		!apiequality.Semantic.DeepEqual(expected.Status, a.migration.Status) || !apiequality.Semantic.DeepEqual(expected.Spec, a.migration.Spec) || expected.Generation != a.migration.Generation || expected.UID != a.migration.UID ||
+		!onFailurePath(expected) || expected.Status.RetryGate.Exemption == "" || budgetSpent(expected) {
+		return nil, nil, errNativeWorkerRetry
+	}
+	observation, known := a.readiness.Observation()
+	if !known || !nativeRetryObservationPassed(observation, nativeRetryInputs(expected), r.currentTime()) {
+		return nil, nil, errNativeWorkerRetry
+	}
+	live, _, err := r.nativeRecoveryQuiescentCurrent(ctx, expected, a.worker, a.pvc, a.pod)
+	if err != nil || !nativeRecoveryWorkerFailed(a.worker) || r.nativeCompareClosureCurrent(ctx, live, a.closed) != nil {
+		return nil, nil, errNativeWorkerRetry
+	}
+	return live, a.pvc, nil
+}
+
+func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	if !nativeRetryPolicyValid(m) || m.Spec.Suspend || !m.DeletionTimestamp.IsZero() || !nativeRecoveryWorkerFailed(worker) {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	live, original, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, nil)
+	if err != nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	if live.Status.RetryGate == nil {
+		desired := live.DeepCopy()
+		failedAt := jobFailedAt(worker)
+		if failedAt.IsZero() {
+			failedAt = r.currentTime()
+		}
+		desired.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: live.Status.Attempts, FailedAt: metav1.NewTime(failedAt), Failure: "Native worker failed"}
+		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonGateProbing, "Native retry waits for fresh target authority")
+		return r.patchNativeRetry(ctx, m, desired, base)
+	}
+	rg := live.Status.RetryGate
+	if !nativeRetryGateCurrent(rg, live.Status.Attempts, r.currentTime()) {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	if rg.Exemption == "" && verdictOverdue(rg, r.currentTime()) {
+		desired := live.DeepCopy()
+		desired.Status.RetryGate.Exemption = v1beta1.RetryGateCounted
+		if budgetSpent(desired) {
+			r.failNativeRetryBudget(desired)
+		}
+		return r.patchNativeRetry(ctx, m, desired, base)
+	}
+	if rg.Exemption != "" && budgetSpent(live) {
+		if live.Status.Phase == v1beta1.PhaseFailed && meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionFailed) {
+			return ctrl.Result{}, nil
+		}
+		desired := live.DeepCopy()
+		r.failNativeRetryBudget(desired)
+		return r.patchNativeRetry(ctx, m, desired, base)
+	}
+	var readiness *native.RetryReadiness
+	err = r.runNativeRecoveryRead(ctx, live, worker, pvc, original, native.JobRoleRetryGate, func(ctx context.Context, w native.ExecutionData) error {
+		var readErr error
+		readiness, readErr = r.NativeEvidence.ReadRetryReadiness(ctx, w, nativeRetryInputs(live))
+		return readErr
+	})
+	if err != nil || readiness == nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	observation, known := readiness.Observation()
+	if !known {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, live, worker, pvc, original); err != nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	if rg.Exemption == "" {
+		desired := live.DeepCopy()
+		desired.Status.RetryGate.Exemption = exemptionVerdict(gateCensus{Total: observation.Total, SyncRep: observation.SyncRep, GateWaiting: observation.GateWaiting, SyncRepSince: observation.OldestSyncRepWaitUnix, Named: observation.ApplicationAttributionKnown}, rg.FailedAt.Time)
+		if desired.Status.RetryGate.Exemption == v1beta1.RetryGateExempt {
+			if desired.Status.ExemptAttempts == int32(1<<31-1) {
+				return ctrl.Result{}, errNativeWorkerRetry
+			}
+			desired.Status.ExemptAttempts++
+		}
+		if budgetSpent(desired) {
+			r.failNativeRetryBudget(desired)
+		}
+		return r.patchNativeRetry(ctx, m, desired, base)
+	}
+	if !nativeRetryObservationPassed(observation, nativeRetryInputs(live), r.currentTime()) {
+		desired := live.DeepCopy()
+		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonSessionsRemain, "Native target retry authority holds the next worker")
+		return r.patchNativeRetry(ctx, m, desired, base)
+	}
+	closed, err := r.closeNativeCompareHelpers(ctx, live, worker, pvc, original)
+	if err != nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	a := &nativeRetryAdmission{migration: live.DeepCopy(), worker: worker.DeepCopy(), pvc: pvc.DeepCopy(), pod: original.DeepCopy(), readiness: readiness, closed: closed}
+	return r.startNativeRetry(ctx, live, live.DeepCopy(), a)
+}
+
+func (r *MigrationReconciler) failNativeRetryBudget(m *v1beta1.Migration) {
+	m.Status.Phase = v1beta1.PhaseFailed
+	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", "Native retry budget is exhausted")
+}
+
+func (r *MigrationReconciler) patchNativeRetry(ctx context.Context, m, desired, base *v1beta1.Migration) (ctrl.Result, error) {
+	desired.Status.ObservedGeneration = desired.Generation
+	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return ctrl.Result{}, nativeWorkerError(err)
+	}
+	desired.DeepCopyInto(m)
+	return ctrl.Result{RequeueAfter: retryGateInterval}, nil
+}
 
 var (
 	errNativeRecovery       = errors.New("native recovery identity or execution unavailable")
@@ -175,4 +316,8 @@ func (r *MigrationReconciler) stopNativeWorker(ctx context.Context, m *v1beta1.M
 		return false, errNativeRecovery
 	}
 	return true, nil
+}
+
+func nativeRetryGateCurrent(rg *v1beta1.RetryGateStatus, attempt int32, now time.Time) bool {
+	return rg != nil && rg.FailedAttempt == attempt && !rg.FailedAt.IsZero() && !rg.FailedAt.After(now) && (rg.Exemption == "" || rg.Exemption == v1beta1.RetryGateCounted || rg.Exemption == v1beta1.RetryGateExempt)
 }

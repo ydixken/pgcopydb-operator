@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -154,5 +155,53 @@ func nativeCloneStatusConflict(t *testing.T) {
 	got := f.current()
 	if got.Status.Phase == v1beta1.PhaseCompleted || got.Status.CompletedAt != nil || got.Status.Replication.Endpos != "0/90" || got.Status.NativeJobUID != string(f.worker.UID) || got.Status.NativePVCUID != string(f.pvc.UID) {
 		t.Fatal("conflict overwrote winning state")
+	}
+}
+
+func TestNativeCloneStaleFailureCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		verification, unknown bool
+	}{
+		{"successful report", false, false},
+		{"checked mismatch", true, false},
+		{"operational comparison unknown", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var verification *v1beta1.VerificationOptions
+			if tc.verification {
+				verification = &v1beta1.VerificationOptions{Schema: true}
+			}
+			f := newNativeCloneFixture(t, false, verification)
+			if tc.verification {
+				_, pod := nativeInstallCompare(t, f, compareSchema, false)
+				if tc.unknown {
+					f.outputs[pod.Name] = []byte("unknown\n")
+				}
+			}
+			f.m.Status.Phase = v1beta1.PhaseFailed
+			f.r.setCondition(f.m, v1beta1.ConditionFailed, metav1.ConditionTrue, "PreviousFailure", "Previous attempt failed")
+			if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+				t.Fatal(err)
+			}
+			_, err := nativeCloneFinish(t, f)
+			got := f.current()
+			if got.Status.NativeJobUID != string(f.worker.UID) || got.Status.NativePVCUID != string(f.pvc.UID) || got.Status.Replication != nil {
+				t.Fatal("clone rejoin changed receipts or invented E")
+			}
+			if tc.unknown {
+				if err == nil || f.patches != 0 || got.Status.Phase != v1beta1.PhaseFailed || got.Status.CompletedAt != nil || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
+					t.Fatal("unknown comparison cleared failure or completed transfer")
+				}
+				return
+			}
+			failure := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionFailed)
+			if err != nil || got.Status.Phase != v1beta1.PhaseCompleted || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) || failure == nil || failure.Status != metav1.ConditionFalse || failure.Reason != "MigrationSucceeded" {
+				t.Fatalf("successful clone retained stale failure: err=%v failure=%+v", err, failure)
+			}
+			if tc.verification && !meta.IsStatusConditionFalse(got.Status.Conditions, v1beta1.ConditionVerified) {
+				t.Fatal("checked mismatch was cleared by transfer success")
+			}
+		})
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -103,17 +105,8 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 			t.Error("native clone used cached read")
 			return errBoom
 		},
-		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if f.onCreate != nil {
-				return f.onCreate(ctx, c, obj, opts...)
-			}
-			t.Error("native clone created follow resources")
-			return errBoom
-		},
-		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
-			t.Error("native clone deleted retained execution")
-			return errBoom
-		},
+		Create: f.createNativeCloneFixtureJob,
+		Delete: f.deleteNativeCloneFixtureHelper,
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
 			f.patches++
 			raw, err := p.Data(obj)
@@ -135,11 +128,11 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 	f.encodeReport()
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(server.Close)
-	checked, err := podexec.New(&rest.Config{Host: server.URL})
+	checked, err := podexec.New(&rest.Config{Host: server.URL, QPS: 1000, Burst: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.r.NativeJobs = checked
+	f.r.NativeJobs, f.r.NativePreflight = checked, checked
 	t.Cleanup(func() {
 		if f.r.Sentinel.(*fakeSentinel).callCount() != 0 || f.r.Progress.(*fakeProgress).counts() != 0 || f.r.Logs.(*fakeLogs).calls != 0 {
 			t.Error("native clone reached legacy SQL or logs")
@@ -176,13 +169,16 @@ func (f *nativeCloneFixture) serve(w http.ResponseWriter, request *http.Request)
 	parts := strings.Split(request.URL.Path, "/")
 	w.Header().Set("Content-Type", "application/json")
 	if strings.HasSuffix(request.URL.Path, "/log") {
-		f.logs++
+		isDiscovery := strings.HasPrefix(parts[len(parts)-2], probeVersion)
+		if !isDiscovery {
+			f.logs++
+		}
 		raw := f.raw
 		if output, ok := f.outputs[parts[len(parts)-2]]; ok {
 			raw = output
 		}
 		_, _ = w.Write(raw)
-		if f.afterLogs != nil {
+		if f.afterLogs != nil && !isDiscovery {
 			f.afterLogs()
 		}
 		return
@@ -236,6 +232,10 @@ func TestNativeCloneOnlyCompletionReport(t *testing.T) {
 	})
 	t.Run("follow clone report remains DATA", func(t *testing.T) {
 		f := newNativeCloneFixture(t, true, nil)
+		f.m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: caughtUpLSN}
+		if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+			t.Fatal(err)
+		}
 		if report, err := nativeCloneRead(t, f); err != nil || report == nil || f.patches != 0 || f.r.NativeEvidence != nil {
 			t.Fatalf("clone DATA required follow authority: %v", err)
 		}
@@ -329,4 +329,65 @@ func TestNativeCloneOnlyCompletionReport(t *testing.T) {
 			t.Fatal("cancellation reached capture")
 		}
 	})
+}
+
+func (f *nativeCloneFixture) createNativeCloneFixtureJob(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if strings.HasPrefix(obj.GetName(), probeVersion) {
+		job := obj.(*batchv1.Job)
+		job.UID = types.UID("clone-discovery-" + job.Name)
+		job.Generation = 1
+		defaultProbeJob(job)
+		job.Status = *f.worker.Status.DeepCopy()
+		pod := probePod(job)
+		if f.outputs == nil {
+			f.outputs = map[string][]byte{}
+		}
+		f.outputs[pod.Name] = []byte(finishFixtureCaps)
+		if err := c.Create(ctx, job, opts...); err != nil {
+			return err
+		}
+		return c.Create(ctx, pod)
+	}
+	if f.onCreate != nil {
+		return f.onCreate(ctx, c, obj, opts...)
+	}
+	f.t.Error("native clone created follow resources")
+	return errBoom
+}
+func (f *nativeCloneFixture) deleteNativeCloneFixtureHelper(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+	job, ok := obj.(*batchv1.Job)
+	if !ok || job.UID == f.worker.UID {
+		return errBoom
+	}
+	options := &client.DeleteOptions{}
+	for _, opt := range opts {
+		opt.ApplyToDelete(options)
+	}
+	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != job.UID {
+		f.t.Error("clone helper deletion lacks exact UID")
+		return errBoom
+	}
+	if !strings.HasPrefix(job.Name, probeVersion) {
+		live := &v1beta1.Migration{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(f.m), live); err != nil || !meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionComplete) || string(job.UID) != live.Status.NativeSchemaJobUID && string(job.UID) != live.Status.NativeDataJobUID {
+			f.t.Error("clone deleted unconsumed helper")
+			return errBoom
+		}
+	}
+	if err := c.Delete(ctx, job, opts...); err != nil {
+		return err
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if owner := metav1.GetControllerOf(pod); owner != nil && owner.UID == job.UID {
+			if err := c.Delete(ctx, pod); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

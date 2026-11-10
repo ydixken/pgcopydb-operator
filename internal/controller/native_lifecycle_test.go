@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	clientscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
@@ -58,6 +60,10 @@ type lifecycleAPI struct {
 	worker                                  *batchv1.Job
 	job                                     *batchv1.Job
 	pod                                     *corev1.Pod
+	discoveryJob                            *batchv1.Job
+	discoveryPod                            *corev1.Pod
+	jobDeleted                              bool
+	cancelWaiting                           context.CancelFunc
 	pendingReads                            int
 	replacePending                          bool
 	replaceBeforeReader                     bool
@@ -73,6 +79,7 @@ type lifecycleAPI struct {
 	createFault, relayFault, mainFault      string
 	logNoise                                []byte
 	onCreate                                func(*lifecycleAPI)
+	afterCreateReply                        func(*lifecycleAPI)
 	duringRelay                             func(*lifecycleAPI)
 	afterLogs                               func(*lifecycleAPI)
 }
@@ -81,7 +88,7 @@ type lifecycleAPI struct {
 func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	t.Helper()
 	m, pvc := nativeIdentityObjects()
-	m.Generation = 1
+	m.Generation, m.ResourceVersion = 1, "1"
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
 	m.Status.Attempts = 1
 	m.Status.JobName = m.Name + "-run-1"
@@ -90,11 +97,13 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	m.Spec.Target.URISecretRef = &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "native-target"}, Key: "native-uri"}
 	pvc.Status.Phase = corev1.ClaimBound
 	image := "registry.example.test/team/runner@sha256:" + strings.Repeat("1", 64)
-	work, err := nativeWorkIdentity(m, pvc)
+	worker, err := buildNativeWorkerJob(m, pvc, image, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: m.Status.JobName, Namespace: m.Namespace, UID: "native-worker", OwnerReferences: pvc.OwnerReferences}, Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "pgcopydb", Image: image, Command: []string{shellPath, "-c", "exec \"$0\" \"$@\"", "/usr/local/bin/rpgmigrate"}, Args: []string{"clone", "--follow", "--plugin", "pgoutput"}, Env: nativeIdentityEnv(work)}}}}}, Status: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}}
+	worker.UID = "native-worker"
+	worker.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
+	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
 	s := &lifecycleAPI{t: t, migration: m, pvc: pvc, worker: worker}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -104,6 +113,10 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 			t.Fatal(err)
 		}
 	}
+	if err := controllerutil.SetControllerReference(m, worker, scheme); err != nil {
+		t.Fatal(err)
+	}
+	s.extraPods = []corev1.Pod{*nativeRecoveryTestPod(worker, 0)}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion, batchv1.SchemeGroupVersion, v1beta1.GroupVersion})
 	for _, entry := range []struct {
 		gv   schema.GroupVersion
@@ -111,7 +124,7 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	}{{corev1.SchemeGroupVersion, "Pod"}, {corev1.SchemeGroupVersion, "PersistentVolumeClaim"}, {batchv1.SchemeGroupVersion, lifecycleJobKind}, {v1beta1.GroupVersion, "Migration"}} {
 		mapper.Add(entry.gv.WithKind(entry.kind), meta.RESTScopeNamespace)
 	}
-	config := &rest.Config{Host: s.URL}
+	config := &rest.Config{Host: s.URL, QPS: 1000, Burst: 1000}
 	api, err := client.New(config, client.Options{Scheme: scheme, Mapper: mapper})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +133,7 @@ func newLifecycleAPI(t *testing.T) (*lifecycleAPI, *MigrationReconciler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, &MigrationReconciler{Client: api, APIReader: api, Scheme: scheme, NativeEvidence: native.NewReader(api, transport), RPGMigrateRunnerImage: image}
+	return s, &MigrationReconciler{Client: api, APIReader: api, Scheme: scheme, NativeEvidence: native.NewReader(api, transport), NativePreflight: transport, RPGMigrateRunnerImage: image}
 }
 
 func (s *lifecycleAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -131,9 +144,16 @@ func (s *lifecycleAPI) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodDelete {
+		s.deleteHelper(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		s.otherWrites++
 		http.Error(w, "unexpected mutation", http.StatusForbidden)
+		return
+	}
+	if s.serveLifecycleAuxiliary(w, r) {
 		return
 	}
 	switch {
@@ -152,15 +172,11 @@ func (s *lifecycleAPI) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(s.pvc)
 	case strings.HasSuffix(r.URL.Path, "/jobs/"+s.worker.Name):
 		_ = json.NewEncoder(w).Encode(s.worker)
-	case s.job != nil && strings.HasSuffix(r.URL.Path, "/jobs/"+s.job.Name):
+	case s.job != nil && !s.jobDeleted && strings.HasSuffix(r.URL.Path, "/jobs/"+s.job.Name):
 		_ = json.NewEncoder(w).Encode(s.job)
 	case strings.HasSuffix(r.URL.Path, "/pods"):
-		list := corev1.PodList{Items: append([]corev1.Pod{}, s.extraPods...)}
-		if s.pod != nil {
-			list.Items = append(list.Items, *s.pod.DeepCopy())
-		}
-		_ = json.NewEncoder(w).Encode(list)
-	case strings.HasSuffix(r.URL.Path, "/pods/"+lifecycleHelperPod):
+		s.listLifecyclePods(w, r)
+	case !s.jobDeleted && strings.HasSuffix(r.URL.Path, "/pods/"+lifecycleHelperPod):
 		s.servePod(w)
 	case strings.HasSuffix(r.URL.Path, "/log"):
 		s.logsRead = true
@@ -184,6 +200,9 @@ func (s *lifecycleAPI) servePod(w http.ResponseWriter) {
 	}
 	if s.injected {
 		s.postExecReads++
+		if s.mainFault == lifecycleWaitingMain && s.postExecReads >= 3 && s.cancelWaiting != nil {
+			s.cancelWaiting()
+		}
 		if s.postExecReads >= 2 && s.mainFault != lifecycleWaitingMain {
 			s.complete()
 		}
@@ -203,7 +222,6 @@ func (s *lifecycleAPI) servePod(w http.ResponseWriter) {
 }
 
 func (s *lifecycleAPI) createJob(w http.ResponseWriter, r *http.Request) {
-	s.creates++
 	job := &batchv1.Job{}
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -214,11 +232,27 @@ func (s *lifecycleAPI) createJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad fixture request", http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(job.Name, probeVersion) {
+		job.UID = types.UID("discovery-" + job.Name)
+		job.Generation = 1
+		defaultProbeJob(job)
+		job.Status = *s.worker.Status.DeepCopy()
+		s.discoveryJob, s.discoveryPod = job, probePod(job)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(job)
+		return
+	}
+	s.creates++
+	s.jobDeleted = false
 	s.created = append(s.created, job.DeepCopy())
 	job.UID = types.UID("helper-" + job.Name)
 	s.job = job
 	controller := true
-	s.pod = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: lifecycleHelperPod, Namespace: job.Namespace, UID: types.UID("pod-" + job.Name), Labels: map[string]string{batchv1.ControllerUidLabel: string(job.UID)}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: lifecycleJobKind, Name: job.Name, UID: job.UID, Controller: &controller}}}, Spec: *job.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "pgcopydb", ContainerID: "containerd://native-helper", Image: "runtime-display-tag", ImageID: job.Spec.Template.Spec.Containers[0].Image, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}
+	block := true
+	s.pod = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: lifecycleHelperPod, Namespace: job.Namespace, UID: types.UID("pod-" + job.Name), Labels: map[string]string{batchv1.ControllerUidLabel: string(job.UID)}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: lifecycleJobKind, Name: job.Name, UID: job.UID, Controller: &controller, BlockOwnerDeletion: &block}}}, Spec: *job.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: "pgcopydb", ContainerID: "containerd://native-helper", Image: "runtime-display-tag", ImageID: job.Spec.Template.Spec.Containers[0].Image, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}
+	s.pod.Labels = maps.Clone(job.Spec.Template.Labels)
+	s.pod.Labels[batchv1.ControllerUidLabel] = string(job.UID)
+	s.pod.Spec.NodeName = finishFixtureNode
 	s.postExecReads = 0
 	s.injected = false
 	if s.onCreate != nil {
@@ -344,8 +378,11 @@ func lifecycleResult(t *testing.T, input []byte) []byte {
 
 func lifecycleCall(t *testing.T, s *lifecycleAPI, r *MigrationReconciler) (*native.CompletedObservation, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	s.mu.Lock()
+	s.cancelWaiting = cancel
+	s.mu.Unlock()
 	observation, err := r.readNativeCompletedEvidence(ctx, s.migration.DeepCopy(), s.worker.DeepCopy(), s.pvc.DeepCopy())
 	s.mu.Lock()
 	if s.secrets != 0 {
@@ -400,6 +437,8 @@ func lifecycleConfiguredOverride(t *testing.T) {
 	image := "registry.example.test/team/override@sha256:" + strings.Repeat("2", 64)
 	s.migration.Spec.Runner.Image = image
 	s.worker.Spec.Template.Spec.Containers[0].Image = image
+	s.extraPods[0].Spec.Containers[0].Image = image
+	s.extraPods[0].Status.ContainerStatuses[0].ImageID = image
 	r.RPGMigrateRunnerImage = ""
 	r.RunnerImage = "legacy-runner:latest"
 	got, err := lifecycleCall(t, s, r)
@@ -450,6 +489,8 @@ func lifecycleFinalSizeCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.migration.Spec.Runner.NodeSelector["padding"] = strings.Repeat("x", 1048576-len(raw))
+	s.worker.Spec.Template.Spec.NodeSelector = maps.Clone(s.migration.Spec.Runner.NodeSelector)
+	s.extraPods[0].Spec.NodeSelector = maps.Clone(s.migration.Spec.Runner.NodeSelector)
 	got, err := lifecycleCall(t, s, r)
 	if got != nil || err == nil || s.creates != 0 || s.relays != 0 {
 		t.Fatal("decorated over-limit Job reached Create")
@@ -593,7 +634,11 @@ func lifecyclePreRelayRefusals(t *testing.T) {
 	} {
 		t.Run("before_relay_"+tc.name, func(t *testing.T) {
 			s, r := newLifecycleAPI(t)
-			s.onCreate = tc.change
+			if tc.name == "job_uid" {
+				s.afterCreateReply = tc.change
+			} else {
+				s.onCreate = tc.change
+			}
 			got, err := lifecycleCall(t, s, r)
 			if got != nil || err == nil || s.creates != 1 || s.relays != 0 {
 				t.Fatalf("invalid incarnation reached relay: %v", err)
@@ -759,7 +804,7 @@ func TestNativeEvidenceCreateLossFreshInvocation(t *testing.T) {
 	first := s.job.DeepCopy()
 	s.complete()
 	s.createFault = ""
-	transport, err := podexec.New(&rest.Config{Host: s.URL})
+	transport, err := podexec.New(&rest.Config{Host: s.URL, QPS: 1000, Burst: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,4 +814,83 @@ func TestNativeEvidenceCreateLossFreshInvocation(t *testing.T) {
 	if got == nil || err != nil || s.creates != 2 || s.relays != 1 || s.job.Name == first.Name || s.job.UID == first.UID || s.migration.Status.Replication.Endpos != lifecycleEnd {
 		t.Fatalf("fresh controller reused old operation or moved E: %v", err)
 	}
+}
+
+func (s *lifecycleAPI) deleteHelper(w http.ResponseWriter, r *http.Request) {
+	options, err := lifecycleDeleteOptions(r)
+	if err != nil || options.Preconditions == nil || options.Preconditions.UID == nil || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		http.Error(w, "bad helper deletion", http.StatusBadRequest)
+		return
+	}
+	if s.discoveryJob != nil && strings.HasSuffix(r.URL.Path, "/jobs/"+s.discoveryJob.Name) && *options.Preconditions.UID == s.discoveryJob.UID {
+		s.discoveryJob, s.discoveryPod = nil, nil
+	} else if s.job != nil && strings.HasSuffix(r.URL.Path, "/jobs/"+s.job.Name) && *options.Preconditions.UID == s.job.UID {
+		s.jobDeleted = true
+	} else {
+		http.Error(w, "unknown helper deletion", http.StatusForbidden)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(metav1.Status{Status: metav1.StatusSuccess})
+}
+
+func lifecycleDeleteOptions(r *http.Request) (metav1.DeleteOptions, error) {
+	var options metav1.DeleteOptions
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return options, err
+	}
+	_, _, err = clientscheme.Codecs.UniversalDeserializer().Decode(raw, nil, &options)
+	return options, err
+}
+
+func (s *lifecycleAPI) serveLifecycleAuxiliary(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet && s.job != nil && s.afterCreateReply != nil {
+		s.afterCreateReply(s)
+		s.afterCreateReply = nil
+	}
+	if s.discoveryJob != nil {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/jobs/"+s.discoveryJob.Name):
+			_ = json.NewEncoder(w).Encode(s.discoveryJob)
+			return true
+		case strings.HasSuffix(r.URL.Path, "/pods/"+s.discoveryPod.Name):
+			_ = json.NewEncoder(w).Encode(s.discoveryPod)
+			return true
+		case strings.HasSuffix(r.URL.Path, "/pods/"+s.discoveryPod.Name+"/log"):
+			_, _ = w.Write([]byte(finishFixtureCaps))
+			return true
+		}
+	}
+	for i := range s.extraPods {
+		pod := &s.extraPods[i]
+		if strings.HasSuffix(r.URL.Path, "/pods/"+pod.Name) {
+			_ = json.NewEncoder(w).Encode(pod)
+			return true
+		}
+	}
+	return false
+}
+func (s *lifecycleAPI) listLifecyclePods(w http.ResponseWriter, r *http.Request) {
+	list := corev1.PodList{ListMeta: metav1.ListMeta{ResourceVersion: "lifecycle-snapshot"}, Items: append([]corev1.Pod{}, s.extraPods...)}
+	if s.pod != nil && !s.jobDeleted {
+		list.Items = append(list.Items, *s.pod.DeepCopy())
+	}
+	if s.discoveryPod != nil {
+		list.Items = append(list.Items, *s.discoveryPod.DeepCopy())
+	}
+	if selector := r.URL.Query().Get("labelSelector"); selector != "" {
+		key, value, ok := strings.Cut(selector, "=")
+		if !ok {
+			http.Error(w, "bad selector", http.StatusBadRequest)
+			return
+		}
+		filtered := make([]corev1.Pod, 0, len(list.Items))
+		for _, pod := range list.Items {
+			if pod.Labels[key] == value {
+				filtered = append(filtered, pod)
+			}
+		}
+		list.Items = filtered
+	}
+	_ = json.NewEncoder(w).Encode(list)
 }

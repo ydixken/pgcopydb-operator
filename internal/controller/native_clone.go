@@ -41,8 +41,13 @@ func (r *MigrationReconciler) finishNativeClone(ctx context.Context, m, base *v1
 	}
 	now := metav1.NewTime(r.currentTime())
 	m.Status.Phase, m.Status.CompletedAt = v1beta1.PhaseCompleted, &now
+	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionFalse, "MigrationSucceeded", "Native clone finished")
 	r.setCondition(m, v1beta1.ConditionComplete, metav1.ConditionTrue, "MigrationSucceeded", "Native clone finished")
+	m.Status.NativeFinalizedJobUID = string(worker.UID)
 	if err := r.updateNativeStatus(ctx, m, base); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.disposeNativeFinalizedVerificationHelpers(ctx, m); err != nil {
 		return ctrl.Result{}, err
 	}
 	if r.Recorder != nil {

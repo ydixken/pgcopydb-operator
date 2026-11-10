@@ -91,6 +91,9 @@ func (r *MigrationReconciler) captureNativeEndposAck(ctx context.Context, m *v1b
 	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
 		return nil, errNativeFollowCompletion
 	}
+	if err := r.nativeCleanupPreflight(ctx, live, worker, pvc, original); err != nil {
+		return nil, errNativeFollowCompletion
+	}
 	if _, _, err := r.nativeFollowTerminalCurrent(ctx, m, worker, pvc, original); err != nil || native.ValidateEvidenceJobSize(expected) != nil || ctx.Err() != nil {
 		return nil, errNativeFollowCompletion
 	}
@@ -188,6 +191,9 @@ func (r *MigrationReconciler) readNativeFollowTargetCompletion(ctx context.Conte
 		return nil, errNativeFollowCompletion
 	}
 	if _, _, err := r.nativeFollowTerminalCurrent(ctx, m, worker, pvc, capture.original); err != nil || ctx.Err() != nil || !r.nativeEndposHelperUnchanged(ctx, capture) {
+		return nil, errNativeFollowCompletion
+	}
+	if r.nativePreflightCleanup(ctx, m, capture.created, capture.pod) != nil {
 		return nil, errNativeFollowCompletion
 	}
 	return observation, nil

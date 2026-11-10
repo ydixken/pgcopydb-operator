@@ -40,6 +40,8 @@ var (
 )
 
 const (
+	nativeDiscoveryConfigRefused  = "native discovery configuration refused"
+	nativePreflightConfigRefused  = "native preflight configuration refused"
 	nativePreflightDefaultSA      = "default"
 	nativePreflightTotal          = 90 * time.Second
 	nativePreflightCleanupReserve = 30 * time.Second
@@ -64,14 +66,14 @@ func (r *MigrationReconciler) ensureNativePreflight(ctx context.Context, m *v1be
 	}
 	image := runnerImageFor(m, r.RPGMigrateRunnerImage)
 	if !nativeEvidenceDirectImage(image) {
-		return nil, false, "native discovery configuration refused", nil
+		return nil, false, nativeDiscoveryConfigRefused, nil
 	}
 	live, err := r.nativePreflightMigration(ctx, m, image)
 	if err != nil {
 		return nil, false, "", err
 	}
 	if _, err := nativeConfigCapabilities(live); err != nil {
-		return nil, false, "native preflight configuration refused", nil
+		return nil, false, nativePreflightConfigRefused, nil
 	}
 	work, cancel := context.WithDeadline(ctx, deadline.Add(-nativePreflightCleanupReserve))
 	defer cancel()
@@ -82,9 +84,9 @@ func (r *MigrationReconciler) ensureNativePreflight(ctx context.Context, m *v1be
 	op := hex.EncodeToString(operation[:])
 	job, err := buildNativeVersionJob(live, r.RPGMigrateRunnerImage, "rpgmigrate-version-"+op)
 	if err != nil {
-		return nil, false, "native discovery configuration refused", nil
+		return nil, false, nativeDiscoveryConfigRefused, nil
 	}
-	payload, err := r.nativePreflightPhase(ctx, work, deadline, live, image, job, true)
+	payload, err := r.nativePreflightPhase(ctx, work, deadline, live, image, job, true, r.nativePreflightMigration)
 	if err != nil || ctx.Err() != nil {
 		return nativePreflightPhaseFailure(ctx, nil, err)
 	}
@@ -110,9 +112,9 @@ func (r *MigrationReconciler) ensureNativePreflight(ctx context.Context, m *v1be
 	}
 	job, err = buildNativePreflightJob(current, r.RPGMigrateRunnerImage, "rpgmigrate-preflight-"+op, op)
 	if err != nil {
-		return nil, false, "native preflight configuration refused", nil
+		return nil, false, nativePreflightConfigRefused, nil
 	}
-	payload, err = r.nativePreflightPhase(ctx, work, deadline, current, image, job, false)
+	payload, err = r.nativePreflightPhase(ctx, work, deadline, current, image, job, false, r.nativePreflightMigration)
 	if err != nil || ctx.Err() != nil {
 		return nativePreflightPhaseFailure(ctx, version, err)
 	}
@@ -164,11 +166,11 @@ func (r *MigrationReconciler) nativePreflightMigration(ctx context.Context, expe
 	return live, nil
 }
 
-func (r *MigrationReconciler) nativePreflightPhase(parent, work context.Context, deadline time.Time, m *v1beta1.Migration, image string, expected *batchv1.Job, version bool) (raw []byte, err error) {
+func (r *MigrationReconciler) nativePreflightPhase(parent, work context.Context, deadline time.Time, m *v1beta1.Migration, image string, expected *batchv1.Job, version bool, admit func(context.Context, *v1beta1.Migration, string) (*v1beta1.Migration, error)) (raw []byte, err error) {
 	if work.Err() != nil {
 		return nil, work.Err()
 	}
-	if _, err := r.nativePreflightMigration(work, m, image); err != nil {
+	if _, err := admit(work, m, image); err != nil {
 		if work.Err() != nil {
 			return nil, work.Err()
 		}
@@ -205,7 +207,7 @@ func (r *MigrationReconciler) nativePreflightPhase(parent, work context.Context,
 		return nil, errNativePreflightUnavailable
 	}
 	err = wait.PollUntilContextCancel(work, nativePreflightPoll, true, func(ctx context.Context) (bool, error) {
-		if _, err := r.nativePreflightMigration(ctx, m, image); err != nil {
+		if _, err := admit(ctx, m, image); err != nil {
 			return false, errNativePreflightUnavailable
 		}
 		job, err := r.nativePreflightLiveJob(ctx, expected, created, binding)
@@ -256,7 +258,7 @@ func (r *MigrationReconciler) nativePreflightPhase(parent, work context.Context,
 		}
 		return nil, errNativePreflightUnavailable
 	}
-	if !r.nativePreflightExecutionUnchanged(work, m, image, expected, observed, original, binding) {
+	if !r.nativePreflightExecutionUnchanged(work, m, image, expected, observed, original, binding, admit) {
 		return nil, errNativePreflightUnavailable
 	}
 	return outcome.Payload(), nil
@@ -309,11 +311,11 @@ func nativePreflightContainerReady(pod *corev1.Pod, image string) (bool, error) 
 	}
 	return true, nil
 }
-func (r *MigrationReconciler) nativePreflightExecutionUnchanged(ctx context.Context, m *v1beta1.Migration, image string, expected, observed *batchv1.Job, original *corev1.Pod, binding podexec.NativeContainerBinding) bool {
+func (r *MigrationReconciler) nativePreflightExecutionUnchanged(ctx context.Context, m *v1beta1.Migration, image string, expected, observed *batchv1.Job, original *corev1.Pod, binding podexec.NativeContainerBinding, admit func(context.Context, *v1beta1.Migration, string) (*v1beta1.Migration, error)) bool {
 	if observed == nil || original == nil {
 		return false
 	}
-	if _, err := r.nativePreflightMigration(ctx, m, image); err != nil {
+	if _, err := admit(ctx, m, image); err != nil {
 		return false
 	}
 	job, err := r.nativePreflightLiveJob(ctx, expected, observed, binding)
@@ -344,12 +346,12 @@ func nativePreflightJobFailed(job *batchv1.Job) bool {
 }
 
 func nativePreflightJobMatches(expected, actual *batchv1.Job) bool {
-	if expected == nil || actual == nil || actual.UID == "" || !actual.DeletionTimestamp.IsZero() || actual.Name != expected.Name || actual.Namespace != expected.Namespace || actual.GenerateName != expected.GenerateName ||
+	if expected == nil || actual == nil || actual.UID == "" || expected.UID != "" && expected.UID != actual.UID || !actual.DeletionTimestamp.IsZero() || actual.Name != expected.Name || actual.Namespace != expected.Namespace || actual.GenerateName != expected.GenerateName ||
 		!apiequality.Semantic.DeepEqual(actual.OwnerReferences, expected.OwnerReferences) || !apiequality.Semantic.DeepEqual(actual.Labels, expected.Labels) || !apiequality.Semantic.DeepEqual(actual.Annotations, expected.Annotations) || !apiequality.Semantic.DeepEqual(actual.Finalizers, expected.Finalizers) {
 		return false
 	}
 	want, got := expected.DeepCopy(), actual.DeepCopy()
-	if !nativeWorkerControllerFields(got) || want.Spec.Template.Spec.RuntimeClassName != nil || got.Spec.Template.Spec.RuntimeClassName != nil {
+	if !nativeWorkerControllerFields(want) || !nativeWorkerControllerFields(got) || want.Spec.Template.Spec.RuntimeClassName != nil || got.Spec.Template.Spec.RuntimeClassName != nil {
 		return false
 	}
 	nativeWorkerDefaults(want)
@@ -513,7 +515,12 @@ func (r *MigrationReconciler) nativePreflightCleanup(ctx context.Context, m *v1b
 		if current.UID != created.UID || !nativeEvidenceOwnedBy(current, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()) {
 			return errNativePreflightUnavailable
 		}
-		if r.Delete(ctx, current, client.Preconditions{UID: &created.UID}, client.PropagationPolicy(metav1.DeletePropagationForeground)) != nil {
+		uid := string(current.UID)
+		finalizedJob := nativeFinalizationRecorded(m) && uid != "" && (uid == m.Status.NativeJobUID || uid == m.Status.NativeSchemaJobUID || uid == m.Status.NativeDataJobUID)
+		if finalizedJob && !nativeEvidenceWorkerComplete(current) {
+			return errNativePreflightUnavailable
+		}
+		if err := r.Delete(ctx, current, client.Preconditions{UID: &current.UID, ResourceVersion: &current.ResourceVersion}, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && (!finalizedJob || !apierrors.IsNotFound(err)) {
 			return errNativePreflightUnavailable
 		}
 	} else if !apierrors.IsNotFound(err) {

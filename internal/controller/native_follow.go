@@ -81,14 +81,14 @@ func (r *MigrationReconciler) setNativePersistedEnd(ctx context.Context, m *v1be
 }
 
 func (r *MigrationReconciler) updateNativeStatus(ctx context.Context, m, base *v1beta1.Migration) error {
-	if r.Client == nil || r.APIReader == nil || m == nil || base == nil || ctx.Err() != nil || !nativeControlStatusIdentity(m, base) {
+	if r.Client == nil || r.APIReader == nil || m == nil || base == nil || ctx.Err() != nil || !nativeControlStatusIdentity(m, base) || !nativeFinalizationStatusTransition(m, base) {
 		return errNativeControlAdmission
 	}
 	live := &v1beta1.Migration{}
 	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(base), live) != nil || !nativeControlStatusIdentity(live, base) {
 		return errNativeControlAdmission
 	}
-	if live.ResourceVersion != base.ResourceVersion || live.Status.Attempts != base.Status.Attempts || live.Status.JobName != base.Status.JobName || nativeControlEnd(live) != nativeControlEnd(base) {
+	if live.ResourceVersion != base.ResourceVersion || live.Status.Attempts != base.Status.Attempts || live.Status.JobName != base.Status.JobName || live.Status.NativeFinalizedJobUID != base.Status.NativeFinalizedJobUID || nativeControlEnd(live) != nativeControlEnd(base) {
 		return nativeControlConflict()
 	}
 	end := nativeControlEnd(live)
@@ -101,7 +101,11 @@ func (r *MigrationReconciler) updateNativeStatus(ctx context.Context, m, base *v
 	} else if end != "" {
 		desired.Status.Replication = &v1beta1.ReplicationStatus{Endpos: end}
 	}
-	return r.patchNativeControlStatus(ctx, desired, live)
+	if err := r.patchNativeControlStatus(ctx, desired, live); err != nil {
+		return err
+	}
+	desired.DeepCopyInto(m)
+	return nil
 }
 
 func nativeControlStatusIdentity(a, b *v1beta1.Migration) bool {

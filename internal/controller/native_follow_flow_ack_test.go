@@ -31,9 +31,10 @@ const (
 
 type nativeFollowAckReader struct {
 	*podexec.Exec
-	reads  int
-	helper *batchv1.Job
-	pod    *corev1.Pod
+	reads   int
+	helper  *batchv1.Job
+	pod     *corev1.Pod
+	deleted bool
 }
 
 func (r *nativeFollowAckReader) JobCloneNative(context.Context, string, types.UID, podexec.NativeContainerBinding) (podexec.NativeOutcome, error) {
@@ -64,15 +65,32 @@ func nativeFollowAckFixture(t *testing.T, laterBegin bool) (*lifecycleAPI, *Migr
 			defaultProbeJob(api.job)
 			api.job.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
 			api.pod = probePod(api.job)
-			jobs.helper, jobs.pod = api.job, api.pod
+			jobs.helper, jobs.pod, jobs.deleted = api.job, api.pod, false
 			api.logNoise = nativeTerminalTestAck(t, ack)
 		}
 	}
 	prior := s.Config.Handler
 	s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete && jobs.helper != nil && strings.HasSuffix(request.URL.Path, "/jobs/"+jobs.helper.Name) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			options, err := lifecycleDeleteOptions(request)
+			if err != nil || options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != jobs.helper.UID {
+				http.Error(w, "unknown ACK deletion", http.StatusForbidden)
+				return
+			}
+			jobs.deleted = true
+			_ = json.NewEncoder(w).Encode(metav1.Status{Status: metav1.StatusSuccess})
+			return
+		}
 		if request.Method == http.MethodGet {
 			s.mu.Lock()
 			if jobs.helper != nil && strings.HasSuffix(request.URL.Path, "/jobs/"+jobs.helper.Name) {
+				if jobs.deleted {
+					http.NotFound(w, request)
+					s.mu.Unlock()
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(jobs.helper)
 				s.mu.Unlock()
@@ -80,6 +98,11 @@ func nativeFollowAckFixture(t *testing.T, laterBegin bool) (*lifecycleAPI, *Migr
 			}
 			if jobs.pod != nil && strings.HasSuffix(request.URL.Path, "/pods/"+jobs.pod.Name) {
 				w.Header().Set("Content-Type", "application/json")
+				if jobs.deleted {
+					http.NotFound(w, request)
+					s.mu.Unlock()
+					return
+				}
 				_ = json.NewEncoder(w).Encode(jobs.pod)
 				s.mu.Unlock()
 				return
@@ -90,10 +113,13 @@ func nativeFollowAckFixture(t *testing.T, laterBegin bool) (*lifecycleAPI, *Migr
 				if request.URL.Query().Get("labelSelector") == "" {
 					pods.Items = append(pods.Items, s.extraPods...)
 				}
-				if s.pod != nil {
+				if s.pod != nil && !s.jobDeleted {
 					pods.Items = append(pods.Items, *s.pod.DeepCopy())
 				}
-				if request.URL.Query().Get("labelSelector") == "" && jobs.pod != nil && jobs.pod != s.pod {
+				if s.discoveryPod != nil {
+					pods.Items = append(pods.Items, *s.discoveryPod.DeepCopy())
+				}
+				if request.URL.Query().Get("labelSelector") == "" && jobs.pod != nil && !jobs.deleted && jobs.pod != s.pod {
 					pods.Items = append(pods.Items, *jobs.pod.DeepCopy())
 				}
 				_ = json.NewEncoder(w).Encode(pods)
@@ -108,7 +134,7 @@ func nativeFollowAckFixture(t *testing.T, laterBegin bool) (*lifecycleAPI, *Migr
 		}
 		prior.ServeHTTP(w, request)
 	})
-	transport, err := podexec.New(&rest.Config{Host: s.URL})
+	transport, err := podexec.New(&rest.Config{Host: s.URL, QPS: 1000, Burst: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +237,7 @@ func TestNativeAckLifecycle(t *testing.T) {
 			case nativeFollowAckWorkerActive:
 				s.worker.Status = batchv1.JobStatus{Active: 1}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			raw, err := r.readNativeEndposAck(ctx, s.migration.DeepCopy(), s.worker.DeepCopy(), s.pvc.DeepCopy())
 			if err == nil || raw != nil || s.creates > 1 || s.relays != 0 || s.otherWrites != 0 {

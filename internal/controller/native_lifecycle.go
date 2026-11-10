@@ -36,6 +36,10 @@ func (r *MigrationReconciler) readNativeCompletedEvidence(ctx context.Context, e
 		return nil, errNativeEvidenceLifecycle
 	}
 	m, worker, pvc := expectedMigration.DeepCopy(), expectedWorker.DeepCopy(), expectedPVC.DeepCopy()
+	_, originalWorker, err := r.nativeCompletionCurrent(ctx, m, worker, pvc, nil)
+	if err != nil {
+		return nil, errNativeEvidenceLifecycle
+	}
 	live, err := r.nativeEvidenceMigration(ctx, m, worker, pvc)
 	if err != nil {
 		return nil, errNativeEvidenceLifecycle
@@ -58,6 +62,10 @@ func (r *MigrationReconciler) readNativeCompletedEvidence(ctx context.Context, e
 	if err != nil || controllerutil.SetControllerReference(live, job, r.Scheme) != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
+	if err := r.nativeCleanupPreflight(ctx, live, worker, pvc, originalWorker); err != nil {
+		return nil, errNativeEvidenceLifecycle
+	}
+	expected := job.DeepCopy()
 	if native.ValidateEvidenceJobSize(job) != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
@@ -85,14 +93,16 @@ func (r *MigrationReconciler) readNativeCompletedEvidence(ctx context.Context, e
 	if err != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
+	helperOriginal, err := r.nativeCompletedHelperPod(ctx, job, original)
+	if err != nil {
+		return nil, errNativeEvidenceLifecycle
+	}
 	observation, err := r.NativeEvidence.ReadCompleted(ctx, want, live.Status.Replication.Endpos)
 	if err != nil || observation == nil || ctx.Err() != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
-	if _, err := r.nativeEvidenceMigration(ctx, m, worker, pvc); err != nil || ctx.Err() != nil {
-		return nil, errNativeEvidenceLifecycle
-	}
-	if !r.nativeEvidenceHelperUnchanged(ctx, created, live, original, image) || ctx.Err() != nil {
+	capture := &nativeStateHelper{expected: expected, created: created, pod: helperOriginal, data: native.ExecutionData{PlatformImageID: image, Container: podexec.NativeContainerBinding{ContainerID: original.containerID}}}
+	if err := r.consumeNativeCompletedHelper(ctx, m, worker, pvc, originalWorker, capture); err != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
 	return observation, nil

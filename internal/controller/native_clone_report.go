@@ -24,10 +24,7 @@ func (r *MigrationReconciler) readNativeCloneReport(ctx context.Context, m *v1be
 		return nil, errNativeCloneReport
 	}
 	image := runnerImageFor(m, r.RPGMigrateRunnerImage)
-	if _, err := r.nativePreflightMigration(ctx, m, image); err != nil {
-		return nil, errNativeCloneReport
-	}
-	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
+	_, original, err := r.nativeCompletionCurrent(ctx, m, worker, pvc, nil)
 	if err != nil {
 		return nil, errNativeCloneReport
 	}

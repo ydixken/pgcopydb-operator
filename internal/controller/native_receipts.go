@@ -18,7 +18,7 @@ import (
 )
 
 // Only a known successful Create may supply this Job; existing-name discovery grants no receipt.
-func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job, pvc *corev1.PersistentVolumeClaim, announce bool) (ctrl.Result, error) {
+func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job, pvc *corev1.PersistentVolumeClaim, announce bool, retry *nativeRetryAdmission) (ctrl.Result, error) {
 	if r.Client == nil || r.APIReader == nil || r.Recorder == nil || pvc == nil || ctx.Err() != nil || !nativeAttemptRecordIdentity(m, base, job) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
@@ -32,6 +32,17 @@ func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *
 	} else if m.Status.JobName != jobName(m, m.Status.Attempts) || !native.NativeReceiptsMatch(m, types.UID(m.Status.NativeJobUID), pvc.UID) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
+	if m.Status.Attempts > 0 {
+		if retry == nil || !retry.used || retry.recorded {
+			return ctrl.Result{}, errNativeWorkerRetry
+		}
+		if _, _, err := r.nativeRetryCurrent(ctx, m, retry); err != nil {
+			return ctrl.Result{}, errNativeWorkerRetry
+		}
+		retry.recorded = true
+	} else if retry != nil {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
 	desired := m.DeepCopy()
 	if desired.Status.StartedAt == nil {
 		now := metav1.Now()
@@ -40,6 +51,7 @@ func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *
 	desired.Status.Attempts++
 	desired.Status.JobName = job.Name
 	desired.Status.NativeJobUID, desired.Status.NativePVCUID = string(job.UID), string(pvc.UID)
+	desired.Status.NativeFinalizedJobUID = ""
 	if !native.NativeReceiptsMatch(desired, job.UID, pvc.UID) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
@@ -49,8 +61,12 @@ func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *
 			fmt.Sprintf("attempt %d running as Job %s", desired.Status.Attempts, job.Name))
 	}
 	if desired.Status.Attempts > 1 {
+		desired.Status.NativeSchemaJobUID, desired.Status.NativeDataJobUID = "", ""
+		desired.Status.Verification, desired.Status.VerificationProgress, desired.Status.CompletedAt = nil, nil, nil
 		desired.Status.RetryGate = nil
 		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionFalse, reasonGatePassed, "Native retry admission passed")
+		r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionFalse, "NativeRetryStarted", "Native retry is running")
+		r.setCondition(desired, v1beta1.ConditionComplete, metav1.ConditionFalse, "NativeRetryStarted", "Native retry awaits completion proof")
 	}
 	desired.Status.ObservedGeneration = desired.Generation
 	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {

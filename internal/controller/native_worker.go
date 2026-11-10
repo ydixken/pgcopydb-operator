@@ -72,15 +72,37 @@ func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v
 	if m != nil && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Status.Attempts > 0 {
 		return ctrl.Result{}, errNativeWorkerRetry
 	}
+	return r.startNativeAttemptAdmitted(ctx, m, base, nil)
+}
+
+func (r *MigrationReconciler) startNativeRetry(ctx context.Context, m, base *v1beta1.Migration, admission *nativeRetryAdmission) (ctrl.Result, error) {
+	if admission == nil || admission.used || admission.recorded {
+		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	admission.used = true
+	return r.startNativeAttemptAdmitted(ctx, m, base, admission)
+}
+
+func (r *MigrationReconciler) startNativeAttemptAdmitted(ctx context.Context, m, base *v1beta1.Migration, retry *nativeRetryAdmission) (ctrl.Result, error) {
+	current := r.nativeWorkerCurrent
+	if retry != nil {
+		current = func(ctx context.Context, m *v1beta1.Migration, _ *corev1.PersistentVolumeClaim) (*v1beta1.Migration, *corev1.PersistentVolumeClaim, error) {
+			return r.nativeRetryCurrent(ctx, m, retry)
+		}
+	}
 	if r.Client == nil || r.APIReader == nil || r.Scheme == nil || r.Recorder == nil || ctx.Err() != nil ||
-		!nativeWorkerMigrationMatches(m, base) {
+		m == nil || base == nil || m.ResourceVersion != base.ResourceVersion || !apiequality.Semantic.DeepEqual(m, base) ||
+		retry == nil && !nativeWorkerMigrationMatches(m, base) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
-	live, pvc, err := r.nativeWorkerCurrent(ctx, m, nil)
+	live, pvc, err := current(ctx, m, nil)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	expected, err := buildNativeWorkerJob(live, pvc, r.RPGMigrateRunnerImage, 1)
+	if live.Status.Attempts < 0 || live.Status.Attempts == int32(1<<31-1) {
+		return ctrl.Result{}, errNativeWorkerAdmission
+	}
+	expected, err := buildNativeWorkerJob(live, pvc, r.RPGMigrateRunnerImage, live.Status.Attempts+1)
 	if err != nil || controllerutil.SetControllerReference(live, expected, r.Scheme) != nil {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
@@ -91,7 +113,7 @@ func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v
 	case getErr == nil:
 		return ctrl.Result{}, errNativeWorkerAdmission
 	case apierrors.IsNotFound(getErr):
-		if _, _, err := r.nativeWorkerCurrent(ctx, live, pvc); err != nil || ctx.Err() != nil {
+		if _, _, err := current(ctx, live, pvc); err != nil || ctx.Err() != nil {
 			return ctrl.Result{}, errNativeWorkerAdmission
 		}
 		actual = expected.DeepCopy()
@@ -105,21 +127,21 @@ func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v
 	if !nativeWorkerJobMatches(live, pvc, expected, actual) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
-	current, _, err := r.nativeWorkerCurrent(ctx, live, pvc)
+	confirmedMigration, _, err := current(ctx, live, pvc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	confirmed := &batchv1.Job{}
 	if r.APIReader.Get(ctx, key, confirmed) != nil || confirmed.UID != actual.UID ||
-		!nativeWorkerJobMatches(current, pvc, expected, confirmed) || ctx.Err() != nil {
+		!nativeWorkerJobMatches(confirmedMigration, pvc, expected, confirmed) || ctx.Err() != nil {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
-	return r.recordNativeAttempt(ctx, current, current.DeepCopy(), confirmed, pvc, true)
+	return r.recordNativeAttempt(ctx, confirmedMigration, confirmedMigration.DeepCopy(), confirmed, pvc, true, retry)
 }
 
 func nativeWorkerJobMatches(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, expected, actual *batchv1.Job) bool {
 	if m == nil || expected == nil || actual == nil || actual.UID == "" || !actual.DeletionTimestamp.IsZero() ||
-		actual.Name != jobName(m, 1) || actual.Name != expected.Name || actual.Namespace != m.Namespace || actual.Namespace != expected.Namespace ||
+		m.Status.Attempts < 0 || m.Status.Attempts == int32(1<<31-1) || actual.Name != jobName(m, m.Status.Attempts+1) || actual.Name != expected.Name || actual.Namespace != m.Namespace || actual.Namespace != expected.Namespace ||
 		expected.UID != "" && expected.UID != actual.UID ||
 		!nativeEvidenceOwnedBy(actual, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()) ||
 		actual.GenerateName != expected.GenerateName || !apiequality.Semantic.DeepEqual(actual.OwnerReferences, expected.OwnerReferences) ||
