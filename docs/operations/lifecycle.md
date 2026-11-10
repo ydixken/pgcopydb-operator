@@ -4,6 +4,13 @@ This page covers the lifecycle of a Migration.
 It shows how to check a Migration with a dry run and how to suspend it.
 It also shows how the operator retries failed attempts, and what deletion cleans up.
 
+Native worker and evidence-bearing helper Job builders omit `ttlSecondsAfterFinished` so the TTL controller cannot delete execution evidence before validation.
+Callers MUST retain each helper until checked result capture and the complete proof join consume its evidence.
+Retain schema and data verification helpers until the caller durably records fresh final verification.
+After that point, callers MUST either delete the exact recorded Job UID or restore the configured TTL.
+Clear a helper UID pin only after its caller deletes the known terminal Job and an uncached read returns `NotFound`.
+Cleanup remains a caller obligation, and legacy Job TTL policies stay unchanged.
+
 ## Initial status
 
 `Pending` is the first phase of a Migration.

@@ -83,8 +83,8 @@ func assertProbeEnvelope(t *testing.T, m *v1beta1.Migration, job *batchv1.Job, n
 	if !reflect.DeepEqual(job.Labels, labels(m)) || !reflect.DeepEqual(job.Spec.Template.Labels, labels(m)) {
 		t.Fatal("probe lost existing valid labels")
 	}
-	if !reflect.DeepEqual(pod.Containers[0].Resources, pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)) || !reflect.DeepEqual(pod.Affinity, runnerAffinity(m)) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || !reflect.DeepEqual(job.Spec.TTLSecondsAfterFinished, m.Spec.TTLSecondsAfterFinished) {
-		t.Fatal("probe lost resource, scheduling or TTL policy")
+	if !reflect.DeepEqual(pod.Containers[0].Resources, pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)) || !reflect.DeepEqual(pod.Affinity, runnerAffinity(m)) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || job.Spec.TTLSecondsAfterFinished != nil {
+		t.Fatal("probe lost resource, scheduling or evidence retention")
 	}
 }
 

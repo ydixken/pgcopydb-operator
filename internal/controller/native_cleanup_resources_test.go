@@ -42,6 +42,8 @@ type cleanupInventoryFixture struct {
 func newCleanupInventoryFixture(t *testing.T) *cleanupInventoryFixture {
 	t.Helper()
 	s, r := newLifecycleAPI(t)
+	s.migration.Status.NativeJobUID = string(s.worker.UID)
+	s.migration.Status.NativePVCUID = string(s.pvc.UID)
 	s.migration.Status.Replication = nil
 	work, err := nativeWorkIdentity(s.migration, s.pvc)
 	if err != nil {

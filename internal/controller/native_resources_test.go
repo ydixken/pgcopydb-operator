@@ -140,8 +140,8 @@ func TestNativeJobsPreserveIdentityAndConnections(t *testing.T) {
 				if slices.ContainsFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == "filters" }) || len(pod.Volumes) < 2 || pod.Volumes[0].PersistentVolumeClaim == nil || pod.Volumes[0].PersistentVolumeClaim.ClaimName != want.PVCName {
 					t.Fatal("evidence helper added clone setup or lost owned PVC")
 				}
-				if !reflect.DeepEqual(c.Resources, m.Spec.Runner.Resources) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || !reflect.DeepEqual(pod.Affinity, m.Spec.Runner.Affinity) || !reflect.DeepEqual(job.Spec.TTLSecondsAfterFinished, &ttl) {
-					t.Fatal("evidence helper lost admitted scheduling/TTL envelope")
+				if !reflect.DeepEqual(c.Resources, m.Spec.Runner.Resources) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || !reflect.DeepEqual(pod.Affinity, m.Spec.Runner.Affinity) || job.Spec.TTLSecondsAfterFinished != nil {
+					t.Fatal("evidence helper lost admitted scheduling or evidence retention")
 				}
 				for _, private := range []string{m.Spec.Source.Host, m.Spec.Source.Username} {
 					if private != "" && len(private) > 3 && strings.Contains(strings.Join(c.Args, " "), private) {
@@ -315,8 +315,8 @@ func TestNativeWorkerJobProgram(t *testing.T) {
 }
 
 func TestNativeWorkerTTLRetention(t *testing.T) {
-	zero, finite := int32(0), int32(120)
-	for _, ttl := range []*int32{nil, &zero, &finite} {
+	zero, short, finite := int32(0), int32(1), int32(120)
+	for _, ttl := range []*int32{nil, &zero, &short, &finite} {
 		m, pvc := nativeWorkerJobInputs()
 		m.Spec.TTLSecondsAfterFinished = ttl
 		for _, attempt := range []int32{1, 2} {
@@ -324,10 +324,6 @@ func TestNativeWorkerTTLRetention(t *testing.T) {
 			if err != nil || job.Spec.TTLSecondsAfterFinished != nil {
 				t.Fatal("native worker TTL can delete required original execution evidence", err)
 			}
-		}
-		version, err := buildNativeVersionJob(m, nativeEvidenceTestImage, probeTestVersionName)
-		if err != nil || !reflect.DeepEqual(version.Spec.TTLSecondsAfterFinished, ttl) {
-			t.Fatal("native helper TTL changed", err)
 		}
 		m.Spec.Engine = v1beta1.MigrationEnginePGCopyDB
 		legacy, err := buildJob(m, testRunnerImage, 1)

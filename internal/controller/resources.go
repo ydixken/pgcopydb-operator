@@ -1603,7 +1603,7 @@ func buildNativeVersionJob(m *v1beta1.Migration, runnerImage, name string) (*bat
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: m.Namespace, Labels: labels(m)},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff, Completions: &one, Parallelism: &one,
-			ActiveDeadlineSeconds: &deadline, TTLSecondsAfterFinished: m.Spec.TTLSecondsAfterFinished,
+			ActiveDeadlineSeconds: &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels(m)},
 				Spec: corev1.PodSpec{
@@ -1674,6 +1674,7 @@ func buildNativeEvidenceJob(m *v1beta1.Migration, runnerImage string, want nativ
 	}
 	deadline, automount := int64(90), false
 	job.Spec.ActiveDeadlineSeconds = &deadline
+	job.Spec.TTLSecondsAfterFinished = nil
 	pod := &job.Spec.Template.Spec
 	pod.AutomountServiceAccountToken = &automount
 	pod.DNSPolicy = corev1.DNSClusterFirst
