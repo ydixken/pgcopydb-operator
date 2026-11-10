@@ -22,17 +22,18 @@ import (
 
 type nativeSamplerFixture struct {
 	*nativeControlFixture
-	want        native.ExecutionData
-	client      *native.Client
-	mu          sync.Mutex
-	now         time.Time
-	lag         int64
-	binding     string
-	cache       []byte
-	replay      bool
-	badProgress bool
-	beforeReply func(bool)
-	ops         []string
+	want           native.ExecutionData
+	client         *native.Client
+	mu             sync.Mutex
+	now            time.Time
+	lag            int64
+	binding        string
+	cache          []byte
+	replay         bool
+	badProgress    bool
+	legacyProgress bool
+	beforeReply    func(bool)
+	ops            []string
 }
 
 func newNativeSamplerFixture(t *testing.T) (*nativeSamplerFixture, *nativeSampler) {
@@ -149,6 +150,9 @@ func (f *nativeSamplerFixture) execSample(w http.ResponseWriter, r *http.Request
 	} else {
 		zero := int64(0)
 		report := native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: "list progress", Capabilities: []native.Capability{native.CapProgress}, Work: &f.want.Work, Phase: "copying", Copy: &native.CopyProgress{Tables: &native.Counters{Total: &zero, Done: &zero}, Indexes: &native.Counters{Total: &zero, Done: &zero}, Bytes: &native.Counters{Total: &zero, Done: &zero}}}
+		if followEnabled(f.m) && !f.legacyProgress {
+			nativeM9Status(&report)
+		}
 		raw, marshalErr := json.Marshal(report)
 		if marshalErr != nil {
 			f.t.Error(marshalErr)
@@ -512,4 +516,12 @@ func TestNativeSamplerFreshness(t *testing.T) {
 			t.Fatal("cancelled sample retained previous lag")
 		}
 	})
+}
+
+func TestM9FollowProgressRequiresSettings(t *testing.T) {
+	f, s := newNativeSamplerFixture(t)
+	f.legacyProgress = true
+	if got, err := f.sample(s, true, 0); err == nil || got.progress != nil || got.catchUpConfirmed {
+		t.Fatal("follow accepted old progress", err)
+	}
 }

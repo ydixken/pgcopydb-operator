@@ -80,6 +80,8 @@ func nativeTerminalTestFixture(t *testing.T) (*lifecycleAPI, *MigrationReconcile
 	one, yes, e := int64(1), true, lifecycleEnd
 	clone := &native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: nativeTerminalCloneCommand, Capabilities: []native.Capability{native.CapCloneSingleDB}, Work: &work, Phase: nativeTerminalPhase, Copy: &native.CopyProgress{Tables: &native.Counters{Total: &one, Done: &one}, Indexes: &native.Counters{Total: &one, Done: &one}, Bytes: &native.Counters{Total: &one, Done: &one}}}
 	ack := &native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: "stream sentinel set endpos", Capabilities: []native.Capability{native.CapCutover}, Work: &work, Phase: nativeTerminalPhase, Replication: &native.Replication{CertifiedLSN: &e, DurableReplayLSN: &e, EndLSN: &e, EndPersisted: &yes, Drained: &yes, CheckpointID: nativeTerminalToken, DrainProof: &native.DrainProof{Kind: "keepalive", Work: &work, CheckpointID: nativeTerminalToken, Committed: &yes, EndLSN: e, ReplayLSN: e}}}
+	nativeM9Status(clone)
+	nativeM9Status(ack)
 	return s, r, clone, ack
 }
 
@@ -175,4 +177,27 @@ func TestNativeFinalProofJoin(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestM9TerminalRequiresSettings(t *testing.T) {
+	for _, field := range []string{"clone", "acknowledgment"} {
+		t.Run(field, func(t *testing.T) {
+			s, r, clone, ack := nativeTerminalTestFixture(t)
+			report := clone
+			if field == "acknowledgment" {
+				report = ack
+			}
+			report.Settings = nil
+			report.Capabilities = report.Capabilities[:1]
+			if got, err := r.readNativeFollowCompletion(context.Background(), s.migration.DeepCopy(), s.worker.DeepCopy(), s.pvc.DeepCopy(), clone, nativeTerminalTestAck(t, ack)); got != nil || err == nil {
+				t.Fatal("old follow report supplied completion")
+			}
+		})
+	}
+}
+
+func nativeM9Status(report *native.Report) {
+	report.Capabilities = append(report.Capabilities, native.CapDurabilityStatus)
+	report.Settings = &native.EffectiveFollowSettings{Durability: "durable", ApplyGroupTxns: 100,
+		Limits: native.FollowLimits{ChannelBytes: 8388608, ChannelMessages: 1024, MaxMessageBytes: 16777216, GroupRows: 10000, GroupBytes: 8388608}}
 }

@@ -264,3 +264,34 @@ func TestSharedNativeFixtures(t *testing.T) {
 		}
 	}
 }
+
+func TestM9ProducerReports(t *testing.T) {
+	count := 0
+	for _, c := range sharedCases(t) {
+		if !strings.HasPrefix(c.ID, "m9-") || !c.Accept {
+			continue
+		}
+		count++
+		t.Run(c.ID, func(t *testing.T) {
+			raw := append(append([]byte("native-report: "), bytes.TrimSpace(readSharedFile(t, c.Payload))...), '\n')
+			got, err := ParseReportLine(raw, c.Binding.binding())
+			if err != nil || got == nil || got.Settings == nil {
+				t.Fatal("producer report refused", err)
+			}
+			settings := got.Settings
+			if settings.ApplyGroupTxns != 23 || settings.Limits != (FollowLimits{ChannelBytes: 8388608, ChannelMessages: 17, MaxMessageBytes: 16777216, GroupRows: 10000, GroupBytes: 8388608}) {
+				t.Fatal("stored settings changed")
+			}
+			if strings.HasPrefix(c.ID, "m9-durable-") {
+				if settings.Durability != durabilityDurable || settings.BarrierIntervalMS != nil {
+					t.Fatal("durable cadence changed")
+				}
+			} else if settings.Durability != "replay-safe" || settings.BarrierIntervalMS == nil || *settings.BarrierIntervalMS != 500 {
+				t.Fatal("replay-safe cadence changed")
+			}
+		})
+	}
+	if count != 10 {
+		t.Fatalf("producer reports = %d, want 10", count)
+	}
+}

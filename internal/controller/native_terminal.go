@@ -21,7 +21,7 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 		return nil, errNativeFollowCompletion
 	}
 	work, err := nativeWorkIdentity(m, pvc)
-	if err != nil || !nativeEvidenceWorkerComplete(worker) || native.ValidateCompletedClone(clone, work) != nil {
+	if err != nil || !nativeEvidenceWorkerComplete(worker) || native.ValidateCompletedClone(clone, work) != nil || !nativeFollowStatus(clone) {
 		return nil, errNativeFollowCompletion
 	}
 	original, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
@@ -34,7 +34,7 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 	}
 	checkpoint := observation.Checkpoint().Evidence()
 	report, err := native.ParseReportLine(acknowledgment, native.Binding{Command: "stream sentinel set endpos", Work: work, EndLSN: m.Status.Replication.Endpos, Checkpoint: &checkpoint})
-	if err != nil || report.Replication == nil || report.Replication.Drained == nil || !*report.Replication.Drained || report.Replication.EndPersisted == nil || !*report.Replication.EndPersisted {
+	if err != nil || !nativeFollowAcknowledgment(report) {
 		return nil, errNativeFollowCompletion
 	}
 	confirmed, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
@@ -42,4 +42,12 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 		return nil, errNativeFollowCompletion
 	}
 	return observation, nil
+}
+
+func nativeFollowStatus(report *native.Report) bool {
+	return report != nil && report.Settings != nil && native.RequireCapabilities(report.Capabilities, native.CapDurabilityStatus) == nil
+}
+
+func nativeFollowAcknowledgment(report *native.Report) bool {
+	return nativeFollowStatus(report) && report.Replication != nil && report.Replication.Drained != nil && *report.Replication.Drained && report.Replication.EndPersisted != nil && *report.Replication.EndPersisted
 }

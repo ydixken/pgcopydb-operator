@@ -125,6 +125,9 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 	}
 	one := int64(1)
 	f.report = &native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: nativeTerminalCloneCommand, Capabilities: []native.Capability{native.CapCloneSingleDB}, Work: &work, Phase: nativeTerminalPhase, Copy: &native.CopyProgress{Tables: &native.Counters{Total: &one, Done: &one}, Indexes: &native.Counters{Total: &one, Done: &one}, Bytes: &native.Counters{Total: &one, Done: &one}}}
+	if follow {
+		nativeM9Status(f.report)
+	}
 	f.encodeReport()
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(server.Close)

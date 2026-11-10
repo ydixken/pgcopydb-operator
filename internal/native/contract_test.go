@@ -636,3 +636,101 @@ func TestSealedFileVersionCapability(t *testing.T) {
 		}
 	}
 }
+
+func TestM9DurabilitySettings(t *testing.T) {
+	count := 0
+	for _, c := range sharedCases(t) {
+		if !strings.HasPrefix(c.ID, "m9-") || c.Kind != fixtureReportKind {
+			continue
+		}
+		count++
+		t.Run(c.ID, func(t *testing.T) {
+			got, err := ParseReport(readSharedFile(t, c.Payload), c.Binding.binding())
+			if (err == nil && got != nil) != c.Accept {
+				t.Fatalf("acceptance differs: %v", err)
+			}
+		})
+	}
+	if count != 73 {
+		t.Fatalf("M9 cases = %d, want 73", count)
+	}
+}
+
+func TestM9StatusCapabilityPairing(t *testing.T) {
+	legacy := fixture(fixtureProgressCommand, `"copy":{}`)
+	if _, err := ParseReport(legacy, binding(fixtureProgressCommand)); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range sharedCases(t) {
+		if c.ID == "m9-durable-progress" {
+			found = true
+			raw := readSharedFile(t, c.Payload)
+			for _, mutation := range []struct{ old, next string }{
+				{`"durability.status.v1"`, `"durability.status.v1","durability.status.v1"`},
+				{`"settings":`, `"Settings":`},
+			} {
+				if _, err := ParseReport(replace(t, raw, mutation.old, mutation.next), c.Binding.binding()); err == nil {
+					t.Fatal("malformed extension accepted")
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing durability pairing fixture")
+	}
+}
+
+func TestM9SettingsDoNotProveCompletion(t *testing.T) {
+	raw := replace(t, drainFixture(), `"capabilities":[`, `"capabilities":["durability.status.v1",`)
+	raw = replace(t, raw, `"replication":`, `"settings":`+m9SettingsJSON+`,"replication":`)
+	if _, err := ParseReport(raw, drainBinding()); err != nil {
+		t.Fatal(err)
+	}
+	want := drainBinding()
+	want.Checkpoint = nil
+	if _, err := ParseReport(raw, want); err == nil {
+		t.Fatal("settings replaced checkpoint authority")
+	}
+	withoutProof, _, found := strings.Cut(string(raw), `,"drain_proof":`)
+	if !found {
+		t.Fatal("missing drain proof mutation target")
+	}
+	if _, err := ParseReport([]byte(withoutProof+"}}"), drainBinding()); err == nil {
+		t.Fatal("settings replaced drain proof")
+	}
+	for _, field := range []struct{ old, next string }{
+		{`"end_persisted":true`, `"end_persisted":false`},
+		{`"committed":true`, `"committed":false`},
+	} {
+		if _, err := ParseReport(replace(t, raw, field.old, field.next), drainBinding()); err == nil {
+			t.Fatal("settings supplied missing completion predicate")
+		}
+	}
+}
+
+const m9SettingsJSON = `{"durability":"durable","barrier_interval_ms":null,"apply_group_txns":100,"limits":{"channel_bytes":8388608,"channel_messages":1024,"max_message_bytes":16777216,"group_rows":10000,"group_bytes":8388608}}`
+
+func TestM9SettingsExactUint64Range(t *testing.T) {
+	raw := fixture(fixtureProgressCommand, `"copy":{},"settings":`+m9SettingsJSON)
+	raw = replace(t, raw, `"capabilities":[`, `"capabilities":["durability.status.v1",`)
+	raw = replace(t, raw, `"apply_group_txns":100`, `"apply_group_txns":18446744073709551615`)
+	raw = replace(t, raw, `"durability":"durable"`, `"durability":"replay-safe"`)
+	raw = replace(t, raw, `"barrier_interval_ms":null`, `"barrier_interval_ms":18446744073709551615`)
+	got, err := ParseReport(raw, binding(fixtureProgressCommand))
+	if err != nil || got.Settings.ApplyGroupTxns != ^uint64(0) || got.Settings.BarrierIntervalMS == nil || *got.Settings.BarrierIntervalMS != ^uint64(0) {
+		t.Fatal("uint64 settings lost precision", err)
+	}
+}
+
+func TestM9SettingsRejectedOnNonFollowCommands(t *testing.T) {
+	raw := fixture("list tables", `"copy":{},"settings":`+m9SettingsJSON)
+	raw = replace(t, raw, `"capabilities":[`, `"capabilities":["durability.status.v1",`)
+	if _, err := ParseReport(raw, binding("list tables")); err == nil {
+		t.Fatal("list tables accepted follow settings")
+	}
+	raw = fixture(fixtureProgressCommand, `"copy":{},"settings":null`)
+	if _, err := ParseReport(raw, binding(fixtureProgressCommand)); err == nil {
+		t.Fatal("unpaired null settings accepted")
+	}
+}

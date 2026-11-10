@@ -27,11 +27,15 @@ func ParseCloneOutput(raw []byte, work WorkIdentity, follow bool) (*Report, erro
 		}
 		raw = rest
 		if record, ok := bytes.CutPrefix(line, []byte("native-report: ")); ok {
-			if cloneOutputObject(record, "protocol_version", "engine_version", "command", "capabilities", "work", "phase", "copy") == nil {
+			fields := []string{"protocol_version", "engine_version", "command", "capabilities", reportWorkMember, "phase", "copy"}
+			if follow {
+				fields = append(fields, "settings")
+			}
+			if cloneOutputObject(record, fields...) == nil {
 				return nil, errCloneOutput
 			}
 			report, err := ParseReport(record, Binding{Command: nativeCloneCommand, Work: work})
-			if err != nil {
+			if err != nil || (follow && RequireCapabilities(report.Capabilities, CapDurabilityStatus) != nil) {
 				return nil, errCloneOutput
 			}
 			switch report.Phase {

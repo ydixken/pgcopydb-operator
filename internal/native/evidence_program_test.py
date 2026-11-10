@@ -48,23 +48,73 @@ def retry_request(commit=True, local=False):
     return value
 
 
+def stored_settings():
+    return dict(durability='durable',barrier_interval_ms=None,apply_group_txns=100,limits=dict(channel_bytes=8388608,channel_messages=1024,max_message_bytes=16777216,group_rows=10000,group_bytes=8388608))
+
+
+def invalid_settings():
+    yield None
+    for key in stored_settings():
+        value=stored_settings();del value[key];yield value
+    for key,bad in [('extra',1),('durability','relaxed'),('durability',True),('barrier_interval_ms',0),('barrier_interval_ms',1),('apply_group_txns',0),('apply_group_txns',True),('apply_group_txns',1.0),('apply_group_txns',2**64)]:
+        value=stored_settings();value[key]=bad;yield value
+    for interval in (None,0,True,1.0,2**64):
+        value=stored_settings();value.update(durability='replay-safe',barrier_interval_ms=interval);yield value
+    for key,maximum in stored_settings()['limits'].items():
+        for bad in (None,0,-1,True,1.0,maximum+1,2**64):
+            value=stored_settings();value['limits'][key]=bad;yield value
+        value=stored_settings();del value['limits'][key];yield value
+    value=stored_settings();value['limits']['extra']=1;yield value
+
+
+def refusal_manifest_bytes(manifest):
+    for version in range(10):
+        changed=copy.deepcopy(manifest);changed['format_version']=version;yield json.dumps(changed).encode()
+    changed=copy.deepcopy(manifest);changed['target_provenance'][0]['record']['intent']['binding']['metadata_version']=6;yield json.dumps(changed).encode()
+    for settings in invalid_settings():
+        changed=copy.deepcopy(manifest);changed['follow_state']['effective_settings']=settings;yield json.dumps(changed).encode()
+    changed=copy.deepcopy(manifest);del changed['follow_state']['effective_settings'];yield json.dumps(changed).encode()
+    changed=copy.deepcopy(manifest);changed['follow_state']['extra']=None;yield json.dumps(changed).encode()
+    raw=json.dumps(manifest).encode()
+    for old,new in ((b'"apply_group_txns": 100',b'"apply_group_txns": 1e2'),(b'"apply_group_txns": 100',b'"apply_group_txns": 100,"apply_group_txns": 100'),(b'"channel_bytes": 8388608',b'"channel_bytes": 8388608,"channel_bytes": 8388608'),(b'"effective_settings": {',b'"effective_settings": null,"effective_settings": {')):
+        yield raw.replace(old,new)
+
+
+def check_preconnection_admission(case,scope,req,path,manifest,state_name,run):
+    state_type=scope[state_name];uid=os.geteuid();original_read=os.read
+    def state(value):
+        with mock.patch.object(os,'geteuid',return_value=uid):return state_type(value)
+    env={name:str(req['execution']['work'][field]) for name,field in [('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation')]}
+    raw=json.dumps(manifest).encode()
+    for candidate in [raw,*refusal_manifest_bytes(manifest)]:
+        path.write_bytes(candidate);channel=mock.Mock();channel.consume.return_value=json.dumps(req).encode()
+        material=mock.Mock(side_effect=RuntimeError('connection boundary reached'));session=mock.Mock();stdin=[json.dumps(req).encode(),b'']
+        def read(fd,size):return stdin.pop(0) if fd==0 else original_read(fd,size)
+        with mock.patch.dict(scope,InputChannel=lambda *a:channel,Diagnostics=mock.Mock(),Materialization=material,Session=session,**{state_name:state}),mock.patch.dict(os.environ,dict(env,LANG='C',LC_ALL='C',PGCONNECT_TIMEOUT='10'),clear=True),mock.patch.object(scope['resource'],'setrlimit'),mock.patch.object(os,'geteuid',return_value=65532),mock.patch.object(os,'set_blocking'),mock.patch.object(os,'read',side_effect=read):
+            case.assertEqual(run(),1);session.assert_not_called()
+            if candidate==raw:material.assert_called_once()
+            else:material.assert_not_called()
+    path.write_bytes(raw)
+
+
 def private_fixture(directory_info):
     req=request(); work=req['execution']['work']; run=list(bytes.fromhex(work['run_id']))
     stream=dict(run=run,source=dict(system_identifier=123,database_oid=11),generation=1)
     source=dict(identity=stream['source'],timeline=1,major=16)
     slot=dict(intent=dict(binding=dict(stream=stream,slot_name='native_slot',plugin='pgoutput',catalog_epoch=1),nonce=[1]*16),consistent_point=8,snapshot_token='snapshot')
     pub=dict(name='native_publication',oid=88,owner_oid=33)
-    binding=dict(stream=stream,target_system_identifier=456,target_database_oid=22,schema_name='_rpgmigrate_'+work['run_id'],table_name='checkpoint',owner_oid=33,metadata_version=6)
-    target=dict(intent=dict(binding=binding,nonce=[2]*16),schema_oid=44,table_oid=55,marker_table_oid=66,marker_index_oid=77)
+    binding=dict(stream=stream,target_system_identifier=456,target_database_oid=22,schema_name='_rpgmigrate_'+work['run_id'],table_name='checkpoint',owner_oid=33,metadata_version=7)
+    target=dict(intent=dict(binding=binding,nonce=[2]*16),schema_oid=44,table_oid=55,marker_table_oid=66,marker_index_oid=77,large_object_table_oid=78,large_object_index_oid=79)
     operator=dict(migration_uid=work['migration_uid'],run=run,workdir_id=work['workdir_id'],checkpoint_generation=1)
-    plan=dict(source=source,target=dict(identity=dict(system_identifier=456,database_oid=22),major=18),generation=1,tables=[],sequences=[],policy=dict(no_owner=False,no_acl=False,no_comments=False,no_tablespaces=False))
+    plan=dict(source=source,target=dict(identity=dict(system_identifier=456,database_oid=22),major=18),generation=1,tables=[],sequences=[],policy=dict(no_owner=False,no_acl=False,no_comments=False,no_tablespaces=False),copy_policy=dict(use_copy_binary=True,split_tables_larger_than=536870912,split_max_parts=8,skip_large_objects=False),copy_tables=[])
     follow_binding=dict(slot=slot,publication=pub,source_timeline=1,copy_generation=1,source_types=[dict(oid=25,schema='pg_catalog',name='text')])
     clone=dict(plan=plan,ticket=dict(token='snapshot',source=source,generation=1),phase='analyzing',owned_objects=[],owned_tables=[],completion=None)
-    follow=dict(cleanup=None,origin_name=None,publication=dict(phase='confirmed',intent=dict(run=run,name=pub['name'],nonce=[3]*16),receipt=pub),binding=follow_binding,restart=None,preliminary=None)
-    manifest=dict(magic='RPGMIGRATE',format_version=8,run=run,canonical_path='/work/pgcopydb',directory_device=directory_info.st_dev,directory_inode=directory_info.st_ino,copy_complete=None,target_provenance=[dict(phase='confirmed',record=target)],source_slot=dict(phase='confirmed',record=slot),clone_state=clone,follow_state=follow,operator=operator)
+    follow=dict(effective_settings=stored_settings(),cleanup=None,origin_name=None,publication=dict(phase='confirmed',intent=dict(run=run,name=pub['name'],nonce=[3]*16),receipt=pub),binding=follow_binding,restart=None,preliminary=None)
+    manifest=dict(magic='RPGMIGRATE',format_version=10,run=run,canonical_path='/work/pgcopydb',directory_device=directory_info.st_dev,directory_inode=directory_info.st_ino,copy_complete=None,target_provenance=[dict(phase='confirmed',record=target)],source_slot=dict(phase='confirmed',record=slot),clone_state=clone,follow_state=follow,operator=operator)
     endpos=dict(version=1,stream=stream,copy_generation=1,slot_nonce=[1]*16,target_nonce=[2]*16,end_lsn=32,sealed=True)
-    row=['rpgmigrate','6',bytes(run).hex(),bytes([2]*16).hex(),'123','11','1','456','22','33','44','55','1','7','9','0/9','0/10','0','7','snapshot','0/8',bytes([1]*16).hex(),json.dumps(dict(generation=1,phase='analyzing',snapshot_token='snapshot',source_timeline=1,table_count=0)),'0/10',json.dumps(dict(binding=follow_binding,operator=operator,origin_name=None)),'0/20','0/30','later_begin','t']
+    row=['rpgmigrate','7',bytes(run).hex(),bytes([2]*16).hex(),'123','11','1','456','22','33','44','55','1','7','9','0/9','0/10','0','7','snapshot','0/8',bytes([1]*16).hex(),json.dumps(dict(generation=1,phase='analyzing',snapshot_token='snapshot',source_timeline=1,table_count=0,prepared_generation=None,large_objects=dict(generation=1,initial=dict(objects=0,bytes=0),final_sync=dict(objects=0,bytes=0)))),'0/10',json.dumps(dict(binding=follow_binding,operator=operator,origin_name=None)),'0/20','0/30','later_begin','t']
     return req,manifest,endpos,row
+
 
 
 def response(value,raw):
@@ -575,6 +625,9 @@ class NativePythonTests(unittest.TestCase):
                 state=P.SourceState(req);self.assertEqual(state.binding[3],'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59');state.revalidate()
                 self.assertNotIn('control',events);self.assertNotIn('endpos.json',events);self.assertNotIn('lock',events)
                 self.assertEqual((control/'endpos.json').read_bytes(),b'not E');self.assertTrue((owned/'data').is_dir())
+                state.close(False)
+                check_preconnection_admission(self,P.__dict__,req,file,manifest,'SourceState',lambda:P.run_source_observation(req['kind'],req['operation_id'],req['program_sha256']))
+                state=P.SourceState(req)
                 replacement=owned/'new';replacement.write_bytes(file.read_bytes());replacement.chmod(0o600);os.replace(replacement,file)
                 with self.assertRaises(P.Refusal):state.revalidate()
                 state.close(False)
@@ -1043,6 +1096,29 @@ class NativePythonTests(unittest.TestCase):
         columns=json.loads((base/'native_columns.json').read_bytes())['checkpoint']
         self.assertEqual(P.COLUMNS,[(c['name'],c['type']) for c in columns])
 
+        inventory=json.loads((base/'native_m8_source_manifest.json').read_bytes())
+        self.assertEqual((inventory['native_format'],inventory['metadata_version']),(9,7))
+        self.assertEqual(inventory['source_commit'],'daeac05a3360defab2671f41e60493bc8168838d')
+        self.assertEqual(inventory['source_sha256'],'1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1')
+        for name,digest in inventory['files'].items(): self.assertEqual(hashlib.sha256((base/name).read_bytes()).hexdigest(),digest)
+        for major in (16,18):
+            for kind,marker in (('catalog',False),('marker_catalog',True),('large_object_catalog','large_object')):
+                expected=' '.join(line.strip() for line in (base/f'native_m8_{kind}_{major}.sql').read_text().splitlines() if not line.startswith('--'))
+                self.assertEqual(P.catalog_sql(marker,major,7),expected)
+        m9=json.loads((base/'native_m9_source_manifest.json').read_bytes())
+        self.assertEqual((m9['native_format'],m9['metadata_version']),(10,7))
+        self.assertFalse(m9['runtime_qualified'])
+        self.assertEqual(m9['source_sha256'],inventory['source_sha256'])
+        self.assertEqual(m9['files'],inventory['files'])
+        self.assertEqual(m9['persisted_settings_patch_sha256'],'cb7bb877ddd8ed6759d9f235a518bf8906f74ca9aaab8428ccecf9b3e7347975')
+        _,manifest,_,_=private_fixture(os.stat(HERE));settings=manifest['follow_state']['effective_settings']
+        self.assertEqual(set(manifest['follow_state']),set(m9['follow_state_fields']))
+        self.assertEqual(set(settings),set(m9['effective_settings_fields']))
+        self.assertEqual(settings['limits'],m9['limit_maxima'])
+        self.assertEqual(m9['source_files']['src/apply/metadata.rs'],m9['source_sha256'])
+        for version in (5,8,True,7.0):
+            with self.subTest(version=version),self.assertRaises(P.Refusal): P.catalog_sql(False,16,version)
+
     def test_RuntimeMetadata(self):
         value=dict(version=1,architecture='arm64',library_path='/usr/lib/aarch64-linux-gnu/libpq.so.5.18',library_sha256='a'*64,libpq_version=180006,package_name='libpq5',package_version='18.6-1.pgdg13+1')
         self.assertEqual(P.runtime_metadata(value,'aarch64'),value['library_path'])
@@ -1135,6 +1211,29 @@ class NativePythonTests(unittest.TestCase):
             finally:channel.close()
 
     def test_PrivateAdmission(self):
+        req, valid, _, _ = private_fixture(os.stat(HERE))
+        for validate in (P.validate_manifest,P.validate_source_manifest):
+            for durability,interval in (('durable',None),('replay-safe',1),('replay-safe',2**64-1)):
+                changed=copy.deepcopy(valid);changed['follow_state']['effective_settings'].update(durability=durability,barrier_interval_ms=interval,apply_group_txns=2**64-1)
+                with self.subTest(durability=durability,interval=interval):validate(changed,req,os.stat(HERE))
+            for settings in invalid_settings():
+                changed=copy.deepcopy(valid);changed['follow_state']['effective_settings']=settings
+                with self.subTest(settings=settings),self.assertRaises(P.Refusal):validate(changed,req,os.stat(HERE))
+            changed=copy.deepcopy(valid);del changed['follow_state']['effective_settings']
+            with self.assertRaises(P.Refusal):validate(changed,req,os.stat(HERE))
+        init=copy.deepcopy(valid);init.update(copy_complete=None,target_provenance=[],source_slot=None,clone_state=None)
+        init['follow_state']={key:None for key in init['follow_state']}
+        self.assertIsNone(P.follow_settings(init)['effective_settings'])
+        for field,value in [('copy_complete',dict(tables=0,rows=0,bytes=0)),('target_provenance',valid['target_provenance']),('source_slot',valid['source_slot']),('clone_state',valid['clone_state'])]:
+            changed=copy.deepcopy(init);changed[field]=value
+            with self.subTest(init_field=field),self.assertRaises(P.Refusal):P.follow_settings(changed)
+        for field in ('cleanup','publication','binding','restart','preliminary'):
+            changed=copy.deepcopy(init);changed['follow_state'][field]={}
+            with self.subTest(init_follow_field=field),self.assertRaises(P.Refusal):P.follow_settings(changed)
+        raw=json.dumps(valid).encode()
+        for bad in (raw.replace(b'"apply_group_txns": 100',b'"apply_group_txns": 1e2'),raw.replace(b'"apply_group_txns": 100',b'"apply_group_txns": 100,"apply_group_txns": 100'),raw.replace(b'"channel_bytes": 8388608',b'"channel_bytes": 8388608,"channel_bytes": 8388608'),raw.replace(b'"effective_settings": {',b'"effective_settings": null,"effective_settings": {')):
+            with self.assertRaises(P.Refusal):P.strict_json(bad,1048576)
+
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)/'work'; root.mkdir(mode=0o700)
             owned=root/'pgcopydb'; owned.mkdir(mode=0o700)
@@ -1159,6 +1258,9 @@ class NativePythonTests(unittest.TestCase):
                     with self.subTest(index=index), self.assertRaises(P.Refusal): P.validate_control_row(changed,state)
                 changed=list(row); follow=json.loads(changed[24]); follow['operator']['checkpoint_generation']=True; changed[24]=json.dumps(follow)
                 with self.assertRaises(P.Refusal): P.validate_control_row(changed,state)
+                state.close()
+                check_preconnection_admission(self,P.__dict__,req,owned/'manifest.json',manifest,'PrivateState',lambda:P.run_completed_evidence(req['operation_id'],req['program_sha256']))
+                state=P.PrivateState(req)
                 state.revalidate()
                 replacement=owned/'replacement'; replacement.write_bytes((owned/'manifest.json').read_bytes()); replacement.chmod(0o600)
                 os.replace(replacement,owned/'manifest.json')
@@ -1174,6 +1276,78 @@ class NativePythonTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(P.Refusal): P.validate_manifest(changed,req,owned.stat())
             for key,bad in [('sealed',False),('sealed',1),('end_lsn',33),('version',True)]:
                 with self.subTest(key=key), self.assertRaises(P.Refusal): P.validate_control(dict(endpos,**{key:bad}),manifest,req)
+
+        from types import SimpleNamespace
+        req, candidate, endpos, row = private_fixture(os.stat(HERE))
+        target = P.validate_manifest(candidate, req, os.stat(HERE))
+        state = SimpleNamespace(manifest=candidate, target=target, req=req)
+        self.assertEqual(P.validate_control_row(row, state)['drain_end_lsn'], '0/20')
+        self.assertEqual(P.validate_source_manifest(candidate, req, os.stat(HERE))[3], 'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59')
+        for version, metadata in ((8, 6), (8, 7), (9, 7), (10, 6), (999, 7), (True, 7), (10.0, 7), (10, True), (10, 7.0)):
+            changed = copy.deepcopy(candidate); changed['format_version'] = version
+            changed['target_provenance'][0]['record']['intent']['binding']['metadata_version'] = metadata
+            for validate in (P.validate_manifest, P.validate_source_manifest):
+                with self.subTest(version=version, metadata=metadata), self.assertRaises(P.Refusal): validate(changed, req, os.stat(HERE))
+        for key in ('large_object_table_oid', 'large_object_index_oid'):
+            for value in (0, 55, 66, 77, 78, True):
+                if key == 'large_object_table_oid' and value == 78: continue
+                changed = copy.deepcopy(candidate); changed['target_provenance'][0]['record'][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+            changed = copy.deepcopy(candidate); del changed['target_provenance'][0]['record'][key]
+            with self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+        for key in ('copy_policy', 'copy_tables'):
+            changed = copy.deepcopy(candidate); del changed['clone_state']['plan'][key]
+            with self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+        populated=copy.deepcopy(candidate);clone=populated['clone_state'];plan=clone['plan']
+        table=dict(source_oid=101,name=dict(schema='public',table='records'),writable_columns=['id'],all_columns=['id'],identity_modes=[0],partition_identity_modes=None)
+        plan['tables']=[table]
+        plan['copy_tables']=[dict(source_oid=101,format='binary',parts=[dict(number=1,count=2,start_block=0,end_block=10),dict(number=2,count=2,start_block=10,end_block=None)])]
+        clone['owned_objects']=[dict(class_oid=1259,object_oid=102,object_sub_id=0,namespace_oid=103,namespace_name='public',name='records',kind='r',owner_oid=33)]
+        clone['owned_tables']=[dict(table=table,target_oid=102,target_namespace_oid=103,target_owner_oid=33,generation=1)]
+        self.assertEqual(P.validate_manifest(populated,req,os.stat(HERE)),target)
+        self.assertEqual(P.validate_source_manifest(populated,req,os.stat(HERE))[3],P.validate_source_manifest(candidate,req,os.stat(HERE))[3])
+        for format in ('text','binary'):
+            singleton=copy.deepcopy(plan);singleton['copy_tables'][0].update(format=format,parts=[dict(number=1,count=1,start_block=0,end_block=None)])
+            P.copy_profile(singleton,10)
+        bad_profiles=[lambda p:p.update(copy_tables=[]),lambda p:p['copy_tables'].append(copy.deepcopy(p['copy_tables'][0])),lambda p:p['copy_tables'][0].update(source_oid=999),lambda p:p['copy_tables'][0].update(format='unknown'),lambda p:p['copy_tables'][0].update(parts=[]),lambda p:p['copy_tables'][0]['parts'][0].update(number=True),lambda p:p['copy_tables'][0]['parts'][0].update(count=1),lambda p:p['copy_tables'][0]['parts'][0].update(start_block=1),lambda p:p['copy_tables'][0]['parts'][0].update(end_block=None),lambda p:p['copy_tables'][0]['parts'][0].update(end_block=0),lambda p:p['copy_tables'][0]['parts'][1].update(start_block=9),lambda p:p['copy_tables'][0]['parts'][1].update(end_block=11),lambda p:p['copy_tables'][0]['parts'][1].pop('end_block'),lambda p:p['copy_policy'].update(use_copy_binary=False),lambda p:p['copy_policy'].update(split_max_parts=1),lambda p:p['copy_policy'].update(split_max_parts=0),lambda p:p['copy_policy'].update(split_max_parts=2**31),lambda p:p['copy_policy'].update(split_tables_larger_than=0),lambda p:p['copy_policy'].update(skip_large_objects=1)]
+        for mutate in bad_profiles:
+            changed=copy.deepcopy(populated);mutate(changed['clone_state']['plan'])
+            for validate in (P.validate_manifest,P.validate_source_manifest):
+                with self.subTest(mutate=mutate),self.assertRaises(P.Refusal):validate(changed,req,os.stat(HERE))
+        boundary=copy.deepcopy(plan);boundary['copy_policy']['split_max_parts']=4096
+        boundary['copy_tables'][0]['parts']=[dict(number=i+1,count=4096,start_block=i,end_block=i+1 if i<4095 else None) for i in range(4096)]
+        P.copy_profile(boundary,10)
+        boundary['copy_tables'][0]['parts'].append(dict(number=4097,count=4097,start_block=4096,end_block=None))
+        with self.assertRaises(P.Refusal):P.copy_profile(boundary,10)
+        ordered=copy.deepcopy(plan);second=copy.deepcopy(table);second['source_oid']=104;second['name']['table']='other'
+        ordered['tables'].append(second);execution=copy.deepcopy(ordered['copy_tables'][0]);execution['source_oid']=104;ordered['copy_tables'].append(execution)
+        P.copy_profile(ordered,10);ordered['copy_tables'].reverse()
+        with self.assertRaises(P.Refusal):P.copy_profile(ordered,10)
+        controls = [dict(prepared_generation=2), dict(prepared_generation=True), dict(large_objects=dict(generation=2, initial=dict(objects=0, bytes=0), final_sync=dict(objects=0, bytes=0))), dict(large_objects=dict(generation=1, initial=None, final_sync=dict(objects=0, bytes=0))), dict(large_objects=dict(generation=1, initial=dict(objects=True, bytes=0), final_sync=dict(objects=0, bytes=0)))]
+        for updates in controls:
+            changed = list(row); changed[22] = json.dumps(dict(json.loads(row[22]), **updates))
+            with self.subTest(control=updates), self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
+        for key in ('prepared_generation', 'large_objects'):
+            changed = list(row); control = json.loads(row[22]); del control[key]; changed[22] = json.dumps(control)
+            with self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
+        control=json.loads(row[22]);control['large_objects']['initial']=dict(objects=2,bytes=2**64-1);control['large_objects']['final_sync']=dict(objects=3,bytes=17)
+        changed=list(row);changed[22]=json.dumps(control);P.validate_control_row(changed,state)
+        for value in (dict(objects=2**64,bytes=0),dict(objects=0,bytes=-1),dict(objects=0,bytes=0,extra=True)):
+            changed=list(row);control=json.loads(row[22]);control['large_objects']['initial']=value;changed[22]=json.dumps(control)
+            with self.subTest(receipt=value),self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        control=json.loads(row[22]);control['prepared_generation']=1
+        changed=list(row);changed[22]=json.dumps(control);P.validate_control_row(changed,state)
+        skipped=copy.deepcopy(candidate);skipped['clone_state']['plan']['copy_policy']['skip_large_objects']=True
+        skip_state=SimpleNamespace(manifest=skipped,target=target,req=req)
+        with self.assertRaises(P.Refusal):P.validate_control_row(row,skip_state)
+        control['large_objects'].update(initial=None,final_sync=None);changed[22]=json.dumps(control)
+        P.validate_control_row(changed,skip_state)
+        with self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        for key in ('initial','final_sync'):
+            control=json.loads(row[22]);del control['large_objects'][key];changed=list(row);changed[22]=json.dumps(control)
+            with self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        changed = list(row); changed[1] = '6'
+        with self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
 
     def test_DescriptorMutation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1201,7 +1375,7 @@ class NativePythonTests(unittest.TestCase):
         req,manifest,endpos,row=private_fixture(os.stat(HERE))
         state=SimpleNamespace(req=req,manifest=manifest,target=manifest['target_provenance'][0]['record'],revalidate=lambda:None)
         materials=SimpleNamespace(connection=lambda role:role.encode(),check=lambda:None)
-        events=[]; fault=[None]
+        events=[]; fault=[None]; catalogs=[]; locks=[]
         class Session:
             def __init__(self,library,conninfo,deadline,diag):
                 self.role=conninfo; self.backend=23; self.props={'PQuser':b'fixture','PQdb':b'database','ssl':0}
@@ -1211,6 +1385,8 @@ class NativePythonTests(unittest.TestCase):
             def quote(self,value): return '"'+value+'"'
             def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
                 events.append(('query',self.role,tag))
+                if sql.startswith(('SELECT n.nspowner','SELECT c.relnamespace')): catalogs.append((sql,params))
+                if sql.startswith('LOCK TABLE ONLY'): locks.append(sql)
                 if commit and fault[0]=='unknown_commit': raise P.Refusal('unknown_commit')
                 if not rows: return []
                 if width==6: return [[b'123',b'11',b'1',b't',b'23',b'160006']]
@@ -1232,6 +1408,15 @@ class NativePythonTests(unittest.TestCase):
                 with self.assertRaises(P.Refusal) as error: P.observe(state,None,materials,time.monotonic()+25,None)
                 self.assertEqual(error.exception.error_class,want)
                 self.assertEqual(events[-1],('close',b'target',False))
+
+            events.clear(); catalogs.clear(); locks.clear(); fault[0]=None
+            req,manifest,endpos,row=private_fixture(os.stat(HERE))
+            state=SimpleNamespace(req=req,manifest=manifest,target=manifest['target_provenance'][0]['record'],revalidate=lambda:None)
+            checkpoint,guards=P.observe(state,None,materials,time.monotonic()+25,None)
+            self.assertEqual(guards,P.GUARDS)
+            self.assertEqual([params for _,params in catalogs],[(44,55,22,33,'_rpgmigrate_'+req['execution']['work']['run_id'],'checkpoint',66,77,78,79),(66,77,44,33),(78,79,44,33)])
+            self.assertEqual([sql for sql,_ in catalogs],[P.catalog_sql(kind,18,7) for kind in (False,True,'large_object')])
+            self.assertEqual(len(locks),3);self.assertIn('"large_object_done"',locks[-1])
 
     def test_NoSQLBeforeAdmission(self):
         raw=json.dumps(dict(request(),version=True)).encode()

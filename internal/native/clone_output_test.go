@@ -1,6 +1,7 @@
 package native
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -45,7 +46,11 @@ func TestNativeCloneOutput(t *testing.T) {
 			{"unknown streaming measurements", cloneStartupFixture + strings.Replace(streaming, cloneCopyFixture, `"copy":{"tables":{},"indexes":{},"bytes":{}}`, 1) + terminal, true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				got, err := ParseCloneOutput([]byte(tc.raw), work, tc.follow)
+				raw := tc.raw
+				if tc.follow {
+					raw = m9FollowOutput(raw)
+				}
+				got, err := ParseCloneOutput([]byte(raw), work, tc.follow)
 				if err != nil || got == nil || got.Work == nil || *got.Work != work || got.Replication != nil || got.Cleanup != nil || ValidateCompletedClone(got, work) != nil {
 					t.Fatalf("completed clone data unavailable: report=%+v error=%v", got, err)
 				}
@@ -183,6 +188,9 @@ func TestNativeCloneOutput(t *testing.T) {
 
 func refuseCloneOutput(t *testing.T, raw []byte, work WorkIdentity, follow bool) {
 	t.Helper()
+	if follow {
+		raw = []byte(m9FollowOutput(string(raw)))
+	}
 	got, err := ParseCloneOutput(raw, work, follow)
 	if err == nil || got != nil {
 		t.Fatalf("unavailable clone accepted: report=%+v error=%v", got, err)
@@ -219,4 +227,43 @@ func TestNativeCloneOutputDiagnosticJSON(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestM9FollowRequiresStoredSettings(t *testing.T) {
+	work := binding(nativeCloneCommand).Work
+	legacy := []byte(cloneReportFixture("completed"))
+	if got, err := ParseCloneOutput(legacy, work, true); got != nil || err == nil {
+		t.Fatal("follow accepted legacy settings-free report")
+	}
+	if got, err := ParseCloneOutput(legacy, work, false); got == nil || err != nil {
+		t.Fatal("plain clone changed", err)
+	}
+	mixed := cloneStartupFixture + cloneReportFixture("streaming") + m9FollowOutput(cloneReportFixture("completed"))
+	if got, err := ParseCloneOutput([]byte(mixed), work, true); got != nil || err == nil {
+		t.Fatal("follow accepted settings-free streaming frame")
+	}
+	count := 0
+	for _, c := range sharedCases(t) {
+		if c.ID != "m9-durable-clone-completed" && c.ID != "m9-replay-safe-clone-completed" {
+			continue
+		}
+		count++
+		raw := append(append([]byte("native-report: "), bytes.TrimSpace(readSharedFile(t, c.Payload))...), '\n')
+		if got, err := ParseCloneOutput(raw, c.Binding.Work, true); got == nil || err != nil {
+			t.Fatal("producer follow report refused", err)
+		}
+		refuseCloneOutput(t, raw, c.Binding.Work, false)
+		streaming := readSharedFile(t, strings.Replace(c.Payload, "-completed.json", "-streaming.json", 1))
+		frames := []byte(cloneStartupFixture + "native-report: " + string(bytes.TrimSpace(streaming)) + "\n" + string(raw))
+		if got, err := ParseCloneOutput(frames, c.Binding.Work, true); got == nil || err != nil {
+			t.Fatal("producer streaming follow refused", err)
+		}
+	}
+	if count != 2 {
+		t.Fatal("missing completed follow producer fixtures")
+	}
+}
+
+func m9FollowOutput(raw string) string {
+	return strings.ReplaceAll(raw, `"capabilities":["clone.single_db"]`, `"capabilities":["clone.single_db","durability.status.v1"],"settings":`+m9SettingsJSON)
 }

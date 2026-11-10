@@ -28,7 +28,11 @@ const (
 	CapVerify            Capability = "verify.v1"
 	CapCleanup           Capability = "cleanup.v1"
 	CapVerifySealedFiles Capability = "verify.sealed_files.v1"
+	CapDurabilityStatus  Capability = "durability.status.v1"
 	commandSetEndpos                = "stream sentinel set endpos"
+	commandSentinelGet              = "stream sentinel get"
+	reportWorkMember                = "work"
+	durabilityDurable               = "durable"
 	resourceKindWorkdir             = "workdir"
 )
 
@@ -72,15 +76,56 @@ type Version struct {
 }
 
 type Report struct {
-	ProtocolVersion int64         `json:"protocol_version"`
-	EngineVersion   string        `json:"engine_version"`
-	Command         string        `json:"command"`
-	Capabilities    []Capability  `json:"capabilities"`
-	Work            *WorkIdentity `json:"work"`
-	Phase           string        `json:"phase"`
-	Copy            *CopyProgress `json:"copy,omitempty"`
-	Replication     *Replication  `json:"replication,omitempty"`
-	Cleanup         *Cleanup      `json:"cleanup,omitempty"`
+	ProtocolVersion int64                    `json:"protocol_version"`
+	EngineVersion   string                   `json:"engine_version"`
+	Command         string                   `json:"command"`
+	Capabilities    []Capability             `json:"capabilities"`
+	Work            *WorkIdentity            `json:"work"`
+	Phase           string                   `json:"phase"`
+	Copy            *CopyProgress            `json:"copy,omitempty"`
+	Replication     *Replication             `json:"replication,omitempty"`
+	Cleanup         *Cleanup                 `json:"cleanup,omitempty"`
+	Settings        *EffectiveFollowSettings `json:"settings,omitempty"`
+}
+
+type EffectiveFollowSettings struct {
+	Durability        string       `json:"durability"`
+	BarrierIntervalMS *uint64      `json:"barrier_interval_ms"`
+	ApplyGroupTxns    uint64       `json:"apply_group_txns"`
+	Limits            FollowLimits `json:"limits"`
+}
+
+type FollowLimits struct {
+	ChannelBytes    uint64 `json:"channel_bytes"`
+	ChannelMessages uint64 `json:"channel_messages"`
+	MaxMessageBytes uint64 `json:"max_message_bytes"`
+	GroupRows       uint64 `json:"group_rows"`
+	GroupBytes      uint64 `json:"group_bytes"`
+}
+
+func (s *EffectiveFollowSettings) UnmarshalJSON(raw []byte) error {
+	object := cloneOutputObject(raw, "durability", "barrier_interval_ms", "apply_group_txns", "limits")
+	if object == nil || cloneOutputObject(object["limits"], "channel_bytes", "channel_messages", "max_message_bytes", "group_rows", "group_bytes") == nil {
+		return errors.New("invalid native follow settings fields")
+	}
+	type settings EffectiveFollowSettings
+	var got settings
+	if json.Unmarshal(raw, &got) != nil || got.ApplyGroupTxns == 0 ||
+		(got.Durability != durabilityDurable && got.Durability != "replay-safe") ||
+		(got.Durability == durabilityDurable && got.BarrierIntervalMS != nil) ||
+		(got.Durability == "replay-safe" && (got.BarrierIntervalMS == nil || *got.BarrierIntervalMS == 0)) {
+		return errors.New("invalid native follow settings")
+	}
+	for _, limit := range []struct{ value, maximum uint64 }{
+		{got.Limits.ChannelBytes, 8388608}, {got.Limits.ChannelMessages, 1024},
+		{got.Limits.MaxMessageBytes, 16777216}, {got.Limits.GroupRows, 10000}, {got.Limits.GroupBytes, 8388608},
+	} {
+		if limit.value == 0 || limit.value > limit.maximum {
+			return errors.New("invalid native follow limit")
+		}
+	}
+	*s = EffectiveFollowSettings(got)
+	return nil
 }
 
 type Counters struct {
@@ -131,7 +176,7 @@ func RequireCapabilities(got []Capability, required ...Capability) error {
 	seen := make(map[Capability]bool, len(got))
 	for _, c := range got {
 		switch c {
-		case CapCloneSingleDB, CapLargeObjects, CapBinaryFallback, CapSplit, CapPGOutput, CapProgress, CapCutover, CapVerify, CapCleanup, CapVerifySealedFiles:
+		case CapCloneSingleDB, CapLargeObjects, CapBinaryFallback, CapSplit, CapPGOutput, CapProgress, CapCutover, CapVerify, CapCleanup, CapVerifySealedFiles, CapDurabilityStatus:
 		default:
 			return errors.New("unknown native capability")
 		}
@@ -150,11 +195,11 @@ func RequireCapabilities(got []Capability, required ...Capability) error {
 
 func commandCapability(command string) Capability {
 	switch command {
-	case "clone", "list tables":
+	case nativeCloneCommand, "list tables":
 		return CapCloneSingleDB
-	case "list progress":
+	case nativeProgressCommand:
 		return CapProgress
-	case "stream sentinel get", commandSetEndpos:
+	case commandSentinelGet, commandSetEndpos:
 		return CapCutover
 	case "stream cleanup":
 		return CapCleanup
@@ -224,6 +269,15 @@ func ParseReport(raw []byte, want Binding) (*Report, error) {
 	if err := RequireCapabilities(r.Capabilities, capability); err != nil {
 		return nil, err
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil, errors.New("invalid native report fields")
+	}
+	_, settingsPresent := fields["settings"]
+	if settingsPresent != slices.Contains(r.Capabilities, CapDurabilityStatus) ||
+		(settingsPresent && (r.Settings == nil || !slices.Contains([]string{nativeCloneCommand, nativeProgressCommand, commandSentinelGet, commandSetEndpos}, r.Command))) {
+		return nil, errors.New("native follow settings and capability are not paired")
+	}
 	if !slices.Contains([]string{"planning", "copying", "finalizing", "streaming", "draining", "completed", "failed", "suspended"}, r.Phase) {
 		return nil, errors.New("unknown native phase")
 	}
@@ -235,11 +289,11 @@ func ParseReport(raw []byte, want Binding) (*Report, error) {
 
 func validatePayload(r *Report, want Binding) error {
 	switch r.Command {
-	case "clone", "list tables", "list progress":
+	case nativeCloneCommand, "list tables", nativeProgressCommand:
 		if r.Copy == nil {
 			return errors.New("native copy report is absent")
 		}
-	case "stream sentinel get", commandSetEndpos:
+	case commandSentinelGet, commandSetEndpos:
 		if r.Replication == nil {
 			return errors.New("native replication report is absent")
 		}
@@ -436,10 +490,12 @@ func uniqueValue(d *json.Decoder, depth int) bool {
 // encoding/json also matches case variants, so enforce the v1 spellings before decoding.
 func canonicalMember(name string) bool {
 	switch name {
-	case "protocol_version", "engine_version", "command", "capabilities", "work", "phase", "copy", "replication", "cleanup",
+	case "protocol_version", "engine_version", "command", "capabilities", reportWorkMember, "phase", "copy", "replication", "cleanup",
 		"migration_uid", "run_id", "workdir_id", "checkpoint_generation", "tables", "indexes", "bytes", "total", "done",
 		"source_durable_head_lsn", "received_lsn", "certified_lsn", "durable_replay_lsn", "end_lsn", "end_persisted", "drained", "checkpoint_id", "drain_proof",
-		"committed", "replay_lsn", "complete", "resources", "kind", "name", "owned", "removed":
+		"committed", "replay_lsn", "complete", "resources", "kind", "name", "owned", "removed",
+		"settings", "durability", "barrier_interval_ms", "apply_group_txns", "limits",
+		"channel_bytes", "channel_messages", "max_message_bytes", "group_rows", "group_bytes":
 		return true
 	default:
 		return false

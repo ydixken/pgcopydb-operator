@@ -77,6 +77,9 @@ func (s *nativeSampler) Sample(ctx context.Context, control *native.Client, m *v
 	s.mu.Unlock()
 
 	progress, err := nativeSampleProgress(callCtx, control, scope.execution, admit)
+	if err == nil && scope.follow && !nativeFollowStatus(progress) {
+		err = native.ErrNativeControlUnavailable
+	}
 	if err != nil {
 		return s.finish(callCtx, serial, scope, started, nativeSample{}, nil, err)
 	}

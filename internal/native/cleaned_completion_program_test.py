@@ -49,6 +49,11 @@ def prepare(t):
     return control, row
 
 
+def replay_safe(t):
+    t.value['follow_state']['effective_settings'].update(durability='replay-safe',barrier_interval_ms=100)
+    t.write()
+
+
 class Sessions:
     def __init__(self, state, fault=None):
         self.state, self.fault, self.events = state, fault, []
@@ -163,27 +168,30 @@ class CleanedTests(unittest.TestCase):
 
     def test_Observe(self):
         observe = self.required('observe_cleaned')
-        with tree() as t:
-            prepare(t); state = S['CleanedState'](t.req)
-            material = types.SimpleNamespace(connection=lambda role: role.encode(), check=lambda: None)
-            try:
-                sessions = Sessions(state)
-                with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
-                self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
-                self.assertEqual(sessions.events[-1], ('close', b'source', True))
-                self.assertEqual(sessions.sources, 3)
-                target = next(i for i,e in enumerate(sessions.events) if e == ('open', b'target'))
-                self.assertIn(('close', b'source', True), sessions.events[:target])
-                queries = [e for e in sessions.events if e[0] == 'query']
-                self.assertFalse(any(word in e[2].lower() for e in queries for word in ['pg_current_wal', 'pg_create', 'pg_drop', 'drop publication', 'create publication']))
-                updates = [e for e in queries if e[2].startswith('UPDATE ONLY ')]
-                self.assertEqual(len(updates), 1); self.assertEqual(len(updates[0][3]), 29)
-                self.assertEqual(updates[0][3], sessions.row)
-                self.assertEqual(sessions.next_backend, 104)
-                for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
-                    sessions = Sessions(state, mode)
-                    with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
-            finally: state.close()
+        for replay_safe_mode in (False, True):
+            with tree() as t:
+                prepare(t)
+                if replay_safe_mode: replay_safe(t)
+                state = S['CleanedState'](t.req)
+                material = types.SimpleNamespace(connection=lambda role: role.encode(), check=lambda: None)
+                try:
+                    sessions = Sessions(state)
+                    with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
+                    self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
+                    self.assertEqual(sessions.events[-1], ('close', b'source', True))
+                    self.assertEqual(sessions.sources, 3)
+                    target = next(i for i,e in enumerate(sessions.events) if e == ('open', b'target'))
+                    self.assertIn(('close', b'source', True), sessions.events[:target])
+                    queries = [e for e in sessions.events if e[0] == 'query']
+                    self.assertFalse(any(word in e[2].lower() for e in queries for word in ['pg_current_wal', 'pg_create', 'pg_drop', 'drop publication', 'create publication']))
+                    updates = [e for e in queries if e[2].startswith('UPDATE ONLY ')]
+                    self.assertEqual(len(updates), 1); self.assertEqual(len(updates[0][3]), 29)
+                    self.assertEqual(updates[0][3], sessions.row)
+                    self.assertEqual(sessions.next_backend, 104)
+                    for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
+                        sessions = Sessions(state, mode)
+                        with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                finally: state.close()
 
     def test_StateReplacement(self):
         cls = self.required('CleanedState')
@@ -198,6 +206,9 @@ class CleanedTests(unittest.TestCase):
 
     def test_MainRefusesBeforeSQL(self):
         main = self.required('cleaned_completion_main')
+        with tree() as t:
+            prepare(t)
+            I.FIXTURE.check_preconnection_admission(self,S,t.req,t.root/'manifest.json',t.value,'CleanedState',lambda:main(['-',t.req['kind'],t.req['operation_id'],t.req['program_sha256']]))
         req = request(); req['kind'] = 'owned_inventory'
         with mock.patch.dict(S, InputChannel=mock.Mock(), Session=mock.Mock()), mock.patch.dict(os.environ, LANG='C', LC_ALL='C', PGCONNECT_TIMEOUT='10'), mock.patch.object(S['resource'], 'setrlimit'):
             S['InputChannel'].return_value.consume.return_value = json.dumps(req).encode()

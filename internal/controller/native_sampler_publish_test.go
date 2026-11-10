@@ -87,6 +87,9 @@ func (f *nativePublicationFixture) progress(w http.ResponseWriter, r *http.Reque
 	}
 	f.mu.Lock()
 	report := native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: "list progress", Capabilities: []native.Capability{native.CapProgress}, Work: &f.want.Work, Phase: f.phase, Copy: cloneNativeCopyProgress(f.copy)}
+	if followEnabled(f.m) {
+		nativeM9Status(&report)
+	}
 	hook := f.beforeReply
 	f.mu.Unlock()
 	raw, err := json.Marshal(report)

@@ -48,6 +48,7 @@ def manifest(info, phase='analyzing', table=False):
     if table:
         item = dict(source_oid=101, name=dict(schema='public', table='records'), writable_columns=['id'], all_columns=['id'], identity_modes=[0], partition_identity_modes=None)
         clone['plan']['tables'] = [item]
+        clone['plan']['copy_tables'] = [dict(source_oid=101,format='text',parts=[dict(number=1,count=1,start_block=0,end_block=None)])]
         if phase not in ('fresh', 'pre_data_pending'):
             clone['owned_objects'] = [dict(class_oid=1259, object_oid=102, object_sub_id=0, namespace_oid=103, namespace_name='public', name='records', kind='r', owner_oid=33)]
             clone['owned_tables'] = [dict(table=copy.deepcopy(item), target_oid=102, target_namespace_oid=103, target_owner_oid=33, generation=1)]
@@ -220,7 +221,25 @@ class InventoryTests(unittest.TestCase):
                         with self.subTest(phase=phase, table=table, cleanup=progress):
                             self.assertEqual(validate(value, req, info), value['target_provenance'][0]['record'])
 
+        with tempfile.TemporaryDirectory() as directory:
+            req, value, _, _ = FIXTURE.private_fixture(os.stat(directory))
+            self.assertEqual(validate(value, req, os.stat(directory)), value['target_provenance'][0]['record'])
+            for version, metadata in ((8, 6), (8, 7), (9, 7), (10, 6), (10.0, 7), (True, 7)):
+                changed = copy.deepcopy(value); changed['format_version'] = version
+                changed['target_provenance'][0]['record']['intent']['binding']['metadata_version'] = metadata
+                with self.subTest(version=version, metadata=metadata), self.assertRaises(SCOPE['Refusal']): validate(changed, req, os.stat(directory))
+
     def test_InventoryPendingRefusals(self):
+        req, valid = manifest(os.stat(HERE))
+        for settings in FIXTURE.invalid_settings():
+            changed=copy.deepcopy(valid);changed['follow_state']['effective_settings']=settings
+            with self.subTest(settings=settings),self.assertRaises(SCOPE['Refusal']):SCOPE['validate_inventory_manifest'](changed,req,os.stat(HERE))
+        for mode,interval in (('durable',None),('replay-safe',1),('replay-safe',2**64-1)):
+            changed=copy.deepcopy(valid);changed['follow_state']['effective_settings'].update(durability=mode,barrier_interval_ms=interval)
+            SCOPE['validate_inventory_manifest'](changed,req,os.stat(HERE))
+
+        with PrivateTree() as fixture:
+            FIXTURE.check_preconnection_admission(self,SCOPE,fixture.req,fixture.root/'manifest.json',fixture.value,'InventoryState',lambda:SCOPE['owned_inventory_main'](['-',fixture.req['kind'],fixture.req['operation_id'],fixture.req['program_sha256']]))
         validate = self.required('validate_inventory_manifest')
         with tempfile.TemporaryDirectory() as directory:
             req, original = manifest(os.stat(directory), table=True)
@@ -301,6 +320,16 @@ class InventoryTests(unittest.TestCase):
                         self.assertFalse(any(word in sql.upper() for word in ('FOR UPDATE', 'ADVISORY', 'COMMIT;', 'UPDATE ONLY', 'DROP ')))
                 finally: state.close()
 
+        with PrivateTree() as fixture:
+            _,fixture.value,_,_=FIXTURE.private_fixture(fixture.root.stat())
+            fixture.value['operator']['workdir_id']=fixture.req['execution']['work']['workdir_id'];fixture.write()
+            state=SCOPE['InventoryState'](fixture.req);library,materials=InventoryPQ(),Materials()
+            try:
+                observe(state,library,materials,time.monotonic()+5,types.SimpleNamespace(check=lambda:None))
+                catalogs=[params for role,sql,params in library.queries if role=='target' and sql.startswith(('SELECT n.nspowner','SELECT c.relnamespace'))]
+                self.assertEqual(catalogs,[[b'44',b'55',b'22',b'33',('_rpgmigrate_'+fixture.req['execution']['work']['run_id']).encode(),b'checkpoint',b'66',b'77',b'78',b'79'],[b'66',b'77',b'44',b'33'],[b'78',b'79',b'44',b'33']]*2)
+            finally:state.close()
+
     def test_InventoryClosedSessions(self):
         observe = self.required('observe_inventory')
         for fault in (None, 'source-close', 'target-close', 'notice', 'unknown-commit'):
@@ -353,7 +382,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_InventoryCompositeDelivery(self):
         self.required('owned_inventory_main')
-        self.assertEqual(hashlib.sha256(CORE).hexdigest(), 'e1bd440ba849d975c88dbf5de9a0e7f47e55c162d1b819e549a3e0ddad570dcc')
+        self.assertEqual(hashlib.sha256(CORE).hexdigest(), '3891eb1c94a94e8969ae7dd0313e847b0f2163b90ca23772c9f80fb6ca70e430')
         self.assertEqual(hashlib.sha256(WRITER).hexdigest(), '4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882')
         helper = HELPER.read_bytes(); adapter = (HERE / 'owned_inventory_request_writer.py').read_bytes()
         self.assertLessEqual(len(helper), 16384); self.assertLessEqual(len(adapter), 3072)

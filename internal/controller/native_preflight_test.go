@@ -288,7 +288,7 @@ func TestNativePreflightDiscovery(t *testing.T) {
 			f := newPreflightFixture(t)
 			if follow {
 				f.m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
-				f.version = []byte(strings.Replace(probeVersionLine, probeCaps, `"capabilities":["clone.single_db","progress.v1","verify.sealed_files.v1","cdc.pgoutput","cutover.v1","cleanup.v1"]`, 1))
+				f.version = []byte(strings.Replace(probeVersionLine, probeCaps, `"capabilities":["clone.single_db","progress.v1","verify.sealed_files.v1","cdc.pgoutput","cutover.v1","cleanup.v1","durability.status.v1"]`, 1))
 				if err := f.store.Update(context.Background(), f.m); err != nil {
 					t.Fatal(err)
 				}
@@ -838,7 +838,7 @@ func testProbeCapabilityOmissions(t *testing.T) {
 	for _, profile := range []string{"default clone", probeFollowCase} {
 		caps := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapBinaryFallback, native.CapSplit, native.CapLargeObjects}
 		if profile == probeFollowCase {
-			caps = []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapPGOutput, native.CapCutover, native.CapCleanup}
+			caps = []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles, native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus}
 		}
 		for omit := range caps {
 			t.Run(profile+"/"+string(caps[omit]), func(t *testing.T) {

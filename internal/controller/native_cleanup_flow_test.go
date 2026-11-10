@@ -54,7 +54,7 @@ const finishChangedToken = "1:0:2"
 
 const finishFixtureNode = "fixture-node"
 
-const finishFixtureCaps = `{"protocol_version":1,"engine_version":"fixture","capabilities":["clone.single_db","copy.large_objects","copy.binary_fallback","copy.split","progress.v1","verify.sealed_files.v1","cdc.pgoutput","cutover.v1","cleanup.v1","verify.v1"]}` + "\n"
+const finishFixtureCaps = `{"protocol_version":1,"engine_version":"fixture","capabilities":["clone.single_db","copy.large_objects","copy.binary_fallback","copy.split","progress.v1","verify.sealed_files.v1","cdc.pgoutput","cutover.v1","cleanup.v1","verify.v1","durability.status.v1"]}` + "\n"
 
 type nativeFinishFixture struct {
 	*nativeCloneFixture
@@ -172,6 +172,7 @@ func (f *nativeFinishFixture) create(ctx context.Context, c client.WithWatch, ob
 			certified, witness, proofKind = nativeTerminalEarlierLSN, nativeTerminalLaterLSN, finishLaterBeginProof
 		}
 		ack := &native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: "stream sentinel set endpos", Capabilities: []native.Capability{native.CapCutover}, Work: &work, Phase: nativeTerminalPhase, Replication: &native.Replication{CertifiedLSN: &certified, DurableReplayLSN: &certified, EndLSN: &e, EndPersisted: &yes, Drained: &yes, CheckpointID: nativeTerminalToken, DrainProof: &native.DrainProof{Kind: proofKind, Work: &work, CheckpointID: nativeTerminalToken, Committed: &yes, EndLSN: e, ReplayLSN: witness}}}
+		nativeM9Status(ack)
 		f.outputs[pod.Name] = nativeTerminalTestAck(f.t, ack)
 	case jobKindCleanup:
 		f.outputs[pod.Name] = f.cleanupReport()

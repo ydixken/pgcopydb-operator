@@ -1,0 +1,47 @@
+{
+  "generated": true,
+  "runtime_qualified": false,
+  "native_format": 10,
+  "metadata_version": 7,
+  "source": "src/apply/metadata.rs",
+  "source_sha256": "1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1",
+  "source_base_commit": "ea51e2375e51adc3d42115c588f5d3b23ea6d4a6",
+  "persisted_settings_patch_sha256": "cb7bb877ddd8ed6759d9f235a518bf8906f74ca9aaab8428ccecf9b3e7347975",
+  "source_files": {
+    "src/state.rs": "696cdd3dd80f1b56460f99f73f4e5d24836b8db975a0413ce6ad2e0a91d2c8c7",
+    "src/state/follow_state.rs": "8e98f8ef29858a11abb245325c112c745a7c5e740dbc74a5e789bf6ffbacb53b",
+    "src/contracts.rs": "9f83c5eb27ffc01d2a799b5c4257870a58b16f6a8e9e3a33ca7746c2b10fd2c9",
+    "src/apply/metadata.rs": "1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1"
+  },
+  "follow_state_fields": [
+    "effective_settings",
+    "cleanup",
+    "origin_name",
+    "publication",
+    "binding",
+    "restart",
+    "preliminary"
+  ],
+  "effective_settings_fields": [
+    "durability",
+    "barrier_interval_ms",
+    "apply_group_txns",
+    "limits"
+  ],
+  "limit_maxima": {
+    "channel_bytes": 8388608,
+    "channel_messages": 1024,
+    "max_message_bytes": 16777216,
+    "group_rows": 10000,
+    "group_bytes": 8388608
+  },
+  "files": {
+    "native_m8_catalog_16.sql": "a076115a8c8c810cf8584b7f946c062c126639244abb95ef57480e27bf4b5373",
+    "native_m8_marker_catalog_16.sql": "17c74d591eec48f7f657b82e7b8192436dff971dbedc8640c1422f36bfbc05d8",
+    "native_m8_large_object_catalog_16.sql": "8469ffcdad00b66da4670fce5327eff7e93a2bc2da3565edd3687ee8cb226933",
+    "native_m8_catalog_18.sql": "dc639d90b75218bb0d28174fd53ffe71b7fab55eaf999c1a4b8163520dbb56e2",
+    "native_m8_marker_catalog_18.sql": "17c74d591eec48f7f657b82e7b8192436dff971dbedc8640c1422f36bfbc05d8",
+    "native_m8_large_object_catalog_18.sql": "8469ffcdad00b66da4670fce5327eff7e93a2bc2da3565edd3687ee8cb226933",
+    "native_m8_columns.json": "5dd285a78b974037752e6a5a541a03f180e6cfeed149ca102352ccdf96e2a65c"
+  }
+}

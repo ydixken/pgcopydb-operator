@@ -3539,6 +3539,1167 @@
         "runtime": "version"
       },
       "stage": "configuration"
+    },
+    {
+      "id": "m9-durable-clone-streaming",
+      "kind": "report",
+      "payload": "payloads/m9-durable-clone-streaming.json",
+      "accept": true,
+      "binding": {
+        "command": "clone",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-durable-clone-completed",
+      "kind": "report",
+      "payload": "payloads/m9-durable-clone-completed.json",
+      "accept": true,
+      "binding": {
+        "command": "clone",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-durable-progress",
+      "kind": "report",
+      "payload": "payloads/m9-durable-progress.json",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-durable-sentinel-get",
+      "kind": "report",
+      "payload": "payloads/m9-durable-sentinel-get.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:3",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "m9-durable-sentinel-set",
+      "kind": "report",
+      "payload": "payloads/m9-durable-sentinel-set.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:3",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "m9-replay-safe-clone-streaming",
+      "kind": "report",
+      "payload": "payloads/m9-replay-safe-clone-streaming.json",
+      "accept": true,
+      "binding": {
+        "command": "clone",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-replay-safe-clone-completed",
+      "kind": "report",
+      "payload": "payloads/m9-replay-safe-clone-completed.json",
+      "accept": true,
+      "binding": {
+        "command": "clone",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-replay-safe-progress",
+      "kind": "report",
+      "payload": "payloads/m9-replay-safe-progress.json",
+      "accept": true,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        }
+      }
+    },
+    {
+      "id": "m9-replay-safe-sentinel-get",
+      "kind": "report",
+      "payload": "payloads/m9-replay-safe-sentinel-get.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel get",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:3",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "m9-replay-safe-sentinel-set",
+      "kind": "report",
+      "payload": "payloads/m9-replay-safe-sentinel-set.json",
+      "accept": true,
+      "binding": {
+        "command": "stream sentinel set endpos",
+        "work": {
+          "checkpoint_generation": 1,
+          "migration_uid": "07070707-0707-0707-0707-070707070707",
+          "run_id": "07070707070707070707070707070707",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd"
+        },
+        "end_lsn": "0/20",
+        "checkpoint": {
+          "checkpoint_id": "1:0:3",
+          "certified_lsn": "0/10",
+          "durable_replay_lsn": "0/10",
+          "drain_end_lsn": "0/20",
+          "drain_replay_lsn": "0/30",
+          "drain_kind": "later_begin",
+          "barrier_confirmed": true
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-settings-absent",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-settings-absent.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-capability-absent",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-capability-absent.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-settings-null",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-settings-null.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-settings-array",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-settings-array.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-settings-extra",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-settings-extra.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-settings-case",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-settings-case.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-missing-durability",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-missing-durability.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-missing-barrier_interval_ms",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-missing-barrier_interval_ms.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-missing-apply_group_txns",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-missing-apply_group_txns.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-missing-limits",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-missing-limits.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-mode-relaxed",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-mode-relaxed.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-mode-Durable",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-mode-Durable.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-mode-replay_safe",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-mode-replay_safe.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-mode-empty",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-mode-empty.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-0",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-0.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-1",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-1.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-2",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-2.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-3",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-3.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-4",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-4.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-5",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-5.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-apply_group_txns-6",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-apply_group_txns-6.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-0",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-0.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-1",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-1.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-2",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-2.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-3",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-3.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-4",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-4.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-barrier_interval_ms-5",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-barrier_interval_ms-5.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-replay-safe-null",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-replay-safe-null.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-durable-positive-cadence",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-durable-positive-cadence.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-null",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-null.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-extra",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-extra.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-case",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-case.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-missing-channel_bytes",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-missing-channel_bytes.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_bytes-zero",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_bytes-zero.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_bytes-over",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_bytes-over.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_bytes-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_bytes-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_bytes-negative",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_bytes-negative.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-missing-channel_messages",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-missing-channel_messages.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_messages-zero",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_messages-zero.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_messages-over",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_messages-over.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_messages-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_messages-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-channel_messages-negative",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-channel_messages-negative.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-missing-max_message_bytes",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-missing-max_message_bytes.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-max_message_bytes-zero",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-max_message_bytes-zero.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-max_message_bytes-over",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-max_message_bytes-over.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-max_message_bytes-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-max_message_bytes-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-max_message_bytes-negative",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-max_message_bytes-negative.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-missing-group_rows",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-missing-group_rows.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_rows-zero",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_rows-zero.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_rows-over",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_rows-over.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_rows-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_rows-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_rows-negative",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_rows-negative.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-missing-group_bytes",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-missing-group_bytes.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_bytes-zero",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_bytes-zero.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_bytes-over",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_bytes-over.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_bytes-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_bytes-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-limits-group_bytes-negative",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-limits-group_bytes-negative.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-duplicate-settings",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-duplicate-settings.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-duplicate-member",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-duplicate-member.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-duplicate-limit",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-duplicate-limit.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-exponent",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-exponent.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-integer-float",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-integer-float.json",
+      "accept": false,
+      "binding": {
+        "command": "list progress",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        }
+      }
+    },
+    {
+      "id": "m9-invalid-cleanup-settings",
+      "kind": "report",
+      "payload": "payloads/m9-invalid-cleanup-settings.json",
+      "accept": false,
+      "binding": {
+        "command": "stream cleanup",
+        "work": {
+          "migration_uid": "00112233-4455-6677-8899-aabbccddeeff",
+          "run_id": "00112233445566778899aabbccddeeff",
+          "workdir_id": "11112222-3333-4444-aaaa-bbbbccccdddd",
+          "checkpoint_generation": 1
+        },
+        "resources": [
+          {
+            "kind": "replication_slot",
+            "name": "native_slot",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "publication",
+            "name": "native_publication",
+            "owned": true,
+            "retain": false
+          },
+          {
+            "kind": "workdir",
+            "name": "/work/pgcopydb",
+            "owned": true,
+            "retain": true
+          },
+          {
+            "kind": "replication_origin",
+            "name": "recorded_origin",
+            "owned": false,
+            "retain": true
+          }
+        ]
+      }
     }
   ]
 }

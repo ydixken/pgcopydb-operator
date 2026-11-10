@@ -203,23 +203,26 @@ class CleanupRejoinTests(unittest.TestCase):
 
     def test_TargetAuthority(self):
         observe = self.required('observe_cleanup_rejoin')
-        with C.tree() as t:
-            prepare(t); state = S['CleanupRejoinState'](t.req)
-            material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
-            try:
-                sessions = Sessions(state)
-                proof = S['validate_control_row'](sessions.row, state)
-                self.assertEqual(proof['certified_lsn'], '0/10'); self.assertEqual(proof['durable_replay_lsn'], '0/10')
-                self.assertEqual(proof['drain_end_lsn'], '0/20'); self.assertEqual(proof['drain_replay_lsn'], '0/30')
-                row = list(sessions.row); row[23] = '0/30'; row[27] = 'keepalive'
-                self.assertEqual(S['validate_control_row'](row, state)['drain_kind'], 'keepalive')
-                for index, value in [(18, '18446744073709551616'), (19, 'foreign'), (25, '0/21'), (26, '0/20'), (27, 'keepalive'), (28, 'f')]:
-                    row = list(sessions.row); row[index] = value
-                    with self.subTest(index=index), self.assertRaises(S['Refusal']): S['validate_control_row'](row, state)
-                for fault in ('unknown_commit', 'unlock', 'catalog', 'target_close', 'row_mutation'):
-                    bad = Sessions(state, fault)
-                    with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
-            finally: state.close()
+        for replay_safe_mode in (False, True):
+            with C.tree() as t:
+                prepare(t)
+                if replay_safe_mode: C.replay_safe(t)
+                state = S['CleanupRejoinState'](t.req)
+                material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
+                try:
+                    sessions = Sessions(state)
+                    proof = S['validate_control_row'](sessions.row, state)
+                    self.assertEqual(proof['certified_lsn'], '0/10'); self.assertEqual(proof['durable_replay_lsn'], '0/10')
+                    self.assertEqual(proof['drain_end_lsn'], '0/20'); self.assertEqual(proof['drain_replay_lsn'], '0/30')
+                    row = list(sessions.row); row[23] = '0/30'; row[27] = 'keepalive'
+                    self.assertEqual(S['validate_control_row'](row, state)['drain_kind'], 'keepalive')
+                    for index, value in [(18, '18446744073709551616'), (19, 'foreign'), (25, '0/21'), (26, '0/20'), (27, 'keepalive'), (28, 'f')]:
+                        row = list(sessions.row); row[index] = value
+                        with self.subTest(index=index), self.assertRaises(S['Refusal']): S['validate_control_row'](row, state)
+                    for fault in ('unknown_commit', 'unlock', 'catalog', 'target_close', 'row_mutation'):
+                        bad = Sessions(state, fault)
+                        with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                finally: state.close()
 
     def test_RoutesStayNarrow(self):
         self.required('validate_cleanup_rejoin_manifest')
@@ -236,6 +239,9 @@ class CleanupRejoinTests(unittest.TestCase):
 
     def test_MainClosure(self):
         main = self.required('cleanup_rejoin_completion_main')
+        with C.tree() as t:
+            prepare(t)
+            C.I.FIXTURE.check_preconnection_admission(self,S,t.req,t.root/'manifest.json',t.value,'CleanupRejoinState',lambda:main(['-',t.req['kind'],t.req['operation_id'],t.req['program_sha256']]))
         req = request(); raw = json.dumps(req).encode(); checkpoint = C.I.FIXTURE.response(req,raw)['checkpoint']
         env = {key:str(req['execution']['work'][field]) for key,field in [('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation')]}
         original_policy = S['qualified_resolver_policy']

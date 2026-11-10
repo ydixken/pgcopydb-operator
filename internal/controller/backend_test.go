@@ -148,7 +148,7 @@ func TestValidateNativeConfigGatesFollowAndVerification(t *testing.T) {
 	if err := validateNativeConfig(m, cloneCapabilities()); err == nil {
 		t.Fatal("follow defaulted to an unqualified plugin")
 	}
-	caps := append(cloneCapabilities(), native.CapPGOutput, native.CapCutover, native.CapCleanup)
+	caps := append(cloneCapabilities(), native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus)
 	if err := validateNativeConfig(m, caps); err != nil {
 		t.Fatal(err)
 	}
@@ -164,9 +164,9 @@ func TestValidateNativeConfigGatesFollowAndVerification(t *testing.T) {
 func TestValidateNativeConfigRequiresEachFollowCapability(t *testing.T) {
 	m := nativeMigration()
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true, Plugin: pgoutputPlugin}
-	for _, omitted := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {
+	for _, omitted := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus} {
 		caps := cloneCapabilities()
-		for _, c := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup} {
+		for _, c := range []native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus} {
 			if c != omitted {
 				caps = append(caps, c)
 			}
@@ -200,7 +200,7 @@ func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloneRequired := []native.Capability{native.CapCloneSingleDB, native.CapProgress, native.CapVerifySealedFiles}
-	followRequired := append([]native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup}, cloneRequired...)
+	followRequired := append([]native.Capability{native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus}, cloneRequired...)
 	for _, tc := range []struct {
 		name         string
 		follow       bool
@@ -223,12 +223,16 @@ func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
 			}
 			m.Spec.Verification = tc.verification
 			before := m.DeepCopy()
-			if err := validateNativeConfig(m, version.Capabilities); err != nil {
+			capabilities := version.Capabilities
+			if tc.follow {
+				capabilities = append(append([]native.Capability(nil), capabilities...), native.CapDurabilityStatus)
+			}
+			if err := validateNativeConfig(m, capabilities); err != nil {
 				t.Fatalf("qualified discovery refused narrowed profile: %v", err)
 			}
 			for _, omitted := range tc.required {
-				caps := make([]native.Capability, 0, len(version.Capabilities)-1)
-				for _, capability := range version.Capabilities {
+				caps := make([]native.Capability, 0, len(capabilities)-1)
+				for _, capability := range capabilities {
 					if capability != omitted {
 						caps = append(caps, capability)
 					}
@@ -248,7 +252,7 @@ func TestQualifiedDiscoveryCapabilitiesAdmitOnlyNarrowedProfiles(t *testing.T) {
 				t.Run(control.name, func(t *testing.T) {
 					candidate := m.DeepCopy()
 					control.mutate(candidate)
-					if err := validateNativeConfig(candidate, version.Capabilities); err == nil {
+					if err := validateNativeConfig(candidate, capabilities); err == nil {
 						t.Fatal("qualified discovery admitted unqualified default")
 					}
 				})
@@ -278,5 +282,17 @@ func TestNativeConfigRefusesHistoricalSixCapabilityProfile(t *testing.T) {
 	m.Spec.Clone = v1beta1.CloneOptions{SplitTablesLargerThan: &zero, UseCopyBinary: &no, Skip: []v1beta1.SkipOption{testSkipLargeObjects}}
 	if err := validateNativeConfig(m, version.Capabilities); err == nil {
 		t.Fatal("historical six-capability producer passed the sealed-file native profile")
+	}
+}
+
+func TestM9FollowRequiresSettingsCapability(t *testing.T) {
+	m := nativeMigration()
+	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true}
+	caps := append(cloneCapabilities(), native.CapPGOutput, native.CapCutover, native.CapCleanup)
+	if err := validateNativeConfig(m, caps); err == nil {
+		t.Fatal("follow profile accepted old status capability set")
+	}
+	if err := validateNativeConfig(m, append(caps, native.Capability("durability.status.v1"))); err != nil {
+		t.Fatal(err)
 	}
 }

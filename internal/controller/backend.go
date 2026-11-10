@@ -88,7 +88,7 @@ func nativeFollowConfig(m *v1beta1.Migration, required *[]native.Capability) err
 			return errors.New("native decoding plugin is not qualified")
 		}
 		if f.Enabled {
-			*required = append(*required, native.CapPGOutput, native.CapCutover, native.CapCleanup)
+			*required = append(*required, native.CapPGOutput, native.CapCutover, native.CapCleanup, native.CapDurabilityStatus)
 		}
 		other := *f
 		other.Enabled, other.Plugin, other.MaxCatchupLag = false, "", nil

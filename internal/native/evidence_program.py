@@ -813,9 +813,55 @@ def table_plan(value):
   if key=='partition_identity_modes' and value[key] is None: continue
   modes=bounded_array(value[key],1600); need(len(modes)==len(value['all_columns']))
   for mode in modes: need(uint(mode,255) in (0,97,100))
+def native_format(m):
+ version=uint(m['format_version'],10,True);need(version==10);return version
+def target_metadata(m):
+ native_format(m);targets=bounded_array(m['target_provenance'],1);need(len(targets)==1)
+ keys(targets[0],'phase record');need(targets[0]['phase']=='confirmed');target=targets[0]['record']
+ fields='table_oid marker_table_oid marker_index_oid large_object_table_oid large_object_index_oid'
+ keys(target,'intent schema_oid '+fields);keys(target['intent'],'binding nonce');nonce(target['intent']['nonce'])
+ binding=target['intent']['binding'];keys(binding,'stream target_system_identifier target_database_oid schema_name table_name owner_oid metadata_version')
+ need(uint(binding['metadata_version'],7,True)==7)
+ for key in ('schema_oid',*fields.split()): uint(target[key],(1<<32)-1,True)
+ need(len({target[key] for key in fields.split()})==len(fields.split()))
+ return target
+def copy_profile(plan,version):
+ need(type(version) is int and version==10)
+ keys(plan,'source target generation tables sequences policy copy_policy copy_tables')
+ policy=plan['copy_policy'];keys(policy,'use_copy_binary split_tables_larger_than split_max_parts skip_large_objects')
+ boolean(policy['use_copy_binary']);boolean(policy['skip_large_objects']);uint(policy['split_tables_larger_than']);maximum=uint(policy['split_max_parts'],(1<<31)-1,True)
+ tables=bounded_array(plan['tables'],4096);sources=set()
+ for table in tables:
+  table_plan(table);need(table['source_oid'] not in sources);sources.add(table['source_oid'])
+ copies=bounded_array(plan['copy_tables'],4096);need(len(copies)==len(sources));previous=0;total=0
+ for copy in copies:
+  keys(copy,'source_oid format parts');oid=uint(copy['source_oid'],(1<<32)-1,True);need(previous<oid and oid in sources);previous=oid
+  need(copy['format'] in ('text','binary') and (policy['use_copy_binary'] or copy['format']=='text'))
+  parts=bounded_array(copy['parts'],4096);count=len(parts);total+=count;need(0<count<=maximum and total<=4096 and (policy['split_tables_larger_than']!=0 or count==1));start=0
+  for index,part in enumerate(parts):
+   keys(part,'number count start_block end_block');need(uint(part['number'],(1<<31)-1,True)==index+1 and uint(part['count'],(1<<31)-1,True)==count and uint(part['start_block'],(1<<32)-1)==start)
+   if part['end_block'] is None: need(index+1==count)
+   else:
+    end=uint(part['end_block'],(1<<32)-1,True);need(end>start and index+1<count);start=end
+def follow_settings(m):
+ follow=m['follow_state'];keys(follow,'effective_settings cleanup origin_name publication binding restart preliminary')
+ settings=follow['effective_settings']
+ if settings is None:
+  need(m['copy_complete'] is None and not m['target_provenance'] and m['source_slot'] is None and m['clone_state'] is None and all(follow[key] is None for key in ('cleanup','publication','binding','restart','preliminary')))
+ else:
+  keys(settings,'durability barrier_interval_ms apply_group_txns limits')
+  mode=settings['durability'];interval=settings['barrier_interval_ms']
+  need(mode in ('durable','replay-safe'))
+  if mode=='durable': need(interval is None)
+  else: uint(interval,U64,True)
+  uint(settings['apply_group_txns'],U64,True)
+  limits=settings['limits'];keys(limits,'channel_bytes channel_messages max_message_bytes group_rows group_bytes')
+  for key,maximum in zip(('channel_bytes','channel_messages','max_message_bytes','group_rows','group_bytes'),(8388608,1024,16777216,10000,8388608)): uint(limits[key],maximum,True)
+ return follow
+
 def validate_manifest(manifest,req,dir_info):
  m=manifest; keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
- need(m['magic']=='RPGMIGRATE' and uint(m['format_version'],8)==8 and m['canonical_path']=='/work/pgcopydb')
+ need(m['magic']=='RPGMIGRATE' and native_format(m)==10 and m['canonical_path']=='/work/pgcopydb')
  run=nonce(m['run']); work=req['execution']['work']
  need(run.hex()==work['run_id'])
  need((uint(m['directory_device']),uint(m['directory_inode']))==identity(dir_info))
@@ -825,20 +871,15 @@ def validate_manifest(manifest,req,dir_info):
  if m['copy_complete'] is not None:
   keys(m['copy_complete'],'tables rows bytes')
   for count in m['copy_complete'].values(): uint(count)
- targets=bounded_array(m['target_provenance'],1); need(len(targets)==1)
- keys(targets[0],'phase record'); need(targets[0]['phase']=='confirmed'); target=targets[0]['record']
- keys(target,'intent schema_oid table_oid marker_table_oid marker_index_oid'); keys(target['intent'],'binding nonce'); nonce(target['intent']['nonce'])
- binding=target['intent']['binding']; keys(binding,'stream target_system_identifier target_database_oid schema_name table_name owner_oid metadata_version')
+ target=target_metadata(m);binding=target['intent']['binding']
  stream(binding['stream']); need(binding['stream']['run']==m['run'])
- need(uint(binding['metadata_version'],6,True)==6 and binding['schema_name']=='_rpgmigrate_'+work['run_id'] and binding['table_name']=='checkpoint')
+ need(binding['schema_name']=='_rpgmigrate_'+work['run_id'] and binding['table_name']=='checkpoint')
  name(binding['schema_name']); name(binding['table_name']); uint(binding['target_system_identifier'],U64,True)
  for key in ('target_database_oid','owner_oid'): uint(binding[key],(1<<32)-1,True)
- for key in ('schema_oid','table_oid','marker_table_oid','marker_index_oid'): uint(target[key],(1<<32)-1,True)
- need(len({target[k] for k in ('table_oid','marker_table_oid','marker_index_oid')})==3)
  keys(m['source_slot'],'phase record'); need(m['source_slot']['phase']=='confirmed'); slot_record(m['source_slot']['record'])
  need(m['source_slot']['record']['intent']['binding']['stream']==binding['stream'])
  clone=m['clone_state']; keys(clone,'plan ticket phase owned_objects owned_tables completion'); need(clone['phase']=='analyzing' and clone['completion'] is None)
- plan=clone['plan']; keys(plan,'source target generation tables sequences policy')
+ plan=clone['plan']; copy_profile(plan,native_format(m))
  keys(plan['source'],'identity timeline major'); keys(plan['target'],'identity major')
  source_identity(plan['source']['identity']); source_identity(plan['target']['identity'])
  need(plan['source']['identity']==binding['stream']['source'] and plan['target']['identity']==dict(system_identifier=binding['target_system_identifier'],database_oid=binding['target_database_oid']))
@@ -871,7 +912,7 @@ def validate_manifest(manifest,req,dir_info):
   need(obj['target_oid'] not in targets_seen and obj['table']['source_oid'] not in sources_seen)
   targets_seen.add(obj['target_oid']); sources_seen.add(obj['table']['source_oid'])
   need(any(o['class_oid']==1259 and o['object_oid']==obj['target_oid'] and o['object_sub_id']==0 and o['namespace_oid']==obj['target_namespace_oid'] and o['namespace_name']==obj['table']['name']['schema'] and o['name']==obj['table']['name']['table'] and o['kind']=='r' and o['owner_oid']==obj['target_owner_oid'] for o in objects))
- follow=m['follow_state']; keys(follow,'cleanup origin_name publication binding restart preliminary')
+ follow=follow_settings(m)
  need(follow['cleanup'] is None and follow['restart'] is None and follow['preliminary'] is None)
  if follow['origin_name'] is not None: name(follow['origin_name'])
  fb=follow['binding']; keys(fb,'slot publication source_timeline copy_generation source_types'); slot_record(fb['slot']); publication(fb['publication'])
@@ -966,7 +1007,7 @@ def validate_control_row(row,state):
  for cell in row:
   if cell is not None: text(cell,262144,True)
  m=state.manifest; target=state.target; b=target['intent']['binding']; slot=m['source_slot']['record']; plan=m['clone_state']['plan']
- want=['rpgmigrate','6',bytes(m['run']).hex(),bytes(target['intent']['nonce']).hex()]+[str(n) for n in (b['stream']['source']['system_identifier'],b['stream']['source']['database_oid'],b['stream']['generation'],b['target_system_identifier'],b['target_database_oid'],b['owner_oid'],target['schema_oid'],target['table_oid'])]
+ want=['rpgmigrate',str(b['metadata_version']),bytes(m['run']).hex(),bytes(target['intent']['nonce']).hex()]+[str(n) for n in (b['stream']['source']['system_identifier'],b['stream']['source']['database_oid'],b['stream']['generation'],b['target_system_identifier'],b['target_database_oid'],b['owner_oid'],target['schema_oid'],target['table_oid'])]
  need(row[:12]==want,RESULT); order=decimal(row[12]); applied=0
  if not order: need(all(cell is None for cell in row[13:17]),RESULT)
  else:
@@ -974,9 +1015,16 @@ def validate_control_row(row,state):
  epoch=decimal(row[17]); counter=decimal(row[18],U64,True)
  need(row[19]==slot['snapshot_token'] and len(row[19].encode())<=1024,RESULT)
  anchor=lsn(row[20]); need(anchor>0 and anchor==slot['consistent_point'] and row[21]==bytes(slot['intent']['nonce']).hex(),RESULT)
- clone=strict_json(row[22].encode(),4096); keys(clone,'generation phase snapshot_token source_timeline table_count')
- need(clone==dict(generation=plan['generation'],phase='analyzing',snapshot_token=m['clone_state']['ticket']['token'],source_timeline=plan['source']['timeline'],table_count=len(plan['tables'])),RESULT)
- for key in ('generation','source_timeline','table_count'): uint(clone[key])
+ clone=strict_json(row[22].encode(),4096);native_format(m)
+ keys(clone,'generation phase snapshot_token source_timeline table_count prepared_generation large_objects')
+ expected=dict(generation=plan['generation'],phase='analyzing',snapshot_token=m['clone_state']['ticket']['token'],source_timeline=plan['source']['timeline'],table_count=len(plan['tables']))
+ need(all(same(clone[key],value) for key,value in expected.items()),RESULT)
+ prepared=clone['prepared_generation'];need(prepared is None or uint(prepared,U64,True)==plan['generation'],RESULT)
+ lo=clone['large_objects'];keys(lo,'generation initial final_sync');need(uint(lo['generation'],U64,True)==plan['generation'],RESULT)
+ for phase in ('initial','final_sync'):
+  if lo[phase] is not None:
+   keys(lo[phase],'objects bytes');uint(lo[phase]['objects']);uint(lo[phase]['bytes'])
+ need(all(lo[phase] is None for phase in ('initial','final_sync')) if plan['copy_policy']['skip_large_objects'] else all(lo[phase] is not None for phase in ('initial','final_sync')),RESULT)
  certified=lsn(row[23]) if row[23] is not None else 0
  need(row[23] is None or certified>0,RESULT)
  follow=strict_json(row[24].encode(),262144); keys(follow,'binding operator origin_name')
@@ -993,7 +1041,10 @@ MARKER_16="SELECT c.relnamespace=$3::oid AND c.relowner=$4::oid AND c.relname='c
 CATALOG_EDITS=[(4170, 4170, "OR (con.contype = 'n' AND con.conenforced AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred AND con.conislocal AND con.coninhcount = 0 AND con.conindid = 0 AND con.conbin IS NULL AND pg_catalog.cardinality(con.conkey) = 1 AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid AND a.attnum = con.conkey[1] AND a.attnotnull))"), (4063, 4063, 'p.conenforced AND NOT p.conperiod AND ')]
 MARKER_EDITS=[(3491, 3491, "OR (con.contype='n' AND con.conenforced AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred AND con.conislocal AND con.coninhcount=0 AND con.conindid=0 AND con.conbin IS NULL AND cardinality(con.conkey)=1 AND EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum=con.conkey[1] AND a.attnotnull))")]
 COLUMNS=list(zip('magic version run_id nonce source_system source_database generation target_system target_database owner_oid schema_oid table_oid applied_order last_xid begin_ordinal source_commit_lsn source_end_lsn barrier_epoch barrier_counter copy_snapshot_token copy_consistent_point copy_plan_nonce clone_state certified_lsn follow_binding drain_end_lsn drain_witness_lsn drain_kind follow_completed'.split(),[['text', 'int4', 'bytea', 'numeric', 'oid', 'pg_lsn', 'bool'][int(c)] for c in '01223433444434355330520505506']))
-def catalog_sql(marker,major):
+def catalog_sql(marker,major,metadata_version=6):
+ need(type(metadata_version) is int and metadata_version in (6,7),CAP_ERR)
+ if metadata_version==7: return candidate_catalog_sql(marker,major)
+ need(type(marker) is bool,CAP_ERR)
  sql=MARKER_16 if marker else CATALOG_16
  for token,fragment in reversed(CATALOG_FRAGMENTS): sql=sql.replace(token,fragment)
  sql=sql.replace('@','pg_catalog.')
@@ -1001,6 +1052,24 @@ def catalog_sql(marker,major):
   for start,end,replacement in (MARKER_EDITS if marker else CATALOG_EDITS): sql=sql[:start]+replacement+sql[end:]
  else: need(major==16,CAP_ERR)
  return sql.replace('@','pg_catalog.')
+# Generated from the pinned native-9 metadata fixtures; the native-8 fixtures remain unchanged.
+M8_CATALOG_EDITS={'catalog': [[4390, 4390, 'idx.oid NOT IN ($7::oid,$8::oid,$9::oid,$10::oid) AND '], [5624, 5624, ', $9::oid, $10::oid'], [5894, 5894, ', $9::oid, $10::oid'], [6077, 6078, ' IN ('], [6085, 6085, ',$9::oid)'], [6153, 6154, ' IN ('], [6161, 6161, ',$9::oid)'], [6342, 6342, '::oid,$9'], [6633, 6633, ', $9::oid, $10::oid'], [6816, 6817, ' IN ('], [6824, 6824, ',$9::oid)'], [6892, 6893, ' IN ('], [6900, 6900, ',$9::oid)']], 'marker_catalog': [[325, 326, '6'], [1267, 1267, "e),(12,'copy_format',25,-1,true),(13,'part_number',23,-1,true),(14,'part_count',23,-1,true),(15,'start_block',20,-1,true),(16,'end_block',20,-1,fals"], [2399, 2400, '6'], [2419, 2420, '6'], [2480, 2480, '3 4 '], [2483, 2483, ' 6 13'], [2531, 2531, ' 0 0 0 0'], [2575, 2575, ' 0 0 0 0'], [2599, 2599, " AND idx.relname='copy_done_pkey'"], [2934, 2934, "bytea_ops' AND opcmethod=idx.relam AND opcdefault),(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='bytea_ops' AND opcmethod=idx.relam AND opcdefault),(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='"], [3099, 3099, "_ops' AND opcmethod=idx.relam AND opcdefault),(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='oid_ops' AND opcmethod=idx.relam AND opcdefault),(SELECT oid FROM pg_catalog.pg_opclass WHERE opcnamespace='pg_catalog'::pg_catalog.regnamespace AND opcname='int4"], [3341, 3341, '3,4,'], [3344, 3344, ',6,13'], [3491, 3491, '{pg18}']], 'large_object_catalog': [[68, 68, 'large_obje'], [69, 72, 't'], [325, 326, '3'], [1049, 1109, ''], [1146, 1147, '6'], [1149, 1150, ''], [1151, 1171, 'bj'], [1172, 1214, 'c'], [1216, 1225, 'oid'], [1240, 1242, '7'], [1271, 1273, '8'], [1275, 1275, "target_acl',25,-1,false),(9,'target_"], [1277, 1279, "mment',25,-1,false),(10,'source"], [1280, 1283, ''], [1284, 1284, 'etad'], [1286, 1286, 'a'], [1302, 1303, '1'], [1305, 1306, 'logic'], [1307, 1307, "l_bytes',1700,1310724,t"], [1308, 1308, "ue),(12,'conten"], [1310, 1316, 'hash'], [1318, 1320, '17'], [1332, 1333, '3'], [1335, 1335, 'sync_'], [1336, 1336, 'h'], [1337, 1345, 'se'], [1348, 1349, '5'], [1356, 1415, ''], [2547, 2548, '4'], [2567, 2568, '4'], [2632, 2634, ''], [2637, 2640, ''], [2685, 2689, ''], [2744, 2748, ''], [2790, 2790, 'large_obje'], [2791, 2794, 't'], [3670, 3987, ''], [4188, 4190, ''], [4193, 4196, '']], 'catalog_18': [[4063, 4063, 'p.conenforced AND NOT p.conperiod AND '], [4170, 4170, "OR (con.contype = 'n' AND con.conenforced AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred AND con.conislocal AND con.coninhcount = 0 AND con.conindid = 0 AND con.conbin IS NULL AND pg_catalog.cardinality(con.conkey) = 1 AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid = c.oid AND a.attnum = con.conkey[1] AND a.attnotnull))"]], 'marker_catalog_18': [], 'large_object_catalog_18': []}
+def candidate_catalog_sql(marker,major):
+ need(type(marker) is bool or marker=='large_object',CAP_ERR);need(major in (16,18),CAP_ERR)
+ kind='large_object_catalog' if marker=='large_object' else 'marker_catalog' if marker else 'catalog'
+ sql=catalog_sql(bool(marker),16)
+ stages=['marker_catalog','large_object_catalog'] if kind=='large_object_catalog' else [kind]
+ if major==18: stages.append(kind+'_18')
+ for stage in stages:
+  for start,end,value in reversed(M8_CATALOG_EDITS[stage]): sql=sql[:start]+value+sql[end:]
+ return sql
+def catalog_params(target,marker):
+ b=target['intent']['binding']
+ if marker:
+  prefix='large_object' if marker=='large_object' else 'marker'
+  return (target[prefix+'_table_oid'],target[prefix+'_index_oid'],target['schema_oid'],b['owner_oid'])
+ params=(target['schema_oid'],target['table_oid'],b['target_database_oid'],b['owner_oid'],b['schema_name'],b['table_name'],target['marker_table_oid'],target['marker_index_oid'])
+ return params+(target['large_object_table_oid'],target['large_object_index_oid'])
 class Materialization:
     def __init__(self, env, source_only=False, target_only=False):
         need(type(source_only) is bool and type(target_only) is bool and not (source_only and target_only), CAP_ERR)
@@ -1191,10 +1260,15 @@ def observe(state,library,materials,deadline,diag):
   session.query('BEGIN ISOLATION LEVEL READ COMMITTED;',tag='BEGIN',state=2,rows=0,width=0); mark('begin')
   schema=session.quote(binding['schema_name']); table=schema+'.'+session.quote('checkpoint'); marker=schema+'.'+session.quote('copy_done')
   for label,relation in [('lock_checkpoint',table),('lock_marker',marker)]:
-   session.query('LOCK TABLE ONLY '+relation+' IN SHARE ROW EXCLUSIVE MODE;',tag='LOCK TABLE',state=2,rows=0,width=0); mark(label)
+   session.query('LOCK TABLE ONLY '+relation+' IN SHARE ROW EXCLUSIVE MODE;',tag='LOCK TABLE',state=2,rows=0,width=0)
+   if label=='lock_marker':
+    session.query('LOCK TABLE ONLY '+schema+'.'+session.quote('large_object_done')+' IN SHARE ROW EXCLUSIVE MODE;',tag='LOCK TABLE',state=2,rows=0,width=0)
+   mark(label)
   for marker_kind,label in [(False,'catalog_checkpoint'),(True,'catalog_marker')]:
-   params=(target['marker_table_oid'],target['marker_index_oid'],target['schema_oid'],binding['owner_oid']) if marker_kind else (target['schema_oid'],target['table_oid'],binding['target_database_oid'],binding['owner_oid'],binding['schema_name'],binding['table_name'],target['marker_table_oid'],target['marker_index_oid'])
-   exact_true(session.query(catalog_sql(marker_kind,major),params,state=2)); mark(label)
+   exact_true(session.query(catalog_sql(marker_kind,major,binding['metadata_version']),catalog_params(target,marker_kind),state=2))
+   if marker_kind:
+    exact_true(session.query(catalog_sql('large_object',major,7),catalog_params(target,'large_object'),state=2))
+   mark(label)
   query=row_query(table); row=decoded_row(session.query(query,state=2,width=29)); checkpoint=validate_control_row(row,state); mark('row_read')
   values=[]; assign=[]; where=[]
   for index,(column,kind) in enumerate(COLUMNS):
@@ -1451,19 +1525,20 @@ def work_environment(req):
 
 def validate_source_manifest(m, req, directory):
  keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
- work=req['execution']['work']; need(m['magic']=='RPGMIGRATE' and uint(m['format_version'],8)==8 and m['canonical_path']=='/work/pgcopydb')
+ work=req['execution']['work']; need(m['magic']=='RPGMIGRATE' and native_format(m)==10 and m['canonical_path']=='/work/pgcopydb')
+ if bounded_array(m['target_provenance'],1): target_metadata(m)
  run=nonce(m['run']); need(run.hex()==work['run_id'] and (uint(m['directory_device']),uint(m['directory_inode']))==identity(directory))
  keys(m['operator'],'migration_uid run workdir_id checkpoint_generation'); need(work['checkpoint_generation']==1)
  need(same(m['operator'],dict(migration_uid=work['migration_uid'],run=list(run),workdir_id=work['workdir_id'],checkpoint_generation=1)))
  clone=m['clone_state']; keys(clone,'plan ticket phase owned_objects owned_tables completion')
  need(clone['phase'] in ('fresh','pre_data_pending','copying','post_data_pending','post_data_complete','sequences_pending','sequences_complete','analyzing','complete'))
- plan=clone['plan']; keys(plan,'source target generation tables sequences policy'); source=plan['source']; keys(source,'identity timeline major')
+ plan=clone['plan']; copy_profile(plan,native_format(m)); source=plan['source']; keys(source,'identity timeline major')
  source_identity(source['identity']); uint(source['timeline'],(1<<32)-1,True); need(uint(source['major'],18,True) in (16,18)); generation=uint(plan['generation'],U64,True)
  slot=m['source_slot']; keys(slot,'phase record'); need(slot['phase']=='confirmed'); slot=slot['record']; slot_record(slot)
  stream_id=slot['intent']['binding']['stream']; need(stream_id['run']==m['run'] and stream_id['source']==source['identity'] and slot['intent']['binding']['catalog_epoch']==generation)
  ticket=clone['ticket']; keys(ticket,'token source generation'); text(ticket['token'],1024)
  need(same(ticket['source'],source) and uint(ticket['generation'],U64,True)==generation and ticket['token']==slot['snapshot_token'])
- follow=m['follow_state']; keys(follow,'cleanup origin_name publication binding restart preliminary')
+ follow=follow_settings(m)
  need(follow['cleanup'] is None and follow['restart'] is None and follow['preliminary'] is None)
  binding=follow['binding']; keys(binding,'slot publication source_timeline copy_generation source_types')
  need(same(binding['slot'],slot) and uint(binding['copy_generation'],U64,True)==generation and uint(binding['source_timeline'],(1<<32)-1,True)==source['timeline'])
