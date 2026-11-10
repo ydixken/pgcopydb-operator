@@ -2226,6 +2226,10 @@ spec:
               jobName:
                 description: jobName is the current worker Job.
                 type: string
+              nativeDataJobUID:
+                description: nativeDataJobUID pins the successfully created native
+                  data helper before capture or rejoin.
+                type: string
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -2233,6 +2237,10 @@ spec:
               nativePVCUID:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
+                type: string
+              nativeSchemaJobUID:
+                description: nativeSchemaJobUID pins the successfully created native
+                  schema helper before capture or rejoin.
                 type: string
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.
@@ -4757,6 +4765,10 @@ spec:
               jobName:
                 description: jobName is the current worker Job.
                 type: string
+              nativeDataJobUID:
+                description: nativeDataJobUID pins the successfully created native
+                  data helper before capture or rejoin.
+                type: string
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -4764,6 +4776,10 @@ spec:
               nativePVCUID:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
+                type: string
+              nativeSchemaJobUID:
+                description: nativeSchemaJobUID pins the successfully created native
+                  schema helper before capture or rejoin.
                 type: string
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.

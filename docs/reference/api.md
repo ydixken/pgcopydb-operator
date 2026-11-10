@@ -328,6 +328,8 @@ _Appears in:_
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
 | `nativeJobUID` _string_ | nativeJobUID binds native execution to the recorded worker Job incarnation. |  | Optional: \{\} <br /> |
 | `nativePVCUID` _string_ | nativePVCUID binds native execution to the recorded work PVC incarnation. |  | Optional: \{\} <br /> |
+| `nativeSchemaJobUID` _string_ | nativeSchemaJobUID pins the successfully created native schema helper before capture or rejoin. |  | Optional: \{\} <br /> |
+| `nativeDataJobUID` _string_ | nativeDataJobUID pins the successfully created native data helper before capture or rejoin. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 

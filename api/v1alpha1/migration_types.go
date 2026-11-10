@@ -909,6 +909,14 @@ type MigrationStatus struct {
 	// +optional
 	NativePVCUID string `json:"nativePVCUID,omitempty"`
 
+	// nativeSchemaJobUID pins the successfully created native schema helper before capture or rejoin.
+	// +optional
+	NativeSchemaJobUID string `json:"nativeSchemaJobUID,omitempty"`
+
+	// nativeDataJobUID pins the successfully created native data helper before capture or rejoin.
+	// +optional
+	NativeDataJobUID string `json:"nativeDataJobUID,omitempty"`
+
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 	// +optional

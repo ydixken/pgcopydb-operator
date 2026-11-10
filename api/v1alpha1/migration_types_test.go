@@ -176,11 +176,13 @@ func fullMigration() *Migration {
 					Elapsed: &metav1.Duration{Duration: 10 * time.Second},
 				}},
 			}},
-			JobName:      "full-run-2",
-			NativeJobUID: "worker-job-uid",
-			NativePVCUID: "work-pvc-uid",
-			StartedAt:    &now,
-			CompletedAt:  &now,
+			JobName:            "full-run-2",
+			NativeJobUID:       "worker-job-uid",
+			NativePVCUID:       "work-pvc-uid",
+			NativeSchemaJobUID: "schema-job-uid",
+			NativeDataJobUID:   "data-job-uid",
+			StartedAt:          &now,
+			CompletedAt:        &now,
 		},
 	}
 }
@@ -399,9 +401,12 @@ func TestNativeIdentityReceiptJSON(t *testing.T) {
 	}{
 		{name: "omitted", want: `{}`},
 		{
-			name:   "recorded",
-			status: MigrationStatus{JobName: "worker", NativeJobUID: "job-uid", NativePVCUID: "pvc-uid"},
-			want:   `{"jobName":"worker","nativeJobUID":"job-uid","nativePVCUID":"pvc-uid"}`,
+			name: "recorded",
+			status: MigrationStatus{
+				JobName: "worker", NativeJobUID: "job-uid", NativePVCUID: "pvc-uid",
+				NativeSchemaJobUID: "schema-job-uid", NativeDataJobUID: "data-job-uid",
+			},
+			want: `{"jobName":"worker","nativeJobUID":"job-uid","nativePVCUID":"pvc-uid","nativeSchemaJobUID":"schema-job-uid","nativeDataJobUID":"data-job-uid"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
