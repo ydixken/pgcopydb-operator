@@ -98,6 +98,14 @@
               {
                 "name": "RPGMIGRATE_CHECKPOINT_GENERATION",
                 "value": "1"
+              },
+              {
+                "name": "LC_ALL",
+                "value": "C"
+              },
+              {
+                "name": "LANG",
+                "value": "C"
               }
             ],
             "resources": {

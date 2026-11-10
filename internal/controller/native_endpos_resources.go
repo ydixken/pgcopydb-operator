@@ -68,7 +68,7 @@ func buildNativeEndposJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 		c.Env = append(c.Env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
 	}
 	c.Env = append(c.Env, nativeIdentityEnv(work)...)
-	c.Env = append(c.Env, corev1.EnvVar{Name: "LC_ALL", Value: "C"}, corev1.EnvVar{Name: "LANG", Value: "C"})
+	c.Env = append(c.Env, corev1.EnvVar{Name: nativeLCAllEnv, Value: "C"}, corev1.EnvVar{Name: nativeLangEnv, Value: "C"})
 	c.VolumeMounts = append([]corev1.VolumeMount{{Name: workdirVolume, MountPath: "/work"}, {Name: nativeEndposTmpVolume, MountPath: "/tmp"}}, target.Mounts...)
 	addConnectTimeout(job)
 	if native.ValidateEvidenceJobSize(job) != nil {

@@ -58,6 +58,9 @@ const (
 	// workerContainer names the pgcopydb container in every Job this
 	// operator builds; podexec targets it by the same name.
 	workerContainer = "pgcopydb"
+
+	nativeLangEnv  = "LANG"
+	nativeLCAllEnv = "LC_ALL"
 )
 
 func labels(m *v1beta1.Migration) map[string]string {
@@ -195,6 +198,7 @@ func buildNativeWorkerJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 	container := &pod.Containers[0]
 	container.Command[len(container.Command)-1] = "/usr/local/bin/rpgmigrate"
 	container.Env = append(container.Env, nativeIdentityEnv(work)...)
+	container.Env = append(container.Env, corev1.EnvVar{Name: nativeLCAllEnv, Value: "C"}, corev1.EnvVar{Name: nativeLangEnv, Value: "C"})
 	container.Resources = pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)
 	return job, nil
 }

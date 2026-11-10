@@ -376,6 +376,14 @@ func TestNativeWorkerJobConnections(t *testing.T) {
 					t.Fatal("native worker changed canonical credentials, TLS or prelude")
 				}
 				assertNativeWorkerIdentity(t, c.Env, pvc.UID)
+				work, err := nativeWorkIdentity(m, pvc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				extra := append(nativeIdentityEnv(work), corev1.EnvVar{Name: nativeWorkerLocaleAll, Value: "C"}, corev1.EnvVar{Name: nativeWorkerLocaleLang, Value: "C"})
+				if !reflect.DeepEqual(c.Env[len(base.Env):], extra) {
+					t.Fatal("native worker changed its identity/locale environment or added connection overrides")
+				}
 				if c.Image != nativeEvidenceTestImage || job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim == nil || job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != pvc.Name {
 					t.Fatal("worker lost image precedence or exact owned claim")
 				}

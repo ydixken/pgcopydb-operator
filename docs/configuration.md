@@ -219,6 +219,7 @@ Without a per-Migration image override, the empty default leaves native helpers 
 The native image never defaults to `runner.image` or `--runner-image`.
 `spec.runner.image` still overrides the image per Migration.
 We preserve image values exactly, without trimming or normalization.
+Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 
 > [!important]
 > This setting does not enable the native backend.
