@@ -611,6 +611,8 @@ class LifecycleTests(GuardFixture):
         with self.assertRaises(MODULE.Refusal) as raised:
             MODULE.execute([sys.executable, '-c', 'import sys; print("registry-password-fixture", file=sys.stderr); sys.exit(9)'])
         self.assertEqual(str(raised.exception), 'CalledProcessError')
+        self.assertEqual(raised.exception.failure_class, 'CalledProcessError')
+        self.assertEqual(raised.exception.returncode, 9)
         self.assertNotIn('registry-password-fixture', str(raised.exception))
 
 
@@ -1603,6 +1605,70 @@ class RegistryPullTests(unittest.TestCase):
                     if args[-1] == image['config_digest']:
                         return base64.b64decode(graph['config_base64']).decode()
         raise AssertionError(args)
+
+    def test_cri_prefix_uses_duration_for_pull_and_inspecti(self):
+        for node in self.ledger['nodes']:
+            self.assertEqual(self.guard.cri_prefix(node['id']), [
+                'podman', 'exec', node['id'], 'env', '-i',
+                'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                'crictl', '--config=/dev/null', '--runtime-endpoint=unix:///run/containerd/containerd.sock',
+                '--image-endpoint=unix:///run/containerd/containerd.sock', '--timeout=10s'])
+        for node_id in (None, 1, [], '', '1' * 63, 'A' * 64, 'g' * 64, '1' * 64 + '\n',
+                        'containerd://' + '1' * 64, 'sha256:' + '1' * 64):
+            with self.subTest(node_id=node_id), self.assertRaises(MODULE.Refusal):
+                self.guard.cri_prefix(node_id)
+        self.assertEqual(self.calls, [])
+        self.guard.pull()
+        for action in ('pull', 'inspecti'):
+            calls = [args for args in self.calls if 'crictl' in args and args[-2] == action]
+            self.assertTrue(calls, action)
+            for args in calls:
+                self.assertIn('--timeout=10s', args)
+                self.assertNotIn('--timeout=10', args)
+
+    def test_cri_pull_failure_retains_safe_operation_class_and_returncode(self):
+        sentinel = 'registry-password-fixture@foreign.invalid/repo@sha256:' + 'f' * 64
+        cases = [('CalledProcessError', 1, 1), ('TimeoutExpired', None, None),
+                 ('OSError', -255, -255), ('FileNotFoundError', 255, 255),
+                 ('PermissionError', 0, 0), ('UnicodeDecodeError', None, None),
+                 (sentinel, 1, 1), ('CalledProcessError', True, None),
+                 ('CalledProcessError', 999, None), ('CalledProcessError', '1', None),
+                 ('CalledProcessError', -256, None)]
+        for failure_class, code, expected_code in cases:
+            with self.subTest(failure_class=failure_class, returncode=code):
+                path = self.directory / 'pulled-image-resolution-evidence.json'
+                path.unlink(missing_ok=True)
+                self.calls.clear()
+                before = self.guard.private_bytes('ownership.json')
+                def fail(args, **kwargs):
+                    if 'crictl' in args and args[-2] == 'pull':
+                        self.calls.append(args)
+                        raise MODULE.CommandError(failure_class, code)
+                    return self.command(args, **kwargs)
+                self.guard.command = fail
+                with self.assertRaises(MODULE.Refusal) as raised:
+                    self.guard.pull()
+                expected_class = 'CommandError' if failure_class == sentinel else failure_class
+                expected = {'operation': 'cri-pull', 'error_class': expected_class, 'returncode': expected_code}
+                evidence = self.guard.private_json(path.name)
+                self.assertEqual(evidence['pulls'], [dict(
+                    node_id=self.ledger['nodes'][0]['id'], requested_ref=self.calls[0][-1], status='failed', **expected)])
+                self.assertIs(evidence['complete'], False)
+                self.assertTrue(evidence['node_bindings'])
+                self.assertTrue(all(nodes == {} for nodes in evidence['node_bindings'].values()))
+                self.assertEqual(self.guard.read()['phase'], 'ready')
+                self.assertEqual(self.guard.private_bytes('ownership.json'), before)
+                self.assertEqual(str(raised.exception),
+                    f'cri-pull failed (class={expected_class}, returncode={expected_code})')
+                self.assertNotIn(sentinel, str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+                self.assertEqual(len(self.calls), 1)
+                with self.assertRaises(MODULE.Refusal):
+                    self.guard.pull_evidence(self.ledger, MODULE.registry.PULL_ROLES, self.directory, path.name)
+                with self.assertRaises(MODULE.Refusal):
+                    self.guard.pull()
+                self.assertEqual(len(self.calls), 1)
 
     def test_full_pull_deduplicates_physical_images_preserving_logical_matrix(self):
         self.guard.pull()

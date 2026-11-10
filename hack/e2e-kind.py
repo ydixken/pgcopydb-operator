@@ -1532,7 +1532,7 @@ class Guard:
             raise Refusal('CRI operation requires a canonical exact node CID')
         return ['podman', 'exec', node_id, 'env', '-i', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'crictl', '--config=/dev/null', '--runtime-endpoint=unix:///run/containerd/containerd.sock',
-            '--image-endpoint=unix:///run/containerd/containerd.sock', '--timeout=10']
+            '--image-endpoint=unix:///run/containerd/containerd.sock', '--timeout=10s']
 
     def pulled_references(self, node_id, call):
         prefix = ['podman', 'exec', node_id, 'env', '-i', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
@@ -1646,7 +1646,16 @@ class Guard:
                     retain()
                     try:
                         admit()
-                        self.registry_call(ledger, self.cri_prefix(node['id']) + ['pull', image['ref']], deadline=deadline, monotonic_deadline=monotonic_deadline, timeout=min(300, deadline - time.time()))
+                        try:
+                            self.registry_call(ledger, self.cri_prefix(node['id']) + ['pull', image['ref']], deadline=deadline, monotonic_deadline=monotonic_deadline, timeout=min(300, deadline - time.time()))
+                        except CommandError as error:
+                            failure = error.failure_class if error.failure_class in ('CalledProcessError', 'TimeoutExpired',
+                                'OSError', 'FileNotFoundError', 'PermissionError', 'UnicodeDecodeError') else 'CommandError'
+                            returncode = error.returncode
+                            if type(returncode) is not int or not -255 <= returncode <= 255:
+                                returncode = None
+                            attempt.update(operation='cri-pull', error_class=failure, returncode=returncode)
+                            raise Refusal(f'cri-pull failed (class={failure}, returncode={returncode})') from None
                         admit()
                         attempt['status'] = 'verified'
                         pulled.add(key)

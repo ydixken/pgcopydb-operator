@@ -19,6 +19,8 @@ PostgreSQL references retain the major tag with the digest, so CNPG can select t
 The registry index digest, selected manifest digest, and image config digest have separate roles.
 A lock records a null index for a single manifest.
 Per-node evidence binds the actual CRI image representations before workloads start.
+The global CRI connection timeout uses the explicit duration `10s`.
+Failed pull diagnostics retain only the constant operation, safe error class, and return code, and the guard discards raw child output.
 The suite independently checks the SHA-256 of the exact `RUN/image-lock.json` bytes against `image_lock_sha256`.
 
 > [!important]
