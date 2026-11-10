@@ -74,6 +74,7 @@ def response(value,raw):
 
 class FileOptionsLibrary:
     defaults={b'service':(None,b'PGSERVICE',None),b'password':(None,b'PGPASSWORD',None),b'passfile':(None,b'PGPASSFILE',None),b'sslmode':(None,b'PGSSLMODE',b'prefer'),b'sslrootcert':(None,b'PGSSLROOTCERT',None),b'sslcert':(None,b'PGSSLCERT',None),b'sslkey':(None,b'PGSSLKEY',None),b'sslcrl':(None,b'PGSSLCRL',None),b'sslcrldir':(None,b'PGSSLCRLDIR',None),b'dbname':(None,b'PGDATABASE',None),b'sslpassword':(None,None,None),b'host':(None,b'PGHOST',None)}
+    defaults[b'sslkeylogfile']=(None,None,None)
     def __init__(self,cases):self.cases=cases;self.parsed=[];self.options_freed=0;self.errors_freed=0;self.keep=[]
     def PQconninfoParse(self,raw,error):
         self.parsed.append(raw);values=self.cases[raw]
@@ -239,7 +240,7 @@ class PreflightFixture:
         self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
         for name,value in [('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)]:self.stack.enter_context(mock.patch.object(P,name,value))
         self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')))
-        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda resolver:self.event('resolver-policy')))
         self.stack.enter_context(mock.patch.object(P,'preflight_tools',side_effect=lambda major,deadline,diag:(self.event('tools') or (major,major))))
         self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532))
         self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'))
@@ -327,7 +328,7 @@ class SourceFixture:
         self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
         for name,value in (('SourceState',State),('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)):self.stack.enter_context(mock.patch.object(P,name,value))
         self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')))
-        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda resolver:self.event('resolver-policy')))
         self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532));self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'))
         self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock));self.stack.enter_context(mock.patch.object(P.os,'set_blocking'))
         def read(fd,cap):outer.case.assertEqual(fd,0);part=outer.parts.pop(0);outer.case.assertLessEqual(len(part),cap);return part
@@ -418,7 +419,7 @@ class RetryFixture:
              'RPGMIGRATE_MIGRATION_UID':work['migration_uid'],'RPGMIGRATE_RUN_ID':work['run_id'],'RPGMIGRATE_WORKDIR_ID':work['workdir_id'],'RPGMIGRATE_CHECKPOINT_GENERATION':'1'}
         self.stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
         for name,value in (('InputChannel',Channel),('Materialization',Material),('StableFile',Resolver),('Diagnostics',Diagnostics),('Session',Session)):self.stack.enter_context(mock.patch.object(P,name,value))
-        self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')));self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda:self.event('resolver-policy')))
+        self.stack.enter_context(mock.patch.object(P,'load_runtime',side_effect=lambda:self.event('runtime')));self.stack.enter_context(mock.patch.object(P,'qualified_resolver_policy',side_effect=lambda resolver:self.event('resolver-policy')))
         self.stack.enter_context(mock.patch.object(P.os,'geteuid',return_value=65532));self.stack.enter_context(mock.patch.object(P.resource,'setrlimit'));self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock))
         for name in ('SourceState','PrivateState','observe','run_completed_evidence','run_source_observation','run_native_preflight'):self.stack.enter_context(mock.patch.object(P,name,side_effect=AssertionError('foreign role or authority path entered')))
         return self
@@ -804,7 +805,7 @@ class NativePythonTests(unittest.TestCase):
     def test_NativePreflightResolverClosed(self):
         with PreflightFixture(self) as fixture,mock.patch.object(P,'qualified_resolver_policy',side_effect=P.Refusal('capability')):
             self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
-        with self.assertRaises(P.Refusal):P.qualified_resolver_policy()
+        with self.assertRaises(P.Refusal):P.qualified_resolver_policy(object())
 
     def test_NativePreflightTools(self):
         from types import SimpleNamespace
@@ -909,8 +910,39 @@ class NativePythonTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(P.Refusal): P.validate_environment(dict(clean, **{name:''}))
         for locale in ['en_US.UTF-8', '', 'C.UTF-8']:
             with self.assertRaises(P.Refusal): P.validate_environment(dict(clean, LANG=locale))
-        with self.assertRaises(P.Refusal) as failure: P.qualified_resolver_policy()
+        with self.assertRaises(P.Refusal) as failure: P.qualified_resolver_policy(object())
         self.assertEqual(failure.exception.error_class, 'capability')
+
+    def test_QualifiedResolverPolicy(self):
+        import inspect
+        self.assertEqual(tuple(inspect.signature(P.qualified_resolver_policy).parameters), ('resolver',))
+        self.assertEqual(P.qualified_resolver_policy.__annotations__, {'resolver':'StableFile','return':None})
+        with self.assertRaises(P.Refusal) as failure:
+            P.qualified_resolver_policy(object())
+        self.assertEqual(failure.exception.error_class, 'capability')
+        for fixture in (PreflightFixture(self),SourceFixture(self),SourceFixture(self,'active_lag'),RetryFixture(self)):
+            with self.subTest(role=type(fixture).__name__),fixture:
+                opened=[];calls=[];opener=P.StableFile
+                def capture(*args):
+                    resolver=opener(*args);opened.append(resolver);return resolver
+                def policy(resolver):
+                    self.assertEqual(len(opened),1);self.assertIs(resolver,opened[0]);calls.append(resolver)
+                with mock.patch.object(P,'StableFile',side_effect=capture),mock.patch.object(P,'qualified_resolver_policy',side_effect=policy):
+                    self.assertEqual(fixture.run(),0)
+                self.assertEqual(len(calls),2)
+
+    def test_ConnectionHomePolicy(self):
+        import pwd
+        self.assertEqual(P.connection_home.__annotations__, {'envb':dict,'return':bytes|None})
+        with mock.patch.object(pwd,'getpwuid',side_effect=AssertionError('unqualified NSS lookup')) as lookup:
+            for home in (b'/private/home',b'relative home ',b'/nonutf8-\xff',b'/'*1023):
+                with self.subTest(home=home):
+                    self.assertIs(P.connection_home({b'HOME':home}),home)
+            for env in ({},{b'HOME':b''},{b'HOME':'/text'},{b'HOME':b'bad\0home'},{b'HOME':b'/'*1024}):
+                with self.subTest(env=env),self.assertRaises(P.Refusal) as failure:
+                    P.connection_home(env)
+                self.assertEqual(failure.exception.error_class,'capability')
+            lookup.assert_not_called()
 
     def test_ABI(self):
         self.assertEqual(P.main.__annotations__,{'argv':list[str],'return':int})
@@ -1421,7 +1453,8 @@ class NativePythonTests(unittest.TestCase):
     def test_RelayClosureOrder(self):
         from types import SimpleNamespace
         value=request();raw=json.dumps(value).encode()
-        for unknown in (False,True):
+        for fault in ('none','unknown_commit','resolver_closure'):
+            unknown=fault=='unknown_commit';resolver_failure=fault=='resolver_closure'
             events=[];payloads=[]
             class Channel:
                 def __init__(self,*args):pass
@@ -1440,14 +1473,23 @@ class NativePythonTests(unittest.TestCase):
                 return response(value,raw)['checkpoint'],P.GUARDS
             state=SimpleNamespace(close=lambda:events.append('private'),resources=lambda:response(value,raw)['resources'])
             materials=SimpleNamespace(files=[],close=lambda:events.append('materials'),prepare=lambda *args:events.append('prepare'))
-            resolver=SimpleNamespace(raw=b'nameserver 127.0.0.1\n',check=lambda:None,close=lambda:events.append('resolver'))
+            resolver=SimpleNamespace(raw=b'nameserver 127.0.0.1\n',check=lambda:events.append('resolver-check'),close=lambda:events.append('resolver'))
             diagnostics=SimpleNamespace(close=lambda:events.append('diagnostics'))
-            with mock.patch.dict(os.environ,{'LANG':'C','LC_ALL':'C'},clear=True),mock.patch.object(P.os,'geteuid',return_value=65532),mock.patch.object(P.resource,'setrlimit'),mock.patch.object(P,'InputChannel',Channel),mock.patch.object(P,'PrivateState',return_value=state),mock.patch.object(P,'Materialization',return_value=materials),mock.patch.object(P,'StableFile',return_value=resolver),mock.patch.object(P,'Diagnostics',return_value=diagnostics),mock.patch.object(P,'load_runtime'),mock.patch.object(P,'qualified_resolver_policy'),mock.patch.object(P,'observe',side_effect=observe) as operation,mock.patch.object(P.os,'write') as ordinary:
-                self.assertEqual(P.run_completed_evidence('5'*32,'6'*64),1 if unknown else 0)
+            def policy(actual):
+                self.assertIs(actual,resolver);events.append('resolver-policy')
+                if resolver_failure and events.count('resolver-policy')==2:raise P.Refusal('capability')
+            with mock.patch.dict(os.environ,{'LANG':'C','LC_ALL':'C'},clear=True),mock.patch.object(P.os,'geteuid',return_value=65532),mock.patch.object(P.resource,'setrlimit'),mock.patch.object(P,'InputChannel',Channel),mock.patch.object(P,'PrivateState',return_value=state),mock.patch.object(P,'Materialization',return_value=materials),mock.patch.object(P,'StableFile',return_value=resolver),mock.patch.object(P,'Diagnostics',return_value=diagnostics),mock.patch.object(P,'load_runtime'),mock.patch.object(P,'qualified_resolver_policy',side_effect=policy),mock.patch.object(P,'observe',side_effect=observe) as operation,mock.patch.object(P.os,'write') as ordinary:
+                self.assertEqual(P.run_completed_evidence('5'*32,'6'*64),1 if unknown or resolver_failure else 0)
                 operation.assert_called_once();ordinary.assert_not_called()
             self.assertEqual(events.count('consume'),1);self.assertEqual(events.count('publish'),1)
             if unknown:self.assertEqual(payloads[0]['error_class'],'unknown_commit');self.assertNotIn('checkpoint',payloads[0])
-            else:self.assertIs(payloads[0]['private_closed'],True)
+            elif resolver_failure:
+                self.assertEqual(payloads[0]['error_class'],'capability');self.assertNotIn('checkpoint',payloads[0])
+                self.assertEqual(events.count('resolver-policy'),2);self.assertNotIn('resolver-check',events)
+            else:
+                self.assertIs(payloads[0]['private_closed'],True)
+                self.assertEqual(events.count('resolver-policy'),2)
+                self.assertEqual(events[events.index('target')+1:events.index('resolver')],['resolver-policy','resolver-check'])
 
     def test_RelayCloseFault(self):
         channel=P.InputChannel(os.urandom(16).hex(),time.monotonic()+3)
@@ -1527,6 +1569,72 @@ class NativePythonTests(unittest.TestCase):
         for env in ({},{b'HOME':b''}):
             with self.assertRaises(P.Refusal) as error:P.connection_home(env)
             self.assertEqual(error.exception.error_class,'capability')
+
+    def test_FileKeyLogRefusal(self):
+        self.require_file_api()
+        from types import SimpleNamespace
+        base={b'password':b'password-canary',b'sslmode':b'disable'}
+        pin=mock.Mock(side_effect=AssertionError('credential pin before refusal'))
+        material=SimpleNamespace(pin=pin,check=lambda:None)
+        cases=[
+            (b"password=password-canary sslmode=disable sslkeylogfile='/private/key-log-canary'",b'/private/key-log-canary',None,None),
+            (b'postgresql://u:password-canary@host/db?sslmode=disable&sslkeylogfile=%2Fprivate%2Fkey-log-canary',b'/private/key-log-canary',None,None),
+            (b'fixture-selected-option',None,b'FIXTURE_KEYLOG_OPTION',b'/private/key-log-canary'),
+            (b'fixture-compiled-option',None,None,b'/private/key-log-canary'),
+            (b'fixture-before-file-pin',b'/private/key-log-canary',None,None),
+            (b'fixture-nonempty-whitespace',b' ',None,None),
+        ]
+        for raw,explicit,environment,fallback in cases:
+            with self.subTest(case=raw):
+                library=FileOptionsLibrary({raw:dict(base)});library.defaults=dict(library.defaults)
+                if raw==b'fixture-before-file-pin':library.cases[raw][b'sslmode']=b'require'
+                library.defaults[b'sslkeylogfile']=(explicit,environment,fallback if environment is None else None)
+                env={b'HOME':b'/private/default-canary'}
+                if environment is not None:env[environment]=fallback
+                library.PQconnectStartParams=mock.Mock();library.PQsendQueryParams=mock.Mock()
+                connection=None
+                try:
+                    with mock.patch.object(P,'SealedFile') as snapshot,self.assertRaises(P.Refusal) as failure:
+                        connection=P.ConnectionInput(library,raw,env,material,time.monotonic()+3)
+                    self.assertEqual(failure.exception.error_class,'capability')
+                    self.assertNotIn('canary',str(failure.exception));snapshot.assert_not_called()
+                    self.assertEqual(P.failure_envelope('5'*32,failure.exception),dict(version=1,kind='completed_evidence_failure',operation_id='5'*32,error_class='capability',sqlstate=''))
+                    self.assertEqual(library.parsed,[raw]);self.assertEqual(library.options_freed,1)
+                    pin.assert_not_called();library.PQconnectStartParams.assert_not_called();library.PQsendQueryParams.assert_not_called()
+                finally:
+                    if connection is not None:connection.close()
+        for explicit,environment,selected in ((b'',None,None),(None,None,None),(b'',b'FIXTURE_KEYLOG_OPTION',b'ignored'),(None,b'FIXTURE_KEYLOG_OPTION',b'')):
+            raw=b'postgresql://u:password-canary@first,second/db%3Dname?sslkeylogfile=&gssencmode=prefer&require_auth=password%2Cscram-sha-256&oauth_client_secret=provider-canary&sslmode=disable'
+            library=FileOptionsLibrary({raw:base});library.defaults=dict(library.defaults)
+            library.defaults[b'sslkeylogfile']=(explicit,environment,None)
+            env={b'UNRELATED_OPTION':b'provider-canary'}
+            if environment is not None:env[environment]=selected
+            before=dict(env);connection=P.ConnectionInput(library,raw,env,material,time.monotonic()+3)
+            try:
+                self.assertEqual(list(connection.keywords),[b'dbname',None]);self.assertEqual(list(connection.values),[raw,None])
+                self.assertIs(connection.raw,raw);self.assertEqual(library.parsed,[raw]);self.assertEqual(env,before)
+            finally:connection.close()
+        for refused in ('source','target',None):
+            source=b'source-opaque';target=b'target-opaque';parsed=[]
+            values={source:dict(base),target:dict(base)}
+            if refused is not None:values[source if refused=='source' else target][b'sslkeylogfile']=b'/private/key-log-canary'
+            library=FileOptionsLibrary(values);library.PQsendQueryParams=mock.Mock()
+            library.PQconnectStartParams=mock.Mock(side_effect=lambda keys,values,expand:(parsed.append((list(library.parsed),values[0],expand)) or None))
+            owner=P.Materialization.__new__(P.Materialization);owner.roles={'source':source,'target':target};owner.envb={};owner.inputs={};owner.prepared=False;owner.check=lambda:None;owner.pin=pin
+            if refused is not None:
+                with self.assertRaises(P.Refusal) as failure:
+                    owner.prepare(library,time.monotonic()+3)
+                    P.Session(library,owner.connection('source'),time.monotonic()+3,SimpleNamespace(check=lambda:None))
+                self.assertEqual(failure.exception.error_class,'capability');self.assertFalse(owner.prepared)
+                self.assertEqual(library.parsed,[source] if refused=='source' else [source,target])
+                self.assertTrue(all(item.closed for item in owner.inputs.values()));library.PQconnectStartParams.assert_not_called()
+            else:
+                owner.prepare(library,time.monotonic()+3)
+                for role,raw in (('source',source),('target',target)):
+                    with self.assertRaises(P.Refusal) as failure:P.Session(library,owner.connection(role),time.monotonic()+3,SimpleNamespace(check=lambda:None))
+                    self.assertEqual(failure.exception.error_class,'connection')
+                self.assertEqual(parsed,[([source,target],source,1),([source,target],target,1)])
+            library.PQsendQueryParams.assert_not_called();pin.assert_not_called()
 
     def test_FileSources(self):
         self.require_file_api()

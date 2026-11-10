@@ -81,8 +81,14 @@ func TestNativePythonResultDiscipline(t *testing.T) { pythonMechanismCase(t, "te
 func TestNativePythonOrderedGuards(t *testing.T)    { pythonMechanismCase(t, "test_OrderedGuards") }
 func TestNativePythonPrivateInput(t *testing.T)     { pythonMechanismCase(t, "test_PrivateInput") }
 func TestNativePythonEnvironmentDNS(t *testing.T)   { pythonMechanismCase(t, "test_EnvironmentDNS") }
-func TestNativePythonRequestWire(t *testing.T)      { pythonMechanismCase(t, "test_RequestWire") }
-func TestNativePythonRequestDigests(t *testing.T)   { pythonMechanismCase(t, "test_RequestDigests") }
+func TestNativePythonQualifiedResolverPolicy(t *testing.T) {
+	pythonMechanismCase(t, "test_QualifiedResolverPolicy")
+}
+func TestNativePythonConnectionHomePolicy(t *testing.T) {
+	pythonMechanismCase(t, "test_ConnectionHomePolicy")
+}
+func TestNativePythonRequestWire(t *testing.T)    { pythonMechanismCase(t, "test_RequestWire") }
+func TestNativePythonRequestDigests(t *testing.T) { pythonMechanismCase(t, "test_RequestDigests") }
 
 func TestNativePythonUnknownCommit(t *testing.T)    { pythonMechanismCase(t, "test_UnknownCommit") }
 func TestNativePythonPrivateAdmission(t *testing.T) { pythonMechanismCase(t, "test_PrivateAdmission") }
@@ -119,6 +125,9 @@ func TestNativeEvidenceEmbeddedLimits(t *testing.T) {
 func TestNativePythonFileOptions(t *testing.T) { pythonMechanismCase(t, "test_FileOptions") }
 func TestNativePythonFileOptionPrecedence(t *testing.T) {
 	pythonMechanismCase(t, "test_FileOptionPrecedence")
+}
+func TestNativePythonFileKeyLogRefusal(t *testing.T) {
+	pythonMechanismCase(t, "test_FileKeyLogRefusal")
 }
 func TestNativePythonFileSources(t *testing.T)   { pythonMechanismCase(t, "test_FileSources") }
 func TestNativePythonFileSnapshots(t *testing.T) { pythonMechanismCase(t, "test_FileSnapshots") }
@@ -263,7 +272,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 54 || len(registered) != 54 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 57 || len(registered) != 57 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)

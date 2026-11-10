@@ -27,8 +27,42 @@ func TestNativeComparisonLargeReport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path).CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte("Ran 8 tests")) || !bytes.Contains(output, []byte("\nOK\n")) {
+	if err != nil || !bytes.Contains(output, []byte("Ran 9 tests")) || !bytes.Contains(output, []byte("\nOK\n")) {
 		t.Fatalf("comparison mechanism failed: %s", output)
+	}
+}
+
+func TestNativeCompositeResolverCalls(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("required Python interpreter is absent")
+	}
+	const check = `import ast,sys
+tree=ast.parse(sys.stdin.buffer.read())
+calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='qualified_resolver_policy']
+assert len(calls)==int(sys.argv[1])
+assert all(len(n.args)==1 and not n.keywords and isinstance(n.args[0],ast.Name) and n.args[0].id=='resolver' for n in calls)
+`
+	for _, test := range []struct {
+		name, count string
+		program     []byte
+	}{
+		{"canonical", "8", EvidenceProgram()},
+		{"comparison", "10", ComparisonProgram()},
+		{"inventory", "10", OwnedInventoryProgram()},
+		{"cleaned", "12", CleanedCompletionProgram()},
+		{"cleanup rejoin", "12", CleanupRejoinCompletionProgram()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, python, "-I", "-B", "-c", check, test.count)
+			cmd.Stdin = bytes.NewReader(test.program)
+			out, err := cmd.CombinedOutput()
+			if err != nil || len(out) != 0 || ctx.Err() != nil {
+				t.Fatal("joined production source lost retained resolver policy arguments")
+			}
+		})
 	}
 }
 

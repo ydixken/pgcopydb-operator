@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).parent
 SCOPE = {'__name__': '_comparison_test'}
@@ -109,6 +110,32 @@ class ComparisonTests(unittest.TestCase):
   with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
    self.assertEqual(SCOPE['comparison_main'](['-', 'native_comparison', 'data', 'a'*32, 'b'*64]), 1)
   self.assertEqual(output.getvalue(), '')
+
+ def test_main_resolver_policy(self):
+  original_policy = SCOPE['qualified_resolver_policy']
+  original_stat = os.stat
+  for fault in (None, 'admission', 'closure', 'closed_policy'):
+   events = []; output = []
+   resolver = types.SimpleNamespace(raw=b'fixture')
+   materials = types.SimpleNamespace(files=[], prepare=lambda *a:None, check=lambda:None, close=lambda:events.append('materials'))
+   diag = types.SimpleNamespace(check=lambda:None, close=lambda:events.append('diagnostics'))
+   def policy(retained):
+    self.assertIs(retained, resolver); self.assertEqual(materials.files, [resolver])
+    phase = 'admission' if not events else 'closure'; events.append(phase)
+    if fault == 'closed_policy': original_policy(retained)
+    if fault == phase: raise SCOPE['Refusal']('capability')
+   def capture(*args):
+    self.assertEqual(events, ['admission']); events.append('child'); return dict(matched=True)
+   def write(fd, raw):
+    self.assertEqual(fd, 1); output.append(raw); return len(raw)
+   with tempfile.TemporaryDirectory() as directory, self.subTest(fault=fault), mock.patch.dict(SCOPE, comparison_work=lambda:WORK, Diagnostics=lambda:diag, Materialization=lambda *a:materials, StableFile=lambda *a:resolver, load_runtime=lambda:None, qualified_resolver_policy=policy, comparison_child_files=lambda *a:({}, ()), fdopen=lambda *a:os.open(directory, os.O_RDONLY | os.O_DIRECTORY), compare_tmp_budget=lambda *a:None, capture_comparison=capture), mock.patch.dict(os.environ, LANG='C', LC_ALL='C', PGCONNECT_TIMEOUT='10', clear=True), mock.patch.object(SCOPE['resource'], 'setrlimit'), mock.patch.object(os, 'geteuid', return_value=65532), mock.patch.object(os, 'stat', side_effect=lambda path, **kw:original_stat(directory if path=='/tmp' else path, **kw)), mock.patch.object(os, 'set_blocking'), mock.patch.object(os, 'write', side_effect=write):
+    code = SCOPE['comparison_main'](['-', 'native_comparison', 'data', 'a'*32, 'b'*64])
+   if fault is None:
+    self.assertEqual(code, 0); self.assertEqual(events, ['admission', 'child', 'closure', 'materials', 'diagnostics'])
+    self.assertEqual(b''.join(output), b'{"matched":true}\n')
+   else:
+    self.assertEqual(code, 1); self.assertEqual(output, [])
+    self.assertEqual('child' in events, fault == 'closure')
 
  def test_report_cap(self):
   cap = SCOPE['COMPARE_REPORT_CAP']

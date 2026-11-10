@@ -237,7 +237,8 @@ class CleanedTests(unittest.TestCase):
         req = request(); raw = json.dumps(req).encode()
         work_env = {key: str(req['execution']['work'][field]) for key, field in [('RPGMIGRATE_MIGRATION_UID', 'migration_uid'), ('RPGMIGRATE_RUN_ID', 'run_id'), ('RPGMIGRATE_WORKDIR_ID', 'workdir_id'), ('RPGMIGRATE_CHECKPOINT_GENERATION', 'checkpoint_generation')]}
         checkpoint = I.FIXTURE.response(req, raw)['checkpoint']
-        for fault in [None, 'source', 'barrier', 'materials', 'state', 'diagnostics']:
+        original_policy = S['qualified_resolver_policy']
+        for fault in [None, 'source', 'barrier', 'materials', 'state', 'diagnostics', 'admission', 'closure', 'closed_policy']:
             events = []
             def closed(name):
                 def close(*args):
@@ -249,16 +250,24 @@ class CleanedTests(unittest.TestCase):
             materials = types.SimpleNamespace(files=[], prepare=lambda *a:None, check=lambda:None, close=closed('materials'))
             resolver = types.SimpleNamespace(raw=b'fixture', check=lambda:None)
             diag = types.SimpleNamespace(close=closed('diagnostics'))
+            def policy(retained):
+                self.assertIs(retained, resolver); self.assertEqual(materials.files, [resolver])
+                phase = 'admission' if not events else 'closure'; events.append(phase)
+                if fault == 'closed_policy': original_policy(retained)
+                if fault == phase: raise S['Refusal']('capability')
             def observe(*args):
+                self.assertEqual(events, ['admission'])
                 if fault in ('source', 'barrier'): raise S['Refusal']('unknown_commit' if fault=='barrier' else 'connection')
                 events.append('barrier'); return checkpoint, S['GUARDS']
-            with self.subTest(fault=fault), mock.patch.dict(S, InputChannel=lambda *a:channel, CleanedState=lambda *a:state, Materialization=lambda *a:materials, StableFile=lambda *a:resolver, Diagnostics=lambda:diag, load_runtime=lambda:None, qualified_resolver_policy=lambda:None, observe_cleaned=observe), mock.patch.dict(os.environ, dict(work_env, LANG='C', LC_ALL='C', PGCONNECT_TIMEOUT='10'), clear=True), mock.patch.object(S['resource'], 'setrlimit'), mock.patch.object(S['os'], 'geteuid', return_value=65532):
+            with self.subTest(fault=fault), mock.patch.dict(S, InputChannel=lambda *a:channel, CleanedState=lambda *a:state, Materialization=lambda *a:materials, StableFile=lambda *a:resolver, Diagnostics=lambda:diag, load_runtime=lambda:None, qualified_resolver_policy=policy, observe_cleaned=observe), mock.patch.dict(os.environ, dict(work_env, LANG='C', LC_ALL='C', PGCONNECT_TIMEOUT='10'), clear=True), mock.patch.object(S['resource'], 'setrlimit'), mock.patch.object(S['os'], 'geteuid', return_value=65532):
                 code = main(['-', req['kind'], req['operation_id'], req['program_sha256']])
             if fault is None:
-                self.assertEqual(code, 0); self.assertEqual(events, ['barrier', 'materials', 'state', 'diagnostics'])
+                self.assertEqual(code, 0); self.assertEqual(events, ['admission', 'barrier', 'closure', 'materials', 'state', 'diagnostics'])
                 result = json.loads(channel.finish.call_args.args[0]); self.assertTrue(result['cleanup_complete'] and result['source_resources_absent'])
             else:
                 self.assertEqual(code, 1); self.assertEqual(channel.finish.call_args.args, ())
+                if fault in ('admission', 'closed_policy'): self.assertNotIn('barrier', events)
+                if fault == 'closure': self.assertIn('barrier', events)
 
 
 if __name__ == '__main__': unittest.main()

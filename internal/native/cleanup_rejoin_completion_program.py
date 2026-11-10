@@ -65,9 +65,9 @@ def cleanup_rejoin_completion_main(argv):
   req=validate_cleanup_rejoin_request(raw,op,sha);work_environment(req);diag=Diagnostics();need(os.geteuid()==65532)
   state=CleanupRejoinState(req);materials=Materialization(os.environ)
   resolver=StableFile('/etc/resolv.conf',CAP);materials.files.append(resolver);resolver.raw.decode('ascii');need(b'\0' not in resolver.raw,CAP_ERR)
-  library=load_runtime();materials.prepare(library,deadline);qualified_resolver_policy();need(time.monotonic()<deadline,'timeout')
+  library=load_runtime();materials.prepare(library,deadline);qualified_resolver_policy(resolver);need(time.monotonic()<deadline,'timeout')
   checkpoint,guards=observe_cleanup_rejoin(state,library,materials,deadline,diag)
-  qualified_resolver_policy();resolver.check();materials.check();state.revalidate()
+  qualified_resolver_policy(resolver);resolver.check();materials.check();state.revalidate()
   materials.close();materials=None;resources=state.resources();state.close();state=None;diag.close();diag=None
   need(time.monotonic()<deadline,'timeout');request_sha,execution_sha=request_digests(raw)
   result=dict(version=1,kind='cleanup_rejoin_completed_evidence',operation_id=op,program_sha256=sha,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],checkpoint=checkpoint,resources=resources,guards=guards,source_closed=True,target_closed=True,materialization_closed=True,private_closed=True,diagnostics_clean=True,cleanup_pending=True,source_resources_checked=True)

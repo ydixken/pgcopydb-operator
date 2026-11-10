@@ -277,7 +277,7 @@ def comparison_main(argv):
    library = load_runtime()
    # These owners survive a scan; each operation on them has a separate phase alarm.
    materials.prepare(library, float('inf'))
-   qualified_resolver_policy(); materials.check(); diag.check()
+   qualified_resolver_policy(resolver); materials.check(); diag.check()
    env, selected = comparison_child_files(materials)
    directory = fdopen('/tmp', True); tmp_identity = identity(os.fstat(directory))
    compare_tmp_budget(directory)
@@ -288,7 +288,7 @@ def comparison_main(argv):
   result = capture_comparison(args, check, operation_id, program_sha256, work, directory, env, selected)
   with comparison_phase():
    need(identity(os.fstat(directory)) == tmp_identity == identity(os.stat('/tmp', follow_symlinks=False)), CLOSE)
-   materials.check(); qualified_resolver_policy(); diag.check()
+   materials.check(); qualified_resolver_policy(resolver); diag.check()
    materials.close(); materials = None
    checked_close(directory); directory = None
    diag.close(); diag = None

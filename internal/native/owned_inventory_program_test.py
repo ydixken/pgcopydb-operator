@@ -315,7 +315,7 @@ class InventoryTests(unittest.TestCase):
                         with self.assertRaises((SCOPE['Refusal'], OSError)): observe(state, library, materials, time.monotonic() + 5, types.SimpleNamespace(check=lambda: None))
                     self.assertEqual(sorted(library.closed), sorted(materials.closes))
                 finally: state.close()
-        with self.assertRaises(SCOPE['Refusal']) as error: SCOPE['qualified_resolver_policy']()
+        with self.assertRaises(SCOPE['Refusal']) as error: SCOPE['qualified_resolver_policy'](object())
         self.assertEqual(error.exception.error_class, 'capability')
         with PrivateTree() as fixture:
             state = SCOPE['InventoryState'](fixture.req); library, materials = InventoryPQ(), Materials()
@@ -325,9 +325,35 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(library.closed, ['source']); self.assertEqual(materials.closes, ['source'])
             finally: state.close()
 
+    def test_InventoryResolverPolicy(self):
+        req = request(); raw = json.dumps(req).encode()
+        env = {key: str(req['execution']['work'][field]) for key, field in [('RPGMIGRATE_MIGRATION_UID', 'migration_uid'), ('RPGMIGRATE_RUN_ID', 'run_id'), ('RPGMIGRATE_WORKDIR_ID', 'workdir_id'), ('RPGMIGRATE_CHECKPOINT_GENERATION', 'checkpoint_generation')]}
+        original_policy = SCOPE['qualified_resolver_policy']
+        for fault in (None, 'admission', 'closure', 'closed_policy'):
+            events = []; channel = mock.Mock(); channel.consume.return_value = raw
+            state = types.SimpleNamespace(revalidate=lambda:None, resources=lambda:[], close=lambda:events.append('state'))
+            materials = types.SimpleNamespace(files=[], prepare=lambda *a:None, check=lambda:None, close=lambda:events.append('materials'))
+            resolver = types.SimpleNamespace(raw=b'fixture', check=lambda:None)
+            diag = types.SimpleNamespace(close=lambda:events.append('diagnostics'))
+            def policy(retained):
+                self.assertIs(retained, resolver); self.assertEqual(materials.files, [resolver])
+                phase = 'admission' if not events else 'closure'; events.append(phase)
+                if fault == 'closed_policy': original_policy(retained)
+                if fault == phase: raise SCOPE['Refusal']('capability')
+            def observe(*args):
+                self.assertEqual(events, ['admission']); events.append('observe')
+            with self.subTest(fault=fault), mock.patch.dict(SCOPE, InputChannel=lambda *a:channel, InventoryState=lambda *a:state, Materialization=lambda *a:materials, StableFile=lambda *a:resolver, Diagnostics=lambda:diag, load_runtime=lambda:None, qualified_resolver_policy=policy, observe_inventory=observe), mock.patch.dict(os.environ, dict(env, LANG='C', LC_ALL='C', PGCONNECT_TIMEOUT='10'), clear=True), mock.patch.object(SCOPE['resource'], 'setrlimit'), mock.patch.object(os, 'geteuid', return_value=65532):
+                code = SCOPE['owned_inventory_main'](['-', req['kind'], req['operation_id'], req['program_sha256']])
+            if fault is None:
+                self.assertEqual(code, 0); self.assertEqual(events, ['admission', 'observe', 'closure', 'materials', 'state', 'diagnostics'])
+                self.assertEqual(json.loads(channel.finish.call_args.args[0])['kind'], 'owned_inventory')
+            else:
+                self.assertEqual(code, 1); self.assertEqual(channel.finish.call_args.args, ())
+                self.assertEqual('observe' in events, fault == 'closure')
+
     def test_InventoryCompositeDelivery(self):
         self.required('owned_inventory_main')
-        self.assertEqual(hashlib.sha256(CORE).hexdigest(), 'd1b311f2930955dd6ed6d8085786ab8f0f7db52581d30b0a7e1c292c98ebdbe8')
+        self.assertEqual(hashlib.sha256(CORE).hexdigest(), 'e1bd440ba849d975c88dbf5de9a0e7f47e55c162d1b819e549a3e0ddad570dcc')
         self.assertEqual(hashlib.sha256(WRITER).hexdigest(), '4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882')
         helper = HELPER.read_bytes(); adapter = (HERE / 'owned_inventory_request_writer.py').read_bytes()
         self.assertLessEqual(len(helper), 16384); self.assertLessEqual(len(adapter), 3072)

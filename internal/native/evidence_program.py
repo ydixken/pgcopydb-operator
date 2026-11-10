@@ -116,7 +116,7 @@ def failure_envelope(op, failure):
 def validate_environment(env):
  need(not any(k.startswith('LD_') or k in BANNED for k in env),CAP_ERR)
  need(env.get('LC_ALL')=='C' and env.get('LANG')=='C',CAP_ERR)
-def qualified_resolver_policy():
+def qualified_resolver_policy(resolver: 'StableFile') -> None:
  # The packaged libc/resolver bounds need independent qualification before activation.
  raise Refusal(CAP_ERR)
 def identity(info): return (info.st_dev,info.st_ino)
@@ -545,6 +545,7 @@ class ConnectionInput:
         try:
             need(not any(key in envb for key in (b'OPENSSL_CONF', b'OPENSSL_MODULES', b'OPENSSL_ENGINES')), CAP_ERR)
             options = parse_connection_options(library, raw)
+            need(not selected_option(options, b'sslkeylogfile', envb), CAP_ERR)
             need(selected_option(options, b'service', envb) is None, CAP_ERR)
             tls = selected_option(options, b'sslmode', envb) != b'disable'
             if tls:
@@ -1227,9 +1228,9 @@ def run_completed_evidence(operation_id: str,program_sha256: str) -> int:
   state=PrivateState(req); materials=Materialization(os.environ)
   resolver=StableFile('/etc/resolv.conf',CAP); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR); materials.files.append(resolver)
   library=load_runtime(); materials.prepare(library,deadline)
-  qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  qualified_resolver_policy(resolver); need(time.monotonic()<deadline,'timeout')
   checkpoint,guards=observe(state,library,materials,deadline,diag)
-  resolver.check(); resolver.close(); resolver=None
+  qualified_resolver_policy(resolver); resolver.check(); resolver.close(); resolver=None
   materials.close(); materials=None; resources=state.resources(); state.close(); state=None
   diag.close(); diag=None; need(time.monotonic()<deadline,'timeout')
   request_sha,execution_sha=request_digests(raw)
@@ -1363,7 +1364,7 @@ def run_native_preflight(operation_id: str, program_sha256: str) -> int:
   diag=Diagnostics(); need(os.geteuid()==65532,'admission'); materials=Materialization(os.environ)
   resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver)
   resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
-  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy()
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(resolver)
   source=Session(library,materials.connection('source'),min(deadline,time.monotonic()+10),diag); source.deadline=deadline
   target=Session(library,materials.connection('target'),min(deadline,time.monotonic()+10),diag); target.deadline=deadline
   for session in (source,target):
@@ -1378,7 +1379,7 @@ def run_native_preflight(operation_id: str, program_sha256: str) -> int:
   need((source_major,target_major) in ((16,16),(18,18),(16,18)),CAP_ERR)
   dump,restore,checks=preflight_checks(source,target,source_major,target_major,follow=='1',deadline,diag)
   need(preflight_identity(source)==source_identity and preflight_identity(target)==target_identity,CONN)
-  resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(resolver); need(time.monotonic()<deadline,'timeout')
   source.close(); source=None; target.close(); target=None
   materials.check(); materials.close(); materials=None; diag.close(); diag=None
   need(time.monotonic()<close_deadline,'timeout')
@@ -1559,14 +1560,14 @@ def run_source_observation(kind: str, operation_id: str, program_sha256: str) ->
   raw=bytes(raw); req=validate_source_request(raw,kind,operation_id,program_sha256); work_environment(req)
   state=SourceState(req); materials=Materialization(os.environ,source_only=True)
   resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
-  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(); state.revalidate()
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(resolver); state.revalidate()
   session=Session(library,materials.connection('source'),min(deadline,time.monotonic()+10),diag); session.deadline=deadline
   for setting,milliseconds in (('statement_timeout',4000),('lock_timeout',1000),('idle_in_transaction_session_timeout',6000)):
    remaining=int((deadline-time.monotonic())*1000); need(remaining>0,'timeout')
    session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
   session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
   fingerprint=state.binding[3]; pinned=source_session_identity(session,state.binding[0]); position=source_position(session,kind,state.binding)
-  need(source_session_identity(session,state.binding[0])==pinned,CONN); source_publication(session,state.binding[2]); state.revalidate(); materials.check(); resolver.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  need(source_session_identity(session,state.binding[0])==pinned,CONN); source_publication(session,state.binding[2]); state.revalidate(); materials.check(); resolver.check(); diag.check(); qualified_resolver_policy(resolver); need(time.monotonic()<deadline,'timeout')
   session.close(); session=None; materials.check(); materials.close(); materials=None; state.close(); state=None; diag.close(); diag=None
   need(time.monotonic()<closing,'timeout'); request_sha,execution_sha=request_digests(raw)
   result=dict(version=1,kind=kind,operation_id=operation_id,program_sha256=program_sha256,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],source_binding_sha256=fingerprint,source_closed=True,private_closed=True,diagnostics_clean=True)
@@ -1605,7 +1606,7 @@ def run_target_retry(operation_id: str, program_sha256: str) -> int:
   req=validate_target_retry_request(raw,operation_id,program_sha256); work_environment(req)
   diag=Diagnostics(); need(os.geteuid()==65532,'admission'); materials=Materialization(os.environ,target_only=True)
   resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
-  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy()
+  library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(resolver)
   session=Session(library,materials.connection('target'),min(deadline,time.monotonic()+10),diag); session.deadline=deadline
   for setting,milliseconds in (('statement_timeout',4000),('lock_timeout',1000),('idle_in_transaction_session_timeout',6000)):
    remaining=int((deadline-time.monotonic())*1000); need(remaining>0,'timeout')
@@ -1623,7 +1624,7 @@ def run_target_retry(operation_id: str, program_sha256: str) -> int:
    need(time.monotonic()<commit_limit,'timeout'); need(session.commit_ack is True,RESULT); session.deadline=deadline
   need(preflight_identity(session)==pinned,CONN)
   need(session.query("SELECT @current_setting('synchronous_commit'),@current_setting('application_name');",width=2)==[[census['target_synchronous_commit'].encode('ascii'),application]],CONN)
-  work_environment(req); resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(); need(time.monotonic()<deadline,'timeout')
+  work_environment(req); resolver.check(); materials.check(); diag.check(); qualified_resolver_policy(resolver); need(time.monotonic()<deadline,'timeout')
   session.close(); session=None; materials.check(); materials.close(); materials=None; diag.close(); diag=None; need(time.monotonic()<closing,'timeout')
   request_sha,execution_sha=request_digests(raw)
   result=dict(version=1,kind='target_retry',operation_id=operation_id,program_sha256=program_sha256,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],**census,synchronous_commit_admitted=not inputs['expect_local'] or census['target_synchronous_commit']=='local',probe_attempted=attempted,probe_committed=attempted,target_closed=True,materialization_closed=True,diagnostics_clean=True)

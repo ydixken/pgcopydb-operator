@@ -173,8 +173,8 @@ def owned_inventory_main(argv):
   req=validate_inventory_request(raw,op,sha);work_environment(req);diag=Diagnostics();need(os.geteuid()==65532)
   state=InventoryState(req);mat=Materialization(os.environ)
   resolver=StableFile('/etc/resolv.conf',CAP);mat.files.append(resolver);resolver.raw.decode('ascii');need(b'\0' not in resolver.raw,CAP_ERR)
-  library=load_runtime();mat.prepare(library,deadline);qualified_resolver_policy();need(time.monotonic()<deadline,'timeout')
-  observe_inventory(state,library,mat,deadline,diag);qualified_resolver_policy();resolver.check();mat.check();state.revalidate()
+  library=load_runtime();mat.prepare(library,deadline);qualified_resolver_policy(resolver);need(time.monotonic()<deadline,'timeout')
+  observe_inventory(state,library,mat,deadline,diag);qualified_resolver_policy(resolver);resolver.check();mat.check();state.revalidate()
   mat.close();mat=None;resources=state.resources();state.close();state=None;diag.close();diag=None
   need(time.monotonic()<deadline,'timeout');request_sha,execution_sha=request_digests(raw)
   result=dict(version=1,kind='owned_inventory',operation_id=op,program_sha256=sha,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],resources=resources,source_closed=True,target_closed=True,materialization_closed=True,private_closed=True,diagnostics_clean=True)
