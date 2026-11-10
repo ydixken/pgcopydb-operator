@@ -327,6 +327,14 @@ const (
 )
 
 var nativeWireKeys = map[string]string{
+
+	"owned_request":                 "version kind operation_id program_sha256 execution pod_name container",
+	"owned_request.execution":       nativeExecutionWireKeys,
+	"owned_request.execution.work":  sourceWorkWireKeys,
+	"owned_request.container":       nativeContainerWireKeys,
+	"owned_inventory":               "version kind operation_id program_sha256 request_sha256 execution_sha256 work resources source_closed target_closed materialization_closed private_closed diagnostics_clean",
+	"owned_inventory.work":          sourceWorkWireKeys,
+	"owned_inventory.resources[]":   "kind name owned retain",
 	"retry_request":                 "version kind operation_id program_sha256 execution pod_name container inputs",
 	"retry_request.execution":       nativeExecutionWireKeys,
 	"retry_request.execution.work":  sourceWorkWireKeys,
