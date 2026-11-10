@@ -58,6 +58,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -154,9 +156,6 @@ const (
 	baseSeedProfile = "v4"
 	// seedConfigMap is the SQL every pair's seed Job mounts.
 	seedConfigMap = "e2e-fixtures"
-	// seedImage only needs a psql client; the CNPG operand image has one and
-	// is already pulled on any cluster running CNPG fixtures.
-	seedImage = "ghcr.io/cloudnative-pg/postgresql:18"
 	// seedLogTail is generous because the log is the seed's profile, not just
 	// a failure hint: the DDL alone echoes a line per object before the first
 	// table is loaded.
@@ -221,11 +220,26 @@ func (c featureLabelingClient) Create(
 	opts ...client.CreateOption,
 ) error {
 	if migration, ok := obj.(*v1beta1.Migration); ok {
+		migration.Spec.Runner.Image = envDefault("E2E_RUNNER_IMAGE", migration.Spec.Runner.Image)
+		if engine := os.Getenv("E2E_ENGINE"); engine != "" {
+			migration.Spec.Engine = v1beta1.MigrationEngine(engine)
+		}
 		if err := labelFeatureMigration(migration); err != nil {
 			return err
 		}
 	}
 	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c featureLabelingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if activeKindSuite != nil && obj.GetNamespace() != "" {
+		if err := requireKindNamespaceContext(ctx, obj.GetNamespace()); apierrors.IsNotFound(err) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
+	return c.Client.Delete(ctx, obj, opts...)
 }
 
 // fixturesFS carries the fixture SQL and the script that stages it (see
@@ -313,6 +327,11 @@ var operatorTag = "v0.11.3"
 // as the manager and is overridable with E2E_RUNNER_TAG so an unreleased
 // runner can be tested against real servers.
 var runnerTag = operatorTag
+
+// The seed needs only psql; the default operand image is already present outside kind.
+var seedImage = envDefault("E2E_SEED_IMAGE", "ghcr.io/cloudnative-pg/postgresql:18")
+
+var smallProfile = envTrue("E2E_SMALL")
 
 // envTrue reports whether the given switch-style environment variable is
 // set to exactly "true".
@@ -553,6 +572,12 @@ func postgresIntAtLeast(n, minimum int) bool {
 }
 
 func init() {
+	if smallProfile {
+		if err := validateSmallProfile(os.Getenv); err != nil {
+			panic(err)
+		}
+		scale = 0.01
+	}
 	cfg, err := loadExternalConfig(os.Getenv)
 	if err != nil {
 		panic(err.Error())
@@ -1232,6 +1257,27 @@ var (
 )
 
 func TestE2E(t *testing.T) {
+	if _, err := suiteEngine(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	activeKindSuite, err = loadKindSuite(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := helmImageValues(); err != nil {
+		t.Fatal(err)
+	}
+	if activeKindSuite != nil {
+		cfg, _ := GinkgoConfiguration()
+		if cfg.LabelFilter != kindBootstrapLabel || len(cfg.FocusStrings) > 0 || len(cfg.SkipStrings) > 0 ||
+			cfg.DryRun || !cfg.FailOnEmpty {
+			t.Fatal("kind suite requires the exact positive bootstrap selection and fail-on-empty")
+		}
+	}
+	if smallProfile && parallelProcs() != 1 {
+		t.Fatal("E2E_SMALL requires one Ginkgo process")
+	}
 	// Refuse before RunSpecs: Ginkgo runs the AfterSuite teardown for any
 	// attempted BeforeSuite, and that teardown would hit a concurrent run.
 	if run, err := e2eContextGate(os.Getenv("E2E_CONTEXT"), kubeCurrentContext); err != nil {
@@ -1253,7 +1299,14 @@ func connectSuite() {
 	ctx = context.Background()
 	Expect(validateFeatureE2ERunValue()).To(Succeed())
 
-	cfg, err := config.GetConfig()
+	var cfg *rest.Config
+	var err error
+	if activeKindSuite != nil {
+		cfg, err = clientcmd.NewNonInteractiveClientConfig(
+			activeKindSuite.raw, activeKindSuite.input.Context, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
+	} else {
+		cfg, err = config.GetConfig()
+	}
 	Expect(err).NotTo(HaveOccurred(), "no usable kubeconfig; aborting")
 	// A bounded per-request timeout so an unreachable API server aborts the
 	// suite instead of hanging.
@@ -1272,8 +1325,10 @@ func connectSuite() {
 // install, the namespaces and the seed ConfigMap. Then every process brings up
 // and seeds its own source/target pair, concurrently with the others.
 var _ = SynchronizedBeforeSuite(func() []byte {
+	By(kindSetupConnectStage)
 	connectSuite()
 
+	By("kind-setup:crd-exists")
 	By("checking the Migration CRD exists (the suite does not manage it)")
 	const crdName = "migrations.pgcopydb-operator.io"
 	crdGVK := schema.GroupVersionKind{
@@ -1283,6 +1338,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: crdName}, crd)).
 		To(Succeed(), "CRD migrations.pgcopydb-operator.io not found or cluster unreachable;"+
 			" install the CRD first (chart with crds.install=true, or config/crd), the suite will not create it")
+	By("kind-setup:crd-schema")
 	By("checking the cluster CRD serves every field this checkout declares")
 	candidate := servedVersion(candidateCRD(), v1beta1.SchemeGroupVersion.Version)
 	Expect(candidate).NotTo(BeNil(), crdPath+" declares no v1beta1")
@@ -1302,6 +1358,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 
 	if external == nil {
 		By("preparing the fixture StorageClass and checking Longhorn capacity")
+		By("kind-setup:storage")
 		ensureFixtureStorage()
 	}
 
@@ -1310,8 +1367,16 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	// plus the first AfterSuite silently destroy each other's environment.
 	// Fail fast when the release exists; E2E_FORCE=true takes over a release
 	// that a crashed run left behind.
+	if activeKindSuite != nil {
+		By("kind-setup:namespaces")
+		for _, namespace := range []string{nsOperator, nsE2E, nsX} {
+			ensureNamespace(namespace)
+		}
+	}
+	By("kind-setup:release-ownership")
 	By("checking no other e2e run holds the operator release")
-	if err := exec.Command("helm", "status", helmRelease, "-n", nsOperator).Run(); err == nil {
+	statusArgs := suiteCommandArgs("helm", []string{"status", helmRelease, "-n", nsOperator})
+	if err := exec.Command("helm", statusArgs...).Run(); err == nil {
 		if featureE2ERunValue != "" || !envTrue("E2E_FORCE") {
 			Fail("helm release " + helmRelease + " already exists in " + nsOperator +
 				": another e2e run is active, or a crashed run left it behind. The suite is" +
@@ -1330,6 +1395,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	if featureE2ERunValue == "" {
 		helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
 	}
+	By("kind-setup:otel")
 	deployOTelCollector()
 	values := []string{
 		"crds.install=false",
@@ -1347,6 +1413,10 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		"otel.endpoint=http://" + otelCollectorName + "." + nsOperator + ":4318",
 		"otel.metricsIntervalSeconds=5",
 	}
+	By("kind-setup:helm-values")
+	imageValues, imageErr := helmImageValues()
+	Expect(imageErr).NotTo(HaveOccurred())
+	values = append(values, imageValues...)
 	args := []string{"install", helmRelease, chartPath, "-n", nsOperator, "--wait"}
 	if manageNamespaces {
 		args = append(args, "--create-namespace")
@@ -1360,6 +1430,7 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	for _, v := range values {
 		args = append(args, "--set", v)
 	}
+	By("kind-setup:helm-install")
 	helmRun(args...)
 
 	if manageNamespaces {
@@ -1374,16 +1445,20 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	}
 
 	By("applying the fixture ConfigMap the seed Jobs mount")
+	By("kind-setup:seed-config")
 	applySeedConfigMap()
 	// ensureFixtureStorage may fall back to the default class; every pair follows it.
 	return []byte(fixtureStorageClass)
 }, func(storageClass []byte) {
+	By(kindSetupConnectStage)
 	connectSuite()
 	fixtureStorageClass = string(storageClass)
 	sourceCluster, targetCluster, seedJobName = pairNames(GinkgoParallelProcess())
 
 	if external == nil {
+		By("kind-setup:fixture-nodes")
 		fixtureNodes = usableNodeNames()
+		By("kind-setup:fixture-clusters")
 		By(fmt.Sprintf("creating or adopting the CNPG source %s (PG %d) and target %s (PG %d)",
 			sourceCluster, pgSource, targetCluster, pgTarget))
 		ensureClusterShape(sourceCluster, pgSource)
@@ -1406,32 +1481,38 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 		})
 		waitSourceCluster()
 		By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
+		By("kind-setup:fixture-seed")
 		runSeedJob()
 		wg.Wait()
 		Expect(targetReady).To(BeTrue(), "CNPG cluster %s did not become ready", targetCluster)
 	} else {
 		prepareExternalDatabases()
 		By(fmt.Sprintf("seeding the source database (profile %s, scale %s)", seedProfile(), scaleArg()))
+		By("kind-setup:fixture-seed")
 		runSeedJob()
 	}
 
 	By("resetting the target database so the fresh-clone scenario starts empty")
+	By("kind-setup:target-reset")
 	resetTargetObjects()
 
 	By("clearing replication leftovers on the source from crashed runs")
+	By("kind-setup:source-replication-reset")
 	resetSourceReplication()
 
 	By("clearing replication origin leftovers on the target from crashed runs")
+	By("kind-setup:target-replication-reset")
 	resetTargetReplication()
 
 	By("granting the follow-mode privileges to the app role")
+	By("kind-setup:follow-privileges")
 	ensureFollowPrivileges()
 })
 
 // Nothing is torn down per process: process 1 removes every pair once the
 // other processes have exited, while the operator still runs for the purge.
 var _ = SynchronizedAfterSuite(func() {}, func() {
-	if featureE2ERunValue != "" {
+	if featureE2ERunValue != "" && activeKindSuite == nil {
 		return
 	}
 	Expect(runEach(
@@ -1453,6 +1534,9 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 			Expect(runEach(operatorTeardownSteps(func() {
 				By("uninstalling the suite's operator")
 				helmRun("uninstall", helmRelease, "-n", nsOperator, "--ignore-not-found")
+				if manageNamespaces {
+					By("deleting " + nsOperator)
+				}
 			})...)).To(Succeed())
 		},
 		func() {
@@ -1464,6 +1548,9 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 		},
 	)).To(Succeed(),
 		"the suite's teardown left state behind; after an external run see docs/operations/e2e-external.md#cleanup")
+	if activeKindSuite != nil {
+		kindFixturesCleaned = true
+	}
 })
 
 // operatorTeardownSteps removes the operator, its namespace when the suite owns it, and the
@@ -1471,9 +1558,16 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 func operatorTeardownSteps(uninstall func()) []func() {
 	return []func(){
 		func() {
+			if activeKindSuite == nil {
+				return
+			}
+			evidence, err := captureKindManagerBuildInfo(ctx, activeKindSuite)
+			kindManagerRuntime = evidence
+			Expect(err).NotTo(HaveOccurred(), "kind manager build-info capture failed")
+		},
+		func() {
 			uninstall()
 			if manageNamespaces {
-				By("deleting " + nsOperator)
 				deleteNamespaces(2*time.Minute, nsOperator)
 			}
 		},
@@ -1583,10 +1677,17 @@ func deleteSuiteObjects(objs ...client.Object) {
 // a real failure still aborts with helm's output on record.
 func helmRun(args ...string) {
 	GinkgoHelper()
+	if activeKindSuite != nil && len(args) > 0 && args[0] == "uninstall" {
+		err := requireKindNamespace(nsOperator)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		Expect(err).NotTo(HaveOccurred(), "operator namespace ownership changed")
+	}
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
 		var out []byte
-		out, err = exec.Command("helm", args...).CombinedOutput()
+		out, err = exec.Command("helm", suiteCommandArgs("helm", args)...).CombinedOutput()
 		_, _ = GinkgoWriter.Write(out)
 		if err == nil {
 			return
@@ -1606,7 +1707,21 @@ func deleteNamespaces(timeout time.Duration, names ...string) {
 	}
 	for _, name := range names {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-		if err := k8sClient.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) {
+		if activeKindSuite != nil {
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, ns); apierrors.IsNotFound(err) {
+				continue
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(requireKindNamespace(name)).To(Succeed())
+		}
+		options := []client.DeleteOption{}
+		if activeKindSuite != nil {
+			options = append(options, &client.DeleteOptions{
+				Preconditions: &metav1.Preconditions{UID: &ns.UID},
+			})
+		}
+		if err := k8sClient.Delete(ctx, ns, options...); err != nil && !apierrors.IsNotFound(err) {
 			Expect(err).NotTo(HaveOccurred(), "failed to delete namespace %s", name)
 		}
 	}
@@ -1622,9 +1737,19 @@ func deleteNamespaces(timeout time.Duration, names ...string) {
 // a manual session) left it behind.
 func ensureNamespace(name string) {
 	GinkgoHelper()
+	if activeKindSuite != nil && name == defaultOperatorNamespace {
+		Expect(createKindOperatorNamespace(ctx, activeKindSuite)).To(Succeed())
+		return
+	}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if activeKindSuite != nil {
+		ns.Labels = map[string]string{kindRunLabel: activeKindSuite.input.RunID}
+	}
 	if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred(), "failed to ensure namespace %s", name)
+	}
+	if activeKindSuite != nil {
+		Expect(requireKindNamespace(name)).To(Succeed())
 	}
 }
 
@@ -1684,9 +1809,10 @@ func cnpgCluster(name, size string, major int) *unstructured.Unstructured {
 			// An explicit major so the version matrix (task e2e:matrix) can
 			// vary it and the default never drifts with the CNPG operator's
 			// own operand default.
-			"imageName": fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major),
-			"storage":   storage,
-			"affinity":  affinity,
+			"imageName":       selectedPostgresImage(major),
+			"imagePullPolicy": string(corev1.PullIfNotPresent),
+			"storage":         storage,
+			"affinity":        affinity,
 			// Requests, no limits, and they are not what spreads these pods:
 			// the anti-affinity above does that. They make the fixtures cost
 			// the scheduler something, which is what stops the workers that
@@ -2004,8 +2130,10 @@ func pvcStorageReady(pvc *corev1.PersistentVolumeClaim, desired resource.Quantit
 }
 
 func readMountedFilesystemCapacity(instance string) (int64, error) {
-	out, err := exec.Command("kubectl", "exec", "-n", nsE2E, instance, "-c", "postgres", "--",
-		"df", "-B1", "--output=size", "/var/lib/postgresql/data").Output()
+	args := suiteCommandArgs(psqlExecKubectl, []string{
+		psqlExecSubcommand, "-n", nsE2E, instance, "-c", postgresContainer, "--",
+		"df", "-B1", "--output=size", "/var/lib/postgresql/data"})
+	out, err := exec.Command(psqlExecKubectl, args...).Output()
 	if err != nil {
 		return 0, fmt.Errorf("kubectl exec df: %w", err)
 	}
@@ -2221,9 +2349,10 @@ func buildSeedJob() *batchv1.Job {
 					RestartPolicy: corev1.RestartPolicyNever,
 					Affinity:      fixtureAntiAffinity(),
 					Containers: []corev1.Container{{
-						Name:      "seed",
-						Image:     seedImage,
-						Resources: workerResources(seedRequests.cpu, seedRequests.memory),
+						Name:            "seed",
+						Image:           seedImage,
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Resources:       workerResources(seedRequests.cpu, seedRequests.memory),
 						// bash, not sh: run.sh reads PIPESTATUS to report the
 						// failing stage rather than the exit of the sed that
 						// labels its output.
@@ -2297,7 +2426,8 @@ func seedConnEnv() []corev1.EnvVar {
 // included: callers report it rather than assert on it, and "pod not found"
 // explains a missing log as well as the log would have.
 func jobLogs(job string, lines int) string {
-	out, _ := exec.Command("kubectl", "logs", "-n", nsE2E, "job/"+job).CombinedOutput()
+	args := suiteCommandArgs(psqlExecKubectl, []string{"logs", "-n", nsE2E, "job/" + job})
+	out, _ := exec.Command(psqlExecKubectl, args...).CombinedOutput()
 	return logTail(string(out), lines)
 }
 
@@ -2861,6 +2991,9 @@ func commandOutput(
 	name string,
 	args ...string,
 ) ([]byte, error) {
+	if name == psqlExecKubectl && (len(args) == 0 || args[0] != kindKubeconfigFlag) {
+		args = suiteCommandArgs(name, args)
+	}
 	cmd := command(ctx, name, args...)
 	out, err := cmd.Output()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -3063,7 +3196,7 @@ func kubectlExecArgs(pod string, stdin bool) []string {
 	if external != nil {
 		container = externalClientContainer
 	}
-	return append(args, "-n", nsE2E, pod, "-c", container, "--")
+	return suiteCommandArgs("kubectl", append(args, "-n", nsE2E, pod, "-c", container, "--"))
 }
 
 // psqlCommand is the psql invocation that reaches db as cluster's admin role.

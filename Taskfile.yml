@@ -30,7 +30,8 @@ tasks:
       - cmd: |-
           if command -v helm >/dev/null; then
             helm lint charts/pgcopydb-operator && ./hack/check-chart-rbac.sh \
-              && ./hack/check-chart-monitoring.sh && ./hack/check-chart-otel.sh
+              && ./hack/check-chart-monitoring.sh && ./hack/check-chart-otel.sh \
+              && ./hack/check-chart-images.sh
           else
             echo "lint: no helm, skipping chart lint"
           fi
@@ -314,3 +315,87 @@ tasks:
     cmds:
       - E2E_CONTEXT='{{.KUBE_CONTEXT}}' E2E_STRESS=true go test ./test/e2e/... -v -timeout 8h -ginkgo.v
         -ginkgo.timeout=8h -ginkgo.label-filter='!chaos'
+
+  image:dev:publish:
+    desc: Publish the development manager from the approved GitHub Actions workflow.
+    requires: {vars: [ARCHITECTURE, OUTPUT_DIR]}
+    cmds:
+      - >-
+        python3 hack/dev-image.py --architecture {{.ARCHITECTURE | shellQuote}}
+        --output-dir {{.OUTPUT_DIR | shellQuote}}
+        {{if .RETAINED_RECEIPT}}--retained-receipt {{.RETAINED_RECEIPT | shellQuote}}{{end}}
+
+  e2e:kind:prepare:
+    desc: Bind a new private run to public image receipts and a frozen image lock.
+    requires: {vars: [RUN_DIR, IMAGE_LOCK, RECEIPT_DIR]}
+    cmds:
+      - >-
+        python3 hack/e2e-kind.py prepare --run-dir {{.RUN_DIR | shellQuote}}
+        --image-lock {{.IMAGE_LOCK | shellQuote}} --receipt-dir {{.RECEIPT_DIR | shellQuote}}
+
+  e2e:kind:check:
+    desc: Check the owned kind source, lock, and current evidence.
+    requires: {vars: [RUN_DIR]}
+    cmds:
+      - python3 hack/e2e-kind.py check --run-dir {{.RUN_DIR | shellQuote}}
+
+  e2e:kind:up:
+    desc: Create the owned kind cluster under its original bounded lease.
+    requires: {vars: [RUN_DIR]}
+    vars:
+      LEASE_SECONDS: '{{.LEASE_SECONDS | default "7200"}}'
+    cmds:
+      - >-
+        python3 hack/e2e-kind.py up --run-dir {{.RUN_DIR | shellQuote}}
+        --lease-seconds {{.LEASE_SECONDS | shellQuote}}
+
+  e2e:kind:pull:
+    desc: Pull pinned public workload images on every exact owned node.
+    requires: {vars: [RUN_DIR]}
+    cmds:
+      - python3 hack/e2e-kind.py pull --run-dir {{.RUN_DIR | shellQuote}}
+
+  e2e:kind:load:
+    desc: Refuse the superseded archive transport without effects.
+    cmds:
+      - "printf '%s\n' 'load is superseded: use e2e:kind:pull with a fresh registry-path RUN' >&2; exit 1"
+
+  e2e:kind:legacy:
+    desc: Run the positive legacy bootstrap selection through the owned guard.
+    requires: {vars: [RUN_DIR]}
+    cmds:
+      - python3 hack/e2e-kind.py run --run-dir {{.RUN_DIR | shellQuote}} --engine pgcopydb
+
+  e2e:kind:native:
+    desc: Request native execution, which refuses until its runtime gates pass.
+    requires: {vars: [RUN_DIR]}
+    cmds:
+      - python3 hack/e2e-kind.py run --run-dir {{.RUN_DIR | shellQuote}} --engine rpgmigrate
+
+  e2e:kind:down:
+    desc: Remove only the exact guarded run resources and retain evidence.
+    requires: {vars: [RUN_DIR]}
+    cmds:
+      - python3 hack/e2e-kind.py down --run-dir {{.RUN_DIR | shellQuote}}
+
+  e2e:kind:suite:
+    desc: Run the exact guard-owned bootstrap suite after context admission.
+    requires: {vars: [RUN_DIR, EXPECT_CONTEXT, E2E_ENGINE]}
+    preconditions:
+      - sh: test {{.RUN_DIR | shellQuote}} = "$E2E_KIND_RUN_DIR"
+        msg: RUN_DIR must match the guard-owned suite input.
+      - sh: test {{.EXPECT_CONTEXT | shellQuote}} = "$E2E_KIND_CONTEXT"
+        msg: EXPECT_CONTEXT must match the guard-owned context.
+      - sh: test {{.E2E_ENGINE | shellQuote}} = pgcopydb && test "$E2E_ENGINE" = pgcopydb
+        msg: The bootstrap suite requires the guard-selected legacy engine.
+      - sh: >-
+          test -z {{.E2E_CONTEXT | default "" | shellQuote}} ||
+          test {{.E2E_CONTEXT | default "" | shellQuote}} = {{.EXPECT_CONTEXT | shellQuote}}
+        msg: E2E_CONTEXT Task variable conflicts with the guard-owned context.
+      - sh: test -z "${E2E_CONTEXT:-}" || test "$E2E_CONTEXT" = {{.EXPECT_CONTEXT | shellQuote}}
+        msg: E2E_CONTEXT conflicts with the guard-owned context.
+    cmds:
+      - >-
+        E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} E2E_ENGINE=pgcopydb E2E_SMALL=true
+        go test ./test/e2e -run '^TestE2E$' -count=1 -v -timeout 30m
+        -ginkgo.v -ginkgo.timeout=30m -ginkgo.label-filter=kind-bootstrap -ginkgo.fail-on-empty

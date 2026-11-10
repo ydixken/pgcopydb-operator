@@ -476,8 +476,9 @@ func createProgressPoolRunner(clusters [2]*unstructured.Unstructured) *batchv1.J
 					Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 				}},
 				Containers: []corev1.Container{{
-					Name:  "pgcopydb",
-					Image: "ghcr.io/ydixken/pgcopydb-operator/runner:" + runnerTag,
+					Name:            "pgcopydb",
+					Image:           selectedToolImage(),
+					ImagePullPolicy: corev1.PullIfNotPresent,
 					SecurityContext: &corev1.SecurityContext{
 						AllowPrivilegeEscalation: ptr.To(false), ReadOnlyRootFilesystem: ptr.To(true),
 						Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},

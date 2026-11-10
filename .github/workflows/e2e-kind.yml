@@ -1,0 +1,64 @@
+name: Kind offline contracts
+
+on:
+  push:
+    branches: [feat/rpgmigrate-native-operator]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kind-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+# Runtime activation requires a qualified Linux-native-host Guard transport,
+# source-bound public receipts, and a fresh external lock and RUN.
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install the pinned Task command runner
+        run: go install github.com/go-task/task/v3/cmd/task@v3.54.0
+      - name: Run nonempty offline provisioning and publication controls
+        run: |
+          python3 -B - <<'PYTEST'
+          import importlib.util
+          import unittest
+          suite = unittest.TestSuite()
+          for number, path in enumerate(('hack/test_e2e_kind.py', 'hack/test_dev_image.py')):
+              spec = importlib.util.spec_from_file_location(f'kind_contract_{number}', path)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              selected = unittest.defaultTestLoader.loadTestsFromModule(module)
+              if selected.countTestCases() == 0:
+                  raise SystemExit('offline contract inventory is empty')
+              suite.addTests(selected)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.skipped:
+              raise SystemExit('offline contract gate failed or skipped')
+          PYTEST
+      - name: Run nonempty cluster-free Go contract controls
+        run: |
+          report=$(mktemp)
+          trap 'rm -f "$report"' EXIT
+          go test ./test/buildconfig ./test/e2e \
+            -run '^(TestKind|TestOTelCollector|TestOperatorTeardown|TestDevPublicationTask)' \
+            -count=1 -json > "$report"
+          python3 - "$report" <<'PYTEST'
+          import json
+          import sys
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          for package in ('test/buildconfig', 'test/e2e'):
+              selected = [event for event in events if event.get('Package', '').endswith('/' + package)]
+              completed = {event['Test'] for event in selected if event.get('Action') == 'pass' and 'Test' in event}
+              if not completed or any(event.get('Action') in ('fail', 'skip') for event in selected):
+                  raise SystemExit('Go contract inventory failed, skipped, or empty')
+          PYTEST

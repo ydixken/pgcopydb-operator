@@ -1,0 +1,72 @@
+name: Development manager image
+
+on:
+  push:
+    branches: [feat/rpgmigrate-native-operator]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-ghcr-ydixken-pgcopydb-operator
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'ydixken/pgcopydb-operator'
+      && github.ref == 'refs/heads/feat/rpgmigrate-native-operator'
+      && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare Task
+        run: |
+          if ! command -v task >/dev/null; then
+            mkdir -p "$RUNNER_TEMP/task-bin"
+            GOBIN="$RUNNER_TEMP/task-bin" go install github.com/go-task/task/v3/cmd/task@v3.54.0
+            printf '%s\n' "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+          fi
+      - name: Test publication policy
+        run: python3 -m unittest discover -s hack -p test_dev_image.py
+      - name: Inspect, build, smoke, publish once, and verify anonymously
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          task image:dev:publish
+          ARCHITECTURE="$ARCHITECTURE"
+          OUTPUT_DIR="$RUNNER_TEMP/manager-publication-$ARCHITECTURE"
+      - name: Retain sanitized publication identity
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: manager-publication-${{ matrix.architecture }}
+          path: |
+            ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/publication-receipt.json
+            ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/smoke-receipt.json
+            ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/build-receipt.json
+            ${{ runner.temp }}/manager-publication-${{ matrix.architecture }}/push-outcome.json
+          if-no-files-found: error

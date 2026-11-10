@@ -39,25 +39,31 @@ import (
 )
 
 const (
-	managerDockerfile = "../../Dockerfile"
-	runnerDockerfile  = "../../images/runner/Dockerfile"
-	releaseWorkflow   = "../../.github/workflows/release.yml"
-	e2eWorkflow       = "../../.github/workflows/e2e.yml"
-	builderWorkflow   = "../../.github/workflows/pgcopydb-builder.yml"
-	promoteWorkflow   = "../../.github/workflows/promote.yml"
-	workflowDir       = "../../.github/workflows"
-	ciWorkflow        = "../../.github/workflows/ci.yml"
-	chartValues       = "../../charts/pgcopydb-operator/values.yaml"
-	chartReadme       = "../../charts/pgcopydb-operator/README.md"
-	runnerReadme      = "../../images/runner/README.md"
-	mainGo            = "../../cmd/main.go"
-	mainTest          = "../../cmd/main_test.go"
-	pollerTest        = "../../internal/progress/poller_test.go"
-	builderDockerfile = "../../images/pgcopydb-builder/Dockerfile"
-	e2eSuite          = "../../test/e2e/e2e_suite_test.go"
-	managerImageJob   = "manager-image"
-	runnerImageJob    = "runner-image"
-	stableReleaseTag  = "v0.13.1"
+	managerDockerfile  = "../../Dockerfile"
+	runnerDockerfile   = "../../images/runner/Dockerfile"
+	releaseWorkflow    = "../../.github/workflows/release.yml"
+	e2eWorkflow        = "../../.github/workflows/e2e.yml"
+	builderWorkflow    = "../../.github/workflows/pgcopydb-builder.yml"
+	promoteWorkflow    = "../../.github/workflows/promote.yml"
+	workflowDir        = "../../.github/workflows"
+	ciWorkflow         = "../../.github/workflows/ci.yml"
+	chartValues        = "../../charts/pgcopydb-operator/values.yaml"
+	chartReadme        = "../../charts/pgcopydb-operator/README.md"
+	runnerReadme       = "../../images/runner/README.md"
+	mainGo             = "../../cmd/main.go"
+	mainTest           = "../../cmd/main_test.go"
+	pollerTest         = "../../internal/progress/poller_test.go"
+	builderDockerfile  = "../../images/pgcopydb-builder/Dockerfile"
+	e2eSuite           = "../../test/e2e/e2e_suite_test.go"
+	managerImageJob    = "manager-image"
+	runnerImageJob     = "runner-image"
+	stableReleaseTag   = "v0.13.1"
+	kindRunDirFlag     = "--run-dir"
+	kindPrepareCommand = "prepare"
+	kindUpCommand      = "up"
+	kindCheckCommand   = "check"
+	kindPullCommand    = "pull"
+	kindDownCommand    = "down"
 )
 
 const dependencyReviewAllowLicenses = "Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, " +
@@ -778,12 +784,16 @@ func TestE2ETasksNameTheirContext(t *testing.T) {
 				continue
 			}
 			runners = append(runners, name)
-			if !strings.HasPrefix(s, prefix) {
-				t.Errorf("task %s runs the e2e suite with %q, want it to start with %q", name, s, prefix)
+			wantPrefix := prefix
+			if name == "e2e:kind:suite" {
+				wantPrefix = "E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} "
+			}
+			if !strings.HasPrefix(s, wantPrefix) {
+				t.Errorf("task %s runs the e2e suite with %q, want it to start with %q", name, s, wantPrefix)
 			}
 		}
 	}
-	for _, want := range []string{"e2e", "e2e:matrix", "e2e:stress"} {
+	for _, want := range []string{"e2e", "e2e:matrix", "e2e:stress", "e2e:kind:suite"} {
 		if !slices.Contains(runners, want) {
 			t.Errorf("task %s no longer runs the e2e suite; update this test's command patterns", want)
 		}
@@ -1340,5 +1350,149 @@ func TestPinnedVersionMatchesEveryAssertion(t *testing.T) {
 				"the in-pod progress poll would fail closed and status.progress would go dark",
 				versions, version)
 		}
+	}
+}
+
+func kindTaskFixture(t *testing.T) (string, string, string, []string) {
+	t.Helper()
+	task, err := exec.LookPath("task")
+	if err != nil {
+		t.Fatal("Task is required for the command contract gate")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Taskfile.yml"), []byte(read(t, "../../Taskfile.yml")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(dir, "trace.json")
+	script := `#!/bin/sh
+exec /usr/bin/env python3-real -c \
+'import json,os,sys; open(os.environ["TASK_TRACE"],"w").write(json.dumps(sys.argv[1:]))' "$@"
+`
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("Python is required for the command contract gate")
+	}
+	if err := os.Symlink(python, filepath.Join(dir, "python3-real")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"), "TASK_TRACE=" + trace}
+	return task, dir, trace, env
+}
+
+func TestKindTaskCommandsPreserveExplicitPrivateInputs(t *testing.T) {
+	task, dir, trace, env := kindTaskFixture(t)
+	run := filepath.Join(dir, "run $literal 'quoted'")
+	lock := filepath.Join(dir, "image-lock.json")
+	receipts := filepath.Join(dir, "receipts 'quoted'")
+	cases := []struct {
+		name string
+		vars []string
+		want []string
+	}{
+		{
+			kindPrepareCommand, []string{"IMAGE_LOCK=" + lock, "RECEIPT_DIR=" + receipts},
+			[]string{kindPrepareCommand, kindRunDirFlag, run, "--image-lock", lock, "--receipt-dir", receipts},
+		},
+		{kindCheckCommand, nil, []string{kindCheckCommand, kindRunDirFlag, run}},
+		{kindUpCommand, nil, []string{kindUpCommand, kindRunDirFlag, run, "--lease-seconds", "7200"}},
+		{kindPullCommand, nil, []string{kindPullCommand, kindRunDirFlag, run}},
+		{"legacy", nil, []string{"run", kindRunDirFlag, run, "--engine", "pgcopydb"}},
+		{"native", nil, []string{"run", kindRunDirFlag, run, "--engine", "rpgmigrate"}},
+		{kindDownCommand, nil, []string{kindDownCommand, kindRunDirFlag, run}},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			args := append([]string{"--dir", dir, "e2e:kind:" + item.name, "RUN_DIR=" + run}, item.vars...)
+			cmd := exec.Command(task, args...)
+			cmd.Env = env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("command contract: %v\n%s", err, out)
+			}
+			var got []string
+			if err := json.Unmarshal([]byte(read(t, trace)), &got); err != nil {
+				t.Fatal(err)
+			}
+			if want := append([]string{"hack/e2e-kind.py"}, item.want...); !slices.Equal(got, want) {
+				t.Fatalf("command argv %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestKindTaskRefusesMissingInputsAndSupersededLoadBeforeEffects(t *testing.T) {
+	task, dir, trace, env := kindTaskFixture(t)
+	for _, target := range []string{
+		kindPrepareCommand, kindCheckCommand, kindUpCommand, kindPullCommand, "legacy", "native", kindDownCommand, "load",
+	} {
+		cmd := exec.Command(task, "--dir", dir, "e2e:kind:"+target)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("missing inputs or superseded load passed: %s\n%s", target, out)
+		}
+		if _, err := os.Stat(trace); !os.IsNotExist(err) {
+			t.Fatalf("refused target reached Python: %s", target)
+		}
+	}
+}
+
+func TestDevPublicationTaskPreservesExplicitInputs(t *testing.T) {
+	task, dir, trace, env := kindTaskFixture(t)
+	output := filepath.Join(dir, "private $literal 'quoted'")
+	receipt := filepath.Join(output, "receipt.json")
+	cmd := exec.Command(task, "--dir", dir, "image:dev:publish", "ARCHITECTURE=arm64", "OUTPUT_DIR="+output,
+		"RETAINED_RECEIPT="+receipt)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("publication command contract: %v\n%s", err, out)
+	}
+	var got []string
+	if err := json.Unmarshal([]byte(read(t, trace)), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"hack/dev-image.py", "--architecture", "arm64", "--output-dir", output, "--retained-receipt", receipt}
+	if !slices.Equal(got, want) {
+		t.Fatalf("command argv %q, want %q", got, want)
+	}
+}
+
+func TestKindOfflineWorkflowKeepsRuntimeActivationSeparate(t *testing.T) {
+	path := "../../.github/workflows/e2e-kind.yml"
+	wf := mustParse(t, path)
+	if len(wf.Jobs) != 1 {
+		t.Fatal("offline workflow must not imply runtime qualification")
+	}
+	job, ok := wf.Jobs["contracts"]
+	if !ok || len(job.Steps) == 0 {
+		t.Fatal("offline workflow has no contract gate")
+	}
+	source := read(t, path)
+	for _, required := range []string{
+		"runs-on: ubuntu-24.04", "contents: read", "selected.countTestCases() == 0",
+		"not result.wasSuccessful() or result.skipped", "if not completed", "-count=1 -json",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("offline workflow missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"packages: write", "self-hosted", "e2e:kind:up", "e2e:kind:legacy", "E2E_CONTEXT=",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("offline workflow unexpectedly contains %q", forbidden)
+		}
+	}
+}
+
+func TestKindChartDigestLintWiring(t *testing.T) {
+	const check = "./hack/check-chart-images.sh"
+	if !strings.Contains(read(t, "../../Taskfile.yml"), "&& "+check) {
+		t.Fatal("Task lint omits chart image digest controls")
+	}
+	job, ok := mustParse(t, ciWorkflow).Jobs["lint"]
+	if !ok || !slices.ContainsFunc(job.Steps, func(step workflowStep) bool { return step.Run == check }) {
+		t.Fatal("CI lint omits chart image digest controls")
 	}
 }

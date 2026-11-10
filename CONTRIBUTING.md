@@ -125,6 +125,17 @@ Without an explicit root, lint uses `LOCALBIN/golangci-cache`, which is ignored 
 Existing namespaces and Go/module caches remain intact.
 Nothing goes through GitHub's cache service: a round trip to it cost more than it returned ([measured](docs/research/measurements.md#a-github-cache-round-trip-for-the-runner-image)), and buildx would have done the same with the image layers.
 
+## Owned kind development checks
+
+See the [owned kind qualification guide](docs/operations/e2e-kind.md) for the private image lock, source binding, guarded lifecycle, and exact cleanup rules.
+The development manager workflow calls `task image:dev:publish ARCHITECTURE=<architecture> OUTPUT_DIR=<private-directory>` from its admitted Actions context.
+This target does not dispatch a workflow or push a branch.
+It refuses local publication outside that context.
+The workflow publishes only the approved development package and preserves existing tags.
+The separate `e2e-kind.yml` workflow runs nonempty hosted offline contracts with a read-only token.
+Hosted kind runtime remains pending a qualified Linux-native-host Guard transport and exact public source/image receipts.
+Those checks do not replace the release-candidate E2E gates below or open native production admission.
+
 ## E2e tests
 
 `task e2e` runs `test/e2e/` against the CURRENT kubectl context, a real cluster; it prints the context and prompts before touching anything (see the Caution section in [AGENTS.md](AGENTS.md)).

@@ -84,11 +84,12 @@ func otelCollectorObjects() (*corev1.ConfigMap, *appsv1.Deployment, *corev1.Serv
 					},
 				}}},
 				Containers: []corev1.Container{{
-					Name:         "collector",
-					Image:        otelCollectorImage,
-					Args:         []string{"--config=/conf/config.yaml"},
-					Ports:        []corev1.ContainerPort{{Name: "otlp-http", ContainerPort: otelCollectorPort}},
-					VolumeMounts: []corev1.VolumeMount{{Name: "conf", MountPath: "/conf", ReadOnly: true}},
+					Name:            "collector",
+					Image:           envDefault("E2E_COLLECTOR_IMAGE", otelCollectorImage),
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Args:            []string{"--config=/conf/config.yaml"},
+					Ports:           []corev1.ContainerPort{{Name: "otlp-http", ContainerPort: otelCollectorPort}},
+					VolumeMounts:    []corev1.VolumeMount{{Name: "conf", MountPath: "/conf", ReadOnly: true}},
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("50m"),
@@ -117,8 +118,17 @@ func otelCollectorObjects() (*corev1.ConfigMap, *appsv1.Deployment, *corev1.Serv
 // deployOTelCollector applies the collector and waits for its Deployment to be Available.
 func deployOTelCollector() {
 	GinkgoHelper()
-	// Helm creates nsOperator later when the suite owns namespaces, so it must exist first.
-	if manageNamespaces {
+	if activeKindSuite != nil {
+		// Kind bootstrap already created the namespace and recorded its server-issued UID.
+		Expect(activeKindSuite.operatorNamespaceAbsent && activeKindSuite.operatorNamespaceUID != "" &&
+			featureE2ERunPattern.MatchString(activeKindSuite.input.RunID) && nsOperator == defaultOperatorNamespace).
+			To(BeTrue(), "kind collector namespace creation proof is unavailable")
+		namespace := &corev1.Namespace{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nsOperator}, namespace)).To(Succeed())
+		Expect(namespace.UID == activeKindSuite.operatorNamespaceUID &&
+			namespace.Labels[kindRunLabel] == activeKindSuite.input.RunID && namespace.DeletionTimestamp.IsZero()).
+			To(BeTrue(), "kind collector namespace identity changed or is terminating")
+	} else if manageNamespaces {
 		ensureNamespace(nsOperator)
 	}
 	cm, dep, svc := otelCollectorObjects()

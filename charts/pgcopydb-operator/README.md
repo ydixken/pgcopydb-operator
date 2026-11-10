@@ -17,9 +17,11 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 |-----|---------|-------------|
 | `image.repository` | `ghcr.io/ydixken/pgcopydb-operator` | Manager image. |
 | `image.tag` | `""` | Manager tag; empty uses the chart appVersion. |
+| `image.digest` | `""` | Manager SHA-256 digest; overrides `image.tag`. |
 | `image.pullPolicy` | `IfNotPresent` | Manager pull policy. |
 | `runner.image.repository` | `ghcr.io/ydixken/pgcopydb-operator/runner` | Worker Job image, passed as `--runner-image`. |
 | `runner.image.tag` | `""` | Runner tag; empty uses the chart appVersion. |
+| `runner.image.digest` | `""` | Runner SHA-256 digest; overrides `runner.image.tag`. |
 | `runner.rpgmigrateImage` | `""` | Native helper image, passed as `--rpgmigrate-runner-image` when nonempty. |
 | `runner.progressPollVersions` | `["0.18.144.g86bf908", ...]` | The twenty-one pgcopydb builds allowed to run the progress poll; `[]` disables it. |
 | `imagePullSecrets` | `[]` | Pull secrets for the manager pod. |
@@ -63,6 +65,11 @@ CRDs install as regular templates, annotated `helm.sh/resource-policy: keep`, so
 | `otel.headersSecret.key` | `headers` | Key of the headers in that Secret. |
 | `extraEnv` | `[]` | Extra env vars for the manager container. |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Manager pod scheduling. |
+
+Set `image.digest` and `runner.image.digest` to pin the manager and worker images independently.
+Each value MUST be empty or `sha256:` followed by 64 lowercase hexadecimal characters.
+A nonempty digest takes precedence over its tag and renders as `repository@sha256:...`; an invalid value fails rendering.
+When a digest is empty or absent, the image uses its tag, or the chart appVersion if the tag is empty.
 
 The native image setting does not enable `spec.engine: rpgmigrate`, which still fails with `UnsupportedEngine`.
 Use a qualified immutable single-platform manifest pin.

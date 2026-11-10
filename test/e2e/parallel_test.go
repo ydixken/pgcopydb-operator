@@ -93,6 +93,10 @@ const (
 	parallelFixtureCPU, parallelFixtureMemory = "1", "1Gi"
 	parallelSeedCPU, parallelSeedMemory       = "100m", "128Mi"
 	parallelRunnerCPU, parallelRunnerMemory   = "250m", "512Mi"
+	kindSmallCPU                              = "500m"
+	kindSmallSharedBuffers                    = "128MB"
+	kindSmallEffectiveCache                   = "384MB"
+	kindSmallWalBuffers                       = "16MB"
 )
 
 // requests is one pod's CPU and memory request.
@@ -101,6 +105,10 @@ type requests struct{ cpu, memory string }
 // suiteRequests sizes fixture servers, seed Jobs and Migration runners. One
 // pair per process does not fit the one-process sizes, so several get less.
 func suiteRequests(procs int) (fixture, seed, runner requests) {
+	if smallProfile {
+		return requests{kindSmallCPU, parallelFixtureMemory}, requests{parallelSeedCPU, parallelSeedMemory},
+			requests{kindSmallCPU, parallelRunnerMemory}
+	}
 	if procs > 1 {
 		return requests{parallelFixtureCPU, parallelFixtureMemory}, requests{parallelSeedCPU, parallelSeedMemory},
 			requests{parallelRunnerCPU, parallelRunnerMemory}
@@ -120,6 +128,9 @@ type pgCaches struct{ sharedBuffers, effectiveCacheSize, maintenanceWorkMem, wal
 // suiteCaches halves every cache of the one-process set in a parallel run, so a
 // fixture stays near its 1Gi request instead of the 1.2-1.65GiB it used at 2Gi.
 func suiteCaches(procs int) pgCaches {
+	if smallProfile {
+		return pgCaches{kindSmallSharedBuffers, kindSmallEffectiveCache, kindSmallMaintenance, kindSmallWalBuffers}
+	}
 	if procs > 1 {
 		return pgCaches{parallelSharedBuffers, "1536MB", "256MB", "32MB"}
 	}

@@ -4,6 +4,8 @@ image:
   repository: ghcr.io/ydixken/pgcopydb-operator
   # Empty tag falls back to the chart appVersion, so chart and image move together.
   tag: ""
+  # A digest takes precedence over tag, so a pin cannot follow a moving tag.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # Image the manager spawns as per-Migration worker Jobs (passed as --runner-image).
@@ -14,6 +16,7 @@ runner:
     repository: ghcr.io/ydixken/pgcopydb-operator/runner
     # Empty tag falls back to the chart appVersion.
     tag: ""
+    digest: ""
   # Exact pgcopydb versions allowed to run the in-pod progress poll. Fail
   # closed: any other runner version never runs it, an empty list disables it.
   progressPollVersions:

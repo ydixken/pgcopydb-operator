@@ -1,0 +1,297 @@
+{
+  "schema": 2,
+  "cnpg": {
+    "version": "1.30.1",
+    "manifest_sha256": "37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb"
+  },
+  "legacy_baseline": "86bf908adca02d87063849dae775a02c1659c829",
+  "images": [
+    {
+      "role": "node",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "docker.io/kindest/node",
+      "origin_ref": "docker.io/kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+      "digest": null,
+      "index_digest": "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+      "config_digest": null
+    },
+    {
+      "role": "cnpg-controller",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/cloudnative-pg",
+      "origin_ref": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1",
+      "digest": "sha256:9a10dd7d7466310d5d543f618478cb905093cfc7a5463b538f449da626660083",
+      "index_digest": "sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07",
+      "config_digest": "sha256:eaca429ffff79a7e7be1cf77d51250c5b9701d8ee0173b98c0f6e02f5a6db428"
+    },
+    {
+      "role": "postgresql-16",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "postgresql-17",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": "ghcr.io/cloudnative-pg/postgresql:17",
+      "digest": "sha256:6604fb7b7abbb76174bc2ac2d8115ba3d8af5ca9c33ce294d966a6a038afa009",
+      "index_digest": "sha256:70664ebcfa1100361b5bdc28bbf06fdbe08db2dc4ad7bd14de33c5e05fe8ea8e",
+      "config_digest": "sha256:4458a4c5de135d0aaa8940a8c08dedd2de82db7634776617636045cab654d1bf"
+    },
+    {
+      "role": "postgresql-18",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "manager",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "legacy-runner",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator/runner",
+      "origin_ref": "ghcr.io/ydixken/pgcopydb-operator/runner:v0.25.0",
+      "digest": "sha256:5e5b148d63f4b3327c20d22daeef0e62fc85a530418671cc0b4a88ed2960be2a",
+      "index_digest": "sha256:ec9e552b833afcf08034018d98f329486c324488c61e0c4b392edc83ad5c6440",
+      "config_digest": "sha256:28d72892ba637fd609b77ed36b975adb4603b60b7499287c981e800b05518ee8"
+    },
+    {
+      "role": "native-runner",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/rpgmigrate",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "seed-tool-runner",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator/runner",
+      "origin_ref": "ghcr.io/ydixken/pgcopydb-operator/runner:v0.25.0",
+      "digest": "sha256:5e5b148d63f4b3327c20d22daeef0e62fc85a530418671cc0b4a88ed2960be2a",
+      "index_digest": "sha256:ec9e552b833afcf08034018d98f329486c324488c61e0c4b392edc83ad5c6440",
+      "config_digest": "sha256:28d72892ba637fd609b77ed36b975adb4603b60b7499287c981e800b05518ee8"
+    },
+    {
+      "role": "otel-collector",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector",
+      "origin_ref": "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.162.0",
+      "digest": "sha256:ef772ad07ca455ad83fabbf3da792f0f298a3d41a08e9099367364c0d1349801",
+      "index_digest": "sha256:310a800ad69ee430e7c541796852a242c9c7db97aaad4daa5ccf843c525fbdb2",
+      "config_digest": "sha256:4b51986761b3b2894a21eb6949b9758f2bcad178a59d0bfb9d97e019df9203bf"
+    },
+    {
+      "role": "node",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "docker.io/kindest/node",
+      "origin_ref": "docker.io/kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+      "digest": null,
+      "index_digest": "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+      "config_digest": null
+    },
+    {
+      "role": "cnpg-controller",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/cloudnative-pg",
+      "origin_ref": "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.1",
+      "digest": "sha256:b0f9805bd5f98592e7320b5ea624dd10a7a6ef8e477df5650655c94f0b242497",
+      "index_digest": "sha256:923c267ec29636db3bee20f993d0ec4973fa22998e1adad37da79e4d32b5bc07",
+      "config_digest": "sha256:e876074c3d035dda6ea891db954e46df9c8307b36463b5e9a8e2e6e8a9c17488"
+    },
+    {
+      "role": "postgresql-16",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "postgresql-17",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": "ghcr.io/cloudnative-pg/postgresql:17",
+      "digest": "sha256:3751df220f3dd3a01c07b532336a6ba63138cea302b9c2fea335de5ef375b1dc",
+      "index_digest": "sha256:70664ebcfa1100361b5bdc28bbf06fdbe08db2dc4ad7bd14de33c5e05fe8ea8e",
+      "config_digest": "sha256:7cd06950ac7bcfca4a8a5f4e9b2010f61ff4d09217eba4c479022dad79087945"
+    },
+    {
+      "role": "postgresql-18",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/cloudnative-pg/postgresql",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "manager",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "legacy-runner",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator/runner",
+      "origin_ref": "ghcr.io/ydixken/pgcopydb-operator/runner:v0.23.2",
+      "digest": "sha256:81d8e6bd35ad479e9cb67b9e1432748b3fa68edc5ffb45f8145d294ebb1839e3",
+      "index_digest": "sha256:158be4d9c555987950db4bc6294e3d6962c1e2e0dbdb009b5fddb872f629c3b0",
+      "config_digest": "sha256:dfcb8c817035935cc567bb8f4c56264f2e3e741f37155f8ee83ff1390af42958"
+    },
+    {
+      "role": "native-runner",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/rpgmigrate",
+      "origin_ref": null,
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "seed-tool-runner",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/ydixken/pgcopydb-operator/runner",
+      "origin_ref": "ghcr.io/ydixken/pgcopydb-operator/runner:v0.23.2",
+      "digest": "sha256:81d8e6bd35ad479e9cb67b9e1432748b3fa68edc5ffb45f8145d294ebb1839e3",
+      "index_digest": "sha256:158be4d9c555987950db4bc6294e3d6962c1e2e0dbdb009b5fddb872f629c3b0",
+      "config_digest": "sha256:dfcb8c817035935cc567bb8f4c56264f2e3e741f37155f8ee83ff1390af42958"
+    },
+    {
+      "role": "otel-collector",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector",
+      "origin_ref": "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector:0.162.0",
+      "digest": "sha256:83206d04cdc29e33b6ee7a97aeba37c1e956c76bd0dd804afe7398caf3fd29c8",
+      "index_digest": "sha256:310a800ad69ee430e7c541796852a242c9c7db97aaad4daa5ccf843c525fbdb2",
+      "config_digest": "sha256:2e31a248c3aeb7acb7c3cb1830fa0a9d1674f016c6ab11e957d6c93138fd46e6"
+    },
+    {
+      "role": "storage-provisioner",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "docker.io/kindest/local-path-provisioner",
+      "origin_ref": "docker.io/kindest/local-path-provisioner:v20260820-69b56db7",
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "storage-helper",
+      "os": "linux",
+      "architecture": "arm64",
+      "variant": null,
+      "repository": "docker.io/kindest/local-path-helper",
+      "origin_ref": "docker.io/kindest/local-path-helper:v20260131-7181c60a",
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "storage-provisioner",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "docker.io/kindest/local-path-provisioner",
+      "origin_ref": "docker.io/kindest/local-path-provisioner:v20260820-69b56db7",
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    },
+    {
+      "role": "storage-helper",
+      "os": "linux",
+      "architecture": "amd64",
+      "variant": null,
+      "repository": "docker.io/kindest/local-path-helper",
+      "origin_ref": "docker.io/kindest/local-path-helper:v20260131-7181c60a",
+      "digest": null,
+      "index_digest": null,
+      "config_digest": null
+    }
+  ],
+  "legacy_qualification": {
+    "architecture": "arm64",
+    "os": "linux",
+    "variant": null,
+    "runner_repository": "ghcr.io/ydixken/pgcopydb-operator/runner",
+    "runner_manifest_digest": "sha256:5e5b148d63f4b3327c20d22daeef0e62fc85a530418671cc0b4a88ed2960be2a",
+    "runner_config_digest": "sha256:28d72892ba637fd609b77ed36b975adb4603b60b7499287c981e800b05518ee8",
+    "baseline_commit": "86bf908adca02d87063849dae775a02c1659c829",
+    "builder_ref": "ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:86bf908adca02d87063849dae775a02c1659c829@sha256:ef596ea105604ef128244057dd34411f433d4c40fdf897bcaa8b33793df9fec8",
+    "binary_sha256": "0230465af0537ca4b70c26c7ddf558da99ea964f36d64a855ba132fde2a29f3a",
+    "binary_size": 8491144,
+    "binary_layer_digest": "sha256:a57a9cfac3bfaeef568129bdffcb4579b287960b85c7f4136a3d0dd72152fa9e",
+    "original_evidence_sha256": "19cf9a600414f7b07d2508bbcd4bd778a5866f0a059dcfdf68fef4966cfb5bb4",
+    "original_qualification_sha256": "c96f38803a5c19994725e69427e49b4175f768fe8cfc9efc9c22cfd0626132fc",
+    "original_probe_sha256": "396c49d330ab17ee237d2d78caab4f0f037b30831de65af0169e0091f9c708a7"
+  },
+  "storage_manifest": {
+    "file": "default-storage.yaml",
+    "sha256": "dc16a44e6a49a1f26fc39f341c361e7939993bd68431efc3a49d216e5914e903",
+    "node_index_digest": "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+    "node_manifest_digest": "sha256:10210eabcf5dc4b585756bbd3f7fbb60cc0a12a252f28aeba269d93e0070c025",
+    "node_layer_digest": "sha256:45ce1f46a149f8baecffbabb8231addaa1b0c30a5cf74d5f52dcc8df6f0f9db2"
+  }
+}
