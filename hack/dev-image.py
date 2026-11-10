@@ -38,7 +38,8 @@ MAX_BLOB = 536870912
 
 FAILURE_REASONS = {
     'VALIDATION_REFUSED', 'SOURCE_NOT_CLEAN', 'ACTIONS_CONTEXT_INVALID', 'NATIVE_PLATFORM_INVALID',
-    'PODMAN_RETRY_UNSUPPORTED', 'WORKFLOW_CREDENTIAL_MISSING', 'COMMAND_UNAVAILABLE_OR_TIMEOUT',
+    'PODMAN_RETRY_UNSUPPORTED', 'PODMAN_VERSION_INVALID', 'PODMAN_PUSH_FLAGS_UNSUPPORTED',
+    'PODMAN_PULL_FLAGS_UNSUPPORTED', 'WORKFLOW_CREDENTIAL_MISSING', 'COMMAND_UNAVAILABLE_OR_TIMEOUT',
     'COMMAND_FAILED_OR_OUTPUT_LIMIT', 'REGISTRY_AUTHORIZATION_UNAVAILABLE', 'PACKAGE_UNAUTHORIZED',
     'PACKAGE_FORBIDDEN', 'PACKAGE_NOT_FOUND', 'PACKAGE_RATE_LIMITED', 'PACKAGE_HTTP_FAILURE',
     'IO_FAILURE', 'INVALID_TEXT', 'INVALID_VALUE', 'MISSING_FIELD', 'INVALID_TYPE',
@@ -505,9 +506,64 @@ def trusted_context(source, architecture):
             os.environ.get('GITHUB_REF') != 'refs/heads/' + BRANCH or
             os.environ.get('GITHUB_SHA') != source['commit']):
         raise Refusal('publisher requires the exact trusted feature-branch Actions source')
+    tool_preflight(architecture)
+
+
+def tool_preflight(architecture, *, evidence=None):
+    proof = evidence if evidence is not None else {}
     native_architecture(architecture)
-    if b'--retry' not in command(['podman', 'push', '--help']):
-        raise Refusal('Podman lacks explicit no-retry publication support')
+    proof.update(os='linux', architecture=architecture, server_version=None, server_os=None,
+                 server_architecture=None, engine_version=None)
+    versions = decode(command(['podman', 'version', '--format=json']))
+    if not isinstance(versions, dict) or not isinstance(versions.get('Client'), dict):
+        raise Refusal('invalid Podman version response', reason='PODMAN_VERSION_INVALID')
+    for name in ('Client', 'Server'):
+        if name not in versions:
+            continue
+        component = versions[name]
+        if (not isinstance(component, dict) or not isinstance(component.get('Version'), str) or
+                not re.fullmatch(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}', component['Version']) or
+                component.get('Os') != 'linux' or component.get('OsArch') != 'linux/' + architecture):
+            raise Refusal('invalid Podman version or platform', reason='PODMAN_VERSION_INVALID')
+        prefix = name.lower()
+        proof.update({prefix + '_version': component['Version'], prefix + '_os': 'linux', prefix + '_architecture': architecture})
+    info = decode(command(['podman', 'info', '--format=json']))
+    if (not isinstance(info, dict) or not isinstance(info.get('host'), dict) or
+            info['host'].get('os') != 'linux' or info['host'].get('arch') != architecture or
+            not isinstance(info.get('version', {}), dict)):
+        raise Refusal('invalid Podman engine platform', reason='PODMAN_VERSION_INVALID')
+    engine_version = info.get('version', {}).get('Version')
+    if engine_version is not None:
+        if not isinstance(engine_version, str) or not re.fullmatch(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}', engine_version):
+            raise Refusal('invalid Podman engine version', reason='PODMAN_VERSION_INVALID')
+        if engine_version != proof['server_version' if 'Server' in versions else 'client_version']:
+            raise Refusal('inconsistent Podman engine version', reason='PODMAN_VERSION_INVALID')
+        proof['engine_version'] = engine_version
+    proof['engine_mode'] = 'remote' if 'Server' in versions else 'local'
+    for operation, required in (
+            ('push', ('retry', 'authfile', 'digestfile', 'tls-verify')),
+            ('pull', ('retry', 'authfile', 'tls-verify'))):
+        help_output = command(['podman', operation, '--help'])
+        options = set(re.findall(rb'(?m)^[ \t]*(?:-[A-Za-z0-9],\s+)?(--[a-z][a-z0-9-]*)(?=[ \t=]|$)', help_output))
+        proof[operation + '_flags'] = {name.replace('-', '_'): ('--' + name).encode() in options for name in required}
+    for operation in ('push', 'pull'):
+        if not all(proof[operation + '_flags'].values()):
+            raise Refusal('required Podman options are unavailable', reason='PODMAN_' + operation.upper() + '_FLAGS_UNSUPPORTED')
+    proof['status'] = 'READY'
+    return proof
+
+
+def tool_preflight_main(architecture):
+    proof = {}
+    try:
+        tool_preflight(architecture, evidence=proof)
+    except (Refusal, OSError, ValueError, KeyError, TypeError) as error:
+        proof.update(status='REFUSED', stage='trusted-context-and-tools',
+                     reason=error.reason if isinstance(error, Refusal) else 'VALIDATION_REFUSED')
+        print(canonical(proof).decode())
+        return 1
+    print(canonical(proof).decode())
+    return 0
 
 
 def native_architecture(architecture):

@@ -1,8 +1,8 @@
-# The two Actions Runner Controller scale sets that serve this repository.
-# actionlint validates runs-on against GitHub's own labels and cannot know
-# these, so without them every workflow reports an unknown label and the real
-# findings are lost in the noise. See CONTRIBUTING.md for what each one is.
+# Keep the project ARC scale sets visible to static runner validation.
+# Ubuntu 26.04 extends the pinned linter's older official hosted-runner inventory.
 self-hosted-runner:
   labels:
     - github-runner-pgcopydb-operator
     - github-runner-pgcopydb-e2e
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

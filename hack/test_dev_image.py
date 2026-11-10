@@ -539,14 +539,109 @@ class PublicationTests(unittest.TestCase):
                 M.require_package(status, b'provider-canary https://private.invalid/token')
             self.assertEqual(error.exception.reason, reason)
 
+    def test_native_tool_preflight_selects_only_numeric_versions_and_exact_flags(self):
+        for architecture in ('amd64', 'arm64'):
+            for server in (None, {'Version': '5.8.3', 'Os': 'linux', 'OsArch': 'linux/' + architecture}):
+                with self.subTest(architecture=architecture, server=server):
+                    versions = {'Client': {'Version': '5.7.0', 'Os': 'linux', 'OsArch': 'linux/' + architecture,
+                                           'Connection': 'credential-canary https://provider.invalid/private'}}
+                    if server is not None: versions['Server'] = server
+                    responses = {('podman', 'version', '--format=json'): raw(versions),
+                                 ('podman', 'info', '--format=json'): raw({'host': {'os': 'linux', 'arch': architecture},
+                                                                         'version': {'Version': '5.7.0' if server is None else '5.8.3'}}),
+                                 ('podman', 'push', '--help'): b'      --retry uint\n      --authfile string\n      --digestfile string\n      --tls-verify\n',
+                                 ('podman', 'pull', '--help'): b'      --retry uint\n      --authfile string\n      --tls-verify\n'}
+                    with patch.object(M, 'native_architecture') as native, patch.object(M, 'command', side_effect=lambda argv: responses[tuple(argv)]):
+                        proof = M.tool_preflight(architecture)
+                    native.assert_called_once_with(architecture)
+                    self.assertEqual(proof['client_version'], '5.7.0')
+                    self.assertEqual(proof['server_version'], None if server is None else '5.8.3')
+                    self.assertEqual(proof['architecture'], architecture)
+                    self.assertEqual(proof['os'], 'linux')
+                    self.assertEqual(proof['engine_mode'], 'local' if server is None else 'remote')
+                    self.assertTrue(all(proof['push_flags'].values()))
+                    self.assertTrue(all(proof['pull_flags'].values()))
+                    self.assertEqual(proof['engine_version'], '5.7.0' if server is None else '5.8.3')
+                    self.assertEqual(proof['status'], 'READY')
+                    self.assertNotIn('credential-canary', json.dumps(proof))
+
+    def test_native_tool_preflight_refuses_missing_exact_options_or_help_failure(self):
+        version = raw({'Client': {'Version': '5.7.0', 'Os': 'linux', 'OsArch': 'linux/amd64'}})
+        push = b'      --retry uint\n      --authfile string\n      --digestfile string\n      --tls-verify\n'
+        pull = b'      --retry uint\n      --authfile string\n      --tls-verify\n'
+        for operation, missing in (('push', '--retry'), ('pull', '--retry'), ('push', '--digestfile'), ('pull', '--tls-verify')):
+            responses = {('podman', 'version', '--format=json'): version,
+                         ('podman', 'info', '--format=json'): raw({'host': {'os': 'linux', 'arch': 'amd64'}}),
+                         ('podman', 'push', '--help'): push, ('podman', 'pull', '--help'): pull}
+            responses[('podman', operation, '--help')] = responses[('podman', operation, '--help')].replace(missing.encode(), (missing + '-delay').encode())
+            with self.subTest(operation=operation, missing=missing), patch.object(M, 'native_architecture'), \
+                 patch.object(M, 'command', side_effect=lambda argv: responses[tuple(argv)]):
+                with self.assertRaises(M.Refusal): M.tool_preflight('amd64')
+        responses = {('podman', 'version', '--format=json'): version,
+                     ('podman', 'info', '--format=json'): raw({'host': {'os': 'linux', 'arch': 'amd64'}}),
+                     ('podman', 'push', '--help'): push}
+        def failed_pull_help(argv):
+            if argv == ['podman', 'pull', '--help']:
+                raise M.Refusal('command failed or output exceeded bound')
+            return responses[tuple(argv)]
+        with patch.object(M, 'native_architecture'), patch.object(M, 'command', side_effect=failed_pull_help):
+            with self.assertRaises(M.Refusal): M.tool_preflight('amd64')
+
+    def test_native_tool_preflight_refuses_malformed_version_or_platform(self):
+        for changes in ({'Version': '5.7.0 credential-canary'}, {'Version': 5.7}, {'Version': 'v5.7.0'},
+                        {'Version': None}, {'Os': 'darwin'}, {'OsArch': 'linux/arm64'}):
+            versions = {'Client': dict(Version='5.7.0', Os='linux', OsArch='linux/amd64')}
+            versions['Client'].update(changes)
+            with self.subTest(changes=changes), patch.object(M, 'native_architecture'), patch.object(M, 'command', return_value=raw(versions)):
+                with self.assertRaises(M.Refusal): M.tool_preflight('amd64')
+        for server, info in ((None, {'host': {'os': 'linux', 'arch': 'amd64'}}),
+                             ({'Version': '5.8.3', 'Os': 'darwin', 'OsArch': 'darwin/amd64'}, {'host': {'os': 'linux', 'arch': 'amd64'}}),
+                             ({'Version': '5.8.3', 'Os': 'linux', 'OsArch': 'linux/amd64'},
+                              {'host': {'os': 'linux', 'arch': 'amd64'}, 'version': {'Version': '5.7.0'}}),
+                             ('absent', {'host': {'os': 'linux', 'arch': 'arm64'}}),
+                             ('absent', {'host': {'os': 'linux', 'arch': 'amd64'}, 'version': {'Version': 'credential-canary'}})):
+            versions = {'Client': {'Version': '5.7.0', 'Os': 'linux', 'OsArch': 'linux/amd64'}}
+            if server != 'absent': versions['Server'] = server
+            responses = {('podman', 'version', '--format=json'): raw(versions), ('podman', 'info', '--format=json'): raw(info),
+                         ('podman', 'push', '--help'): b'      --retry uint\n      --authfile string\n      --digestfile string\n      --tls-verify\n',
+                         ('podman', 'pull', '--help'): b'      --retry uint\n      --authfile string\n      --tls-verify\n'}
+            with self.subTest(server=server, info=info), patch.object(M, 'native_architecture'), \
+                 patch.object(M, 'command', side_effect=lambda argv: responses[tuple(argv)]):
+                with self.assertRaises(M.Refusal): M.tool_preflight('amd64')
+
+    def test_credential_free_tool_preflight_prints_only_selected_evidence(self):
+        stdout = io.StringIO()
+        versions = raw({'Client': {'Version': '5.7.0', 'Os': 'linux', 'OsArch': 'linux/amd64', 'secret': 'canary-one'}})
+        responses = {('podman', 'version', '--format=json'): versions,
+                     ('podman', 'info', '--format=json'): raw({'host': {'os': 'linux', 'arch': 'amd64'}}),
+                     ('podman', 'push', '--help'): b'      --retry-delay string\n      --authfile string\n      --digestfile string\n      --tls-verify\n',
+                     ('podman', 'pull', '--help'): b'      --retry uint\n      --authfile string\n      --tls-verify\n'}
+        with patch.object(M, 'native_architecture'), patch.object(M, 'command', side_effect=lambda argv: responses[tuple(argv)]), \
+             patch.object(M, 'Registry') as registry, patch.object(sys, 'stdout', stdout):
+            self.assertEqual(M.tool_preflight_main('amd64'), 1)
+            registry.assert_not_called()
+        evidence = json.loads(stdout.getvalue())
+        self.assertEqual(evidence['status'], 'REFUSED')
+        self.assertEqual(evidence['client_version'], '5.7.0')
+        self.assertFalse(evidence['push_flags']['retry'])
+        self.assertNotIn('canary-one', stdout.getvalue())
+        failures = []
+        for canary in ('canary-exception-one', 'another-canary https://provider.invalid/private'):
+            stdout = io.StringIO()
+            with patch.object(M, 'native_architecture'), patch.object(M, 'command', side_effect=OSError(canary)), \
+                 patch.object(sys, 'stdout', stdout):
+                self.assertEqual(M.tool_preflight_main('amd64'), 1)
+            failures.append(stdout.getvalue())
+        self.assertEqual(failures[0], failures[1])
+
     def test_workflow_has_exact_trusted_branch_and_serialized_native_jobs(self):
         text = Path(__file__).parents[1].joinpath('.github/workflows/dev-manager-image.yml').read_text()
         self.assertIn('feat/rpgmigrate-native-operator', text)
         self.assertIn('dev-ghcr-ydixken-pgcopydb-operator', text)
         self.assertIn('cancel-in-progress: false', text)
         self.assertIn('max-parallel: 1', text)
-        self.assertIn('ubuntu-24.04-arm', text)
-        self.assertIn('ubuntu-24.04', text)
+        self.assertIn('ubuntu-26.04-arm', text)
+        self.assertIn('ubuntu-26.04', text)
         self.assertIn('packages: write', text)
         self.assertNotIn('pull_request', text)
         self.assertNotIn('workflow_dispatch', text)
@@ -558,6 +653,10 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('if-no-files-found: error', text)
         self.assertIn('persist-credentials: false', text)
         self.assertIn('GITHUB_TOKEN:', text)
+        self.assertIn('tool_preflight_main', text)
+        self.assertLess(text.index('tool_preflight_main'), text.index('GITHUB_TOKEN:'))
+        preflight = text[text.index('- name: Check native publication tools'):text.index('- name: Inspect, build')]
+        self.assertNotIn('secrets.', preflight)
         self.assertNotIn('docker/login', text)
 
 

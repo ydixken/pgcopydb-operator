@@ -26,9 +26,9 @@ jobs:
       matrix:
         include:
           - architecture: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - architecture: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -51,6 +51,13 @@ jobs:
           fi
       - name: Test publication policy
         run: python3 -m unittest discover -s hack -p test_dev_image.py
+      - name: Check native publication tools
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: >-
+          python3 -c 'import os, runpy;
+          publisher = runpy.run_path("hack/dev-image.py");
+          raise SystemExit(publisher["tool_preflight_main"](os.environ["ARCHITECTURE"]))'
       - name: Inspect, build, smoke, publish once, and verify anonymously
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
