@@ -57,17 +57,20 @@ class Sessions:
         clone = json.loads(self.row[22]); clone['table_count'] = len(state.manifest['clone_state']['plan']['tables'])
         self.row[22] = json.dumps(clone)
         self.sources = 0
+        self.next_backend = 100
 
     def session(self, library, connection, deadline, diag):
         owner = self
         role = connection
+        owner.next_backend += 1; backend = owner.next_backend
         owner.events.append(('open', role))
         if role == b'source': owner.sources += 1
         source_number = owner.sources
 
         class Session:
-            backend = 23
             props = {'PQuser': b'fixture', 'PQdb': b'database', 'ssl': 0}
+
+            def __init__(self): self.backend = backend
 
             def quote(self, value): return '"' + value + '"'
 
@@ -75,9 +78,15 @@ class Sessions:
                 owner.events.append(('query', role, sql, params))
                 if commit and owner.fault == 'unknown_commit': raise S['Refusal']('unknown_commit')
                 if not rows: return []
-                if width == 9: return [[b'123', b'11', b'1', b'160006', b'23', b'33', b'33', b't', b'off']]
-                if width == 6: return [[b'123', b'11', b'1', b't', b'23', b'160006']]
-                if width == 7: return [[b'456', b'22', b'33', b'33', b'23', b'180006', b't']]
+                if width == 9:
+                    row = [b'123', b'11', b'1', b'160006', str(backend).encode(), b'33', b'33', b't', b'off']
+                    if owner.fault == 'own_pid_changed': row[4] = str(backend+1).encode()
+                    changes = {'source_system': (0,b'124'), 'source_database': (1,b'12'), 'source_timeline': (2,b'2'), 'source_version': (3,b'160007'), 'source_role': (5,b'34'), 'source_session_role': (6,b'34'), 'source_recovery': (7,b'f'), 'source_readonly': (8,b'on')}
+                    if source_number>=3 and owner.fault in changes:
+                        index,value=changes[owner.fault];row[index]=value
+                    return [row]
+                if width == 6: return [[b'123', b'11', b'1', b't', str(backend).encode(), b'160006']]
+                if width == 7: return [[b'456', b'22', b'33', b'33', str(backend).encode(), b'180006', b't']]
                 if width == 4: return [[b'fixture', b'fixture', b'database', b'f']]
                 if width == 29:
                     row = list(owner.row)
@@ -170,7 +179,8 @@ class CleanedTests(unittest.TestCase):
                 updates = [e for e in queries if e[2].startswith('UPDATE ONLY ')]
                 self.assertEqual(len(updates), 1); self.assertEqual(len(updates[0][3]), 29)
                 self.assertEqual(updates[0][3], sessions.row)
-                for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation']:
+                self.assertEqual(sessions.next_backend, 104)
+                for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
                     sessions = Sessions(state, mode)
                     with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
             finally: state.close()

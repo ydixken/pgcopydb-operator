@@ -33,7 +33,8 @@ def cleaned_source_absence(state,library,materials,deadline,diag):
  except BaseException:
   session.close(False);raise
  session.close()
- return pinned
+ # Each connection authenticates its own PID; only the other identity fields span sessions.
+ return pinned[:4]+pinned[5:]
 def observe_cleaned(state,library,materials,deadline,diag):
  pinned=cleaned_source_absence(state,library,materials,deadline,diag)
  checkpoint,guards=observe(state,library,materials,deadline,diag)

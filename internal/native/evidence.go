@@ -327,6 +327,15 @@ const (
 )
 
 var nativeWireKeys = map[string]string{
+	"cleanup_rejoin_request":                        cleanupRejoinRequestWireKeys,
+	"cleanup_rejoin_request.execution":              nativeExecutionWireKeys,
+	"cleanup_rejoin_request.execution.work":         sourceWorkWireKeys,
+	"cleanup_rejoin_request.container":              nativeContainerWireKeys,
+	"cleanup_rejoin_completed_evidence":             "version kind operation_id program_sha256 request_sha256 execution_sha256 work checkpoint resources guards source_closed target_closed materialization_closed private_closed diagnostics_clean cleanup_pending source_resources_checked",
+	"cleanup_rejoin_completed_evidence.work":        sourceWorkWireKeys,
+	"cleanup_rejoin_completed_evidence.checkpoint":  cleanupRejoinCheckpointWireKeys,
+	"cleanup_rejoin_completed_evidence.resources[]": cleanedResourceWireKeys,
+
 	"cleaned_request":                        "version kind operation_id program_sha256 execution pod_name container saved_e",
 	"cleaned_request.execution":              nativeExecutionWireKeys,
 	"cleaned_request.execution.work":         sourceWorkWireKeys,
