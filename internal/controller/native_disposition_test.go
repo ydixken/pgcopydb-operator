@@ -1140,3 +1140,279 @@ func TestNativeHistoricalDeletionReceiptBoundary(t *testing.T) {
 		})
 	}
 }
+
+const nativeFailureWinningEnd = "0/FFFF"
+const nativeFailureWinningPatchCase = "winning saved E"
+
+type nativeFailureLegacyProgress struct {
+	*fakeProgress
+	t *testing.T
+}
+
+func (p nativeFailureLegacyProgress) GateScript() string {
+	p.t.Fatal("native failure reached legacy progress or verification stage SQL")
+	return ""
+}
+
+type nativeFailureLegacyLogs struct {
+	LogReader
+	t *testing.T
+}
+
+func (l nativeFailureLegacyLogs) JobLogs(context.Context, string, string, int64) ([]byte, error) {
+	l.t.Fatal("native failure reached legacy worker, verification or stage logs")
+	return nil, errBoom
+}
+
+func (l nativeFailureLegacyLogs) JobLogsByUID(context.Context, string, types.UID, int64) ([]byte, error) {
+	l.t.Fatal("native failure reached legacy retry log transport")
+	return nil, errBoom
+}
+
+func (l nativeFailureLegacyLogs) JobLogsTimestamps(context.Context, string, string, int64) ([]byte, error) {
+	l.t.Fatal("native failure reached legacy supervisor reaping")
+	return nil, errBoom
+}
+
+func newNativeFailureFixture(t *testing.T, follow bool, category string) *nativeCloneFixture {
+	t.Helper()
+	f := newNativeCloneFixture(t, follow, &v1beta1.VerificationOptions{Schema: true, Data: true})
+	legacyProgress := f.r.Progress.(*fakeProgress)
+	f.r.Progress = nativeFailureLegacyProgress{fakeProgress: legacyProgress, t: t}
+	t.Cleanup(func() { f.r.Progress = legacyProgress })
+	legacyLogs := f.r.Logs
+	f.r.Logs = nativeFailureLegacyLogs{LogReader: legacyLogs, t: t}
+	t.Cleanup(func() { f.r.Logs = legacyLogs })
+	f.m.Spec.BackoffLimit = 3
+	f.m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: lifecycleEnd}
+	f.worker.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}
+	f.replace(f.m)
+	f.replace(f.worker)
+	f.pod = nativeRecoveryTestPod(f.worker, 1)
+	f.pod.Status.ContainerStatuses[0].State.Terminated.Reason = "Error"
+	f.pod.Labels = maps.Clone(f.worker.Spec.Template.Labels)
+	f.pod.Labels[batchv1.ControllerUidLabel] = string(f.worker.UID)
+	f.replace(f.pod)
+	f.raw = nativeFailureTestRecord("ERROR", "native:"+category+": postgres://user:CANARY@private/db row=CANARY")
+	f.onCreate = func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+		t.Fatal("terminal classification created worker, verification, cleanup or retry work")
+		return errBoom
+	}
+	return f
+}
+
+func assertNativeFailureRetained(t *testing.T, f *nativeCloneFixture) {
+	t.Helper()
+	got := f.current()
+	if got.Status.Attempts != 1 || got.Status.NativeJobUID != string(f.worker.UID) || got.Status.NativePVCUID != string(f.pvc.UID) || nativeControlEnd(got) != lifecycleEnd || got.Status.CompletedAt != nil || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionComplete) {
+		t.Fatal("failure changed retained execution, saved E or completion authority")
+	}
+	for _, obj := range []client.Object{f.worker.DeepCopy(), f.pvc.DeepCopy(), f.pod.DeepCopy()} {
+		if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(obj), obj); err != nil {
+			t.Fatal("failure removed a retained resource", err)
+		}
+	}
+	if f.r.Sentinel.(*fakeSentinel).callCount() != 0 || f.r.Progress.(interface{ counts() int }).counts() != 0 {
+		t.Fatal("failure reached legacy sentinel, retry, progress, verification or supervisor heuristics")
+	}
+}
+
+func TestNativeFailureDisposition(t *testing.T) {
+	for _, follow := range []bool{false, true} {
+		for _, category := range []string{"BadArgs", "BadConfig", "BadState"} {
+			t.Run(strconv.FormatBool(follow)+"/"+category, func(t *testing.T) {
+				f := newNativeFailureFixture(t, follow, category)
+				handled, result, err := nativeDisposition(t, f)
+				got := f.current()
+				condition := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionFailed)
+				if !handled || err != nil || result != (ctrl.Result{}) || got.Status.Phase != v1beta1.PhaseFailed || condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "Native"+category || got.Status.RetryGate != nil || f.logs != 1 || f.patches != 1 {
+					t.Fatal("terminal native diagnostic did not persist fixed failure before retry", handled, result, err)
+				}
+				encoded, err := json.Marshal(got.Status)
+				if err != nil || bytes.Contains(encoded, []byte("CANARY")) || bytes.Contains(encoded, []byte("postgres://")) {
+					t.Fatal("terminal status exposed private diagnostic")
+				}
+				assertNativeFailureRetained(t, f)
+				f.m = got
+				f.raw = nil
+				if handled, result, err := nativeDisposition(t, f); !handled || err != nil || result != (ctrl.Result{}) || f.patches != 1 || f.logs != 1 {
+					t.Fatal("recorded terminal failure retried after logs disappeared", handled, result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeFailureUnknownRetainsRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"missing logs", nil},
+		{"transient", nativeFailureTestRecord("ERROR", "native:Target: transient")},
+		{"embedded", nativeFailureTestRecord("ERROR", "embedded native:BadState: CANARY")},
+		{"malformed", []byte("{malformed\n")},
+		{"partial", []byte(`{"error_severity":"ERROR","message":"native:BadState: partial"}`)},
+		{"oversized", nativeFailureTestRecord("ERROR", "native:BadState: "+strings.Repeat("x", 65536))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeFailureFixture(t, true, "BadState")
+			f.raw = tc.raw
+			handled, result, err := nativeDisposition(t, f)
+			got := f.current()
+			if !handled || err != nil || result.RequeueAfter != retryGateInterval || got.Status.RetryGate == nil || got.Status.RetryGate.Failure != "Native worker failed" || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) {
+				t.Fatal("unknown diagnostic bypassed controlled retry", handled, result, err)
+			}
+			assertNativeFailureRetained(t, f)
+		})
+	}
+}
+
+func TestNativeFailureAdmission(t *testing.T) {
+	for _, kind := range []string{"success", "active", "pod running", "job replacement", nativePVCReplacementCase, "failure pod replacement", "container replacement", "intent changed", "status changed", "finalized history", "complete history", probeSuspendCase, nativeRecoveryDeleteCase} {
+		t.Run(kind, func(t *testing.T) {
+			f := newNativeFailureFixture(t, true, "BadState")
+			switch kind {
+			case "success":
+				f.worker.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
+				f.replace(f.worker)
+			case "active":
+				f.worker.Status.Active = 1
+				f.replace(f.worker)
+			case "pod running":
+				f.pod.Status.Phase = corev1.PodRunning
+				f.pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+				f.replace(f.pod)
+			case "finalized history":
+				f.m.Status.NativeFinalizedJobUID = f.m.Status.NativeJobUID
+				f.replace(f.m)
+			case "complete history":
+				f.m.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionComplete, Status: metav1.ConditionTrue, Reason: "Historical", LastTransitionTime: metav1.Now()}}
+				f.replace(f.m)
+			case probeSuspendCase:
+				f.m.Spec.Suspend = true
+				f.replace(f.m)
+			case nativeRecoveryDeleteCase:
+				f.m.Finalizers = []string{finalizerName}
+				f.replace(f.m)
+				if err := f.store.Delete(context.Background(), f.m); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), f.m); err != nil {
+					t.Fatal(err)
+				}
+				f.r.NativeEvidence = nil
+			default:
+				f.afterLogs = func() {
+					switch kind {
+					case "job replacement":
+						o := f.worker.DeepCopy()
+						o.UID = workerReplacementUID
+						f.replace(o)
+					case nativePVCReplacementCase:
+						o := f.pvc.DeepCopy()
+						o.UID = workerReplacementUID
+						f.replace(o)
+					case "failure pod replacement":
+						o := f.pod.DeepCopy()
+						o.UID = workerReplacementUID
+						f.replace(o)
+					case "container replacement":
+						o := f.pod.DeepCopy()
+						o.Status.ContainerStatuses[0].ContainerID = "containerd://replacement"
+						f.replace(o)
+					case "intent changed":
+						o := f.current()
+						o.Generation++
+						o.Spec.Suspend = true
+						f.replace(o)
+					case "status changed":
+						o := f.current()
+						o.Status.Replication.Endpos = nativeFailureWinningEnd
+						f.replace(o)
+					}
+				}
+			}
+			_, _, _ = nativeDisposition(t, f)
+			got := f.current()
+			if meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || got.Status.RetryGate != nil || f.logs > 1 || (kind == probeSuspendCase || kind == nativeRecoveryDeleteCase) && f.logs != 0 {
+				t.Fatal("unadmitted, successful or retained intent classified terminal")
+			}
+			if kind != probeSuspendCase && f.patches != 0 {
+				t.Fatal("unadmitted failure changed status")
+			}
+		})
+	}
+}
+
+func TestNativeFailureStatusPatch(t *testing.T) {
+	for _, kind := range []string{"status error", "conflict", nativeFailureWinningPatchCase} {
+		t.Run(kind, func(t *testing.T) {
+			f := newNativeFailureFixture(t, true, "BadConfig")
+			f.patch = func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+				desired := obj.(*v1beta1.Migration)
+				condition := meta.FindStatusCondition(desired.Status.Conditions, v1beta1.ConditionFailed)
+				if desired.Status.Phase != v1beta1.PhaseFailed || condition == nil || condition.Reason != nativeFailureBadConfig {
+					t.Fatal("terminal failure patch was replaced by retry bookkeeping")
+				}
+				if kind == nativeFailureWinningPatchCase {
+					winner := f.current()
+					winner.Status.Replication.Endpos = nativeFailureWinningEnd
+					if err := c.Status().Update(ctx, winner); err != nil {
+						t.Fatal(err)
+					}
+					return c.Status().Patch(ctx, obj, p)
+				}
+				if kind == "conflict" {
+					return nativeControlConflict()
+				}
+				return errors.New("CANARY raw status error")
+			}
+			_, _, err := nativeDisposition(t, f)
+			got := f.current()
+			if err == nil || strings.Contains(err.Error(), "CANARY") || f.logs != 1 || f.patches != 1 || got.Status.RetryGate != nil || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) {
+				t.Fatal("failed terminal patch lost error or persisted retry authority")
+			}
+			if kind != "status error" && !apierrors.IsConflict(err) {
+				t.Fatal("optimistic conflict was hidden")
+			}
+			if kind == nativeFailureWinningPatchCase {
+				if nativeControlEnd(got) != nativeFailureWinningEnd {
+					t.Fatal("conflict overwrote winning saved E")
+				}
+			} else {
+				assertNativeFailureRetained(t, f)
+			}
+		})
+	}
+}
+
+func TestNativeFailureNativeDispatch(t *testing.T) {
+	f := newNativeFailureFixture(t, true, "BadState")
+	result, err := f.r.reconcileNative(context.Background(), f.m, f.m.DeepCopy())
+	got := f.current()
+	if err != nil || result != (ctrl.Result{}) || got.Status.Phase != v1beta1.PhaseFailed || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || got.Status.RetryGate != nil || f.logs != 1 || f.patches != 1 {
+		t.Fatal("native dispatch bypassed fixed terminal failure", result, err)
+	}
+	assertNativeFailureRetained(t, f)
+}
+
+func TestNativeFailureCaptureUnavailable(t *testing.T) {
+	for _, kind := range []string{"failure capture unavailable", "abnormal termination"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newNativeFailureFixture(t, true, "BadState")
+			if kind == "failure capture unavailable" {
+				f.r.NativeJobs = nil
+			} else {
+				f.pod.Status.ContainerStatuses[0].State.Terminated.Reason = "OOMKilled"
+				f.replace(f.pod)
+			}
+			handled, result, err := nativeDisposition(t, f)
+			got := f.current()
+			if !handled || err != nil || result.RequeueAfter != retryGateInterval || got.Status.RetryGate == nil || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || f.logs != 0 {
+				t.Fatal("unavailable original failure capture became terminal or bypassed retry", handled, result, err)
+			}
+			assertNativeFailureRetained(t, f)
+		})
+	}
+}

@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -35,8 +36,7 @@ func (r *MigrationReconciler) reconcileNativeDisposition(ctx context.Context, m,
 		return false, ctrl.Result{}, nil
 	}
 	r.stopSampling(client.ObjectKeyFromObject(m))
-	if r.APIReader == nil || r.Client == nil || ctx.Err() != nil || m.UID == "" || m.UID != base.UID || m.Generation != base.Generation || m.ResourceVersion != base.ResourceVersion ||
-		!apiequality.Semantic.DeepEqual(m.Spec, base.Spec) || !apiequality.Semantic.DeepEqual(m.Status, base.Status) {
+	if r.APIReader == nil || r.Client == nil || ctx.Err() != nil || !nativeDispositionSnapshotMatches(m, base) {
 		return true, ctrl.Result{}, errNativeDisposition
 	}
 	if deleting && m.Status.NativeFinalizedJobUID != "" && m.Status.NativeFinalizedJobUID != m.Status.NativeJobUID {
@@ -65,8 +65,63 @@ func (r *MigrationReconciler) reconcileNativeDisposition(ctx context.Context, m,
 	if deleting || live.Spec.Suspend {
 		return r.reconcileNativeRetainedDisposition(ctx, live, current, claim)
 	}
+	if terminal, err := r.reconcileNativeFailure(ctx, live, current, claim); terminal || err != nil {
+		return true, ctrl.Result{}, err
+	}
 	result, err := r.reconcileNativeRetry(ctx, live, live.DeepCopy(), current, claim)
 	return true, result, err
+}
+
+func nativeDispositionSnapshotMatches(m, base *v1beta1.Migration) bool {
+	return m.UID != "" && m.UID == base.UID && m.Generation == base.Generation && m.ResourceVersion == base.ResourceVersion &&
+		apiequality.Semantic.DeepEqual(m.Spec, base.Spec) && apiequality.Semantic.DeepEqual(m.Status, base.Status)
+}
+
+type nativeFailureReader interface {
+	JobFailureNative(context.Context, string, types.UID, podexec.NativeContainerBinding) (podexec.NativeOutcome, error)
+}
+
+func (r *MigrationReconciler) reconcileNativeFailure(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	live, original, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, nil)
+	if err != nil || !nativeRecoveryWorkerFailed(worker) || live.Status.NativeFinalizedJobUID != "" {
+		return false, errNativeDisposition
+	}
+	if condition := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionFailed); condition != nil && condition.Status == metav1.ConditionTrue && live.Status.Phase == v1beta1.PhaseFailed && live.Status.ObservedGeneration == live.Generation {
+		switch condition.Reason {
+		case nativeFailureBadArgs, nativeFailureBadConfig, nativeFailureBadState:
+			return true, nil
+		}
+	}
+	reader, available := r.NativeJobs.(nativeFailureReader)
+	if !available {
+		return false, nil
+	}
+	status := original.Status.ContainerStatuses[0]
+	binding := podexec.NativeContainerBinding{PodUID: original.UID, ContainerName: workerContainer, ContainerID: status.ContainerID, ImageID: runnerImageFor(live, r.RPGMigrateRunnerImage), TemplateSHA256: podexec.NativeTemplateSHA256(worker.Spec.Template), ExecutionSHA256: podexec.NativeExecutionSHA256(worker.Spec.Template)}
+	output, captureErr := reader.JobFailureNative(ctx, live.Namespace, worker.UID, binding)
+	confirmed, _, err := r.nativeRecoveryQuiescentCurrent(ctx, live, worker, pvc, original)
+	if err != nil {
+		return false, errNativeDisposition
+	}
+	if captureErr != nil || !output.Successful() {
+		return false, nil
+	}
+	reason, terminal := nativeWorkerTerminalFailure(output.Payload())
+	if !terminal {
+		return false, nil
+	}
+	desired := confirmed.DeepCopy()
+	desired.Status.Phase, desired.Status.ObservedGeneration = v1beta1.PhaseFailed, desired.Generation
+	r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionTrue, reason, "Native worker reported a terminal failure; retained state is preserved")
+	r.setCondition(desired, v1beta1.ConditionComplete, metav1.ConditionFalse, reason, "Native worker did not complete")
+	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(confirmed, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, nativeWorkerError(err)
+	}
+	desired.DeepCopyInto(m)
+	metrics.Record(desired)
+	return true, nil
 }
 
 func (r *MigrationReconciler) reconcileNativeRetainedDisposition(ctx context.Context, live *v1beta1.Migration, worker *batchv1.Job, claim *corev1.PersistentVolumeClaim) (bool, ctrl.Result, error) {
