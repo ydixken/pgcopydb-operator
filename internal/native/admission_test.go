@@ -193,6 +193,147 @@ func TestNativeAdmissionDefaults(t *testing.T) {
 	}
 }
 
+func TestNativeAdmissionRuntimeSelection(t *testing.T) {
+	for _, route := range []struct {
+		name  string
+		setup func(*testing.T) (*readerAPI, *Reader, ExecutionData)
+		admit func(*Reader, *readerAPI, ExecutionData, bool) error
+	}{
+		{cloneOutputCompletedPhase, func(t *testing.T) (*readerAPI, *Reader, ExecutionData) {
+			api, r := newReaderAPI(t)
+			return api, r, ExecutionData{}
+		}, func(r *Reader, api *readerAPI, _ ExecutionData, completed bool) error {
+			_, err := r.admitCompleted(context.Background(), api.fixture.want, completed)
+			return err
+		}},
+		{"retry", func(t *testing.T) (*readerAPI, *Reader, ExecutionData) {
+			return newRetryReaderAPI(t, RetryInputs{})
+		}, func(r *Reader, _ *readerAPI, w ExecutionData, completed bool) error {
+			_, err := r.admitRetry(context.Background(), w, completed)
+			return err
+		}},
+		{"owned_inventory", newOwnedReaderAPI, func(r *Reader, _ *readerAPI, w ExecutionData, completed bool) error {
+			_, err := r.admitOwned(context.Background(), w, completed)
+			return err
+		}},
+		{"cleaned_completion", newCleanedReaderAPI, func(r *Reader, _ *readerAPI, w ExecutionData, completed bool) error {
+			_, err := r.admitCleaned(context.Background(), w, fixtureEndLSN, completed)
+			return err
+		}},
+		{"cleanup_rejoin", newCleanupRejoinReaderAPI, func(r *Reader, _ *readerAPI, w ExecutionData, completed bool) error {
+			_, err := r.admitCleanupRejoin(context.Background(), w, fixtureEndLSN, completed)
+			return err
+		}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			for _, phase := range []string{"running", cloneOutputCompletedPhase} {
+				t.Run(phase, func(t *testing.T) {
+					targets := []string{"helper_job", "helper_pod", "helper_job_and_pod"}
+					if route.name != cloneOutputCompletedPhase {
+						targets = append(targets, "original_job", "original_pod", "original_job_and_pod")
+					}
+					for _, target := range targets {
+						t.Run(target, func(t *testing.T) {
+							for _, tc := range []struct {
+								name   string
+								change func(*corev1.PodSpec)
+								want   bool
+							}{
+								{"nil_defaults", func(*corev1.PodSpec) {}, true},
+								{"host_users_true", func(s *corev1.PodSpec) { s.HostUsers = admissionBool(true) }, true},
+								{"host_users_false", func(s *corev1.PodSpec) { s.HostUsers = admissionBool(false) }, false},
+								{"custom_runtime", func(s *corev1.PodSpec) { s.RuntimeClassName = new("custom-runtime") }, false},
+								{"empty_runtime", func(s *corev1.PodSpec) { s.RuntimeClassName = new("") }, false},
+							} {
+								t.Run(tc.name, func(t *testing.T) {
+									api, r, w := route.setup(t)
+									switch target {
+									case "helper_job":
+										tc.change(&api.fixture.job.Spec.Template.Spec)
+									case "helper_pod":
+										tc.change(&api.fixture.pod.Spec)
+									case "helper_job_and_pod":
+										tc.change(&api.fixture.job.Spec.Template.Spec)
+										tc.change(&api.fixture.pod.Spec)
+									case "original_job":
+										tc.change(&api.fixture.worker.Spec.Template.Spec)
+									case "original_pod":
+										tc.change(&api.extraPods[0].Spec)
+									case "original_job_and_pod":
+										tc.change(&api.fixture.worker.Spec.Template.Spec)
+										tc.change(&api.extraPods[0].Spec)
+									}
+									// Bind the changed desired template so isolation is the rejecting boundary.
+									template := podexec.NativeTemplateSHA256(api.fixture.job.Spec.Template)
+									api.fixture.want.TemplateSHA256, w.TemplateSHA256 = template, template
+									if w.Container != (podexec.NativeContainerBinding{}) {
+										w.Container.TemplateSHA256 = template
+										w.Container.ExecutionSHA256 = podexec.NativeExecutionSHA256(api.fixture.job.Spec.Template)
+									}
+									if phase == cloneOutputCompletedPhase {
+										api.complete()
+									}
+									if err := route.admit(r, api, w, phase == cloneOutputCompletedPhase); (err == nil) != tc.want {
+										t.Fatalf("runtime admission = %v, want admitted %v", err, tc.want)
+									}
+									if api.writerCalls != 0 || api.logCalls != 0 {
+										t.Fatal("admission reached transport")
+									}
+								})
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeAdmissionSamePodRuntimeSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b *bool
+		want bool
+	}{
+		{"nil_nil", nil, nil, true},
+		{"nil_true", nil, admissionBool(true), true},
+		{"true_nil", admissionBool(true), nil, true},
+		{"true_true", admissionBool(true), admissionBool(true), true},
+		{"nil_false", nil, admissionBool(false), false},
+		{"false_nil", admissionBool(false), nil, false},
+		{"true_false", admissionBool(true), admissionBool(false), false},
+		{"false_true", admissionBool(false), admissionBool(true), false},
+		{"false_false", admissionBool(false), admissionBool(false), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := corev1.PodSpec{HostUsers: tc.a}, corev1.PodSpec{HostUsers: tc.b}
+			if samePodExecution(&a, &b) != tc.want {
+				t.Fatal("HostUsers default equivalence changed")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		a, b *string
+		want bool
+	}{
+		{"nil_nil", nil, nil, true},
+		{"nil_custom", nil, new("custom-runtime"), false},
+		{"custom_nil", new("custom-runtime"), nil, false},
+		{"same_custom", new("custom-runtime"), new("custom-runtime"), true},
+		{"different_custom", new("custom-runtime"), new("other-runtime"), false},
+		{"nil_empty", nil, new(""), false},
+		{"empty_nil", new(""), nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := corev1.PodSpec{RuntimeClassName: tc.a}, corev1.PodSpec{RuntimeClassName: tc.b}
+			if samePodExecution(&a, &b) != tc.want {
+				t.Fatal("RuntimeClassName exact comparison changed")
+			}
+		})
+	}
+}
+
 func TestNativeEvidenceJobSize(t *testing.T) {
 	t.Run("bounds", evidenceJobJSONBounds)
 	t.Run("oversize_before_relay", func(t *testing.T) {
