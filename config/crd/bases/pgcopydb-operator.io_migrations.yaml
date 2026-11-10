@@ -2230,6 +2230,10 @@ spec:
                 description: nativeDataJobUID pins the successfully created native
                   data helper before capture or rejoin.
                 type: string
+              nativeFinalizedJobUID:
+                description: nativeFinalizedJobUID records historical workflow finalization,
+                  not replication completion authority.
+                type: string
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -2362,9 +2366,8 @@ spec:
                 type: string
               verification:
                 description: |-
-                  verification reports each requested compare check separately, because
-                  the Verified condition collapses them and its reason names only the
-                  first mismatch. Re-derived from the compare Jobs every reconcile.
+                  verification records each requested compare result separately, because
+                  the Verified condition reports only the first mismatch.
                 items:
                   description: VerificationResult is one compare check's outcome.
                   properties:
@@ -4769,6 +4772,10 @@ spec:
                 description: nativeDataJobUID pins the successfully created native
                   data helper before capture or rejoin.
                 type: string
+              nativeFinalizedJobUID:
+                description: nativeFinalizedJobUID records historical workflow finalization,
+                  not replication completion authority.
+                type: string
               nativeJobUID:
                 description: nativeJobUID binds native execution to the recorded worker
                   Job incarnation.
@@ -4901,9 +4908,8 @@ spec:
                 type: string
               verification:
                 description: |-
-                  verification reports each requested compare check separately, because
-                  the Verified condition collapses them and its reason names only the
-                  first mismatch. Re-derived from the compare Jobs every reconcile.
+                  verification records each requested compare result separately, because
+                  the Verified condition reports only the first mismatch.
                 items:
                   description: VerificationResult is one compare check's outcome.
                   properties:

@@ -322,7 +322,7 @@ _Appears in:_
 | `retryGate` _[RetryGateStatus](#retrygatestatus)_ | retryGate records a failed attempt while the retry gate decides about the next. |  | Optional: \{\} <br /> |
 | `progress` _[CloneProgress](#cloneprogress)_ | progress reports base-copy progress. |  | Optional: \{\} <br /> |
 | `replication` _[ReplicationStatus](#replicationstatus)_ | replication reports streaming state while following. |  | Optional: \{\} <br /> |
-| `verification` _[VerificationResult](#verificationresult) array_ | verification reports each requested compare check separately, because<br />the Verified condition collapses them and its reason names only the<br />first mismatch. Re-derived from the compare Jobs every reconcile. |  | Optional: \{\} <br /> |
+| `verification` _[VerificationResult](#verificationresult) array_ | verification records each requested compare result separately, because<br />the Verified condition reports only the first mismatch. |  | Optional: \{\} <br /> |
 | `verificationRehearsal` _[VerificationRehearsalStatus](#verificationrehearsalstatus)_ | verificationRehearsal reports the latest spec.verification.rehearsal run. |  | Optional: \{\} <br /> |
 | `verificationProgress` _[VerificationProgress](#verificationprogress) array_ | verificationProgress holds the latest compare data progress sample of each<br />kind of run. An item stays after its run ends, until the next run of that kind starts. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
@@ -330,6 +330,7 @@ _Appears in:_
 | `nativePVCUID` _string_ | nativePVCUID binds native execution to the recorded work PVC incarnation. |  | Optional: \{\} <br /> |
 | `nativeSchemaJobUID` _string_ | nativeSchemaJobUID pins the successfully created native schema helper before capture or rejoin. |  | Optional: \{\} <br /> |
 | `nativeDataJobUID` _string_ | nativeDataJobUID pins the successfully created native data helper before capture or rejoin. |  | Optional: \{\} <br /> |
+| `nativeFinalizedJobUID` _string_ | nativeFinalizedJobUID records historical workflow finalization, not replication completion authority. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 

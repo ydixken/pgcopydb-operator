@@ -878,9 +878,8 @@ type MigrationStatus struct {
 	// +optional
 	Replication *ReplicationStatus `json:"replication,omitempty"`
 
-	// verification reports each requested compare check separately, because
-	// the Verified condition collapses them and its reason names only the
-	// first mismatch. Re-derived from the compare Jobs every reconcile.
+	// verification records each requested compare result separately, because
+	// the Verified condition reports only the first mismatch.
 	// +listType=map
 	// +listMapKey=check
 	// +optional
@@ -916,6 +915,10 @@ type MigrationStatus struct {
 	// nativeDataJobUID pins the successfully created native data helper before capture or rejoin.
 	// +optional
 	NativeDataJobUID string `json:"nativeDataJobUID,omitempty"`
+
+	// nativeFinalizedJobUID records historical workflow finalization, not replication completion authority.
+	// +optional
+	NativeFinalizedJobUID string `json:"nativeFinalizedJobUID,omitempty"`
 
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
