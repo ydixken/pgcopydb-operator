@@ -302,11 +302,14 @@ func TestNativeCloneArgsKeepsConnectionsOutOfArgv(t *testing.T) {
 }
 
 func TestNativeCleanupArgsRefusesMissingOwnedState(t *testing.T) {
-	for _, m := range []*v1beta1.Migration{nil, nativeMigration(), {Spec: v1beta1.MigrationSpec{}}} {
-		if m != nil {
-			m.Status.Replication = &v1beta1.ReplicationStatus{SlotName: "legacy-name"}
-		}
-		if args, err := nativeCleanupArgs(m); err == nil || args != nil {
+	m, pvc := nativeIdentityObjects()
+	m.Status.Replication = &v1beta1.ReplicationStatus{SlotName: "legacy-name"}
+	work, err := nativeWorkIdentity(m, pvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range []native.WorkIdentity{{}, work} {
+		if args, err := nativeCleanupArgs(identity, native.AdmittedOwnedState{}); err == nil || args != nil {
 			t.Fatalf("cleanup without independently owned state = %q, %v", args, err)
 		}
 	}

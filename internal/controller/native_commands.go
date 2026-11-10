@@ -101,12 +101,3 @@ func nativeCloneArgs(m *v1beta1.Migration, attempt int32) ([]string, error) {
 	}
 	return args, nil
 }
-
-//nolint:unparam // Cleanup intentionally refuses until independent owned-state admission exists.
-func nativeCleanupArgs(m *v1beta1.Migration) ([]string, error) {
-	if _, err := backendFor(m); err != nil {
-		return nil, err
-	}
-	// Migration status cannot prove the engine-owned resource inventory required for cleanup.
-	return nil, errors.New("native cleanup requires independently admitted owned state")
-}
