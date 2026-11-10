@@ -17,12 +17,12 @@ import (
 
 // The caller supplies fresh catch-up eligibility and user cutover policy; this method only freezes E.
 func (r *MigrationReconciler) persistNativeEnd(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, control *native.Client) (ctrl.Result, error) {
-	if r.Client == nil || control == nil || m == nil || !followEnabled(m) || ctx.Err() != nil {
+	if r.Client == nil || control == nil || m == nil || worker == nil || pvc == nil || !followEnabled(m) || ctx.Err() != nil || !native.NativeReceiptsMatch(m, worker.UID, pvc.UID) {
 		return ctrl.Result{}, errNativeControlAdmission
 	}
 	facts, err := r.admitNativeControlFacts(ctx, m, worker, pvc)
-	if err != nil {
-		return ctrl.Result{}, err
+	if err != nil || !native.NativeReceiptsMatch(facts.migration, facts.worker.UID, facts.pvc.UID) {
+		return ctrl.Result{}, errNativeControlAdmission
 	}
 	if facts.migration.ResourceVersion != m.ResourceVersion {
 		return ctrl.Result{}, nativeControlConflict()
@@ -38,8 +38,8 @@ func (r *MigrationReconciler) persistNativeEnd(ctx context.Context, m *v1beta1.M
 		return ctrl.Result{}, native.ErrNativeControlUnavailable
 	}
 	after, err := r.nativeControlFacts(ctx, m, worker, pvc, facts.data.OperationID)
-	if err != nil {
-		return ctrl.Result{}, err
+	if err != nil || !native.NativeReceiptsMatch(after.migration, after.worker.UID, after.pvc.UID) {
+		return ctrl.Result{}, errNativeControlAdmission
 	}
 	if !sameNativeControlFacts(facts, after) || after.migration.ResourceVersion != facts.migration.ResourceVersion {
 		return ctrl.Result{}, nativeControlConflict()
@@ -57,12 +57,12 @@ func (r *MigrationReconciler) persistNativeEnd(ctx context.Context, m *v1beta1.M
 }
 
 func (r *MigrationReconciler) setNativePersistedEnd(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, control *native.Client) ([]byte, error) {
-	if control == nil || m == nil || !followEnabled(m) {
+	if control == nil || m == nil || worker == nil || pvc == nil || !followEnabled(m) || !native.NativeReceiptsMatch(m, worker.UID, pvc.UID) {
 		return nil, errNativeControlAdmission
 	}
 	before, end, err := r.nativePersistedEndFacts(ctx, m, worker, pvc)
-	if err != nil {
-		return nil, err
+	if err != nil || !native.NativeReceiptsMatch(before.migration, before.worker.UID, before.pvc.UID) {
+		return nil, errNativeControlAdmission
 	}
 	if before.migration.ResourceVersion != m.ResourceVersion {
 		return nil, nativeControlConflict()
@@ -70,7 +70,7 @@ func (r *MigrationReconciler) setNativePersistedEnd(ctx context.Context, m *v1be
 	raw, callErr := control.SetEndpos(ctx, before.data, end)
 	after, sameEnd, readErr := r.nativePersistedEndFacts(ctx, m, worker, pvc)
 	after.data.OperationID = before.data.OperationID
-	if readErr != nil || end != sameEnd || !sameNativeControlFacts(before, after) || after.migration.ResourceVersion != before.migration.ResourceVersion || ctx.Err() != nil {
+	if readErr != nil || !native.NativeReceiptsMatch(after.migration, after.worker.UID, after.pvc.UID) || end != sameEnd || !sameNativeControlFacts(before, after) || after.migration.ResourceVersion != before.migration.ResourceVersion || ctx.Err() != nil {
 		return nil, native.ErrNativeSetEndposUnknownEffect
 	}
 	if callErr != nil {
@@ -105,7 +105,9 @@ func (r *MigrationReconciler) updateNativeStatus(ctx context.Context, m, base *v
 }
 
 func nativeControlStatusIdentity(a, b *v1beta1.Migration) bool {
-	return a.UID != "" && a.UID == b.UID && a.Name == b.Name && a.Namespace == b.Namespace && a.Generation > 0 && a.Generation == b.Generation && a.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && apiequality.Semantic.DeepEqual(a.Spec, b.Spec)
+	return a != nil && b != nil && a.UID != "" && a.UID == b.UID && a.Name == b.Name && a.Namespace == b.Namespace && a.Generation > 0 && a.Generation == b.Generation && a.Spec.Engine == v1beta1.MigrationEngineRPGMigrate &&
+		a.Status.NativeJobUID == b.Status.NativeJobUID && a.Status.NativePVCUID == b.Status.NativePVCUID &&
+		a.Status.NativeSchemaJobUID == b.Status.NativeSchemaJobUID && a.Status.NativeDataJobUID == b.Status.NativeDataJobUID && apiequality.Semantic.DeepEqual(a.Spec, b.Spec)
 }
 
 func (r *MigrationReconciler) patchNativeControlStatus(ctx context.Context, m, base *v1beta1.Migration) error {

@@ -145,6 +145,8 @@ type MigrationReconciler struct {
 
 	// Native evidence requires an uncached Reader and an explicit native image.
 	NativeEvidence        *native.Reader
+	NativeControl         *native.Client
+	NativeJobs            NativeJobReader
 	RPGMigrateRunnerImage string
 
 	// Sentinel drives follow migrations; nil disables follow handling.
