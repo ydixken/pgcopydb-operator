@@ -49,10 +49,21 @@ def prepare(t):
     return control, row
 
 
+def candidate(t):
+    _, model, _, _ = I.FIXTURE.candidate_fixture(t.root.stat())
+    t.value['format_version'] = 9
+    t.value['target_provenance'] = model['target_provenance']
+    plan = t.value['clone_state']['plan']
+    plan['copy_policy'] = model['clone_state']['plan']['copy_policy']
+    plan['copy_tables'] = [dict(source_oid=item['source_oid'], format='text', parts=[dict(number=1, count=1, start_block=0, end_block=None)]) for item in sorted(plan['tables'], key=lambda item:item['source_oid'])]
+    t.write()
+
+
 class Sessions:
     def __init__(self, state, fault=None):
         self.state, self.fault, self.events = state, fault, []
-        _, _, _, self.row = I.FIXTURE.private_fixture(os.stat(HERE))
+        fixture = I.FIXTURE.candidate_fixture if state.manifest['format_version'] == 9 else I.FIXTURE.private_fixture
+        _, _, _, self.row = fixture(os.stat(HERE))
         self.row[24] = json.dumps(dict(binding=state.manifest['follow_state']['binding'], operator=state.manifest['operator'], origin_name=None))
         clone = json.loads(self.row[22]); clone['table_count'] = len(state.manifest['clone_state']['plan']['tables'])
         self.row[22] = json.dumps(clone)
@@ -163,27 +174,30 @@ class CleanedTests(unittest.TestCase):
 
     def test_Observe(self):
         observe = self.required('observe_cleaned')
-        with tree() as t:
-            prepare(t); state = S['CleanedState'](t.req)
-            material = types.SimpleNamespace(connection=lambda role: role.encode(), check=lambda: None)
-            try:
-                sessions = Sessions(state)
-                with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
-                self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
-                self.assertEqual(sessions.events[-1], ('close', b'source', True))
-                self.assertEqual(sessions.sources, 3)
-                target = next(i for i,e in enumerate(sessions.events) if e == ('open', b'target'))
-                self.assertIn(('close', b'source', True), sessions.events[:target])
-                queries = [e for e in sessions.events if e[0] == 'query']
-                self.assertFalse(any(word in e[2].lower() for e in queries for word in ['pg_current_wal', 'pg_create', 'pg_drop', 'drop publication', 'create publication']))
-                updates = [e for e in queries if e[2].startswith('UPDATE ONLY ')]
-                self.assertEqual(len(updates), 1); self.assertEqual(len(updates[0][3]), 29)
-                self.assertEqual(updates[0][3], sessions.row)
-                self.assertEqual(sessions.next_backend, 104)
-                for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
-                    sessions = Sessions(state, mode)
-                    with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
-            finally: state.close()
+        for candidate_format in (False, True):
+            with tree() as t:
+                prepare(t)
+                if candidate_format: candidate(t)
+                state = S['CleanedState'](t.req)
+                material = types.SimpleNamespace(connection=lambda role: role.encode(), check=lambda: None)
+                try:
+                    sessions = Sessions(state)
+                    with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
+                    self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
+                    self.assertEqual(sessions.events[-1], ('close', b'source', True))
+                    self.assertEqual(sessions.sources, 3)
+                    target = next(i for i,e in enumerate(sessions.events) if e == ('open', b'target'))
+                    self.assertIn(('close', b'source', True), sessions.events[:target])
+                    queries = [e for e in sessions.events if e[0] == 'query']
+                    self.assertFalse(any(word in e[2].lower() for e in queries for word in ['pg_current_wal', 'pg_create', 'pg_drop', 'drop publication', 'create publication']))
+                    updates = [e for e in queries if e[2].startswith('UPDATE ONLY ')]
+                    self.assertEqual(len(updates), 1); self.assertEqual(len(updates[0][3]), 29)
+                    self.assertEqual(updates[0][3], sessions.row)
+                    self.assertEqual(sessions.next_backend, 104)
+                    for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
+                        sessions = Sessions(state, mode)
+                        with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                finally: state.close()
 
     def test_StateReplacement(self):
         cls = self.required('CleanedState')

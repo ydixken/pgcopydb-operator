@@ -67,6 +67,22 @@ def private_fixture(directory_info):
     return req,manifest,endpos,row
 
 
+
+def candidate_fixture(info):
+    req, manifest, endpos, row = private_fixture(info)
+    manifest['format_version'] = 9
+    target = manifest['target_provenance'][0]['record']
+    target['intent']['binding']['metadata_version'] = 7
+    target.update(large_object_table_oid=78, large_object_index_oid=79)
+    plan = manifest['clone_state']['plan']
+    plan.update(copy_policy=dict(use_copy_binary=True, split_tables_larger_than=536870912, split_max_parts=8, skip_large_objects=False), copy_tables=[])
+    row[1] = '7'
+    control = json.loads(row[22])
+    control.update(prepared_generation=None, large_objects=dict(generation=1, initial=dict(objects=0, bytes=0), final_sync=dict(objects=0, bytes=0)))
+    row[22] = json.dumps(control)
+    return req, manifest, endpos, row
+
+
 def response(value,raw):
     digest,execution=P.request_digests(raw)
     return dict(version=1,kind='completed_evidence',operation_id=value['operation_id'],request_sha256=digest,program_sha256=value['program_sha256'],execution_sha256=execution,work=value['execution']['work'],checkpoint=dict(checkpoint_id='1:0:7',certified_lsn='0/10',durable_replay_lsn='0/10',drain_end_lsn='0/20',drain_replay_lsn='0/30',drain_kind='later_begin',barrier_confirmed=True),resources=[dict(kind='workdir',name='/work/pgcopydb',owned=True,retain=True)],guards=P.GUARDS,source_closed=True,target_closed=True,private_closed=True,diagnostics_clean=True)
@@ -1043,6 +1059,18 @@ class NativePythonTests(unittest.TestCase):
         columns=json.loads((base/'native_columns.json').read_bytes())['checkpoint']
         self.assertEqual(P.COLUMNS,[(c['name'],c['type']) for c in columns])
 
+        inventory=json.loads((base/'native_m8_source_manifest.json').read_bytes())
+        self.assertEqual((inventory['native_format'],inventory['metadata_version']),(9,7))
+        self.assertEqual(inventory['source_commit'],'daeac05a3360defab2671f41e60493bc8168838d')
+        self.assertEqual(inventory['source_sha256'],'1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1')
+        for name,digest in inventory['files'].items(): self.assertEqual(hashlib.sha256((base/name).read_bytes()).hexdigest(),digest)
+        for major in (16,18):
+            for kind,marker in (('catalog',False),('marker_catalog',True),('large_object_catalog','large_object')):
+                expected=' '.join(line.strip() for line in (base/f'native_m8_{kind}_{major}.sql').read_text().splitlines() if not line.startswith('--'))
+                self.assertEqual(P.catalog_sql(marker,major,7),expected)
+        for version in (5,8,True,7.0):
+            with self.subTest(version=version),self.assertRaises(P.Refusal): P.catalog_sql(False,16,version)
+
     def test_RuntimeMetadata(self):
         value=dict(version=1,architecture='arm64',library_path='/usr/lib/aarch64-linux-gnu/libpq.so.5.18',library_sha256='a'*64,libpq_version=180006,package_name='libpq5',package_version='18.6-1.pgdg13+1')
         self.assertEqual(P.runtime_metadata(value,'aarch64'),value['library_path'])
@@ -1175,6 +1203,78 @@ class NativePythonTests(unittest.TestCase):
             for key,bad in [('sealed',False),('sealed',1),('end_lsn',33),('version',True)]:
                 with self.subTest(key=key), self.assertRaises(P.Refusal): P.validate_control(dict(endpos,**{key:bad}),manifest,req)
 
+        from types import SimpleNamespace
+        req, candidate, endpos, row = candidate_fixture(os.stat(HERE))
+        target = P.validate_manifest(candidate, req, os.stat(HERE))
+        state = SimpleNamespace(manifest=candidate, target=target, req=req)
+        self.assertEqual(P.validate_control_row(row, state)['drain_end_lsn'], '0/20')
+        self.assertEqual(P.validate_source_manifest(candidate, req, os.stat(HERE))[3], 'fe1781120b07a00ef1128150a37c78e97584c53d585ee972367ff67a745f9b59')
+        for version, metadata in ((8, 7), (9, 6), (10, 7), (999, 7), (True, 7), (9.0, 7), (9, True), (9, 7.0)):
+            changed = copy.deepcopy(candidate); changed['format_version'] = version
+            changed['target_provenance'][0]['record']['intent']['binding']['metadata_version'] = metadata
+            for validate in (P.validate_manifest, P.validate_source_manifest):
+                with self.subTest(version=version, metadata=metadata), self.assertRaises(P.Refusal): validate(changed, req, os.stat(HERE))
+        for key in ('large_object_table_oid', 'large_object_index_oid'):
+            for value in (0, 55, 66, 77, 78, True):
+                if key == 'large_object_table_oid' and value == 78: continue
+                changed = copy.deepcopy(candidate); changed['target_provenance'][0]['record'][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+            changed = copy.deepcopy(candidate); del changed['target_provenance'][0]['record'][key]
+            with self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+        for key in ('copy_policy', 'copy_tables'):
+            changed = copy.deepcopy(candidate); del changed['clone_state']['plan'][key]
+            with self.assertRaises(P.Refusal): P.validate_manifest(changed, req, os.stat(HERE))
+        populated=copy.deepcopy(candidate);clone=populated['clone_state'];plan=clone['plan']
+        table=dict(source_oid=101,name=dict(schema='public',table='records'),writable_columns=['id'],all_columns=['id'],identity_modes=[0],partition_identity_modes=None)
+        plan['tables']=[table]
+        plan['copy_tables']=[dict(source_oid=101,format='binary',parts=[dict(number=1,count=2,start_block=0,end_block=10),dict(number=2,count=2,start_block=10,end_block=None)])]
+        clone['owned_objects']=[dict(class_oid=1259,object_oid=102,object_sub_id=0,namespace_oid=103,namespace_name='public',name='records',kind='r',owner_oid=33)]
+        clone['owned_tables']=[dict(table=table,target_oid=102,target_namespace_oid=103,target_owner_oid=33,generation=1)]
+        self.assertEqual(P.validate_manifest(populated,req,os.stat(HERE)),target)
+        self.assertEqual(P.validate_source_manifest(populated,req,os.stat(HERE))[3],P.validate_source_manifest(candidate,req,os.stat(HERE))[3])
+        for format in ('text','binary'):
+            singleton=copy.deepcopy(plan);singleton['copy_tables'][0].update(format=format,parts=[dict(number=1,count=1,start_block=0,end_block=None)])
+            P.copy_profile(singleton,9)
+        bad_profiles=[lambda p:p.update(copy_tables=[]),lambda p:p['copy_tables'].append(copy.deepcopy(p['copy_tables'][0])),lambda p:p['copy_tables'][0].update(source_oid=999),lambda p:p['copy_tables'][0].update(format='unknown'),lambda p:p['copy_tables'][0].update(parts=[]),lambda p:p['copy_tables'][0]['parts'][0].update(number=True),lambda p:p['copy_tables'][0]['parts'][0].update(count=1),lambda p:p['copy_tables'][0]['parts'][0].update(start_block=1),lambda p:p['copy_tables'][0]['parts'][0].update(end_block=None),lambda p:p['copy_tables'][0]['parts'][0].update(end_block=0),lambda p:p['copy_tables'][0]['parts'][1].update(start_block=9),lambda p:p['copy_tables'][0]['parts'][1].update(end_block=11),lambda p:p['copy_tables'][0]['parts'][1].pop('end_block'),lambda p:p['copy_policy'].update(use_copy_binary=False),lambda p:p['copy_policy'].update(split_max_parts=1),lambda p:p['copy_policy'].update(split_max_parts=0),lambda p:p['copy_policy'].update(split_max_parts=2**31),lambda p:p['copy_policy'].update(split_tables_larger_than=0),lambda p:p['copy_policy'].update(skip_large_objects=1)]
+        for mutate in bad_profiles:
+            changed=copy.deepcopy(populated);mutate(changed['clone_state']['plan'])
+            for validate in (P.validate_manifest,P.validate_source_manifest):
+                with self.subTest(mutate=mutate),self.assertRaises(P.Refusal):validate(changed,req,os.stat(HERE))
+        boundary=copy.deepcopy(plan);boundary['copy_policy']['split_max_parts']=4096
+        boundary['copy_tables'][0]['parts']=[dict(number=i+1,count=4096,start_block=i,end_block=i+1 if i<4095 else None) for i in range(4096)]
+        P.copy_profile(boundary,9)
+        boundary['copy_tables'][0]['parts'].append(dict(number=4097,count=4097,start_block=4096,end_block=None))
+        with self.assertRaises(P.Refusal):P.copy_profile(boundary,9)
+        ordered=copy.deepcopy(plan);second=copy.deepcopy(table);second['source_oid']=104;second['name']['table']='other'
+        ordered['tables'].append(second);execution=copy.deepcopy(ordered['copy_tables'][0]);execution['source_oid']=104;ordered['copy_tables'].append(execution)
+        P.copy_profile(ordered,9);ordered['copy_tables'].reverse()
+        with self.assertRaises(P.Refusal):P.copy_profile(ordered,9)
+        controls = [dict(prepared_generation=2), dict(prepared_generation=True), dict(large_objects=dict(generation=2, initial=dict(objects=0, bytes=0), final_sync=dict(objects=0, bytes=0))), dict(large_objects=dict(generation=1, initial=None, final_sync=dict(objects=0, bytes=0))), dict(large_objects=dict(generation=1, initial=dict(objects=True, bytes=0), final_sync=dict(objects=0, bytes=0)))]
+        for updates in controls:
+            changed = list(row); changed[22] = json.dumps(dict(json.loads(row[22]), **updates))
+            with self.subTest(control=updates), self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
+        for key in ('prepared_generation', 'large_objects'):
+            changed = list(row); control = json.loads(row[22]); del control[key]; changed[22] = json.dumps(control)
+            with self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
+        control=json.loads(row[22]);control['large_objects']['initial']=dict(objects=2,bytes=2**64-1);control['large_objects']['final_sync']=dict(objects=3,bytes=17)
+        changed=list(row);changed[22]=json.dumps(control);P.validate_control_row(changed,state)
+        for value in (dict(objects=2**64,bytes=0),dict(objects=0,bytes=-1),dict(objects=0,bytes=0,extra=True)):
+            changed=list(row);control=json.loads(row[22]);control['large_objects']['initial']=value;changed[22]=json.dumps(control)
+            with self.subTest(receipt=value),self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        control=json.loads(row[22]);control['prepared_generation']=1
+        changed=list(row);changed[22]=json.dumps(control);P.validate_control_row(changed,state)
+        skipped=copy.deepcopy(candidate);skipped['clone_state']['plan']['copy_policy']['skip_large_objects']=True
+        skip_state=SimpleNamespace(manifest=skipped,target=target,req=req)
+        with self.assertRaises(P.Refusal):P.validate_control_row(row,skip_state)
+        control['large_objects'].update(initial=None,final_sync=None);changed[22]=json.dumps(control)
+        P.validate_control_row(changed,skip_state)
+        with self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        for key in ('initial','final_sync'):
+            control=json.loads(row[22]);del control['large_objects'][key];changed=list(row);changed[22]=json.dumps(control)
+            with self.assertRaises(P.Refusal):P.validate_control_row(changed,state)
+        changed = list(row); changed[1] = '6'
+        with self.assertRaises(P.Refusal): P.validate_control_row(changed, state)
+
     def test_DescriptorMutation(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'private'; path.write_bytes(b'original'); path.chmod(0o600)
@@ -1201,7 +1301,7 @@ class NativePythonTests(unittest.TestCase):
         req,manifest,endpos,row=private_fixture(os.stat(HERE))
         state=SimpleNamespace(req=req,manifest=manifest,target=manifest['target_provenance'][0]['record'],revalidate=lambda:None)
         materials=SimpleNamespace(connection=lambda role:role.encode(),check=lambda:None)
-        events=[]; fault=[None]
+        events=[]; fault=[None]; catalogs=[]; locks=[]
         class Session:
             def __init__(self,library,conninfo,deadline,diag):
                 self.role=conninfo; self.backend=23; self.props={'PQuser':b'fixture','PQdb':b'database','ssl':0}
@@ -1211,6 +1311,8 @@ class NativePythonTests(unittest.TestCase):
             def quote(self,value): return '"'+value+'"'
             def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
                 events.append(('query',self.role,tag))
+                if sql.startswith(('SELECT n.nspowner','SELECT c.relnamespace')): catalogs.append((sql,params))
+                if sql.startswith('LOCK TABLE ONLY'): locks.append(sql)
                 if commit and fault[0]=='unknown_commit': raise P.Refusal('unknown_commit')
                 if not rows: return []
                 if width==6: return [[b'123',b'11',b'1',b't',b'23',b'160006']]
@@ -1232,6 +1334,15 @@ class NativePythonTests(unittest.TestCase):
                 with self.assertRaises(P.Refusal) as error: P.observe(state,None,materials,time.monotonic()+25,None)
                 self.assertEqual(error.exception.error_class,want)
                 self.assertEqual(events[-1],('close',b'target',False))
+
+            events.clear(); catalogs.clear(); locks.clear(); fault[0]=None
+            req,manifest,endpos,row=candidate_fixture(os.stat(HERE))
+            state=SimpleNamespace(req=req,manifest=manifest,target=manifest['target_provenance'][0]['record'],revalidate=lambda:None)
+            checkpoint,guards=P.observe(state,None,materials,time.monotonic()+25,None)
+            self.assertEqual(guards,P.GUARDS)
+            self.assertEqual([params for _,params in catalogs],[(44,55,22,33,'_rpgmigrate_'+req['execution']['work']['run_id'],'checkpoint',66,77,78,79),(66,77,44,33),(78,79,44,33)])
+            self.assertEqual([sql for sql,_ in catalogs],[P.catalog_sql(kind,18,7) for kind in (False,True,'large_object')])
+            self.assertEqual(len(locks),3);self.assertIn('"large_object_done"',locks[-1])
 
     def test_NoSQLBeforeAdmission(self):
         raw=json.dumps(dict(request(),version=True)).encode()
