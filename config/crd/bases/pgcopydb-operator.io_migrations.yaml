@@ -2226,6 +2226,14 @@ spec:
               jobName:
                 description: jobName is the current worker Job.
                 type: string
+              nativeJobUID:
+                description: nativeJobUID binds native execution to the recorded worker
+                  Job incarnation.
+                type: string
+              nativePVCUID:
+                description: nativePVCUID binds native execution to the recorded work
+                  PVC incarnation.
+                type: string
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.
                 format: int64
@@ -4748,6 +4756,14 @@ spec:
                 type: integer
               jobName:
                 description: jobName is the current worker Job.
+                type: string
+              nativeJobUID:
+                description: nativeJobUID binds native execution to the recorded worker
+                  Job incarnation.
+                type: string
+              nativePVCUID:
+                description: nativePVCUID binds native execution to the recorded work
+                  PVC incarnation.
                 type: string
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.

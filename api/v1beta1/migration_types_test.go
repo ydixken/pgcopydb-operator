@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -175,9 +176,11 @@ func fullMigration() *Migration {
 					Elapsed: &metav1.Duration{Duration: 10 * time.Second},
 				}},
 			}},
-			JobName:     "full-run-2",
-			StartedAt:   &now,
-			CompletedAt: &now,
+			JobName:      "full-run-2",
+			NativeJobUID: "worker-job-uid",
+			NativePVCUID: "work-pvc-uid",
+			StartedAt:    &now,
+			CompletedAt:  &now,
 		},
 	}
 }
@@ -386,4 +389,36 @@ func jsonTags(typ reflect.Type) []string {
 		tags = append(tags, strings.Split(field.Tag.Get("json"), ",")[0])
 	}
 	return tags
+}
+
+func TestNativeIdentityReceiptJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status MigrationStatus
+		want   string
+	}{
+		{name: "omitted", want: `{}`},
+		{
+			name:   "recorded",
+			status: MigrationStatus{JobName: "worker", NativeJobUID: "job-uid", NativePVCUID: "pvc-uid"},
+			want:   `{"jobName":"worker","nativeJobUID":"job-uid","nativePVCUID":"pvc-uid"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != tc.want {
+				t.Fatalf("status JSON = %s, want %s", raw, tc.want)
+			}
+			var roundTrip MigrationStatus
+			if err := json.Unmarshal(raw, &roundTrip); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(roundTrip, tc.status) {
+				t.Fatalf("status round trip = %#v, want %#v", roundTrip, tc.status)
+			}
+		})
+	}
 }

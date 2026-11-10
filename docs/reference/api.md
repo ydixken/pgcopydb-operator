@@ -326,6 +326,8 @@ _Appears in:_
 | `verificationRehearsal` _[VerificationRehearsalStatus](#verificationrehearsalstatus)_ | verificationRehearsal reports the latest spec.verification.rehearsal run. |  | Optional: \{\} <br /> |
 | `verificationProgress` _[VerificationProgress](#verificationprogress) array_ | verificationProgress holds the latest compare data progress sample of each<br />kind of run. An item stays after its run ends, until the next run of that kind starts. |  | Optional: \{\} <br /> |
 | `jobName` _string_ | jobName is the current worker Job. |  | Optional: \{\} <br /> |
+| `nativeJobUID` _string_ | nativeJobUID binds native execution to the recorded worker Job incarnation. |  | Optional: \{\} <br /> |
+| `nativePVCUID` _string_ | nativePVCUID binds native execution to the recorded work PVC incarnation. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 

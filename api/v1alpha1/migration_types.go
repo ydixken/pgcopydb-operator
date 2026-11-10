@@ -901,6 +901,14 @@ type MigrationStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// nativeJobUID binds native execution to the recorded worker Job incarnation.
+	// +optional
+	NativeJobUID string `json:"nativeJobUID,omitempty"`
+
+	// nativePVCUID binds native execution to the recorded work PVC incarnation.
+	// +optional
+	NativePVCUID string `json:"nativePVCUID,omitempty"`
+
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 	// +optional
