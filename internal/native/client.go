@@ -63,7 +63,7 @@ func (c *Client) sourceObservation(ctx context.Context, m *v1beta1.Migration, w 
 }
 
 func sourceMigrationMatches(m *v1beta1.Migration, w ExecutionData) bool {
-	return activeRoleWorker(w) && m != nil && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && m.Status.Attempts == w.Attempt && m.Status.JobName == w.JobName
+	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && activeRoleWorker(w) && m != nil && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && m.Status.Attempts == w.Attempt && m.Status.JobName == w.JobName
 }
 
 // Recovery reads startup materialization without replaying its file-writing prelude.

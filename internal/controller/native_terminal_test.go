@@ -55,6 +55,7 @@ func nativeTerminalTestFixture(t *testing.T) (*lifecycleAPI, *MigrationReconcile
 	}
 	j.UID, j.Status = s.worker.UID, s.worker.Status
 	s.worker = j
+	s.migration.Status.NativeJobUID, s.migration.Status.NativePVCUID = string(j.UID), string(s.pvc.UID)
 	s.extraPods = []corev1.Pod{*nativeRecoveryTestPod(j, 0)}
 	originalHandler := s.Config.Handler
 	s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -109,7 +109,7 @@ func validateRetryObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.Per
 }
 
 func retryMigrationMatches(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job) bool {
-	return m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !m.Spec.Suspend && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
+	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.DeletionTimestamp.IsZero() && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !m.Spec.Suspend && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
 }
 
 func retryPVCMatches(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) bool {

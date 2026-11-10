@@ -191,6 +191,8 @@ func buildNativeWorkerJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 	if err != nil {
 		return nil, errors.New("native worker connection materialization invalid")
 	}
+	// Final native proof and cleanup still need the original Job and Pod after exit.
+	job.Spec.TTLSecondsAfterFinished = nil
 	pod := &job.Spec.Template.Spec
 	automount := false
 	pod.AutomountServiceAccountToken = &automount

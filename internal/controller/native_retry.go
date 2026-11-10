@@ -7,10 +7,12 @@ import (
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -33,7 +35,8 @@ func (r *MigrationReconciler) nativeRecoveryMigration(ctx context.Context, expec
 		!apiequality.Semantic.DeepEqual(live.Labels, expected.Labels) || !apiequality.Semantic.DeepEqual(live.Annotations, expected.Annotations) ||
 		!apiequality.Semantic.DeepEqual(live.DeletionTimestamp, expected.DeletionTimestamp) ||
 		live.Status.Attempts < 1 || live.Status.JobName != jobName(live, live.Status.Attempts) ||
-		!nativeRecoveryPVCMatches(expectedPVC, pvc) {
+		!nativeRecoveryPVCMatches(expectedPVC, pvc) ||
+		!native.NativeReceiptsMatch(live, types.UID(expected.Status.NativeJobUID), pvc.UID) {
 		return nil, nil, errNativeRecovery
 	}
 	if rep := live.Status.Replication; rep != nil && rep.Endpos != "" {
@@ -55,7 +58,7 @@ func nativeRecoveryPVCMatches(expected, pvc *corev1.PersistentVolumeClaim) bool 
 }
 
 func (r *MigrationReconciler) nativeRecoveryCurrent(ctx context.Context, expected *v1beta1.Migration, expectedWorker *batchv1.Job, expectedPVC *corev1.PersistentVolumeClaim) (*v1beta1.Migration, *batchv1.Job, *corev1.PersistentVolumeClaim, error) {
-	if expectedWorker == nil || expectedWorker.UID == "" || r.Scheme == nil {
+	if expectedWorker == nil || expectedWorker.UID == "" || expected == nil || expected.Status.NativeJobUID != string(expectedWorker.UID) || r.Scheme == nil {
 		return nil, nil, nil, errNativeRecovery
 	}
 	live, pvc, err := r.nativeRecoveryMigration(ctx, expected, expectedPVC)

@@ -110,7 +110,7 @@ func validateOwnedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.Per
 }
 
 func ownedMigrationMatches(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job) bool {
-	return m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && !m.Spec.Clone.AllDatabases && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
+	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && !m.Spec.Clone.AllDatabases && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
 }
 
 func ownedHelperPodIdentity(w ExecutionData, job *batchv1.Job, pod *corev1.Pod) bool {

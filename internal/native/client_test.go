@@ -48,7 +48,7 @@ func newSourceAPI(t *testing.T) (*sourceAPI, *Client) {
 	w.Container.TemplateSHA256 = w.TemplateSHA256
 	w.Container.ExecutionSHA256 = podexec.NativeExecutionSHA256(job.Spec.Template)
 	pod := &corev1.Pod{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"}, ObjectMeta: metav1.ObjectMeta{Namespace: w.Namespace, Name: w.PodName, UID: w.Container.PodUID, OwnerReferences: []metav1.OwnerReference{{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: sourceJobKind, Name: w.JobName, UID: w.JobUID, Controller: &controller}}}, Spec: *job.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: nativeContainerName, Image: w.ImageRef, ImageID: w.PlatformImageID, ContainerID: w.Container.ContainerID, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}
-	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: w.Namespace, Name: w.MigrationName, UID: w.MigrationUID, Generation: w.MigrationGeneration}, Spec: v1beta1.MigrationSpec{Engine: v1beta1.MigrationEngineRPGMigrate, Follow: &v1beta1.FollowOptions{Enabled: true}}, Status: v1beta1.MigrationStatus{Attempts: w.Attempt, JobName: w.JobName}}
+	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: w.Namespace, Name: w.MigrationName, UID: w.MigrationUID, Generation: w.MigrationGeneration}, Spec: v1beta1.MigrationSpec{Engine: v1beta1.MigrationEngineRPGMigrate, Follow: &v1beta1.FollowOptions{Enabled: true}}, Status: v1beta1.MigrationStatus{Attempts: w.Attempt, JobName: w.JobName, NativeJobUID: string(w.WorkerJobUID), NativePVCUID: string(w.PVCUID)}}
 	s := &sourceAPI{want: w, migration: m, job: job, pod: pod, t: t}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)

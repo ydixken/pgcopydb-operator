@@ -200,7 +200,7 @@ func (f *workerAttemptFixture) refused(err error, creates, patches int) {
 	if f.r.Sentinel.(*fakeSentinel).callCount() != 0 || f.r.Progress.(*fakeProgress).counts() != 0 || f.r.Logs.(*fakeLogs).calls != 0 {
 		f.t.Fatal("native attempt reached legacy observation or SQL")
 	}
-	if m := f.storedMigration(); m.Status.Attempts != 0 || m.Status.JobName != "" {
+	if m := f.storedMigration(); m.Status.Attempts != 0 || m.Status.JobName != "" || m.Status.NativeJobUID != "" || m.Status.NativePVCUID != "" {
 		f.t.Fatal("refusal recorded an attempt")
 	}
 }
@@ -221,7 +221,7 @@ func TestNativeWorkerDispatch(t *testing.T) {
 			t.Fatal("native first attempt did not create and record once", err)
 		}
 		got := f.storedMigration()
-		if got.Status.Attempts != 1 || got.Status.JobName != jobName(f.m, 1) || got.Status.Progress == nil || got.Status.Progress.TablesDone != 7 {
+		if got.Status.Attempts != 1 || got.Status.JobName != jobName(f.m, 1) || got.Status.NativeJobUID != string(workerServerUID) || got.Status.NativePVCUID != string(f.pvc.UID) || got.Status.Progress == nil || got.Status.Progress.TablesDone != 7 {
 			t.Fatal("status did not preserve final live peer fields")
 		}
 		job := &batchv1.Job{}
@@ -438,13 +438,7 @@ func TestNativeWorkerExistingJobBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
-			if positive {
-				if err != nil || f.creates != 0 || f.patches != 1 || f.storedMigration().Status.Attempts != 1 || len(f.r.Recorder.(*events.FakeRecorder).Events) != 0 {
-					t.Fatal("owned overlap did not record actual Job", err)
-				}
-			} else {
-				f.refused(err, 0, 0)
-			}
+			f.refused(err, 0, 0)
 		})
 	}
 	t.Run("replaced after admission", func(t *testing.T) {
@@ -506,12 +500,7 @@ func TestNativeWorkerCreateUncertainty(t *testing.T) {
 				}
 			}
 			_, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
-			if name == workerOwnedCollisionCase {
-				if err != nil || f.creates != 1 || f.patches != 1 || len(f.r.Recorder.(*events.FakeRecorder).Events) != 0 {
-					t.Fatal("collision did not admit server Job", err)
-				}
-				return
-			}
+
 			patches := 0
 			if name == workerStatusUnavailableCase {
 				patches = 1

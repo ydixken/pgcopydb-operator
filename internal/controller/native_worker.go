@@ -44,6 +44,7 @@ func nativeWorkerMigrationMatches(live, expected *v1beta1.Migration) bool {
 		apiequality.Semantic.DeepEqual(live.Labels, expected.Labels) && apiequality.Semantic.DeepEqual(live.Annotations, expected.Annotations) &&
 		apiequality.Semantic.DeepEqual(live.Spec, expected.Spec) && live.Status.Attempts == 0 &&
 		live.Status.Attempts == expected.Status.Attempts && live.Status.JobName == "" && live.Status.JobName == expected.Status.JobName &&
+		live.Status.NativeJobUID == "" && live.Status.NativePVCUID == "" && expected.Status.NativeJobUID == "" && expected.Status.NativePVCUID == "" &&
 		live.Status.Phase != v1beta1.PhaseCompleted && live.Status.Phase != v1beta1.PhaseFailed && live.Status.Phase != v1beta1.PhaseSuspended &&
 		!meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionComplete) &&
 		!meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionFailed)
@@ -86,24 +87,15 @@ func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v
 	key := types.NamespacedName{Namespace: live.Namespace, Name: expected.Name}
 	actual := &batchv1.Job{}
 	getErr := r.APIReader.Get(ctx, key, actual)
-	created := false
 	switch {
 	case getErr == nil:
+		return ctrl.Result{}, errNativeWorkerAdmission
 	case apierrors.IsNotFound(getErr):
 		if _, _, err := r.nativeWorkerCurrent(ctx, live, pvc); err != nil || ctx.Err() != nil {
 			return ctrl.Result{}, errNativeWorkerAdmission
 		}
 		actual = expected.DeepCopy()
-		createErr := r.Create(ctx, actual)
-		switch {
-		case createErr == nil:
-			created = true
-		case apierrors.IsAlreadyExists(createErr):
-			actual = &batchv1.Job{}
-			if r.APIReader.Get(ctx, key, actual) != nil {
-				return ctrl.Result{}, errNativeWorkerAdmission
-			}
-		default:
+		if createErr := r.Create(ctx, actual); createErr != nil {
 			// An unknown Create outcome supplies no permission to replay or adopt.
 			return ctrl.Result{}, errNativeWorkerAdmission
 		}
@@ -122,7 +114,7 @@ func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v
 		!nativeWorkerJobMatches(current, pvc, expected, confirmed) || ctx.Err() != nil {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
-	return r.recordAttempt(ctx, current, current.DeepCopy(), confirmed, created)
+	return r.recordNativeAttempt(ctx, current, current.DeepCopy(), confirmed, pvc, true)
 }
 
 func nativeWorkerJobMatches(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, expected, actual *batchv1.Job) bool {

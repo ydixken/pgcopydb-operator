@@ -96,6 +96,7 @@ func newNativeControlFixture(t *testing.T) *nativeControlFixture {
 		t.Fatal(err)
 	}
 	worker.UID = nativeControlWorkerUID
+	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
 	worker.Generation = 1
 	worker.TypeMeta = metav1.TypeMeta{APIVersion: batchv1.SchemeGroupVersion.String(), Kind: lifecycleJobKind}
 	if controllerutil.SetControllerReference(m, worker, scheme) != nil {

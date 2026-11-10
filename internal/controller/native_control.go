@@ -98,7 +98,7 @@ func (r *MigrationReconciler) nativeControlFacts(ctx context.Context, m *v1beta1
 	}
 	claim := &corev1.PersistentVolumeClaim{}
 	job := &batchv1.Job{}
-	if !nativeControlObjectsMatch(live, worker, pvc) {
+	if !nativeControlObjectsMatch(live, worker, pvc) || !native.NativeReceiptsMatch(live, worker.UID, pvc.UID) {
 		return nativeControlFacts{}, errNativeControlAdmission
 	}
 	if r.APIReader.Get(ctx, client.ObjectKeyFromObject(pvc), claim) != nil || claim.UID != pvc.UID || claim.Status.Phase != corev1.ClaimBound || !apiequality.Semantic.DeepEqual(claim.Spec, pvc.Spec) || !apiequality.Semantic.DeepEqual(claim.OwnerReferences, pvc.OwnerReferences) {

@@ -287,7 +287,7 @@ func TestNativeWorkerJobProgram(t *testing.T) {
 	assertNativeEvidencePodIsolation(t, pod)
 	assertNativeEvidencePodSecurity(t, pod)
 	assertNativeEvidenceContainerIsolation(t, c, nativeEvidenceTestImage)
-	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 || job.Spec.ActiveDeadlineSeconds != nil || !reflect.DeepEqual(job.Spec.TTLSecondsAfterFinished, &ttl) {
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 || job.Spec.ActiveDeadlineSeconds != nil || job.Spec.TTLSecondsAfterFinished != nil {
 		t.Fatal("worker inherited retries or a bounded helper deadline")
 	}
 	if !reflect.DeepEqual(c.Resources, pgcopydb.EffectiveRunnerResources(m.Spec.Runner.Resources)) || !reflect.DeepEqual(pod.NodeSelector, m.Spec.Runner.NodeSelector) || !reflect.DeepEqual(pod.Tolerations, m.Spec.Runner.Tolerations) || !reflect.DeepEqual(pod.Affinity, m.Spec.Runner.Affinity) {
@@ -311,6 +311,32 @@ func TestNativeWorkerJobProgram(t *testing.T) {
 		return e.Name == "PGCONNECT_TIMEOUT" || e.Name == "PGCOPYDB_APPLY_GROUP_TXNS"
 	}) {
 		t.Fatal("worker inherited a control-Job timeout or unqualified apply override")
+	}
+}
+
+func TestNativeWorkerTTLRetention(t *testing.T) {
+	zero, finite := int32(0), int32(120)
+	for _, ttl := range []*int32{nil, &zero, &finite} {
+		m, pvc := nativeWorkerJobInputs()
+		m.Spec.TTLSecondsAfterFinished = ttl
+		for _, attempt := range []int32{1, 2} {
+			job, err := buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, attempt)
+			if err != nil || job.Spec.TTLSecondsAfterFinished != nil {
+				t.Fatal("native worker TTL can delete required original execution evidence", err)
+			}
+		}
+		version, err := buildNativeVersionJob(m, nativeEvidenceTestImage, probeTestVersionName)
+		if err != nil || !reflect.DeepEqual(version.Spec.TTLSecondsAfterFinished, ttl) {
+			t.Fatal("native helper TTL changed", err)
+		}
+		m.Spec.Engine = v1beta1.MigrationEnginePGCopyDB
+		legacy, err := buildJob(m, testRunnerImage, 1)
+		if err != nil || !reflect.DeepEqual(legacy.Spec.TTLSecondsAfterFinished, ttl) {
+			t.Fatal("legacy worker TTL changed", err)
+		}
+		if !reflect.DeepEqual(m.Spec.TTLSecondsAfterFinished, ttl) {
+			t.Fatal("native retention changed the selected user TTL")
+		}
 	}
 }
 
