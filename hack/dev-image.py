@@ -43,11 +43,16 @@ FAILURE_REASONS = {
     'COMMAND_FAILED_OR_OUTPUT_LIMIT', 'REGISTRY_AUTHORIZATION_UNAVAILABLE', 'PACKAGE_UNAUTHORIZED',
     'PACKAGE_FORBIDDEN', 'PACKAGE_NOT_FOUND', 'PACKAGE_RATE_LIMITED', 'PACKAGE_HTTP_FAILURE',
     'IO_FAILURE', 'INVALID_TEXT', 'INVALID_VALUE', 'MISSING_FIELD', 'INVALID_TYPE',
+    'SMOKE_CONFIG_ID_INVALID', 'SMOKE_CONFIG_ID_MISMATCH', 'SMOKE_RUNTIME_MISMATCH',
+    'SMOKE_SOURCE_LABELS_MISMATCH', 'SMOKE_HELP_DECLARATIONS_MISSING', 'SMOKE_CONTAINER_ID_INVALID',
+    'SMOKE_EXECUTABLE_INVALID', 'SMOKE_BUILD_METADATA_MISMATCH', 'SMOKE_CLEANUP_FAILED',
 }
 FAILURE_STAGES = {
     'startup', 'source-validation', 'evidence-directory', 'retained-receipt', 'local-verification',
     'trusted-context-and-tools', 'workflow-credential', 'registry-authorization', 'package-and-namespace',
     'tag-lookup', 'retained-graph', 'anonymous-graph', 'retained-identity', 'build-context', 'build',
+    'smoke-image-id', 'smoke-image-inspect', 'smoke-help-run', 'smoke-help-contract', 'smoke-container-create',
+    'smoke-executable-copy', 'smoke-executable-file', 'smoke-build-metadata', 'smoke-cleanup',
     'smoke', 'source-recheck', 'tag-recheck', 'push', 'published-graph', 'anonymous-pull-smoke', 'receipt-write',
 }
 REFUSAL_REASONS = {
@@ -64,7 +69,8 @@ REFUSAL_REASONS = {
 
 
 class Refusal(Exception):
-    def __init__(self, message, *, reason=None):
+    def __init__(self, message, *, reason=None, stage=None):
+        self.stage = stage if stage in FAILURE_STAGES else None
         self.reason = reason if reason in FAILURE_REASONS else REFUSAL_REASONS.get(message, 'VALIDATION_REFUSED')
         super().__init__(message)
 
@@ -459,45 +465,88 @@ def read_private(path):
     return decode(path.read_bytes())
 
 
+def _config_digest(value):
+    if not isinstance(value, str) or not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', value):
+        raise Refusal('invalid complete config image ID', reason='SMOKE_CONFIG_ID_INVALID')
+    return value if value.startswith('sha256:') else 'sha256:' + value
+
+
 def smoke(image_id, source, architecture, directory, *, env=None):
-    if not re.fullmatch(DIGEST, image_id):
-        raise Refusal('smoke requires an immutable image ID')
-    inspect = decode(command(['podman', 'image', 'inspect', image_id], env=env))
-    if (not isinstance(inspect, list) or len(inspect) != 1 or inspect[0].get('Id') != image_id or
-            inspect[0].get('Os') != 'linux' or inspect[0].get('Architecture') != architecture or
-            inspect[0].get('Config', {}).get('User') != '65532:65532' or
-            inspect[0].get('Config', {}).get('Entrypoint') != ['/manager']):
-        raise Refusal('native smoke image identity or runtime configuration mismatch')
-    help_output = command(['podman', 'run', '--rm', '--pull=never', '--network=none', '--read-only', '--cap-drop=ALL',
-                           '--security-opt=no-new-privileges', '--user=65532:65532', '--tmpfs=/tmp:rw,noexec,nosuid,size=16m',
-                           image_id, '--help'], env=env, combined=True)
-    if b'--metrics-bind-address' not in help_output or b'--health-probe-bind-address' not in help_output:
-        raise Refusal('native manager help smoke failed')
-    container = command(['podman', 'create', '--pull=never', '--network=none', image_id], env=env).decode().strip()
-    if not re.fullmatch(r'[0-9a-f]{64}', container):
-        raise Refusal('smoke container identity invalid')
-    binary = directory / 'manager-smoke-binary'
+    stage, container, binary, first_error = 'smoke-image-id', None, None, None
     try:
+        image_id = _config_digest(image_id)
+        stage = 'smoke-image-inspect'
+        inspected = decode(command(['podman', 'image', 'inspect', image_id], env=env))
+        if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+            raise Refusal('invalid native image inspection', reason='SMOKE_RUNTIME_MISMATCH')
+        image = inspected[0]
+        if _config_digest(image.get('Id')) != image_id:
+            raise Refusal('inspected config ID differs', reason='SMOKE_CONFIG_ID_MISMATCH')
+        config = image.get('Config')
+        if (image.get('Os') != 'linux' or image.get('Architecture') != architecture or not isinstance(config, dict) or
+                config.get('User') != '65532:65532' or config.get('Entrypoint') != ['/manager']):
+            raise Refusal('native smoke runtime configuration differs', reason='SMOKE_RUNTIME_MISMATCH')
+        expected_labels = build_labels(source, build_input_sha(source, architecture))
+        if not isinstance(config.get('Labels'), dict) or any(config['Labels'].get(key) != value for key, value in expected_labels.items()):
+            raise Refusal('native smoke source labels differ', reason='SMOKE_SOURCE_LABELS_MISMATCH')
+        stage = 'smoke-help-run'
+        help_output = command(['podman', 'run', '--rm', '--pull=never', '--network=none', '--read-only', '--cap-drop=ALL',
+                               '--security-opt=no-new-privileges', '--user=65532:65532', '--tmpfs=/tmp:rw,noexec,nosuid,size=16m',
+                               image_id, '--help'], env=env, combined=True)
+        stage = 'smoke-help-contract'
+        declarations = set(re.findall(rb'(?m)^[ \t]+-{1,2}(metrics-bind-address|health-probe-bind-address)[ \t]+string[ \t]*$', help_output))
+        if declarations != {b'metrics-bind-address', b'health-probe-bind-address'}:
+            raise Refusal('native manager help declarations missing', reason='SMOKE_HELP_DECLARATIONS_MISSING')
+        stage = 'smoke-container-create'
+        candidate = command(['podman', 'create', '--pull=never', '--network=none', image_id], env=env).decode().strip()
+        if not re.fullmatch(r'[0-9a-f]{64}', candidate):
+            raise Refusal('smoke container identity invalid', reason='SMOKE_CONTAINER_ID_INVALID')
+        container = candidate
+        binary = directory / 'manager-smoke-binary'
+        stage = 'smoke-executable-copy'
         command(['podman', 'cp', container + ':/manager', str(binary)], env=env)
+        stage = 'smoke-executable-file'
         if binary.is_symlink() or not binary.is_file() or binary.stat().st_size > MAX_BLOB:
-            raise Refusal('manager executable is not a bounded regular file')
+            raise Refusal('manager executable is not a bounded regular file', reason='SMOKE_EXECUTABLE_INVALID')
+        stage = 'smoke-build-metadata'
         metadata = command(['go', 'version', '-m', str(binary)], env=env).decode()
         settings = {}
         for line in metadata.splitlines():
             if line.startswith('\tbuild\t') and '=' in line:
                 key, value = line[len('\tbuild\t'):].split('=', 1)
+                if key in settings:
+                    raise Refusal('duplicate manager build setting', reason='SMOKE_BUILD_METADATA_MISMATCH')
                 settings[key] = value.strip('"')
         version = 'm7-' + source['payload_inventory_sha256'][:12]
+        module_found = re.search(r'(?m)^\t(?:mod|dep)\tgithub\.com/ydixken/pgcopydb-operator\t', metadata) is not None
         if (settings.get('GOOS') != 'linux' or settings.get('GOARCH') != architecture or
-                settings.get('CGO_ENABLED') != '0' or settings.get('-ldflags') != '-X main.version=' + version or
-                'github.com/ydixken/pgcopydb-operator' not in metadata):
-            raise Refusal('manager executable build metadata differs from admitted source version')
+                settings.get('CGO_ENABLED') != '0' or settings.get('-ldflags') != '-X main.version=' + version or not module_found):
+            raise Refusal('manager executable build metadata differs', reason='SMOKE_BUILD_METADATA_MISMATCH')
         return dict(schema_version=1, image_id=image_id, os='linux', architecture=architecture,
                     executable_sha256=sha(binary.read_bytes()), source_version=version, help_passed=True,
                     read_only=True, user='65532:65532', network='none', build_info_observed=False)
+    except BaseException as error:
+        # Cleanup must not replace the original failure or cancellation.
+        first_error = error
+        if isinstance(error, Exception):
+            first_error = error if isinstance(error, Refusal) else Refusal('native smoke operation failed', reason=(
+                'IO_FAILURE' if isinstance(error, OSError) else 'VALIDATION_REFUSED'))
+            first_error.stage = stage
+        raise first_error
     finally:
-        command(['podman', 'rm', container], env=env)
-        binary.unlink(missing_ok=True)
+        cleanup_failed = False
+        if container is not None:
+            try:
+                command(['podman', 'rm', container], env=env)
+            except Exception:
+                cleanup_failed = True
+        if binary is not None:
+            try:
+                binary.unlink(missing_ok=True)
+            except OSError:
+                cleanup_failed = True
+        if cleanup_failed and first_error is None:
+            raise Refusal('native smoke cleanup failed', reason='SMOKE_CLEANUP_FAILED', stage='smoke-cleanup')
 
 
 def trusted_context(source, architecture):
@@ -594,8 +643,9 @@ def anonymous_smoke(receipt, source, architecture, directory):
         ref = PACKAGE + '@' + receipt['graph']['manifest_digest']
         command(['podman', 'pull', '--retry=0', '--tls-verify=true', '--authfile', str(auth), ref], timeout=600, env=env)
         observed = decode(command(['podman', 'image', 'inspect', ref], env=env))
-        if not isinstance(observed, list) or len(observed) != 1 or observed[0].get('Id') != receipt['graph']['config_digest']:
-            raise Refusal('anonymous digest pull config identity mismatch')
+        if (not isinstance(observed, list) or len(observed) != 1 or not isinstance(observed[0], dict) or
+                _config_digest(observed[0].get('Id')) != receipt['graph']['config_digest']):
+            raise Refusal('anonymous digest pull config identity mismatch', reason='SMOKE_CONFIG_ID_MISMATCH', stage='smoke-image-inspect')
         return smoke(receipt['graph']['config_digest'], source, architecture, directory, env=env)
 
 
@@ -664,8 +714,8 @@ def publish(args, *, state=None):
         copy_build_context(root, context)
         state['stage'] = 'build'
         command(argv + [str(context)], cwd=root, timeout=2400)
-    state['stage'] = 'smoke'
-    image_id = iid_file.read_text().strip()
+    state['stage'] = 'smoke-image-id'
+    image_id = _config_digest(iid_file.read_text().strip())
     observed = smoke(image_id, source, architecture, directory)
     smoke_sha = sha(canonical(observed))
     write_private(directory / 'smoke-receipt.json', observed)
@@ -728,7 +778,7 @@ def report_failure(args, state, error):
                KeyError: 'MISSING_FIELD', TypeError: 'INVALID_TYPE'}
     reason = error.reason if isinstance(error, Refusal) else next(
         (code for kind, code in reasons.items() if isinstance(error, kind)), 'VALIDATION_REFUSED')
-    stage = state.get('stage', 'startup')
+    stage = error.stage if isinstance(error, Refusal) and error.stage in FAILURE_STAGES else state.get('stage', 'startup')
     receipt = dict(schema_version=1, status='REFUSED', role='manager', architecture=args.architecture,
                    stage=stage if stage in FAILURE_STAGES else 'startup',
                    reason=reason if reason in FAILURE_REASONS else 'VALIDATION_REFUSED')

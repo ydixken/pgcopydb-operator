@@ -287,7 +287,7 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(sorted(path.name for path in output.iterdir()), ['.gitignore', 'Dockerfile'])
 
     def test_help_smoke_accepts_standard_go_stderr_without_logging_it(self):
-        result = subprocess.CompletedProcess([], 0, b'', b'--metrics-bind-address --health-probe-bind-address')
+        result = subprocess.CompletedProcess([], 0, b'', b'  -metrics-bind-address string\n  -health-probe-bind-address string\n')
         with patch.object(M.subprocess, 'run', return_value=result):
             self.assertEqual(M.command(['manager', '--help'], combined=True), result.stderr)
 
@@ -374,28 +374,210 @@ class PublicationTests(unittest.TestCase):
             self.assertFalse(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root))
             with self.assertRaises(M.Refusal): M.source_identity(root)
 
-    def test_native_smoke_binds_binary_metadata_and_does_not_claim_runtime_build_info(self):
+    def manager_smoke_command(self, *, inspected=None, help_output=None, metadata=None, failures=None):
         image_id = digest(self.config)
-        metadata = ('/manager: go1.27.0\n\tmod\tgithub.com/ydixken/pgcopydb-operator\t(devel)\n'
-                    '\tbuild\tGOOS=linux\n\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n'
-                    '\tbuild\t-ldflags="-X main.version=m7-' + self.source['payload_inventory_sha256'][:12] + '"\n').encode()
+        inspected = inspected if inspected is not None else dict(
+            Id=image_id.removeprefix('sha256:'), Digest=digest(self.manifest), Os='linux', Architecture='arm64',
+            Config=dict(User='65532:65532', Entrypoint=['/manager'],
+                        Labels=M.build_labels(self.source, M.build_input_sha(self.source, 'arm64'))))
+        if help_output is None:
+            help_output = (b'Usage of /manager:\n  -health-probe-bind-address string\n'
+                           b'        The address the probe endpoint binds to.\n  -metrics-bind-address string\n'
+                           b'        The address the metrics endpoint binds to.\n')
+        if metadata is None:
+            metadata = ('/manager: go1.27.0\n\tpath\tcommand-line-arguments\n\tdep\tgithub.com/ydixken/pgcopydb-operator\t(devel)\n'
+                        '\tbuild\tGOOS=linux\n\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n'
+                        '\tbuild\t-ldflags="-X main.version=m7-' + self.source['payload_inventory_sha256'][:12] + '"\n').encode()
+        failures = failures or {}
+        events = []
         def fake(argv, **kwargs):
-            if argv[:3] == ['podman', 'image', 'inspect']:
-                return raw([dict(Id=image_id, Os='linux', Architecture='arm64', Config=dict(User='65532:65532', Entrypoint=['/manager']))])
-            if argv[:2] == ['podman', 'run']:
-                self.assertIn('--pull=never', argv); self.assertIn('--read-only', argv)
+            operation = {('podman', 'image', 'inspect'): 'inspect', ('go', 'version', '-m'): 'metadata'}.get(tuple(argv[:3]), argv[1])
+            events.append(operation)
+            if operation in failures: raise failures[operation]
+            if operation == 'inspect': return raw([inspected])
+            if operation == 'run':
+                for flag in ('--pull=never', '--read-only', '--network=none', '--cap-drop=ALL',
+                             '--security-opt=no-new-privileges', '--user=65532:65532'):
+                    self.assertIn(flag, argv)
                 self.assertTrue(kwargs['combined'])
-                return b'--metrics-bind-address --health-probe-bind-address'
-            if argv[:2] == ['podman', 'create']: return b'a' * 64
-            if argv[:2] == ['podman', 'cp']: Path(argv[-1]).write_bytes(b'manager executable')
-            if argv[:3] == ['go', 'version', '-m']: return metadata
+                return help_output
+            if operation == 'create': return b'a' * 64
+            if operation == 'cp': Path(argv[-1]).write_bytes(b'manager executable')
+            if operation == 'metadata': return metadata
             return b''
+        return image_id, fake, events
+
+    def test_native_smoke_binds_binary_metadata_and_does_not_claim_runtime_build_info(self):
+        image_id, fake, events = self.manager_smoke_command()
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
             receipt = M.smoke(image_id, self.source, 'arm64', Path(temporary))
-            self.assertEqual(receipt['executable_sha256'], hashlib.sha256(b'manager executable').hexdigest())
-            self.assertFalse(receipt['build_info_observed'])
-            metadata = metadata.replace(b'GOARCH=arm64', b'GOARCH=amd64')
-            with self.assertRaises(M.Refusal): M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertEqual(receipt['executable_sha256'], hashlib.sha256(b'manager executable').hexdigest())
+        self.assertEqual(receipt['image_id'], image_id)
+        self.assertFalse(receipt['build_info_observed'])
+        self.assertEqual(events, ['inspect', 'run', 'create', 'cp', 'metadata', 'rm'])
+
+    def test_native_smoke_accepts_prefixed_inspect_id_and_standard_go_help(self):
+        inspected = dict(Id=digest(self.config), Os='linux', Architecture='arm64', Config=dict(
+            User='65532:65532', Entrypoint=['/manager'], Labels=M.build_labels(self.source, M.build_input_sha(self.source, 'arm64'))))
+        image_id, fake, _ = self.manager_smoke_command(inspected=inspected)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            self.assertEqual(M.smoke(image_id, self.source, 'arm64', Path(temporary))['image_id'], image_id)
+
+    def test_whole_native_smoke_accepts_exit_zero_help_on_stderr(self):
+        for help_exit_code in (0, 1):
+            image_id, fake, _ = self.manager_smoke_command()
+            def run(argv, **kwargs):
+                payload = fake(argv, combined=True)
+                if argv[:2] == ['podman', 'run']:
+                    return subprocess.CompletedProcess(argv, help_exit_code, b'', payload)
+                return subprocess.CompletedProcess(argv, 0, payload, b'')
+            with self.subTest(help_exit_code=help_exit_code), tempfile.TemporaryDirectory() as temporary, patch.object(M.subprocess, 'run', side_effect=run):
+                if help_exit_code:
+                    with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+                    self.assertEqual(error.exception.stage, 'smoke-help-run')
+                else:
+                    receipt = M.smoke(image_id, self.source, 'arm64', Path(temporary))
+                    self.assertTrue(receipt['help_passed'])
+                    self.assertEqual(receipt['image_id'], image_id)
+
+    def test_config_id_canonicalization_accepts_only_complete_config_ids(self):
+        expected = 'sha256:' + 'a' * 64
+        for value in ('a' * 64, expected):
+            self.assertEqual(M._config_digest(value), expected)
+        for value in ('a' * 63, 'A' * 64, 'sha512:' + 'a' * 64, 'docker://' + expected, None, expected + 'extra'):
+            with self.subTest(value=value), self.assertRaises(M.Refusal): M._config_digest(value)
+
+    def test_native_smoke_refuses_wrong_config_identity_runtime_and_source_labels(self):
+        base = dict(Id=digest(self.config).removeprefix('sha256:'), Digest=digest(self.manifest), Os='linux', Architecture='arm64',
+                    Config=dict(User='65532:65532', Entrypoint=['/manager'],
+                                Labels=M.build_labels(self.source, M.build_input_sha(self.source, 'arm64'))))
+        for change, reason in (({'Id': 'f' * 64, 'Digest': digest(self.config)}, 'SMOKE_CONFIG_ID_MISMATCH'),
+                               ({'Id': None, 'Digest': digest(self.config)}, 'SMOKE_CONFIG_ID_INVALID'),
+                               ({'Architecture': 'amd64'}, 'SMOKE_RUNTIME_MISMATCH'),
+                               ({'Config': dict(base['Config'], User='0')}, 'SMOKE_RUNTIME_MISMATCH'),
+                               ({'Config': dict(base['Config'], Labels={})}, 'SMOKE_SOURCE_LABELS_MISMATCH')):
+            image_id, fake, events = self.manager_smoke_command(inspected=dict(base, **change))
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+                with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+                self.assertEqual(error.exception.reason, reason)
+                self.assertEqual(error.exception.stage, 'smoke-image-inspect')
+                self.assertEqual(events, ['inspect'])
+
+    def test_native_smoke_requires_exact_go_help_declarations(self):
+        for help_output in (b'', b'  -metrics-bind-address string\n', b'Mention --metrics-bind-address and --health-probe-bind-address in prose',
+                            b'  -metrics-bind-address-foreign string\n  -health-probe-bind-address string\n',
+                            b'  -metrics-bind-address string\n  -health-probe-bind-address-foreign string\n',
+                            b'  -metrics-bind-address int\n  -health-probe-bind-address string\n'):
+            image_id, fake, events = self.manager_smoke_command(help_output=help_output)
+            with self.subTest(help_output=help_output), tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+                with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+                self.assertEqual(error.exception.reason, 'SMOKE_HELP_DECLARATIONS_MISSING')
+                self.assertEqual(error.exception.stage, 'smoke-help-contract')
+                self.assertEqual(events, ['inspect', 'run'])
+        help_output = b'  --metrics-bind-address string\n  --health-probe-bind-address string\n'
+        image_id, fake, _ = self.manager_smoke_command(help_output=help_output)
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            self.assertTrue(M.smoke(image_id, self.source, 'arm64', Path(temporary))['help_passed'])
+
+    def test_native_smoke_accepts_exact_main_or_dependency_module_record(self):
+        for record in ('mod', 'dep'):
+            metadata = ('/manager: go1.27.0\n\tpath\tcommand-line-arguments\n\t' + record +
+                        '\tgithub.com/ydixken/pgcopydb-operator\t(devel)\n\tbuild\tGOOS=linux\n'
+                        '\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n\tbuild\t-ldflags="-X main.version=m7-' +
+                        self.source['payload_inventory_sha256'][:12] + '"\n').encode()
+            image_id, fake, _ = self.manager_smoke_command(metadata=metadata)
+            with self.subTest(record=record), tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+                self.assertTrue(M.smoke(image_id, self.source, 'arm64', Path(temporary))['help_passed'])
+
+    def test_native_smoke_refuses_forged_build_metadata(self):
+        metadata = ('/manager: go1.27.0\n\tpath\tcommand-line-arguments\n\tdep\tgithub.com/ydixken/pgcopydb-operator\t(devel)\n'
+                    '\tbuild\tGOOS=linux\n\tbuild\tGOARCH=arm64\n\tbuild\tCGO_ENABLED=0\n'
+                    '\tbuild\t-ldflags="-X main.version=m7-' + self.source['payload_inventory_sha256'][:12] + '"\n').encode()
+        for invalid in (metadata.replace(b'GOARCH=arm64', b'GOARCH=amd64'), metadata.replace(b'CGO_ENABLED=0', b'CGO_ENABLED=1'),
+                        metadata.replace(b'm7-' + b'c' * 12, b'm7-' + b'f' * 12),
+                        metadata.replace(b'\tdep\t', b'\tunknown\t'), metadata + b'\tbuild\tGOARCH=arm64\n'):
+            image_id, fake, events = self.manager_smoke_command(metadata=invalid)
+            with self.subTest(metadata=invalid), tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+                with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+                self.assertEqual(error.exception.reason, 'SMOKE_BUILD_METADATA_MISMATCH')
+                self.assertEqual(error.exception.stage, 'smoke-build-metadata')
+                self.assertEqual(events[-1], 'rm')
+
+    def test_native_smoke_preserves_first_failure_when_cleanup_also_fails(self):
+        primary = M.Refusal('command unavailable or timed out')
+        cleanup = M.Refusal('cleanup-canary')
+        image_id, fake, events = self.manager_smoke_command(failures={'cp': primary, 'rm': cleanup})
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertIs(error.exception, primary)
+        self.assertEqual(error.exception.stage, 'smoke-executable-copy')
+        self.assertEqual(events[-1], 'rm')
+        image_id, fake, _ = self.manager_smoke_command(failures={'rm': cleanup})
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertEqual(error.exception.reason, 'SMOKE_CLEANUP_FAILED')
+        self.assertEqual(error.exception.stage, 'smoke-cleanup')
+        unexpected = RuntimeError('unexpected-primary-canary')
+        image_id, fake, _ = self.manager_smoke_command(failures={'cp': unexpected, 'rm': cleanup})
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertEqual(error.exception.reason, 'VALIDATION_REFUSED')
+        self.assertEqual(error.exception.stage, 'smoke-executable-copy')
+        cancellation = KeyboardInterrupt()
+        image_id, fake, _ = self.manager_smoke_command(failures={'cp': cancellation, 'rm': cleanup})
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            with self.assertRaises(KeyboardInterrupt) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertIs(error.exception, cancellation)
+
+    def test_native_smoke_help_command_failure_keeps_fixed_substage(self):
+        image_id, fake, _ = self.manager_smoke_command(failures={'run': M.Refusal('command failed or output exceeded bound')})
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+            with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', Path(temporary))
+        self.assertEqual(error.exception.reason, 'COMMAND_FAILED_OR_OUTPUT_LIMIT')
+        self.assertEqual(error.exception.stage, 'smoke-help-run')
+
+    def test_native_smoke_reports_invalid_input_container_and_executable_boundaries(self):
+        for boundary, stage, reason in (('image-id', 'smoke-image-id', 'SMOKE_CONFIG_ID_INVALID'),
+                                        ('create', 'smoke-container-create', 'SMOKE_CONTAINER_ID_INVALID'),
+                                        ('cp', 'smoke-executable-file', 'SMOKE_EXECUTABLE_INVALID')):
+            image_id, fake, _ = self.manager_smoke_command()
+            def command(argv, **kwargs):
+                if argv[1] == boundary: return b'invalid' if boundary == 'create' else b''
+                return fake(argv, **kwargs)
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=command):
+                with self.assertRaises(M.Refusal) as error:
+                    M.smoke('invalid' if boundary == 'image-id' else image_id, self.source, 'arm64', Path(temporary))
+                self.assertEqual(error.exception.stage, stage)
+                self.assertEqual(error.exception.reason, reason)
+
+    def test_anonymous_smoke_uses_config_id_not_manifest_digest(self):
+        proof = self.graph(blobs=True)
+        def command(argv, **kwargs):
+            if argv[:3] == ['podman', 'image', 'inspect']:
+                return raw([dict(Id=digest(self.config).removeprefix('sha256:'), Digest=digest(self.manifest))])
+            self.assertIn(M.PACKAGE + '@' + digest(self.manifest), argv)
+            return b''
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=command), patch.object(M, 'smoke', return_value=self.smoke) as smoke:
+            self.assertEqual(M.anonymous_smoke(proof, self.source, 'arm64', Path(temporary)), self.smoke)
+            self.assertEqual(smoke.call_args.args[0], digest(self.config))
+
+    def test_smoke_failure_substage_is_private_fixed_canary_invariant(self):
+        import argparse
+        values = []
+        for canary in ('first-canary https://private.invalid/token', 'second-canary /private/path'):
+            image_id, fake, _ = self.manager_smoke_command(failures={'cp': M.Refusal(canary), 'rm': M.Refusal('cleanup-canary')})
+            with tempfile.TemporaryDirectory() as temporary, patch.object(M, 'command', side_effect=fake):
+                output = Path(temporary).resolve()
+                with self.assertRaises(M.Refusal) as error: M.smoke(image_id, self.source, 'arm64', output)
+                stdout = io.StringIO()
+                with patch.object(sys, 'stdout', stdout):
+                    M.report_failure(argparse.Namespace(architecture='arm64', output_dir=str(output)), {'stage': 'smoke'}, error.exception)
+                value = (output / 'publication-failure.json').read_bytes()
+                self.assertEqual(json.loads(value)['stage'], 'smoke-executable-copy')
+                self.assertEqual(set(json.loads(value)), {'schema_version', 'status', 'role', 'architecture', 'stage', 'reason'})
+                self.assertEqual((output / 'publication-failure.json').stat().st_mode & 0o777, 0o600)
+                values.append((value, stdout.getvalue()))
+        self.assertEqual(values[0], values[1])
 
     def test_redirect_never_forwards_authorization_and_rejects_foreign_origin(self):
         import urllib.request
