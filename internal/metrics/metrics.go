@@ -341,6 +341,10 @@ var samplingPhases = map[v1beta1.MigrationPhase]bool{
 // recordReplication maps status.replication onto the lag and LSN gauges; each
 // gauge is set only on a successful parse, absent-over-fake-zero throughout.
 func recordReplication(m *v1beta1.Migration) {
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		recordNativeReplication(m)
+		return
+	}
 	r := m.Status.Replication
 	if r == nil || !samplingPhases[m.Status.Phase] {
 		l := prometheus.Labels{labelNamespace: m.Namespace, labelName: m.Name}

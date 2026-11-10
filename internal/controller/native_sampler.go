@@ -44,6 +44,7 @@ type nativeSample struct {
 	lagBytes         *int64
 	progress         *native.CopyProgress
 	phase            string
+	observedAt       time.Time
 	catchUpConfirmed bool
 }
 
@@ -144,6 +145,9 @@ func (s *nativeSampler) finish(ctx context.Context, serial uint64, scope nativeS
 		return nativeSample{}, native.ErrNativeControlUnavailable
 	}
 	s.started, s.completed = started, completed
+	if nativeCopyMeasured(got.progress) {
+		got.observedAt = completed
+	}
 	if sampleErr != nil || lag == nil || lag.LagBytes() == nil {
 		s.previous, s.current = nativeLagObservation{}, nativeLagObservation{}
 	} else {

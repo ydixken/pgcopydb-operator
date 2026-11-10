@@ -75,7 +75,11 @@ type samplerRun struct {
 	last         sampled
 	copySeen     bool
 	// syncRepOver: the last stored sample was over syncRepThreshold.
-	syncRepOver bool
+	syncRepOver            bool
+	nativeInput            *nativeSamplerInput
+	native                 nativeSampler
+	nativeBaseCopyComplete bool
+	nativeSerial           uint64
 }
 
 // NewSampler builds a sampler; it samples nothing until the manager starts it.
@@ -110,7 +114,7 @@ func (s *Sampler) Observe(key types.NamespacedName, job string, allDatabases boo
 		return sampled{}, false
 	}
 	run := s.runs[key]
-	if run != nil && (run.job != job || run.allDatabases != allDatabases) {
+	if run != nil && (run.nativeInput != nil || run.job != job || run.allDatabases != allDatabases) {
 		s.stopLocked(key)
 		run = nil
 	}
@@ -134,7 +138,7 @@ func (s *Sampler) SampleNow(ctx context.Context, key types.NamespacedName, job s
 	got := sampled{sample: smp, err: err, at: at, copySeen: smp != nil && smp.CopyStarted}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if run := s.runs[key]; run != nil && run.job == job {
+	if run := s.runs[key]; run != nil && run.nativeInput == nil && run.job == job {
 		got = s.keepLocked(key, run, got)
 	}
 	return got
@@ -172,6 +176,10 @@ func (s *Sampler) Stop(key types.NamespacedName) {
 func (s *Sampler) stopLocked(key types.NamespacedName) {
 	if run := s.runs[key]; run != nil {
 		run.cancel()
+		if run.nativeInput != nil {
+			run.native.Stop()
+			metrics.RecordNativeLag(key.Namespace, key.Name, nil)
+		}
 		delete(s.runs, key)
 	}
 	metrics.RecordSyncRepWaits(key.Namespace, key.Name, nil)
@@ -183,19 +191,37 @@ func (s *Sampler) loop(ctx context.Context, key types.NamespacedName, run *sampl
 	log := logf.Log.WithName("sampler").WithValues("migration", key, "job", run.job)
 	for {
 		at := time.Now()
-		smp, err := s.progress.Sample(ctx, key.Namespace, run.job, run.allDatabases)
-		took := time.Since(at)
 		s.mu.Lock()
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || s.runs[key] != run {
 			s.mu.Unlock()
 			return
 		}
-		s.keepLocked(key, run, sampled{sample: smp, err: err, at: at, copySeen: smp != nil && smp.CopyStarted})
+		nativeRun := run.nativeInput != nil
+		s.mu.Unlock()
+		var err error
+		if nativeRun {
+			_, err = s.sampleNativeRun(ctx, key, run)
+		} else {
+			var smp *progress.Sample
+			smp, err = s.progress.Sample(ctx, key.Namespace, run.job, run.allDatabases)
+			s.mu.Lock()
+			if ctx.Err() == nil && s.runs[key] == run {
+				s.keepLocked(key, run, sampled{sample: smp, err: err, at: at, copySeen: smp != nil && smp.CopyStarted})
+			}
+			s.mu.Unlock()
+		}
+		took := time.Since(at)
+		s.mu.Lock()
+		if ctx.Err() != nil || s.runs[key] != run {
+			s.mu.Unlock()
+			return
+		}
 		hint := run.hint
+		across := hint.dataAcross || run.nativeBaseCopyComplete
 		s.mu.Unlock()
 
 		period := s.copyPeriod
-		if hint.dataAcross {
+		if across {
 			period = s.period
 		}
 		if err != nil {
