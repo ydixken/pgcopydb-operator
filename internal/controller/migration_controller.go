@@ -214,15 +214,15 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	base := m.DeepCopy()
 	// Dispatch before lifecycle handling so an unavailable engine cannot reach legacy effects.
 	if engine, err := backendFor(m); err != nil || engine != v1beta1.MigrationEnginePGCopyDB {
-		msg := "rpgmigrate backend is not implemented or qualified"
-		if err != nil {
-			msg = err.Error()
-		} else if err := validateNativeConfig(m, nil); err != nil {
-			msg += ": " + err.Error()
-		}
+		msg := unsupportedEngineMessage(m, err)
 		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "UnsupportedEngine", msg)
 		r.fail(m, "UnsupportedEngine", "Validate", msg)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
+	}
+	// Runtime qualification must open the guard above before this native route is reachable.
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		observing = true
+		return r.reconcileNative(ctx, m, base)
 	}
 	if !m.DeletionTimestamp.IsZero() {
 		r.stopSampling(req.NamespacedName)
