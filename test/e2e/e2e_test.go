@@ -314,6 +314,35 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 var _ = Describe("Migration", func() {
 	BeforeEach(resetMigrationPair)
 
+	It("cuts over an empty database and verifies its data", func() {
+		requireCNPGFixtures()
+		db := fmt.Sprintf("e2e_empty_%d", time.Now().UnixNano())
+		name := "e2e-empty-database"
+		DeferCleanup(func() {
+			deleteMigration(name)
+			for _, cluster := range []string{sourceCluster, targetCluster} {
+				psqlDB(cluster, postgresContainer, "DROP DATABASE IF EXISTS "+db+" WITH (FORCE)")
+			}
+		})
+		for _, cluster := range []string{sourceCluster, targetCluster} {
+			psqlDB(cluster, postgresContainer,
+				"CREATE DATABASE "+db+" OWNER "+sqlIdent(appRole(cluster))+" TEMPLATE template0")
+		}
+		m := newFollowMigration(name, v1beta1.CutoverManual)
+		m.Spec.Source.Database = db
+		m.Spec.Target.Database = db
+		m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+		create(m)
+		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		approveCutover(name)
+		done := waitCompleted(name, nsE2E)
+		expectConditionTrue(done, v1beta1.ConditionCutoverComplete)
+		expectConditionTrue(done, v1beta1.ConditionVerified)
+		Expect(jobLogs(name+"-compare-data", 100)).To(ContainSubstring("empty databases verified"))
+		Expect(sourceSlotCount()).To(Equal("0"))
+		Expect(targetOriginCount()).To(Equal("0"))
+	})
+
 	// Labelled flaky, not skipped: it fails about three runs in four at
 	// E2E_SCALE=0.1 (see issue 88), which is often enough to stop every
 	// automated release, and it still passes reliably enough by hand to be
