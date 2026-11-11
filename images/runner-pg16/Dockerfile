@@ -1,7 +1,7 @@
-# Variant of the operator's images/runner/Dockerfile (v0.25.0) with the
-# PostgreSQL 16 client tools instead of 18, for targets older than PostgreSQL 17
+# Variant of the operator's images/runner/Dockerfile (v0.25.0) with pg_dump and
+# pg_restore 16 plus psql 18, for targets older than PostgreSQL 17
 # (pg_restore 17+ sends SET transaction_timeout, which they reject). Only the
-# client major differs. Original header follows.
+# client tools differ. Original header follows.
 # Runner image for the operator's migration Jobs: the forked pgcopydb 0.18
 # plus the PostgreSQL 18 client tools, on debian:trixie-slim with the PGDG apt
 # repo. pg_dump/pg_restore MUST be >= the newest server major on either side,
@@ -34,11 +34,18 @@ RUN set -eux; \
     curl -fsSL https://apt.postgresql.org/pub/repos/apt/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
-    # Client 18 dumps sources back to 9.2 but restores only into targets on
-    # 17 or later, the servers that accept the SET transaction_timeout it sends.
-    # libgc1 is the one library the fork-built pgcopydb links beyond
-    # postgresql-client-18's libpq5.
-    apt-get install -y --no-install-recommends postgresql-client-16 libgc1; \
+    # Client 16 restores into targets older than 17: pg_restore 17+ sends
+    # SET transaction_timeout, which those servers reject. The preflight
+    # PgBouncer check needs psql 18 (backend PID in \conninfo), so both
+    # majors are installed and /opt/pgtools mixes them.
+    # libgc1 is the one library the fork-built pgcopydb links beyond libpq5.
+    apt-get install -y --no-install-recommends postgresql-client-16 postgresql-client-18 libgc1; \
+    # pgcopydb takes pg_dump and pg_restore from the directory of the first
+    # psql on PATH. Copies, not symlinks, so that directory holds real files.
+    install -d /opt/pgtools; \
+    cp /usr/lib/postgresql/16/bin/pg_dump /usr/lib/postgresql/16/bin/pg_dumpall \
+       /usr/lib/postgresql/16/bin/pg_restore /usr/lib/postgresql/18/bin/psql /opt/pgtools/; \
+    rm -rf /usr/lib/postgresql/16/bin /usr/lib/postgresql/18/bin; \
     # curl was build-time only; drop it to shrink the attack surface
     apt-get purge -y --auto-remove curl; \
     # Everything below runs in this layer on purpose: files deleted in a later
@@ -62,15 +69,13 @@ RUN set -eux; \
       libuuid1 login mount ncurses-bin util-linux; \
     rm -rf /var/lib/apt/lists/*
 
-# The fork-built binary lands next to the version-18 client tools, so the
-# PATH below covers it too.
-COPY --from=pgcopydb /pgcopydb /usr/lib/postgresql/16/bin/pgcopydb
+# The fork-built binary lands next to the client tools, so the PATH below
+# covers it too.
+COPY --from=pgcopydb /pgcopydb /opt/pgtools/pgcopydb
 
-# Version-18 binaries ahead of Debian's pg_wrapper, so pg_dump and pg_restore
-# resolve to 18.x deterministically even if another client major lands later.
-# With postgresql-client-common purged the wrappers are gone entirely, which
-# makes this the only path to the client tools.
-ENV PATH=/usr/lib/postgresql/16/bin:$PATH
+# With postgresql-client-common purged the Debian wrappers are gone, which
+# makes /opt/pgtools the only path to the client tools.
+ENV PATH=/opt/pgtools:$PATH
 
 # Purging packages can break the remaining tools through shared libraries.
 # Run the worker, credential escaping, and sampler timeout after purging so
@@ -82,8 +87,8 @@ RUN set -eux; \
     grep -qF 'compare progress: ' "$(command -v pgcopydb)"; \
     pg_dump --version | grep -qE ' 16\.'; \
     pg_restore --version | grep -qE ' 16\.'; \
-    pg_restore --version >/dev/null; \
-    psql --version >/dev/null; \
+    psql --version | grep -qE ' 18\.'; \
+    test "$(dirname "$(command -v psql)")" = "$(dirname "$(command -v pg_restore)")"; \
     timeout --version | grep -qF 'GNU coreutils'; \
     timeout --signal=TERM --kill-after=1s 6s true; \
     sed --version | grep -qF 'GNU sed'; \
