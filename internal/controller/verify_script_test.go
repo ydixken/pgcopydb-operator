@@ -56,6 +56,12 @@ const stubVerifyPsql = `#!/bin/sh
 case "$*" in
   *pg_replication_origin_progress*) echo "$STUB_PROGRESS" ;;
   *pg_wal_lsn_diff*) echo "$STUB_GAP" ;;
+  *pg_largeobject_metadata*)
+    case "$1" in
+      src) echo "${STUB_SOURCE_EMPTY:-f}" ;;
+      tgt) echo "${STUB_TARGET_EMPTY:-f}" ;;
+      *) exit 9 ;;
+    esac ;;
   *)
     sql=$(cat)
     case "$sql" in
@@ -109,6 +115,7 @@ func runMigrationVerifyScript(t *testing.T, migration *v1beta1.Migration, gate, 
 	cmd := exec.Command(shellPath, "-c", inDir(job.Spec.Template.Spec.Containers[0].Args[1], dir))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
+		"PGCOPYDB_SOURCE_PGURI=src",
 		"PGCOPYDB_TARGET_PGURI=tgt",
 		"STUB_REPORT="+reportPath,
 	)
@@ -174,6 +181,22 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			env:         []string{"STUB_PROGRESS=0/92D00000", "STUB_GAP=1186480"},
 			code:        0,
 			wantLog:     wantContentPass,
+			wantCompare: true,
+		},
+		{
+			name:        "empty databases with publication-filtered WAL",
+			report:      "[]",
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", "STUB_TARGET_EMPTY=t"},
+			code:        0,
+			wantLog:     "empty databases verified",
+			wantCompare: true,
+		},
+		{
+			name:        "an empty cached selection in a nonempty source",
+			report:      "[]",
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=f", "STUB_TARGET_EMPTY=t"},
+			code:        1,
+			wantLog:     wantRefused,
 			wantCompare: true,
 		},
 		{
