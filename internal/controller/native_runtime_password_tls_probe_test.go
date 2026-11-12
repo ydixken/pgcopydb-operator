@@ -889,9 +889,10 @@ func nativePasswordCredentials(host string) (nativePasswordKeys, error) {
 	return result, nil
 }
 
+// initdb admits only loopback hosts, so the client Pod needs an explicit TLS and SCRAM rule.
 func nativePasswordServerCommand(major int) []string {
 	binary := fmt.Sprintf("/usr/lib/postgresql/%d/bin/", major)
-	return []string{shellPath, "-ec", binary + "initdb -D /var/lib/postgresql/probe-data --username=native_probe --pwfile=/run/server-input/password --auth-local=reject --auth-host=scram-sha-256 --encoding=UTF8 --no-locale; exec " + binary + "postgres -D /var/lib/postgresql/probe-data -c listen_addresses='*' -c unix_socket_directories=/tmp -c ssl=on -c ssl_cert_file=/run/server-input/server.crt -c ssl_key_file=/run/server-input/server.key -c password_encryption=scram-sha-256 -c log_min_error_statement=panic"}
+	return []string{shellPath, "-ec", binary + "initdb -D /var/lib/postgresql/probe-data --username=native_probe --pwfile=/run/server-input/password --auth-local=reject --auth-host=scram-sha-256 --encoding=UTF8 --no-locale; printf 'hostssl all native_probe all scram-sha-256\\n' > /var/lib/postgresql/probe-data/pg_hba.conf; exec " + binary + "postgres -D /var/lib/postgresql/probe-data -c listen_addresses='*' -c unix_socket_directories=/tmp -c ssl=on -c ssl_cert_file=/run/server-input/server.crt -c ssl_key_file=/run/server-input/server.key -c password_encryption=scram-sha-256 -c log_min_error_statement=panic"}
 }
 
 func nativePasswordServer(input nativeRuntimeInput, node nativeRuntimeNode, image nativeRuntimeImage, major int) (*corev1.Pod, error) {
@@ -1397,5 +1398,23 @@ func TestNativePasswordTLSBindingWaitCoversKubeletProjection(t *testing.T) {
 	capped := &rest.Config{Host: "https://127.0.0.1:6443", Timeout: 30 * time.Second}
 	if untimed := nativeRuntimeStreamConfig(capped); untimed.Timeout != 0 || capped.Timeout != 30*time.Second || untimed.Host != capped.Host {
 		t.Fatal("the followed log stream keeps the request cap or the shared config changed")
+	}
+}
+
+func TestNativePasswordTLSServerAdmitsOnlyRemoteTLSScram(t *testing.T) {
+	for _, major := range []int{16, 18} {
+		command := nativePasswordServerCommand(major)
+		if len(command) != 3 {
+			t.Fatal("fixed server command shape changed")
+		}
+		setup, exec, found := strings.Cut(command[2], "; exec ")
+		rule := "; printf 'hostssl all native_probe all scram-sha-256\\n' > /var/lib/postgresql/probe-data/pg_hba.conf"
+		if !found || !strings.HasSuffix(setup, rule) || strings.Count(command[2], "pg_hba") != 1 || !strings.HasPrefix(exec, fmt.Sprintf("/usr/lib/postgresql/%d/bin/postgres ", major)) {
+			t.Fatal("the probe server does not replace pg_hba with the single remote TLS SCRAM rule before exec", major)
+		}
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Command: command}}}}
+		if err := nativeRuntimeExpectedCommand(pod, fmt.Sprintf("pg%d", major), &nativeRuntimeProfileRequest{}); err != nil {
+			t.Fatal("the active profile refused the fixed server command", err)
+		}
 	}
 }
