@@ -17,8 +17,10 @@ limitations under the License.
 package conn
 
 import (
+	"cmp"
 	"errors"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,8 +361,8 @@ func TestPreludeScript_PassfileEscaping(t *testing.T) {
 	srcPassword := `p:a\s"s $x` + "`w`" + `:\`
 	tgtPassword := "plain"
 	script := PreludeScript(nil, []Passfile{
-		{Host: "src.example.com", User: "alice", File: writeSecret("source-password", srcPassword)},
-		{Host: "tgt.example.com", User: "bob", File: writeSecret("target-password", tgtPassword+"\n")},
+		{Host: "src.example.com", Port: 5432, User: "alice", File: writeSecret("source-password", srcPassword)},
+		{Host: "tgt.example.com", Port: 6432, User: "bob", File: writeSecret("target-password", tgtPassword+"\n")},
 	}, "")
 	// Hermetic run: point the passfile at the test dir instead of the
 	// container's fixed /tmp/pgpass.
@@ -390,17 +392,17 @@ func TestPreludeScript_PassfileEscaping(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("want 2 passfile lines, got %q", raw)
 	}
-	if want := `src.example.com:*:*:alice:p\:a\\s"s $x` + "`w`" + `\:\\`; lines[0] != want {
+	if want := `src.example.com:5432:*:alice:p\:a\\s"s $x` + "`w`" + `\:\\`; lines[0] != want {
 		t.Fatalf("escaped line:\n got %q\nwant %q", lines[0], want)
 	}
-	for i, want := range []struct{ host, user, password string }{
-		{"src.example.com", "alice", srcPassword},
+	for i, want := range []struct{ host, port, user, password string }{
+		{"src.example.com", "5432", "alice", srcPassword},
 		// The trailing newline of a secret is trimmed, not part of the password.
-		{"tgt.example.com", "bob", tgtPassword},
+		{"tgt.example.com", "6432", "bob", tgtPassword},
 	} {
 		f := libpqPassfileFields(lines[i])
-		if len(f) != 5 || f[0] != want.host || f[1] != "*" || f[2] != "*" || f[3] != want.user || f[4] != want.password {
-			t.Fatalf("line %d parses to %q, want host=%q user=%q password=%q", i, f, want.host, want.user, want.password)
+		if len(f) != 5 || f[0] != want.host || f[1] != want.port || f[2] != "*" || f[3] != want.user || f[4] != want.password {
+			t.Fatalf("line %d parses to %q, want host=%q port=%q user=%q password=%q", i, f, want.host, want.port, want.user, want.password)
 		}
 	}
 }
@@ -438,7 +440,10 @@ const (
 	tDB        = "app"
 	tPass      = "pw"
 	tRequire   = "require"
-	tLine      = tHost + ":*:*:" + tUser + ":" + tPass
+	tLine      = tHost + ":5432:*:" + tUser + ":" + tPass
+	tLine6432  = tHost + ":6432:*:" + tUser + ":" + tPass
+	tUnbound   = "cannot be bound to an exact passfile line"
+	envPGPort  = "PGPORT"
 	envSrcDB   = "PGM_SOURCE_DB"
 	envSrcUser = "PGM_SOURCE_USER"
 	envSrcHost = "PGM_SOURCE_HOST"
@@ -642,7 +647,7 @@ func runSidePrelude(t *testing.T, s Side, prelude string, env map[string]string,
 	script = strings.ReplaceAll(script, credsDir+"/"+string(s)+"-mnt/"+string(s)+"-password", pwFile)
 
 	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$`+uriEnv(s)+`"`)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), envPGPort+"=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -678,7 +683,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			env:      map[string]string{envSrcDB: tURI6432},
 			password: tPass,
 			wantURI:  tURI6432 + "?" + tSrcKeep,
-			wantLine: tLine,
+			wantLine: tLine6432,
 		},
 		{
 			name:     "uri without port",
@@ -720,7 +725,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: "db.example.com:6432", envSrcUser: tUser},
 			password: tPass,
 			wantURI:  tURI6432 + "?" + tSrcKeep,
-			wantLine: tLine,
+			wantLine: tLine6432,
 		},
 		{
 			name:     "bare name defaults the port and appends sslmode",
@@ -745,7 +750,7 @@ func TestSecretRefPrelude(t *testing.T) {
 			env:      map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
 			password: `p:a\ss:`,
 			wantURI:  "postgresql://alice@db.example.com:5432/app?" + tSrcKeep,
-			wantLine: `db.example.com:*:*:alice:p\:a\\ss\:`,
+			wantLine: `db.example.com:5432:*:alice:p\:a\\ss\:`,
 		},
 		{
 			name:     "uri with sslmode keeps the spec tls params",
@@ -877,6 +882,24 @@ func TestSecretRefPrelude(t *testing.T) {
 			env:     map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser},
 			wantErr: "password key PW missing",
 		},
+		{
+			name:     "portless uri takes PGPORT like libpq",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app", envPGPort: "6432"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?" + tSrcKeep,
+			wantLine: tLine6432,
+		},
+		{name: "bracketed ipv6 uri fails", env: map[string]string{envSrcDB: "postgresql://alice@[::1]:5432/app"}, wantErr: tUnbound},
+		{name: "multi-host uri fails", env: map[string]string{envSrcDB: "postgresql://alice@h1:5432,h2:5433/app"}, wantErr: tUnbound},
+		{name: "hostless uri fails", env: map[string]string{envSrcDB: "postgresql://alice@/app?host=/run/postgresql"}, wantErr: tUnbound},
+		{name: "uri query port fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=x&port=6432"}, wantErr: "the URI query sets 'port'"},
+		{name: "uri query host fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?host=other"}, wantErr: "the URI query sets 'host'"},
+		{name: "uri query service fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?service=s"}, wantErr: "the URI query sets 'service'"},
+		{name: "percent-encoded uri query key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?%70ort=6432"}, wantErr: "the URI query sets '%70ort'"},
+		{name: "uri empty port fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com:/app"}, wantErr: "port '' is not one decimal port"},
+		{name: "bare non-decimal port fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "db.example.com:64x2", envSrcUser: tUser}, wantErr: "port '64x2' is not one decimal port"},
+		{name: "bare ipv6 host fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "::1", envSrcUser: tUser}, wantErr: tUnbound},
+		{name: "PGPORT list fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app", envPGPort: "5432,6432"}, wantErr: "port '5432,6432' is not one decimal port"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -921,7 +944,8 @@ const (
 	envSrcSuperUser = "PGM_SOURCE_SUPER_USER"
 	envSrcSuperHost = "PGM_SOURCE_SUPER_HOST"
 	envSrcPGURI     = "PGCOPYDB_SOURCE_PGURI"
-	tSuperLine      = tHost + ":*:*:" + tSuperUser + ":" + tSuperPass
+	tSuperLine      = tHost + ":5432:*:" + tSuperUser + ":" + tSuperPass
+	tSuperLine6432  = tHost + ":6432:*:" + tSuperUser + ":" + tSuperPass
 )
 
 func superConn() *v1beta1.PostgresConnection {
@@ -1054,7 +1078,7 @@ func runSuperPrelude(t *testing.T, s Side, c *v1beta1.PostgresConnection, env ma
 	script = strings.ReplaceAll(script, credsDir+"/"+side+"-mnt/"+side+"-password", pwFile)
 
 	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s' "$`+SuperURIEnv(s)+`"`)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), envPGPort+"=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -1088,14 +1112,14 @@ func TestSuperPrelude(t *testing.T) {
 			name:      "inline primary with port and query",
 			env:       map[string]string{envSrcPGURI: tURI6432 + "?sslmode=require"},
 			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB + "?sslmode=require",
-			wantLines: []string{tHost + ":*:*:" + tSuperUser + ":" + tSuperPass},
+			wantLines: []string{tSuperLine6432},
 		},
 		{
 			name:      "secretRef primary with DB as URI",
 			secretRef: true,
 			env:       map[string]string{envSrcDB: tURI6432},
 			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB + "?" + tSrcKeep,
-			wantLines: []string{tLine, tHost + ":*:*:" + tSuperUser + ":" + tSuperPass},
+			wantLines: []string{tLine6432, tSuperLine6432},
 		},
 		{
 			name:      "secretRef primary with bare name",
@@ -1108,13 +1132,13 @@ func TestSuperPrelude(t *testing.T) {
 			name:      "matching url key passes",
 			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost},
 			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
-			wantLines: []string{tSuperLine},
+			wantLines: []string{tSuperLine6432},
 		},
 		{
 			name:      "matching url key with the primary's port passes",
 			env:       map[string]string{envSrcPGURI: tURI6432, envSrcSuperHost: tHost + ":6432"},
 			wantURI:   "postgresql://" + tSuperUser + "@" + tHost + ":6432/" + tDB,
-			wantLines: []string{tSuperLine},
+			wantLines: []string{tSuperLine6432},
 		},
 		{
 			name:    "port-mismatched url key fails",
@@ -1151,6 +1175,16 @@ func TestSuperPrelude(t *testing.T) {
 			name:    "unset primary URI fails as ordering bug",
 			env:     map[string]string{},
 			wantErr: "prelude ordering bug",
+		},
+		{
+			name:    "multi-host primary fails",
+			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@h1:5432,h2:5433/" + tDB},
+			wantErr: "superuser secret: endpoint 'h1:5432,h2:5433' cannot be bound",
+		},
+		{
+			name:    "primary query port fails",
+			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB + "?port=6432"},
+			wantErr: "superuser secret: the URI query sets 'port'",
 		},
 		{
 			name:      "password-bearing primary never leaks into the super URI",
@@ -1430,5 +1464,150 @@ func TestSuperPrelude_KeepsSynchronousCommit(t *testing.T) {
 				t.Fatalf("super URI %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// libpqPassword returns the password libpq's passwordFromFile picks for one
+// connection: the first line whose host, port, database and user each equal
+// the connection's or are "*".
+func libpqPassword(passfile, host, port, db, user string) (string, bool) {
+	for line := range strings.SplitSeq(passfile, "\n") {
+		f := libpqPassfileFields(line)
+		if len(f) != 5 {
+			continue
+		}
+		match := true
+		for i, want := range []string{host, port, db, user} {
+			match = match && (f[i] == "*" || f[i] == want)
+		}
+		if match {
+			return f[4], true
+		}
+	}
+	return "", false
+}
+
+// runBothSides runs one prelude for both sides the way a Job does and returns
+// the passfile and the URI each side hands to libpq.
+func runBothSides(t *testing.T, src, tgt *v1beta1.PostgresConnection, env map[string]string, passwords map[Side]string) (string, map[Side]string) {
+	t.Helper()
+	dir := t.TempDir()
+	pgpass := filepath.Join(dir, "pgpass")
+	cmdEnv := append(os.Environ(), envPGPort+"=")
+	preludes := make([]string, 0, 2)
+	var entries []Passfile
+	replace := make([]string, 0, 10)
+	replace = append(replace, PgpassPath, pgpass)
+	for i, c := range []*v1beta1.PostgresConnection{src, tgt} {
+		s := []Side{Source, Target}[i]
+		m, err := Materialize(s, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pwFile := filepath.Join(dir, string(s)+"-password")
+		if err := os.WriteFile(pwFile, []byte(passwords[s]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		replace = append(replace, credsDir+"/"+string(s)+"-mnt/"+string(s)+"-password", pwFile, URIFile(s), filepath.Join(dir, string(s)+"-uri"))
+		for _, e := range m.Env {
+			if e.ValueFrom == nil {
+				cmdEnv = append(cmdEnv, e.Name+"="+e.Value)
+			}
+		}
+		if m.Passfile != nil {
+			entries = append(entries, *m.Passfile)
+		}
+		preludes = append(preludes, m.Prelude)
+	}
+	for k, v := range env {
+		cmdEnv = append(cmdEnv, k+"="+v)
+	}
+	script := strings.NewReplacer(replace...).Replace(PreludeScript(preludes, entries, ""))
+	cmd := exec.Command(shellPath(t), "-c", script, "sh", "-c", `printf '%s\n%s' "$`+uriEnv(Source)+`" "$`+uriEnv(Target)+`"`)
+	cmd.Env = cmdEnv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prelude failed: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(pgpass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src2, tgt2, _ := strings.Cut(string(out), "\n")
+	return string(raw), map[Side]string{Source: src2, Target: tgt2}
+}
+
+// TestPassfile_SharedHostUserDistinctPorts proves each side authenticates with
+// its own password when both name the same host and user on different ports:
+// with a wildcard port libpq gives the second side the first side's line.
+func TestPassfile_SharedHostUserDistinctPorts(t *testing.T) {
+	inline := func(port int32) *v1beta1.PostgresConnection {
+		c := inlineConn()
+		c.Port = port
+		return c
+	}
+	secret := func(side Side) *v1beta1.PostgresConnection {
+		c := secretConn()
+		c.SecretRef = &v1beta1.ConnectionSecret{Name: string(side) + "-bundle"}
+		return c
+	}
+	tgtEnv := func(k string) string { return "PGM_TARGET_" + k }
+	ref := inlineConn()
+	uri := func(hostport string) string {
+		return "postgresql://" + ref.Username + "@" + hostport + "/" + ref.Database
+	}
+	for _, tc := range []struct {
+		name     string
+		src, tgt *v1beta1.PostgresConnection
+		env      map[string]string
+	}{
+		{name: "inline explicit and default port", src: inline(6432), tgt: inline(0)},
+		{name: "secretRef uri port and bare default", src: secret(Source), tgt: secret(Target), env: map[string]string{
+			envSrcDB: uri(ref.Host + ":6432"), tgtEnv("DB"): ref.Database, tgtEnv("HOST"): ref.Host, tgtEnv("USER"): ref.Username}},
+		{name: "secretRef portless uri and bare host:port", src: secret(Source), tgt: secret(Target), env: map[string]string{
+			envSrcDB: uri(ref.Host), tgtEnv("DB"): ref.Database, tgtEnv("HOST"): ref.Host + ":6432", tgtEnv("USER"): ref.Username}},
+		{name: "secretRef portless uri under PGPORT and inline", src: secret(Source), tgt: inline(5432), env: map[string]string{
+			envSrcDB: uri(ref.Host), envPGPort: "6432"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			passwords := map[Side]string{Source: "source-pw", Target: "target-pw"}
+			passfile, uris := runBothSides(t, tc.src, tc.tgt, tc.env, passwords)
+			ports := map[string]bool{}
+			for _, s := range []Side{Source, Target} {
+				u, err := url.Parse(uris[s])
+				if err != nil {
+					t.Fatal(err)
+				}
+				port := u.Port()
+				if port == "" {
+					port = cmp.Or(tc.env[envPGPort], "5432")
+				}
+				ports[port] = true
+				got, ok := libpqPassword(passfile, u.Hostname(), port, strings.TrimPrefix(u.Path, "/"), u.User.Username())
+				if !ok || got != passwords[s] {
+					t.Fatalf("%s at %s:%s authenticates with %q, want its own password; passfile:\n%s", s, u.Hostname(), port, got, passfile)
+				}
+			}
+			if len(ports) != 2 {
+				t.Fatalf("fixture must put the sides on distinct ports, got %v", ports)
+			}
+		})
+	}
+}
+
+// TestComposeURI_RefusesUnbindableHost covers inline hosts whose URI authority
+// libpq would read differently from the passfile line the prelude writes.
+func TestComposeURI_RefusesUnbindableHost(t *testing.T) {
+	for _, host := range []string{"::1", "[::1]", tHost + ":6432", "h1,h2", "/run/postgresql", "db%2e", "db'x", "db x"} {
+		c := inlineConn()
+		c.Host = host
+		if _, err := Materialize(Source, c); err == nil || !strings.Contains(err.Error(), tUnbound) {
+			t.Fatalf("host %q: want refusal, got %v", host, err)
+		}
+	}
+	c := inlineConn()
+	c.Host = "Pg-1.ns_x.svc.cluster.local"
+	if _, err := Materialize(Source, c); err != nil {
+		t.Fatalf("plain DNS name refused: %v", err)
 	}
 }

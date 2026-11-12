@@ -74,9 +74,11 @@ func uriEnv(s Side) string {
 func tlsMountPath(s Side) string { return "/etc/pgcopydb/tls/" + string(s) }
 
 // Passfile describes one line the runner prelude must add to the passfile:
-// libpq format host:*:*:user:<contents of File>, with ':' and '\' escaped.
+// libpq format host:port:*:user:<contents of File>, with ':' and '\' escaped.
+// The port is exact: with a wildcard, two sides on one host and user share a line.
 type Passfile struct {
 	Host string
+	Port int32
 	User string
 	File string
 }
@@ -159,7 +161,7 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 		vol, mount, file := passwordVolume(string(s), c.PasswordSecretRef.Name, c.PasswordSecretRef.Key, false)
 		m.Volumes = append(m.Volumes, vol)
 		m.Mounts = append(m.Mounts, mount)
-		m.Passfile = &Passfile{Host: c.Host, User: c.Username, File: file}
+		m.Passfile = &Passfile{Host: c.Host, Port: inlinePort(c), User: c.Username, File: file}
 	}
 	return m, nil
 }
@@ -304,6 +306,7 @@ func MaterializeSuperuser(s Side, c *v1beta1.PostgresConnection) *Materialized {
 // superPrelude renders the shell that derives a side's superuser URI from the
 // already-composed primary URI, userinfo swapped and password-free (the PW file
 // feeds the passfile). Host parsing follows the primary: no key=value DSNs, no IPv6.
+// The primary may be a uriSecretRef the operator never parsed, so pf_endpoint checks it here.
 func superPrelude(s Side, pwFile, pwKey string) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 [ -n "${@BASE@-}" ] || { echo "@SIDE@ superuser secret: primary connection URI is not composed; prelude ordering bug" >&2; exit 1; }
@@ -315,20 +318,19 @@ case "$sup_user" in *@*|*:*|*/*|*"?"*|*"#"*|*%*|*"&"*) echo "@SIDE@ superuser se
 sup_rest=${sup_base#*://}
 sup_hp=${sup_rest%%\?*}; sup_hostpart=${sup_hp%%/*}
 case "$sup_hostpart" in *@*) sup_hostport=${sup_hostpart##*@} ;; *) sup_hostport=$sup_hostpart ;; esac
-sup_host=${sup_hostport%%:*}
+pf_endpoint "@SIDE@ superuser secret" "$sup_hostport" "$sup_base"
 sup_want=${@HOST@-}
 if [ -n "$sup_want" ]; then
-  case "$sup_hostport" in *:*) sup_hpd=$sup_hostport ;; *) sup_hpd=$sup_hostport:5432 ;; esac
-  case "$sup_want" in *:*) sup_cmp=$sup_hpd ;; *) sup_cmp=$sup_host ;; esac
+  case "$sup_want" in *:*) sup_cmp=$pf_host:$pf_port ;; *) sup_cmp=$pf_host ;; esac
   [ "$sup_want" = "$sup_cmp" ] || { echo "@SIDE@ superuser secret: url key '$sup_want' does not match the connection endpoint '$sup_cmp'; the superuser secret URL keys MUST name the same endpoint" >&2; exit 1; }
 fi
 sup_uri="${sup_base%%://*}://$sup_user@$sup_hostport${sup_rest#"$sup_hostpart"}"
 export @SUPERURI@="$sup_uri"
 printf '%s' "$sup_uri" > @URIFILE@
 [ -f @PWFILE@ ] || { echo "@SIDE@ superuser secret: password key @PWKEY@ missing" >&2; exit 1; }
-printf '%s:*:*:%s:%s\n' "$(pf_esc "$sup_host")" "$(pf_esc "$sup_user")" "$(pf_esc "$(cat @PWFILE@)")" >> @PGPASS@
+printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$sup_user")" "$(pf_esc "$(cat @PWFILE@)")" >> @PGPASS@
 `
-	return strings.NewReplacer(
+	return endpointShell + strings.NewReplacer(
 		"@BASE@", uriEnv(s),
 		"@USER@", pgmEnv(s, "SUPER_USER"),
 		"@HOST@", pgmEnv(s, "SUPER_HOST"),
@@ -347,18 +349,25 @@ func ComposeURI(s Side, c *v1beta1.PostgresConnection) (string, error) {
 	if c.Host == "" || c.Username == "" {
 		return "", fmt.Errorf("%s: host and username are required without uriSecretRef", s)
 	}
-	port := c.Port
-	if port == 0 {
-		port = 5432
+	if strings.Trim(c.Host, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_") != "" {
+		return "", fmt.Errorf("%s: host %q cannot be bound to an exact passfile line; use a DNS name or IPv4 address, or uriSecretRef", s, c.Host)
 	}
 	u := url.URL{
 		Scheme:   "postgresql",
 		User:     url.User(c.Username),
-		Host:     fmt.Sprintf("%s:%d", c.Host, port),
+		Host:     fmt.Sprintf("%s:%d", c.Host, inlinePort(c)),
 		Path:     "/" + c.Database,
 		RawQuery: querySuffix(s, c),
 	}
 	return u.String(), nil
+}
+
+// inlinePort is the port the inline form's URI and passfile line both carry.
+func inlinePort(c *v1beta1.PostgresConnection) int32 {
+	if c.Port == 0 {
+		return 5432
+	}
+	return c.Port
 }
 
 // sslParam renders the spec's sslmode as one libpq query param, or "".
@@ -437,11 +446,27 @@ func fillParams(q string) string {
 	return b.String()
 }
 
+// endpointShell defines pf_endpoint LABEL HOSTPORT URI: it sets pf_host and pf_port to what
+// libpq matches the passfile against (no port means PGPORT, then 5432), or refuses the endpoint
+// by name when the URI authority or query would make libpq connect somewhere the line does not name.
+const endpointShell = `pf_endpoint() {
+  case "$2" in ''|:*|*,*|*\[*|*\]*|*%*) echo "$1: endpoint '$2' cannot be bound to an exact passfile line; use one host or host:port without IPv6 brackets or percent-encoding" >&2; exit 1 ;; esac
+  pf_host=${2%%:*}
+  case "$2" in *:*) pf_port=${2#*:} ;; *) pf_port=${PGPORT:-5432} ;; esac
+  case "$pf_port" in ''|*[!0-9]*) echo "$1: port '$pf_port' is not one decimal port; the passfile line needs the exact port" >&2; exit 1 ;; esac
+  case "$3" in *\?*) pf_q=${3#*\?}\& ;; *) pf_q= ;; esac
+  while [ -n "$pf_q" ]; do
+    pf_k=${pf_q%%\&*}; pf_q=${pf_q#*\&}; pf_k=${pf_k%%=*}
+    case "$pf_k" in host|port|service|*%*) echo "$1: the URI query sets '$pf_k', which moves the endpoint off its passfile line; name host and port in the URI authority" >&2; exit 1 ;; esac
+  done
+}
+`
+
 // secretRefPrelude renders the shell that composes one side's PGCOPYDB_*_PGURI
 // and passfile line. Values carrying URI syntax or percent-encoding are
 // rejected by name, because they would compose a wrong URI or a passfile line
 // libpq never matches; uriSecretRef is the escape hatch.
-// Host parsing assumes host or host:port; bracketed IPv6 literals are out of scope.
+// Host parsing accepts host or host:port; pf_endpoint refuses the rest by name.
 func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string, syncLocal bool) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 db=$@DB@
@@ -476,9 +501,9 @@ postgresql://*|postgres://*)
   uri="postgresql://$user@$hostport/$db"
   ;;
 esac
-host=${hostport%%:*}
+pf_endpoint "@SIDE@ connection secret" "$hostport" "$uri"
 `
-	b := strings.NewReplacer(
+	b := endpointShell + strings.NewReplacer(
 		"@DB@", pgmEnv(s, "DB"),
 		"@USER@", pgmEnv(s, "USER"),
 		"@HOST@", pgmEnv(s, "HOST"),
@@ -508,7 +533,7 @@ host=${hostport%%:*}
 	b += `export ` + uriEnv(s) + `="$uri"
 printf '%s' "$uri" > ` + URIFile(s) + `
 [ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + pwKey + ` missing" >&2; exit 1; }
-printf '%s:*:*:%s:%s\n' "$(pf_esc "$host")" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + PgpassPath + `
+printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + PgpassPath + `
 `
 	return b
 }
@@ -576,8 +601,8 @@ func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 			// sed escapes backslashes first, then colons; $(cat ...) would strip
 			// trailing newlines which sed does not, so sed reads the file itself.
 			fmt.Fprintf(&b,
-				"printf '%%s:*:*:%%s:%%s\\n' '%s' '%s' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
-				e.Host, e.User, e.File, PgpassPath)
+				"printf '%%s:%d:*:%%s:%%s\\n' '%s' '%s' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
+				e.Port, e.Host, e.User, e.File, PgpassPath)
 		}
 		for _, p := range pre {
 			b.WriteString(p)
