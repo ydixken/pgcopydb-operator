@@ -71,8 +71,8 @@ Each value MUST be empty or `sha256:` followed by 64 lowercase hexadecimal chara
 A nonempty digest takes precedence over its tag and renders as `repository@sha256:...`; an invalid value fails rendering.
 When a digest is empty or absent, the image uses its tag, or the chart appVersion if the tag is empty.
 
-The native image setting does not enable `spec.engine: rpgmigrate`, which still fails with `UnsupportedEngine`.
-Use a qualified immutable single-platform manifest pin.
+`spec.engine: rpgmigrate` runs only when the effective native image pins a qualified runner manifest; anything else fails with `UnsupportedEngine`.
+Use one of the qualified immutable single-platform manifest pins listed in the configuration guide.
 See [Native helper image](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/configuration.md#native-helper-image) for environment precedence and qualification requirements.
 
 ## RBAC and ServiceAccounts

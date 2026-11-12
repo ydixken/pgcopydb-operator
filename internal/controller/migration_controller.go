@@ -213,14 +213,15 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	// base is the object as fetched; every status write patches against it.
 	base := m.DeepCopy()
 	// Dispatch before lifecycle handling so an unavailable engine cannot reach legacy effects.
-	if engine, err := backendFor(m); err != nil || engine != v1beta1.MigrationEnginePGCopyDB {
-		msg := unsupportedEngineMessage(m, err)
+	// Native runs only on a qualified runner digest; native preflight admits only the qualified major pairs.
+	engine, engineErr := backendFor(m)
+	if engineErr != nil || (engine == v1beta1.MigrationEngineRPGMigrate && !nativeRunnerQualified(runnerImageFor(m, r.RPGMigrateRunnerImage))) {
+		msg := unsupportedEngineMessage(m, engineErr)
 		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "UnsupportedEngine", msg)
 		r.fail(m, "UnsupportedEngine", "Validate", msg)
 		return ctrl.Result{}, r.updateStatus(ctx, m, base)
 	}
-	// Runtime qualification must open the guard above before this native route is reachable.
-	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+	if engine == v1beta1.MigrationEngineRPGMigrate {
 		observing = true
 		return r.reconcileNative(ctx, m, base)
 	}

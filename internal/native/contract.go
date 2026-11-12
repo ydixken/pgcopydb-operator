@@ -127,6 +127,18 @@ type OwnedResource struct {
 	Removed *bool  `json:"removed"`
 }
 
+// Engine 908ada6 runner publications, one single-platform manifest per architecture.
+var qualifiedRunnerDigests = []string{
+	"sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b", // arm64
+	"sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b", // amd64
+}
+
+// QualifiedRunner reports whether image pins a qualified runner manifest by digest; the reference shape is checked separately.
+func QualifiedRunner(image string) bool {
+	_, digest, ok := strings.Cut(image, "@")
+	return ok && slices.Contains(qualifiedRunnerDigests, digest)
+}
+
 func RequireCapabilities(got []Capability, required ...Capability) error {
 	seen := make(map[Capability]bool, len(got))
 	for _, c := range got {

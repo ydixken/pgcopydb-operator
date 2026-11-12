@@ -116,9 +116,23 @@ def failure_envelope(op, failure):
 def validate_environment(env):
  need(not any(k.startswith('LD_') or k in BANNED for k in env),CAP_ERR)
  need(env.get('LC_ALL')=='C' and env.get('LANG')=='C',CAP_ERR)
+# libc and libpq runtime metadata packaged in the qualified 908ada6 runner digests (contract.go).
+QUALIFIED_RUNTIME={'aarch64':('70fa4c4cf57eabeb96097cce47582d02379c4cd1de3db3e98ade4dd7089a1b13','122ec42c730898d3f9680b394b0a521ef6f808e29c6db013c0c495caa34dab44'),'x86_64':('9792e3cbb541c8f44c7acf5f14f4022ea62998ecc787d326bed4d8b6547dfd92','f918456013fa6576dcbe2c095dc7fce8ae306facde00f25ab9fcde48b60feada')}
+QUALIFIED_NSS='eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb'
+def packaged_sha256(path):
+ root_ancestors(path); packaged=StableFile(path,16*1024*1024)
+ try: digest=hashlib.sha256(packaged.raw).hexdigest(); packaged.check(); return digest
+ finally: packaged.close()
 def qualified_resolver_policy(resolver: 'StableFile') -> None:
- # The packaged libc/resolver bounds need independent qualification before activation.
- raise Refusal(CAP_ERR)
+ # glibc 2.41 copies six search entries into 256 bytes (CVE-2026-8674): admit only one explicit search line that fits.
+ machine=os.uname().machine; need(type(resolver) is StableFile and resolver.path=='/etc/resolv.conf' and machine in QUALIFIED_RUNTIME,CAP_ERR)
+ resolver.check(); need(all(32<=b<127 or b in (9,10) for b in resolver.raw),CAP_ERR)
+ directives=[line for line in resolver.raw.decode('ascii').split('\n') if line.split()[:1] in (['search'],['domain'])]
+ need(len(directives)==1 and directives[0][:7] in ('search ','search\t'),CAP_ERR)
+ search=directives[0].split()[1:]; need(search and sum(len(entry)+1 for entry in search[:6])<=256,CAP_ERR)
+ libc,runtime=QUALIFIED_RUNTIME[machine]
+ for path,digest in ((f'/usr/lib/{machine}-linux-gnu/libc.so.6',libc),('/etc/nsswitch.conf',QUALIFIED_NSS),('/usr/share/rpgmigrate/python-libpq-runtime.json',runtime)):
+  need(packaged_sha256(path)==digest,CAP_ERR)
 def identity(info): return (info.st_dev,info.st_ino)
 def stamp(info):
  return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_uid,info.st_gid,info.st_size,info.st_mtime_ns,info.st_ctime_ns)

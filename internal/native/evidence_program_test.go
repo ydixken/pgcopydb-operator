@@ -87,6 +87,9 @@ func TestNativePythonEnvironmentDNS(t *testing.T) { pythonMechanismCase(t, "test
 func TestNativePythonQualifiedResolverPolicy(t *testing.T) {
 	pythonMechanismCase(t, "test_QualifiedResolverPolicy")
 }
+func TestNativePythonQualifiedResolverTuple(t *testing.T) {
+	pythonMechanismCase(t, "test_QualifiedResolverTuple")
+}
 func TestNativePythonConnectionHomePolicy(t *testing.T) {
 	pythonMechanismCase(t, "test_ConnectionHomePolicy")
 }
@@ -275,7 +278,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 58 || len(registered) != 58 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 59 || len(registered) != 59 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)
