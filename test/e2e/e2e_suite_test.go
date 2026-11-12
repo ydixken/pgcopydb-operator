@@ -227,6 +227,11 @@ func (c featureLabelingClient) Create(
 		}
 		if migration.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
 			migration.Spec.Clone = nativeClone(migration.Spec.Clone)
+			if external == nil {
+				if err := nativeVerifyFull(migration); err != nil {
+					return err
+				}
+			}
 		}
 		if err := labelFeatureMigration(migration); err != nil {
 			return err
@@ -242,6 +247,24 @@ func nativeClone(c v1beta1.CloneOptions) v1beta1.CloneOptions {
 		TableJobs: c.TableJobs, UseCopyBinary: ptr.To(false),
 		SplitTablesLargerThan: ptr.To(resource.MustParse("0")), Skip: []v1beta1.SkipOption{"largeObjects"},
 	}
+}
+
+const sslVerifyFull = "verify-full"
+
+// nativeVerifyFull pins each side to the suite's CNPG cluster CA, as the runner-profile receipts were
+// qualified, and refuses a connection it cannot bind instead of leaving it on sslmode=prefer.
+func nativeVerifyFull(m *v1beta1.Migration) error {
+	for _, conn := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
+		cluster, inline := strings.CutSuffix(conn.Host, "-rw."+m.Namespace+".svc")
+		if !inline || cluster == "" || strings.Contains(cluster, ".") || conn.TLS != nil ||
+			conn.SSLMode != "" && conn.SSLMode != sslVerifyFull {
+			return fmt.Errorf("native Migration %s/%s connection cannot be pinned to its CNPG CA", m.Namespace, m.Name)
+		}
+		conn.SSLMode = sslVerifyFull
+		conn.TLS = &v1beta1.TLSSecretRefs{RootCA: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: cluster + "-ca"}, Key: "ca.crt"}}
+	}
+	return nil
 }
 
 func (c featureLabelingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
@@ -1284,13 +1307,23 @@ var (
 	mountedFilesystemCapacity = readMountedFilesystemCapacity
 )
 
-// kindLabelFilterAllowed lists the exact positive selections a kind run may take;
-// the native ones are reachable only once suiteEngine stops refusing rpgmigrate.
+// kindLabelFilterAllowed lists the exact positive selections a kind run may take for its engine.
 func kindLabelFilterAllowed(engine v1beta1.MigrationEngine, filter string) bool {
-	if filter == kindBootstrapLabel {
-		return true
+	if engine == v1beta1.MigrationEnginePGCopyDB {
+		return filter == kindBootstrapLabel
 	}
 	return engine == v1beta1.MigrationEngineRPGMigrate && (filter == nativeLabel || filter == nativeFaultLabel)
+}
+
+// kindSuiteDescription is the RunSpecs description, which Ginkgo prefixes to the text a focus matches.
+const kindSuiteDescription = "pgcopydb-operator e2e suite"
+
+// kindFocus anchors a native kind run to the one spec its guard-bound input names; legacy keeps its label.
+func (run *kindSuite) kindFocus() []string {
+	if run.input.Engine != string(v1beta1.MigrationEngineRPGMigrate) {
+		return nil
+	}
+	return []string{"^" + regexp.QuoteMeta(kindSuiteDescription+" "+run.input.Spec) + "$"}
 }
 
 func TestE2E(t *testing.T) {
@@ -1305,12 +1338,13 @@ func TestE2E(t *testing.T) {
 	if _, err := helmImageValues(); err != nil {
 		t.Fatal(err)
 	}
+	cfg, reporterCfg := GinkgoConfiguration()
 	if activeKindSuite != nil {
-		cfg, _ := GinkgoConfiguration()
 		if !kindLabelFilterAllowed(selectedEngine(), cfg.LabelFilter) || len(cfg.FocusStrings) > 0 ||
-			len(cfg.SkipStrings) > 0 || cfg.DryRun || !cfg.FailOnEmpty {
+			len(cfg.SkipStrings) > 0 || len(cfg.FocusFiles) > 0 || len(cfg.SkipFiles) > 0 || cfg.DryRun || !cfg.FailOnEmpty {
 			t.Fatal("kind suite requires an exact positive selection for its engine and fail-on-empty")
 		}
+		cfg.FocusStrings = activeKindSuite.kindFocus()
 	}
 	if smallProfile && parallelProcs() != 1 {
 		t.Fatal("E2E_SMALL requires one Ginkgo process")
@@ -1327,7 +1361,7 @@ func TestE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "pgcopydb-operator e2e suite")
+	RunSpecs(t, kindSuiteDescription, cfg, reporterCfg)
 }
 
 // connectSuite builds this process's API client.

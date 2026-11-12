@@ -51,20 +51,24 @@ type kindSuiteFailure struct {
 	Line     int    `json:"line,omitempty"`
 }
 
-func kindSpecWitness(report types.Report) (executed, passed, skipped int, err error) {
+// kindSpecWitness requires exactly one executed, passed spec named want under label, and no other
+// spec run; a native label also covers specs its run skipped, so only the bootstrap label refuses those.
+func kindSpecWitness(report types.Report, label, want string) (executed, passed, skipped int, err error) {
 	for _, spec := range report.SpecReports {
 		if spec.LeafNodeType != types.NodeTypeIt {
 			continue
 		}
-		labelled, labelErr := spec.MatchesLabelFilter(kindBootstrapLabel)
+		labelled, labelErr := spec.MatchesLabelFilter(label)
 		if labelErr != nil {
 			return 0, 0, 0, labelErr
 		}
-		if !labelled && spec.FullText() != kindBootstrapSpec {
+		ran := spec.State != types.SpecStateSkipped && spec.State != types.SpecStatePending
+		other := spec.FullText() != want
+		if other && !ran && (!labelled || label != kindBootstrapLabel) {
 			continue
 		}
-		if !labelled || spec.FullText() != kindBootstrapSpec {
-			return 0, 0, 0, errors.New("kind bootstrap selected an unexpected spec")
+		if other || !labelled {
+			return 0, 0, 0, errors.New("kind run selected an unexpected spec")
 		}
 		if spec.State == types.SpecStateSkipped || spec.State == types.SpecStatePending {
 			skipped++
@@ -76,7 +80,7 @@ func kindSpecWitness(report types.Report) (executed, passed, skipped int, err er
 		}
 	}
 	if !report.SuiteSucceeded || executed != 1 || passed != 1 || skipped != 0 {
-		err = errors.New("kind bootstrap requires exactly one executed, named, passed spec")
+		err = errors.New("kind run requires exactly one executed, named, passed spec")
 	}
 	return
 }
@@ -147,7 +151,7 @@ func TestKindFailureBeforeSuiteFixture(t *testing.T) {
 			It(strings.TrimPrefix(kindBootstrapSpec, "Kind bootstrap "), func() { Fail("fixture spec must not execute") })
 		})
 		ReportAfterSuite("private failure fixture", func(report Report) {
-			executed, passed, skipped, witnessErr := kindSpecWitness(report)
+			executed, passed, skipped, witnessErr := kindSpecWitness(report, kindBootstrapLabel, kindBootstrapSpec)
 			receipt := struct {
 				Reporter        string             `json:"reporter"`
 				SuiteSucceeded  bool               `json:"suite_succeeded"`

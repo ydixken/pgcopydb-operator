@@ -6,8 +6,9 @@ import re
 
 ROLES = ('node', 'cnpg-controller', 'postgresql-16', 'postgresql-17', 'postgresql-18', 'manager',
          'legacy-runner', 'native-runner', 'seed-tool-runner', 'otel-collector', 'storage-helper', 'storage-provisioner')
-PULL_ROLES = ('manager', 'cnpg-controller', 'postgresql-17', 'legacy-runner', 'seed-tool-runner',
-              'otel-collector', 'storage-helper', 'storage-provisioner')
+# Every image a legacy or native suite RUN starts is pulled and verified by digest before it runs.
+PULL_ROLES = ('manager', 'cnpg-controller', 'postgresql-16', 'postgresql-17', 'postgresql-18', 'legacy-runner', 'native-runner',
+              'seed-tool-runner', 'otel-collector', 'storage-helper', 'storage-provisioner')
 DEV_ROLES = ('manager', 'native-runner')
 SOURCE_KEYS = {'repository', 'commit', 'git_tree', 'payload_inventory_sha256'}
 IMAGE_KEYS = {'role', 'ref', 'os', 'architecture', 'variant', 'digest', 'index_digest', 'config_digest', 'provenance'}

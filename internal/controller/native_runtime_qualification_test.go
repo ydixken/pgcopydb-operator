@@ -373,7 +373,8 @@ def sandbox_value(raw,e,sid,terminal=False):
  else:need(info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False);pid=info.get('pid')
  need(type(pid) is int and 1<pid<4194304)
  config=info.get('config');need(type(config) is dict and config.get('metadata',{}).get('uid')==e['pod_uid'] and config['metadata'].get('name')==e['pod_name'] and config['metadata'].get('namespace')==e['namespace'])
- metadata=info.get('sandboxMetadata',{});need(type(metadata) is dict and metadata.get('RuntimeHandler',metadata.get('runtimeHandler','')) in ('','runc'))
+ # containerd nests the handler under Metadata (read off kind v1.36.4); an absent field is refused, never read as the default.
+ metadata=info.get('sandboxMetadata');need(type(metadata) is dict and type(metadata.get('Metadata')) is dict and metadata['Metadata'].get('RuntimeHandler') in ('','runc'))
  spec=info.get('runtimeSpec');need(type(spec) is dict and spec.get('hooks') in (None,{}))
  namespaces=spec.get('linux',{}).get('namespaces');need(type(namespaces) is list and len(namespaces)==5 and all(type(n) is dict for n in namespaces) and {n.get('type') for n in namespaces}=={'pid','ipc','uts','mount','network'})
  for namespace in namespaces:
@@ -555,7 +556,7 @@ our $deadline;
 $ENV{PATH}='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 use Fcntl qw(:DEFAULT :mode);
 sub need { die "refused\n" unless $_[0]; }
-sub decimal { my ($s,$zero)=@_;need(defined($s) && $s =~ /\A(0|[1-9][0-9]{0,19})\z/);my $v=$1;need(length($v)<20 || $v le '18446744073709551615');need($zero || $v ne '0');return $v; }
+sub decimal { my ($s,$zero)=@_;need(defined($s) && scalar($s =~ /\A(0|[1-9][0-9]{0,19})\z/));my $v=$1;need(length($v)<20 || $v le '18446744073709551615');need($zero || $v ne '0');return $v; }
 sub pid { my $v=decimal($_[0],0);need($v>1 && $v<4194304);return $v; }
 sub uid { need(defined($_[0]) && $_[0] =~ /\A([a-z0-9-]{1,64})\z/);return $1; }
 sub jstr { my $s=$_[0];need(defined($s) && $s !~ /[^\x20-\x7e]/);$s =~ s/([\\"])/\\$1/g;return '"'.$s.'"'; }
@@ -568,7 +569,7 @@ sub pair { my ($a,$b)=@_;my @x=stat($a);my @y=stat($b);return @x && @y && $x[0]=
 sub raw_file { my ($path,$cap)=@_;sysopen(my $fh,$path,O_RDONLY|O_NOFOLLOW) or need(0);my $raw=bounded($fh,$cap);close($fh) or need(0);need(length($raw)>0);return $raw; }
 sub hash_fd { my ($fh)=@_;my $path='/proc/'.$$.'/fd/'.fileno($fh);open(my $pipe,'-|','/usr/bin/sha256sum',$path) or need(0);my $raw=bounded($pipe,256);close($pipe) or need(0);need($raw =~ /\A([0-9a-f]{64})  \/proc\/[0-9]+\/fd\/[0-9]+\n\z/);return $1; }
 sub frame { my ($rows)=@_;my @names=qw(stat_before status cmdline environ mountinfo cgroup stat_after meta);print 'M6FD01',pack('N',8);my $total=10;my %cap=(stat_before=>16384,status=>65536,cmdline=>262144,environ=>262144,mountinfo=>65536,cgroup=>16384,stat_after=>16384,meta=>65536);for my $name (@names){my $raw=$rows->{$name}//'';need(length($raw)<=$cap{$name});$total+=8+length($name)+length($raw);need($total<=1048576);print pack('N',length($name)),$name,pack('N',length($raw)),$raw;} }
-sub key_stat { my ($root)=@_;my $dir=directory($root);my @todo=('server.key');my $links=0;while(@todo){my $part=shift @todo;need($part =~ /\A([A-Za-z0-9_.-]{1,128})\z/ && $part ne '.' && $part ne '..');$part=$1;my $path='/proc/'.$$.'/fd/'.fileno($dir).'/'.$part;my @st=lstat($path);need(@st);if(S_ISLNK($st[2])){need(++$links<=8);my $link=readlink($path);need(defined($link) && $link =~ /\A([A-Za-z0-9_.\/-]{1,256})\z/ && substr($link,0,1) ne '/');my @next=split /\//,$1;need(!grep {$_ eq '..' || $_ eq '.' || $_ eq ''} @next);unshift @todo,@next;next;}if(@todo){need(S_ISDIR($st[2]));sysopen(my $next,$path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW) or need(0);close($dir) or need(0);$dir=$next;next;}need(S_ISREG($st[2]) && $st[4]==0 && $st[5]==999 && ($st[2]&07777)==0440 && $st[3]==1);close($dir) or need(0);return {uid=>'0',gid=>'999',mode=>'288',links=>'1'};}need(0); }
+sub key_stat { my ($root)=@_;my $dir=directory($root);my @todo=('server.key');my $links=0;while(@todo){my $part=shift @todo;need($part =~ /\A([A-Za-z0-9_.-]{1,128})\z/ && $part ne '.' && $part ne '..');$part=$1;my $path='/proc/'.$$.'/fd/'.fileno($dir).'/'.$part;my @st=lstat($path);need(@st);if(S_ISLNK($st[2])){need(++$links<=8);my $link=readlink($path);need(defined($link) && $link =~ /\A([A-Za-z0-9_.\/-]{1,256})\z/ && substr($link,0,1) ne '/');my @next=split /\//,$1;need(!grep {$_ eq '..' || $_ eq '.' || $_ eq ''} @next);unshift @todo,@next;next;}if(@todo){need(S_ISDIR($st[2]));sysopen(my $next,$path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW) or need(0);close($dir) or need(0);$dir=$next;next;}need(S_ISREG($st[2]) && $st[4]==0 && $st[5]==26 && ($st[2]&07777)==0440 && $st[3]==1);close($dir) or need(0);return {uid=>'0',gid=>'26',mode=>'288',links=>'1'};}need(0); }
 
 sub probe {
  my ($p,$pod,$sandbox,$guard)=@_;sysopen(my $proc,'/proc/'.$p,O_RDONLY|O_DIRECTORY|O_NOFOLLOW) or need(0);my $before=read_at($proc,'stat',16384);my $ticks=start($before);need($guard eq '0' || $guard eq $ticks);
@@ -908,6 +909,13 @@ func nativeRuntimeClient(input nativeRuntimeInput) (*kubernetes.Clientset, error
 		return nil, err
 	}
 	return kubernetes.NewForConfig(config)
+}
+
+// A followed log outlives the 30s request cap, so only the caller's context bounds it.
+func nativeRuntimeStreamConfig(config *rest.Config) *rest.Config {
+	untimed := rest.CopyConfig(config)
+	untimed.Timeout = 0
+	return untimed
 }
 
 func nativeRuntimeConfig(input nativeRuntimeInput) (*rest.Config, error) {
@@ -2460,5 +2468,25 @@ func TestNativeRuntimeMetadataCertificateOnly(t *testing.T) {
 				t.Fatal("alternate authentication or endpoint route accepted")
 			}
 		})
+	}
+}
+
+// A list-context match hands need() the capture '0', which Perl reads as false.
+func TestNativeRuntimeNodeDecimalAdmitsZeroOnlyWhereAllowed(t *testing.T) {
+	var subs []string
+	for line := range strings.SplitSeq(nativeRuntimeNodeProgram, "\n") {
+		if strings.HasPrefix(line, "sub need ") || strings.HasPrefix(line, "sub decimal ") {
+			subs = append(subs, line)
+		}
+	}
+	if len(subs) != 2 {
+		t.Fatal("node decimal parser missing")
+	}
+	probe := strings.Join(subs, "\n") + "\nmy $r=eval { decimal($ARGV[0],$ARGV[1]) };print defined($r)?\"ok:$r\":\"refused\";"
+	for _, row := range [][3]string{{"0", "1", "ok:0"}, {"0", "0", nativeRuntimeRefused}, {"16165", "0", "ok:16165"}, {"01", "1", nativeRuntimeRefused}, {"", "1", nativeRuntimeRefused}, {"18446744073709551616", "1", nativeRuntimeRefused}} {
+		out, err := exec.Command("perl", "-e", probe, row[0], row[1]).Output() // #nosec G204 -- fixed host perl over the pinned node source.
+		if err != nil || string(out) != row[2] {
+			t.Fatalf("decimal(%q, %s) = %q, want %q (%v)", row[0], row[1], out, row[2], err)
+		}
 	}
 }

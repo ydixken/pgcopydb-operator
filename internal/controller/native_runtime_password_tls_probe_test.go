@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 )
@@ -141,7 +144,7 @@ func nativePasswordPodStatus(pod *corev1.Pod, image nativeRuntimeImage, known st
 }
 
 func nativePasswordPodMatches(expected, actual *corev1.Pod) bool {
-	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && reflect.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
+	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && apiequality.Semantic.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
 }
 
 // The Job controller drops its tracking finalizer once it has counted a terminated Job Pod; nothing else may change.
@@ -314,7 +317,8 @@ func nativePasswordRemove(ctx context.Context, clientset kubernetes.Interface, o
 		case nativeRuntimeNamespaceKind:
 			err = clientset.CoreV1().Namespaces().Delete(call, o.GetName(), options)
 		}
-		if err != nil && !apierrors.IsNotFound(err) {
+		// A kubelet status write between the read and the delete is a Conflict; the UID check above still binds the retry.
+		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return false, errors.New("cleanup delete refused")
 		}
 		return false, nil
@@ -504,7 +508,7 @@ func nativePasswordDecodeResult(payload []byte, process map[string]any) (map[str
 	return passed, finalProcess, nil
 }
 
-func nativePasswordAuthorizeClient(ctx context.Context, clientset kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage nativeRuntimeImage, fixture *nativePasswordServerFixture, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (*nativePasswordExecution, error) {
+func nativePasswordAuthorizeClient(ctx context.Context, clientset, streams kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage nativeRuntimeImage, fixture *nativePasswordServerFixture, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (*nativePasswordExecution, error) {
 	server, service, keys, pgImage := fixture.pod, fixture.service, fixture.keys, fixture.image
 	expected, err := nativePasswordClient(input, node, nativeImage, major, program)
 	if err != nil {
@@ -530,7 +534,7 @@ func nativePasswordAuthorizeClient(ctx context.Context, clientset kubernetes.Int
 	if err != nil {
 		return nil, err
 	}
-	stream, err := clientset.CoreV1().Pods(input.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: workerContainer, Follow: true}).Stream(ctx)
+	stream, err := streams.CoreV1().Pods(input.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: workerContainer, Follow: true}).Stream(ctx)
 	if err != nil {
 		return nil, errors.New("client readiness stream unavailable")
 	}
@@ -650,12 +654,12 @@ func nativePasswordCollect(ctx context.Context, clientset kubernetes.Interface, 
 	return passed, nil
 }
 
-func nativePasswordRunPair(ctx context.Context, clientset kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage, pgImage nativeRuntimeImage, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (map[string]bool, error) {
+func nativePasswordRunPair(ctx context.Context, clientset, streams kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage, pgImage nativeRuntimeImage, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (map[string]bool, error) {
 	fixture, err := nativePasswordPrepareServer(ctx, clientset, input, node, pgImage, major, owned, unknown, scan)
 	if err != nil {
 		return nil, err
 	}
-	execution, err := nativePasswordAuthorizeClient(ctx, clientset, input, node, nativeImage, fixture, major, program, owned, unknown, scan)
+	execution, err := nativePasswordAuthorizeClient(ctx, clientset, streams, input, node, nativeImage, fixture, major, program, owned, unknown, scan)
 	if err != nil {
 		return nil, err
 	}
@@ -681,9 +685,17 @@ func TestNativePackagedPasswordTLSProbe(t *testing.T) {
 		t.Fatal("fixed probe input refused")
 	}
 	r := input.Runtime
-	clientset, err := nativeRuntimeClient(r)
+	config, err := nativeRuntimeConfig(r)
 	if err != nil {
 		t.Fatal("owned client unavailable")
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal("owned client unavailable")
+	}
+	streams, err := kubernetes.NewForConfig(nativeRuntimeStreamConfig(config))
+	if err != nil {
+		t.Fatal("owned log stream client unavailable")
 	}
 	nativeImage, err := nativeRuntimeAssets(path, r)
 	if err != nil {
@@ -737,7 +749,7 @@ func TestNativePackagedPasswordTLSProbe(t *testing.T) {
 	owned = append(owned, nativeRuntimeOwned{object: namespace, kind: nativeRuntimeNamespaceKind})
 	receipt.NamespaceUID = namespace.UID
 	for index, major := range []int{16, 18} {
-		passed, err := nativePasswordRunPair(work, clientset, r, r.Nodes[index], nativeImage, images[major], major, program, &owned, &unknown, scan)
+		passed, err := nativePasswordRunPair(work, clientset, streams, r, r.Nodes[index], nativeImage, images[major], major, program, &owned, &unknown, scan)
 		if err != nil {
 			t.Fatal("actual password/TLS primitive probe refused")
 		}
@@ -877,9 +889,10 @@ func nativePasswordCredentials(host string) (nativePasswordKeys, error) {
 	return result, nil
 }
 
+// initdb admits only loopback hosts, so the client Pod needs an explicit TLS and SCRAM rule.
 func nativePasswordServerCommand(major int) []string {
 	binary := fmt.Sprintf("/usr/lib/postgresql/%d/bin/", major)
-	return []string{shellPath, "-ec", binary + "initdb -D /var/lib/postgresql/probe-data --username=native_probe --pwfile=/run/server-input/password --auth-local=reject --auth-host=scram-sha-256 --encoding=UTF8 --no-locale; exec " + binary + "postgres -D /var/lib/postgresql/probe-data -c listen_addresses='*' -c unix_socket_directories=/tmp -c ssl=on -c ssl_cert_file=/run/server-input/server.crt -c ssl_key_file=/run/server-input/server.key -c password_encryption=scram-sha-256 -c log_min_error_statement=panic"}
+	return []string{shellPath, "-ec", binary + "initdb -D /var/lib/postgresql/probe-data --username=native_probe --pwfile=/run/server-input/password --auth-local=reject --auth-host=scram-sha-256 --encoding=UTF8 --no-locale; printf 'hostssl all native_probe all scram-sha-256\\n' > /var/lib/postgresql/probe-data/pg_hba.conf; exec " + binary + "postgres -D /var/lib/postgresql/probe-data -c listen_addresses='*' -c unix_socket_directories=/tmp -c ssl=on -c ssl_cert_file=/run/server-input/server.crt -c ssl_key_file=/run/server-input/server.key -c password_encryption=scram-sha-256 -c log_min_error_statement=panic"}
 }
 
 func nativePasswordServer(input nativeRuntimeInput, node nativeRuntimeNode, image nativeRuntimeImage, major int) (*corev1.Pod, error) {
@@ -997,7 +1010,7 @@ def local_closure():
  need(mounts()[0]==original_mounts)
  for file in files+inputs:file.check()
  return self_process()
-start=time.monotonic();limit=start+30;files=[];inputs=[];cwd=None;diag=None
+start=time.monotonic();limit=start+120;files=[];inputs=[];cwd=None;diag=None
 try:
  need(os.geteuid()==65532 and os.getegid()==65532 and os.uname().machine=='aarch64');P.validate_environment(os.environ)
  original_mounts,rows=mounts()
@@ -1315,5 +1328,93 @@ func TestNativePasswordTLSPrivateSecretAcknowledgmentIsExact(t *testing.T) {
 	created.Immutable = ptr.To(false)
 	if nativePasswordSecretMatches(desired, created) {
 		t.Fatal("mutable private input was accepted")
+	}
+}
+
+// The API server returns quantities without the cached text a local String() call leaves behind.
+func TestNativePasswordTLSAdmittedServerQuantitiesCompareByValue(t *testing.T) {
+	input := nativeRuntimeInput{QualificationID: strings.Repeat("1", 32), RunID: strings.Repeat("2", 32), Namespace: "quantity-fixture"}
+	image := nativeRuntimeImage{Ref: "localhost/rpgmigrate@sha256:" + strings.Repeat("3", 64), Digest: "sha256:" + strings.Repeat("3", 64), ConfigDigest: "sha256:" + strings.Repeat("4", 64)}
+	expected, err := nativePasswordServer(input, nativeRuntimeNode{Name: nativePasswordOwnedNode}, image, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted := &corev1.Pod{}
+	if err := json.Unmarshal(raw, admitted); err != nil {
+		t.Fatal(err)
+	}
+	for index := range expected.Spec.Volumes {
+		if limit := expected.Spec.Volumes[index].EmptyDir; limit != nil && limit.SizeLimit != nil {
+			_ = limit.SizeLimit.String()
+		}
+	}
+	if !nativePasswordPodMatches(expected, admitted) {
+		t.Fatal("an admitted server with equal quantities was refused")
+	}
+	changed := admitted.DeepCopy()
+	changed.Spec.Volumes[2].EmptyDir.SizeLimit = resource.NewQuantity(513*1024*1024, resource.BinarySI)
+	if nativePasswordPodMatches(expected, changed) {
+		t.Fatal("a changed server volume limit was admitted")
+	}
+}
+
+func TestNativePasswordTLSCleanupRetriesAStatusConflict(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nativeRuntimePG16, Namespace: "cleanup-fixture", UID: "created", ResourceVersion: "7"}}
+	clientset := kubefake.NewClientset(pod)
+	conflicts := 0
+	clientset.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		if conflicts++; conflicts == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, nil)
+		}
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := nativePasswordRemove(ctx, clientset, nativeRuntimeOwned{object: pod, kind: nativeRuntimePodKind}); !result.VerifiedAbsent || result.Action != nativeRuntimeDeleted || conflicts != 2 {
+		t.Fatal("a status Conflict during deletion left the Pod retained", conflicts)
+	}
+	replaced := pod.DeepCopy()
+	replaced.UID = nativePasswordForeignOwner
+	clientset = kubefake.NewClientset(replaced)
+	if result := nativePasswordRemove(ctx, clientset, nativeRuntimeOwned{object: pod, kind: nativeRuntimePodKind}); result.VerifiedAbsent || result.Action != nativeRuntimeRetained {
+		t.Fatal("a replaced Pod was deleted under the original identity")
+	}
+}
+
+// kubelet projects a Secret created after Pod start only on its next pod sync, 60 to 90 seconds later.
+func TestNativePasswordTLSBindingWaitCoversKubeletProjection(t *testing.T) {
+	match := regexp.MustCompile(`limit=start\+([0-9]+);`).FindStringSubmatch(nativePasswordTLSProgram)
+	if len(match) != 2 {
+		t.Fatal("client binding wait missing")
+	}
+	window, err := strconv.Atoi(match[1])
+	if err != nil || window <= 90 || 2*(window+25) >= 299 {
+		t.Fatal("client binding wait misses the kubelet resync or both pairs overrun the Go work bound", window)
+	}
+	capped := &rest.Config{Host: "https://127.0.0.1:6443", Timeout: 30 * time.Second}
+	if untimed := nativeRuntimeStreamConfig(capped); untimed.Timeout != 0 || capped.Timeout != 30*time.Second || untimed.Host != capped.Host {
+		t.Fatal("the followed log stream keeps the request cap or the shared config changed")
+	}
+}
+
+func TestNativePasswordTLSServerAdmitsOnlyRemoteTLSScram(t *testing.T) {
+	for _, major := range []int{16, 18} {
+		command := nativePasswordServerCommand(major)
+		if len(command) != 3 {
+			t.Fatal("fixed server command shape changed")
+		}
+		setup, exec, found := strings.Cut(command[2], "; exec ")
+		rule := "; printf 'hostssl all native_probe all scram-sha-256\\n' > /var/lib/postgresql/probe-data/pg_hba.conf"
+		if !found || !strings.HasSuffix(setup, rule) || strings.Count(command[2], "pg_hba") != 1 || !strings.HasPrefix(exec, fmt.Sprintf("/usr/lib/postgresql/%d/bin/postgres ", major)) {
+			t.Fatal("the probe server does not replace pg_hba with the single remote TLS SCRAM rule before exec", major)
+		}
+		pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Command: command}}}}
+		if err := nativeRuntimeExpectedCommand(pod, fmt.Sprintf("pg%d", major), &nativeRuntimeProfileRequest{}); err != nil {
+			t.Fatal("the active profile refused the fixed server command", err)
+		}
 	}
 }

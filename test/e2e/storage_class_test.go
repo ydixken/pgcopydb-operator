@@ -21,6 +21,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -327,6 +328,49 @@ func TestCreateWaitsForWorkVolumeReadiness(t *testing.T) {
 			}
 			if !tc.wantError && err != nil {
 				t.Fatalf("create() failed with a ready work volume: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateStopsOnFailedMigration(t *testing.T) {
+	desired := resource.MustParse("12Gi")
+	for _, tc := range []struct {
+		name    string
+		objects []client.Object
+		phase   v1beta1.MigrationPhase
+		stopped bool
+	}{
+		{name: "failed before its volume", phase: v1beta1.PhaseFailed, stopped: true},
+		{name: "failed with a ready volume", objects: []client.Object{workPVC("migration", desired, desired)},
+			phase: v1beta1.PhaseFailed},
+		{name: "pending without a volume", phase: v1beta1.PhasePending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStorageTestState(t, storageTestClient(t, tc.objects...), nil)
+			storageReadyTimeout, storageReadyPollInterval = 2*time.Second, time.Millisecond
+			if !tc.stopped && len(tc.objects) == 0 {
+				storageReadyTimeout = 30 * time.Millisecond
+			}
+			RegisterTestingT(t)
+			m := &v1beta1.Migration{
+				ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: "migration"},
+				Spec:       v1beta1.MigrationSpec{WorkVolume: v1beta1.WorkVolume{Size: desired}},
+				Status: v1beta1.MigrationStatus{Phase: tc.phase, Conditions: []metav1.Condition{{
+					Type: v1beta1.ConditionFailed, Status: metav1.ConditionTrue, Reason: "NativePreflightFailed",
+					Message: "native preflight execution refused"}}},
+			}
+			started := time.Now()
+			err := InterceptGomegaFailure(func() { create(m) })
+			switch {
+			case tc.stopped && (err == nil || !strings.Contains(err.Error(), "native preflight execution refused")):
+				t.Fatalf("create() did not report the Migration failure: %v", err)
+			case tc.stopped && time.Since(started) > time.Second:
+				t.Fatalf("create() waited %s past a Failed Migration", time.Since(started))
+			case !tc.stopped && len(tc.objects) > 0 && err != nil:
+				t.Fatalf("create() refused a ready work volume: %v", err)
+			case !tc.stopped && len(tc.objects) == 0 && (err == nil || strings.Contains(err.Error(), "failed:")):
+				t.Fatalf("create() of a pending Migration without a volume = %v, want the volume timeout", err)
 			}
 		})
 	}

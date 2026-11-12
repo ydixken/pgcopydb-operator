@@ -75,6 +75,23 @@ VOLATILE_ROOTS = (Path('/tmp'), Path('/private/tmp'))
 EVIDENCE_ROOT = Path('/var/tmp').resolve()
 SLEEP_ASSERTION_SECONDS = 5
 LEGACY_ORIGINALS = (('evidence', '.json'), ('qualification', '.json'), ('probe', '.stdout'))
+LEGACY_SPEC = 'Kind bootstrap migrates nonempty PostgreSQL 17 fixtures with committed writer load and verified cutover'
+NATIVE_PAIRS = ('16:16', '18:18', '16:18')
+# One native RUN executes exactly one of these specs: case -> (Ginkgo label, full spec text).
+NATIVE_SPECS = {
+    'fresh-clone': ('native', 'Migration completes a fresh clone with matching rows and sequences'),
+    'early-manual': ('native', 'Migration holds early Manual approval until a paused backlog catches up'),
+    'live-writer': ('native', 'Migration loses no committed transaction when the source is written throughout'),
+    'automatic-cutover': ('native', 'Migration runs an Automatic cutover to completion unattended'),
+    'fault-copy': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-copy'),
+    'fault-stream': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-stream'),
+    'fault-drain': ('native-fault', 'Native faults completes or fails closed when the runner is killed mid-drain'),
+    'fault-failover': ('native-fault', 'Native faults loses no committed row when the target primary fails over under synchronous replication'),
+    'fault-suspend': ('native-fault', 'Native faults keeps its state while suspended and loses nothing after resume'),
+    'fault-delete': ('native-fault', 'Native faults removes only its own source resources when deleted while streaming'),
+}
+NATIVE_RECEIPT_KEYS = {'reporter', 'suite_succeeded', 'failures', 'manager_runtime', 'schema_version', 'run_id', 'engine', 'pair',
+                       'input_sha256', 'selected_spec', 'executed_specs', 'passed_specs', 'skipped_specs', 'cleanup'}
 BASELINE_BUILDER = 'ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:86bf908adca02d87063849dae775a02c1659c829@sha256:ef596ea105604ef128244057dd34411f433d4c40fdf897bcaa8b33793df9fec8'
 
 
@@ -1298,14 +1315,23 @@ class Guard:
         return hashlib.sha256(json.dumps(self.source_inventory(), separators=(',', ':')).encode()).hexdigest()
 
 
-    def receipt(self, ledger):
+    @staticmethod
+    def selection(engine, pair=None, case=None):
+        if engine == 'pgcopydb' and pair in (None, '17:17') and case is None:
+            return {'engine': engine, 'pair': '17:17', 'label': 'kind-bootstrap', 'spec': LEGACY_SPEC}
+        if engine == 'rpgmigrate' and pair in NATIVE_PAIRS and case in NATIVE_SPECS:
+            label, spec = NATIVE_SPECS[case]
+            return {'engine': engine, 'pair': pair, 'label': label, 'spec': spec}
+        raise Refusal('kind route admits legacy pgcopydb 17:17, or native rpgmigrate 16:16, 18:18 or 16:18 with one named spec')
+
+    def receipt(self, ledger, selection):
         path = self.directory / 'suite-receipt.json'
         self.private(path)
         input_path = self.directory / 'suite-input.json'
         self.private(input_path)
         receipt = decode(path.read_text(), 'suite receipt')
         inputs = decode(input_path.read_text(), 'suite input')
-        if not isinstance(receipt, dict) or not isinstance(inputs, dict) or inputs != self.suite_projection(ledger):
+        if not isinstance(receipt, dict) or not isinstance(inputs, dict) or inputs != self.suite_projection(ledger, selection):
             raise Refusal('private suite input or receipt differs from current source, lock or node bindings')
         bootstrap = ledger.get('bootstrap') or {}
         if (not isinstance(bootstrap, dict) or bootstrap.get('cnpg_manifest_sha256') != CNPG_SHA256 or
@@ -1315,16 +1341,23 @@ class Guard:
             raise Refusal('bound bootstrap readiness proof is missing')
         executed = receipt.get('executed_specs')
         if (receipt.get('schema_version') != 2 or receipt.get('run_id') != ledger['run_id'] or
-                receipt.get('engine') != 'pgcopydb' or receipt.get('pair') != '17:17' or
+                receipt.get('engine') != selection['engine'] or receipt.get('pair') != selection['pair'] or
                 receipt.get('reporter') != 'ginkgo-report-after-suite' or receipt.get('suite_succeeded') is not True or
                 receipt.get('failures') != [] or
                 receipt.get('input_sha256') != hashlib.sha256(input_path.read_bytes()).hexdigest() or
                 type(executed) is not int or executed != 1 or type(receipt.get('passed_specs')) is not int or
                 receipt['passed_specs'] != executed or type(receipt.get('skipped_specs')) is not int or
-                receipt['skipped_specs'] != 0 or receipt.get('phase') != 'Completed' or
+                receipt['skipped_specs'] != 0 or receipt.get('selected_spec') != selection['spec'] or
+                receipt.get('cleanup') is not True):
+            raise Refusal('positive ' + ('native execution' if selection['engine'] == 'rpgmigrate' else
+                                         'legacy execution and verification') + ' receipt is required')
+        # A native receipt carries no legacy bootstrap claims; the spec it names asserted its own outcome.
+        if selection['engine'] == 'rpgmigrate' and set(receipt) != NATIVE_RECEIPT_KEYS:
+            raise Refusal('positive native execution receipt is required')
+        if selection['engine'] == 'pgcopydb' and (receipt.get('phase') != 'Completed' or
                 receipt.get('reason') != 'DrainVerified' or receipt.get('complete') is not True or
                 receipt.get('cutover_completed') is not True or receipt.get('complete_reason') != 'MigrationSucceeded' or
-                receipt.get('selected_spec') != 'Kind bootstrap migrates nonempty PostgreSQL 17 fixtures with committed writer load and verified cutover' or
+                receipt.get('selected_spec') != LEGACY_SPEC or
                 receipt.get('nonempty_data_verified') is not True or
                 receipt.get('sequence_verified') is not True or receipt.get('cleanup') is not True):
             raise Refusal('positive legacy execution and verification receipt is required')
@@ -1366,9 +1399,8 @@ class Guard:
             raise Refusal('authenticated manager runtime proof is required')
         return receipt
 
-    def run(self, engine):
-        if engine != 'pgcopydb':
-            raise Refusal('native producer capability and drain qualification are unavailable')
+    def run(self, engine, pair=None, case=None):
+        selection = self.selection(engine, pair, case)
         ledger = self.read()
         if ledger['phase'] != 'pulled' or len(self.owned_nodes(ledger)) != 3:
             raise Refusal('owned pulled cluster is required')
@@ -1377,25 +1409,27 @@ class Guard:
         self.kubeconfig(ledger)
         if any((self.directory / name).exists() for name in ('suite-receipt.json', 'go-test.json')):
             raise Refusal('suite receipt or go-test.json already exists; refusing a stale execution witness')
-        suite_input = self.suite_input(ledger)
+        suite_input = self.suite_input(ledger, selection)
         self.bootstrap(ledger, suite_input['source_tree_sha256'])
-        suite_input = self.suite_input(ledger)
+        suite_input = self.suite_input(ledger, selection)
         self.require_lease()
         roles = {role: image['ref'] for role, image in suite_input['images'].items()}
         self.environment.update(E2E_KIND_RUN_DIR=str(self.directory), E2E_KIND_CONTEXT=ledger['context'],
-                                E2E_RUN_LABEL_VALUE=ledger['run_id'], E2E_ENGINE='pgcopydb', E2E_SMALL='true', E2E_SCALE='0.01',
+                                E2E_RUN_LABEL_VALUE=ledger['run_id'], E2E_ENGINE=engine, E2E_SMALL='true', E2E_SCALE='0.01',
                                 E2E_CNPG_INSTANCES='1', E2E_KEEP_FIXTURES='false', E2E_FORCE='false',
                                 E2E_STRESS='false', E2E_MANAGE_NAMESPACES='true')
-        for env_key, role in [('MANAGER', 'manager'), ('RUNNER', 'legacy-runner'), ('SEED', 'seed-tool-runner'),
-                              ('TOOL', 'seed-tool-runner'), ('COLLECTOR', 'otel-collector'), ('POSTGRES_17', 'postgresql-17')]:
+        for env_key, role in self.suite_environment(selection):
             self.environment['E2E_' + env_key + '_IMAGE'] = roles[role]
-        ledger['suite_execution'] = {'budget_seconds': 1800, 'result': 'running'}
+        if engine == 'rpgmigrate':
+            self.environment.update(zip(('E2E_PG_SOURCE', 'E2E_PG_TARGET'), selection['pair'].split(':')))
+        ledger['suite_execution'] = {'budget_seconds': 1800, 'result': 'running',
+                                     'selection': {'engine': engine, 'pair': selection['pair'], 'case': case}}
         self.save(ledger)
         try:
             self.verify_node_limits(ledger)
             self.registry_call(ledger, ['task', 'e2e:kind:suite', 'RUN_DIR=' + str(self.directory), 'EXPECT_CONTEXT=' + ledger['context'],
-                       'E2E_ENGINE=pgcopydb'], timeout=1800)
-            self.receipt(ledger)
+                       'E2E_ENGINE=' + engine, 'LABEL=' + selection['label']], timeout=1800)
+            self.receipt(ledger, selection)
         except Refusal as error:
             failure = getattr(error, 'failure_class', type(error).__name__)
             if failure not in ('CalledProcessError', 'TimeoutExpired', 'OSError', 'FileNotFoundError',
@@ -1418,8 +1452,8 @@ class Guard:
                                 report.get('schema_version') == 2 and
                                 report.get('reporter') == 'ginkgo-report-after-suite' and
                                 type(report.get('suite_succeeded')) is bool and
-                                report.get('run_id') == ledger['run_id'] and report.get('engine') == 'pgcopydb' and
-                                report.get('pair') == '17:17' and report.get('input_sha256') ==
+                                report.get('run_id') == ledger['run_id'] and report.get('engine') == engine and
+                                report.get('pair') == selection['pair'] and report.get('input_sha256') ==
                                 hashlib.sha256(self.private_bytes('suite-input.json')).hexdigest()):
                             execution['receipt_status'] = 'ginkgo-report-after-suite'
                 except (Refusal, OSError):
@@ -1477,7 +1511,9 @@ class Guard:
         ledger['phase'] = 'down'
         self.save(ledger)
         if (self.directory / 'suite-receipt.json').exists():
-            receipt = dict(self.receipt(ledger), cluster_teardown=True)
+            selection = (ledger.get('suite_execution') or {}).get('selection') or {}
+            receipt = dict(self.receipt(ledger, self.selection(selection.get('engine'), selection.get('pair'), selection.get('case'))),
+                           cluster_teardown=True)
             self.write_private('final-receipt.json', (json.dumps(receipt, sort_keys=True) + '\n').encode())
 
 
@@ -1964,23 +2000,33 @@ class Guard:
                 'source_pin_changed': False, 'runtime_migration_qualified': False, 'cleanup_removed_and_absence_proven': True}}
         return expected
 
-    def suite_projection(self, ledger):
+    @staticmethod
+    def suite_environment(selection):
+        if selection['engine'] == 'pgcopydb':
+            return [('MANAGER', 'manager'), ('RUNNER', 'legacy-runner'), ('SEED', 'seed-tool-runner'),
+                    ('TOOL', 'seed-tool-runner'), ('COLLECTOR', 'otel-collector'), ('POSTGRES_17', 'postgresql-17')]
+        majors = sorted(set(selection['pair'].split(':')))
+        return [('MANAGER', 'manager'), ('RUNNER', 'native-runner'), ('SEED', 'seed-tool-runner'), ('TOOL', 'seed-tool-runner'),
+                ('COLLECTOR', 'otel-collector'), *[('POSTGRES_' + major, 'postgresql-' + major) for major in majors]]
+
+    def suite_projection(self, ledger, selection):
         self.require_prepared(ledger)
         if ledger['phase'] not in ('pulled', 'verified'):
             raise Refusal('suite projection requires complete existing pulled evidence')
         evidence = self.pull_evidence(ledger, registry.PULL_ROLES, self.directory, 'pulled-image-resolution-evidence.json')
         locked, images = self.private_json('image-lock.json')['images'], {}
-        for role in ('manager', 'legacy-runner', 'seed-tool-runner', 'otel-collector', 'postgresql-17'):
+        for role in sorted({role for _, role in self.suite_environment(selection)}):
             image = locked[role]
             images[role] = {key: image[key] for key in ('ref', 'digest', 'architecture')}
             images[role].update(image_id=image['config_digest'], loaded_digest=image['digest'],
                 registry_index_digest=image['index_digest'], node_bindings=evidence['node_bindings'][role])
         return {'schema_version': 2, 'run_id': ledger['run_id'], 'context': ledger['context'],
             'source_tree_sha256': self.source_tree(), 'image_lock_sha256': registry.sha(self.private_bytes('image-lock.json')),
-            'images': images, 'engine': 'pgcopydb', 'pair': '17:17', 'lease_expires_at': ledger['resource_lease']['expires_at']}
+            'images': images, 'engine': selection['engine'], 'pair': selection['pair'], 'spec': selection['spec'],
+            'lease_expires_at': ledger['resource_lease']['expires_at']}
 
-    def suite_input(self, ledger):
-        data = self.suite_projection(ledger)
+    def suite_input(self, ledger, selection):
+        data = self.suite_projection(ledger, selection)
         self.write_private('suite-input.json', registry.canonical(data) + b'\n')
         return data
 
@@ -2155,6 +2201,8 @@ def main():
     parser.add_argument('--image-lock', type=Path)
     parser.add_argument('--receipt-dir', type=Path)
     parser.add_argument('--engine', choices=['pgcopydb', 'rpgmigrate'], default='pgcopydb')
+    parser.add_argument('--pair', choices=['17:17', *NATIVE_PAIRS])
+    parser.add_argument('--case', choices=sorted(NATIVE_SPECS))
     args = parser.parse_args()
     if args.command == 'self-check':
         result = subprocess.run([sys.executable, str(Path(__file__).with_name('test_e2e_kind.py'))], check=False)
@@ -2190,7 +2238,7 @@ def main():
             elif args.command == 'up':
                 guard.up(args.lease_seconds)
             elif args.command == 'run':
-                guard.run(args.engine)
+                guard.run(args.engine, args.pair, args.case)
             else:
                 getattr(guard, args.command)()
         print(json.dumps({'command': args.command, 'result': 'passed', 'run_dir': str(guard.directory)}))

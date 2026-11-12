@@ -26,6 +26,8 @@ var (
 	errNativeRunnerRecord                = errors.New("native runner record is missing or unqualified past admission")
 )
 
+const reasonNativePreflightFailed = "NativePreflightFailed"
+
 func unsupportedEngineMessage(m *v1beta1.Migration, cause error) string {
 	if cause != nil {
 		return cause.Error()
@@ -230,9 +232,9 @@ func (r *MigrationReconciler) reconcileNativeStart(ctx context.Context, m, base 
 		r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionUnknown, "NativePreflightPending", "Native preflight has not passed")
 		if failure != "" {
 			m.Status.Phase = v1beta1.PhaseFailed
-			r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "NativePreflightFailed", failure)
-			r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "NativePreflightFailed", failure)
-			logf.FromContext(ctx).Info("native preflight failed", "reason", "NativePreflightFailed", "message", failure)
+			r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, reasonNativePreflightFailed, failure)
+			r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, reasonNativePreflightFailed, failure)
+			logf.FromContext(ctx).Info("native preflight failed", "reason", reasonNativePreflightFailed, "message", failure)
 		}
 		if err := r.updateNativeStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err

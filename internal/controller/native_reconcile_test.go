@@ -38,6 +38,9 @@ type nativeReconcileConsumer interface {
 	reconcileNative(context.Context, *v1beta1.Migration, *v1beta1.Migration) (ctrl.Result, error)
 }
 
+// The literal, not the production constant, so a renamed reason fails here.
+const wantNativePreflightFailed = "NativePreflightFailed"
+
 func nativeDispatch(t *testing.T, r *MigrationReconciler, m *v1beta1.Migration) (ctrl.Result, error) {
 	t.Helper()
 	consumer, ok := any(r).(nativeReconcileConsumer)
@@ -556,12 +559,12 @@ func TestNativeReconcilePreflightRefusalLogged(t *testing.T) {
 	}
 	for _, kind := range []string{v1beta1.ConditionValidated, v1beta1.ConditionFailed} {
 		c := meta.FindStatusCondition(stored.Status.Conditions, kind)
-		if c == nil || c.Reason != "NativePreflightFailed" || c.Message != want {
+		if c == nil || c.Reason != wantNativePreflightFailed || c.Message != want {
 			t.Fatalf("%s condition does not name the refusal class: %+v", kind, c)
 		}
 	}
 	entries := recorded.FilterMessage("native preflight failed").All()
-	if len(entries) != 1 || recorded.Len() != 1 || entries[0].ContextMap()["reason"] != "NativePreflightFailed" || entries[0].ContextMap()["message"] != want {
+	if len(entries) != 1 || recorded.Len() != 1 || entries[0].ContextMap()["reason"] != wantNativePreflightFailed || entries[0].ContextMap()["message"] != want {
 		t.Fatalf("expected one structured refusal line, got %d of %d: %+v", len(entries), recorded.Len(), entries)
 	}
 }

@@ -2,7 +2,7 @@
 
 Use this harness for one owned Podman-backed kind cluster.
 The legacy bootstrap selects PostgreSQL 17 to 17 with one Ginkgo process.
-Native execution remains closed until the separate image, authentication, TLS, PVC, lifecycle, and migration gates pass.
+A native run selects one named spec on the pair 16:16, 18:18 or 16:18 with the native runner, and every other engine and pair is refused.
 
 ## Source and image inputs
 
@@ -97,11 +97,25 @@ Use the same `RUN_DIR` in all subsequent commands.
    task e2e:kind:pull RUN_DIR="$RUN_DIR"
    ```
 
-5. Run the positive legacy bootstrap selection.
+5. Run the positive legacy bootstrap selection, or one native spec instead.
 
    ```sh
    task e2e:kind:legacy RUN_DIR="$RUN_DIR"
    ```
+
+   Check out these **examples** of a native run:
+
+   - The suspend fault spec, which also writes its TERM receipt, on pair 16:16:
+
+     ```sh
+     task e2e:kind:native RUN_DIR="$RUN_DIR" PAIR=16:16 CASE=fault-suspend
+     ```
+
+   - The unattended Automatic cutover on pair 16:18:
+
+     ```sh
+     task e2e:kind:native RUN_DIR="$RUN_DIR" PAIR=16:18 CASE=automatic-cutover
+     ```
 
 6. Remove only the resources admitted by the guard and retain the evidence.
 
@@ -115,11 +129,14 @@ No command renews the original clocks or converts an older run.
 The lease records a wall and a monotonic expiry.
 macOS pauses the monotonic clock while the host sleeps, so a wall-only expiry is refused as a host sleep or clock step.
 
-On macOS, `up`, `pull`, and the legacy run require AC power and hold a `caffeinate -dims` child for the command's lifetime.
+On macOS, `up`, `pull`, and the legacy and native runs require AC power and hold a `caffeinate -dims` child for the command's lifetime.
 The guard refuses when `pmset` does not show that child's system-sleep assertions.
 The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
-`e2e:kind:native` requests the native route and refuses while its gates remain closed.
-The internal suite Task requires the exact guard-owned run, context, engine, and nonempty positive selection.
+`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
+The guard binds the engine, pair and full spec text into `suite-input.json`, and `TestE2E` focuses on exactly that spec, so a native run never executes a second one.
+Its suite runs with the native runner and the PostgreSQL images of its pair, all pulled and verified by digest on every node during `e2e:kind:pull`.
+Its receipt names that spec and carries none of the legacy bootstrap claims; the spec asserts its own outcome.
+The internal suite Task requires the exact guard-owned run, context, engine, and that engine's positive label.
 Do not invoke it as a context bypass.
 It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go gate keeps its failing assertion.
 The ledger records only whether that file exists.
@@ -149,7 +166,7 @@ Each phase writes its private inputs and receipts into a separate `QUAL_DIR` out
 2. Run each phase with the run's original lease clocks as the parent deadline.
 
    ```sh
-   for phase in metadata password_tls_probe delivery; do
+   for phase in metadata password_tls_probe delivery controller; do
      python3 -B hack/native-runtime-qualification.py --run-dir "$RUN_DIR" \
        --legacy-source-root "$GUARD_ROOT" --qual-dir "$QUAL_DIR" --phase "$phase" \
        --parent-deadline "$LEASE_EXPIRES_AT" --parent-monotonic-deadline "$LEASE_MONOTONIC_EXPIRES_AT"
@@ -161,6 +178,9 @@ Later phases reuse that complete pull receipt and need 2400 seconds.
 `metadata` reads the active CRI profile, resolver, HOME and provider facts on all three nodes.
 `password_tls_probe` connects to disposable PostgreSQL 16 and 18 servers with SCRAM and verify-full TLS.
 `delivery` drives the canonical checked-exec relay and terminal Job proof through fault cases, and remounts a PVC read-only.
+`controller` installs its own Migration CRD and runs the real reconciler with the production pod-exec transport against one native PostgreSQL 16 to 18 Migration.
+It passes only when the reconciler creates exactly the version and preflight Jobs of one operation, consumes a passing preflight and disposes both helpers.
+Its client refuses any other Create, so the phase never claims a work PVC or starts a worker.
 
 > [!important]
 > A failed phase keeps its private artifacts and refuses a rerun into the same `QUAL_DIR`.

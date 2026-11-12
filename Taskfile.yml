@@ -377,10 +377,12 @@ tasks:
       - python3 hack/e2e-kind.py run --run-dir {{.RUN_DIR | shellQuote}} --engine pgcopydb
 
   e2e:kind:native:
-    desc: Request native execution, which refuses until its runtime gates pass.
-    requires: {vars: [RUN_DIR]}
+    desc: Run one named native spec on pair 16:16, 18:18 or 16:18 through the owned guard.
+    requires: {vars: [RUN_DIR, PAIR, CASE]}
     cmds:
-      - python3 hack/e2e-kind.py run --run-dir {{.RUN_DIR | shellQuote}} --engine rpgmigrate
+      - >-
+        python3 hack/e2e-kind.py run --run-dir {{.RUN_DIR | shellQuote}}
+        --engine rpgmigrate --pair {{.PAIR | shellQuote}} --case {{.CASE | shellQuote}}
 
   e2e:kind:down:
     desc: Remove only the exact guarded run resources and retain evidence.
@@ -389,15 +391,18 @@ tasks:
       - python3 hack/e2e-kind.py down --run-dir {{.RUN_DIR | shellQuote}}
 
   e2e:kind:suite:
-    desc: Run the exact guard-owned bootstrap suite after context admission.
-    requires: {vars: [RUN_DIR, EXPECT_CONTEXT, E2E_ENGINE]}
+    desc: Run the exact guard-owned suite selection after context admission.
+    requires: {vars: [RUN_DIR, EXPECT_CONTEXT, E2E_ENGINE, LABEL]}
     preconditions:
       - sh: test {{.RUN_DIR | shellQuote}} = "$E2E_KIND_RUN_DIR"
         msg: RUN_DIR must match the guard-owned suite input.
       - sh: test {{.EXPECT_CONTEXT | shellQuote}} = "$E2E_KIND_CONTEXT"
         msg: EXPECT_CONTEXT must match the guard-owned context.
-      - sh: test {{.E2E_ENGINE | shellQuote}} = pgcopydb && test "$E2E_ENGINE" = pgcopydb
-        msg: The bootstrap suite requires the guard-selected legacy engine.
+      - sh: >-
+          test {{.E2E_ENGINE | shellQuote}} = "$E2E_ENGINE" &&
+          { { test "$E2E_ENGINE" = pgcopydb && test {{.LABEL | shellQuote}} = kind-bootstrap; } ||
+          { test "$E2E_ENGINE" = rpgmigrate && { test {{.LABEL | shellQuote}} = native || test {{.LABEL | shellQuote}} = native-fault; }; }; }
+        msg: The suite requires the guard-selected engine and that engine's own positive label.
       - sh: >-
           test -z {{.E2E_CONTEXT | default "" | shellQuote}} ||
           test {{.E2E_CONTEXT | default "" | shellQuote}} = {{.EXPECT_CONTEXT | shellQuote}}
@@ -406,7 +411,7 @@ tasks:
         msg: E2E_CONTEXT conflicts with the guard-owned context.
     cmds:
       - >-
-        E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} E2E_ENGINE=pgcopydb E2E_SMALL=true
+        E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} E2E_ENGINE={{.E2E_ENGINE | shellQuote}} E2E_SMALL=true
         go test ./test/e2e -json -run '^TestE2E$' -count=1 -v -timeout 30m
-        -ginkgo.v -ginkgo.timeout=30m -ginkgo.label-filter=kind-bootstrap -ginkgo.fail-on-empty
+        -ginkgo.v -ginkgo.timeout=30m -ginkgo.label-filter={{.LABEL | shellQuote}} -ginkgo.fail-on-empty
         > {{.RUN_DIR | shellQuote}}/go-test.json

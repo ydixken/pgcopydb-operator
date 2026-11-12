@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/url"
@@ -189,16 +190,12 @@ func selectedPostgresImage(major int) string {
 		fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major))
 }
 
-// nativePrerequisite names the gate whose landing lifts the native refusal.
-const nativePrerequisite = "M6-ACTIVATE (runner-profile qualification and the lifted UnsupportedEngine)"
-
+// suiteEngine admits both engines; a kind run narrows rpgmigrate to kindNativePairs in validateInput,
+// and the manager dispatches native work only on a qualified runner digest.
 func suiteEngine() (v1beta1.MigrationEngine, error) {
 	switch value := envDefault("E2E_ENGINE", string(v1beta1.MigrationEnginePGCopyDB)); v1beta1.MigrationEngine(value) {
-	case v1beta1.MigrationEnginePGCopyDB:
-		return v1beta1.MigrationEnginePGCopyDB, nil
-	case v1beta1.MigrationEngineRPGMigrate:
-		return "", errors.New("native kind qualification is refused: prerequisite " + nativePrerequisite +
-			" has not landed, so no qualified native runner is available")
+	case v1beta1.MigrationEnginePGCopyDB, v1beta1.MigrationEngineRPGMigrate:
+		return v1beta1.MigrationEngine(value), nil
 	default:
 		return "", errors.New("E2E_ENGINE must be pgcopydb or rpgmigrate")
 	}
@@ -267,14 +264,114 @@ func mutateKindLockFixture(t *testing.T, which, dir string, input *kindSuiteInpu
 	}
 }
 
+func kindFixtureSelection(which string) (engine, pair, spec string) {
+	if !strings.HasPrefix(which, "accepted native") && !strings.HasPrefix(which, "native") {
+		return string(v1beta1.MigrationEnginePGCopyDB), kindLegacyPair, kindBootstrapSpec
+	}
+	pair = kindNativePairs[2]
+	if accepted, ok := strings.CutPrefix(which, "accepted native "); ok {
+		pair = accepted
+	}
+	return string(v1beta1.MigrationEngineRPGMigrate), pair, kindSuspendSpec
+}
+
+const kindBindingRefusal = "input binding is invalid"
+const kindTargetRefusal = "conflicts with E2E_PG_TARGET"
+const kindUnboundRefusal = "unbound E2E_POSTGRES_15_IMAGE"
+
+type kindSelectionCase struct {
+	name, refusal string
+	mutate        func(*kindSuiteInput, map[string]string)
+}
+
+func setKindPair(pair string) func(*kindSuiteInput, map[string]string) {
+	return func(input *kindSuiteInput, env map[string]string) {
+		input.Pair = pair
+		env["E2E_PG_SOURCE"], env["E2E_PG_TARGET"], _ = strings.Cut(pair, ":")
+	}
+}
+
+func unboundKindPostgres(_ *kindSuiteInput, env map[string]string) {
+	env["E2E_POSTGRES_15_IMAGE"] = "example.invalid/postgresql-15:test"
+}
+
+// kindSelectionCases pin the reason each selection is refused, so an unrelated check cannot stand in.
+var kindSelectionCases = []kindSelectionCase{
+	{"native 17:17", kindBindingRefusal, setKindPair(kindLegacyPair)},
+	{"native 18:16", kindBindingRefusal, setKindPair("18:16")},
+	{"native bootstrap spec", kindBindingRefusal, func(input *kindSuiteInput, _ map[string]string) {
+		input.Spec = kindBootstrapSpec
+	}},
+	{"native empty spec", kindBindingRefusal, func(input *kindSuiteInput, _ map[string]string) { input.Spec = "" }},
+	{"native default pair", kindTargetRefusal, func(_ *kindSuiteInput, env map[string]string) {
+		delete(env, "E2E_PG_TARGET")
+	}},
+	{"native other pair env", kindTargetRefusal, func(_ *kindSuiteInput, env map[string]string) {
+		env["E2E_PG_TARGET"] = "16"
+	}},
+	{"native legacy runner role", "image binding invalid for role", func(input *kindSuiteInput, _ map[string]string) {
+		input.Images["legacy-runner"] = input.Images[kindNativeRunner]
+		delete(input.Images, kindNativeRunner)
+	}},
+	{"native unbound postgres image", kindUnboundRefusal, unboundKindPostgres},
+	{"legacy unbound postgres image", kindUnboundRefusal, unboundKindPostgres},
+	{"legacy native pair", kindBindingRefusal, func(input *kindSuiteInput, _ map[string]string) {
+		input.Pair = kindNativePairs[0]
+	}},
+	{"legacy native spec", kindBindingRefusal, func(input *kindSuiteInput, _ map[string]string) {
+		input.Spec = "Migration runs an Automatic cutover to completion unattended"
+	}},
+}
+
+func findKindSelectionCase(which string) (kindSelectionCase, bool) {
+	for _, tc := range kindSelectionCases {
+		if tc.name == which {
+			return tc, true
+		}
+	}
+	return kindSelectionCase{}, false
+}
+
+func TestKindImageEnvironmentByEngineAndPair(t *testing.T) {
+	want := func(runner string, majors ...string) map[string]string {
+		roles := maps.Clone(kindImageEnvironment("", ""))
+		delete(roles, "legacy-runner")
+		delete(roles, "postgresql-17")
+		roles[runner] = kindRunnerImageEnv
+		for _, major := range majors {
+			roles["postgresql-"+major] = "E2E_POSTGRES_" + major + "_IMAGE"
+		}
+		return roles
+	}
+	native := string(v1beta1.MigrationEngineRPGMigrate)
+	for _, tc := range []struct {
+		engine, pair string
+		want         map[string]string
+	}{
+		{string(v1beta1.MigrationEnginePGCopyDB), kindLegacyPair, want("legacy-runner", "17")},
+		{native, kindNativePairs[0], want(kindNativeRunner, "16")},
+		{native, kindNativePairs[1], want(kindNativeRunner, "18")},
+		{native, kindNativePairs[2], want(kindNativeRunner, "16", "18")},
+	} {
+		if got := kindImageEnvironment(tc.engine, tc.pair); !maps.Equal(got, tc.want) {
+			t.Errorf("kindImageEnvironment(%s, %s) = %v, want %v", tc.engine, tc.pair, got, tc.want)
+		}
+	}
+}
+
 func TestKindPrivateConfigRefusals(t *testing.T) {
-	for _, which := range []string{
-		"accepted private config", "host kubeconfig", "wrong context", "extra context",
+	cases := make([]string, 0, 22+len(kindSelectionCases))
+	cases = append(cases, "accepted private config", "host kubeconfig", "wrong context", "extra context",
 		"symlink", "public mode", "wrong image", "missing role", "unprefixed cluster",
 		"wrong lock hash", "wrong lock source", "wrong lock image", "missing lock", "oversized input",
 		"unknown lock field", "missing lock field", "unknown lock role", "missing lock role", "unknown selected field",
-	} {
+		"accepted native 16:16", "accepted native 18:18", "accepted native 16:18")
+	for _, tc := range kindSelectionCases {
+		cases = append(cases, tc.name)
+	}
+	for _, which := range cases {
 		t.Run(which, func(t *testing.T) {
+			engine, pair, spec := kindFixtureSelection(which)
 			dir := t.TempDir()
 			dir, _ = filepath.EvalSymlinks(dir)
 			if err := os.Chmod(dir, 0700); err != nil {
@@ -310,9 +407,12 @@ users:
 			images := map[string]kindImage{}
 			env := map[string]string{
 				"E2E_KIND_RUN_DIR": dir, "E2E_KIND_CONTEXT": context, "E2E_CONTEXT": context, "KUBECONFIG": configPath,
-				"E2E_ENGINE": string(v1beta1.MigrationEnginePGCopyDB), "E2E_SMALL": strconv.FormatBool(true),
+				"E2E_ENGINE": engine, "E2E_SMALL": strconv.FormatBool(true),
 			}
-			for role, key := range kindImageEnvironment {
+			if engine == string(v1beta1.MigrationEngineRPGMigrate) {
+				env["E2E_PG_SOURCE"], env["E2E_PG_TARGET"], _ = strings.Cut(pair, ":")
+			}
+			for role, key := range kindImageEnvironment(engine, pair) {
 				ref := "example.invalid/" + role + ":test@sha256:" + strings.Repeat("b", 64)
 				images[role] = kindImage{
 					Ref: ref, Digest: "sha256:" + strings.Repeat("b", 64),
@@ -327,8 +427,12 @@ users:
 			env["E2E_TOOL_IMAGE"] = images["seed-tool-runner"].Ref
 			input := kindSuiteInput{
 				SchemaVersion: 2, RunID: runID, Context: context, SourceTreeSHA256: strings.Repeat("d", 64),
-				Images: images, Engine: string(v1beta1.MigrationEnginePGCopyDB), Pair: kindLegacyPair,
+				Images: images, Engine: engine, Pair: pair, Spec: spec,
 				LeaseExpiresAt: float64(time.Now().Add(time.Hour).Unix()),
+			}
+			selection, selected := findKindSelectionCase(which)
+			if selected {
+				selection.mutate(&input, env)
 			}
 			source := map[string]string{"repository": "https://github.com/example/operator", "commit": strings.Repeat("a", 40),
 				"git_tree": strings.Repeat("b", 40), "payload_inventory_sha256": input.SourceTreeSHA256}
@@ -383,19 +487,32 @@ users:
 				t.Fatal(err)
 			}
 			run, err := loadKindSuite(func(key string) string { return env[key] })
-			if which == "accepted private config" {
-				if err != nil || run == nil {
-					t.Fatalf("valid private config refused: %v", err)
+			if selected {
+				if err == nil || !strings.Contains(err.Error(), selection.refusal) {
+					t.Fatalf("%s refused for the wrong reason: %v", which, err)
 				}
-				got := run.commandArgs("kubectl", []string{"get", "pods"})
-				want := []string{kindKubeconfigFlag, configPath, "--context", context, "get", "pods"}
-				if !slices.Equal(got, want) {
-					t.Fatalf("argv %v", got)
-				}
-			} else if err == nil {
-				t.Fatalf("%s accepted", which)
+				return
 			}
+			checkKindConfigOutcome(t, which, run, err, configPath, context)
 		})
+	}
+}
+
+func checkKindConfigOutcome(t *testing.T, which string, run *kindSuite, err error, configPath, kubeContext string) {
+	t.Helper()
+	if which != "accepted private config" && !strings.HasPrefix(which, "accepted native") {
+		if err == nil {
+			t.Fatalf("%s accepted", which)
+		}
+		return
+	}
+	if err != nil || run == nil {
+		t.Fatalf("valid private config refused: %v", err)
+	}
+	got := run.commandArgs("kubectl", []string{"get", "pods"})
+	want := []string{kindKubeconfigFlag, configPath, "--context", kubeContext, "get", "pods"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("argv %v", got)
 	}
 }
 
@@ -407,13 +524,35 @@ func TestKindEngineRefusal(t *testing.T) {
 			if err != nil || got != v1beta1.MigrationEnginePGCopyDB {
 				t.Fatalf("legacy selection %q = %s,%v", engine, got, err)
 			}
+		} else if engine == string(v1beta1.MigrationEngineRPGMigrate) {
+			if err != nil || got != v1beta1.MigrationEngineRPGMigrate {
+				t.Fatalf("native selection = %s,%v", got, err)
+			}
 		} else if err == nil {
-			t.Fatalf("unqualified engine %s admitted", engine)
+			t.Fatalf("unknown engine %s admitted", engine)
 		}
 	}
 }
 
 const kindLegacyPair = "17:17"
+
+// kindNativePairs are the only pairs the native kind route runs; legacy stays on kindLegacyPair.
+var kindNativePairs = []string{"16:16", "18:18", "16:18"}
+
+const kindSpecField = "spec"
+
+var kindSpecTextPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9 ,.:-]{0,255}$`)
+
+func kindSelectionValid(engine, pair, spec string) bool {
+	switch v1beta1.MigrationEngine(engine) {
+	case v1beta1.MigrationEnginePGCopyDB:
+		return pair == kindLegacyPair && spec == kindBootstrapSpec
+	case v1beta1.MigrationEngineRPGMigrate:
+		return slices.Contains(kindNativePairs, pair) && spec != kindBootstrapSpec && kindSpecTextPattern.MatchString(spec)
+	}
+	return false
+}
+
 const kindLinux = "linux"
 const kindArchitectureField = "architecture"
 const kindConfigDigestField = "config_digest"
@@ -455,6 +594,7 @@ type kindSuiteInput struct {
 	Images           map[string]kindImage `json:"images"`
 	Engine           string               `json:"engine"`
 	Pair             string               `json:"pair"`
+	Spec             string               `json:"spec"`
 	LeaseExpiresAt   float64              `json:"lease_expires_at"`
 }
 
@@ -524,7 +664,7 @@ func (binding *kindNodeBinding) UnmarshalJSON(data []byte) error {
 func (input *kindSuiteInput) UnmarshalJSON(data []byte) error {
 	type plain kindSuiteInput
 	return decodeKindFields(data, (*plain)(input), "schema_version", "run_id", "context", "source_tree_sha256",
-		"image_lock_sha256", "images", "engine", "pair", "lease_expires_at")
+		"image_lock_sha256", "images", "engine", "pair", kindSpecField, "lease_expires_at")
 }
 
 func readKindInput(path string) ([]byte, error) {
@@ -587,7 +727,7 @@ func (run *kindSuite) validateImageLock() error {
 		expected, ok := lock.Images[role]
 		fields := []string{kindBuildRoleType, kindRefField, "os", kindArchitectureField, kindVariantField, kindDigestField,
 			"index_digest", kindConfigDigestField, "provenance"}
-		if role == kindManagerContainer {
+		if role == kindManagerContainer || role == kindNativeRunner {
 			fields = append(fields, "source")
 		}
 		if decodeKindFields(raw.Images[role], &expected, fields...) != nil {
@@ -625,10 +765,22 @@ var kindFixturesCleaned bool
 var kindPublicImagePattern = regexp.MustCompile(
 	`^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?/[A-Za-z0-9._/-]+(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$`)
 
-var kindImageEnvironment = map[string]string{
-	kindManagerContainer: "E2E_MANAGER_IMAGE", "legacy-runner": "E2E_RUNNER_IMAGE",
-	"seed-tool-runner": "E2E_SEED_IMAGE", "otel-collector": "E2E_COLLECTOR_IMAGE",
-	"postgresql-17": "E2E_POSTGRES_17_IMAGE",
+const kindRunnerImageEnv = "E2E_RUNNER_IMAGE"
+const kindManagerImageEnv = "E2E_MANAGER_IMAGE"
+
+// kindImageEnvironment maps each image role a kind run starts to the variable that selects it.
+func kindImageEnvironment(engine, pair string) map[string]string {
+	roles := map[string]string{kindManagerContainer: kindManagerImageEnv, "seed-tool-runner": "E2E_SEED_IMAGE",
+		"otel-collector": "E2E_COLLECTOR_IMAGE"}
+	if engine != string(v1beta1.MigrationEngineRPGMigrate) {
+		roles["legacy-runner"], roles["postgresql-17"] = kindRunnerImageEnv, "E2E_POSTGRES_17_IMAGE"
+		return roles
+	}
+	roles[kindNativeRunner] = kindRunnerImageEnv
+	for major := range strings.SplitSeq(pair, ":") {
+		roles["postgresql-"+major] = "E2E_POSTGRES_" + major + "_IMAGE"
+	}
+	return roles
 }
 
 func privateKindPath(path string, directory bool) error {
@@ -695,8 +847,7 @@ func (run *kindSuite) validateInput(getenv func(string) string) error {
 	if math.IsNaN(input.LeaseExpiresAt) || math.IsInf(input.LeaseExpiresAt, 0) || input.LeaseExpiresAt <= 0 ||
 		input.SchemaVersion != 2 || !featureE2ERunPattern.MatchString(input.RunID) ||
 		!kindHashPattern.MatchString(input.ImageLockSHA256) || !kindHashPattern.MatchString(input.SourceTreeSHA256) ||
-		input.Context != "kind-rpgmigrate-m7-"+input.RunID ||
-		input.Engine != string(v1beta1.MigrationEnginePGCopyDB) || input.Pair != kindLegacyPair {
+		input.Context != "kind-rpgmigrate-m7-"+input.RunID || !kindSelectionValid(input.Engine, input.Pair, input.Spec) {
 		return errors.New("kind suite input binding is invalid")
 	}
 	if getenv("E2E_CONTEXT") != input.Context || getenv("E2E_KIND_CONTEXT") != input.Context ||
@@ -709,16 +860,19 @@ func (run *kindSuite) validateInput(getenv func(string) string) error {
 		}
 	}
 	for name, want := range map[string]string{"E2E_RUN_LABEL_VALUE": input.RunID,
-		"E2E_OPERATOR_NAMESPACE": defaultOperatorNamespace, "E2E_MANAGE_NAMESPACES": strconv.FormatBool(true),
-		"E2E_PG_SOURCE": "17", "E2E_PG_TARGET": "17"} {
+		"E2E_OPERATOR_NAMESPACE": defaultOperatorNamespace, "E2E_MANAGE_NAMESPACES": strconv.FormatBool(true)} {
 		if value := getenv(name); value != "" && value != want {
 			return fmt.Errorf("kind suite conflicts with %s", name)
 		}
 	}
-	if len(input.Images) != len(kindImageEnvironment) {
+	environment := kindImageEnvironment(input.Engine, input.Pair)
+	if err := validateKindPairEnvironment(input, environment, getenv); err != nil {
+		return err
+	}
+	if len(input.Images) != len(environment) {
 		return errors.New("kind image role set differs")
 	}
-	for role, key := range kindImageEnvironment {
+	for role, key := range environment {
 		image := input.Images[role]
 		if getenv(key) != image.Ref ||
 			!validKindManagerImageID(image.ImageID, "rpgmigrate-m7-"+input.RunID+"-control-plane", image) {
@@ -727,6 +881,26 @@ func (run *kindSuite) validateInput(getenv func(string) string) error {
 	}
 	if getenv("E2E_TOOL_IMAGE") != input.Images["seed-tool-runner"].Ref {
 		return errors.New("kind tool image binding invalid")
+	}
+	return nil
+}
+
+// validateKindPairEnvironment requires the pair's majors and refuses any PostgreSQL image left unbound.
+func validateKindPairEnvironment(input kindSuiteInput, environment map[string]string, getenv func(string) string,
+) error {
+	source, target, _ := strings.Cut(input.Pair, ":")
+	native := input.Engine == string(v1beta1.MigrationEngineRPGMigrate)
+	// A native pair must be named, since the suite's own default is the legacy 17:17.
+	for name, want := range map[string]string{"E2E_PG_SOURCE": source, "E2E_PG_TARGET": target} {
+		if value := getenv(name); value != want && (value != "" || native) {
+			return fmt.Errorf("kind suite conflicts with %s", name)
+		}
+	}
+	for major := 14; major <= 18; major++ {
+		key := fmt.Sprintf("E2E_POSTGRES_%d_IMAGE", major)
+		if getenv(key) != "" && !slices.Contains(slices.Collect(maps.Values(environment)), key) {
+			return fmt.Errorf("kind suite conflicts with unbound %s", key)
+		}
 	}
 	return nil
 }
@@ -789,7 +963,7 @@ func suiteCommandArgs(tool string, args []string) []string {
 func helmImageValues() ([]string, error) {
 	values := []string{}
 	for _, selection := range []struct{ env, prefix string }{
-		{"E2E_MANAGER_IMAGE", "image"}, {"E2E_RUNNER_IMAGE", "runner.image"},
+		{kindManagerImageEnv, "image"}, {kindRunnerImageEnv, "runner.image"},
 	} {
 		image := os.Getenv(selection.env)
 		if image == "" {
@@ -848,8 +1022,24 @@ func TestKindTaskContextAndSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, override := range []string{"", "E2E_CONTEXT=foreign", "EXPECT_CONTEXT=foreign", "E2E_ENGINE=rpgmigrate"} {
-		t.Run(override, func(t *testing.T) {
+	legacy, native := string(v1beta1.MigrationEnginePGCopyDB), string(v1beta1.MigrationEngineRPGMigrate)
+	for _, tc := range []struct {
+		name, engine, label, override string
+		accepted                      bool
+	}{
+		{"legacy", legacy, kindBootstrapLabel, "", true},
+		{"native", native, nativeLabel, "", true},
+		{"native fault", native, nativeFaultLabel, "", true},
+		{"foreign context", legacy, kindBootstrapLabel, "E2E_CONTEXT=foreign", false},
+		{"foreign expected context", legacy, kindBootstrapLabel, "EXPECT_CONTEXT=foreign", false},
+		{"engine differs from input", legacy, kindBootstrapLabel, "E2E_ENGINE=" + native, false},
+		{"legacy native label", legacy, nativeLabel, "", false},
+		{"native bootstrap label", native, kindBootstrapLabel, "", false},
+		{"native compound label", native, nativeLabel + " || chaos", "", false},
+		{"native empty label", native, "", "", false},
+		{"foreign engine", "foreign-engine", nativeLabel, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			capture := filepath.Join(dir, "capture")
 			fakeGo := `#!/bin/sh
@@ -858,18 +1048,19 @@ printf '%s\n' "$E2E_CONTEXT" "$E2E_ENGINE" "$@" > "$M7_CAPTURE"
 			if err := os.WriteFile(filepath.Join(dir, "go"), []byte(fakeGo), 0700); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"--dir", root, "e2e:kind:suite", "RUN_DIR=" + dir, "EXPECT_CONTEXT=owned", "E2E_ENGINE=pgcopydb"}
-			if override != "" {
-				args = append(args, override)
+			args := []string{"--dir", root, "e2e:kind:suite", "RUN_DIR=" + dir, "EXPECT_CONTEXT=owned",
+				"E2E_ENGINE=" + tc.engine, "LABEL=" + tc.label}
+			if tc.override != "" {
+				args = append(args, tc.override)
 			}
 			cmd := exec.Command(taskPath, args...)
 			cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "E2E_KIND_RUN_DIR=" + dir, "E2E_KIND_CONTEXT=owned",
-				"E2E_ENGINE=pgcopydb", "M7_CAPTURE=" + capture}
+				"E2E_ENGINE=" + tc.engine, "M7_CAPTURE=" + capture}
 			out, err := cmd.CombinedOutput()
 			data, readErr := os.ReadFile(capture)
-			if override != "" {
+			if !tc.accepted {
 				if err == nil || !os.IsNotExist(readErr) {
-					t.Fatalf("conflicting Task variable reached suite: %v\n%s", err, out)
+					t.Fatalf("conflicting Task selection reached suite: %v\n%s", err, out)
 				}
 				return
 			}
@@ -877,11 +1068,14 @@ printf '%s\n' "$E2E_CONTEXT" "$E2E_ENGINE" "$@" > "$M7_CAPTURE"
 				t.Fatalf("Task entry failed: %v/%v\n%s", err, readErr, out)
 			}
 			got := strings.Split(strings.TrimSpace(string(data)), "\n")
-			for _, want := range []string{"owned", string(v1beta1.MigrationEnginePGCopyDB), "^TestE2E$", "-count=1",
-				"-ginkgo.label-filter=kind-bootstrap", "-ginkgo.fail-on-empty"} {
+			for _, want := range []string{"owned", tc.engine, "^TestE2E$", "-count=1",
+				"-ginkgo.label-filter=" + tc.label, "-ginkgo.fail-on-empty"} {
 				if !slices.Contains(got, want) {
 					t.Fatalf("Task did not select required argument %s", want)
 				}
+			}
+			if slices.ContainsFunc(got, func(arg string) bool { return strings.HasPrefix(arg, "-ginkgo.focus") }) {
+				t.Fatal("Task passed a focus; the bound suite input owns the native spec selection")
 			}
 		})
 	}
@@ -991,7 +1185,7 @@ func TestKindManagerImageInput(t *testing.T) {
 			env := map[string]string{"E2E_CONTEXT": "kind-rpgmigrate-m7-" + id,
 				"E2E_KIND_CONTEXT": "kind-rpgmigrate-m7-" + id, "E2E_ENGINE": string(v1beta1.MigrationEnginePGCopyDB),
 				"E2E_SMALL": strconv.FormatBool(true)}
-			for role, key := range kindImageEnvironment {
+			for role, key := range kindImageEnvironment(string(v1beta1.MigrationEnginePGCopyDB), kindLegacyPair) {
 				ref := "ghcr.io/example/" + role + "@" + digest
 				bindings := map[string]any{}
 				for i, suffix := range kindNodeSuffixes {
@@ -1007,7 +1201,7 @@ func TestKindManagerImageInput(t *testing.T) {
 			env["E2E_TOOL_IMAGE"] = env["E2E_SEED_IMAGE"]
 			fields := map[string]any{"schema_version": 2, "run_id": id, "context": env["E2E_CONTEXT"],
 				"source_tree_sha256": strings.Repeat("a", 64), "images": images,
-				"engine": string(v1beta1.MigrationEnginePGCopyDB), "pair": kindLegacyPair,
+				"engine": string(v1beta1.MigrationEnginePGCopyDB), "pair": kindLegacyPair, kindSpecField: kindBootstrapSpec,
 				"lease_expires_at": float64(time.Now().Add(time.Hour).Unix()), "image_lock_sha256": strings.Repeat("d", 64)}
 			tc.change(fields)
 			data, err := json.Marshal(fields)

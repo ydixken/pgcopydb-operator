@@ -139,7 +139,7 @@ class QualificationBoundaries(unittest.TestCase):
                      info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                processStatus='running', netNamespaceClosed=False, pid=100,
                                config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
-                               sandboxMetadata=dict(RuntimeHandler=''),
+                               sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')),
                                runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid','ipc','uts','mount')]+
                                                           [dict(type='network', path='/var/run/netns/cni-owned')]))))
         self.assertEqual(functions['sandbox_value'](json.dumps(value).encode(), expected, sandbox),
@@ -149,6 +149,16 @@ class QualificationBoundaries(unittest.TestCase):
                        lambda spec:spec['linux']['namespaces'].append(dict(type='pid'))):
             candidate=json.loads(json.dumps(value));mutate(candidate['info']['runtimeSpec'])
             with self.assertRaises(RuntimeError):
+                functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
+        handled=json.loads(json.dumps(value));handled['info']['sandboxMetadata']['Metadata']['RuntimeHandler']='runc'
+        self.assertEqual(functions['sandbox_value'](json.dumps(handled).encode(), expected, sandbox)['sandbox_pid'], 100)
+        # An absent handler is refused at the live nesting and never read from the top level.
+        for metadata in ({}, dict(RuntimeHandler=''), dict(Metadata={}), dict(Metadata=dict(RuntimeHandler='kata')),
+                         dict(Metadata=dict(runtimeHandler='')), dict(Metadata=None), None):
+            candidate=json.loads(json.dumps(value));candidate['info']['sandboxMetadata']=metadata
+            if metadata is None:
+                del candidate['info']['sandboxMetadata']
+            with self.subTest(metadata=metadata), self.assertRaises(RuntimeError):
                 functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
 
     def test_terminal_proof_accepts_the_sandbox_kubelet_stopped(self):
@@ -160,7 +170,7 @@ class QualificationBoundaries(unittest.TestCase):
                      info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                processStatus='deleted', netNamespaceClosed=True, pid=0,
                                config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
-                               sandboxMetadata=dict(RuntimeHandler=''),
+                               sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')),
                                runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
                                                           [dict(type='network', path='/var/run/netns/cni-owned')]))))
         terminal = dict(expected, previous=dict(sandbox_pid=50))
@@ -240,7 +250,7 @@ class QualificationBoundaries(unittest.TestCase):
                        info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                  processStatus='deleted', netNamespaceClosed=True, pid=0,
                                  config=dict(metadata=dict(uid=uid, name='owned-name', namespace='owned-namespace')),
-                                 sandboxMetadata={}, runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                 sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')), runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
                                                                                 [dict(type='network', path='/var/run/netns/cni-owned')]))))
         replies = dict(inspect=json.dumps(exited).encode(), inspectp=json.dumps(stopped).encode())
         specs = []
@@ -482,6 +492,18 @@ class QualificationBoundaries(unittest.TestCase):
             for action,args in [('probe',(100,'../foreign',101,0)),('release',(100,'owned-pod',1,'/foreign',1,2)),('absence',('/foreign',1))]:
                 with self.subTest(action=action),self.assertRaises(RuntimeError):functions['primitive'](action,*args)
             command.assert_not_called()
+
+    def test_server_key_stat_matches_the_cnpg_fsgroup(self):
+        # The probe servers run with fsGroup 26, so kubelet gives the projected server.key that group.
+        functions=node_functions()
+        key_stat=[line for line in functions['perl_source']().splitlines() if line.startswith('sub key_stat ')]
+        self.assertEqual(len(key_stat),1,'server key primitive missing')
+        self.assertIn('$st[4]==0 && $st[5]==26 && ($st[2]&07777)==0440',key_stat[0])
+        self.assertIn("return {uid=>'0',gid=>'26',mode=>'288',links=>'1'}",key_stat[0])
+        fixture=(Q.ROOT / Q.OWNED[2]).read_text()
+        self.assertEqual(fixture.count("need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))"),1)
+        server=(Q.ROOT / Q.PASSWORD_FILE).read_text()
+        self.assertIn('uid, yes, no, grace, priority, mode := int64(26),',server)
 
     def test_proc_wire_has_fixed_fields_caps_and_no_trailing_bytes(self):
         functions=node_functions()
@@ -1206,6 +1228,73 @@ class DeliveryBoundaries(unittest.TestCase):
             with self.subTest(mutation=name), self.assertRaises(Q.Refusal):
                 Q.validate_delivery_receipt(request, receipt, events)
 
+
+
+class ControllerReceipt(unittest.TestCase):
+    RUNNER = 'ghcr.io/ydixken/rpgmigrate@sha256:' + '8' * 64
+
+    def fixture(self):
+        runtime = fake_request()
+        namespace = 'native-controller-test'
+        runtime.update(phase='controller', required_cases=Q.required_cases('controller', None), namespace=namespace)
+        request = dict(schema_version=1, runtime=runtime, original_parent_deadline=2200)
+        operation = 'a' * 32
+        jobs = [dict(name='rpgmigrate-version-' + operation, uid='version-uid', bytes=4096, image=self.RUNNER),
+                dict(name='rpgmigrate-preflight-' + operation, uid='preflight-uid', bytes=130000, image=self.RUNNER)]
+        objects = [dict(api_version='pgcopydb-operator.io/v1beta1', kind='Migration', namespace=namespace, name='native-controller', uid='migration-uid')]
+        for kind, names in (('Pod', ('pg16', 'pg18')), ('Service', ('pg16', 'pg18')), ('Secret', ('server-16', 'server-18', 'source-auth', 'target-auth'))):
+            objects += [dict(api_version='v1', kind=kind, namespace=namespace, name=name, uid=kind + '-' + name) for name in names]
+        objects += [dict(api_version='v1', kind='Namespace', namespace='', name=namespace, uid='namespace-uid'),
+                    dict(api_version='apiextensions.k8s.io/v1', kind='CustomResourceDefinition', namespace='', name='migrations.pgcopydb-operator.io', uid='crd-uid')]
+        for item in objects:
+            item.update(resource_version='1', action='deleted', verified_absent=True)
+        receipt = dict(schema_version=1, kind='controller', qualification_id=runtime['qualification_id'], run_id=runtime['run_id'],
+                       input_sha256=Q.sha((json.dumps(request, sort_keys=True, separators=(',', ':')) + '\n').encode()),
+                       qualification_source_sha256=runtime['qualification_source_sha256'],
+                       evidence_program_sha256=runtime['evidence_program_sha256'], native_assets_sha256=runtime['native_assets_sha256'],
+                       crd_sha256=Q.sha((Q.ROOT / Q.CONTROLLER_CRD).read_bytes()), namespace_uid='namespace-uid', migration_uid='migration-uid',
+                       started_at=1500, finished_at=1700, reconcile_passes=2,
+                       validated=dict(status='True', reason='NativePreflightPassed', message='Native configuration and active database preflight passed'),
+                       jobs=jobs, refused_creates=[],
+                       cases=[dict(name=name, status='passed', exit_code=0, cleanup=True) for name in runtime['required_cases']],
+                       cleanup=dict(complete=True, objects=objects))
+        events = [dict(Action='pass', Test=Q.CONTROLLER_TEST + '/' + name) for name in runtime['required_cases']]
+        events.append(dict(Action='pass', Test=Q.CONTROLLER_TEST))
+        return request, receipt, events
+
+    def test_controller_inventory_is_fixed_and_matches_go(self):
+        self.assertEqual(Q.required_cases('controller', None)[0], 'controller/version_job_created')
+        with self.assertRaises(Q.Refusal):
+            Q.required_cases('controller', (16, 18))
+        source = (Q.ROOT / Q.CONTROLLER_FILE).read_text()
+        order = source.split('var nativeControllerOrder = []string{', 1)[1].partition('}')[0]
+        self.assertEqual([item.strip().strip('"') for item in order.split(',')], list(Q.CONTROLLER_CASES))
+
+    def test_valid_controller_receipt_passes(self):
+        Q.validate_controller_receipt(*self.fixture(), self.RUNNER)
+
+    def test_controller_receipt_refuses_any_create_or_outcome_drift(self):
+        mutations = {
+            'worker_attempted': lambda r, e: r['refused_creates'].append('*v1.Job/native-controller-run-1'),
+            'preflight_refused': lambda r, e: r['validated'].update(status='False', reason='NativePreflightFailed'),
+            'other_operation': lambda r, e: r['jobs'][1].update(name='rpgmigrate-preflight-' + 'b' * 32),
+            'third_job': lambda r, e: r['jobs'].append(dict(r['jobs'][1], uid='third')),
+            'foreign_image': lambda r, e: r['jobs'][0].update(image='ghcr.io/ydixken/rpgmigrate:latest'),
+            'program_absent': lambda r, e: r['jobs'][1].update(bytes=4096),
+            'too_many_passes': lambda r, e: r.update(reconcile_passes=5),
+            'stale_crd': lambda r, e: r.update(crd_sha256='9' * 64),
+            'failed_case': lambda r, e: r['cases'][3].update(status='refused', exit_code=1),
+            'skipped_go_case': lambda r, e: e.append(dict(Action='skip', Test=Q.CONTROLLER_TEST + '/controller/no_worker_started')),
+            'cleanup_retained': lambda r, e: r['cleanup']['objects'][-1].update(action='retained', verified_absent=False),
+            'cleanup_missing': lambda r, e: r['cleanup']['objects'].pop(0),
+            'foreign_migration': lambda r, e: r['cleanup']['objects'][0].update(uid='other-migration'),
+            'late_receipt': lambda r, e: r.update(finished_at=2201),
+        }
+        for name, mutate in mutations.items():
+            request, receipt, events = self.fixture()
+            mutate(receipt, events)
+            with self.subTest(mutation=name), self.assertRaises(Q.Refusal):
+                Q.validate_controller_receipt(request, receipt, events, self.RUNNER)
 
 if __name__ == '__main__':
     with mock.patch('subprocess.run', side_effect=AssertionError('external process forbidden')):
