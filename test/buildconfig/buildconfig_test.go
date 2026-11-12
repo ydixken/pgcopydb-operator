@@ -181,7 +181,13 @@ esac
 			t.Fatal(err)
 		}
 	}
-	env := append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	// Under make test the fixture's make would inherit the outer one's level and
+	// flags and print "Entering directory" into output the tests compare exactly.
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return name == "MAKELEVEL" || name == "MAKEFLAGS" || name == "MFLAGS"
+	})
+	env = append(env, "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GOTOOLCHAIN=local", "LINT_TRACE="+trace, "FAKE_LINTER="+linter, "FAKE_GOPATH="+dir)
 	return dir, localBin, trace, env
 }
