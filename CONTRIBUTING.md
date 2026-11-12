@@ -44,6 +44,7 @@ A second step runs the coverage tests against 18, because release candidates nev
 With the variable set, `TestPreflightSyncCommit_Server` needs psql 18 or later first on `PATH`, because the preflight pooler check reads the Backend PID that psql 18 added to `\conninfo`.
 The two `ownerAfterRestore` tests run the handover's candidate query and the preflight's `SET ROLE` probe against a live server, because both have version-dependent answers (multirange types, `WITH SET FALSE` membership) that no golden test can pin down.
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
+`TestProgressSQLBounds` also needs psql 15 or later, because older psql prints only the last result of a multi-statement `-c`.
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret.
