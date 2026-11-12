@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import struct
 import sys
 import tempfile
@@ -1022,6 +1023,25 @@ class NativePythonTests(unittest.TestCase):
             self.assertEqual(refusal.exception.error_class,'input')
         finally:
             thread.join(3);channel.close()
+
+    def test_PrivateInputSetgidParent(self):
+        # Reproduces kubelet fsGroup: the new directory inherits S_ISGID from a setgid /tmp.
+        real_mkdir=os.mkdir
+        def inherited(name,mode,*,dir_fd):
+            real_mkdir(name,mode,dir_fd=dir_fd);os.chown(name,-1,os.getegid(),dir_fd=dir_fd);os.chmod(name,0o2700,dir_fd=dir_fd)
+            if not os.stat(name,dir_fd=dir_fd).st_mode&stat.S_ISGID:os.rmdir(name,dir_fd=dir_fd);self.skipTest('setgid not settable here')
+        spec=importlib.util.spec_from_file_location('native_evidence_writer',HERE/'evidence_request_writer.py');writer=importlib.util.module_from_spec(spec);spec.loader.exec_module(writer)
+        with mock.patch.object(P.os,'mkdir',inherited):channel=P.InputChannel(os.urandom(16).hex(),time.monotonic()+3)
+        try:
+            self.assertEqual(os.stat(channel.path,follow_symlinks=False).st_mode,stat.S_IFDIR|0o700)
+            probe=os.open(channel.path,os.O_RDONLY|os.O_DIRECTORY)
+            try:self.assertEqual(writer.private_dir(probe),P.identity(os.fstat(probe)))
+            finally:os.close(probe)
+            channel.check()
+        finally:channel.close()
+        self.assertFalse(os.path.exists(channel.path))
+        with mock.patch.object(P.os,'mkdir',inherited),mock.patch.object(P.os,'fchmod',lambda fd,mode:None):
+            with self.assertRaises(P.Refusal):P.InputChannel(os.urandom(16).hex(),time.monotonic()+3)
 
     def test_PrivateInputTrailing(self):
         operation = os.urandom(16).hex()
