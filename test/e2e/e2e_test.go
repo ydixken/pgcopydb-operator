@@ -136,7 +136,7 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 		resetTargetObjects()
 	})
 
-	It("completes a fresh clone with matching rows and sequences", func() {
+	It("completes a fresh clone with matching rows and sequences", Label(nativeLabel), func() {
 		By("accepting a selected source extension available but not installed on the target")
 		Expect(psql(sourceCluster, "SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'citext')")).To(Equal("t"))
 		Expect(psql(targetCluster, "SELECT EXISTS (SELECT FROM pg_available_extensions "+
@@ -210,9 +210,9 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 	// Each follow scenario asserts the source is free of pgcopydb replication
 	// slots when it finishes, and the next one on the same pair relies on that
 	// clean slate for its own slot counting.
-	It("holds early Manual approval until a paused backlog catches up", earlyManualCutover)
+	It("holds early Manual approval until a paused backlog catches up", Label(nativeLabel), earlyManualCutover)
 
-	It("loses no committed transaction when the source is written throughout", func() {
+	It("loses no committed transaction when the source is written throughout", Label(nativeLabel), func() {
 		const name = "e2e-follow-load"
 		const marker = "live-load"
 
@@ -591,7 +591,7 @@ var _ = Describe("Migration", func() {
 		}, 3*time.Minute, 2*time.Second).Should(Succeed())
 	})
 
-	It("runs an Automatic cutover to completion unattended", func() {
+	It("runs an Automatic cutover to completion unattended", Label(nativeLabel), func() {
 		const name = "e2e-follow-auto"
 		// Schema verification on top: after cutover and cleanup the compare
 		// runs against a quiesced pair, so CutoverCompleted and Verified
