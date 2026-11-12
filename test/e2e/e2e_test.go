@@ -1258,6 +1258,9 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 
 func create(m *v1beta1.Migration) {
 	GinkgoHelper()
+	if nativeKindWorkVolume() {
+		provisionNativeWorkVolume(m)
+	}
 	Expect(k8sClient.Create(ctx, m)).To(Succeed(), "failed to create Migration %s/%s", m.Namespace, m.Name)
 	waitWorkVolumeReady(m)
 }
