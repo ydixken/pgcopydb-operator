@@ -389,3 +389,25 @@ func TestPreflightQualifiedMajorPairs(t *testing.T) {
 		})
 	}
 }
+
+func TestPreflightFailureClass(t *testing.T) {
+	line := func(class string) string {
+		return `{"version":1,"kind":"native_preflight_failure","error_class":"` + class + `"}`
+	}
+	if strings.Join(preflightFailureClasses, " ") != "admission capability input timeout connection diagnostic result transaction_state unknown_commit closure internal" {
+		t.Fatal("closed refusal set differs from the program's ERROR_CLASSES")
+	}
+	for _, class := range preflightFailureClasses {
+		for _, message := range []string{line(class), line(class) + "\n"} {
+			if got, ok := PreflightFailureClass(message); !ok || got != class {
+				t.Fatalf("closed-set refusal %q was not named", message)
+			}
+		}
+	}
+	for _, message := range []string{"", "\n", line("secret"), line("transaction_state") + "\n\n", " " + line("result"), line("result") + " ", "partial\n" + line("result"), line("result") + "\n" + line("result"),
+		`{"version":1,"kind":"native_preflight_failure","error_class":"result","sqlstate":"42501"}`, `{"kind":"native_preflight_failure","version":1,"error_class":"result"}`, "transaction_state"} {
+		if got, ok := PreflightFailureClass(message); ok || got != "" {
+			t.Fatalf("free-form termination message %q named a class", message)
+		}
+	}
+}

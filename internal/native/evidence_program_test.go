@@ -84,6 +84,9 @@ func TestNativePythonPrivateInputSetgidParent(t *testing.T) {
 	pythonMechanismCase(t, "test_PrivateInputSetgidParent")
 }
 func TestNativePythonEnvironmentDNS(t *testing.T) { pythonMechanismCase(t, "test_EnvironmentDNS") }
+func TestNativePythonNativePreflightFailureLine(t *testing.T) {
+	pythonMechanismCase(t, "test_NativePreflightFailureLine")
+}
 func TestNativePythonQualifiedResolverPolicy(t *testing.T) {
 	pythonMechanismCase(t, "test_QualifiedResolverPolicy")
 }
@@ -96,7 +99,10 @@ func TestNativePythonConnectionHomePolicy(t *testing.T) {
 func TestNativePythonRequestWire(t *testing.T)    { pythonMechanismCase(t, "test_RequestWire") }
 func TestNativePythonRequestDigests(t *testing.T) { pythonMechanismCase(t, "test_RequestDigests") }
 
-func TestNativePythonUnknownCommit(t *testing.T)    { pythonMechanismCase(t, "test_UnknownCommit") }
+func TestNativePythonUnknownCommit(t *testing.T) { pythonMechanismCase(t, "test_UnknownCommit") }
+func TestNativePythonSessionTransactionState(t *testing.T) {
+	pythonMechanismCase(t, "test_SessionTransactionState")
+}
 func TestNativePythonPrivateAdmission(t *testing.T) { pythonMechanismCase(t, "test_PrivateAdmission") }
 func TestNativePythonCatalogFixtures(t *testing.T)  { pythonMechanismCase(t, "test_CatalogFixtures") }
 func TestNativePythonRuntimeMetadata(t *testing.T)  { pythonMechanismCase(t, "test_RuntimeMetadata") }
@@ -111,7 +117,7 @@ func TestNativePythonDescriptorMutation(t *testing.T) {
 func TestNativePythonConnectPolling(t *testing.T) { pythonMechanismCase(t, "test_ConnectPolling") }
 
 func TestNativePythonRelay(t *testing.T) {
-	for _, method := range []string{"test_RelayProtocol", "test_RelayFaults", "test_RelayLifetime", "test_RelayDuplicate", "test_RelayDeadline", "test_RelayMainQuiet", "test_RelayClosureOrder", "test_RelayCloseFault", "test_RelayReplacement", "test_RelayOverflow"} {
+	for _, method := range []string{"test_RelayProtocol", "test_RelayFaults", "test_RelayLifetime", "test_RelayDuplicate", "test_RelayDeadline", "test_RelayModeSettle", "test_RelayMainQuiet", "test_RelayClosureOrder", "test_RelayCloseFault", "test_RelayReplacement", "test_RelayOverflow"} {
 		t.Run(method, func(t *testing.T) { pythonMechanismCase(t, method) })
 	}
 }
@@ -278,7 +284,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 59 || len(registered) != 59 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 62 || len(registered) != 62 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)

@@ -17,6 +17,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -206,6 +207,7 @@ func (r *MigrationReconciler) reconcileNativeStart(ctx context.Context, m, base 
 			m.Status.Phase = v1beta1.PhaseFailed
 			r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionFalse, "NativePreflightFailed", failure)
 			r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "NativePreflightFailed", failure)
+			logf.FromContext(ctx).Info("native preflight failed", "reason", "NativePreflightFailed", "message", failure)
 		}
 		if err := r.updateNativeStatus(ctx, m, base); err != nil {
 			return ctrl.Result{}, err

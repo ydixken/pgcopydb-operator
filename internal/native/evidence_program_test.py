@@ -265,7 +265,8 @@ class PreflightFixture:
         self.stack.enter_context(mock.patch.object(P.time,'monotonic',side_effect=lambda:self.clock))
         def write(fd,raw):
             outer.case.assertEqual(fd,1)
-            for name in ('source','target','material','diagnostics'):outer.case.assertIn(name,outer.closes)
+            if b'"native_preflight_failure"' not in raw:
+                for name in ('source','target','material','diagnostics'):outer.case.assertIn(name,outer.closes)
             outer.event('write');outer.output.append(bytes(raw));return len(raw)
         self.stack.enter_context(mock.patch.object(P.os,'write',side_effect=write))
         for name in ('InputChannel','PrivateState','observe','validate_request'):
@@ -749,7 +750,7 @@ class NativePythonTests(unittest.TestCase):
             preflight.assert_called_once_with('5'*32,'6'*64);evidence.assert_called_once_with('5'*32,'6'*64)
         for follow in ('','true','01','2','0\n'):
             with PreflightFixture(self,follow=follow) as fixture:
-                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+                self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture);self.assertNotIn('source-open',fixture.events)
 
     def test_NativePreflightClosedResult(self):
         clone='connections identity source_primary target_writable versions tools temporary_privilege extensions clone_rights rls'.split()
@@ -796,32 +797,52 @@ class NativePythonTests(unittest.TestCase):
         faults=['query-'+str(i) for i in range(1,count+1)]+['runtime','prepare','source-open','target-open','material-check','source-check','target-check','resolver-policy','resolver-check','diagnostics-check','source-close','target-close','resolver-close','material-close','diagnostics-close','tools','expire','late-query-'+str(count),'cleanup-expire-source-close']
         for fault in faults:
             with self.subTest(fault=fault),PreflightFixture(self,follow='1',fault=fault) as fixture:
-                self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+                self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
                 if 'material-open' in fixture.events:self.assertIn('material-close',fixture.events)
         for key in ('connections','temporary_privilege','extensions','clone_rights','rls','wal','publication','slots','replication','unlogged','replica_identity'):
             for bad in ([],[[None]],[[b'f']],[[b't',b't']],[[b't'],[b't']]):
-                with self.subTest(key=key,bad=bad),PreflightFixture(self,follow='1',rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+                with self.subTest(key=key,bad=bad),PreflightFixture(self,follow='1',rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         identity=[b'23',b'11',b'33',b'33',b'160006',b't',b'off']
         for index,bad in ((0,b'24'),(1,b'0'),(2,b'0'),(3,None),(4,b'160000.0'),(4,b'0170000'),(4,b'170006'),(5,b'f')):
             row=identity.copy();row[index]=bad
-            with self.subTest(index=index,bad=bad),PreflightFixture(self,rows={'source-identity':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with self.subTest(index=index,bad=bad),PreflightFixture(self,rows={'source-identity':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         target=[b'24',b'11',b'33',b'33',b'180006',b't',b'on']
-        with PreflightFixture(self,rows={'target-identity':[target]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+        with PreflightFixture(self,rows={'target-identity':[target]}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         for index in range(7):
             row=identity.copy();row[index]=b'180006' if index==4 else b'99'
-            with self.subTest(recheck=index),PreflightFixture(self,rows={'source-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with self.subTest(recheck=index),PreflightFixture(self,rows={'source-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
             row=identity.copy();row[0]=b'24';row[4]=b'180006';row[index]=b'160006' if index==4 else b'99'
-            with self.subTest(target_recheck=index),PreflightFixture(self,rows={'target-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with self.subTest(target_recheck=index),PreflightFixture(self,rows={'target-identity-2':[row]}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         for bad in ([],None,[[None]*7],[identity,identity],[identity[:-1]],[identity+[b'1']]):
-            with PreflightFixture(self,rows={'source-identity':bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with PreflightFixture(self,rows={'source-identity':bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         for source,target in ((18,16),(17,18),(16,17),(15,16),(18,19)):
-            with PreflightFixture(self,source=source,target=target) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with PreflightFixture(self,source=source,target=target) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         for key,bad in (('schemas',[[b'null']]),('schemas',[[b'["x","x"]']]),('extensions-source',[[b'[["x",1]]']]),('extensions-source',[[b'[["x",true],["x",false]]']])):
-            with PreflightFixture(self,rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            with PreflightFixture(self,rows={key:bad}) as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
+
+    def assertPreflightRefused(self, fixture, error_class=None):
+        self.assertEqual(len(fixture.output),1); line=fixture.output[0]
+        self.assertTrue(line.endswith(b'\n') and line.count(b'\n')==1 and len(line)<=96)
+        value=json.loads(line); self.assertEqual(set(value),{'version','kind','error_class'})
+        self.assertEqual((value['version'],value['kind']),(1,'native_preflight_failure')); self.assertIn(value['error_class'],P.ERROR_CLASSES)
+        if error_class is not None: self.assertEqual(value['error_class'],error_class)
+        for canary in (b'private-role',b'private-db',b'private-host',b'secret-sentinel',b'42501'): self.assertNotIn(canary,line)
+
+    def test_NativePreflightFailureLine(self):
+        self.assertEqual(P.ERROR_CLASSES,('admission','capability','input','timeout','connection','diagnostic','result','transaction_state','unknown_commit','closure','internal'))
+        for error_class in P.ERROR_CLASSES:
+            with self.subTest(error_class=error_class),PreflightFixture(self,follow='1') as fixture,mock.patch.object(P,'preflight_checks',side_effect=P.Refusal(error_class,'42501')):
+                self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture,error_class)
+        for failure in (P.Refusal('secret-sentinel'),RuntimeError('secret-sentinel'),KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__),PreflightFixture(self) as fixture,mock.patch.object(P,'preflight_checks',side_effect=failure):
+                self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture,'internal')
+        with PreflightFixture(self,follow='') as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture,'capability')
+        with PreflightFixture(self,fault='query-1') as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture,'result')
+        with PreflightFixture(self,fault='expire') as fixture:self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture,'timeout')
 
     def test_NativePreflightResolverClosed(self):
         with PreflightFixture(self) as fixture,mock.patch.object(P,'qualified_resolver_policy',side_effect=P.Refusal('capability')):
-            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[]);self.assertNotIn('source-open',fixture.events)
+            self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture);self.assertNotIn('source-open',fixture.events)
         with self.assertRaises(P.Refusal):P.qualified_resolver_policy(object())
 
     def test_NativePreflightTools(self):
@@ -885,7 +906,7 @@ class NativePythonTests(unittest.TestCase):
                 result=json.loads(b''.join(fixture.output));self.assertEqual(result['kind'],'native_preflight')
                 wait.assert_called_once_with(1,True,190.)
         with PreflightFixture(self) as fixture,mock.patch.object(P.os,'set_blocking',side_effect=OSError('secret-sentinel')):
-            self.assertEqual(fixture.run(),1);self.assertEqual(fixture.output,[])
+            self.assertEqual(fixture.run(),1);self.assertPreflightRefused(fixture)
         with PreflightFixture(self,fault='cleanup-last-source-close') as fixture:
             self.assertEqual(fixture.run(),0);self.assertEqual(fixture.clock,189.)
             self.assertEqual(len(fixture.queries),24)
@@ -1209,6 +1230,54 @@ class NativePythonTests(unittest.TestCase):
         pq=PQ([result]); pq.state=0; s=session(pq)
         with self.assertRaises(P.Refusal): P.exact_true(s.query('SELECT false;'))
         s.close(False)
+
+    def test_SessionTransactionState(self):
+        class PQ:
+            # PQtransactionStatus follows the statements sent, as libpq does: BEGIN opens, COMMIT/ROLLBACK close.
+            def __init__(self): self.state=0; self.pending=None; self.sent=[]
+            def PQstatus(self,_): return 0
+            def PQtransactionStatus(self,_): return self.state
+            def PQbackendPID(self,_): return 23
+            def PQsendQueryParams(self,conn,sql,*args): self.pending=sql.decode(); self.sent.append(self.pending); return 1
+            def PQflush(self,_): return 0
+            def PQconsumeInput(self,_): return 1
+            def PQisBusy(self,_): return 0
+            def PQgetResult(self,_):
+                sql,self.pending=self.pending,None
+                if sql is None: return None
+                tag=sql.split()[0].rstrip(';')
+                if tag=='BEGIN': self.state=2
+                elif tag in ('COMMIT','ROLLBACK'): self.state=0
+                return dict(status=1,tag=tag.encode())
+            def PQresultStatus(self,r): return r['status']
+            def PQresultErrorField(self,r,_): return None
+            def PQcmdStatus(self,r): return r['tag']
+            def PQcmdTuples(self,r): return b''
+            def PQntuples(self,r): return 0
+            def PQnfields(self,r): return 0
+            def PQclear(self,r): pass
+            def PQfinish(self,_): pass
+        def session():
+            from types import SimpleNamespace
+            s=P.Session.__new__(P.Session); s.lib=PQ(); s.conn=1; s.deadline=time.monotonic()+3
+            s.diag=SimpleNamespace(check=lambda:None); s.notice=False; s.sqlstate=''
+            s.connection=SimpleNamespace(check=lambda:None,close=lambda:None); s.claimed=True
+            s.commit_dispatched=False; s.commit_ack=False; s.backend=23; s.props={}; s.connection_facts=lambda:{}
+            return s
+        # The preflight replica_role probe, verbatim from preflight_checks.
+        s=session()
+        s.query('BEGIN READ ONLY;',tag='BEGIN',state=2,rows=0,width=0)
+        s.query("SET LOCAL session_replication_role TO 'replica';",tag='SET',state=2,rows=0,width=0)
+        s.query('ROLLBACK;',tag='ROLLBACK',rows=0,width=0)
+        self.assertEqual((s.lib.state,len(s.lib.sent)),(0,3)); s.close()
+        s=session()
+        s.query('BEGIN READ WRITE;',tag='BEGIN',state=2,rows=0,width=0)
+        s.query('COMMIT;',tag='COMMIT',rows=0,width=0,commit=True)
+        self.assertTrue(s.commit_ack); s.close()
+        for prior,sql,arguments in [(0,'ROLLBACK;',dict(tag='ROLLBACK',rows=0,width=0)),(0,'COMMIT;',dict(tag='COMMIT',rows=0,width=0,commit=True)),(2,'BEGIN;',dict(tag='BEGIN',state=2,rows=0,width=0)),(0,'SET x TO 1;',dict(tag='SET',state=2,rows=0,width=0)),(2,'SET x TO 1;',dict(tag='SET',rows=0,width=0))]:
+            s=session(); s.lib.state=prior
+            with self.assertRaises(P.Refusal) as failure: s.query(sql,**arguments)
+            self.assertEqual((failure.exception.error_class,s.lib.sent,s.commit_dispatched),(P.TX_STATE,[],False)); s.close(False)
 
     def test_Writer(self):
         import subprocess
@@ -1616,6 +1685,39 @@ class NativePythonTests(unittest.TestCase):
         finally:
             if proc.poll() is None:proc.kill();proc.communicate(timeout=3)
             channel.close()
+
+    def test_RelayModeSettle(self):
+        import subprocess,fcntl
+        source=(HERE/'evidence_request_writer.py').read_text()
+        for settles in (True,False):
+            op=os.urandom(16).hex();path=Path('/tmp')/('rpgmigrate-evidence-'+op)
+            # The program's mkdir under a kubelet fsGroup /tmp, before its fchmod lands.
+            path.mkdir(mode=0o700);os.chown(path,-1,os.getegid());os.chmod(path,0o2700)
+            self.assertEqual(os.stat(path).st_mode,0o42700)
+            directory=os.open(path,os.O_RDONLY|os.O_DIRECTORY);proc=None
+            try:
+                started=time.monotonic()
+                proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment())
+                time.sleep(.5)
+                self.assertIsNone(proc.poll(),'relay refused the directory before the program cleared setgid')
+                fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(directory,fcntl.LOCK_UN)
+                if settles:
+                    os.chmod(path,0o700);deadline=time.monotonic()+3;admitted=False
+                    while not admitted and time.monotonic()<deadline:
+                        try:fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(directory,fcntl.LOCK_UN);time.sleep(.01)
+                        except BlockingIOError:admitted=True
+                    self.assertTrue(admitted,'relay did not admit the directory once it reached 0o700')
+                stdout,stderr=proc.communicate(timeout=8);elapsed=time.monotonic()-started
+                # Without FIFOs neither case can complete; both end at the injection window, quietly.
+                self.assertEqual((proc.returncode!=0,stdout,stderr),(True,b'',b''))
+                self.assertGreaterEqual(elapsed,4.5);self.assertLess(elapsed,8)
+                if not settles:fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:
+                os.close(directory)
+                if proc is not None:
+                    if proc.poll() is None:proc.kill()
+                    proc.communicate(timeout=3)
+                path.rmdir()
 
     def test_RelayMainQuiet(self):
         import subprocess

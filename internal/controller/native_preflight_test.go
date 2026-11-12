@@ -140,7 +140,9 @@ func defaultProbeJob(job *batchv1.Job) {
 	c := &p.Containers[0]
 	c.ImagePullPolicy = corev1.PullIfNotPresent
 	c.TerminationMessagePath = corev1.TerminationMessagePathDefault
-	c.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	if c.TerminationMessagePolicy == "" {
+		c.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	}
 	job.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{batchv1.ControllerUidLabel: string(job.UID)}}
 	maps.Copy(job.Spec.Template.Labels, map[string]string{batchv1.ControllerUidLabel: string(job.UID), nativeWorkerLegacyControllerLabel: string(job.UID), batchv1.JobNameLabel: job.Name, nativeWorkerLegacyJobNameLabel: job.Name})
 }
@@ -1080,5 +1082,88 @@ func TestNativePreflightAcceptsLinuxSealedFileDiscovery(t *testing.T) {
 	v, passed, failure, err := f.run()
 	if err != nil || failure != "" || !passed || v == nil || f.creates != 2 || f.deletes != 2 || f.logs.Load() != 2 {
 		t.Fatal("Linux sealed-file discovery failed checked preflight", failure, err)
+	}
+}
+
+const probeRefusalLine = `{"version":1,"kind":"native_preflight_failure","error_class":"transaction_state"}` + "\n"
+
+// refusePreflightPod fails the preflight container once, before the poll reads its Job.
+func refusePreflightPod(f *preflightFixture, message string, exit, signal int32, jobFailed bool) {
+	done := false
+	f.onRead = func(obj client.Object) {
+		if _, ok := obj.(*batchv1.Job); !ok || done {
+			return
+		}
+		pods := &corev1.PodList{}
+		if err := f.store.List(context.Background(), pods, client.InNamespace(f.m.Namespace)); err != nil {
+			f.t.Fatal(err)
+		}
+		for i := range pods.Items {
+			p := &pods.Items[i]
+			if !strings.HasPrefix(p.Name, "rpgmigrate-preflight-") {
+				continue
+			}
+			done = true
+			p.Status.Phase = corev1.PodFailed
+			term := p.Status.ContainerStatuses[0].State.Terminated
+			term.ExitCode, term.Signal, term.Message = exit, signal, message
+			if err := f.store.Status().Update(context.Background(), p); err != nil {
+				f.t.Fatal(err)
+			}
+			if !jobFailed {
+				return
+			}
+			job := &batchv1.Job{}
+			if err := f.store.Get(context.Background(), client.ObjectKey{Namespace: p.Namespace, Name: p.OwnerReferences[0].Name}, job); err != nil {
+				f.t.Fatal(err)
+			}
+			job.Status.Failed = 1
+			if err := f.store.Status().Update(context.Background(), job); err != nil {
+				f.t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestNativePreflightRefusalClass(t *testing.T) {
+	named := errNativePreflightTerminal.Error() + ": error class transaction_state"
+	for _, tc := range []struct {
+		name, message string
+		exit, signal  int32
+		jobFailed     bool
+		want          string
+	}{
+		{"pod exit", probeRefusalLine, 1, 0, false, named},
+		{"job failed", probeRefusalLine, 1, 0, true, named},
+		{"no trailing newline", strings.TrimSuffix(probeRefusalLine, "\n"), 1, 0, false, named},
+		{"empty message", "", 1, 0, false, errNativePreflightTerminal.Error()},
+		{"empty message job failed", "", 1, 0, true, errNativePreflightTerminal.Error()},
+		{"unknown class", strings.Replace(probeRefusalLine, "transaction_state", probeCanary, 1), 1, 0, false, errNativePreflightTerminal.Error()},
+		{"extra log line", probeCanary + "\n" + probeRefusalLine, 1, 0, true, errNativePreflightTerminal.Error()},
+		{"other exit", probeRefusalLine, 2, 0, false, errNativePreflightTerminal.Error()},
+		{"signaled", probeRefusalLine, 1, 9, false, errNativePreflightTerminal.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPreflightFixture(t)
+			refusePreflightPod(f, tc.message, tc.exit, tc.signal, tc.jobFailed)
+			v, p, s, e := f.run()
+			f.assertNoAuthority(v, p, s, e)
+			if e != nil || s != tc.want || f.creates != 2 || f.deletes != 2 || f.logs.Load() != 1 {
+				t.Fatalf("refusal surfaced %q %v creates=%d deletes=%d logs=%d", s, e, f.creates, f.deletes, f.logs.Load())
+			}
+		})
+	}
+}
+
+func TestNativePreflightRefusalJobPolicy(t *testing.T) {
+	const op = "0123456789abcdef0123456789abcdef"
+	f := newPreflightFixture(t)
+	job, err := buildNativePreflightJob(f.m, f.r.RPGMigrateRunnerImage, "rpgmigrate-preflight-"+op, op)
+	if err != nil || job.Spec.Template.Spec.Containers[0].TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Fatal("preflight refusal line does not reach the termination message")
+	}
+	version, err := buildNativeVersionJob(f.m, f.r.RPGMigrateRunnerImage, "rpgmigrate-version-"+op)
+	if err != nil || version.Spec.Template.Spec.Containers[0].TerminationMessagePolicy != "" {
+		t.Fatal("version Job changed its termination message source")
 	}
 }
