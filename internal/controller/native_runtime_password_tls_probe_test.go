@@ -30,6 +30,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -141,7 +142,7 @@ func nativePasswordPodStatus(pod *corev1.Pod, image nativeRuntimeImage, known st
 }
 
 func nativePasswordPodMatches(expected, actual *corev1.Pod) bool {
-	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && reflect.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
+	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && apiequality.Semantic.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
 }
 
 // The Job controller drops its tracking finalizer once it has counted a terminated Job Pod; nothing else may change.
@@ -1315,5 +1316,36 @@ func TestNativePasswordTLSPrivateSecretAcknowledgmentIsExact(t *testing.T) {
 	created.Immutable = ptr.To(false)
 	if nativePasswordSecretMatches(desired, created) {
 		t.Fatal("mutable private input was accepted")
+	}
+}
+
+// The API server returns quantities without the cached text a local String() call leaves behind.
+func TestNativePasswordTLSAdmittedServerQuantitiesCompareByValue(t *testing.T) {
+	input := nativeRuntimeInput{QualificationID: strings.Repeat("1", 32), RunID: strings.Repeat("2", 32), Namespace: "quantity-fixture"}
+	image := nativeRuntimeImage{Ref: "localhost/rpgmigrate@sha256:" + strings.Repeat("3", 64), Digest: "sha256:" + strings.Repeat("3", 64), ConfigDigest: "sha256:" + strings.Repeat("4", 64)}
+	expected, err := nativePasswordServer(input, nativeRuntimeNode{Name: nativePasswordOwnedNode}, image, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted := &corev1.Pod{}
+	if err := json.Unmarshal(raw, admitted); err != nil {
+		t.Fatal(err)
+	}
+	for index := range expected.Spec.Volumes {
+		if limit := expected.Spec.Volumes[index].EmptyDir; limit != nil && limit.SizeLimit != nil {
+			_ = limit.SizeLimit.String()
+		}
+	}
+	if !nativePasswordPodMatches(expected, admitted) {
+		t.Fatal("an admitted server with equal quantities was refused")
+	}
+	changed := admitted.DeepCopy()
+	changed.Spec.Volumes[2].EmptyDir.SizeLimit = resource.NewQuantity(513*1024*1024, resource.BinarySI)
+	if nativePasswordPodMatches(expected, changed) {
+		t.Fatal("a changed server volume limit was admitted")
 	}
 }
