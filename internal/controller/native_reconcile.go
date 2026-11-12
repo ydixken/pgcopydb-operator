@@ -22,6 +22,7 @@ import (
 var (
 	errNativeReconcile                   = errors.New("native reconciliation identity or execution unavailable")
 	errNativeFinalizationReceiptConflict = errors.New("NativeFinalizationReceiptConflict")
+	errNativeRunnerRecord                = errors.New("native runner record is missing or unqualified past admission")
 )
 
 func unsupportedEngineMessage(m *v1beta1.Migration, cause error) string {
@@ -38,6 +39,29 @@ func unsupportedEngineMessage(m *v1beta1.Migration, cause error) string {
 
 func nativeRunnerQualified(image string) bool {
 	return nativeEvidenceDirectImage(image) && native.QualifiedRunner(image)
+}
+
+// engineUnsupported reports whether dispatch persists UnsupportedEngine; refused is a status integrity error that writes nothing.
+func (r *MigrationReconciler) engineUnsupported(m *v1beta1.Migration, engine v1beta1.MigrationEngine, engineErr error) (bool, error) {
+	switch {
+	case engineErr != nil:
+		return true, nil
+	case engine != v1beta1.MigrationEngineRPGMigrate:
+		return false, nil
+	case !nativeRunnerRecordIntact(m):
+		return false, errNativeRunnerRecord
+	}
+	return m.Status.NativeRunnerImage == "" && !nativeRunnerQualified(runnerImageFor(m, r.RPGMigrateRunnerImage)), nil
+}
+
+// nativeRunnerRecordIntact refuses a native Migration past admission without a qualified runner record.
+// Failing it instead would end the Migration without native cleanup, and admitting it again could switch the runner.
+func nativeRunnerRecordIntact(m *v1beta1.Migration) bool {
+	if image := m.Status.NativeRunnerImage; image != "" {
+		return nativeRunnerQualified(image)
+	}
+	// Only an empty status or an admission refusal precedes the record.
+	return statusIsEmpty(m.Status) || meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed) && m.Status.Attempts == 0 && m.Status.JobName == ""
 }
 
 func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
@@ -80,7 +104,8 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 			return ctrl.Result{}, errNativeReconcile
 		}
 		if statusIsEmpty(m.Status) {
-			m.Status.Phase = v1beta1.PhasePending
+			// Dispatch qualified this image in the same pass; recording it ends admission.
+			m.Status.Phase, m.Status.NativeRunnerImage = v1beta1.PhasePending, runnerImageFor(m, r.RPGMigrateRunnerImage)
 			if err := r.updateNativeStatus(ctx, m, base); err != nil {
 				return ctrl.Result{}, err
 			}

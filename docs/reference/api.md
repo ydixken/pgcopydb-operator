@@ -331,6 +331,7 @@ _Appears in:_
 | `nativeSchemaJobUID` _string_ | nativeSchemaJobUID pins the successfully created native schema helper before capture or rejoin. |  | Optional: \{\} <br /> |
 | `nativeDataJobUID` _string_ | nativeDataJobUID pins the successfully created native data helper before capture or rejoin. |  | Optional: \{\} <br /> |
 | `nativeFinalizedJobUID` _string_ | nativeFinalizedJobUID records historical workflow finalization, not replication completion authority. |  | Optional: \{\} <br /> |
+| `nativeRunnerImage` _string_ | nativeRunnerImage is the runner image admitted for a native Migration; every later native Job runs it. |  | Optional: \{\} <br /> |
 | `startedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 | `completedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ |  |  | Optional: \{\} <br /> |
 

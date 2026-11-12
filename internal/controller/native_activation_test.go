@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,12 +45,8 @@ var _ = Describe("Native activation tuple", func() {
 	ctx := context.Background()
 
 	// envtest runs no kubelet, so a version Job never runs; its creation is the evidence and ends the pass.
-	run := func(name, runnerImage string) (*v1beta1.Migration, []*batchv1.Job) {
+	passes := func(name, runnerImage string, n int) (*v1beta1.Migration, []*batchv1.Job) {
 		GinkgoHelper()
-		DeferCleanup(removeMigration, ctx, name)
-		m := validMigration(name)
-		m.Spec.Engine = v1beta1.MigrationEngineRPGMigrate
-		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		var mu sync.Mutex
 		var created []*batchv1.Job
 		pass, cancel := context.WithTimeout(ctx, nativePreflightCleanupReserve+2*time.Second)
@@ -63,14 +60,35 @@ var _ = Describe("Native activation tuple", func() {
 		}}
 		r.APIReader, r.NativePreflight, r.RPGMigrateRunnerImage = k8sClient, refusingNativePreflight{}, runnerImage
 		req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}}
-		for range 2 {
+		for range n {
 			_, _ = r.Reconcile(pass, req)
 		}
 		got := &v1beta1.Migration{}
-		Expect(k8sClient.Get(ctx, req.NamespacedName, got)).To(Succeed())
+		if err := k8sClient.Get(ctx, req.NamespacedName, got); !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		return got, created
+	}
+	runMigration := func(m *v1beta1.Migration, runnerImage string, n int) (*v1beta1.Migration, []*batchv1.Job) {
+		GinkgoHelper()
+		DeferCleanup(removeMigration, ctx, m.Name)
+		DeferCleanup(func() {
+			live := &v1beta1.Migration{}
+			if k8sClient.Get(ctx, client.ObjectKeyFromObject(m), live) == nil && len(live.Finalizers) > 0 {
+				live.Finalizers = nil
+				_ = k8sClient.Update(ctx, live)
+			}
+		})
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		return passes(m.Name, runnerImage, n)
+	}
+	run := func(name, runnerImage string) (*v1beta1.Migration, []*batchv1.Job) {
+		GinkgoHelper()
+		m := validMigration(name)
+		m.Spec.Engine = v1beta1.MigrationEngineRPGMigrate
+		return runMigration(m, runnerImage, 2)
 	}
 
 	It("admits a native Migration on a qualified runner digest into native preflight", func() {
@@ -82,8 +100,47 @@ var _ = Describe("Native activation tuple", func() {
 		Expect(jobs[0].Spec.Template.Spec.Containers[0].Image).To(Equal(qualifiedRunnerARM64))
 	})
 
+	It("keeps the admitted runner digest after the operator flag moves", func() {
+		name := "mig-native-flag-moved"
+		admitted, _ := run(name, qualifiedRunnerARM64)
+		Expect(admitted.Status.NativeRunnerImage).To(Equal(qualifiedRunnerARM64))
+		for _, flag := range []string{testRunnerTag, qualifiedRunnerAMD64} {
+			m, jobs := passes(name, flag, 2)
+			Expect(meta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionFailed)).To(BeFalse(), "status = %+v", m.Status)
+			Expect(m.Status.NativeRunnerImage).To(Equal(qualifiedRunnerARM64))
+			Expect(jobs).NotTo(BeEmpty())
+			for _, job := range jobs {
+				Expect(job.Spec.Template.Spec.Containers[0].Image).To(Equal(qualifiedRunnerARM64), "flag %q Job %q", flag, job.Name)
+			}
+		}
+	})
+
+	It("runs native deletion after the operator flag moves", func() {
+		name := "mig-native-flag-moved-delete"
+		m := validMigration(name)
+		m.Spec.Engine, m.Spec.Follow = v1beta1.MigrationEngineRPGMigrate, &v1beta1.FollowOptions{Enabled: true}
+		created, _ := runMigration(m, qualifiedRunnerARM64, 2)
+		Expect(created.Finalizers).To(ContainElement(finalizerName))
+		Expect(created.Status.NativeRunnerImage).To(Equal(qualifiedRunnerARM64))
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+		_, _ = passes(name, testRunnerTag, 1)
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(created), &v1beta1.Migration{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "deletion left the Migration: %v", err)
+	})
+
+	It("keeps the runner record immutable", func() {
+		m, _ := run("mig-native-record-immutable", qualifiedRunnerARM64)
+		Expect(m.Status.NativeRunnerImage).To(Equal(qualifiedRunnerARM64))
+		moved := m.DeepCopy()
+		moved.Status.NativeRunnerImage = qualifiedRunnerAMD64
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, moved))).To(BeTrue())
+		removed := m.DeepCopy()
+		removed.Status.NativeRunnerImage = ""
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, removed))).To(BeTrue())
+	})
+
 	It("refuses a native Migration on an unqualified runner before any Job", func() {
-		m, jobs := run("mig-native-unqualified", "ghcr.io/ydixken/rpgmigrate:dev-908ada6")
+		m, jobs := run("mig-native-unqualified", testRunnerTag)
 		validated := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionValidated)
 		Expect(validated).NotTo(BeNil())
 		Expect(validated.Reason).To(Equal(testUnsupportedEngine))

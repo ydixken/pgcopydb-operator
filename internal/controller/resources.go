@@ -1693,8 +1693,11 @@ func addConnectTimeout(job *batchv1.Job) {
 }
 
 // runnerImageFor is the image every Job of m runs, which the preflight names
-// when its probe fails.
+// when its probe fails. A native Migration's admission record wins, so a later flag change cannot move it.
 func runnerImageFor(m *v1beta1.Migration, runnerImage string) string {
+	if m.Status.NativeRunnerImage != "" {
+		return m.Status.NativeRunnerImage
+	}
 	if m.Spec.Runner.Image != "" {
 		return m.Spec.Runner.Image
 	}

@@ -841,6 +841,7 @@ const (
 )
 
 // MigrationStatus is the observed state of a Migration.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.nativeRunnerImage) || has(self.nativeRunnerImage)",message="nativeRunnerImage cannot be removed once recorded"
 type MigrationStatus struct {
 	// observedGeneration is the .metadata.generation last reconciled.
 	// +optional
@@ -919,6 +920,11 @@ type MigrationStatus struct {
 	// nativeFinalizedJobUID records historical workflow finalization, not replication completion authority.
 	// +optional
 	NativeFinalizedJobUID string `json:"nativeFinalizedJobUID,omitempty"`
+
+	// nativeRunnerImage is the runner image admitted for a native Migration; every later native Job runs it.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="nativeRunnerImage is immutable once recorded"
+	// +optional
+	NativeRunnerImage string `json:"nativeRunnerImage,omitempty"`
 
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
