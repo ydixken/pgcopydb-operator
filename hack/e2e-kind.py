@@ -68,6 +68,10 @@ CNPG_RESOURCE_IDENTITIES = (
 )
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 IDENTITY = re.compile(r'[0-9a-f]{64}\Z')
+# A reboot wipes /tmp, which lost earlier proofs; evidence defaults to /var/tmp instead.
+VOLATILE_ROOTS = (Path('/tmp'), Path('/private/tmp'))
+EVIDENCE_ROOT = Path('/var/tmp').resolve()
+SLEEP_ASSERTION_SECONDS = 5
 BASELINE_BUILDER = 'ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:86bf908adca02d87063849dae775a02c1659c829@sha256:ef596ea105604ef128244057dd34411f433d4c40fdf897bcaa8b33793df9fec8'
 
 
@@ -195,6 +199,8 @@ class Guard:
             raise Refusal('only the Podman provider is allowed')
         if not self.directory.is_absolute() or self.directory.resolve() != self.directory:
             raise Refusal('RUN_DIR must be absolute without symlinks or traversal')
+        if any(root == self.directory or root in self.directory.parents for root in VOLATILE_ROOTS):
+            raise Refusal('RUN_DIR must not be under /tmp, which a reboot wipes')
         if any((ancestor / '.git').exists() or (ancestor / '.git').is_symlink()
                for ancestor in (self.directory, *self.directory.parents)):
             raise Refusal('RUN_DIR must be outside Git checkouts and worktrees')
@@ -537,7 +543,11 @@ class Guard:
         keys = ('m7_cpus', 'm7_memory_mib', 'm3_reserved_cpus', 'm3_reserved_memory_mib')
         if not isinstance(lease, dict) or set(lease) != {*keys, 'authorized', 'expires_at', 'monotonic_expires_at'}:
             raise Refusal('live resource lease fields do not match the fixed profile')
-        expiry = lease.get('expires_at')
+        expiry, monotonic_expiry = lease.get('expires_at'), lease.get('monotonic_expires_at')
+        if (all(type(value) in (int, float) and math.isfinite(value) for value in (expiry, monotonic_expiry)) and
+                expiry <= time.time() and monotonic_expiry > time.monotonic()):
+            # macOS pauses the monotonic clock during sleep, so only the wall lease runs out.
+            raise Refusal('wall lease expired while monotonic time remains: host sleep or clock step')
         if (lease.get('authorized') is not True or type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry <= time.time() or type(lease.get('monotonic_expires_at')) not in (int, float) or
                 not math.isfinite(lease['monotonic_expires_at']) or lease['monotonic_expires_at'] <= time.monotonic() or
                 any(type(lease.get(key)) is not int for key in keys) or
@@ -546,6 +556,23 @@ class Guard:
             raise Refusal('leader-authorized live resource lease is missing, invalid, or expired')
         self.capacity(dict(lease, m3_reserved_cpus=8, m3_reserved_memory_mib=12288))
         self.disk()
+
+    def hold_awake(self):
+        # shortcut: macOS only; the Linux-native-host transport (M7-HOSTED) needs its own sleep policy.
+        if platform.system() != 'Darwin':
+            return None
+        if "'AC Power'" not in self.call(['pmset', '-g', 'batt']).split('\n', 1)[0]:
+            raise Refusal('host sleep guard requires AC power, because caffeinate -s is ignored on battery')
+        child = subprocess.Popen(['caffeinate', '-dims', '-w', str(os.getpid())], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pattern = re.compile(r'^\s*pid ' + str(child.pid) + r'\(caffeinate\): .* (PreventSystemSleep|PreventUserIdleSystemSleep) named:', re.M)
+        deadline = time.monotonic() + SLEEP_ASSERTION_SECONDS
+        while child.poll() is None and time.monotonic() < deadline:
+            if {match[1] for match in pattern.finditer(self.call(['pmset', '-g', 'assertions']))} == {'PreventSystemSleep', 'PreventUserIdleSystemSleep'}:
+                return child
+            time.sleep(0.1)
+        child.kill()
+        raise Refusal('host sleep assertion is not active')
 
     def capacity(self, lease):
         info = decode(self.call(['podman', 'info', '--format', 'json']), 'Podman capacity')
@@ -862,10 +889,6 @@ class Guard:
         self.require_lease()
         ledger['phase'] = 'ready'
         self.save(ledger)
-
-    def load(self):
-        raise Refusal('load transport is superseded; use a fresh registry run and pull')
-
 
     def download_manifest(self):
         path = self.directory / 'cnpg-source.yaml'
@@ -1222,8 +1245,8 @@ class Guard:
         self.require_lease()
         self.verify_node_limits(ledger)
         self.kubeconfig(ledger)
-        if (self.directory / 'suite-receipt.json').exists():
-            raise Refusal('suite receipt already exists; refusing a stale execution witness')
+        if any((self.directory / name).exists() for name in ('suite-receipt.json', 'go-test.json')):
+            raise Refusal('suite receipt or go-test.json already exists; refusing a stale execution witness')
         suite_input = self.suite_input(ledger)
         self.bootstrap(ledger, suite_input['source_tree_sha256'])
         suite_input = self.suite_input(ledger)
@@ -1252,7 +1275,8 @@ class Guard:
             if type(returncode) is not int or not -255 <= returncode <= 255:
                 returncode = None
             execution = ledger['suite_execution']
-            execution.update(result='failed', error_class=failure, returncode=returncode, receipt_status='absent')
+            execution.update(result='failed', error_class=failure, returncode=returncode, receipt_status='absent',
+                             go_test_json=self.go_test_json())
             path = self.directory / 'suite-receipt.json'
             if path.exists() or path.is_symlink():
                 execution.update(receipt_file='suite-receipt.json', receipt_status='unvalidated')
@@ -1272,10 +1296,18 @@ class Guard:
                     pass
             self.save(ledger)
             raise Refusal(f'suite execution failed within 1800s budget: {failure} '
-                          f'(returncode={returncode}, receipt={execution["receipt_status"]})') from None
-        ledger['suite_execution']['result'] = 'passed'
+                          f'(returncode={returncode}, receipt={execution["receipt_status"]}, go_test_json={execution["go_test_json"]})') from None
+        ledger['suite_execution'].update(result='passed', go_test_json=self.go_test_json())
         ledger['phase'] = 'verified'
         self.save(ledger)
+
+    def go_test_json(self):
+        # The private stream keeps a failing assertion; only its presence enters the ledger.
+        try:
+            self.private(self.directory / 'go-test.json')
+            return 'go-test.json'
+        except Refusal:
+            return 'absent'
 
     def kubernetes_ownership(self, ledger):
         nodes = decode(self.kubectl(['get', 'nodes', '-o', 'json']), 'Kubernetes nodes')
@@ -1972,7 +2004,7 @@ class Guard:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['prepare', 'check', 'up', 'load', 'run', 'down', 'pull', 'self-check'])
+    parser.add_argument('command', choices=['prepare', 'check', 'up', 'run', 'down', 'pull', 'self-check'])
     parser.add_argument('--run-dir', type=Path)
     parser.add_argument('--lease-seconds', type=int)
     parser.add_argument('--image-lock', type=Path)
@@ -1982,9 +2014,6 @@ def main():
     if args.command == 'self-check':
         result = subprocess.run([sys.executable, str(Path(__file__).with_name('test_e2e_kind.py'))], check=False)
         return result.returncode
-    if args.command == 'load':
-        print(json.dumps({'command': 'load', 'result': 'refused', 'error': 'load transport is superseded; create a fresh registry run and pull'}), file=sys.stderr)
-        return 1
     if args.command == 'prepare' and (args.image_lock is None or args.receipt_dir is None):
         parser.error('prepare requires --image-lock and --receipt-dir')
     if args.command != 'prepare' and (args.image_lock is not None or args.receipt_dir is not None):
@@ -1993,6 +2022,8 @@ def main():
         parser.error('up requires --lease-seconds')
     if args.command != 'up' and args.lease_seconds is not None:
         parser.error('--lease-seconds is only valid with up')
+    if args.run_dir is None and args.command == 'prepare':
+        args.run_dir = EVIDENCE_ROOT / ('rpgmigrate-m7-run-' + uuid.uuid4().hex)
     if args.run_dir is None:
         parser.error('--run-dir is required')
     try:
@@ -2007,6 +2038,8 @@ def main():
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Refusal('another lifecycle command owns RUN_DIR') from None
+            if args.command in ('up', 'pull', 'run'):
+                guard.hold_awake()
             if args.command == 'prepare':
                 guard.prepare(args.image_lock, args.receipt_dir)
             elif args.command == 'up':
@@ -2015,7 +2048,7 @@ def main():
                 guard.run(args.engine)
             else:
                 getattr(guard, args.command)()
-        print(json.dumps({'command': args.command, 'result': 'passed'}))
+        print(json.dumps({'command': args.command, 'result': 'passed', 'run_dir': str(guard.directory)}))
         return 0
     except Exception as error:
         message = str(error) if isinstance(error, Refusal) else type(error).__name__

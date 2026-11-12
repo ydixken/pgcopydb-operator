@@ -327,10 +327,11 @@ tasks:
 
   e2e:kind:prepare:
     desc: Bind a new private run to public image receipts and a frozen image lock.
-    requires: {vars: [RUN_DIR, IMAGE_LOCK, RECEIPT_DIR]}
+    summary: Without RUN_DIR, the guard creates a fresh run under /var/tmp and prints its path.
+    requires: {vars: [IMAGE_LOCK, RECEIPT_DIR]}
     cmds:
       - >-
-        python3 hack/e2e-kind.py prepare --run-dir {{.RUN_DIR | shellQuote}}
+        python3 hack/e2e-kind.py prepare {{if .RUN_DIR}}--run-dir {{.RUN_DIR | shellQuote}}{{end}}
         --image-lock {{.IMAGE_LOCK | shellQuote}} --receipt-dir {{.RECEIPT_DIR | shellQuote}}
 
   e2e:kind:check:
@@ -354,11 +355,6 @@ tasks:
     requires: {vars: [RUN_DIR]}
     cmds:
       - python3 hack/e2e-kind.py pull --run-dir {{.RUN_DIR | shellQuote}}
-
-  e2e:kind:load:
-    desc: Refuse the superseded archive transport without effects.
-    cmds:
-      - "printf '%s\n' 'load is superseded: use e2e:kind:pull with a fresh registry-path RUN' >&2; exit 1"
 
   e2e:kind:legacy:
     desc: Run the positive legacy bootstrap selection through the owned guard.
@@ -397,5 +393,6 @@ tasks:
     cmds:
       - >-
         E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} E2E_ENGINE=pgcopydb E2E_SMALL=true
-        go test ./test/e2e -run '^TestE2E$' -count=1 -v -timeout 30m
+        go test ./test/e2e -json -run '^TestE2E$' -count=1 -v -timeout 30m
         -ginkgo.v -ginkgo.timeout=30m -ginkgo.label-filter=kind-bootstrap -ginkgo.fail-on-empty
+        > {{.RUN_DIR | shellQuote}}/go-test.json
