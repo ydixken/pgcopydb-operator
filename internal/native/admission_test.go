@@ -122,6 +122,32 @@ func TestNativeAdmissionObjects(t *testing.T) {
 	}
 }
 
+// TestNativeAdmissionNoStdin pins that a native container never runs with stdin or a TTY attached,
+// so an OpenSSL passphrase prompt reads EOF and the binding refuses it as a diagnostic.
+func TestNativeAdmissionNoStdin(t *testing.T) {
+	f := newAdmissionFixture(t)
+	for _, c := range []corev1.Container{f.job.Spec.Template.Spec.Containers[0], f.pod.Spec.Containers[0]} {
+		if c.Stdin || c.StdinOnce || c.TTY {
+			t.Fatal("fixture container attaches stdin or a TTY")
+		}
+	}
+	for name, attach := range map[string]func(*corev1.Container){
+		"stdin":      func(c *corev1.Container) { c.Stdin = true },
+		"stdin_once": func(c *corev1.Container) { c.Stdin, c.StdinOnce = true, true },
+		"tty":        func(c *corev1.Container) { c.TTY = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAdmissionFixture(t)
+			attach(&f.job.Spec.Template.Spec.Containers[0])
+			attach(&f.pod.Spec.Containers[0])
+			f.want.TemplateSHA256 = podexec.NativeTemplateSHA256(f.job.Spec.Template)
+			if _, err := validateAdmissionObjects(f.want, f.m, f.pvc, f.job, f.worker, f.pod, false); err == nil {
+				t.Fatal("native container with stdin or a TTY admitted")
+			}
+		})
+	}
+}
+
 func TestNativeAdmissionEnvironmentDNS(t *testing.T) {
 	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LOCALDOMAIN", "RES_OPTIONS", "LANGUAGE", "LOCPATH", "GCONV_PATH", "NLSPATH"} {
 		t.Run(name, func(t *testing.T) {
