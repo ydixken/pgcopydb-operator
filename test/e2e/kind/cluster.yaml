@@ -1,5 +1,10 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+# The qualification profile requires every pod slice to carry pids.max=4096.
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    podPidsLimit: 4096
 nodes:
   - role: control-plane
     extraMounts:
