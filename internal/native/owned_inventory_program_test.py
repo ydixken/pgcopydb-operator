@@ -371,7 +371,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_InventoryCompositeDelivery(self):
         self.required('owned_inventory_main')
-        self.assertEqual(hashlib.sha256(CORE).hexdigest(), '6ade39cbd827cb3ec677d53842d2d0daf624152dc9c3bc861cf37cceed090fcf')
+        self.assertEqual(hashlib.sha256(CORE).hexdigest(), '02b5ae9394b526d81451a9004adda7ed05cd9171e61c39245521db731645d678')
         self.assertEqual(hashlib.sha256(WRITER).hexdigest(), '4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882')
         helper = HELPER.read_bytes(); adapter = (HERE / 'owned_inventory_request_writer.py').read_bytes()
         self.assertLessEqual(len(helper), 16384); self.assertLessEqual(len(adapter), 3072)
