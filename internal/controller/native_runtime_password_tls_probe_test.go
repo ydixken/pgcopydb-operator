@@ -144,6 +144,19 @@ func nativePasswordPodMatches(expected, actual *corev1.Pod) bool {
 	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && reflect.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
 }
 
+// The Job controller drops its tracking finalizer once it has counted a terminated Job Pod; nothing else may change.
+func nativePasswordPodContinues(expected, live *corev1.Pod, terminalJobPod bool) bool {
+	if nativePasswordPodMatches(expected, live) {
+		return true
+	}
+	if !terminalJobPod || expected == nil || !slices.Equal(expected.Finalizers, []string{batchv1.JobTrackingFinalizer}) {
+		return false
+	}
+	released := expected.DeepCopy()
+	released.Finalizers = nil
+	return nativePasswordPodMatches(released, live)
+}
+
 func nativePasswordServerReady(ctx context.Context, clientset kubernetes.Interface, created *corev1.Pod, image nativeRuntimeImage) (*corev1.Pod, error) {
 	var result *corev1.Pod
 	known := ""
@@ -209,7 +222,7 @@ func nativePasswordClientReady(ctx context.Context, clientset kubernetes.Interfa
 
 func nativePasswordContinuity(ctx context.Context, clientset kubernetes.Interface, job *batchv1.Job, pod *corev1.Pod, image nativeRuntimeImage, terminal bool) error {
 	live, err := clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-	if err != nil || !nativePasswordPodMatches(pod, live) {
+	if err != nil || !nativePasswordPodContinues(pod, live, terminal && job != nil) {
 		return errors.New("probe Pod continuity lost")
 	}
 	known := pod.Status.ContainerStatuses[0].ContainerID
@@ -1250,6 +1263,29 @@ func TestNativePasswordTLSDirectPodMetadataCannotDrift(t *testing.T) {
 				t.Fatal("direct Pod metadata drift was admitted")
 			}
 		})
+	}
+}
+
+func TestNativePasswordTLSTerminalTrackingFinalizerRelease(t *testing.T) {
+	running := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client-16-pod", Namespace: "primitive-fixture", UID: "primitive-original-uid", Finalizers: []string{batchv1.JobTrackingFinalizer}}}
+	released := running.DeepCopy()
+	released.Finalizers = nil
+	if !nativePasswordPodContinues(running, released, true) || !nativePasswordPodContinues(running, running, true) {
+		t.Fatal("the Job controller's tracking finalizer release was refused")
+	}
+	if nativePasswordPodContinues(running, released, false) {
+		t.Fatal("a running or direct Pod lost its finalizer unnoticed")
+	}
+	foreign := released.DeepCopy()
+	foreign.Finalizers = []string{nativePasswordForeignOwner}
+	relabelled := released.DeepCopy()
+	relabelled.Labels = map[string]string{nativeRuntimeRunLabel: "foreign-label"}
+	untracked := running.DeepCopy()
+	untracked.Finalizers = nil
+	for name, pair := range map[string][2]*corev1.Pod{"foreign_finalizer": {running, foreign}, "other_drift": {running, relabelled}, "never_tracked": {untracked, foreign}, "foreign_removed": {foreign, released}} {
+		if nativePasswordPodContinues(pair[0], pair[1], true) {
+			t.Fatalf("%s was admitted as a tracking finalizer release", name)
+		}
 	}
 }
 
