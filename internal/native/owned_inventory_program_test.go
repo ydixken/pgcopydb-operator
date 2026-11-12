@@ -28,7 +28,7 @@ func TestNativeOwnedInventoryProgramCanonicalSource(t *testing.T) {
 	}
 	coreHash := EvidenceProgramSHA256()
 	writerHash := EvidenceRequestWriterSHA256()
-	if hex.EncodeToString(coreHash[:]) != "02b5ae9394b526d81451a9004adda7ed05cd9171e61c39245521db731645d678" || hex.EncodeToString(writerHash[:]) != "4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882" {
+	if hex.EncodeToString(coreHash[:]) != "e8f79fd072b4f5cb7142bc9fa08aa18d8f44e3b3181a8f36daec8c9dcb1b54ab" || hex.EncodeToString(writerHash[:]) != "4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882" {
 		t.Fatal("canonical source changed")
 	}
 }
@@ -203,10 +203,10 @@ func TestNativeOwnedInventoryPython(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path).CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte("Ran 8 tests")) || !bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("Ran 0 tests")) || bytes.Contains(output, []byte("skipped=")) {
+	if err != nil || !bytes.Contains(output, []byte("Ran 9 tests")) || !bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("Ran 0 tests")) || bytes.Contains(output, []byte("skipped=")) {
 		t.Fatalf("required nonempty inventory Python suite failed: %s", output)
 	}
-	for _, name := range []string{"ConfirmedPhases", "PendingRefusals", "NoEndposAuthority", "SourceReplacement", "ClosedSessions", "ResolverPolicy", "CompositeDelivery", "RelayPolicy"} {
+	for _, name := range []string{"ConfirmedPhases", "PendingRefusals", "NoEndposAuthority", "SourceReplacement", "ClosedSessions", "ResolverPolicy", "CompositeDelivery", "RelayPolicy", "WorkRoot"} {
 		if !bytes.Contains(output, []byte("test_Inventory"+name+" (")) {
 			t.Fatalf("required inventory Python case %s did not run: %s", name, output)
 		}

@@ -49,6 +49,13 @@ def retry_request(commit=True, local=False):
     return value
 
 
+def mounted(actual,root):
+    # A tempdir stand-in shares the device of '/', so '/' reports another device, as under a real /work mount.
+    def stated(path,*args,**kwargs):
+        return os.stat_result((0,0,-1)+(0,)*7) if path=='/' else actual(str(root) if path=='/work' else path,*args,**kwargs)
+    return stated
+
+
 def private_fixture(directory_info):
     req=request(); work=req['execution']['work']; run=list(bytes.fromhex(work['run_id']))
     stream=dict(run=run,source=dict(system_identifier=123,database_oid=11),generation=1)
@@ -584,7 +591,7 @@ class NativePythonTests(unittest.TestCase):
             control=owned/'control';control.mkdir(mode=0o700);(control/'endpos.json').write_bytes(b'not E');(owned/'data').mkdir(mode=0o700)
             actual_open=P.fdopen;actual_stat=os.stat;events=[]
             def opened(path,directory=False,parent=None):events.append(path);return actual_open(str(root) if path=='/work' else path,directory,parent)
-            def stated(path,*args,**kwargs):return actual_stat(str(root) if path=='/work' else path,*args,**kwargs)
+            stated=mounted(actual_stat,root)
             env={key:str(req['execution']['work'][field]) for key,field in (('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation'))}
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict(os.environ,env,clear=True));stack.enter_context(mock.patch.object(P,'fdopen',side_effect=opened));stack.enter_context(mock.patch.object(P.os,'stat',side_effect=stated))
@@ -1236,6 +1243,36 @@ class NativePythonTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode,0);self.assertEqual(result.stdout,b'');self.assertEqual(result.stderr,b'')
             finally:channel.close()
 
+    def test_WorkRootAdmission(self):
+        def info(uid,gid,mode,dev=7,kind=stat.S_IFDIR):return os.stat_result((kind|mode,1,dev,2,uid,gid,0,0,0,0))
+        def admitted(value,egid=65532,groups=(65532,)):
+            with mock.patch.object(P.os,'fstat',return_value=value),mock.patch.object(P.os,'stat',return_value=info(0,0,0o755,dev=8)),mock.patch.object(P.os,'geteuid',return_value=65532),mock.patch.object(P.os,'getegid',return_value=egid),mock.patch.object(P.os,'getgroups',return_value=list(groups)):
+                try:return P.work_root(3) is value
+                except P.Refusal:return False
+        for value,egid,groups in ((info(0,65532,0o2775),65532,(65532,)),(info(0,65532,0o2770),65532,(65532,)),(info(65532,65532,0o2775),65532,(65532,)),(info(65532,65532,0o700),65532,()),(info(0,65532,0o2775),2000,(65532,)),(info(0,2000,0o2775),2000,())):
+            with self.subTest(admit=(value.st_uid,value.st_gid,oct(value.st_mode),egid,groups)):self.assertTrue(admitted(value,egid,groups))
+        refused=[(info(0,65532,0o2777),65532,(65532,)),(info(0,65532,0o3777),65532,(65532,)),(info(1000,65532,0o2775),65532,(65532,)),(info(1000,1000,0o2775),1000,(1000,)),(info(0,2000,0o2775),65532,(65532,2000)),(info(0,65532,0o2775),2000,()),(info(0,65532,0o2755),65532,(65532,)),(info(65532,65532,0o2575),65532,(65532,)),(info(65532,65532,0o2075),65532,(65532,)),(info(0,65532,0o2775,dev=8),65532,(65532,)),(info(65532,65532,0o700,kind=stat.S_IFREG),65532,()),(info(65532,65532,0o777,kind=stat.S_IFLNK),65532,())]
+        for value,egid,groups in refused:
+            with self.subTest(refuse=(value.st_uid,value.st_gid,oct(value.st_mode),value.st_dev,egid,groups)):self.assertFalse(admitted(value,egid,groups))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'work';root.mkdir();root.chmod(0o2775);owned=root/'pgcopydb';owned.mkdir(mode=0o700);owned.chmod(0o700)
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode),0o2775)
+            req=source_request();_,manifest,_,_=private_fixture(owned.stat());manifest['operator']['workdir_id']=req['execution']['work']['workdir_id'];manifest['clone_state']['phase']='copying'
+            file=owned/'manifest.json';file.write_text(json.dumps(manifest));file.chmod(0o600)
+            link=Path(directory)/'link';link.symlink_to(root);target=[root];actual_open=P.fdopen;actual_stat=os.stat
+            def opened(path,directory=False,parent=None):return actual_open(str(target[0]) if path=='/work' else path,directory,parent)
+            env={key:str(req['execution']['work'][field]) for key,field in (('RPGMIGRATE_MIGRATION_UID','migration_uid'),('RPGMIGRATE_RUN_ID','run_id'),('RPGMIGRATE_WORKDIR_ID','workdir_id'),('RPGMIGRATE_CHECKPOINT_GENERATION','checkpoint_generation'))}
+            with mock.patch.dict(os.environ,env,clear=True),mock.patch.object(P,'fdopen',side_effect=opened),mock.patch.object(P.os,'stat',side_effect=mounted(actual_stat,root)):
+                P.SourceState(req).close()
+                for mode in (0o2700,0o2770,0o770,0o750):
+                    owned.chmod(mode);self.assertEqual(stat.S_IMODE(owned.stat().st_mode),mode)
+                    with self.subTest(below=oct(mode)),self.assertRaises(P.Refusal):P.SourceState(req)
+                owned.chmod(0o700);root.chmod(0o2777)
+                with self.assertRaises(P.Refusal):P.SourceState(req)
+                root.chmod(0o2775);target[0]=link
+                with self.assertRaises(OSError):P.SourceState(req)
+                target[0]=root;P.SourceState(req).close()
+
     def test_PrivateAdmission(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)/'work'; root.mkdir(mode=0o700)
@@ -1247,8 +1284,7 @@ class NativePythonTests(unittest.TestCase):
             actual_open=P.fdopen; actual_stat=os.stat
             def mapped_open(path,directory=False,parent=None):
                 return actual_open(str(root) if path=='/work' else path,directory,parent)
-            def mapped_stat(path,*args,**kwargs):
-                return actual_stat(str(root) if path=='/work' else path,*args,**kwargs)
+            mapped_stat=mounted(actual_stat,root)
             with mock.patch.object(P,'fdopen',side_effect=mapped_open), mock.patch.object(P.os,'stat',side_effect=mapped_stat):
                 state=P.PrivateState(req)
                 checkpoint=P.validate_control_row(row,state)

@@ -155,6 +155,13 @@ def private_type(fd,directory=False):
  need(info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==(0o700 if directory else 0o600))
  need(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode) and info.st_nlink==1)
  return info
+def work_root(fd):
+ # kubelet fsGroup (65532 in every admitted Pod) leaves the volume root root:<fsGroup>, setgid and group rwx; below it private_type holds.
+ info=os.fstat(fd); mode=stat.S_IMODE(info.st_mode); uid=os.geteuid(); write=0o300 if info.st_uid==uid else 0o030
+ need(stat.S_ISDIR(info.st_mode) and info.st_dev!=os.stat('/').st_dev and info.st_uid in (0,uid) and mode&write==write and not mode&0o002)
+ need(info.st_gid in (os.getegid(),65532) and info.st_gid in (os.getegid(),*os.getgroups()))
+ return info
+def work_type(fd,directory,path): return work_root(fd) if path=='/work' else private_type(fd,directory)
 def wait_fd(fd, writing, deadline, diag=None):
  remaining=deadline-time.monotonic(); need(remaining>0,'timeout')
  reads=[fd] if not writing else []
@@ -960,7 +967,7 @@ class PrivateState:
   except BaseException:
    self.close(False); raise
  def open(self,path,directory,parent=None):
-  fd=fdopen(path,directory,parent); self.fds.append(fd); private_type(fd,directory)
+  fd=fdopen(path,directory,parent); self.fds.append(fd); work_type(fd,directory,path)
   return fd
  def entries(self):
   need(sorted(os.listdir(self.root))==['control','manifest.json'])
@@ -971,7 +978,7 @@ class PrivateState:
   if self.locked:
    fcntl.flock(self.lock,fcntl.LOCK_UN); self.locked=False
  def revalidate(self):
-  need(identity(private_type(self.parent,True))==identity(os.stat('/work',follow_symlinks=False)))
+  need(identity(work_root(self.parent))==identity(os.stat('/work',follow_symlinks=False)))
   for fd,parent,path,directory in [(self.root,self.parent,'pgcopydb',True),(self.control,self.root,'control',True),(self.lock,self.control,'lock',False)]:
    need(identity(private_type(fd,directory))==identity(os.stat(path,dir_fd=parent,follow_symlinks=False)))
   self.lock_control()
@@ -1565,10 +1572,10 @@ class SourceState:
   except BaseException:
    self.close(False); raise
  def open(self,path,directory,parent=None):
-  fd=fdopen(path,directory,parent); self.fds.append(fd); private_type(fd,directory); return fd
+  fd=fdopen(path,directory,parent); self.fds.append(fd); work_type(fd,directory,path); return fd
  def revalidate(self):
   work_environment(self.req)
-  need(identity(private_type(self.parent,True))==identity(os.stat('/work',follow_symlinks=False)))
+  need(identity(work_root(self.parent))==identity(os.stat('/work',follow_symlinks=False)))
   need(identity(private_type(self.root,True))==identity(os.stat('pgcopydb',dir_fd=self.parent,follow_symlinks=False)))
   self.manifest.check()
   need(same(validate_source_manifest(strict_json(self.manifest.raw,1048576),self.req,os.fstat(self.root)),self.binding))
