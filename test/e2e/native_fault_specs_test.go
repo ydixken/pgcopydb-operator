@@ -29,6 +29,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -150,7 +151,14 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 		}
 
 		By("suspending the streaming Migration")
+		term := beginNativeTerm("suspend", name, c.foreign.config.UID)
+		if term != nil {
+			term.request()
+		}
 		setSuspend(name, true)
+		if term != nil {
+			term.awaitTerminated()
+		}
 		suspended := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseSuspended)
 		Eventually(func(g Gomega) {
 			pods := &corev1.PodList{}
@@ -171,6 +179,9 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("0"), "native sessions remain on the target while suspended")
 		}, 2*time.Minute, 2*time.Second).Should(Succeed())
+		if term != nil {
+			term.complete(nativeTermMigration, nativeTermJob, nativeTermPod, nativeTermPVC)
+		}
 
 		By("holding the target still while the writer builds a backlog")
 		held := applied(Default, c.target)
@@ -195,7 +206,16 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 		c.waitStreaming()
 
 		By("deleting the Migration while the writer still commits")
-		deleteMigration(name)
+		if term := beginNativeTerm("delete", name, c.foreign.config.UID); term != nil {
+			term.request()
+			Expect(k8sClient.Delete(ctx, &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: nsE2E, Name: name}},
+				client.Preconditions{UID: &term.migration})).To(Succeed(), "deleting %s", name)
+			term.awaitTerminated()
+			deleteMigration(name)
+			term.complete(nativeTermMigration)
+		} else {
+			deleteMigration(name)
+		}
 		c.stopWriter()
 
 		By("checking exactly the owned source resources are gone and the rest is retained")

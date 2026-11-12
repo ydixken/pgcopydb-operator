@@ -121,6 +121,7 @@ It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go g
 The ledger records only whether that file exists.
 The stream can contain fixture output, so keep it in the private run directory and do not publish it.
 A run refuses to start over an existing `go-test.json` or `suite-receipt.json`.
+On pair 16:16 the native suspend and delete fault specs also write `native-term-16-16-<case>.json` there, and fail unless `hack/native-term-receipt.py` accepts it.
 
 > [!caution]
 > Preserve historical failed receipts and old run identities.
