@@ -841,6 +841,7 @@ func TestWorkflowActionInventory(t *testing.T) {
 		"actions/deploy-pages":             "v5",
 		"actions/setup-go":                 "v7",
 		"actions/setup-python":             "v7",
+		"actions/upload-artifact":          "v6",
 		"actions/upload-pages-artifact":    "v5",
 		"azure/setup-helm":                 "v5",
 		"azure/setup-kubectl":              "v5",
@@ -850,6 +851,13 @@ func TestWorkflowActionInventory(t *testing.T) {
 		"docker/setup-buildx-action":       "v4",
 		"docker/setup-qemu-action":         "v4",
 		"oras-project/setup-oras":          "v2",
+	}
+	// A full commit pin names the approved tag it was read off, so a repin to
+	// another major fails here like a tag bump would (git ls-remote 2026-11-12).
+	pinned := map[string]string{
+		"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1":        "v7",
+		"actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e":        "v7",
+		"actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f": "v6",
 	}
 
 	entries, err := os.ReadDir(workflowDir)
@@ -888,8 +896,11 @@ func TestWorkflowActionInventory(t *testing.T) {
 			t.Errorf("%s uses unapproved action %q", location, name)
 			return
 		}
+		if tag, ok := pinned[uses]; ok {
+			version = tag
+		}
 		if version != want {
-			t.Errorf("%s uses %s@%s, want %s@%s", location, name, version, name, want)
+			t.Errorf("%s uses %s (%s), want %s@%s", location, uses, version, name, want)
 		}
 		if name == "actions/dependency-review-action" {
 			dependencyReviews++
