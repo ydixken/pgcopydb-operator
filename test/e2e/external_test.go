@@ -600,7 +600,7 @@ func prepareExternalDatabases() {
 	pgSource, pgTarget = serverMajor(sourceCluster), serverMajor(targetCluster)
 	By(fmt.Sprintf("checking the external source (PG %d) and target (PG %d) are empty or stamped",
 		pgSource, pgTarget))
-	Expect(checkMajors(pgSource, pgTarget)).To(Succeed())
+	Expect(checkMajors(selectedEngine(), pgSource, pgTarget)).To(Succeed())
 	Expect(guardRoles(func(cluster string) string { return psql(cluster, unstampedRolesSQL(cluster)) })).To(Succeed())
 	toStamp, err := guardPair(func(cluster string) (string, bool) {
 		return psql(cluster, userObjectsSQL), psql(cluster, stampedSQL) == "t"
