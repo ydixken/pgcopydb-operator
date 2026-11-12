@@ -111,8 +111,9 @@ def exact_true(rows):
  need(rows==[[b't']],RESULT)
  return True
 def failure_envelope(op, failure):
- allowed={'admission',CAP_ERR,INPUT,'timeout',CONN,'diagnostic',RESULT,TX_STATE,'unknown_commit',CLOSE,'internal'}
- return dict(version=1,kind='completed_evidence_failure',operation_id=op,error_class=failure.error_class if failure.error_class in allowed else 'internal',sqlstate=failure.sqlstate)
+ return dict(version=1,kind='completed_evidence_failure',operation_id=op,error_class=failure_class(failure),sqlstate=failure.sqlstate)
+ERROR_CLASSES=('admission',CAP_ERR,INPUT,'timeout',CONN,'diagnostic',RESULT,TX_STATE,'unknown_commit',CLOSE,'internal')
+def failure_class(failure): return failure.error_class if isinstance(failure,Refusal) and failure.error_class in ERROR_CLASSES else 'internal'
 def validate_environment(env):
  need(not any(k.startswith('LD_') or k in BANNED for k in env),CAP_ERR)
  need(env.get('LC_ALL')=='C' and env.get('LANG')=='C',CAP_ERR)
@@ -1469,11 +1470,14 @@ def run_native_preflight(operation_id: str, program_sha256: str) -> int:
     wait_fd(1,True,close_deadline); continue
    need(0<written<=len(output)-offset,RESULT); offset+=written
   return 0
- except BaseException:
+ except BaseException as error:
   for item in (source,target,materials,diag):
    if item is not None:
     try: item.close(False) if isinstance(item,Session) else item.close()
     except BaseException: pass
+  # One closed-set line, never a value: the preflight container's termination message names the refusal.
+  try: os.write(1,b'{"version":1,"kind":"native_preflight_failure","error_class":"%s"}\n'%failure_class(error).encode())
+  except BaseException: pass
   return 1
 
 def execution_data_fields(value):

@@ -70,6 +70,20 @@ func ParsePreflightResult(raw []byte, operationID string, programSHA256 [32]byte
 	return &PreflightResult{passed: true}, nil
 }
 
+// preflightFailureClasses mirrors ERROR_CLASSES in evidence_program.py.
+var preflightFailureClasses = []string{"admission", "capability", "input", "timeout", "connection", "diagnostic", "result", "transaction_state", "unknown_commit", "closure", "internal"}
+
+// PreflightFailureClass names a refusal only from the program's exact closed-set line, never from free text.
+func PreflightFailureClass(message string) (string, bool) {
+	for _, class := range preflightFailureClasses {
+		line := `{"version":1,"kind":"native_preflight_failure","error_class":"` + class + `"}`
+		if message == line || message == line+"\n" {
+			return class, true
+		}
+	}
+	return "", false
+}
+
 // The caller must freshly admit configuration, primary profiles, and actual image capabilities before projection.
 func PreflightMaterialization(m *v1beta1.Migration, operationID string) ([]string, []string, []corev1.EnvVar, []corev1.Volume, []corev1.VolumeMount, error) {
 	if m == nil || m.UID == "" || !lowerHex(operationID, 32) {

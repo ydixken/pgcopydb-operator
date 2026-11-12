@@ -12,6 +12,7 @@ When the pod is already gone, the condition carries only the Job message.
 | [`describe` shows no phase, no conditions, no events](#migration-has-no-status-and-the-log-repeats-is-immutable) | Spec and admission |
 | [An update fails with `<field> is immutable`, for `dryRun`, `allDatabases`, `deferIndexes`, `ownerAfterRestore`, `source`, `target` or `follow`](#an-update-fails-with-field-is-immutable) | Spec and admission |
 | [Phase `Failed` at `Validating`, reason `PreflightFailed`](#phase-failed-at-validating) | Preflight failures |
+| [`NativePreflightFailed` with `native preflight execution refused`](#native-preflight-refused-with-an-error-class) | Preflight failures |
 | [`PreflightFailed` names the all-databases superuser requirement](#all-databases-superuser-requirement) | Preflight failures |
 | [`PreflightFailed` names unavailable selected extensions](#unavailable-selected-extensions) | Preflight failures |
 | [`Validated` is `Unknown` with reason `PreflightRunning`](#preflight-pod-cannot-start) | Preflight failures |
@@ -119,6 +120,23 @@ The possible causes are:
 Do the recovery action that the condition gives.
 Then create a new Migration.
 No worker attempt has started.
+
+### Native preflight refused with an error class
+
+A `spec.engine: rpgmigrate` Migration fails at `Validating` with reason `NativePreflightFailed` and the message `native preflight execution refused: error class <class>`.
+The native preflight program refused, and the class says which kind of check stopped it.
+The manager also logs one `native preflight failed` line with the same message.
+The class comes from a closed set and never carries a host, a role, a database or an SQLSTATE:
+
+- `connection`: a connection failed, or its identity, primary role or target writability did not hold.
+- `result`: a check returned something other than true, such as a privilege, `wal_level`, a free replication slot, replica identity or unlogged tables; or `pg_dump` and `pg_restore` do not match the target major.
+- `capability`: the runner environment, the resolver policy or the PostgreSQL major pair is not qualified.
+- `timeout`: the 60-second preflight deadline passed.
+- `diagnostic`: libpq or the server emitted a notice or diagnostic output.
+- `admission`, `input`, `transaction_state`, `unknown_commit`, `closure` and `internal`: the program's own process or session state failed a check; report these with the manager log line.
+
+The message without a class means the container did not leave the program's line, for example after a kill or an out-of-memory exit.
+Run the checks for the named class against both servers, fix the cause, then create a new Migration.
 
 ### All-databases superuser requirement
 

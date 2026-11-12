@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -137,7 +138,7 @@ func nativePreflightPhaseFailure(ctx context.Context, version *native.Version, e
 		return nil, false, "", ctx.Err()
 	}
 	if errors.Is(err, errNativePreflightTerminal) {
-		return nil, false, errNativePreflightTerminal.Error(), nil
+		return nil, false, err.Error(), nil
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return version, false, "", nil
@@ -215,7 +216,7 @@ func (r *MigrationReconciler) nativePreflightPhase(parent, work context.Context,
 			return false, err
 		}
 		if nativePreflightJobFailed(job) {
-			return false, errNativePreflightTerminal
+			return false, r.nativePreflightFailedJob(ctx, job, original)
 		}
 		pod, err := r.nativePreflightPod(ctx, job)
 		if err != nil {
@@ -298,7 +299,7 @@ func nativePreflightContainerReady(pod *corev1.Pod, image string) (bool, error) 
 		return false, errNativePreflightUnavailable
 	}
 	if pod.Status.Phase == corev1.PodFailed || s.State.Terminated != nil && (s.State.Terminated.ExitCode != 0 || s.State.Terminated.Signal != 0) {
-		return false, errNativePreflightTerminal
+		return false, nativePreflightRefusal(pod)
 	}
 	if s.ContainerID != "" && (s.Image == "" || s.ImageID != image) {
 		return false, errNativePreflightUnavailable
@@ -310,6 +311,31 @@ func nativePreflightContainerReady(pod *corev1.Pod, image string) (bool, error) 
 		return false, errNativePreflightUnavailable
 	}
 	return true, nil
+}
+
+// nativePreflightFailedJob is always terminal; only the Job's own bound Pod may name the refusal class.
+func (r *MigrationReconciler) nativePreflightFailedJob(ctx context.Context, job *batchv1.Job, original *corev1.Pod) error {
+	pod, err := r.nativePreflightPod(ctx, job)
+	if err != nil || pod == nil || !nativePreflightPodMatches(job, pod) || !nativePreflightSamePod(original, pod) {
+		return errNativePreflightTerminal
+	}
+	return nativePreflightRefusal(pod)
+}
+
+// nativePreflightRefusal names the program's error class when its only container exited 1 with the closed-set line.
+func nativePreflightRefusal(pod *corev1.Pod) error {
+	if len(pod.Status.ContainerStatuses) != 1 {
+		return errNativePreflightTerminal
+	}
+	t := pod.Status.ContainerStatuses[0].State.Terminated
+	if t == nil || t.ExitCode != 1 || t.Signal != 0 {
+		return errNativePreflightTerminal
+	}
+	class, ok := native.PreflightFailureClass(t.Message)
+	if !ok {
+		return errNativePreflightTerminal
+	}
+	return fmt.Errorf("%w: error class %s", errNativePreflightTerminal, class)
 }
 func (r *MigrationReconciler) nativePreflightExecutionUnchanged(ctx context.Context, m *v1beta1.Migration, image string, expected, observed *batchv1.Job, original *corev1.Pod, binding podexec.NativeContainerBinding, admit func(context.Context, *v1beta1.Migration, string) (*v1beta1.Migration, error)) bool {
 	if observed == nil || original == nil {

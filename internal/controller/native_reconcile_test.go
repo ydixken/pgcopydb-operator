@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/zapr"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"k8s.io/client-go/rest"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -25,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const nativeReconcileWorkerReplacementCase = "recorded worker replacement"
@@ -524,5 +529,36 @@ func TestNativeFinalizedTerminalPinnedHelpers(t *testing.T) {
 	stored := &v1beta1.Migration{}
 	if f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), stored) != nil || !apiequality.Semantic.DeepEqual(stored.Status, *before) {
 		t.Fatal("helper disposal changed historical E, results or pins")
+	}
+}
+
+func TestNativeReconcilePreflightRefusalLogged(t *testing.T) {
+	f := newPreflightFixture(t)
+	f.m.Status.Phase = v1beta1.PhasePending
+	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
+	f.r.APIReader = nativeDispatchProbeReader{preflightFixtureReader{f}}
+	f.r.Client = interceptor.NewClient(f.store, interceptor.Funcs{Create: f.createJob, Delete: f.deleteJob})
+	refusePreflightPod(f, probeRefusalLine, 1, 0, false)
+	core, recorded := observer.New(zapcore.DebugLevel)
+	ctx := log.IntoContext(context.Background(), zapr.NewLogger(zap.New(core)))
+	if _, err := f.r.reconcileNative(ctx, f.m, f.m.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	want := errNativePreflightTerminal.Error() + ": error class transaction_state"
+	stored := &v1beta1.Migration{}
+	if f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), stored) != nil || stored.Status.Phase != v1beta1.PhaseFailed {
+		t.Fatal("refused preflight did not fail the Migration")
+	}
+	for _, kind := range []string{v1beta1.ConditionValidated, v1beta1.ConditionFailed} {
+		c := meta.FindStatusCondition(stored.Status.Conditions, kind)
+		if c == nil || c.Reason != "NativePreflightFailed" || c.Message != want {
+			t.Fatalf("%s condition does not name the refusal class: %+v", kind, c)
+		}
+	}
+	entries := recorded.FilterMessage("native preflight failed").All()
+	if len(entries) != 1 || recorded.Len() != 1 || entries[0].ContextMap()["reason"] != "NativePreflightFailed" || entries[0].ContextMap()["message"] != want {
+		t.Fatalf("expected one structured refusal line, got %d of %d: %+v", len(entries), recorded.Len(), entries)
 	}
 }

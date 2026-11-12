@@ -1652,6 +1652,8 @@ func buildNativePreflightJob(m *v1beta1.Migration, runnerImage, name, operationI
 	pod.Volumes = volumes
 	container := &pod.Containers[0]
 	container.Command, container.Args, container.Env, container.VolumeMounts = command, args, env, mounts
+	// A refused program writes one closed-set line to stdout; the log tail becomes the termination message.
+	container.TerminationMessagePolicy = corev1.TerminationMessageFallbackToLogsOnError
 	return job, nil
 }
 
