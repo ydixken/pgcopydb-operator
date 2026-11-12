@@ -555,7 +555,7 @@ our $deadline;
 $ENV{PATH}='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 use Fcntl qw(:DEFAULT :mode);
 sub need { die "refused\n" unless $_[0]; }
-sub decimal { my ($s,$zero)=@_;need(defined($s) && $s =~ /\A(0|[1-9][0-9]{0,19})\z/);my $v=$1;need(length($v)<20 || $v le '18446744073709551615');need($zero || $v ne '0');return $v; }
+sub decimal { my ($s,$zero)=@_;need(defined($s) && scalar($s =~ /\A(0|[1-9][0-9]{0,19})\z/));my $v=$1;need(length($v)<20 || $v le '18446744073709551615');need($zero || $v ne '0');return $v; }
 sub pid { my $v=decimal($_[0],0);need($v>1 && $v<4194304);return $v; }
 sub uid { need(defined($_[0]) && $_[0] =~ /\A([a-z0-9-]{1,64})\z/);return $1; }
 sub jstr { my $s=$_[0];need(defined($s) && $s !~ /[^\x20-\x7e]/);$s =~ s/([\\"])/\\$1/g;return '"'.$s.'"'; }
