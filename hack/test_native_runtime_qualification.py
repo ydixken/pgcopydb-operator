@@ -495,6 +495,18 @@ class QualificationBoundaries(unittest.TestCase):
                 result=subprocess.run(['perl','-e',probe,value,zero],capture_output=True,text=True,timeout=10,check=True)
                 self.assertEqual(result.stdout,expected)
 
+    def test_server_key_stat_matches_the_cnpg_fsgroup(self):
+        # The probe servers run with fsGroup 26, so kubelet gives the projected server.key that group.
+        functions=node_functions()
+        key_stat=[line for line in functions['perl_source']().splitlines() if line.startswith('sub key_stat ')]
+        self.assertEqual(len(key_stat),1,'server key primitive missing')
+        self.assertIn('$st[4]==0 && $st[5]==26 && ($st[2]&07777)==0440',key_stat[0])
+        self.assertIn("return {uid=>'0',gid=>'26',mode=>'288',links=>'1'}",key_stat[0])
+        fixture=(Q.ROOT / Q.OWNED[2]).read_text()
+        self.assertEqual(fixture.count("need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))"),1)
+        server=(Q.ROOT / Q.PASSWORD_FILE).read_text()
+        self.assertIn('uid, yes, no, grace, priority, mode := int64(26),',server)
+
     def test_proc_wire_has_fixed_fields_caps_and_no_trailing_bytes(self):
         functions=node_functions()
         self.assertTrue(callable(functions.get('decode_primitive')), 'bounded node proc wire missing')
