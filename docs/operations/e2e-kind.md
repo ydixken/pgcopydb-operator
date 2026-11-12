@@ -59,7 +59,7 @@ Release tags, `latest`, main pushes, and package changes outside these two appro
 
 ## Run the guarded lifecycle
 
-The host requires the qualified Podman VM transport and the pinned tool versions in the guard.
+The host requires the qualified Podman VM transport and the pinned tool versions in the guard, including the Podman 6.2.0 client.
 The guard checks VM capacity, cgroups, source identity, and private paths before effects.
 We read each node's cgroup facts in one `podman machine ssh` call per check, because the qualification stages repeat the full admission hundreds of times and every VM session costs a round trip.
 The three nodes' observations, pulls and image verifications run concurrently, and the first failure or stage alarm kills the sibling commands.

@@ -156,7 +156,7 @@ class FakeCommands:
                       'Architecture': 'arm64', 'Os': 'linux', 'RepoDigests': ['example.invalid/image@sha256:' + 'b' * 64]}
         # Each read of a batched VM call goes through this hook as if it were its own ssh.
         self.batched = self
-        self.podman_version = 'podman version 6.1.4\n'
+        self.podman_version = 'podman version 6.2.0\n'
 
     def kubeconfig_bytes(self):
         # JSON is kubeconfig YAML; all embedded credential bytes are inert placeholders.
@@ -1506,6 +1506,19 @@ class FastAdmissionTests(NodeLimitFixture):
         with self.assertRaises(MODULE.CommandError) as raised: reads(commands[2])
         self.assertEqual(raised.exception.returncode, 3)
         self.assertEqual(reads(commands[3]), "it's")
+
+
+class HostToolTests(GuardFixture):
+    def test_only_the_pinned_kind_and_podman_clients_are_admitted(self):
+        self.guard.tools()
+        original = self.fake
+        self.guard.command = lambda args, **kwargs: 'kind v0.32.0 go1.27.0 linux/arm64\n' if args[:2] == ['kind', 'version'] else original(args, **kwargs)
+        with self.assertRaisesRegex(MODULE.Refusal, 'kind 0.33.0 is required'): self.guard.tools()
+        self.guard.command = original
+        for version in ('podman version 6.1.4\n', 'podman version 6.2.1\n', 'podman version 6.2.0-dev\n', ''):
+            with self.subTest(version=version):
+                self.fake.podman_version = version
+                with self.assertRaisesRegex(MODULE.Refusal, 'Podman 6.2.0 is required'): self.guard.tools()
 
 
 class ConcurrencyTests(unittest.TestCase):

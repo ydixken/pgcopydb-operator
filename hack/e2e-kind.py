@@ -531,8 +531,8 @@ class Guard:
     def tools(self):
         if not self.call(['kind', 'version']).startswith('kind v0.33.0 '):
             raise Refusal('kind 0.33.0 is required')
-        if self.call(['podman', '--version']).strip() != 'podman version 6.1.4':
-            raise Refusal('Podman 6.1.4 is required')
+        if self.call(['podman', '--version']).strip() != 'podman version 6.2.0':
+            raise Refusal('Podman 6.2.0 is required')
         for tool in [['kubectl', 'version', '--client', '-o', 'json'], ['helm', 'version', '--short'], ['task', '--version']]:
             self.call(tool)
 
