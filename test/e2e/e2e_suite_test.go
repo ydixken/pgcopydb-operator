@@ -60,6 +60,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -224,11 +225,23 @@ func (c featureLabelingClient) Create(
 		if engine := os.Getenv("E2E_ENGINE"); engine != "" {
 			migration.Spec.Engine = v1beta1.MigrationEngine(engine)
 		}
+		if migration.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+			migration.Spec.Clone = nativeClone(migration.Spec.Clone)
+		}
 		if err := labelFeatureMigration(migration); err != nil {
 			return err
 		}
 	}
 	return c.Client.Create(ctx, obj, opts...)
+}
+
+// nativeClone keeps only what native admission qualifies: table jobs, with
+// DropIfExists, filters, binary COPY, split parts and large objects explicitly off.
+func nativeClone(c v1beta1.CloneOptions) v1beta1.CloneOptions {
+	return v1beta1.CloneOptions{
+		TableJobs: c.TableJobs, UseCopyBinary: ptr.To(false),
+		SplitTablesLargerThan: ptr.To(resource.MustParse("0")), Skip: []v1beta1.SkipOption{"largeObjects"},
+	}
 }
 
 func (c featureLabelingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
@@ -332,6 +345,14 @@ var runnerTag = operatorTag
 var seedImage = envDefault("E2E_SEED_IMAGE", "ghcr.io/cloudnative-pg/postgresql:18")
 
 var smallProfile = envTrue("E2E_SMALL")
+
+// nativeLabel positively selects the specs the native matrix runs.
+const nativeLabel = "native"
+
+// selectedEngine is the raw E2E_ENGINE choice; suiteEngine decides whether it may run.
+func selectedEngine() v1beta1.MigrationEngine {
+	return v1beta1.MigrationEngine(envDefault("E2E_ENGINE", string(v1beta1.MigrationEnginePGCopyDB)))
+}
 
 // envTrue reports whether the given switch-style environment variable is
 // set to exactly "true".
@@ -776,7 +797,7 @@ func initMajors() {
 	}
 	pgSource = pgMajorEnv("E2E_PG_SOURCE")
 	pgTarget = pgMajorEnv("E2E_PG_TARGET")
-	if err := checkMajors(pgSource, pgTarget); err != nil {
+	if err := checkMajors(selectedEngine(), pgSource, pgTarget); err != nil {
 		panic("E2E_PG_SOURCE/E2E_PG_TARGET: " + err.Error())
 	}
 }
@@ -800,7 +821,14 @@ func pgMajorEnv(name string) int {
 // checkMajors holds the version rules: upgrade direction only, since a newer
 // pg_dump does not restore into an older server, a PG15+ target for follow
 // mode's GRANT SET ON PARAMETER, and a PG17+ target for the runner's pg_restore 18.
-func checkMajors(source, target int) error {
+// The native engine replaces them with its three qualified pairs.
+func checkMajors(engine v1beta1.MigrationEngine, source, target int) error {
+	if engine == v1beta1.MigrationEngineRPGMigrate {
+		if pair := [2]int{source, target}; pair != [2]int{16, 16} && pair != [2]int{18, 18} && pair != [2]int{16, 18} {
+			return fmt.Errorf("native pair %d:%d is not one of 16:16, 18:18 and 16:18", source, target)
+		}
+		return nil
+	}
 	if target < source {
 		return fmt.Errorf("target PostgreSQL %d is older than source %d: the suite runs upgrade direction only",
 			target, source)

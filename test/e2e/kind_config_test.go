@@ -189,13 +189,16 @@ func selectedPostgresImage(major int) string {
 		fmt.Sprintf("ghcr.io/cloudnative-pg/postgresql:%d", major))
 }
 
+// nativePrerequisite names the gate whose landing lifts the native refusal.
+const nativePrerequisite = "M6-ACTIVATE (runner-profile qualification and the lifted UnsupportedEngine)"
+
 func suiteEngine() (v1beta1.MigrationEngine, error) {
 	switch value := envDefault("E2E_ENGINE", string(v1beta1.MigrationEnginePGCopyDB)); v1beta1.MigrationEngine(value) {
 	case v1beta1.MigrationEnginePGCopyDB:
 		return v1beta1.MigrationEnginePGCopyDB, nil
 	case v1beta1.MigrationEngineRPGMigrate:
-		return "", errors.New("native kind qualification requires M3/M4/M5/M6 producer evidence;" +
-			" no qualified native runner is available")
+		return "", errors.New("native kind qualification is refused: prerequisite " + nativePrerequisite +
+			" has not landed, so no qualified native runner is available")
 	default:
 		return "", errors.New("E2E_ENGINE must be pgcopydb or rpgmigrate")
 	}

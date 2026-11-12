@@ -214,6 +214,10 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_PG_SOURCE` (`17`) is the PostgreSQL major (14 to 18) for the source cluster's CNPG operand image.
 - `E2E_PG_TARGET` (`17`) is the PostgreSQL major for the target.
   It MUST NOT be older than the source, and MUST be at least 17 (see below).
+- `E2E_ENGINE` (`pgcopydb`) sets `spec.engine` on every Migration the suite creates.
+  `rpgmigrate` accepts only the pairs 16:16, 18:18 and 16:18, and turns off DropIfExists, filters, binary COPY, split parts and large objects in each Migration.
+  The Ginkgo label `native` selects the specs the native matrix runs.
+  `TestE2E` refuses `rpgmigrate` and names the missing prerequisite until native activation lands.
 - `E2E_OPERATOR_TAG` (unset) is a manager image tag to install instead of the pinned release; the runner follows it.
 - `E2E_RUNNER_TAG` (unset) is the worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.
 - `E2E_STORAGE_CLASS` (unset) pins the fixture volumes to one StorageClass, and wins over the suite-owned one.

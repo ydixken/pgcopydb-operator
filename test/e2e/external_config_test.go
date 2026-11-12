@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/yaml"
 
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
 
@@ -294,7 +295,7 @@ func TestExternalServerMajors(t *testing.T) {
 		{source: 16, target: 16,
 			wantErr: "target PostgreSQL 16 is older than 17: the runner's pg_restore 18 sends SET transaction_timeout"},
 	} {
-		err := checkMajors(tt.source, tt.target)
+		err := checkMajors(v1beta1.MigrationEnginePGCopyDB, tt.source, tt.target)
 		if tt.wantErr == "" && err != nil {
 			t.Errorf("checkMajors(%d, %d) = %v, want nil", tt.source, tt.target, err)
 		}
