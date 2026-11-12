@@ -69,8 +69,20 @@ func namedURI(t *testing.T, uri, db, app string) string {
 	return u.String()
 }
 
+// requireMultiResultPSQL fails early because psql before 15 prints only the
+// last result of a multi-statement -c, which reads as a timeout defect.
+func requireMultiResultPSQL(t *testing.T) {
+	t.Helper()
+	out, _ := exec.Command("psql", "--version").Output()
+	var major int
+	if _, err := fmt.Sscanf(string(out), "psql (PostgreSQL) %d", &major); err != nil || major < 15 {
+		t.Fatalf("progress SQL regressions require psql 15 or later first on PATH, got %q", strings.TrimSpace(string(out)))
+	}
+}
+
 func TestProgressSQLBounds(t *testing.T) {
 	uri := namedURI(t, testPGURI(t), "", "progress_sql_test")
+	requireMultiResultPSQL(t)
 	for _, tc := range []struct {
 		name, query, wrapper, want string
 		fail, timeout              bool
