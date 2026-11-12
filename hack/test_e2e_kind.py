@@ -9,6 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 import tempfile
+import signal
 import sys
 import tarfile
 
@@ -106,6 +107,9 @@ class PreparationEntryTests(unittest.TestCase):
         self.assertEqual(failure.exception.code, 2)
 
 
+BATCHED = 'batched-read'
+
+
 class FakeCommands:
     def __init__(self, ledger):
         self.calls = []
@@ -150,6 +154,9 @@ class FakeCommands:
         self.update_returns = {}
         self.image = {'Id': 'sha256:' + 'a' * 64, 'Digest': 'sha256:' + 'b' * 64,
                       'Architecture': 'arm64', 'Os': 'linux', 'RepoDigests': ['example.invalid/image@sha256:' + 'b' * 64]}
+        # Each read of a batched VM call goes through this hook as if it were its own ssh.
+        self.batched = self
+        self.podman_version = 'podman version 6.1.4\n'
 
     def kubeconfig_bytes(self):
         # JSON is kubeconfig YAML; all embedded credential bytes are inert placeholders.
@@ -163,6 +170,16 @@ class FakeCommands:
 
     def __call__(self, args, env=None, input=None, timeout=120, umask=0o022):
         self.calls.append((args, env, input))
+        batch = MODULE.shlex.split(args[4]) if args[:4] == ['podman', 'machine', 'ssh', '--'] and len(args) == 5 else []
+        if batch[:4] == ['sh', '-c', MODULE.VM_BATCH, 'm7-batch']:
+            lines = []
+            for command in batch[4:]:
+                try:
+                    output, status = self.batched(['podman', 'machine', 'ssh', '--', command], env=BATCHED), 0
+                except MODULE.CommandError as error:
+                    output, status = '', error.returncode or 1
+                lines.append(str(status) + ' ' + base64.b64encode(output.encode()).decode() + '\n')
+            return ''.join(lines)
         if args[:2] == ['kind', 'create']:
             self.ids = list(self.provider_order)
             expected = (MODULE.ROOT / 'test/e2e/kind/cluster.yaml').read_text().replace('RUN_ID', self.marker).replace(
@@ -179,7 +196,7 @@ class FakeCommands:
         if args[:2] == ['kind', 'version']:
             return 'kind v0.33.0 go1.27.0 linux/arm64\n'
         if args == ['podman', '--version']:
-            return 'podman version 6.1.4\n'
+            return self.podman_version
         if args[:2] == ['podman', 'info']:
             return json.dumps({'host': self.capacity})
         if args == ['podman', 'machine', 'ssh', '--', 'cat', '/proc/meminfo']:
@@ -231,6 +248,7 @@ class FakeCommands:
             cmd = MODULE.shlex.split(args[4])
             if cmd == ['stat', '-fc', '%T', '/sys/fs/cgroup']: return self.cgroup_fs + '\n'
             if cmd == ['cat', '/proc/self/mountinfo']: return self.cgroup_mountinfo
+            if cmd == ['cat', '/proc/meminfo']: return self.meminfo
             if cmd[:3] == ['realpath', '-e', '--']:
                 return ''.join(self.canonical_overrides.get(path, path) + '\n' for path in cmd[3:])
             if cmd[:1] == ['cat'] and len(cmd) == 2 and cmd[1].startswith('/proc/'):
@@ -566,6 +584,8 @@ class LifecycleTests(GuardFixture):
             with self.subTest(meminfo=meminfo):
                 self.fake.meminfo = meminfo
                 with self.assertRaises(MODULE.Refusal): self.guard.require_lease()
+        self.fake.meminfo = 'MemTotal: 33554432 kB\nMemAvailable: 33554433 kB\n'
+        with self.assertRaisesRegex(MODULE.Refusal, 'memory availability is unavailable or invalid'): self.guard.require_lease()
         self.assert_no_mutations()
 
 
@@ -1126,12 +1146,12 @@ class LifecycleTests(GuardFixture):
         self.guard.save(self.ledger)
         self.guard.check = lambda: self.guard.read()
         self.guard.require_prepared = lambda ledger: None
-        self.guard.disk = lambda: None
+        self.guard.disk = lambda vm=None: None
         self.guard.shared_storage = lambda: None
         self.guard.verify_storage_mount = lambda ledger: None
         return MODULE.CONFIG
 
-class NodeLimitTests(GuardFixture):
+class NodeLimitFixture(GuardFixture):
     def setUp(self):
         super().setUp()
         self.ledger['phase'] = 'creating'
@@ -1141,6 +1161,15 @@ class NodeLimitTests(GuardFixture):
             'm7_cpus': 6, 'm7_memory_mib': 12288, 'm3_reserved_cpus': 6, 'm3_reserved_memory_mib': 6144}
         self.guard.save(self.ledger)
 
+    def assert_no_updates(self):
+        self.assertFalse(any(args[:2] == ['podman', 'update'] for args, _, _ in self.fake.calls))
+
+    def assert_no_runtime_effects(self):
+        self.assertFalse(any(args[:2] == ['kind', 'load'] or args[:2] == ['task', 'e2e:kind:suite'] or
+            args[0] in ('kubectl', 'helm') and any(verb in args for verb in ('apply', 'create', 'install', 'upgrade')) for args, _, _ in self.fake.calls))
+
+
+class NodeLimitTests(NodeLimitFixture):
     def test_owned_three_nodes_receive_only_exact_cid_updates_and_verified_aggregate(self):
         self.guard.enforce_node_limits(self.ledger)
         updates = [args for args, _, _ in self.fake.calls if args[:2] == ['podman', 'update']]
@@ -1152,13 +1181,6 @@ class NodeLimitTests(GuardFixture):
         with self.assertRaises(MODULE.Refusal): self.guard.verify_node_limits(self.ledger)
         self.assertFalse(any(args[:2] in (['podman', 'update'], ['kind', 'load']) for args, _, _ in self.fake.calls))
 
-
-    def assert_no_updates(self):
-        self.assertFalse(any(args[:2] == ['podman', 'update'] for args, _, _ in self.fake.calls))
-
-    def assert_no_runtime_effects(self):
-        self.assertFalse(any(args[:2] == ['kind', 'load'] or args[:2] == ['task', 'e2e:kind:suite'] or
-            args[0] in ('kubectl', 'helm') and any(verb in args for verb in ('apply', 'create', 'install', 'upgrade')) for args, _, _ in self.fake.calls))
 
     def test_all_three_identities_and_supported_process_paths_are_checked_before_first_update(self):
         for change in ('missing-node', 'foreign-label', 'missing-marker', 'image', 'pid', 'running', 'started', 'host-type',
@@ -1269,7 +1291,7 @@ class NodeLimitTests(GuardFixture):
                  ('container', 'memory.swap.max', 'max'), ('container', 'memory.swap.max', '-1'),
                  ('container', 'cpu.max', '100000 100000'), ('container', 'memory.max', '2147483648'),
                  ('ancestor', 'cpu.max', '100000 100000'), ('ancestor', 'memory.max', '2147483648'),
-                 ('scope', 'memory.max', None)]
+                 ('scope', 'memory.max', None), ('ancestor', 'cpu.max', '100000 max')]
         for level, key, value in cases:
             with self.subTest(level=level, key=key, value=value):
                 self.doCleanups();self.setUp()
@@ -1337,16 +1359,18 @@ class NodeLimitTests(GuardFixture):
         self.assertFalse(any(args[:2] == ['podman', 'rm'] for args, _, _ in self.fake.calls))
 
     def test_pid_start_changes_during_observation_never_publish_verified_caps(self):
-        original, changed = self.fake, False
-        def command(args, **kwargs):
+        original, changed = self.fake.batched, False
+        def read(args, **kwargs):
             nonlocal changed
             result = original(args, **kwargs)
-            if not changed and args[:4] == ['podman', 'machine', 'ssh', '--'] and '/cpu.max' in args[-1]:
+            if not changed and '/cpu.max' in args[-1]:
                 changed = True;self.fake.node_ticks['1' * 64] += 1
             return result
-        self.guard.command = command
-        with self.assertRaisesRegex(MODULE.Refusal, 'identity changed|changed while'): self.guard.enforce_node_limits(self.ledger)
-        self.assertEqual(self.guard.read()['node_limits']['status'], 'failed')
+        self.fake.batched = read
+        # The change lands between the limit read and the after-identity read of the same batched call.
+        with self.assertRaisesRegex(MODULE.Refusal, 'changed while reading cgroups'): self.guard.enforce_node_limits(self.ledger)
+        proof = self.guard.read()['node_limits']
+        self.assertEqual((proof['status'], [node['update'] for node in proof['nodes']]), ('failed', ['returned']))
         self.assert_no_runtime_effects()
 
     def test_later_fresh_checks_refuse_lost_limits_process_restart_or_stale_proof_without_updating(self):
@@ -1368,6 +1392,170 @@ class NodeLimitTests(GuardFixture):
                 self.assert_no_updates();self.assert_no_runtime_effects()
 
 
+
+
+class FastAdmissionTests(NodeLimitFixture):
+    def vm_calls(self):
+        return [args for args, env, _ in self.fake.calls if args[:4] == ['podman', 'machine', 'ssh', '--'] and env != BATCHED]
+
+    def test_each_check_reads_the_vm_once_per_lease_and_once_per_node(self):
+        self.guard.enforce_node_limits(self.ledger)
+        self.fake.calls.clear()
+        observed = self.guard.verify_node_limits(self.ledger)
+        self.assertEqual(len(self.vm_calls()), 4)
+        self.assertTrue(all('m7-batch' in args[4] for args in self.vm_calls()))
+        self.assertEqual([value['host_config']['NanoCpus'] for value in observed], [2000000000] * 3)
+        self.assertEqual([value['cgroups'] for value in observed], [proof['limits']['cgroups'] for proof in self.guard.read()['node_limits']['nodes']])
+
+    def test_unplanned_batched_read_or_changed_after_pid_refuses(self):
+        self.guard.enforce_node_limits(self.ledger)
+        cid = '2' * 64
+        self.fake.node_cgroups[cid] += '/moved'
+        with self.assertRaisesRegex(MODULE.Refusal, 'cgroup identity changed'): self.guard.verify_node_limits(self.ledger)
+        self.doCleanups();self.setUp();self.guard.enforce_node_limits(self.ledger)
+        original, inspected = self.fake, []
+        def command(args, **kwargs):
+            if args[:2] == ['podman', 'inspect'] and args[-1] == cid:
+                inspected.append(args)
+                if len(inspected) == 3:  # ownership, before, then the after-inspection of the observation
+                    self.fake.node_states[cid]['Pid'] += 1
+            return original(args, **kwargs)
+        self.guard.command = command
+        with self.assertRaisesRegex(MODULE.Refusal, 'changed while reading cgroups'): self.guard.verify_node_limits(self.ledger)
+        for identity in (None, {}, {'cgroup_path': 'relative'}):
+            with self.subTest(identity=identity):
+                self.doCleanups();self.setUp();self.guard.enforce_node_limits(self.ledger)
+                self.ledger['node_limits']['nodes'][1]['identity'] = identity;self.guard.save(self.ledger);self.fake.calls.clear()
+                with self.assertRaisesRegex(MODULE.Refusal, 'cgroup identity changed'): self.guard.verify_node_limits(self.ledger)
+                self.assert_no_updates()
+
+    def test_each_refusal_of_a_fresh_observation_names_its_own_fact(self):
+        cases = {'ticks': 'start time, or cgroup identity changed', 'ancestor-link': 'path is unavailable, linked, or noncanonical',
+                 'long-value': 'inventory is incomplete or malformed', 'after-root': 'changed while reading cgroups',
+                 'inspection': 'node inspection unavailable', 'aggregate': 'aggregate owned node limits',
+                 'after-host': 'changed while reading cgroups'}
+        for change, message in cases.items():
+            with self.subTest(change=change):
+                self.doCleanups();self.setUp();self.guard.enforce_node_limits(self.ledger);self.fake.calls.clear()
+                cid = '3' * 64
+                if change == 'ticks': self.fake.node_ticks[cid] += 1
+                if change == 'ancestor-link': self.fake.canonical_overrides['/sys/fs/cgroup/user.slice'] = '/sys/fs/cgroup/foreign'
+                if change == 'long-value': self.fake.cgroup_overrides[(cid, 'container', 'memory.max')] = '9' * 129
+                if change == 'after-root':
+                    original, reads = self.fake.batched, []
+                    def read(args, **kwargs):
+                        if args[-1] == 'cat /proc/self/mountinfo':
+                            reads.append(args)
+                            if len(reads) == 2:
+                                self.fake.cgroup_mountinfo = self.fake.cgroup_mountinfo.replace('42 1 ', '43 1 ')
+                        return original(args, **kwargs)
+                    self.fake.batched = read
+                if change == 'inspection':
+                    original = self.fake
+                    self.guard.command = lambda args, **kwargs: '[]' if args[:2] == ['podman', 'inspect'] and args[-1] == cid else original(args, **kwargs)
+                if change == 'after-host':
+                    original, inspected = self.fake, []
+                    def command(args, **kwargs):
+                        if args[:2] == ['podman', 'inspect'] and args[-1] == cid:
+                            inspected.append(args)
+                            if len(inspected) == 3:  # ownership, before, then the after-inspection of the observation
+                                self.fake.node_hosts[cid] = dict(self.fake.node_hosts[cid], CpuPeriod=50000, CpuQuota=100000)
+                        return original(args, **kwargs)
+                    self.guard.command = command
+                if change == 'aggregate':
+                    observation = self.guard.node_limit_observation
+                    self.guard.node_limit_observation = lambda ledger, node, expected: dict(observation(ledger, node, expected), cpu='1')
+                with self.assertRaisesRegex(MODULE.Refusal, message): self.guard.verify_node_limits(self.ledger)
+                self.assert_no_updates()
+
+    def test_batched_vm_framing_and_replay_refuse_anything_unplanned(self):
+        commands = [['cat', '/proc/meminfo'], ['df', '-B1', '--output=avail', '/var']]
+        for raw in ('', '0 \n', '0 \n0 \n0 \n', '0 \n0 ', 'x \n0 \n', '256 \n0 \n', '0 !!\n0 \n', '0\n0 \n', '-1 \n0 \n'):
+            with self.subTest(raw=raw):
+                self.guard.command = lambda args, **kwargs: raw
+                with self.assertRaisesRegex(MODULE.Refusal, 'framing is invalid'): self.guard.vm_batch(commands, 'unplanned')
+        data = MODULE.base64.b64encode(b'\xff').decode()
+        self.guard.command = lambda args, **kwargs: '0 ' + MODULE.base64.b64encode(b'ok\n').decode() + '\n3 ' + data + '\n'
+        reads = self.guard.vm_batch(commands, 'unplanned')
+        with self.assertRaisesRegex(MODULE.Refusal, 'unplanned'): reads(commands[1])
+        with self.assertRaisesRegex(MODULE.Refusal, 'unplanned'): reads(commands[0], private_output=True)
+        self.assertEqual(reads(commands[0]), 'ok\n')
+        with self.assertRaises(MODULE.CommandError) as raised: reads(commands[1])
+        self.assertEqual((raised.exception.failure_class, raised.exception.returncode), ('CalledProcessError', 3))
+        with self.assertRaisesRegex(MODULE.Refusal, 'unplanned'): reads(commands[1])
+        self.guard.command = lambda args, **kwargs: '0 ' + data + '\n0 \n'
+        with self.assertRaises(MODULE.CommandError) as raised: self.guard.vm_batch(commands, 'unplanned')(commands[0])
+        self.assertEqual(raised.exception.failure_class, 'UnicodeDecodeError')
+
+    def test_batch_script_keeps_exact_bytes_and_status_in_a_posix_shell(self):
+        shim = Path(self.tmp.name) / 'bin'
+        shim.mkdir()
+        # The VM has GNU base64; the shim keeps this test independent of the host flavour.
+        (shim / 'base64').write_text('#!/bin/sh\n[ "$1" = -w0 ] || exit 64\nexec ' + sys.executable +
+            ' -c "import base64,sys;sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())"\n')
+        (shim / 'base64').chmod(0o700)
+        def remote(args, **kwargs):
+            self.assertEqual(args[:4], ['podman', 'machine', 'ssh', '--'])
+            return subprocess.run(['/bin/sh', '-c', args[4]], env={'PATH': str(shim) + ':/usr/bin:/bin'},
+                                  capture_output=True, check=True).stdout.decode()
+        self.guard.command = remote
+        commands = [['printf', '%s', 'a.b\n\n'], ['true'], ['sh', '-c', "printf 'x y'\\''z.7'; exit 3"], ['printf', '%s', "it's"]]
+        reads = self.guard.vm_batch(commands, 'unplanned')
+        self.assertEqual(reads(commands[0]), 'a.b\n\n')
+        self.assertEqual(reads(commands[1]), '')
+        with self.assertRaises(MODULE.CommandError) as raised: reads(commands[2])
+        self.assertEqual(raised.exception.returncode, 3)
+        self.assertEqual(reads(commands[3]), "it's")
+
+
+class ConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        directory = Path(self.tmp.name).resolve()
+        directory.chmod(0o700)
+        self.guard = MODULE.Guard(directory, environ={})
+
+    def run_each(self, items):
+        started = MODULE.time.monotonic()
+        def item(value):
+            return self.guard.each(item, value) if isinstance(value[0], list) else self.guard.call(value)
+        with self.assertRaises(BaseException) as raised:
+            self.guard.each(item, items)
+        self.assertLess(MODULE.time.monotonic() - started, 10)
+        return raised.exception
+
+    def test_first_real_failure_kills_running_siblings(self):
+        error = self.run_each([['/bin/sleep', '30'], ['/usr/bin/false'], ['/bin/sleep', '30']])
+        self.assertEqual((type(error), error.failure_class, error.returncode), (MODULE.CommandError, 'CalledProcessError', 1))
+        error = self.run_each([[['/bin/sleep', '30'], ['/usr/bin/false']], ['/bin/sleep', '30']])
+        self.assertEqual((type(error), error.failure_class), (MODULE.CommandError, 'CalledProcessError'))
+        self.assertEqual(self.guard.call(['/usr/bin/true']), '')
+
+    def test_cancelled_scope_refuses_to_start_new_children(self):
+        def item(value):
+            if value == 'late':
+                MODULE.time.sleep(0.5)
+                return self.guard.call(['/bin/sleep', '30'])
+            return self.guard.call(['/usr/bin/false'])
+        started = MODULE.time.monotonic()
+        with self.assertRaises(MODULE.CommandError) as raised:
+            self.guard.each(item, ['late', 'fail'])
+        self.assertLess(MODULE.time.monotonic() - started, 10)
+        self.assertEqual((type(raised.exception), raised.exception.returncode), (MODULE.CommandError, 1))
+
+    def test_stage_alarm_kills_every_child_and_leaves_later_calls_usable(self):
+        def expired(_signal, _frame):
+            raise MODULE.Refusal('fixed host stage deadline expired')
+        previous = signal.signal(signal.SIGALRM, expired)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 0.3)
+        error = self.run_each([['/bin/sleep', '30'], [['/bin/sleep', '30'], ['/bin/sleep', '30']]])
+        self.assertEqual(str(error), 'fixed host stage deadline expired')
+        self.assertEqual(self.guard.call(['/usr/bin/true']), '')
+
+    def test_results_keep_item_order(self):
+        self.assertEqual(self.guard.each(lambda value: self.guard.call(['/bin/echo', value]), ['a', 'b', 'c']), ['a\n', 'b\n', 'c\n'])
 
 
 class RegistryTransportTests(unittest.TestCase):
@@ -1646,8 +1834,10 @@ class RegistryPullTests(unittest.TestCase):
                 expected_class = 'CommandError' if failure_class == sentinel else failure_class
                 expected = {'operation': 'cri-pull', 'error_class': expected_class, 'returncode': expected_code}
                 evidence = self.guard.private_json(path.name)
-                self.assertEqual(evidence['pulls'], [dict(
-                    node_id=self.ledger['nodes'][0]['id'], requested_ref=self.calls[0][-1], status='failed', **expected)])
+                # The three nodes of the first role pull concurrently, so each records its own failure.
+                self.assertEqual({tuple(args[-2:]) for args in self.calls}, {('pull', self.calls[0][-1])})
+                self.assertEqual(sorted(evidence['pulls'], key=lambda pull: pull['node_id']), [dict(
+                    node_id=node['id'], requested_ref=self.calls[0][-1], status='failed', **expected) for node in self.ledger['nodes']])
                 self.assertIs(evidence['complete'], False)
                 self.assertTrue(evidence['node_bindings'])
                 self.assertTrue(all(nodes == {} for nodes in evidence['node_bindings'].values()))
@@ -1658,12 +1848,12 @@ class RegistryPullTests(unittest.TestCase):
                 self.assertNotIn(sentinel, str(raised.exception))
                 self.assertIsNone(raised.exception.__cause__)
                 self.assertTrue(raised.exception.__suppress_context__)
-                self.assertEqual(len(self.calls), 1)
+                self.assertEqual(len(self.calls), 3)
                 with self.assertRaises(MODULE.Refusal):
                     self.guard.pull_evidence(self.ledger, MODULE.registry.PULL_ROLES, self.directory, path.name)
                 with self.assertRaises(MODULE.Refusal):
                     self.guard.pull()
-                self.assertEqual(len(self.calls), 1)
+                self.assertEqual(len(self.calls), 3)
 
     def test_full_pull_deduplicates_physical_images_preserving_logical_matrix(self):
         self.guard.pull()
@@ -1696,6 +1886,60 @@ class RegistryPullTests(unittest.TestCase):
         count = len(self.calls)
         with self.assertRaises((MODULE.Refusal, FileExistsError)): self.guard.pull()
         self.assertEqual(len(self.calls), count)
+
+    def test_cancelled_sibling_pull_never_masks_the_real_failure(self):
+        nodes = self.ledger['nodes']
+        def fail(args, **kwargs):
+            if 'crictl' in args and args[-2] == 'pull' and args[2] == nodes[0]['id']:
+                raise MODULE.Cancelled()
+            if 'crictl' in args and args[-2] == 'pull' and args[2] == nodes[1]['id']:
+                raise MODULE.CommandError('TimeoutExpired')
+            return self.command(args, **kwargs)
+        self.guard.command = fail
+        with self.assertRaisesRegex(MODULE.Refusal, r'^cri-pull failed \(class=TimeoutExpired, returncode=None\)$'): self.guard.pull()
+        pulls = {pull['node_id']: pull for pull in self.guard.private_json('pulled-image-resolution-evidence.json')['pulls']}
+        self.assertEqual(pulls[nodes[0]['id']]['status'], 'failed')
+        self.assertNotIn('error_class', pulls[nodes[0]['id']])
+
+    def test_pull_deadline_is_checked_before_and_after_the_matrix(self):
+        images = {image['role']: image for image in self.images.values()}
+        with self.assertRaisesRegex(MODULE.Refusal, 'original deadline expired'):
+            self.guard.perform_pulls(self.ledger, images, ('manager',), self.directory, 'early.json', MODULE.time.time() - 1,
+                                     {'pulls': [], 'node_bindings': {}}, lambda: None)
+        self.assertFalse(any('pull' in args for args in self.calls))
+        now = MODULE.time.time()
+        clock, deadline, proof = [now], now + 100, {'pulls': [], 'node_bindings': {}}
+        def admit():
+            if len(proof['node_bindings'].get('manager', {})) == 3:
+                clock[0] = deadline + 1
+        with patch.object(MODULE.time, 'time', side_effect=lambda: clock[0]), self.assertRaisesRegex(MODULE.Refusal, 'original deadline expired'):
+            self.guard.perform_pulls(self.ledger, images, ('manager',), self.directory, 'late.json', deadline, proof, admit)
+        self.assertEqual(len(proof['node_bindings']['manager']), 3)
+
+    def test_completed_pull_evidence_refuses_partial_foreign_or_changed_matrices(self):
+        self.guard.pull()
+        ledger = self.guard.read()
+        name = 'pulled-image-resolution-evidence.json'
+        evidence = self.guard.private_json(name)
+        for change, message in (('missing', 'matrix is incomplete'), ('duplicate', 'partial, duplicate or foreign'),
+                                ('failed', 'partial, duplicate or foreign')):
+            with self.subTest(change=change):
+                value = copy.deepcopy(evidence)
+                if change == 'missing': value['pulls'].pop()
+                if change == 'duplicate': value['pulls'][-1] = value['pulls'][0]
+                if change == 'failed': value['pulls'][0]['status'] = 'failed'
+                self.guard.write_private(name, MODULE.registry.canonical(value) + b'\n')
+                with self.assertRaisesRegex(MODULE.Refusal, message):
+                    self.guard.pull_evidence(ledger, MODULE.registry.PULL_ROLES, self.directory, name)
+        self.guard.write_private(name, MODULE.registry.canonical(evidence) + b'\n')
+        self.guard.pull_evidence(ledger, MODULE.registry.PULL_ROLES, self.directory, name)
+        verify = self.guard._verify_pulled
+        def changed(image, node_id, *args):
+            binding = verify(image, node_id, *args)
+            return dict(binding, accepted_image_ids=binding['accepted_image_ids'][:-1]) if node_id == '3' * 64 else binding
+        self.guard._verify_pulled = changed
+        with self.assertRaisesRegex(MODULE.Refusal, 'differs from completed pull evidence'):
+            self.guard.pull_evidence(ledger, MODULE.registry.PULL_ROLES, self.directory, name)
 
     def test_foreign_node_and_unavailable_content_refuse_without_pull(self):
         image = self.images['manager']
