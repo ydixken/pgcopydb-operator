@@ -29,6 +29,11 @@ PASSWORD_FILE = 'internal/controller/native_runtime_password_tls_probe_test.go'
 DELIVERY_TEST = 'TestNativePackagedDeliveryQualification'
 DELIVERY_SELECTOR = 'RPGMIGRATE_NATIVE_DELIVERY_INPUT'
 DELIVERY_FILE = 'internal/controller/native_runtime_delivery_test.go'
+CONTROLLER_TEST = 'TestNativePackagedControllerCreate'
+CONTROLLER_SELECTOR = 'RPGMIGRATE_NATIVE_CONTROLLER_INPUT'
+CONTROLLER_FILE = 'internal/controller/native_runtime_controller_test.go'
+CONTROLLER_CRD = 'config/crd/bases/pgcopydb-operator.io_migrations.yaml'
+CONTROLLER_CASES = ('version_job_created', 'preflight_job_created', 'preflight_consumed', 'helpers_disposed', 'no_worker_started')
 DELIVERY_CASES = ('quiet_success', 'concurrent_relay_refused', 'foreign_lock_refused', 'truncated_result_refused',
                   'stderr_refused', 'startup_log_refused', 'main_failure_refused', 'disconnect_no_replay')
 SELECTOR = 'RPGMIGRATE_NATIVE_RUNTIME_INPUT'
@@ -131,7 +136,7 @@ def sha(raw):
 
 
 def required_cases(phase, pair):
-    if phase not in ('prepare', 'metadata', 'password_tls_probe', 'delivery', 'connections', 'evidence'):
+    if phase not in ('prepare', 'metadata', 'password_tls_probe', 'delivery', 'controller', 'connections', 'evidence'):
         raise Refusal('unknown phase')
     if (phase in ('connections', 'evidence')) != (pair is not None):
         raise Refusal('pair is required only for connection and evidence phases')
@@ -148,6 +153,8 @@ def required_cases(phase, pair):
             'sealed_ca_identity', 'private_closure', 'no_sensitive_persistence')]
     if phase == 'delivery':
         return ['delivery/' + case for case in DELIVERY_CASES] + ['pvc/fsgroup_readonly_remount']
+    if phase == 'controller':
+        return ['controller/' + case for case in CONTROLLER_CASES]
     raise Refusal('missing production policy and actual producer fixtures')
 
 
@@ -192,7 +199,7 @@ def legacy_lock(guard):
 def source_identity():
     names = set(OWNED) | {'go.mod', 'go.sum', 'Taskfile.yml', 'internal/controller/native_worker_test.go',
                           'internal/controller/native_preflight_test.go', 'internal/controller/native_lifecycle_test.go'}
-    names.update((PASSWORD_FILE, DELIVERY_FILE))
+    names.update((PASSWORD_FILE, DELIVERY_FILE, CONTROLLER_FILE, CONTROLLER_CRD))
     for subtree in ('internal', 'api', 'cmd'):
         names.update(str(path.relative_to(ROOT)) for path in (ROOT / subtree).rglob('*.go')
                      if not path.name.endswith('_test.go'))
@@ -627,7 +634,7 @@ def validate_password_receipt(request, receipt, events):
 
 def run_selected_go(request_path, timeout, selector, test, package, name):
     environment = dict(os.environ)
-    if any(key in environment for key in (SELECTOR, PASSWORD_SELECTOR, DELIVERY_SELECTOR, 'GOFLAGS', 'GOWORK', 'GOTOOLCHAIN', 'GOENV')):
+    if any(key in environment for key in (SELECTOR, PASSWORD_SELECTOR, DELIVERY_SELECTOR, CONTROLLER_SELECTOR, 'GOFLAGS', 'GOWORK', 'GOTOOLCHAIN', 'GOENV')):
         raise Refusal('inherited primitive Go override')
     environment[selector] = str(request_path)
     result = subprocess.run(['go', 'test', package, '-run', '^' + test + '$',
@@ -730,6 +737,75 @@ def validate_delivery_receipt(request, receipt, events):
         raise Refusal('delivery cleanup kinds differ')
 
 
+def validate_controller_receipt(request, receipt, events, runner_ref):
+    closed(request, {'schema_version', 'runtime', 'original_parent_deadline'}, 'controller request')
+    runtime = closed(request['runtime'], REQUEST_KEYS, 'controller runtime')
+    fields = set('schema_version kind qualification_id run_id input_sha256 qualification_source_sha256 evidence_program_sha256 '
+                 'native_assets_sha256 crd_sha256 namespace_uid migration_uid started_at finished_at reconcile_passes validated '
+                 'jobs refused_creates cases cleanup'.split())
+    closed(receipt, fields, 'controller receipt')
+    expected = required_cases('controller', None)
+    if (type(request['schema_version']) is not int or request['schema_version'] != 1 or runtime['phase'] != 'controller' or
+            runtime['pair'] is not None or runtime['required_cases'] != expected or
+            type(receipt['schema_version']) is not int or receipt['schema_version'] != 1 or receipt['kind'] != 'controller' or
+            receipt['crd_sha256'] != sha(read_file(ROOT / CONTROLLER_CRD))):
+        raise Refusal('fixed controller phase selection differs')
+    for key in ('qualification_id', 'run_id', 'qualification_source_sha256', 'evidence_program_sha256', 'native_assets_sha256'):
+        if receipt[key] != runtime[key]:
+            raise Refusal('controller receipt source binding differs')
+    if (receipt['input_sha256'] != sha((json.dumps(request, sort_keys=True, separators=(',', ':')) + '\n').encode()) or
+            any(not isinstance(receipt[key], str) or not receipt[key] for key in ('namespace_uid', 'migration_uid')) or
+            any(type(receipt[key]) not in (int, float) or not math.isfinite(receipt[key]) for key in ('started_at', 'finished_at')) or
+            not runtime['stage_deadline'] - 600 <= receipt['started_at'] <= receipt['finished_at'] <= min(
+                runtime['stage_deadline'] + 600, runtime['lease_expires_at'], request['original_parent_deadline'])):
+        raise Refusal('controller receipt output or deadline binding differs')
+    cases = receipt['cases']
+    if not isinstance(cases, list) or [item.get('name') if isinstance(item, dict) else None for item in cases] != expected:
+        raise Refusal('actual controller inventory missing')
+    for item in cases:
+        closed(item, {'name', 'status', 'exit_code', 'cleanup'}, 'controller case')
+        if item['status'] != 'passed' or type(item['exit_code']) is not int or item['exit_code'] != 0 or item['cleanup'] is not True:
+            raise Refusal('controller case failed or did not close')
+    # The real reconciler created exactly the version then the preflight helper of one operation, and nothing else.
+    jobs = receipt['jobs']
+    if not isinstance(jobs, list) or len(jobs) != 2 or receipt['refused_creates'] != [] or type(receipt['reconcile_passes']) is not int or not 2 <= receipt['reconcile_passes'] <= 4:
+        raise Refusal('controller Create inventory differs')
+    for item in jobs:
+        closed(item, {'name', 'uid', 'bytes', 'image'}, 'controller Job')
+    operation = jobs[0]['name'].removeprefix('rpgmigrate-version-')
+    if (not re.fullmatch('[0-9a-f]{32}', operation) or jobs[1]['name'] != 'rpgmigrate-preflight-' + operation or
+            any(not isinstance(item['uid'], str) or not item['uid'] or item['image'] != runner_ref or type(item['bytes']) is not int for item in jobs) or
+            jobs[0]['uid'] == jobs[1]['uid'] or not len(read_file(ROOT / 'internal/native/evidence_program.py')) < jobs[1]['bytes'] <= 1048576):
+        raise Refusal('controller helper Job identity differs')
+    if receipt['validated'] != {'status': 'True', 'reason': 'NativePreflightPassed', 'message': 'Native configuration and active database preflight passed'}:
+        raise Refusal('controller preflight did not pass')
+    passed = [item.get('Test') for item in events if item.get('Action') == 'pass']
+    if (any(item.get('Action') in ('fail', 'skip') for item in events) or passed.count(CONTROLLER_TEST) != 1 or
+            sorted(item.removeprefix(CONTROLLER_TEST + '/') for item in passed
+                   if isinstance(item, str) and item.startswith(CONTROLLER_TEST + '/')) != sorted(expected)):
+        raise Refusal('actual exact controller Go cases did not execute')
+    cleanup = closed(receipt['cleanup'], {'complete', 'objects'}, 'controller cleanup')
+    objects = cleanup['objects']
+    if cleanup['complete'] is not True or not isinstance(objects, list) or len(objects) != 11:
+        raise Refusal('exact eleven-object controller cleanup missing')
+    apis = {'CustomResourceDefinition': 'apiextensions.k8s.io/v1', 'Migration': 'pgcopydb-operator.io/v1beta1'}
+    counts, uids = {}, set()
+    for item in objects:
+        closed(item, {'api_version', 'kind', 'namespace', 'name', 'uid', 'resource_version', 'action', 'verified_absent'}, 'controller cleanup object')
+        scoped = item.get('kind') in ('Namespace', 'CustomResourceDefinition')
+        if (any(not isinstance(item[key], str) or not item[key] for key in ('name', 'uid')) or item['uid'] in uids or
+                item['action'] != 'deleted' or item['verified_absent'] is not True or
+                item['api_version'] != apis.get(item['kind'], 'v1') or item['namespace'] != ('' if scoped else runtime['namespace']) or
+                item['kind'] == 'Namespace' and (item['name'] != runtime['namespace'] or item['uid'] != receipt['namespace_uid']) or
+                item['kind'] == 'Migration' and item['uid'] != receipt['migration_uid'] or
+                item['kind'] == 'CustomResourceDefinition' and item['name'] != 'migrations.pgcopydb-operator.io'):
+            raise Refusal('controller cleanup identity or verified absence missing')
+        uids.add(item['uid'])
+        counts[item['kind']] = counts.get(item['kind'], 0) + 1
+    if counts != {'Migration': 1, 'Pod': 2, 'Service': 2, 'Secret': 4, 'Namespace': 1, 'CustomResourceDefinition': 1}:
+        raise Refusal('controller cleanup kinds differ')
+
+
 def component_images(guard, output_dir, packet, clocks, *, verify_only=False, before_first=None):
     if not all(callable(getattr(guard, method, None)) for method in
                ('qualify_component_images', 'verify_component_images')):
@@ -809,8 +885,9 @@ def qualify(run_dir: Path, legacy_source_root: Path, output_dir: Path,
         component = component_images(guard, output_dir, packet, clocks, before_first=observe_nodes)
         password = phase == 'password_tls_probe'
         delivery = phase == 'delivery'
-        prefix = {'password_tls_probe': 'native-password-tls-', 'delivery': 'native-delivery-'}.get(phase, 'native-metadata-')
-        receipt_name = {'password_tls_probe': 'password-tls', 'delivery': 'delivery'}.get(phase, 'metadata')
+        controller = phase == 'controller'
+        prefix = {'password_tls_probe': 'native-password-tls-', 'delivery': 'native-delivery-', 'controller': 'native-controller-'}.get(phase, 'native-metadata-')
+        receipt_name = {'password_tls_probe': 'password-tls', 'delivery': 'delivery', 'controller': 'controller'}.get(phase, 'metadata')
         with stage_limit(clocks, 'go') as (wall_stop, mono_stop):
             deadline, _ = go_limits(clocks, wall_stop, mono_stop)
             request = dict(binding, schema_version=1, qualification_id=packet['qualification_id'], phase=phase, pair=None,
@@ -827,6 +904,8 @@ def qualify(run_dir: Path, legacy_source_root: Path, output_dir: Path,
             if delivery:
                 request = dict(schema_version=1, runtime=request,
                            delivery_program_sha256=sha(delivery_program()), original_parent_deadline=parent_deadline)
+            if controller:
+                request = dict(schema_version=1, runtime=request, original_parent_deadline=parent_deadline)
             request_path = output_dir / (receipt_name + '-input.json')
             write_private(request_path, request)
             _, timeout = go_limits(clocks, wall_stop, mono_stop)
@@ -840,6 +919,10 @@ def qualify(run_dir: Path, legacy_source_root: Path, output_dir: Path,
                 events = run_selected_go(request_path, timeout, DELIVERY_SELECTOR, DELIVERY_TEST, './internal/controller', 'delivery')
                 receipt = decode(read_private(Path(request['runtime']['receipt_path'])))
                 validate_delivery_receipt(request, receipt, events)
+            elif controller:
+                events = run_selected_go(request_path, timeout, CONTROLLER_SELECTOR, CONTROLLER_TEST, './internal/controller', 'controller')
+                receipt = decode(read_private(Path(request['runtime']['receipt_path'])))
+                validate_controller_receipt(request, receipt, events, images['native-runner']['image']['ref'])
             else:
                 events = run_go(request_path, timeout)
                 receipt = decode(read_private(Path(request['receipt_path'])))
@@ -867,7 +950,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ('run-dir', 'legacy-source-root', 'qual-dir'):
         parser.add_argument('--' + key, type=Path, required=True)
-    parser.add_argument('--phase', choices=('prepare', 'metadata', 'password_tls_probe', 'delivery', 'connections', 'evidence'), required=True)
+    parser.add_argument('--phase', choices=('prepare', 'metadata', 'password_tls_probe', 'delivery', 'controller', 'connections', 'evidence'), required=True)
     parser.add_argument('--pair', choices=('16:16', '18:18', '16:18'))
     parser.add_argument('--parent-deadline', type=float)
     parser.add_argument('--parent-monotonic-deadline', type=float)

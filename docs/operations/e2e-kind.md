@@ -149,7 +149,7 @@ Each phase writes its private inputs and receipts into a separate `QUAL_DIR` out
 2. Run each phase with the run's original lease clocks as the parent deadline.
 
    ```sh
-   for phase in metadata password_tls_probe delivery; do
+   for phase in metadata password_tls_probe delivery controller; do
      python3 -B hack/native-runtime-qualification.py --run-dir "$RUN_DIR" \
        --legacy-source-root "$GUARD_ROOT" --qual-dir "$QUAL_DIR" --phase "$phase" \
        --parent-deadline "$LEASE_EXPIRES_AT" --parent-monotonic-deadline "$LEASE_MONOTONIC_EXPIRES_AT"
@@ -161,6 +161,9 @@ Later phases reuse that complete pull receipt and need 2400 seconds.
 `metadata` reads the active CRI profile, resolver, HOME and provider facts on all three nodes.
 `password_tls_probe` connects to disposable PostgreSQL 16 and 18 servers with SCRAM and verify-full TLS.
 `delivery` drives the canonical checked-exec relay and terminal Job proof through fault cases, and remounts a PVC read-only.
+`controller` installs its own Migration CRD and runs the real reconciler with the production pod-exec transport against one native PostgreSQL 16 to 18 Migration.
+It passes only when the reconciler creates exactly the version and preflight Jobs of one operation, consumes a passing preflight and disposes both helpers.
+Its client refuses any other Create, so the phase never claims a work PVC or starts a worker.
 
 > [!important]
 > A failed phase keeps its private artifacts and refuses a rerun into the same `QUAL_DIR`.
