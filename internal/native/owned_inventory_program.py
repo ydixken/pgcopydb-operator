@@ -14,28 +14,23 @@ def validate_inventory_request(raw,op,sha):
  return value
 def validate_inventory_manifest(m,req,d):
  keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
- work=req['execution']['work'];need(m['magic']=='RPGMIGRATE' and uint(m['format_version'],8)==8 and m['canonical_path']=='/work/pgcopydb')
+ work=req['execution']['work'];need(m['magic']=='RPGMIGRATE' and native_format(m) in (8,9) and m['canonical_path']=='/work/pgcopydb')
  run=nonce(m['run']);need(run.hex()==work['run_id'] and (uint(m['directory_device']),uint(m['directory_inode']))==identity(d))
  operator=m['operator'];keys(operator,'migration_uid run workdir_id checkpoint_generation');uint(operator['checkpoint_generation'],1,True)
  need(same(operator,dict(migration_uid=work['migration_uid'],run=list(run),workdir_id=work['workdir_id'],checkpoint_generation=1)))
  if m['copy_complete'] is not None:
   keys(m['copy_complete'],'tables rows bytes')
   for count in m['copy_complete'].values(): uint(count)
- targets=bounded_array(m['target_provenance'],1);need(len(targets)==1)
- keys(targets[0],'phase record');need(targets[0]['phase']=='confirmed');target=targets[0]['record']
- keys(target,'intent schema_oid table_oid marker_table_oid marker_index_oid');keys(target['intent'],'binding nonce');nonce(target['intent']['nonce'])
- b=target['intent']['binding'];keys(b,'stream target_system_identifier target_database_oid schema_name table_name owner_oid metadata_version')
+ target=target_metadata(m);b=target['intent']['binding']
  stream(b['stream']);need(b['stream']['run']==m['run'])
- need(uint(b['metadata_version'],6,True)==6 and b['schema_name']=='_rpgmigrate_'+work['run_id'] and b['table_name']=='checkpoint')
+ need(b['schema_name']=='_rpgmigrate_'+work['run_id'] and b['table_name']=='checkpoint')
  name(b['schema_name']);name(b['table_name']);uint(b['target_system_identifier'],U64,True)
  for key in ('target_database_oid','owner_oid'): uint(b[key],(1<<32)-1,True)
- for key in ('schema_oid','table_oid','marker_table_oid','marker_index_oid'): uint(target[key],(1<<32)-1,True)
- need(len({target[k] for k in ('table_oid','marker_table_oid','marker_index_oid')})==3)
  keys(m['source_slot'],'phase record');need(m['source_slot']['phase']=='confirmed');slot=m['source_slot']['record'];slot_record(slot)
  need(slot['intent']['binding']['stream']==b['stream'])
  clone=m['clone_state'];keys(clone,'plan ticket phase owned_objects owned_tables completion')
  need(clone['phase'] in 'fresh pre_data_pending copying post_data_pending post_data_complete sequences_pending sequences_complete analyzing complete'.split())
- p=clone['plan'];keys(p,'source target generation tables sequences policy')
+ p=clone['plan'];copy_profile(p,native_format(m))
  keys(p['source'],'identity timeline major');keys(p['target'],'identity major')
  source_identity(p['source']['identity']);source_identity(p['target']['identity'])
  need(p['source']['identity']==b['stream']['source'] and p['target']['identity']==dict(system_identifier=b['target_system_identifier'],database_oid=b['target_database_oid']))
@@ -141,9 +136,8 @@ def inventory_target(session,state):
  need(len(rows)==1 and len(rows[0])==7,RESULT);values=[v.decode('ascii') if type(v) is bytes else '' for v in rows[0]]
  need(values[:2]==[str(b['target_system_identifier']),str(b['target_database_oid'])] and values[4]==str(session.backend) and decimal(values[5],189999,True)//10000==p['target']['major'] and values[6]=='t',CONN)
  decimal(values[2],(1<<32)-1,True);decimal(values[3],(1<<32)-1,True)
- for marker in (False,True):
-  params=(target['marker_table_oid'],target['marker_index_oid'],target['schema_oid'],b['owner_oid']) if marker else (target['schema_oid'],target['table_oid'],b['target_database_oid'],b['owner_oid'],b['schema_name'],b['table_name'],target['marker_table_oid'],target['marker_index_oid'])
-  exact_true(session.query(catalog_sql(marker,p['target']['major']),params))
+ for marker in ((False,True,'large_object') if b['metadata_version']==7 else (False,True)):
+  exact_true(session.query(catalog_sql(marker,p['target']['major'],b['metadata_version']),catalog_params(target,marker)))
  return values
 def observe_inventory(state,library,mat,deadline,diag):
  sessions=[]

@@ -220,6 +220,14 @@ class InventoryTests(unittest.TestCase):
                         with self.subTest(phase=phase, table=table, cleanup=progress):
                             self.assertEqual(validate(value, req, info), value['target_provenance'][0]['record'])
 
+        with tempfile.TemporaryDirectory() as directory:
+            req, value, _, _ = FIXTURE.candidate_fixture(os.stat(directory))
+            self.assertEqual(validate(value, req, os.stat(directory)), value['target_provenance'][0]['record'])
+            for version, metadata in ((8, 7), (9, 6), (10, 7), (9.0, 7), (True, 7)):
+                changed = copy.deepcopy(value); changed['format_version'] = version
+                changed['target_provenance'][0]['record']['intent']['binding']['metadata_version'] = metadata
+                with self.subTest(version=version, metadata=metadata), self.assertRaises(SCOPE['Refusal']): validate(changed, req, os.stat(directory))
+
     def test_InventoryPendingRefusals(self):
         validate = self.required('validate_inventory_manifest')
         with tempfile.TemporaryDirectory() as directory:
@@ -301,6 +309,16 @@ class InventoryTests(unittest.TestCase):
                         self.assertFalse(any(word in sql.upper() for word in ('FOR UPDATE', 'ADVISORY', 'COMMIT;', 'UPDATE ONLY', 'DROP ')))
                 finally: state.close()
 
+        with PrivateTree() as fixture:
+            _,fixture.value,_,_=FIXTURE.candidate_fixture(fixture.root.stat())
+            fixture.value['operator']['workdir_id']=fixture.req['execution']['work']['workdir_id'];fixture.write()
+            state=SCOPE['InventoryState'](fixture.req);library,materials=InventoryPQ(),Materials()
+            try:
+                observe(state,library,materials,time.monotonic()+5,types.SimpleNamespace(check=lambda:None))
+                catalogs=[params for role,sql,params in library.queries if role=='target' and sql.startswith(('SELECT n.nspowner','SELECT c.relnamespace'))]
+                self.assertEqual(catalogs,[[b'44',b'55',b'22',b'33',('_rpgmigrate_'+fixture.req['execution']['work']['run_id']).encode(),b'checkpoint',b'66',b'77',b'78',b'79'],[b'66',b'77',b'44',b'33'],[b'78',b'79',b'44',b'33']]*2)
+            finally:state.close()
+
     def test_InventoryClosedSessions(self):
         observe = self.required('observe_inventory')
         for fault in (None, 'source-close', 'target-close', 'notice', 'unknown-commit'):
@@ -353,7 +371,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_InventoryCompositeDelivery(self):
         self.required('owned_inventory_main')
-        self.assertEqual(hashlib.sha256(CORE).hexdigest(), 'e1bd440ba849d975c88dbf5de9a0e7f47e55c162d1b819e549a3e0ddad570dcc')
+        self.assertEqual(hashlib.sha256(CORE).hexdigest(), '10005338c4ee5792bf140d3ebf42af23c5d2d42b13dad5cae4daf3622e11ad9e')
         self.assertEqual(hashlib.sha256(WRITER).hexdigest(), '4412adaaa55dbd69aff1ad754c7252562da32440e0f2d2a07e60205d4fb6b882')
         helper = HELPER.read_bytes(); adapter = (HERE / 'owned_inventory_request_writer.py').read_bytes()
         self.assertLessEqual(len(helper), 16384); self.assertLessEqual(len(adapter), 3072)

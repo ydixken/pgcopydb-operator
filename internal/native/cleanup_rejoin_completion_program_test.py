@@ -203,23 +203,26 @@ class CleanupRejoinTests(unittest.TestCase):
 
     def test_TargetAuthority(self):
         observe = self.required('observe_cleanup_rejoin')
-        with C.tree() as t:
-            prepare(t); state = S['CleanupRejoinState'](t.req)
-            material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
-            try:
-                sessions = Sessions(state)
-                proof = S['validate_control_row'](sessions.row, state)
-                self.assertEqual(proof['certified_lsn'], '0/10'); self.assertEqual(proof['durable_replay_lsn'], '0/10')
-                self.assertEqual(proof['drain_end_lsn'], '0/20'); self.assertEqual(proof['drain_replay_lsn'], '0/30')
-                row = list(sessions.row); row[23] = '0/30'; row[27] = 'keepalive'
-                self.assertEqual(S['validate_control_row'](row, state)['drain_kind'], 'keepalive')
-                for index, value in [(18, '18446744073709551616'), (19, 'foreign'), (25, '0/21'), (26, '0/20'), (27, 'keepalive'), (28, 'f')]:
-                    row = list(sessions.row); row[index] = value
-                    with self.subTest(index=index), self.assertRaises(S['Refusal']): S['validate_control_row'](row, state)
-                for fault in ('unknown_commit', 'unlock', 'catalog', 'target_close', 'row_mutation'):
-                    bad = Sessions(state, fault)
-                    with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
-            finally: state.close()
+        for candidate_format in (False, True):
+            with C.tree() as t:
+                prepare(t)
+                if candidate_format: C.candidate(t)
+                state = S['CleanupRejoinState'](t.req)
+                material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
+                try:
+                    sessions = Sessions(state)
+                    proof = S['validate_control_row'](sessions.row, state)
+                    self.assertEqual(proof['certified_lsn'], '0/10'); self.assertEqual(proof['durable_replay_lsn'], '0/10')
+                    self.assertEqual(proof['drain_end_lsn'], '0/20'); self.assertEqual(proof['drain_replay_lsn'], '0/30')
+                    row = list(sessions.row); row[23] = '0/30'; row[27] = 'keepalive'
+                    self.assertEqual(S['validate_control_row'](row, state)['drain_kind'], 'keepalive')
+                    for index, value in [(18, '18446744073709551616'), (19, 'foreign'), (25, '0/21'), (26, '0/20'), (27, 'keepalive'), (28, 'f')]:
+                        row = list(sessions.row); row[index] = value
+                        with self.subTest(index=index), self.assertRaises(S['Refusal']): S['validate_control_row'](row, state)
+                    for fault in ('unknown_commit', 'unlock', 'catalog', 'target_close', 'row_mutation'):
+                        bad = Sessions(state, fault)
+                        with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                finally: state.close()
 
     def test_RoutesStayNarrow(self):
         self.required('validate_cleanup_rejoin_manifest')

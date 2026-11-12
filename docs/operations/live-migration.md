@@ -26,6 +26,21 @@ The next attempt then cannot resume that copy.
 Without `spec.clone.dropIfExists`, the Migration fails as [`SnapshotLost`](../troubleshooting.md#phase-failed-with-reason-snapshotlost).
 With `spec.clone.dropIfExists`, the operator starts the clone again from the beginning, and the failure costs two attempts ([Retries and resume](lifecycle.md#retries-and-resume)).
 
+## Native candidate observation
+
+The native development helpers accept only native format 8 with metadata 6, or candidate native format 9 with metadata 7.
+They refuse mixed pairs, unknown versions, and conversion of existing state.
+The candidate reader checks the saved COPY policy and part profile against the table identities.
+It checks the exact owned identities and catalog definitions for the checkpoint, part markers, and large-object ledger.
+The completed-evidence reader checks the 29-column checkpoint, current generation, snapshot binding, preparation state, and large-object aggregate receipts.
+Its marker guard covers both candidate receipt catalogs.
+
+Source telemetry uses the source binding only.
+Inventory reports owned resources and does not prove part rows, large-object contents, or migration completion.
+Completion still requires checkpoint authority and successful engine comparison.
+Candidate helper decoding does not activate native production admission or capabilities.
+The M8 runtime qualification gate remains separate from these source checks.
+
 ## Preflight
 
 A `<name>-preflight` Job gates the first attempt of every Migration.
