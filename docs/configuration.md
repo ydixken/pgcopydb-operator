@@ -12,6 +12,17 @@ Otherwise it sets `Validated=False` and `Failed=True` with reason `UnsupportedEn
 It also rejects unknown engine values if admission does not reject them first.
 The rejection does not delete, adopt, or clean up existing Jobs, PVCs, or replication resources.
 
+The controller checks the runner image once, at admission, and records the admitted image in `status.nativeRunnerImage`.
+Every later native Job runs the recorded image, including cleanup on deletion.
+A later change to `--rpgmigrate-runner-image` or `spec.runner.image` therefore does not affect an admitted Migration.
+We pin it because failing an in-flight Migration would skip native cleanup and leave its replication slot and publication on the source.
+The API server rejects a status write that changes or removes the record.
+
+> [!warning]
+> A native Migration past admission without a qualified `status.nativeRunnerImage` is refused, not failed and not admitted again.
+> Each reconcile returns an error and changes nothing, deletion included, so its source replication resources stay in place.
+> Run the operator release that admitted it, or, when the field is missing, record the image its worker Job runs.
+
 ## Clone tuning
 
 The `clone` block holds parallelism, same-table splitting, and skips.
@@ -217,7 +228,7 @@ An explicit flag takes priority over the environment, including an explicit empt
 The default is empty.
 Without a per-Migration image override, the empty default leaves native helpers unavailable.
 The native image never defaults to `runner.image` or `--runner-image`.
-`spec.runner.image` still overrides the image per Migration.
+`spec.runner.image` still overrides the image per Migration until admission records it.
 We preserve image values exactly, without trimming or normalization.
 Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 
