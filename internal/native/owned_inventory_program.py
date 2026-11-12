@@ -108,7 +108,7 @@ class InventoryState:
    self.close(False);raise
  def open(self,path,d,parent=None):
   fd=fdopen(path,d,parent);self.fds.append(fd)
-  self.nodes.append((fd,parent,path,stamp(private_type(fd,d))));return fd
+  self.nodes.append((fd,parent,path,stamp(work_type(fd,d,path))));return fd
  def revalidate(self):
   work_environment(self.req)
   for fd,parent,path,before in self.nodes:

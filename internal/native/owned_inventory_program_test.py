@@ -83,7 +83,7 @@ class PrivateTree:
                 return getattr(original_os, name)
 
             def stat(self, path, *args, **kwargs):
-                return original_os.stat(parent if path == '/work' else path, *args, **kwargs)
+                return FIXTURE.mounted(original_os.stat, parent)(path, *args, **kwargs)
 
         def open_file(path, directory=False, parent=None):
             return original_open(self.parent if path == '/work' else path, directory, parent)
@@ -291,6 +291,19 @@ class InventoryTests(unittest.TestCase):
             state = state_type(fixture.req)
             self.assertEqual(state.resources()[-1], dict(kind='replication_origin', name='external_origin', owned=False, retain=False))
             state.close()
+
+    def test_InventoryWorkRoot(self):
+        state_type = self.required('InventoryState')
+        with PrivateTree(control={'lock': b''}) as fixture:
+            fixture.parent.chmod(0o2775); self.assertEqual(fixture.parent.stat().st_mode & 0o7777, 0o2775)
+            state = state_type(fixture.req); state.revalidate(); state.close()
+            for path, mode, restore in ((fixture.parent, 0o2777, 0o2775), (fixture.root, 0o2770, 0o700), (fixture.root / 'control', 0o2770, 0o700)):
+                path.chmod(mode); self.assertEqual(path.stat().st_mode & 0o7777, mode)
+                with self.subTest(path=path.name, mode=oct(mode)), self.assertRaises(SCOPE['Refusal']): state_type(fixture.req)
+                path.chmod(restore)
+            state = state_type(fixture.req); fixture.parent.chmod(0o2770)
+            with self.assertRaises(SCOPE['Refusal']): state.revalidate()
+            state.close(False)
 
     def test_InventorySourceReplacement(self):
         observe = self.required('observe_inventory')

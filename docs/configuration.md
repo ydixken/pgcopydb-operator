@@ -180,6 +180,20 @@ spec:
 For live migrations, the volume also buffers the change stream.
 Budget the needs of the clone, plus the write rate times the expected migration window.
 
+### Native work volume permissions
+
+With `spec.engine: rpgmigrate`, the native helpers check the work volume before they read it.
+They admit the volume root `/work` in the state that kubelet leaves under the Pod `fsGroup` 65532.
+The root must be a directory on its own mount, not a symbolic link.
+It must be owned by root or uid 65532, have group 65532, grant uid 65532 write access, and grant no write access to others.
+A setgid, group-writable root such as `root:65532` with mode `2775` passes.
+We give only the root this leeway, because the volume driver and kubelet own it.
+Everything below it, from `/work/pgcopydb` down, must be owned by uid 65532, with directories at mode `0700` and files at mode `0600`.
+
+> [!warning]
+> On a volume whose driver applies `fsGroup`, the default `fsGroupChangePolicy` makes kubelet add group permissions to every file on the volume each time a Pod mounts it.
+> The native helpers then refuse `/work/pgcopydb`, because its mode is no longer `0700`.
+
 ### Which node the Jobs prefer
 
 A Migration runs its Jobs one after another, except a [verification rehearsal](operations/verification.md#rehearsal), which runs at the same time as the worker.
