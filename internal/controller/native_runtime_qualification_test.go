@@ -910,6 +910,13 @@ func nativeRuntimeClient(input nativeRuntimeInput) (*kubernetes.Clientset, error
 	return kubernetes.NewForConfig(config)
 }
 
+// A followed log outlives the 30s request cap, so only the caller's context bounds it.
+func nativeRuntimeStreamConfig(config *rest.Config) *rest.Config {
+	untimed := rest.CopyConfig(config)
+	untimed.Timeout = 0
+	return untimed
+}
+
 func nativeRuntimeConfig(input nativeRuntimeInput) (*rest.Config, error) {
 	raw, err := nativeRuntimePrivate(input.Kubeconfig)
 	if err != nil {

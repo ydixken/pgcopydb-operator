@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 )
@@ -506,7 +508,7 @@ func nativePasswordDecodeResult(payload []byte, process map[string]any) (map[str
 	return passed, finalProcess, nil
 }
 
-func nativePasswordAuthorizeClient(ctx context.Context, clientset kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage nativeRuntimeImage, fixture *nativePasswordServerFixture, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (*nativePasswordExecution, error) {
+func nativePasswordAuthorizeClient(ctx context.Context, clientset, streams kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage nativeRuntimeImage, fixture *nativePasswordServerFixture, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (*nativePasswordExecution, error) {
 	server, service, keys, pgImage := fixture.pod, fixture.service, fixture.keys, fixture.image
 	expected, err := nativePasswordClient(input, node, nativeImage, major, program)
 	if err != nil {
@@ -532,7 +534,7 @@ func nativePasswordAuthorizeClient(ctx context.Context, clientset kubernetes.Int
 	if err != nil {
 		return nil, err
 	}
-	stream, err := clientset.CoreV1().Pods(input.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: workerContainer, Follow: true}).Stream(ctx)
+	stream, err := streams.CoreV1().Pods(input.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Container: workerContainer, Follow: true}).Stream(ctx)
 	if err != nil {
 		return nil, errors.New("client readiness stream unavailable")
 	}
@@ -652,12 +654,12 @@ func nativePasswordCollect(ctx context.Context, clientset kubernetes.Interface, 
 	return passed, nil
 }
 
-func nativePasswordRunPair(ctx context.Context, clientset kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage, pgImage nativeRuntimeImage, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (map[string]bool, error) {
+func nativePasswordRunPair(ctx context.Context, clientset, streams kubernetes.Interface, input nativeRuntimeInput, node nativeRuntimeNode, nativeImage, pgImage nativeRuntimeImage, major int, program string, owned *[]nativeRuntimeOwned, unknown *bool, scan *nativePasswordCanaries) (map[string]bool, error) {
 	fixture, err := nativePasswordPrepareServer(ctx, clientset, input, node, pgImage, major, owned, unknown, scan)
 	if err != nil {
 		return nil, err
 	}
-	execution, err := nativePasswordAuthorizeClient(ctx, clientset, input, node, nativeImage, fixture, major, program, owned, unknown, scan)
+	execution, err := nativePasswordAuthorizeClient(ctx, clientset, streams, input, node, nativeImage, fixture, major, program, owned, unknown, scan)
 	if err != nil {
 		return nil, err
 	}
@@ -683,9 +685,17 @@ func TestNativePackagedPasswordTLSProbe(t *testing.T) {
 		t.Fatal("fixed probe input refused")
 	}
 	r := input.Runtime
-	clientset, err := nativeRuntimeClient(r)
+	config, err := nativeRuntimeConfig(r)
 	if err != nil {
 		t.Fatal("owned client unavailable")
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatal("owned client unavailable")
+	}
+	streams, err := kubernetes.NewForConfig(nativeRuntimeStreamConfig(config))
+	if err != nil {
+		t.Fatal("owned log stream client unavailable")
 	}
 	nativeImage, err := nativeRuntimeAssets(path, r)
 	if err != nil {
@@ -739,7 +749,7 @@ func TestNativePackagedPasswordTLSProbe(t *testing.T) {
 	owned = append(owned, nativeRuntimeOwned{object: namespace, kind: nativeRuntimeNamespaceKind})
 	receipt.NamespaceUID = namespace.UID
 	for index, major := range []int{16, 18} {
-		passed, err := nativePasswordRunPair(work, clientset, r, r.Nodes[index], nativeImage, images[major], major, program, &owned, &unknown, scan)
+		passed, err := nativePasswordRunPair(work, clientset, streams, r, r.Nodes[index], nativeImage, images[major], major, program, &owned, &unknown, scan)
 		if err != nil {
 			t.Fatal("actual password/TLS primitive probe refused")
 		}
@@ -999,7 +1009,7 @@ def local_closure():
  need(mounts()[0]==original_mounts)
  for file in files+inputs:file.check()
  return self_process()
-start=time.monotonic();limit=start+30;files=[];inputs=[];cwd=None;diag=None
+start=time.monotonic();limit=start+120;files=[];inputs=[];cwd=None;diag=None
 try:
  need(os.geteuid()==65532 and os.getegid()==65532 and os.uname().machine=='aarch64');P.validate_environment(os.environ)
  original_mounts,rows=mounts()
@@ -1371,5 +1381,21 @@ func TestNativePasswordTLSCleanupRetriesAStatusConflict(t *testing.T) {
 	clientset = kubefake.NewClientset(replaced)
 	if result := nativePasswordRemove(ctx, clientset, nativeRuntimeOwned{object: pod, kind: nativeRuntimePodKind}); result.VerifiedAbsent || result.Action != nativeRuntimeRetained {
 		t.Fatal("a replaced Pod was deleted under the original identity")
+	}
+}
+
+// kubelet projects a Secret created after Pod start only on its next pod sync, 60 to 90 seconds later.
+func TestNativePasswordTLSBindingWaitCoversKubeletProjection(t *testing.T) {
+	match := regexp.MustCompile(`limit=start\+([0-9]+);`).FindStringSubmatch(nativePasswordTLSProgram)
+	if len(match) != 2 {
+		t.Fatal("client binding wait missing")
+	}
+	window, err := strconv.Atoi(match[1])
+	if err != nil || window <= 90 || 2*(window+25) >= 299 {
+		t.Fatal("client binding wait misses the kubelet resync or both pairs overrun the Go work bound", window)
+	}
+	capped := &rest.Config{Host: "https://127.0.0.1:6443", Timeout: 30 * time.Second}
+	if untimed := nativeRuntimeStreamConfig(capped); untimed.Timeout != 0 || capped.Timeout != 30*time.Second || untimed.Host != capped.Host {
+		t.Fatal("the followed log stream keeps the request cap or the shared config changed")
 	}
 }
