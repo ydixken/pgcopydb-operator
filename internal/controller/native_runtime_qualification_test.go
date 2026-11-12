@@ -373,7 +373,8 @@ def sandbox_value(raw,e,sid,terminal=False):
  else:need(info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False);pid=info.get('pid')
  need(type(pid) is int and 1<pid<4194304)
  config=info.get('config');need(type(config) is dict and config.get('metadata',{}).get('uid')==e['pod_uid'] and config['metadata'].get('name')==e['pod_name'] and config['metadata'].get('namespace')==e['namespace'])
- metadata=info.get('sandboxMetadata',{});need(type(metadata) is dict and metadata.get('RuntimeHandler',metadata.get('runtimeHandler','')) in ('','runc'))
+ # containerd nests the handler under Metadata (read off kind v1.36.4); an absent field is refused, never read as the default.
+ metadata=info.get('sandboxMetadata');need(type(metadata) is dict and type(metadata.get('Metadata')) is dict and metadata['Metadata'].get('RuntimeHandler') in ('','runc'))
  spec=info.get('runtimeSpec');need(type(spec) is dict and spec.get('hooks') in (None,{}))
  namespaces=spec.get('linux',{}).get('namespaces');need(type(namespaces) is list and len(namespaces)==5 and all(type(n) is dict for n in namespaces) and {n.get('type') for n in namespaces}=={'pid','ipc','uts','mount','network'})
  for namespace in namespaces:

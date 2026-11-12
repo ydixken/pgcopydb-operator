@@ -139,7 +139,7 @@ class QualificationBoundaries(unittest.TestCase):
                      info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                processStatus='running', netNamespaceClosed=False, pid=100,
                                config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
-                               sandboxMetadata=dict(RuntimeHandler=''),
+                               sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')),
                                runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid','ipc','uts','mount')]+
                                                           [dict(type='network', path='/var/run/netns/cni-owned')]))))
         self.assertEqual(functions['sandbox_value'](json.dumps(value).encode(), expected, sandbox),
@@ -149,6 +149,16 @@ class QualificationBoundaries(unittest.TestCase):
                        lambda spec:spec['linux']['namespaces'].append(dict(type='pid'))):
             candidate=json.loads(json.dumps(value));mutate(candidate['info']['runtimeSpec'])
             with self.assertRaises(RuntimeError):
+                functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
+        handled=json.loads(json.dumps(value));handled['info']['sandboxMetadata']['Metadata']['RuntimeHandler']='runc'
+        self.assertEqual(functions['sandbox_value'](json.dumps(handled).encode(), expected, sandbox)['sandbox_pid'], 100)
+        # An absent handler is refused at the live nesting and never read from the top level.
+        for metadata in ({}, dict(RuntimeHandler=''), dict(Metadata={}), dict(Metadata=dict(RuntimeHandler='kata')),
+                         dict(Metadata=dict(runtimeHandler='')), dict(Metadata=None), None):
+            candidate=json.loads(json.dumps(value));candidate['info']['sandboxMetadata']=metadata
+            if metadata is None:
+                del candidate['info']['sandboxMetadata']
+            with self.subTest(metadata=metadata), self.assertRaises(RuntimeError):
                 functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
 
     def test_terminal_proof_accepts_the_sandbox_kubelet_stopped(self):
@@ -160,7 +170,7 @@ class QualificationBoundaries(unittest.TestCase):
                      info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                processStatus='deleted', netNamespaceClosed=True, pid=0,
                                config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
-                               sandboxMetadata=dict(RuntimeHandler=''),
+                               sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')),
                                runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
                                                           [dict(type='network', path='/var/run/netns/cni-owned')]))))
         terminal = dict(expected, previous=dict(sandbox_pid=50))
@@ -240,7 +250,7 @@ class QualificationBoundaries(unittest.TestCase):
                        info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
                                  processStatus='deleted', netNamespaceClosed=True, pid=0,
                                  config=dict(metadata=dict(uid=uid, name='owned-name', namespace='owned-namespace')),
-                                 sandboxMetadata={}, runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                 sandboxMetadata=dict(Metadata=dict(RuntimeHandler='')), runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
                                                                                 [dict(type='network', path='/var/run/netns/cni-owned')]))))
         replies = dict(inspect=json.dumps(exited).encode(), inspectp=json.dumps(stopped).encode())
         specs = []
