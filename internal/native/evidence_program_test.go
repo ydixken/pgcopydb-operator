@@ -80,7 +80,10 @@ func TestNativePythonCredentialsPrivate(t *testing.T) {
 func TestNativePythonResultDiscipline(t *testing.T) { pythonMechanismCase(t, "test_ResultDiscipline") }
 func TestNativePythonOrderedGuards(t *testing.T)    { pythonMechanismCase(t, "test_OrderedGuards") }
 func TestNativePythonPrivateInput(t *testing.T)     { pythonMechanismCase(t, "test_PrivateInput") }
-func TestNativePythonEnvironmentDNS(t *testing.T)   { pythonMechanismCase(t, "test_EnvironmentDNS") }
+func TestNativePythonPrivateInputSetgidParent(t *testing.T) {
+	pythonMechanismCase(t, "test_PrivateInputSetgidParent")
+}
+func TestNativePythonEnvironmentDNS(t *testing.T) { pythonMechanismCase(t, "test_EnvironmentDNS") }
 func TestNativePythonQualifiedResolverPolicy(t *testing.T) {
 	pythonMechanismCase(t, "test_QualifiedResolverPolicy")
 }
@@ -272,7 +275,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 57 || len(registered) != 57 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 58 || len(registered) != 58 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)

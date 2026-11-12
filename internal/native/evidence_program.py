@@ -156,7 +156,9 @@ class InputChannel:
   try:
    self.parent=fdopen(os.path.realpath('/tmp'),True)
    os.mkdir('rpgmigrate-evidence-'+op,0o700,dir_fd=self.parent)
-   self.directory=fdopen('rpgmigrate-evidence-'+op,True,self.parent); self.dir_id=identity(private_type(self.directory,True))
+   self.directory=fdopen('rpgmigrate-evidence-'+op,True,self.parent)
+   # Under kubelet fsGroup /tmp is setgid, so mkdir inherits S_ISGID; fchmod clears it and private_type still demands exactly 0o700.
+   os.fchmod(self.directory,0o700); self.dir_id=identity(private_type(self.directory,True))
    for name in self.names:
     os.mkfifo(name,0o600,dir_fd=self.directory); self.remaining.add(name)
    for name in self.names[1:]+self.names[:1]:
