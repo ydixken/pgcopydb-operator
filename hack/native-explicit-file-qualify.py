@@ -64,7 +64,7 @@ for role in source target; do
   install -o 0 -g 65532 -m 0440 /in/ca.crt tls/$role/ca.crt
   install -o 0 -g 65532 -m 0440 /in/client.crt tls/$role/tls.crt
   install -o 0 -g 65532 -m 0440 /in/client.key tls/$role/tls.key
-  install -o 0 -g 65532 -m 0440 /in/password.txt creds/$role-mnt/$role-password
+  install -o 0 -g 65532 -m 0440 /in/password-$role.txt creds/$role-mnt/$role-password
 done
 install -d -o 0 -g 0 -m 0755 shadow
 install -o 0 -g 0 -m 0444 /dev/null shadow/.native-file-absent
@@ -101,9 +101,11 @@ def private(path, text, mode=0o600):
 
 def make_fixtures(args, fx):
     fx.mkdir(mode=0o700)
-    values = {'password': secrets.token_hex(16), 'keypass': secrets.token_hex(16), 'superuser': secrets.token_hex(16)}
+    values = {'password': secrets.token_hex(16), 'keypass': secrets.token_hex(16), 'superuser': secrets.token_hex(16),
+              'target_password': secrets.token_hex(16)}
     private(fx / 'secrets.json', json.dumps(values))
-    private(fx / 'password.txt', values['password'])
+    private(fx / 'password-source.txt', values['password'])
+    private(fx / 'password-target.txt', values['target_password'])
     private(fx / 'keypass.txt', values['keypass'])
     private(fx / 'server.env', 'POSTGRES_PASSWORD=%s\nPGDATA=/var/lib/postgresql/data/pg\n' % values['superuser'])
     lines = ''.join('%s:*:*:pwuser:%s\n' % (host, '%s') for host in ('localhost', '127.0.0.1'))
@@ -229,7 +231,14 @@ def argv_cases(args, export, vol):
     return rows, mounts, env
 
 
-def integration(args, export, mounts, env, pg18, sha):
+def split_target_password(args, values):
+    # Same host and user, different port and password: a wildcard-port passfile gives the target the source's line.
+    sql = "ALTER ROLE pwuser PASSWORD '%s';\n" % values['target_password']
+    run(['podman', 'exec', '-i', '%s-pg16' % args.prefix, 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres',
+         '-p', str(PORTS[16]), '-d', 'postgres', '-f', '-'], input=sql.encode())
+
+
+def integration(args, export, mounts, env, pg18, sha, values):
     command = export['integration']['command']
     main = ('exec /usr/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH /usr/bin/python3 -I -B /verifier/%s integration '
             '/src/evidence_program.py %s' % (VERIFIER, sha))
@@ -237,9 +246,13 @@ def integration(args, export, mounts, env, pg18, sha):
     result = container(args, 'integration', args.image, [*command[1:], '-c', main],
                        [*RUNNER, *mounts, *env, *src, '--network', 'container:' + pg18, '--entrypoint', command[0]], timeout=120)
     try:
-        return json.loads(result.stdout)
+        out = json.loads(result.stdout)
     except ValueError:
         return {'stage': 'integration', 'error': 'no verifier output', 'exit': result.returncode}
+    leaked = sum(value.encode() in result.stdout + result.stderr for value in values.values())
+    out.setdefault('cases', []).append({'case': 'no_canary_in_output', 'observed': leaked, 'pass': leaked == 0})
+    out['total'], out['passed'] = len(out['cases']), sum(row['pass'] for row in out['cases'])
+    return out
 
 
 def go_tests(evidence):
@@ -300,7 +313,7 @@ def main():
             raise SystemExit('Go embedding and program file disagree')
         receipt['go_refusals'] = export['refusals']
         fx = evidence / 'fixtures'
-        make_fixtures(args, fx)
+        values = make_fixtures(args, fx)
         vol = '%s-fixtures' % args.prefix
         run(['podman', 'volume', 'create', '--label', args.label, vol])
         container(args, 'populate', args.image, ['sh', '-c', POPULATE_SH],
@@ -327,7 +340,8 @@ def main():
         cases_file.chmod(0o644)
         stages['matrix'], _ = verifier(args, 'matrix', ['--network', 'container:' + pg18, '-v', '%s:/fixtures:ro' % vol,
                                                          '-v', '%s:/cases.json:ro' % cases_file], ['matrix', *lib, '/cases.json'])
-        stages['integration'] = integration(args, export, mounts, env, pg18, sha)
+        split_target_password(args, values)
+        stages['integration'] = integration(args, export, mounts, env, pg18, sha, values)
     finally:
         receipt['stages'] = stages
         receipt['cleanup_verified'] = cleanup(args)

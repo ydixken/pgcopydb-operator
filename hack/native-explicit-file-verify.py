@@ -315,8 +315,9 @@ def run_matrix(P, program, sha, cases_path):
         env.update(case.get('env', {}))
         observed = {}
         for mode in ('binding', 'raw'):
+            # A Job container has no stdin or TTY, so an OpenSSL passphrase prompt reads EOF here too.
             child = subprocess.run([sys.executable, '-I', '-B', __file__, 'connect', program, sha, mode], env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40, cwd='/work')
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40, cwd='/work')
             leaked += sum(canary in child.stdout or canary in child.stderr for canary in canaries)
             try:
                 observed[mode] = json.loads(child.stdout)
@@ -332,6 +333,10 @@ def run_matrix(P, program, sha, cases_path):
 def run_integration(P):
     diag = P.Diagnostics()
     c = Checks()
+    # Host and port fields only; the hosts carry no escaped colon.
+    with open('/tmp/pgpass') as handle:
+        c.add('passfile_host_ports', [line.split(':')[:3] for line in handle.read().splitlines()],
+              [['localhost', '5418', '*'], ['localhost', '5416', '*']])
     library = P.load_runtime()
     materials = P.Materialization(os.environ)
     try:
