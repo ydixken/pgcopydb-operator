@@ -151,6 +151,109 @@ class QualificationBoundaries(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
 
+    def test_terminal_proof_accepts_the_sandbox_kubelet_stopped(self):
+        functions = node_functions()
+        expected = dict(pod_uid='owned-pod', pod_name='owned-name', namespace='owned-namespace')
+        sandbox = '2' * 64
+        # Shape read off a live kind v1.36.4 Job sandbox after its container exited.
+        value = dict(status=dict(id=sandbox, state='SANDBOX_NOTREADY', labels={'io.kubernetes.pod.uid': 'owned-pod'}),
+                     info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                               processStatus='deleted', netNamespaceClosed=True, pid=0,
+                               config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
+                               sandboxMetadata=dict(RuntimeHandler=''),
+                               runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                                          [dict(type='network', path='/var/run/netns/cni-owned')]))))
+        terminal = dict(expected, previous=dict(sandbox_pid=50))
+        check = lambda candidate, e=terminal, stopped=True: functions['sandbox_value'](json.dumps(candidate).encode(), e, sandbox, stopped)
+        self.assertEqual(check(value), dict(sandbox_id=sandbox, sandbox_pid=50))
+        ready = json.loads(json.dumps(value))
+        ready['status']['state'] = 'SANDBOX_READY'; ready['info'].update(processStatus='running', netNamespaceClosed=False, pid=100)
+        self.assertEqual(check(ready), dict(sandbox_id=sandbox, sandbox_pid=50))
+        self.assertEqual(check(ready, expected, False), dict(sandbox_id=sandbox, sandbox_pid=100))
+        refusals = [(value, expected, False), (dict(ready, status=dict(ready['status'], state='SANDBOX_NOTREADY')), expected, False),
+                    (dict(ready, info=dict(ready['info'], processStatus='deleted')), expected, False),
+                    (dict(ready, info=dict(ready['info'], netNamespaceClosed=True)), expected, False),
+                    (value, dict(expected, previous=None), True),
+                    (value, dict(expected, previous={}), True), (value, dict(expected, previous=dict(sandbox_pid=1)), True)]
+        for mutate in (lambda v: v['status'].update(state='SANDBOX_UNKNOWN'), lambda v: v['status'].update(id='3' * 64),
+                       lambda v: v['status']['labels'].update({'io.kubernetes.pod.uid': 'foreign'}),
+                       lambda v: v['info'].update(runtimeType='io.containerd.kata.v2'),
+                       lambda v: v['info']['config']['metadata'].update(uid='foreign')):
+            candidate = json.loads(json.dumps(value)); mutate(candidate); refusals.append((candidate, terminal, True))
+        for candidate, e, stopped in refusals:
+            with self.subTest(candidate=candidate, e=e, stopped=stopped), self.assertRaises(RuntimeError):
+                check(candidate, e, stopped)
+
+    def test_terminal_proof_comes_from_cri_container_status(self):
+        functions = node_functions()
+        container, uid, sandbox, boot = '1' * 64, 'owned-pod', '2' * 64, '00000000-0000-0000-0000-000000000001'
+        absent = {'value': '1'}
+        functions.update(primitive=lambda action, *values: dict(meta=dict(absent=absent['value'])),
+                         platform_files=lambda: ('1', '2', boot))
+        previous = dict(container_id=container, pod_uid=uid, sandbox_id=sandbox, pid=3401, start_ticks=200,
+                        boot_id=boot, sandbox_pid=3376)
+        e = dict(container_id=container, pod_uid=uid, previous=previous)
+        # Timestamps keep the trimmed nanosecond form crictl printed on the live node.
+        status = dict(id=container, state='CONTAINER_EXITED', exitCode=0, reason='Completed',
+                      startedAt='2026-11-12T17:17:26.61635947Z', finishedAt='2026-11-12T17:18:06.625554939Z',
+                      labels={'io.kubernetes.pod.uid': uid})
+        value = dict(status=status, info=dict(pid=0))
+        bound = dict(sandbox_id=sandbox, sandbox_pid=3376)
+        result = functions['terminal_result'](e, value, bound, {})
+        self.assertEqual((result['state'], result['terminal_pid_absent'], result['live_process_verified']), ('terminal', True, False))
+        close = dict(status, startedAt='2026-11-12T17:17:26.6Z', finishedAt='2026-11-12T17:17:26.600000001Z')
+        self.assertEqual(functions['terminal_result'](e, dict(value, status=close), bound, {})['state'], 'terminal')
+        refused = [dict(value, status=dict(status, **change)) for change in (
+            dict(state='CONTAINER_RUNNING'), dict(exitCode=1), dict(exitCode=None), dict(id='3' * 64),
+            dict(labels={'io.kubernetes.pod.uid': 'foreign'}), dict(labels={}),
+            dict(finishedAt=status['startedAt']), dict(finishedAt='2026-11-12T17:17:26.616359469Z'),
+            dict(startedAt='0001-01-01T00:00:00Z'), dict(finishedAt='0001-01-01T00:00:00Z'),
+            dict(startedAt=None), dict(finishedAt='2026-11-12 17:18:06Z'), dict(finishedAt='2026-13-12T17:18:06Z'), dict(startedAt='2026-02-30T17:17:26Z'),
+            dict(finishedAt=1763000000000000000))]
+        refused.append(dict(value, info=dict(pid=3401)))
+        for candidate in refused:
+            with self.subTest(status=candidate['status'], info=candidate['info']), self.assertRaises(RuntimeError):
+                functions['terminal_result'](e, candidate, bound, {})
+        for changed in (dict(previous, container_id='3' * 64), dict(previous, pod_uid='foreign'), dict(previous, boot_id='other')):
+            with self.subTest(previous=changed), self.assertRaises(RuntimeError):
+                functions['terminal_result'](dict(e, previous=changed), value, bound, {})
+        with self.assertRaises(RuntimeError):
+            functions['terminal_result'](e, value, dict(bound, sandbox_id='3' * 64), {})
+        absent['value'] = '0'
+        with self.assertRaises(RuntimeError):
+            functions['terminal_result'](e, value, bound, {})
+
+    def test_terminal_mode_binds_the_stopped_sandbox_to_the_recorded_pid(self):
+        functions = node_functions()
+        container, sandbox, uid, boot = '1' * 64, '2' * 64, 'owned-pod', '00000000-0000-0000-0000-000000000001'
+        binding = dict(termination_log_id='0123abcd', image_volume_id=None)
+        previous = dict(binding, container_id=container, pod_uid=uid, sandbox_id=sandbox, pid=3401, start_ticks=200,
+                        boot_id=boot, sandbox_pid=3376)
+        e = dict(mode='terminal', container_id=container, pod_uid=uid, pod_name='owned-name', namespace='owned-namespace',
+                 container_name='main', previous=previous)
+        exited = dict(status=dict(id=container, state='CONTAINER_EXITED', exitCode=0, labels={'io.kubernetes.pod.uid': uid},
+                                  startedAt='2026-11-12T17:17:26.61635947Z', finishedAt='2026-11-12T17:18:06.625554939Z'),
+                      info=dict(sandboxID=sandbox, pid=0, removing=False, snapshotKey=container, snapshotter='overlayfs',
+                                runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                                config=dict(metadata=dict(name='main')), runtimeSpec={}))
+        stopped = dict(status=dict(id=sandbox, state='SANDBOX_NOTREADY', labels={'io.kubernetes.pod.uid': uid}),
+                       info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                                 processStatus='deleted', netNamespaceClosed=True, pid=0,
+                                 config=dict(metadata=dict(uid=uid, name='owned-name', namespace='owned-namespace')),
+                                 sandboxMetadata={}, runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                                                                [dict(type='network', path='/var/run/netns/cni-owned')]))))
+        replies = dict(inspect=json.dumps(exited).encode(), inspectp=json.dumps(stopped).encode())
+        specs = []
+        functions.update(run=lambda action, identifier: replies[action],
+                         checked_spec=lambda spec, request, bound: (specs.append(bound), dict(binding))[1],
+                         primitive=lambda action, *values: dict(meta=dict(absent='1')), platform_files=lambda: ('1', '2', boot))
+        result = functions['projected'](e)
+        self.assertEqual((result['state'], result['sandbox_pid'], result['terminal_pid_absent']), ('terminal', 3376, True))
+        self.assertEqual(specs, [dict(sandbox_id=sandbox, sandbox_pid=3376)])
+        for mode in ('running', 'metadata_release'):
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                functions['projected'](dict(e, mode=mode))
+
     def test_persistent_active_profile_requires_honest_terminal_evidence(self):
         self.assertTrue(callable(getattr(Q,'validate_active_profile',None)), 'persistent active profile gate missing')
         value = active_profile_fixture()

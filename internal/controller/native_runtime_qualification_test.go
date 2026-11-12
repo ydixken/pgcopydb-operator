@@ -199,7 +199,7 @@ need(local_closure()==process)
 print(json.dumps(dict(kind='metadata_complete',process=process,closure=True),sort_keys=True,separators=(',',':')),flush=True)
 `
 
-const nativeRuntimeNodeProgram = `import hashlib,json,math,os,re,selectors,stat,struct,subprocess,sys,time
+const nativeRuntimeNodeProgram = `import datetime,hashlib,json,math,os,re,selectors,stat,struct,subprocess,sys,time
 
 def need(value):
  if not value:raise RuntimeError('active_profile_refused')
@@ -364,11 +364,14 @@ def container_value(raw,e):
  linux=config.get('linux',{});security=linux.get('security_context',linux.get('securityContext',{}));need(type(security) is dict and not security.get('privileged',False))
  return value
 
-def sandbox_value(raw,e,sid):
+def sandbox_value(raw,e,sid,terminal=False):
  value=strict(raw);fields(value,('status','info'));status=value['status'];info=value['info']
- need(type(status) is dict and status.get('id')==sid and status.get('state')=='SANDBOX_READY' and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid'])
- need(type(info) is dict and info.get('runtimeType')=='io.containerd.runc.v2' and info.get('runtimeOptions')==dict(systemd_cgroup=True) and info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False)
- pid=info.get('pid');need(type(pid) is int and 1<pid<4194304)
+ # kubelet stops the sandbox once the Job container exits, so a terminal proof binds the recorded sandbox PID instead.
+ need(type(status) is dict and status.get('id')==sid and status.get('state') in (('SANDBOX_READY','SANDBOX_NOTREADY') if terminal else ('SANDBOX_READY',)) and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid'])
+ need(type(info) is dict and info.get('runtimeType')=='io.containerd.runc.v2' and info.get('runtimeOptions')==dict(systemd_cgroup=True))
+ if terminal:need(type(e.get('previous')) is dict);pid=e['previous'].get('sandbox_pid')
+ else:need(info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False);pid=info.get('pid')
+ need(type(pid) is int and 1<pid<4194304)
  config=info.get('config');need(type(config) is dict and config.get('metadata',{}).get('uid')==e['pod_uid'] and config['metadata'].get('name')==e['pod_name'] and config['metadata'].get('namespace')==e['namespace'])
  metadata=info.get('sandboxMetadata',{});need(type(metadata) is dict and metadata.get('RuntimeHandler',metadata.get('runtimeHandler','')) in ('','runc'))
  spec=info.get('runtimeSpec');need(type(spec) is dict and spec.get('hooks') in (None,{}))
@@ -379,8 +382,15 @@ def sandbox_value(raw,e,sid):
   else:need(path=='')
  return dict(sandbox_id=sid,sandbox_pid=pid)
 
+def cri_time(value):
+ match=re.fullmatch('([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:[.]([0-9]{1,9}))?Z',value) if type(value) is str else None;need(match is not None)
+ try:moment=datetime.datetime(*(int(part) for part in match.groups()[:6]),tzinfo=datetime.timezone.utc)-datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)
+ except ValueError:raise RuntimeError('active_profile_refused') from None
+ return (moment.days*86400+moment.seconds)*10**9+int((match[7] or '').ljust(9,'0'))
+
 def terminal_result(e,value,sandbox,binding):
- previous=e['previous'];need(type(previous) is dict and value['status'].get('state')=='CONTAINER_EXITED' and value['status'].get('exitCode')==0 and value['info']['pid']==0 and previous['sandbox_id']==sandbox['sandbox_id'])
+ previous=e['previous'];status=value['status'];need(type(previous) is dict and status.get('state')=='CONTAINER_EXITED' and status.get('exitCode')==0 and value['info']['pid']==0 and previous['sandbox_id']==sandbox['sandbox_id'])
+ need(status.get('id')==e['container_id']==previous.get('container_id') and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid']==previous.get('pod_uid') and 0<cri_time(status.get('startedAt'))<cri_time(status.get('finishedAt')))
  pid=previous['pid'];need(type(pid) is int and 1<pid<4194304)
  meta=primitive('absence',pid,previous['start_ticks'])['meta'];fields(meta,('absent',));need(meta['absent']=='1')
  boot=platform_files()[2]
@@ -391,7 +401,7 @@ def terminal_result(e,value,sandbox,binding):
  return result
 
 def projected(e):
- first=container_value(run('inspect',e['container_id']),e);sandbox=sandbox_value(run('inspectp',first['info']['sandboxID']),e,first['info']['sandboxID'])
+ first=container_value(run('inspect',e['container_id']),e);sandbox=sandbox_value(run('inspectp',first['info']['sandboxID']),e,first['info']['sandboxID'],e['mode']=='terminal')
  binding=checked_spec(first['info']['runtimeSpec'],e,sandbox)
  if e['mode']=='terminal':return terminal_result(e,first,sandbox,binding)
  need(first['status'].get('state')=='CONTAINER_RUNNING')
