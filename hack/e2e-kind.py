@@ -72,6 +72,7 @@ IDENTITY = re.compile(r'[0-9a-f]{64}\Z')
 VOLATILE_ROOTS = (Path('/tmp'), Path('/private/tmp'))
 EVIDENCE_ROOT = Path('/var/tmp').resolve()
 SLEEP_ASSERTION_SECONDS = 5
+LEGACY_ORIGINALS = (('evidence', '.json'), ('qualification', '.json'), ('probe', '.stdout'))
 BASELINE_BUILDER = 'ghcr.io/ydixken/pgcopydb-operator/pgcopydb-builder:86bf908adca02d87063849dae775a02c1659c829@sha256:ef596ea105604ef128244057dd34411f433d4c40fdf897bcaa8b33793df9fec8'
 
 
@@ -1763,6 +1764,15 @@ class Guard:
 
 
     def baseline_provenance(self, lock, proof, receipts):
+        originals = {kind: self.external_bytes(receipts / ('legacy-runner-original-' + kind + suffix), maximum=65536)
+                     for kind, suffix in LEGACY_ORIGINALS}
+        graph = decode(self.external_bytes(receipts / 'legacy-runner-registry-receipt.json'), 'legacy public graph')
+        expected = self.legacy_receipt(lock, originals, graph)
+        if proof != expected:
+            raise Refusal('sanitized legacy executable receipt was not derived from the admitted original bytes')
+        return expected
+
+    def legacy_receipt(self, lock, originals, graph):
         catalog = decode((CONFIG / 'images.json').read_bytes(), 'static catalog')
         pin = catalog['legacy_qualification']
         fields = {'architecture', 'os', 'variant', 'runner_repository', 'runner_manifest_digest', 'runner_config_digest',
@@ -1776,12 +1786,9 @@ class Guard:
                     ('os', 'os'), ('variant', 'variant'))) or registry.repository(image['ref']) != pin['runner_repository'] or
                 any(seed[k] != image[k] for k in ('ref', 'digest', 'config_digest', 'architecture', 'os', 'variant'))):
             raise Refusal('legacy runner has no admitted immutable executable qualification for this platform')
-        originals = {}
-        for kind, suffix in (('evidence', '.json'), ('qualification', '.json'), ('probe', '.stdout')):
-            raw = self.external_bytes(receipts / ('legacy-runner-original-' + kind + suffix), maximum=65536)
-            if registry.sha(raw) != pin['original_' + kind + '_sha256']:
-                raise Refusal('original legacy qualification bytes differ from the admitted immutable evidence')
-            originals[kind] = raw
+        if set(originals) != {kind for kind, _ in LEGACY_ORIGINALS} or any(
+                registry.sha(raw) != pin['original_' + kind + '_sha256'] for kind, raw in originals.items()):
+            raise Refusal('original legacy qualification bytes differ from the admitted immutable evidence')
         evidence = decode(originals['evidence'], 'original legacy evidence')
         qualification = decode(originals['qualification'], 'original legacy qualification')
         actual = self.parse_runner_probe(originals['probe'].decode())
@@ -1805,7 +1812,6 @@ class Guard:
                 any(not actual.get(tool + '_version') for tool in ('psql', 'pg_dump', 'pg_restore', 'timeout', 'sed')) or
                 any(actual.get(tool + '_path') != '/usr/lib/postgresql/18/bin/' + tool for tool in ('pgcopydb', 'psql', 'pg_dump', 'pg_restore'))):
             raise Refusal('legacy executable, utility or cleanup invariants differ from the admitted evidence')
-        graph = decode(self.external_bytes(receipts / 'legacy-runner-registry-receipt.json'), 'legacy public graph')
         metadata = registry.validate_graph(image, graph, False)
         if pin['binary_layer_digest'] not in {layer['digest'] for layer in metadata['layers']}:
             raise Refusal('fresh public runner graph does not contain the admitted executable layer')
@@ -1815,8 +1821,6 @@ class Guard:
                 'original_evidence_sha256', 'original_qualification_sha256', 'original_probe_sha256')},
             'actual': actual, 'execution': {'nonroot': True, 'read_only': True, 'network': 'none', 'host_mounts': False,
                 'source_pin_changed': False, 'runtime_migration_qualified': False, 'cleanup_removed_and_absence_proven': True}}
-        if proof != expected:
-            raise Refusal('sanitized legacy executable receipt was not derived from the admitted original bytes')
         return expected
 
     def suite_projection(self, ledger):

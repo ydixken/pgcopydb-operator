@@ -2255,5 +2255,78 @@ class RetainedFailureReplayTests(GuardFixture):
         self.assertIn('go test ./test/e2e -json ', suite)
         self.assertIn('> {{.RUN_DIR | shellQuote}}/go-test.json', suite)
 
+
+LOCK_SCRIPT = Path(__file__).with_name('e2e-kind-lock.py')
+LOCK_SPEC = importlib.util.spec_from_file_location('e2e_kind_lock', LOCK_SCRIPT)
+LOCK = importlib.util.module_from_spec(LOCK_SPEC)
+LOCK_SPEC.loader.exec_module(LOCK)
+
+
+class LockGeneratorTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RegistryPreparationTests('test_prepare_retains_only_complete_metadata_and_check_is_read_only')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        for name, value in (('kind', MODULE), ('registry', MODULE.registry), ('Refusal', MODULE.Refusal)):
+            module_patch = patch.object(LOCK, name, value)
+            module_patch.start()
+            self.addCleanup(module_patch.stop)
+        self.output = self.fixture.root / 'lock'
+        self.guard = MODULE.Guard(self.output, environ={})
+        self.guard.architecture = lambda: 'arm64'
+        self.anchors = [self.fixture.receipts / ('legacy-runner-original-' + name + suffix) for name, suffix in MODULE.LEGACY_ORIGINALS]
+        self.blobs = {}
+        for role, graph in self.fixture.graphs.items():
+            image = self.fixture.lock['images'][role]
+            for digest, key in ((image['digest'], 'manifest_base64'), (image['config_digest'], 'config_base64')):
+                self.blobs[(MODULE.registry.repository(image['ref']), digest)] = base64.b64decode(graph[key])
+        self.layer = 200
+
+    def fetch(self, repository, path, method='GET'):
+        digest = path.rsplit('/', 1)[1]
+        if method == 'HEAD':
+            return self.layer, {'content-length': '37'}, b''
+        body = self.blobs.get((repository, digest))
+        return (200, {}, body) if body is not None else (404, {}, b'{}')
+
+    def download(self, role):
+        return (self.fixture.receipts / (role + '-publication-receipt.json')).read_bytes()
+
+    def generate(self, **overrides):
+        return LOCK.generate(self.guard, self.fixture.lock_path, overrides.get('anchors', self.anchors),
+                             overrides.get('fetch', self.fetch), overrides.get('download', self.download))
+
+    def test_regenerated_lock_matches_pins_and_passes_the_guard_receipt_inputs(self):
+        lock = self.generate()
+        self.assertEqual(lock, self.fixture.lock)
+        written, outputs, _ = self.fixture.guard.receipt_inputs(self.output / 'image-lock.json', self.output)
+        self.assertEqual(written, lock)
+        manifest = json.loads((self.output / 'lock-manifest.json').read_bytes())
+        self.assertEqual(manifest['image-lock.json'], MODULE.registry.sha((self.output / 'image-lock.json').read_bytes()))
+        self.assertTrue(set(outputs) - {'node-default-storage.yaml'} <= set(manifest) | {'storage-registry-receipt.json'})
+
+    def test_changed_registry_bytes_missing_blob_or_receipt_refuse_before_any_output(self):
+        image = self.fixture.lock['images']['postgresql-17']
+        def tampered(repository, path, method='GET'):
+            status, headers, body = self.fetch(repository, path, method)
+            return (status, headers, body + b' ') if path.endswith(image['digest']) else (status, headers, body)
+        def foreign(role):
+            receipt = json.loads(self.download(role))
+            receipt['resolved_image']['digest'] = 'sha256:' + 'f' * 64
+            return json.dumps(receipt).encode()
+        cases = {'bytes': {'fetch': tampered}, 'receipt': {'download': foreign}, 'anchor': {'anchors': self.anchors[:1] * 3}}
+        for name, overrides in cases.items():
+            with self.subTest(case=name), self.assertRaises(MODULE.Refusal):
+                self.generate(**overrides)
+            self.assertEqual(list(self.output.iterdir()), [])
+        self.layer = 404
+        with self.assertRaisesRegex(MODULE.Refusal, 'not anonymously public'):
+            self.generate()
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_task_target_runs_the_generator(self):
+        taskfile = (MODULE.ROOT / 'Taskfile.yml').read_text()
+        self.assertTrue('python3 hack/e2e-kind-lock.py --pins {{.PINS | shellQuote}}' in taskfile)
+
 if __name__ == '__main__':
     unittest.main()

@@ -325,6 +325,20 @@ tasks:
         --output-dir {{.OUTPUT_DIR | shellQuote}}
         {{if .RETAINED_RECEIPT}}--retained-receipt {{.RETAINED_RECEIPT | shellQuote}}{{end}}
 
+  e2e:kind:lock:
+    desc: Regenerate the image lock and receipts from public digests and hosted publication runs.
+    summary: >-
+      PINS is an earlier schema 2 lock whose upstream digests stay pinned. LEGACY_ANCHORS is a
+      space-separated list of the three original legacy evidence files. Without OUTPUT_DIR, the
+      lock goes to a fresh directory under /var/tmp.
+    requires: {vars: [PINS, MANAGER_RUN, NATIVE_RUN, LEGACY_ANCHORS]}
+    cmds:
+      - >-
+        python3 hack/e2e-kind-lock.py --pins {{.PINS | shellQuote}}
+        --manager-run {{.MANAGER_RUN | shellQuote}} --native-run {{.NATIVE_RUN | shellQuote}}
+        {{range splitArgs .LEGACY_ANCHORS}}--legacy-anchor {{. | shellQuote}} {{end}}
+        {{if .OUTPUT_DIR}}--output {{.OUTPUT_DIR | shellQuote}}{{end}}
+
   e2e:kind:prepare:
     desc: Bind a new private run to public image receipts and a frozen image lock.
     summary: Without RUN_DIR, the guard creates a fresh run under /var/tmp and prints its path.

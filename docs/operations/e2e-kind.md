@@ -28,6 +28,24 @@ The suite independently checks the SHA-256 of the exact `RUN/image-lock.json` by
 > Require anonymous manifest, config, and blob checks plus a full pull on every owned node.
 > Do not add registry credentials, a local registry, image imports, or image aliases to bypass a refusal.
 
+## Regenerate the image lock
+
+We rebuild the lock from public data, so a lost lock directory is not lost evidence.
+`task e2e:kind:lock` keeps the upstream digests of an earlier schema 2 lock, given as `PINS`, and reads their index, manifest, and config bytes anonymously from the registries.
+It checks each layer blob with an anonymous `HEAD` request.
+It takes the manager and native-runner entries from the publication receipts of the hosted runs `MANAGER_RUN` and `NATIVE_RUN`, which `gh run download` fetches again.
+`LEGACY_ANCHORS` names the three original legacy evidence files, which the generator matches by their catalog SHA-256 values.
+The generator writes the lock, every receipt, and `lock-manifest.json` with file hashes into a fresh private directory.
+Without `OUTPUT_DIR`, that directory is `/var/tmp/rpgmigrate-m7-lock-<uuid>`.
+
+```sh
+task e2e:kind:lock PINS="$OLD_LOCK" MANAGER_RUN="$MANAGER_RUN" NATIVE_RUN="$NATIVE_RUN" \
+  LEGACY_ANCHORS="$EVIDENCE $QUALIFICATION $PROBE"
+```
+
+Run it without `KUBECONFIG`, proxy, or registry overrides, as for the other kind commands.
+The output directory is the `IMAGE_LOCK` parent and the `RECEIPT_DIR` for `e2e:kind:prepare`.
+
 ## Development publication
 
 The approved feature-branch workflow calls `task image:dev:publish` for the exact checkout and architecture.
