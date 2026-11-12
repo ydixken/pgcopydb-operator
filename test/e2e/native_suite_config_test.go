@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -74,6 +75,56 @@ func TestLegacyCloneShapeUnchanged(t *testing.T) {
 		t.Setenv("E2E_ENGINE", engine)
 		if got := createThroughSuiteClient(t, legacyCloneFixture()); !reflect.DeepEqual(got, legacyCloneFixture()) {
 			t.Fatalf("E2E_ENGINE=%q changed the legacy clone: %+v", engine, got)
+		}
+	}
+}
+
+func TestNativeSuiteConnectionsVerifyFull(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	created := func(engine string, change func(*v1beta1.Migration)) (*v1beta1.Migration, error) {
+		t.Setenv("E2E_ENGINE", engine)
+		base := clientfake.NewClientBuilder().WithScheme(scheme).Build()
+		m := newMigration("native-tls", nsE2E, v1beta1.CloneOptions{})
+		m.Spec.Source.Host, m.Spec.Target.Host = "pair-src-rw."+nsE2E+".svc", "pair-dst-rw."+nsE2E+".svc"
+		change(m)
+		if err := (featureLabelingClient{Client: base}).Create(context.Background(), m); err != nil {
+			return nil, err
+		}
+		got := &v1beta1.Migration{}
+		return got, base.Get(context.Background(), client.ObjectKeyFromObject(m), got)
+	}
+	got, err := created(string(v1beta1.MigrationEngineRPGMigrate), func(*v1beta1.Migration) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sides := map[string]v1beta1.PostgresConnection{"pair-src": got.Spec.Source, "pair-dst": got.Spec.Target}
+	for cluster, conn := range sides {
+		want := &v1beta1.TLSSecretRefs{RootCA: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: cluster + "-ca"}, Key: "ca.crt"}}
+		if conn.SSLMode != sslVerifyFull || !reflect.DeepEqual(conn.TLS, want) {
+			t.Fatalf("native %s connection = %s %+v, want verify-full against %s-ca", cluster, conn.SSLMode, conn.TLS, cluster)
+		}
+	}
+	legacy, err := created(string(v1beta1.MigrationEnginePGCopyDB), func(*v1beta1.Migration) {})
+	if err != nil || legacy.Spec.Source.SSLMode != "" || legacy.Spec.Source.TLS != nil || legacy.Spec.Target.TLS != nil {
+		t.Fatalf("legacy connection changed: %v %+v", err, legacy)
+	}
+	for name, change := range map[string]func(*v1beta1.Migration){
+		"foreign namespace": func(m *v1beta1.Migration) { m.Spec.Target.Host = "pair-dst-rw.other.svc" },
+		"replica service":   func(m *v1beta1.Migration) { m.Spec.Source.Host = "pair-src-ro." + nsE2E + ".svc" },
+		"external host":     func(m *v1beta1.Migration) { m.Spec.Source.Host = "db.example.com" },
+		"dotted cluster":    func(m *v1beta1.Migration) { m.Spec.Source.Host = "a.b-rw." + nsE2E + ".svc" },
+		"weaker sslmode":    func(m *v1beta1.Migration) { m.Spec.Target.SSLMode = sslRequire },
+		"preset TLS":        func(m *v1beta1.Migration) { m.Spec.Source.TLS = &v1beta1.TLSSecretRefs{} },
+		"secret form": func(m *v1beta1.Migration) {
+			m.Spec.Source = v1beta1.PostgresConnection{SecretRef: &v1beta1.ConnectionSecret{Name: "pair-src-app"}}
+		},
+	} {
+		if _, err := created(string(v1beta1.MigrationEngineRPGMigrate), change); err == nil {
+			t.Errorf("native Migration with %s was created without a pinned CNPG CA", name)
 		}
 	}
 }

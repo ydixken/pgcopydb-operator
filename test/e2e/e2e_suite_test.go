@@ -227,6 +227,11 @@ func (c featureLabelingClient) Create(
 		}
 		if migration.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
 			migration.Spec.Clone = nativeClone(migration.Spec.Clone)
+			if external == nil {
+				if err := nativeVerifyFull(migration); err != nil {
+					return err
+				}
+			}
 		}
 		if err := labelFeatureMigration(migration); err != nil {
 			return err
@@ -242,6 +247,24 @@ func nativeClone(c v1beta1.CloneOptions) v1beta1.CloneOptions {
 		TableJobs: c.TableJobs, UseCopyBinary: ptr.To(false),
 		SplitTablesLargerThan: ptr.To(resource.MustParse("0")), Skip: []v1beta1.SkipOption{"largeObjects"},
 	}
+}
+
+const sslVerifyFull = "verify-full"
+
+// nativeVerifyFull pins each side to the suite's CNPG cluster CA, as the runner-profile receipts were
+// qualified, and refuses a connection it cannot bind instead of leaving it on sslmode=prefer.
+func nativeVerifyFull(m *v1beta1.Migration) error {
+	for _, conn := range []*v1beta1.PostgresConnection{&m.Spec.Source, &m.Spec.Target} {
+		cluster, inline := strings.CutSuffix(conn.Host, "-rw."+m.Namespace+".svc")
+		if !inline || cluster == "" || strings.Contains(cluster, ".") || conn.TLS != nil ||
+			conn.SSLMode != "" && conn.SSLMode != sslVerifyFull {
+			return fmt.Errorf("native Migration %s/%s connection cannot be pinned to its CNPG CA", m.Namespace, m.Name)
+		}
+		conn.SSLMode = sslVerifyFull
+		conn.TLS = &v1beta1.TLSSecretRefs{RootCA: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: cluster + "-ca"}, Key: "ca.crt"}}
+	}
+	return nil
 }
 
 func (c featureLabelingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {

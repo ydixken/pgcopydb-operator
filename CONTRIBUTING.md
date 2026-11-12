@@ -217,6 +217,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
   It MUST NOT be older than the source, and MUST be at least 17 (see below).
 - `E2E_ENGINE` (`pgcopydb`) sets `spec.engine` on every Migration the suite creates.
   `rpgmigrate` accepts only the pairs 16:16, 18:18 and 16:18, and turns off DropIfExists, filters, binary COPY, split parts and large objects in each Migration.
+  It also connects each side with `sslmode=verify-full` against that CNPG cluster's `<cluster>-ca` Secret, and refuses a Migration whose connection it cannot bind to one.
   The Ginkgo label `native` selects the specs the native matrix runs.
   `TestE2E` refuses `rpgmigrate` and names the missing prerequisite until native activation lands.
 - `E2E_OPERATOR_TAG` (unset) is a manager image tag to install instead of the pinned release; the runner follows it.

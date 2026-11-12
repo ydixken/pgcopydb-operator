@@ -243,7 +243,7 @@ func parsePostgresURI(name, raw string) (postgresURI, error) {
 	switch mode := query.Get("sslmode"); mode {
 	case "", sslDisable, "allow", "prefer", sslRequire:
 		parsed.sslMode = mode
-	case "verify-ca", "verify-full":
+	case "verify-ca", sslVerifyFull:
 		return postgresURI{}, fmt.Errorf("%s asks for sslmode=%s, which needs a CA bundle the suite does not mount",
 			name, mode)
 	default:
