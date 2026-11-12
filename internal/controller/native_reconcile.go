@@ -28,11 +28,16 @@ func unsupportedEngineMessage(m *v1beta1.Migration, cause error) string {
 	if cause != nil {
 		return cause.Error()
 	}
-	msg := "rpgmigrate backend is not implemented or qualified"
-	if err := validateNativeConfig(m, nil); err != nil {
+	msg := "rpgmigrate backend is not qualified for this runner image"
+	// The runner's advertised capabilities are unknown here, so only configuration errors are named.
+	if _, err := nativeConfigCapabilities(m); err != nil {
 		msg += ": " + err.Error()
 	}
 	return msg
+}
+
+func nativeRunnerQualified(image string) bool {
+	return nativeEvidenceDirectImage(image) && native.QualifiedRunner(image)
 }
 
 func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {

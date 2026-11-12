@@ -7,8 +7,8 @@ Complete resources with comments are in the [examples index](examples.md).
 
 Omit `spec.engine` or set it to `pgcopydb` to use the pgcopydb backend.
 The effective engine is immutable for each Migration.
-The controller rejects `rpgmigrate` until a native backend is implemented and qualified.
-It sets `Validated=False` and `Failed=True` with reason `UnsupportedEngine` before it creates resources or executes commands.
+The controller runs `rpgmigrate` only when the Migration's effective runner image pins a qualified runner manifest, as described under [Native helper image](#native-helper-image).
+Otherwise it sets `Validated=False` and `Failed=True` with reason `UnsupportedEngine` before it creates resources or executes commands.
 It also rejects unknown engine values if admission does not reject them first.
 The rejection does not delete, adopt, or clean up existing Jobs, PVCs, or replication resources.
 
@@ -222,8 +222,13 @@ We preserve image values exactly, without trimming or normalization.
 Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 
 > [!important]
-> This setting does not enable the native backend.
-> `spec.engine: rpgmigrate` still fails with `UnsupportedEngine` before the controller creates resources or executes commands.
+> `spec.engine: rpgmigrate` runs only when the effective image pins one of the qualified engine `908ada6` runner manifests.
+> These are `ghcr.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b` for arm64 and `ghcr.io/ydixken/rpgmigrate@sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b` for amd64.
+> An empty value, a tag, or any other digest fails with `UnsupportedEngine` before the controller creates resources or executes commands.
+
+We hold the qualified digests in the operator binary, so an administrator cannot qualify a runner by configuration alone.
+A mirror MAY serve the same manifest under another canonical repository, because the digest names the content.
+Native preflight then admits only the PostgreSQL major pairs 16 to 16, 18 to 18 and 16 to 18, and the runner must advertise every capability the Migration needs.
 
 A native helper image MUST use an immutable, canonical single-platform manifest reference with `@sha256:` and 64 lowercase hexadecimal characters.
 A tag, image index digest, or image configuration digest does not satisfy this requirement.

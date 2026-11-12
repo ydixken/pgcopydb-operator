@@ -21,6 +21,11 @@ import (
 
 const testUnrecognizedEngine v1beta1.MigrationEngine = "unknown"
 
+const (
+	testDispatchUID       = "engine-dispatch"
+	testUnsupportedEngine = "UnsupportedEngine"
+)
+
 func TestReconcileEngineDispatchRejectsBeforeEffects(t *testing.T) {
 	states := []struct {
 		name string
@@ -59,7 +64,7 @@ func TestReconcileEngineDispatchRejectsBeforeEffects(t *testing.T) {
 		for _, state := range states {
 			t.Run(string(engine)+"/"+state.name, func(t *testing.T) {
 				m := followPasswordMigration()
-				m.UID, m.Generation, m.Spec.Engine = "engine-dispatch", 7, engine
+				m.UID, m.Generation, m.Spec.Engine = testDispatchUID, 7, engine
 				state.init(m)
 				objects := []client.Object{
 					m,
@@ -124,10 +129,10 @@ func assertEngineDispatchRejection(t *testing.T, got *v1beta1.Migration) {
 		status metav1.ConditionStatus
 	}{{v1beta1.ConditionValidated, metav1.ConditionFalse}, {v1beta1.ConditionFailed, metav1.ConditionTrue}} {
 		c := meta.FindStatusCondition(got.Status.Conditions, want.typ)
-		if c == nil || c.Status != want.status || c.Reason != "UnsupportedEngine" || c.Message == "" || c.ObservedGeneration != 7 {
+		if c == nil || c.Status != want.status || c.Reason != testUnsupportedEngine || c.Message == "" || c.ObservedGeneration != 7 {
 			t.Errorf("%s = %+v, want %s/UnsupportedEngine at generation 7 with explanation", want.typ, c, want.status)
 		}
-		if c != nil && got.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !strings.Contains(c.Message, "not implemented or qualified") {
+		if c != nil && got.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && !strings.Contains(c.Message, "not qualified for this runner image") {
 			t.Errorf("native rejection does not explain unavailable backend: %q", c.Message)
 		}
 	}
@@ -171,7 +176,7 @@ func TestReconcileEngineDispatchPreservesLegacy(t *testing.T) {
 	for _, engine := range []v1beta1.MigrationEngine{"", v1beta1.MigrationEnginePGCopyDB} {
 		t.Run(string(engine), func(t *testing.T) {
 			m := passwordMigration()
-			m.UID, m.Spec.Engine = "engine-dispatch", engine
+			m.UID, m.Spec.Engine = testDispatchUID, engine
 			r := failingReconciler(t, interceptor.Funcs{}, m, completeJob(preflightJobName(m)))
 			for range 2 {
 				if _, err := r.Reconcile(context.Background(), migrationRequest(m)); err != nil {
@@ -211,6 +216,67 @@ func TestReconcileEngineDispatchStatusFailure(t *testing.T) {
 			installFailureHooks(t, r, engineDispatchNoEffects(t))
 			if _, err := r.Reconcile(context.Background(), migrationRequest(m)); !errors.Is(err, errBoom) {
 				t.Fatalf("status failure = %v, want propagated patch failure", err)
+			}
+		})
+	}
+}
+
+const (
+	qualifiedRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b"
+	qualifiedRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b"
+)
+
+func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
+	for _, tc := range []struct{ name, flag, override string }{
+		{"empty flag", "", ""},
+		{"tag only", "ghcr.io/ydixken/rpgmigrate:dev-908ada6", ""},
+		{"unqualified digest", "ghcr.io/ydixken/rpgmigrate@sha256:" + strings.Repeat("a", 64), ""},
+		{"qualified digest, tag and digest", "ghcr.io/ydixken/rpgmigrate:dev@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b", ""},
+		{"qualified digest, noncanonical repository", "GHCR.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b", ""},
+		{"qualified digest, extra suffix", qualifiedRunnerARM64 + "0", ""},
+		{"unqualified per-Migration override", qualifiedRunnerARM64, "ghcr.io/ydixken/rpgmigrate:dev-908ada6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.UID, m.Generation, m.Spec.Engine, m.Spec.Runner.Image = testDispatchUID, 7, v1beta1.MigrationEngineRPGMigrate, tc.override
+			r := failingReconciler(t, interceptor.Funcs{}, m)
+			r.RPGMigrateRunnerImage = tc.flag
+			installFailureHooks(t, r, engineDispatchNoEffects(t))
+			if res, err := r.Reconcile(context.Background(), migrationRequest(m)); err != nil || res != (ctrl.Result{}) {
+				t.Fatalf("reconcile = %+v, %v, want persisted rejection", res, err)
+			}
+			got := &v1beta1.Migration{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			assertEngineDispatchRejection(t, got)
+		})
+	}
+}
+
+func TestReconcileNativeRunnerTupleAdmits(t *testing.T) {
+	for _, tc := range []struct{ name, flag, override string }{
+		{"arm64 flag", qualifiedRunnerARM64, ""},
+		{"amd64 flag", qualifiedRunnerAMD64, ""},
+		{"qualified per-Migration override", "", qualifiedRunnerAMD64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := passwordMigration()
+			m.UID, m.Generation, m.Spec.Engine, m.Spec.Runner.Image = testDispatchUID, 7, v1beta1.MigrationEngineRPGMigrate, tc.override
+			r := failingReconciler(t, interceptor.Funcs{}, m)
+			r.APIReader, r.RPGMigrateRunnerImage = r.Client, tc.flag
+			if _, err := r.Reconcile(context.Background(), migrationRequest(m)); err != nil {
+				t.Fatal(err)
+			}
+			got := &v1beta1.Migration{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(m), got); err != nil {
+				t.Fatal(err)
+			}
+			if c := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionValidated); c != nil && c.Reason == testUnsupportedEngine {
+				t.Fatalf("qualified runner refused: %+v", c)
+			}
+			if meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionFailed) || got.Status.Phase != v1beta1.PhasePending {
+				t.Fatalf("qualified runner did not reach the native route: %+v", got.Status)
 			}
 		})
 	}

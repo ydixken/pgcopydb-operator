@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -366,5 +367,25 @@ func TestNativePreflightTemporaryStorage(t *testing.T) {
 	}
 	if len(mounts) != 1 || mounts[0].Name != volumes[0].Name || mounts[0].MountPath != "/tmp" {
 		t.Fatal("temporary storage mount changed")
+	}
+}
+
+func TestPreflightQualifiedMajorPairs(t *testing.T) {
+	for _, pair := range []struct {
+		source, target int
+		admitted       bool
+	}{{16, 16, true}, {18, 18, true}, {16, 18, true}, {18, 16, false}, {17, 17, false}, {16, 17, false}, {17, 18, false}, {15, 16, false}, {19, 19, false}} {
+		t.Run(fmt.Sprintf("%d:%d", pair.source, pair.target), func(t *testing.T) {
+			payload := preflightPayload(t, false)
+			payload[preflightSourceMajorKey], payload[preflightTargetMajorKey] = pair.source, pair.target
+			payload[preflightDumpMajorKey], payload[preflightRestoreMajorKey] = pair.target, pair.target
+			if !pair.admitted {
+				refusePreflight(t, preflightJSON(t, payload), preflightOperation, EvidenceProgramSHA256(), false)
+				return
+			}
+			if result, err := ParsePreflightResult(preflightJSON(t, payload), preflightOperation, EvidenceProgramSHA256(), false); err != nil || !result.Passed() {
+				t.Fatalf("qualified pair refused: %v", err)
+			}
+		})
 	}
 }
