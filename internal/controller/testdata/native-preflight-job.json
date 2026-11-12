@@ -51,7 +51,7 @@
             "command": [
               "/bin/sh",
               "-c",
-              "set -eu\numask 077\n: \u003e /tmp/pgpass\nprintf '%s:*:*:%s:%s\\n' 's' 'u' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' /etc/pgcopydb/creds/source-mnt/source-password)\" \u003e\u003e /tmp/pgpass\nexport PGPASSFILE=/tmp/pgpass\nexec \"$0\" \"$@\"",
+              "set -eu\numask 077\n: \u003e /tmp/pgpass\nprintf '%s:5432:*:%s:%s\\n' 's' 'u' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' /etc/pgcopydb/creds/source-mnt/source-password)\" \u003e\u003e /tmp/pgpass\nexport PGPASSFILE=/tmp/pgpass\nexec \"$0\" \"$@\"",
               "/bin/sh"
             ],
             "args": [

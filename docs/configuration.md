@@ -135,7 +135,7 @@ The operator supports `verification.schema` across all databases.
 In this mode, `status.progress` reports summed database sizes on each side, without per-database relation counts or pgcopydb counters.
 `uriSecretRef` accepts both PostgreSQL URIs and libpq keyword/value connection strings (DSNs) for this mode.
 pgcopydb replaces only the database name and keeps the other options, including the password, TLS settings, and `passfile`.
-For inline and `secretRef` connections, the worker writes passfile entries as `host:*:*:user:password`, so one set of credentials authenticates every database.
+For inline and `secretRef` connections, the worker writes passfile entries as `host:port:*:user:password`, so one set of credentials authenticates every database on that endpoint.
 
 ## Filters
 
@@ -288,6 +288,12 @@ The default port is 5432, and `endpoint: external` takes the host from `URL_EXTE
 If the URI sets no `sslmode`, the spec's `sslMode` applies, and the `tls` file paths always apply.
 The password stays a projected file that feeds the passfile, like the other forms.
 [03-clone-platform-secret.yaml](examples/03-clone-platform-secret.yaml) is the complete example.
+
+Each passfile line names the exact host and port the connection uses, so a source and a target on one host and user but different ports keep their own passwords.
+A URI without a port resolves to `PGPORT`, then 5432, the way libpq does.
+The worker rejects, by name, an endpoint it cannot bind to one line: IPv6 literals, several hosts, a missing host, percent-encoding in the host or a query key, and `host`, `port`, or `service` in the URI query.
+The inline `host` follows the same rule and accepts only a DNS name or an IPv4 address.
+`uriSecretRef` carries its own credentials and has none of these limits, unless the side also sets `superuserSecretRef`.
 
 Each side MAY also set `superuserSecretRef`, a Secret in the same convention that names a superuser on the same endpoint.
 For single-database migrations, preflight checks that Secret.
