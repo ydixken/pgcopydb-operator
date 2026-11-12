@@ -33,7 +33,7 @@ jobs:
           import importlib.util
           import unittest
           suite = unittest.TestSuite()
-          for number, path in enumerate(('hack/test_e2e_kind.py', 'hack/test_dev_image.py')):
+          for number, path in enumerate(('hack/test_e2e_kind.py', 'hack/test_dev_image.py', 'hack/test_native_term_receipt.py')):
               spec = importlib.util.spec_from_file_location(f'kind_contract_{number}', path)
               module = importlib.util.module_from_spec(spec)
               spec.loader.exec_module(module)
