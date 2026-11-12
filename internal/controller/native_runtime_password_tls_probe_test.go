@@ -315,7 +315,8 @@ func nativePasswordRemove(ctx context.Context, clientset kubernetes.Interface, o
 		case nativeRuntimeNamespaceKind:
 			err = clientset.CoreV1().Namespaces().Delete(call, o.GetName(), options)
 		}
-		if err != nil && !apierrors.IsNotFound(err) {
+		// A kubelet status write between the read and the delete is a Conflict; the UID check above still binds the retry.
+		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return false, errors.New("cleanup delete refused")
 		}
 		return false, nil
@@ -1347,5 +1348,28 @@ func TestNativePasswordTLSAdmittedServerQuantitiesCompareByValue(t *testing.T) {
 	changed.Spec.Volumes[2].EmptyDir.SizeLimit = resource.NewQuantity(513*1024*1024, resource.BinarySI)
 	if nativePasswordPodMatches(expected, changed) {
 		t.Fatal("a changed server volume limit was admitted")
+	}
+}
+
+func TestNativePasswordTLSCleanupRetriesAStatusConflict(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: nativeRuntimePG16, Namespace: "cleanup-fixture", UID: "created", ResourceVersion: "7"}}
+	clientset := kubefake.NewClientset(pod)
+	conflicts := 0
+	clientset.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		if conflicts++; conflicts == 1 {
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, nil)
+		}
+		return false, nil, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := nativePasswordRemove(ctx, clientset, nativeRuntimeOwned{object: pod, kind: nativeRuntimePodKind}); !result.VerifiedAbsent || result.Action != nativeRuntimeDeleted || conflicts != 2 {
+		t.Fatal("a status Conflict during deletion left the Pod retained", conflicts)
+	}
+	replaced := pod.DeepCopy()
+	replaced.UID = nativePasswordForeignOwner
+	clientset = kubefake.NewClientset(replaced)
+	if result := nativePasswordRemove(ctx, clientset, nativeRuntimeOwned{object: pod, kind: nativeRuntimePodKind}); result.VerifiedAbsent || result.Action != nativeRuntimeRetained {
+		t.Fatal("a replaced Pod was deleted under the original identity")
 	}
 }
