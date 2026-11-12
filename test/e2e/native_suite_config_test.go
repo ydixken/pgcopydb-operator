@@ -102,3 +102,25 @@ func TestNativeRefusalNamesPrerequisite(t *testing.T) {
 		t.Fatalf("native refusal = %v, want it to name %s", err, nativePrerequisite)
 	}
 }
+
+func TestKindLabelFilterAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		engine v1beta1.MigrationEngine
+		filter string
+		want   bool
+	}{
+		{v1beta1.MigrationEnginePGCopyDB, kindBootstrapLabel, true},
+		{v1beta1.MigrationEnginePGCopyDB, nativeLabel, false},
+		{v1beta1.MigrationEnginePGCopyDB, nativeFaultLabel, false},
+		{v1beta1.MigrationEngineRPGMigrate, kindBootstrapLabel, true},
+		{v1beta1.MigrationEngineRPGMigrate, nativeLabel, true},
+		{v1beta1.MigrationEngineRPGMigrate, nativeFaultLabel, true},
+		{v1beta1.MigrationEngineRPGMigrate, nativeFaultLabel + "-copy", false},
+		{v1beta1.MigrationEngineRPGMigrate, nativeLabel + " || chaos", false},
+		{v1beta1.MigrationEngineRPGMigrate, "", false},
+	} {
+		if got := kindLabelFilterAllowed(tc.engine, tc.filter); got != tc.want {
+			t.Errorf("kindLabelFilterAllowed(%s, %q) = %t, want %t", tc.engine, tc.filter, got, tc.want)
+		}
+	}
+}

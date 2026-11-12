@@ -1284,6 +1284,15 @@ var (
 	mountedFilesystemCapacity = readMountedFilesystemCapacity
 )
 
+// kindLabelFilterAllowed lists the exact positive selections a kind run may take;
+// the native ones are reachable only once suiteEngine stops refusing rpgmigrate.
+func kindLabelFilterAllowed(engine v1beta1.MigrationEngine, filter string) bool {
+	if filter == kindBootstrapLabel {
+		return true
+	}
+	return engine == v1beta1.MigrationEngineRPGMigrate && (filter == nativeLabel || filter == nativeFaultLabel)
+}
+
 func TestE2E(t *testing.T) {
 	if _, err := suiteEngine(); err != nil {
 		t.Fatal(err)
@@ -1298,9 +1307,9 @@ func TestE2E(t *testing.T) {
 	}
 	if activeKindSuite != nil {
 		cfg, _ := GinkgoConfiguration()
-		if cfg.LabelFilter != kindBootstrapLabel || len(cfg.FocusStrings) > 0 || len(cfg.SkipStrings) > 0 ||
-			cfg.DryRun || !cfg.FailOnEmpty {
-			t.Fatal("kind suite requires the exact positive bootstrap selection and fail-on-empty")
+		if !kindLabelFilterAllowed(selectedEngine(), cfg.LabelFilter) || len(cfg.FocusStrings) > 0 ||
+			len(cfg.SkipStrings) > 0 || cfg.DryRun || !cfg.FailOnEmpty {
+			t.Fatal("kind suite requires an exact positive selection for its engine and fail-on-empty")
 		}
 	}
 	if smallProfile && parallelProcs() != 1 {
