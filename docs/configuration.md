@@ -229,6 +229,8 @@ Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 We hold the qualified digests in the operator binary, so an administrator cannot qualify a runner by configuration alone.
 A mirror MAY serve the same manifest under another canonical repository, because the digest names the content.
 Native preflight then admits only the PostgreSQL major pairs 16 to 16, 18 to 18 and 16 to 18, and the runner must advertise every capability the Migration needs.
+The native helpers also check the runner's packaged libc, NSS configuration and libpq metadata against the qualified manifests.
+They refuse a `/etc/resolv.conf` that lacks exactly one `search` line, carries a `domain` line, or lists first six search entries whose lengths plus one exceed 256 bytes, because glibc 2.41 cannot copy such a list safely (CVE-2026-8674).
 
 A native helper image MUST use an immutable, canonical single-platform manifest reference with `@sha256:` and 64 lowercase hexadecimal characters.
 A tag, image index digest, or image configuration digest does not satisfy this requirement.

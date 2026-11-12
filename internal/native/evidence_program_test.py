@@ -929,6 +929,60 @@ class NativePythonTests(unittest.TestCase):
         with self.assertRaises(P.Refusal) as failure: P.qualified_resolver_policy(object())
         self.assertEqual(failure.exception.error_class, 'capability')
 
+    def test_QualifiedResolverTuple(self):
+        from types import SimpleNamespace
+        kubelet = b'search default.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.96.0.10\noptions ndots:5\n'
+        def packaged(machine):
+            libc, runtime = P.QUALIFIED_RUNTIME[machine]
+            return {f'/usr/lib/{machine}-linux-gnu/libc.so.6': libc, '/etc/nsswitch.conf': P.QUALIFIED_NSS,
+                    '/usr/share/rpgmigrate/python-libpq-runtime.json': runtime}
+        def policy(raw, machine='aarch64', path='/etc/resolv.conf', digests=None):
+            with tempfile.TemporaryDirectory() as directory:
+                file = Path(directory) / 'resolv.conf'
+                file.write_bytes(raw)
+                resolver = P.StableFile(path, P.CAP, opener=lambda _: os.open(file, os.O_RDONLY))
+                try:
+                    with mock.patch.object(P.os, 'uname', return_value=SimpleNamespace(machine=machine)), \
+                         mock.patch.object(P, 'packaged_sha256', side_effect=(digests or packaged(machine if machine in P.QUALIFIED_RUNTIME else 'aarch64')).__getitem__):
+                        P.qualified_resolver_policy(resolver)
+                finally:
+                    resolver.close()
+        def refused(*args, **kwargs):
+            with self.assertRaises(P.Refusal) as failure:
+                policy(*args, **kwargs)
+            self.assertEqual(failure.exception.error_class, 'capability')
+        for machine in ('aarch64', 'x86_64'):
+            with self.subTest(admitted=machine):
+                policy(kubelet, machine)
+        sixth = b'search ' + b' '.join([b'%cx' % (97 + i) + b'x' * 40 for i in range(5)] + [b'f' * 40])
+        for name, raw in (('first six fill 256 bytes', sixth + b'\n'), ('seventh entry past the copy', sixth + b' ' + b'z' * 300 + b'\n'),
+                          ('tab separator', b'search\tcluster.local\n'), ('comments', b'# domain x\n;search y\nsearch cluster.local\n')):
+            with self.subTest(admitted=name):
+                policy(raw)
+        self.assertEqual(sum(len(entry) + 1 for entry in sixth.split()[1:]), 256)
+        for name, raw in (('first six exceed 256 bytes', sixth + b'x\n'), ('single long entry', b'search ' + b'a' * 256 + b'\n'),
+                          ('no search line', b'nameserver 10.96.0.10\n'), ('empty search', b'search\n'), ('empty search with space', b'search \n'),
+                          ('two search lines', kubelet + b'search other\n'), ('domain line', kubelet + b'domain cluster.local\n'),
+                          ('indented search', b' search cluster.local\n'), ('carriage return', b'search cluster.local\r\n'),
+                          ('vertical tab', b'search a\x0bb\n'), ('non-ASCII', b'search caf\xc3\xa9\n'), ('NUL', b'search a\0b\n')):
+            with self.subTest(refused=name):
+                refused(raw)
+        with self.subTest(refused='unqualified architecture'):
+            refused(kubelet, 'ppc64le')
+        with self.subTest(refused='resolver path'):
+            refused(kubelet, path='/tmp/resolv.conf')
+        for path in packaged('aarch64'):
+            with self.subTest(refused=path):
+                refused(kubelet, digests=dict(packaged('aarch64'), **{path: '0' * 64}))
+        for resolver in (None, object()):
+            with self.subTest(refused=type(resolver).__name__), self.assertRaises(P.Refusal):
+                P.qualified_resolver_policy(resolver)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(P, 'root_ancestors') as ancestors:
+            file = Path(directory) / 'libc.so.6'
+            file.write_bytes(b'packaged')
+            self.assertEqual(P.packaged_sha256(str(file)), hashlib.sha256(b'packaged').hexdigest())
+            ancestors.assert_called_once_with(str(file))
+
     def test_QualifiedResolverPolicy(self):
         import inspect
         self.assertEqual(tuple(inspect.signature(P.qualified_resolver_policy).parameters), ('resolver',))

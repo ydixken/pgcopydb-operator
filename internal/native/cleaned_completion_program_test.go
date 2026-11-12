@@ -29,7 +29,7 @@ func TestNativeCleanedCompletionProgram(t *testing.T) {
 		t.Fatal("bounded fixed program unavailable")
 	}
 	canonical := EvidenceProgramSHA256()
-	if hex.EncodeToString(canonical[:]) != "10005338c4ee5792bf140d3ebf42af23c5d2d42b13dad5cae4daf3622e11ad9e" || len(EvidenceProgram()) != 118972 {
+	if hex.EncodeToString(canonical[:]) != "a2890d3fb11b5aa334b9d5073f9f54e0d72b665840f7ea54eaf1d4efb81e6658" || len(EvidenceProgram()) != 120465 {
 		t.Fatal("ordinary canonical source changed")
 	}
 	if !bytes.Equal(program, append(append(OwnedInventoryProgram(), []byte(cleanedCompletionSeparator)...), []byte(cleanedCompletionProgramSource)...)) {
