@@ -188,6 +188,8 @@ class FakeCommands:
             assert expected.count('  - role: control-plane\n') == 1
             assert expected.count('  - role: worker\n') == 2
             assert expected.count('      ' + MODULE.RUN_LABEL + ': ' + self.marker + '\n') == 3
+            assert expected.count('kubeadmConfigPatches:\n  - |\n    kind: KubeletConfiguration\n    podPidsLimit: 4096\n') == 1
+            assert expected.count('podPidsLimit') == 1
             self.seed_kubernetes_nodes()
             self.volumes = {letter * 64: {'Name': letter * 64, 'CreatedAt': '2026-11-08T12:00:00Z', 'Driver': 'local',
                 'Labels': {self.ledger['cluster'] + suffix: 'true'}} for letter, suffix in zip('abc', ['-control-plane', '-worker', '-worker2'])}

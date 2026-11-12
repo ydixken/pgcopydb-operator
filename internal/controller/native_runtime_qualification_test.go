@@ -199,7 +199,7 @@ need(local_closure()==process)
 print(json.dumps(dict(kind='metadata_complete',process=process,closure=True),sort_keys=True,separators=(',',':')),flush=True)
 `
 
-const nativeRuntimeNodeProgram = `import hashlib,json,math,os,re,selectors,stat,struct,subprocess,sys,time
+const nativeRuntimeNodeProgram = `import datetime,hashlib,json,math,os,re,selectors,stat,struct,subprocess,sys,time
 
 def need(value):
  if not value:raise RuntimeError('active_profile_refused')
@@ -289,18 +289,20 @@ def checked_spec(value,e,sandbox):
  need(process.get('terminal',False) is False and process.get('rlimits',[])==[] and process.get('apparmorProfile','')==process.get('selinuxLabel','')=='')
  need(process['noNewPrivileges'] is True and type(process['oomScoreAdj']) is int and process['oomScoreAdj']==e['oom_score_adj'])
  need(type(process['args']) is list and process['args']==e['command'] and environment(process['env'])==e['environment'])
- uid=999 if e['profile'] in ('pg16','pg18') else 65532;groups=[101,999] if uid==999 else [65532]
+ uid=26 if e['profile'] in ('pg16','pg18') else 65532;groups=[26,101] if uid==26 else [65532]
  user=process['user'];fields(user,('uid','gid'),('additionalGids','username'))
  need(type(user['uid']) is type(user['gid']) is int and user['uid']==user['gid']==uid and user.get('username','')=='')
  need(type(user.get('additionalGids',[])) is list and all(type(g) is int for g in user.get('additionalGids',[])) and sorted(set([uid]+user.get('additionalGids',[])))==groups)
- need(process['cwd']==('/' if uid==999 else '/work'))
+ need(process['cwd']==('/' if uid==26 else '/work'))
  caps=process['capabilities'];fields(caps,(),('bounding','effective','inheritable','permitted','ambient'));need(all(type(v) is list and not v for v in caps.values()))
  linux=value['linux'];fields(linux,('namespaces','resources','cgroupsPath','maskedPaths','readonlyPaths','seccomp'),('devices','sysctl','rootfsPropagation','uidMappings','gidMappings'))
  need(linux.get('devices',[])==[] and linux.get('sysctl',{})=={} and linux.get('rootfsPropagation','')=='' and linux.get('uidMappings',[])==linux.get('gidMappings',[])==[])
  need(normalized_seccomp(linux['seccomp'])==normalized_seccomp(expected_seccomp()))
  baseline=stock_base()['linux']
- for name in ('maskedPaths','readonlyPaths'):
-  need(type(linux[name]) is list and len(linux[name])==len(set(linux[name])) and set(linux[name])==set(baseline[name]))
+ # kubelet v1.36.4 supplies maskedPaths (pkg/securitycontext defaultMaskedPaths), which adds /proc/interrupts to the base spec.
+ masked=['/proc/asound','/proc/acpi','/proc/interrupts','/proc/kcore','/proc/keys','/proc/latency_stats','/proc/timer_list','/proc/timer_stats','/proc/sched_debug','/proc/scsi','/sys/firmware','/sys/devices/virtual/powercap']
+ for name,paths in (('maskedPaths',masked),('readonlyPaths',baseline['readonlyPaths'])):
+  need(type(linux[name]) is list and len(linux[name])==len(set(linux[name])) and set(linux[name])==set(paths))
  ns=linux['namespaces'];need(type(ns) is list and len(ns)==6);seen=set()
  for row in ns:
   fields(row,('type',),('path',));kind=row['type'];need(kind in ('pid','ipc','uts','mount','network','cgroup') and kind not in seen);seen.add(kind)
@@ -308,8 +310,8 @@ def checked_spec(value,e,sandbox):
   need(row.get('path','')==expected)
  resources=linux['resources'];fields(resources,('devices','cpu','memory'),('unified',))
  need(resources['devices']==baseline['resources']['devices'] and resources['cpu']==dict(period=100000,quota=100000,shares=256))
- need(resources['memory']==dict(limit=536870912,swap=536870912) and resources.get('unified',{}) in ({},{'memory.swap.max':'0'}))
- need(linux['cgroupsPath']=='kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice:cri-containerd:'+e['container_id'])
+ need(resources['memory']==dict(limit=536870912,swap=536870912) and resources.get('unified',{}) in ({'memory.oom.group':'1'},{'memory.oom.group':'1','memory.swap.max':'0'}))
+ need(linux['cgroupsPath']=='kubelet-kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice:cri-containerd:'+e['container_id'])
  annotations={'io.kubernetes.cri.'+k:v for k,v in {'sandbox-id':sandbox['sandbox_id'],'sandbox-namespace':e['namespace'],'sandbox-uid':e['pod_uid'],'sandbox-name':e['pod_name'],'container-name':e['container_name'],'image-name':e['image_ref'],'container-type':'container'}.items()}
  need(value['annotations']==annotations)
  expected={m['destination']:m for m in stock_base()['mounts'] if m['destination'] not in ('/run','/dev/shm')}
@@ -318,14 +320,11 @@ def checked_spec(value,e,sandbox):
  binds=[dict(destination='/dev/shm',source='/run/containerd/io.containerd.grpc.v1.cri/sandboxes/'+sid+'/shm',readonly=False),dict(destination='/etc/hostname',source=cri+'/sandboxes/'+sid+'/hostname',readonly=True),dict(destination='/etc/resolv.conf',source=cri+'/sandboxes/'+sid+'/resolv.conf',readonly=True),dict(destination='/etc/hosts',source=root+'/etc-hosts',readonly=False)]+e['mounts']
  for row in binds:
   target=row['destination'];need(target not in expected);expected[target]=dict(destination=target,type='bind',source=row['source'],options=['rbind','rprivate','ro' if row['readonly'] else 'rw'])
- mounts=value['mounts'];need(type(mounts) is list and len(mounts)==len(expected)+1+(e['profile']=='pg16'));seen=set();binding=dict(termination_log_id=None,image_volume_id=None)
+ mounts=value['mounts'];need(type(mounts) is list and len(mounts)==len(expected)+1);seen=set();binding=dict(termination_log_id=None,image_volume_id=None)
  for mount in mounts:
   fields(mount,('destination','type','source','options'));target=mount['destination'];need(type(target) is str and target not in seen and os.path.normpath(target)==target and target.startswith('/'));seen.add(target)
   if target=='/dev/termination-log':
    match=re.fullmatch(re.escape(root+'/containers/'+e['container_name']+'/')+'([0-9a-f]{8})',mount['source']);need(match is not None);binding['termination_log_id']=match[1]
-   need(mount['type']=='bind' and mount['options']==['rbind','rprivate','rw'])
-  elif target=='/var/lib/postgresql/data' and e['profile']=='pg16':
-   match=re.fullmatch(re.escape(cri+'/containers/'+e['container_id']+'/volumes/')+'([0-9a-f]{64})',mount['source']);need(match is not None);binding['image_volume_id']=match[1]
    need(mount['type']=='bind' and mount['options']==['rbind','rprivate','rw'])
   else:need(target in expected and mount==expected[target])
  need(set(expected)<=seen and binding['termination_log_id'] is not None)
@@ -340,9 +339,9 @@ def proc_values(e,args,env,status):
   actual_env=environment([part.decode('utf-8') for part in env[:-1].split(b'\0')])
  except UnicodeError:raise RuntimeError('active_profile_refused') from None
  need(actual_args==e['running_args'] and actual_env==e['process_environment'])
- uid=999 if e['profile'] in ('pg16','pg18') else 65532
+ uid=26 if e['profile'] in ('pg16','pg18') else 65532
  for key in ('Uid','Gid'):need(status.get(key,'').split()==[str(uid)]*4)
- need(sorted(set(status.get('Groups','').split()+[str(uid)]))==(['101','999'] if uid==999 else ['65532']))
+ need(sorted(set(status.get('Groups','').split()+[str(uid)]))==(['101','26'] if uid==26 else ['65532']))
  for key in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):need(re.fullmatch('[0-9a-fA-F]{1,16}',status.get(key,'')) and int(status[key],16)==0)
  need(status.get('NoNewPrivs')=='1' and status.get('Seccomp')=='2')
 
@@ -365,11 +364,14 @@ def container_value(raw,e):
  linux=config.get('linux',{});security=linux.get('security_context',linux.get('securityContext',{}));need(type(security) is dict and not security.get('privileged',False))
  return value
 
-def sandbox_value(raw,e,sid):
+def sandbox_value(raw,e,sid,terminal=False):
  value=strict(raw);fields(value,('status','info'));status=value['status'];info=value['info']
- need(type(status) is dict and status.get('id')==sid and status.get('state')=='SANDBOX_READY' and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid'])
- need(type(info) is dict and info.get('runtimeType')=='io.containerd.runc.v2' and info.get('runtimeOptions')==dict(systemd_cgroup=True) and info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False)
- pid=info.get('pid');need(type(pid) is int and 1<pid<4194304)
+ # kubelet stops the sandbox once the Job container exits, so a terminal proof binds the recorded sandbox PID instead.
+ need(type(status) is dict and status.get('id')==sid and status.get('state') in (('SANDBOX_READY','SANDBOX_NOTREADY') if terminal else ('SANDBOX_READY',)) and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid'])
+ need(type(info) is dict and info.get('runtimeType')=='io.containerd.runc.v2' and info.get('runtimeOptions')==dict(systemd_cgroup=True))
+ if terminal:need(type(e.get('previous')) is dict);pid=e['previous'].get('sandbox_pid')
+ else:need(info.get('processStatus')=='running' and info.get('netNamespaceClosed') is False);pid=info.get('pid')
+ need(type(pid) is int and 1<pid<4194304)
  config=info.get('config');need(type(config) is dict and config.get('metadata',{}).get('uid')==e['pod_uid'] and config['metadata'].get('name')==e['pod_name'] and config['metadata'].get('namespace')==e['namespace'])
  metadata=info.get('sandboxMetadata',{});need(type(metadata) is dict and metadata.get('RuntimeHandler',metadata.get('runtimeHandler','')) in ('','runc'))
  spec=info.get('runtimeSpec');need(type(spec) is dict and spec.get('hooks') in (None,{}))
@@ -380,8 +382,15 @@ def sandbox_value(raw,e,sid):
   else:need(path=='')
  return dict(sandbox_id=sid,sandbox_pid=pid)
 
+def cri_time(value):
+ match=re.fullmatch('([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:[.]([0-9]{1,9}))?Z',value) if type(value) is str else None;need(match is not None)
+ try:moment=datetime.datetime(*(int(part) for part in match.groups()[:6]),tzinfo=datetime.timezone.utc)-datetime.datetime(1970,1,1,tzinfo=datetime.timezone.utc)
+ except ValueError:raise RuntimeError('active_profile_refused') from None
+ return (moment.days*86400+moment.seconds)*10**9+int((match[7] or '').ljust(9,'0'))
+
 def terminal_result(e,value,sandbox,binding):
- previous=e['previous'];need(type(previous) is dict and value['status'].get('state')=='CONTAINER_EXITED' and value['status'].get('exitCode')==0 and value['info']['pid']==0 and previous['sandbox_id']==sandbox['sandbox_id'])
+ previous=e['previous'];status=value['status'];need(type(previous) is dict and status.get('state')=='CONTAINER_EXITED' and status.get('exitCode')==0 and value['info']['pid']==0 and previous['sandbox_id']==sandbox['sandbox_id'])
+ need(status.get('id')==e['container_id']==previous.get('container_id') and status.get('labels',{}).get('io.kubernetes.pod.uid')==e['pod_uid']==previous.get('pod_uid') and 0<cri_time(status.get('startedAt'))<cri_time(status.get('finishedAt')))
  pid=previous['pid'];need(type(pid) is int and 1<pid<4194304)
  meta=primitive('absence',pid,previous['start_ticks'])['meta'];fields(meta,('absent',));need(meta['absent']=='1')
  boot=platform_files()[2]
@@ -392,7 +401,7 @@ def terminal_result(e,value,sandbox,binding):
  return result
 
 def projected(e):
- first=container_value(run('inspect',e['container_id']),e);sandbox=sandbox_value(run('inspectp',first['info']['sandboxID']),e,first['info']['sandboxID'])
+ first=container_value(run('inspect',e['container_id']),e);sandbox=sandbox_value(run('inspectp',first['info']['sandboxID']),e,first['info']['sandboxID'],e['mode']=='terminal')
  binding=checked_spec(first['info']['runtimeSpec'],e,sandbox)
  if e['mode']=='terminal':return terminal_result(e,first,sandbox,binding)
  need(first['status'].get('state')=='CONTAINER_RUNNING')
@@ -477,9 +486,12 @@ def proc_mounts(raw,spec,e,meta):
   rows.append(dict(target=target,flags=words[5].split(','),fstype=words[mark+1]))
  need(0<len(rows)<=128)
  allowed={row['destination'] for row in spec['mounts']}|{'/'}|set(spec['linux']['maskedPaths'])|set(spec['linux']['readonlyPaths']);seen={}
+ # runc inside the rootless kind node cannot mknod, so it bind-mounts its six default device nodes.
+ devices={'/dev/null','/dev/zero','/dev/full','/dev/random','/dev/urandom','/dev/tty'}
  dmi=meta['dmi_pairs'];fields(dmi,('/sys/class/dmi/id/product_name','/sys/class/dmi/id/product_uuid','/sys/devices/virtual/dmi/id/product_name','/sys/devices/virtual/dmi/id/product_uuid'))
  for row in rows:
-  target=row['target'];need(target in allowed or target in dmi);seen[target]=seen.get(target,0)+1;need(seen[target]<=(2 if target in dmi and target.endswith('product_uuid') else 1))
+  target=row['target'];need(target in allowed or target in dmi or target in devices);seen[target]=seen.get(target,0)+1;need(seen[target]<=(2 if target in dmi and target.endswith('product_uuid') else 1))
+  if target in devices:need(row['fstype']=='devtmpfs' and 'nosuid' in row['flags'] and 'noexec' in row['flags'])
   if target in dmi:need(dmi[target]=='1' and 'ro' in row['flags'])
  roots=[row for row in rows if row['target']=='/'];need(len(roots)==1 and roots[0]['fstype']=='overlay' and 'ro' in roots[0]['flags'])
  pairs=meta['volume_pairs'];fields(pairs,('tmp','client','server','pgdata'))
@@ -495,6 +507,12 @@ def proc_mounts(raw,spec,e,meta):
     if flag in mount['options']:need(flag in row['flags'])
  need(type(meta['tmp_bytes']) is str and meta['tmp_bytes'].isdigit() and 0<int(meta['tmp_bytes'])<=67108864)
  return len(rows)
+
+def pids_bound(scope,pod,ancestry):
+ # The scope may carry systemd's TasksMax or max; only kubelet's podPidsLimit=4096 on the pod slice bounds it.
+ need(pod=='4096' and type(ancestry) is list and len(ancestry)<=14);chain=[scope,pod]+ancestry
+ need(all(type(v) is str and (v=='max' or re.fullmatch('[1-9][0-9]{0,18}',v)) for v in chain))
+ return min(int(v) for v in chain if v!='max')
 
 def process_snapshot(e,inspection,sandbox):
  pid=inspection['info'].get('pid');need(type(pid) is int and 1<pid<4194304)
@@ -513,11 +531,13 @@ def process_snapshot(e,inspection,sandbox):
  need(re.fullmatch('mnt:\\[[0-9]+\\]',meta['mount_namespace']) and re.fullmatch('[0-9a-f-]{36}',meta['boot_id']))
  for key in ('tmp_device','tmp_inode'):need(type(meta[key]) is str and re.fullmatch('[0-9]{1,20}',meta[key]))
  mounts=proc_mounts(frames['mountinfo'],inspection['info']['runtimeSpec'],e,meta)
- cg=meta['cgroup_values'];fields(cg,('cpu.max','cpu.weight','memory.max','memory.swap.max','pids.max','parent.pids.max'))
- need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='10' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0' and cg['pids.max']=='max' and cg['parent.pids.max'].isdigit() and 0<int(cg['parent.pids.max'])<=4096)
- need(frames['cgroup'].decode('ascii').endswith('/kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
+ cg=meta['cgroup_values'];fields(cg,('cpu.max','cpu.weight','memory.max','memory.swap.max','pids.max','parent.pids.max','ancestry.pids.max'))
+ # runc maps 256 shares with its quadratic v2 formula: ceil(10**((64+125*8)/612-7/34)) == 35.
+ need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='35' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0')
+ need(pids_bound(cg['pids.max'],cg['parent.pids.max'],cg['ancestry.pids.max'])<=4096)
+ need(frames['cgroup'].decode('ascii').endswith('/kubelet-kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
  if e['profile'] in ('pg16','pg18'):
-  need(meta['key_stat']==dict(uid='0',gid='999',mode='288',links='1'))
+  need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))
  else:need(meta['key_stat'] is None)
  if e.get('self') is not None:need(e['self']['start_ticks']==ticks and e['self']['mount_namespace']==meta['mount_namespace'] and status.get('NSpid','').split()[-1]==str(e['self']['pid']))
  return dict(container_id=e['container_id'],pod_uid=e['pod_uid'],sandbox_id=sandbox['sandbox_id'],pid=pid,start_ticks=ticks,boot_id=meta['boot_id'],mount_namespace=meta['mount_namespace'],admitted_mount_count=mounts,tmp_device=meta['tmp_device'],tmp_inode=meta['tmp_inode'],key_stat_verified=e['profile'] in ('pg16','pg18'))
@@ -559,12 +579,13 @@ sub probe {
  my %ns;for my $kind(qw(mnt pid ipc uts net cgroup user)){my $link=readlink('/proc/'.$p.'/ns/'.$kind);need(defined($link) && $link =~ /\A([a-z]+:\[[0-9]+\])\z/);$ns{$kind}=$1;}
  my %matches;for my $kind(qw(net ipc uts)){my $other=readlink('/proc/'.$sandbox.'/ns/'.$kind);$matches{$kind}=defined($other) && $other eq $ns{$kind}?'1':'0';}
  for my $kind(qw(mnt pid cgroup user)){my $own=readlink('/proc/self/ns/'.$kind);$matches{$kind}=defined($own) && (($kind eq 'user')?($own eq $ns{$kind}):($own ne $ns{$kind}))?'1':'0';}
- my $exe=readlink('/proc/'.$p.'/exe');my %known=('/usr/bin/python3.13'=>['python313','273cb29e073b748379ba546affa562283ed795f84ff230349e12ce610e60975c'],'/usr/lib/postgresql/16/bin/postgres'=>['pg16','a3b0418538ae54f287fe31f3a5ca78a0b506e897617cd55731cd4e036dce4915'],'/usr/lib/postgresql/18/bin/postgres'=>['pg18','c567d1861c8206bb5b0e04b44b65c5c48435b0b836cfb01b8b4f3d542fbdf324']);need(defined($exe) && exists($known{$exe}));$exe=($exe =~ /\A(\/[-a-zA-Z0-9_.\/]+)\z/)[0];
+ my $exe=readlink('/proc/'.$p.'/exe');my %known=('/usr/bin/python3.13'=>['python313','273cb29e073b748379ba546affa562283ed795f84ff230349e12ce610e60975c'],'/usr/lib/postgresql/16/bin/postgres'=>['pg16','af0258f6b3cf8857f5fdd55e30f0fd07de1f0f90b8b625ca6fbf0e34f1359c0e'],'/usr/lib/postgresql/18/bin/postgres'=>['pg18','fc77699680778ae0440b4ea9669aa17773cb9641855f6a3f048c50c9fe39c765']);need(defined($exe) && exists($known{$exe}));$exe=($exe =~ /\A(\/[-a-zA-Z0-9_.\/]+)\z/)[0];
  sysopen(my $binary,'/proc/'.$p.'/exe',O_RDONLY) or need(0);my @binary=stat($binary);need(S_ISREG($binary[2]) && $binary[4]==0 && $binary[5]==0 && ($binary[2]&022)==0 && $binary[3]==1 && $binary[7]<=16777216 && pair($binary,$target.$exe) eq '1');need(hash_fd($binary) eq $known{$exe}[1]);close($binary) or need(0);
  my %dmi;for my $leaf(qw(product_name product_uuid)){for my $dir('/sys/class/dmi/id/','/sys/devices/virtual/dmi/id/'){$dmi{$dir.$leaf}=pair($target.'/'.$leaf,$target.$dir.$leaf);}}
- need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
+ need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubelet-kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
  for my $leaf(qw(cpu.max cpu.weight memory.max memory.swap.max pids.max)){$cg{$leaf}=raw_file('/sys/fs/cgroup'.$path.'/'.$leaf,128);$cg{$leaf} =~ s/\n\z//;}
  my $parent=$path;$parent =~ s/\/[^\/]+\z//;$cg{'parent.pids.max'}=raw_file('/sys/fs/cgroup'.$parent.'/pids.max',128);$cg{'parent.pids.max'} =~ s/\n\z//;
+ my @up;my $level=$parent;while($level ne ''){$level =~ s/\/[^\/]+\z//;my $file='/sys/fs/cgroup'.$level.'/pids.max';last if $level eq '' && !-e $file;my $v=raw_file($file,128);$v =~ s/\n\z//;push @up,$v;}$cg{'ancestry.pids.max'}=\@up;
  open(my $statpipe,'-|','/usr/bin/stat','-f','-c','%b %S',$target.'/tmp') or need(0);my $space=bounded($statpipe,128);close($statpipe) or need(0);need($space =~ /\A([0-9]+) ([0-9]+)\n\z/);my $tmpbytes=$1*$2;
  my $boot=raw_file('/proc/sys/kernel/random/boot_id',64);need($boot =~ /\A([0-9a-f-]{36})\n\z/);$boot=$1;
  my $key=defined($pairs{server})?key_stat($root.'kubernetes.io~secret/server-input'):undef;
@@ -1327,11 +1348,8 @@ func nativeRuntimeExpectedCommand(pod *corev1.Pod, profile string, value *native
 		}
 		binary := fmt.Sprintf("/usr/lib/postgresql/%d/bin/postgres", major)
 		value.RunningArgs = []string{binary, "-D", "/var/lib/postgresql/probe-data", "-c", "listen_addresses=*", "-c", "unix_socket_directories=/tmp", "-c", "ssl=on", "-c", "ssl_cert_file=/run/server-input/server.crt", "-c", "ssl_key_file=/run/server-input/server.key", "-c", "password_encryption=scram-sha-256", "-c", "log_min_error_statement=panic"}
-		version, data := "16.15-1.pgdg13+2", "/var/lib/postgresql/data"
-		if major == 18 {
-			version, data = "18.6-1.pgdg13+2", "/var/lib/postgresql/18/docker"
-		}
-		value.Environment = map[string]string{"PATH": fmt.Sprintf("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/%d/bin", major), "GOSU_VERSION": "1.19", nativeLangEnv: "en_US.utf8", "PG_MAJOR": fmt.Sprint(major), "PG_VERSION": version, "PGDATA": data}
+		// The CNPG image config carries only these two variables.
+		value.Environment = map[string]string{"PATH": fmt.Sprintf("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/%d/bin", major), "PIP_BREAK_SYSTEM_PACKAGES": "1"}
 	} else {
 		program := nativeRuntimeMetadataProgram
 		if profile != nativeRuntimePhase {
@@ -1429,8 +1447,11 @@ func nativeRuntimeExpected(ctx context.Context, clientset kubernetes.Interface, 
 		}
 	}
 	maps.Copy(value.ProcessEnvironment, value.Environment)
+	// runc adds HOME from the image passwd at init, or "/" when the UID has no entry (65532 in the runner).
+	value.ProcessEnvironment["HOME"] = "/"
 	if strings.HasPrefix(profile, "pg") {
 		value.ProcessEnvironment["PWD"] = "/"
+		value.ProcessEnvironment["HOME"] = "/var/lib/postgresql"
 	}
 	value.Mounts, err = nativeRuntimeExpectedMounts(pod)
 	if err != nil {
@@ -2326,6 +2347,9 @@ func TestNativeRuntimeActiveExpectedUsesIndependentServiceAndPodInputs(t *testin
 	expected, err := nativeRuntimeExpected(context.Background(), clientset, pod, nativeRuntimePhase, nil)
 	if err != nil || expected.Environment["KUBERNETES_SERVICE_HOST"] != "10.97.42.1" || expected.Environment["HOSTNAME"] != pod.Name || expected.Environment["HOME"] != "" {
 		t.Fatal("independent Service/Pod environment derivation failed")
+	}
+	if expected.ProcessEnvironment["HOME"] != "/" {
+		t.Fatal("runc HOME for a UID without a passwd entry is not expected")
 	}
 	if len(expected.Command) != 10 || !slices.Equal(expected.RunningArgs, expected.Command[5:]) || expected.OOMScoreAdj != 980 {
 		t.Fatal("fixed command or pinned burstable OOM derivation changed")

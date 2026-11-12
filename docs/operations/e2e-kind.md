@@ -63,6 +63,8 @@ The host requires the qualified Podman VM transport and the pinned tool versions
 The guard checks VM capacity, cgroups, source identity, and private paths before effects.
 We read each node's cgroup facts in one `podman machine ssh` call per check, because the qualification stages repeat the full admission hundreds of times and every VM session costs a round trip.
 The three nodes' observations, pulls and image verifications run concurrently, and the first failure or stage alarm kills the sibling commands.
+The cluster config sets the kubelet `podPidsLimit` to 4096.
+We bound PIDs on the pod slice, because systemd gives each container scope its own `TasksMax`, and the native qualification refuses a pod slice whose `pids.max` is not 4096.
 Set `IMAGE_LOCK` and `RECEIPT_DIR` to the verified external lock and receipt directory from the admitted publication handoff.
 Use the same `RUN_DIR` in all subsequent commands.
 

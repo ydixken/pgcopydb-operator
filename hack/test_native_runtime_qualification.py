@@ -84,7 +84,7 @@ def image_files():
         '/usr/lib/aarch64-linux-gnu/libpq.so.5.18': '094cbe08c8c6134b91b1946e42012318728003cf2dd2fcc0ab1ee9821ba38f58',
         '/usr/lib/aarch64-linux-gnu/libc.so.6': '5' * 64,
         '/usr/bin/python3.13': '6' * 64,
-        '/usr/local/bin/rpgmigrate': '9fdadd2a376e750565cb94f2e978465a9b006566ba16874cef1852fdbb406759',
+        '/usr/local/bin/rpgmigrate': '46dcc819e2ff401501aa5f907324c6612ee1331074a61454edc5eb4fc64a1a4c',
     }
     return {path: dict(sha256=digest, uid=0, gid=0, mode=0o644, links=1,
                        root_readonly=True, shadow_mounts=[], mount_id='1', size=100,
@@ -151,6 +151,109 @@ class QualificationBoundaries(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 functions['sandbox_value'](json.dumps(candidate).encode(), expected, sandbox)
 
+    def test_terminal_proof_accepts_the_sandbox_kubelet_stopped(self):
+        functions = node_functions()
+        expected = dict(pod_uid='owned-pod', pod_name='owned-name', namespace='owned-namespace')
+        sandbox = '2' * 64
+        # Shape read off a live kind v1.36.4 Job sandbox after its container exited.
+        value = dict(status=dict(id=sandbox, state='SANDBOX_NOTREADY', labels={'io.kubernetes.pod.uid': 'owned-pod'}),
+                     info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                               processStatus='deleted', netNamespaceClosed=True, pid=0,
+                               config=dict(metadata=dict(uid='owned-pod', name='owned-name', namespace='owned-namespace')),
+                               sandboxMetadata=dict(RuntimeHandler=''),
+                               runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                                          [dict(type='network', path='/var/run/netns/cni-owned')]))))
+        terminal = dict(expected, previous=dict(sandbox_pid=50))
+        check = lambda candidate, e=terminal, stopped=True: functions['sandbox_value'](json.dumps(candidate).encode(), e, sandbox, stopped)
+        self.assertEqual(check(value), dict(sandbox_id=sandbox, sandbox_pid=50))
+        ready = json.loads(json.dumps(value))
+        ready['status']['state'] = 'SANDBOX_READY'; ready['info'].update(processStatus='running', netNamespaceClosed=False, pid=100)
+        self.assertEqual(check(ready), dict(sandbox_id=sandbox, sandbox_pid=50))
+        self.assertEqual(check(ready, expected, False), dict(sandbox_id=sandbox, sandbox_pid=100))
+        refusals = [(value, expected, False), (dict(ready, status=dict(ready['status'], state='SANDBOX_NOTREADY')), expected, False),
+                    (dict(ready, info=dict(ready['info'], processStatus='deleted')), expected, False),
+                    (dict(ready, info=dict(ready['info'], netNamespaceClosed=True)), expected, False),
+                    (value, dict(expected, previous=None), True),
+                    (value, dict(expected, previous={}), True), (value, dict(expected, previous=dict(sandbox_pid=1)), True)]
+        for mutate in (lambda v: v['status'].update(state='SANDBOX_UNKNOWN'), lambda v: v['status'].update(id='3' * 64),
+                       lambda v: v['status']['labels'].update({'io.kubernetes.pod.uid': 'foreign'}),
+                       lambda v: v['info'].update(runtimeType='io.containerd.kata.v2'),
+                       lambda v: v['info']['config']['metadata'].update(uid='foreign')):
+            candidate = json.loads(json.dumps(value)); mutate(candidate); refusals.append((candidate, terminal, True))
+        for candidate, e, stopped in refusals:
+            with self.subTest(candidate=candidate, e=e, stopped=stopped), self.assertRaises(RuntimeError):
+                check(candidate, e, stopped)
+
+    def test_terminal_proof_comes_from_cri_container_status(self):
+        functions = node_functions()
+        container, uid, sandbox, boot = '1' * 64, 'owned-pod', '2' * 64, '00000000-0000-0000-0000-000000000001'
+        absent = {'value': '1'}
+        functions.update(primitive=lambda action, *values: dict(meta=dict(absent=absent['value'])),
+                         platform_files=lambda: ('1', '2', boot))
+        previous = dict(container_id=container, pod_uid=uid, sandbox_id=sandbox, pid=3401, start_ticks=200,
+                        boot_id=boot, sandbox_pid=3376)
+        e = dict(container_id=container, pod_uid=uid, previous=previous)
+        # Timestamps keep the trimmed nanosecond form crictl printed on the live node.
+        status = dict(id=container, state='CONTAINER_EXITED', exitCode=0, reason='Completed',
+                      startedAt='2026-11-12T17:17:26.61635947Z', finishedAt='2026-11-12T17:18:06.625554939Z',
+                      labels={'io.kubernetes.pod.uid': uid})
+        value = dict(status=status, info=dict(pid=0))
+        bound = dict(sandbox_id=sandbox, sandbox_pid=3376)
+        result = functions['terminal_result'](e, value, bound, {})
+        self.assertEqual((result['state'], result['terminal_pid_absent'], result['live_process_verified']), ('terminal', True, False))
+        close = dict(status, startedAt='2026-11-12T17:17:26.6Z', finishedAt='2026-11-12T17:17:26.600000001Z')
+        self.assertEqual(functions['terminal_result'](e, dict(value, status=close), bound, {})['state'], 'terminal')
+        refused = [dict(value, status=dict(status, **change)) for change in (
+            dict(state='CONTAINER_RUNNING'), dict(exitCode=1), dict(exitCode=None), dict(id='3' * 64),
+            dict(labels={'io.kubernetes.pod.uid': 'foreign'}), dict(labels={}),
+            dict(finishedAt=status['startedAt']), dict(finishedAt='2026-11-12T17:17:26.616359469Z'),
+            dict(startedAt='0001-01-01T00:00:00Z'), dict(finishedAt='0001-01-01T00:00:00Z'),
+            dict(startedAt=None), dict(finishedAt='2026-11-12 17:18:06Z'), dict(finishedAt='2026-13-12T17:18:06Z'), dict(startedAt='2026-02-30T17:17:26Z'),
+            dict(finishedAt=1763000000000000000))]
+        refused.append(dict(value, info=dict(pid=3401)))
+        for candidate in refused:
+            with self.subTest(status=candidate['status'], info=candidate['info']), self.assertRaises(RuntimeError):
+                functions['terminal_result'](e, candidate, bound, {})
+        for changed in (dict(previous, container_id='3' * 64), dict(previous, pod_uid='foreign'), dict(previous, boot_id='other')):
+            with self.subTest(previous=changed), self.assertRaises(RuntimeError):
+                functions['terminal_result'](dict(e, previous=changed), value, bound, {})
+        with self.assertRaises(RuntimeError):
+            functions['terminal_result'](e, value, dict(bound, sandbox_id='3' * 64), {})
+        absent['value'] = '0'
+        with self.assertRaises(RuntimeError):
+            functions['terminal_result'](e, value, bound, {})
+
+    def test_terminal_mode_binds_the_stopped_sandbox_to_the_recorded_pid(self):
+        functions = node_functions()
+        container, sandbox, uid, boot = '1' * 64, '2' * 64, 'owned-pod', '00000000-0000-0000-0000-000000000001'
+        binding = dict(termination_log_id='0123abcd', image_volume_id=None)
+        previous = dict(binding, container_id=container, pod_uid=uid, sandbox_id=sandbox, pid=3401, start_ticks=200,
+                        boot_id=boot, sandbox_pid=3376)
+        e = dict(mode='terminal', container_id=container, pod_uid=uid, pod_name='owned-name', namespace='owned-namespace',
+                 container_name='main', previous=previous)
+        exited = dict(status=dict(id=container, state='CONTAINER_EXITED', exitCode=0, labels={'io.kubernetes.pod.uid': uid},
+                                  startedAt='2026-11-12T17:17:26.61635947Z', finishedAt='2026-11-12T17:18:06.625554939Z'),
+                      info=dict(sandboxID=sandbox, pid=0, removing=False, snapshotKey=container, snapshotter='overlayfs',
+                                runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                                config=dict(metadata=dict(name='main')), runtimeSpec={}))
+        stopped = dict(status=dict(id=sandbox, state='SANDBOX_NOTREADY', labels={'io.kubernetes.pod.uid': uid}),
+                       info=dict(runtimeType='io.containerd.runc.v2', runtimeOptions=dict(systemd_cgroup=True),
+                                 processStatus='deleted', netNamespaceClosed=True, pid=0,
+                                 config=dict(metadata=dict(uid=uid, name='owned-name', namespace='owned-namespace')),
+                                 sandboxMetadata={}, runtimeSpec=dict(linux=dict(namespaces=[dict(type=kind) for kind in ('pid', 'ipc', 'uts', 'mount')] +
+                                                                                [dict(type='network', path='/var/run/netns/cni-owned')]))))
+        replies = dict(inspect=json.dumps(exited).encode(), inspectp=json.dumps(stopped).encode())
+        specs = []
+        functions.update(run=lambda action, identifier: replies[action],
+                         checked_spec=lambda spec, request, bound: (specs.append(bound), dict(binding))[1],
+                         primitive=lambda action, *values: dict(meta=dict(absent='1')), platform_files=lambda: ('1', '2', boot))
+        result = functions['projected'](e)
+        self.assertEqual((result['state'], result['sandbox_pid'], result['terminal_pid_absent']), ('terminal', 3376, True))
+        self.assertEqual(specs, [dict(sandbox_id=sandbox, sandbox_pid=3376)])
+        for mode in ('running', 'metadata_release'):
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                functions['projected'](dict(e, mode=mode))
+
     def test_persistent_active_profile_requires_honest_terminal_evidence(self):
         self.assertTrue(callable(getattr(Q,'validate_active_profile',None)), 'persistent active profile gate missing')
         value = active_profile_fixture()
@@ -208,6 +311,75 @@ class QualificationBoundaries(unittest.TestCase):
                           ('boot_id','replacement'),('mount_namespace','mnt:[8]')]:
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 functions['same_incarnation'](binding,dict(binding,**{key:value}))
+
+    def test_server_process_identity_is_the_locked_cnpg_postgres_user(self):
+        functions = node_functions()
+        expected = json.loads((Q.ROOT / 'hack/testdata/native-runtime-active-profile.json').read_bytes())['expected']
+        expected = dict(expected, profile='pg16')
+        args = ('\0'.join(expected['running_args']) + '\0').encode()
+        env = ('\0'.join(key+'='+value for key,value in expected['process_environment'].items())+'\0').encode()
+        status = dict(Uid='26 26 26 26', Gid='26 26 26 26', Groups='26 101',
+                      CapInh='0', CapPrm='0', CapEff='0', CapBnd='0', CapAmb='0', NoNewPrivs='1', Seccomp='2')
+        functions['proc_values'](expected, args, env, status)
+        for key, value in [('Uid', '999 999 999 999'), ('Gid', '999 999 999 999'), ('Groups', '101 999'), ('Groups', '26')]:
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                functions['proc_values'](expected, args, env, dict(status, **{key: value}))
+
+    def test_mountinfo_admits_only_runc_bound_default_devices(self):
+        functions = node_functions()
+        spec = dict(mounts=[dict(destination='/tmp', type='bind', options=['rbind', 'rprivate', 'rw'])],
+                    linux=dict(maskedPaths=[], readonlyPaths=[]))
+        dmi = dict.fromkeys(('/sys/class/dmi/id/product_name', '/sys/class/dmi/id/product_uuid',
+                             '/sys/devices/virtual/dmi/id/product_name', '/sys/devices/virtual/dmi/id/product_uuid'), '1')
+        meta = dict(dmi_pairs=dmi, volume_pairs=dict(tmp='1', client=None, server=None, pgdata=None), tmp_bytes='67108864')
+        rows = ['1 0 0:1 / / ro,relatime - overlay overlay ro', '2 1 0:2 / /tmp rw,nosuid - tmpfs tmpfs rw']
+        devices = ['%d 1 0:5 /%s /dev/%s rw,nosuid,noexec - devtmpfs devtmpfs rw' % (3 + number, name, name)
+                   for number, name in enumerate(('null', 'zero', 'full', 'random', 'urandom', 'tty'))]
+        raw = lambda lines: ('\n'.join(lines) + '\n').encode()
+        self.assertEqual(functions['proc_mounts'](raw(rows + devices), spec, {}, meta), 8)
+        for changed in (devices[:1] + [devices[0]], [devices[0].replace(',noexec', '')],
+                        [devices[0].replace('devtmpfs devtmpfs', 'tmpfs tmpfs')], [devices[0].replace('/dev/null', '/dev/kmsg')]):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                functions['proc_mounts'](raw(rows + changed), spec, {}, meta)
+
+    def test_cgroup_values_follow_runc_weight_and_kubelet_slices(self):
+        functions = node_functions()
+        uid, container = 'owned-pod', '1' * 64
+        stat = b'100 (python3) ' + b' '.join([b'S'] + [b'0'] * 18 + [b'200'] + [b'0'] * 5)
+        cgroup = ('0::/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-burstable.slice/kubelet-kubepods-burstable-pod'
+                  + uid.replace('-', '_') + '.slice/cri-containerd-' + container + '.scope\n').encode()
+        values = {'cpu.max': '100000 100000', 'cpu.weight': '35', 'memory.max': '536870912', 'memory.swap.max': '0',
+                  'pids.max': 'max', 'parent.pids.max': '4096', 'ancestry.pids.max': ['max', '256076', 'max', 'max']}
+        def frames(cg, path):
+            meta = dict(boot_id='00000000-0000-0000-0000-000000000001', mount_namespace='mnt:[3]',
+                        namespace_matches=dict.fromkeys(('mnt', 'pid', 'ipc', 'uts', 'net', 'cgroup', 'user'), '1'),
+                        binary_kind='python313', tmp_device='1', tmp_inode='2', tmp_bytes='67108864', volume_pairs={},
+                        dmi_pairs={}, cgroup_values=cg, key_stat=None)
+            return dict(meta=meta, stat_before=stat, stat_after=stat, status=b'Name:\tpython3\n', cmdline=b'', environ=b'',
+                        mountinfo=b'', cgroup=path)
+        functions.update(proc_values=lambda *args: None, proc_mounts=lambda *args: 20)
+        def snapshot(cg, path):
+            functions['primitive'] = lambda *args: frames(cg, path)
+            return functions['process_snapshot'](dict(profile='metadata', pod_uid=uid, container_id=container),
+                                                 dict(info=dict(pid=100, runtimeSpec={})), dict(sandbox_pid=50, sandbox_id='2' * 64))
+        self.assertEqual(snapshot(values, cgroup)['start_ticks'], 200)
+        # systemd's TasksMax on the scope is admitted only beneath the pod slice's 4096 bound.
+        for scope in ('38411', '4096', '1'):
+            self.assertEqual(snapshot(dict(values, **{'pids.max': scope}), cgroup)['start_ticks'], 200)
+        self.assertEqual(snapshot(dict(values, **{'ancestry.pids.max': []}), cgroup)['start_ticks'], 200)
+        self.assertEqual(functions['pids_bound']('38411', '4096', ['max', '256076']), 4096)
+        self.assertEqual(functions['pids_bound']('100', '4096', ['max']), 100)
+        refused = [{'parent.pids.max': value} for value in ('max', '4095', '8192', '04096', ' 4096')]
+        refused += [{'pids.max': value} for value in ('0', '-1', '', '1 2', 38411)]
+        refused += [{'ancestry.pids.max': value} for value in ('max', ['0'], ['many'], [None], ['max'] * 15)]
+        for changed in refused:
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                snapshot(dict(values, **changed), cgroup)
+        without = dict(values); del without['ancestry.pids.max']
+        for cg, path in ((dict(values, **{'cpu.weight': '10'}), cgroup), (values, cgroup.replace(b'/kubelet-kubepods-burstable-pod', b'/kubepods-burstable-pod')),
+                         (without, cgroup)):
+            with self.subTest(cg=cg, path=path), self.assertRaises(RuntimeError):
+                snapshot(cg, path)
 
     def test_release_path_is_only_the_matching_owned_tmp_volume(self):
         functions = node_functions()

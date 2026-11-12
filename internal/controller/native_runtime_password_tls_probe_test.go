@@ -144,6 +144,19 @@ func nativePasswordPodMatches(expected, actual *corev1.Pod) bool {
 	return expected != nil && actual != nil && (expected.UID == "" || expected.UID == actual.UID) && expected.Name == actual.Name && expected.Namespace == actual.Namespace && actual.DeletionTimestamp.IsZero() && reflect.DeepEqual(expected.Spec, actual.Spec) && reflect.DeepEqual(expected.Labels, actual.Labels) && reflect.DeepEqual(expected.Annotations, actual.Annotations) && reflect.DeepEqual(expected.OwnerReferences, actual.OwnerReferences) && reflect.DeepEqual(expected.Finalizers, actual.Finalizers)
 }
 
+// The Job controller drops its tracking finalizer once it has counted a terminated Job Pod; nothing else may change.
+func nativePasswordPodContinues(expected, live *corev1.Pod, terminalJobPod bool) bool {
+	if nativePasswordPodMatches(expected, live) {
+		return true
+	}
+	if !terminalJobPod || expected == nil || !slices.Equal(expected.Finalizers, []string{batchv1.JobTrackingFinalizer}) {
+		return false
+	}
+	released := expected.DeepCopy()
+	released.Finalizers = nil
+	return nativePasswordPodMatches(released, live)
+}
+
 func nativePasswordServerReady(ctx context.Context, clientset kubernetes.Interface, created *corev1.Pod, image nativeRuntimeImage) (*corev1.Pod, error) {
 	var result *corev1.Pod
 	known := ""
@@ -209,7 +222,7 @@ func nativePasswordClientReady(ctx context.Context, clientset kubernetes.Interfa
 
 func nativePasswordContinuity(ctx context.Context, clientset kubernetes.Interface, job *batchv1.Job, pod *corev1.Pod, image nativeRuntimeImage, terminal bool) error {
 	live, err := clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-	if err != nil || !nativePasswordPodMatches(pod, live) {
+	if err != nil || !nativePasswordPodContinues(pod, live, terminal && job != nil) {
 		return errors.New("probe Pod continuity lost")
 	}
 	known := pod.Status.ContainerStatuses[0].ContainerID
@@ -870,12 +883,21 @@ func nativePasswordServerCommand(major int) []string {
 }
 
 func nativePasswordServer(input nativeRuntimeInput, node nativeRuntimeNode, image nativeRuntimeImage, major int) (*corev1.Pod, error) {
-	job, err := nativeRuntimeJob(input, node, image, major)
+	// The version-Job builder admits only repository@digest; the locked CNPG reference keeps its major tag.
+	repository, _, _ := strings.Cut(image.Ref, "@")
+	if slash, colon := strings.LastIndex(repository, "/"), strings.LastIndex(repository, ":"); colon > slash {
+		repository = repository[:colon]
+	}
+	builder := image
+	builder.Ref = repository + "@" + image.Digest
+	job, err := nativeRuntimeJob(input, node, builder, major)
 	if err != nil {
 		return nil, err
 	}
+	job.Spec.Template.Spec.Containers[0].Image = image.Ref
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pg%d", major), Namespace: input.Namespace, Labels: map[string]string{nativeRuntimeRunLabel: input.RunID, nativePasswordQualificationLabel: input.QualificationID, "native-probe-server": fmt.Sprint(major)}}, Spec: *job.Spec.Template.Spec.DeepCopy()}
-	uid, yes, no, grace, priority, mode := int64(999), true, false, int64(30), int32(0), int32(0o440)
+	// The locked CNPG images run postgres as UID 26, which ssl-cert (101) lists; initdb refuses a UID without a passwd entry.
+	uid, yes, no, grace, priority, mode := int64(26), true, false, int64(30), int32(0), int32(0o440)
 	pod.Spec.HostUsers = &yes
 	pod.Spec.SecurityContext.RunAsUser = &uid
 	pod.Spec.SecurityContext.RunAsGroup = &uid
@@ -1143,8 +1165,12 @@ func TestNativePasswordTLSFixedFixtureAndTerminalIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *server.Spec.SecurityContext.RunAsUser != 999 || *server.Spec.SecurityContext.RunAsGroup != 999 || *server.Spec.SecurityContext.FSGroup != 999 || *server.Spec.AutomountServiceAccountToken || !*server.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem || server.Spec.RuntimeClassName != nil || server.Spec.Volumes[1].Secret == nil || *server.Spec.Volumes[1].Secret.DefaultMode != 0o440 || server.Spec.Volumes[2].EmptyDir == nil || len(server.Spec.Containers[0].Env) != 0 {
+	if *server.Spec.SecurityContext.RunAsUser != 26 || *server.Spec.SecurityContext.RunAsGroup != 26 || *server.Spec.SecurityContext.FSGroup != 26 || *server.Spec.AutomountServiceAccountToken || !*server.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem || server.Spec.RuntimeClassName != nil || server.Spec.Volumes[1].Secret == nil || *server.Spec.Volumes[1].Secret.DefaultMode != 0o440 || server.Spec.Volumes[2].EmptyDir == nil || len(server.Spec.Containers[0].Env) != 0 {
 		t.Fatal("fixed server ownership or private-file fixture changed")
+	}
+	tagged := nativeRuntimeImage{Ref: "ghcr.io/cloudnative-pg/postgresql:16@sha256:" + strings.Repeat("5", 64), Digest: "sha256:" + strings.Repeat("5", 64), ConfigDigest: "sha256:" + strings.Repeat("6", 64)}
+	if server, err := nativePasswordServer(input, nativeRuntimeNode{Name: nativePasswordOwnedNode}, tagged, 16); err != nil || server.Spec.Containers[0].Image != tagged.Ref {
+		t.Fatal("the locked tagged CNPG reference did not reach the server container", err)
 	}
 	program, err := nativePasswordProgram()
 	if err != nil {
@@ -1249,6 +1275,29 @@ func TestNativePasswordTLSDirectPodMetadataCannotDrift(t *testing.T) {
 				t.Fatal("direct Pod metadata drift was admitted")
 			}
 		})
+	}
+}
+
+func TestNativePasswordTLSTerminalTrackingFinalizerRelease(t *testing.T) {
+	running := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client-16-pod", Namespace: "primitive-fixture", UID: "primitive-original-uid", Finalizers: []string{batchv1.JobTrackingFinalizer}}}
+	released := running.DeepCopy()
+	released.Finalizers = nil
+	if !nativePasswordPodContinues(running, released, true) || !nativePasswordPodContinues(running, running, true) {
+		t.Fatal("the Job controller's tracking finalizer release was refused")
+	}
+	if nativePasswordPodContinues(running, released, false) {
+		t.Fatal("a running or direct Pod lost its finalizer unnoticed")
+	}
+	foreign := released.DeepCopy()
+	foreign.Finalizers = []string{nativePasswordForeignOwner}
+	relabelled := released.DeepCopy()
+	relabelled.Labels = map[string]string{nativeRuntimeRunLabel: "foreign-label"}
+	untracked := running.DeepCopy()
+	untracked.Finalizers = nil
+	for name, pair := range map[string][2]*corev1.Pod{"foreign_finalizer": {running, foreign}, "other_drift": {running, relabelled}, "never_tracked": {untracked, foreign}, "foreign_removed": {foreign, released}} {
+		if nativePasswordPodContinues(pair[0], pair[1], true) {
+			t.Fatalf("%s was admitted as a tracking finalizer release", name)
+		}
 	}
 }
 
