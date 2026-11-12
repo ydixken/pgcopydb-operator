@@ -2469,3 +2469,23 @@ func TestNativeRuntimeMetadataCertificateOnly(t *testing.T) {
 		})
 	}
 }
+
+// A list-context match hands need() the capture '0', which Perl reads as false.
+func TestNativeRuntimeNodeDecimalAdmitsZeroOnlyWhereAllowed(t *testing.T) {
+	var subs []string
+	for line := range strings.SplitSeq(nativeRuntimeNodeProgram, "\n") {
+		if strings.HasPrefix(line, "sub need ") || strings.HasPrefix(line, "sub decimal ") {
+			subs = append(subs, line)
+		}
+	}
+	if len(subs) != 2 {
+		t.Fatal("node decimal parser missing")
+	}
+	probe := strings.Join(subs, "\n") + "\nmy $r=eval { decimal($ARGV[0],$ARGV[1]) };print defined($r)?\"ok:$r\":\"refused\";"
+	for _, row := range [][3]string{{"0", "1", "ok:0"}, {"0", "0", nativeRuntimeRefused}, {"16165", "0", "ok:16165"}, {"01", "1", nativeRuntimeRefused}, {"", "1", nativeRuntimeRefused}, {"18446744073709551616", "1", nativeRuntimeRefused}} {
+		out, err := exec.Command("perl", "-e", probe, row[0], row[1]).Output() // #nosec G204 -- fixed host perl over the pinned node source.
+		if err != nil || string(out) != row[2] {
+			t.Fatalf("decimal(%q, %s) = %q, want %q (%v)", row[0], row[1], out, row[2], err)
+		}
+	}
+}

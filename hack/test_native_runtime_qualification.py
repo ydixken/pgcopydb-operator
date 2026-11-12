@@ -7,7 +7,6 @@ import inspect
 import json
 import os
 import stat
-import subprocess
 from pathlib import Path
 import tempfile
 import sys
@@ -483,17 +482,6 @@ class QualificationBoundaries(unittest.TestCase):
             for action,args in [('probe',(100,'../foreign',101,0)),('release',(100,'owned-pod',1,'/foreign',1,2)),('absence',('/foreign',1))]:
                 with self.subTest(action=action),self.assertRaises(RuntimeError):functions['primitive'](action,*args)
             command.assert_not_called()
-
-    def test_node_decimal_admits_zero_only_where_allowed(self):
-        # A list-context match hands need() the capture '0', which Perl reads as false.
-        source=node_functions()['perl_source']()
-        subs=[line for line in source.splitlines() if line.startswith(('sub need ','sub decimal '))]
-        self.assertEqual(len(subs),2,'node decimal parser missing')
-        probe='\n'.join(subs)+'\nmy $r=eval { decimal($ARGV[0],$ARGV[1]) };print defined($r)?"ok:$r":"refused";'
-        for value,zero,expected in [('0','1','ok:0'),('0','0','refused'),('16165','0','ok:16165'),('01','1','refused'),('','1','refused'),('18446744073709551616','1','refused')]:
-            with self.subTest(value=value,zero=zero):
-                result=subprocess.run(['perl','-e',probe,value,zero],capture_output=True,text=True,timeout=10,check=True)
-                self.assertEqual(result.stdout,expected)
 
     def test_server_key_stat_matches_the_cnpg_fsgroup(self):
         # The probe servers run with fsGroup 26, so kubelet gives the projected server.key that group.
