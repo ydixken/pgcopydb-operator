@@ -1686,6 +1686,39 @@ class NativePythonTests(unittest.TestCase):
             if proc.poll() is None:proc.kill();proc.communicate(timeout=3)
             channel.close()
 
+    def test_RelayModeSettle(self):
+        import subprocess,fcntl
+        source=(HERE/'evidence_request_writer.py').read_text()
+        for settles in (True,False):
+            op=os.urandom(16).hex();path=Path('/tmp')/('rpgmigrate-evidence-'+op)
+            # The program's mkdir under a kubelet fsGroup /tmp, before its fchmod lands.
+            path.mkdir(mode=0o700);os.chown(path,-1,os.getegid());os.chmod(path,0o2700)
+            self.assertEqual(os.stat(path).st_mode,0o42700)
+            directory=os.open(path,os.O_RDONLY|os.O_DIRECTORY);proc=None
+            try:
+                started=time.monotonic()
+                proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment())
+                time.sleep(.5)
+                self.assertIsNone(proc.poll(),'relay refused the directory before the program cleared setgid')
+                fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(directory,fcntl.LOCK_UN)
+                if settles:
+                    os.chmod(path,0o700);deadline=time.monotonic()+3;admitted=False
+                    while not admitted and time.monotonic()<deadline:
+                        try:fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(directory,fcntl.LOCK_UN);time.sleep(.01)
+                        except BlockingIOError:admitted=True
+                    self.assertTrue(admitted,'relay did not admit the directory once it reached 0o700')
+                stdout,stderr=proc.communicate(timeout=8);elapsed=time.monotonic()-started
+                # Without FIFOs neither case can complete; both end at the injection window, quietly.
+                self.assertEqual((proc.returncode!=0,stdout,stderr),(True,b'',b''))
+                self.assertGreaterEqual(elapsed,4.5);self.assertLess(elapsed,8)
+                if not settles:fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:
+                os.close(directory)
+                if proc is not None:
+                    if proc.poll() is None:proc.kill()
+                    proc.communicate(timeout=3)
+                path.rmdir()
+
     def test_RelayMainQuiet(self):
         import subprocess
         op=os.urandom(16).hex();sha=hashlib.sha256((HERE/'evidence_program.py').read_bytes()).hexdigest();value=request();value['operation_id']=op;value['program_sha256']=sha

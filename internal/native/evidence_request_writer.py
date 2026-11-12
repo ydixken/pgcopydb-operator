@@ -108,6 +108,8 @@ def deliver(operation):
             remaining(injection)
             try:directory=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
             except FileNotFoundError:select.select([],[],[],min(.02,remaining(injection)))
+        # Await the program's setgid-clearing fchmod.
+        while stat.S_IMODE(os.fstat(directory).st_mode)!=0o700:select.select([],[],[],min(.02,remaining(injection)))
         original_dir=private_dir(directory)
         fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB)
         # The raw directory descriptor keeps this lease until actual process exit.
