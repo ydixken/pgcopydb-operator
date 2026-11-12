@@ -246,7 +246,7 @@ class QualificationBoundaries(unittest.TestCase):
         cgroup = ('0::/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-burstable.slice/kubelet-kubepods-burstable-pod'
                   + uid.replace('-', '_') + '.slice/cri-containerd-' + container + '.scope\n').encode()
         values = {'cpu.max': '100000 100000', 'cpu.weight': '35', 'memory.max': '536870912', 'memory.swap.max': '0',
-                  'pids.max': 'max', 'parent.pids.max': '4096'}
+                  'pids.max': 'max', 'parent.pids.max': '4096', 'ancestry.pids.max': ['max', '256076', 'max', 'max']}
         def frames(cg, path):
             meta = dict(boot_id='00000000-0000-0000-0000-000000000001', mount_namespace='mnt:[3]',
                         namespace_matches=dict.fromkeys(('mnt', 'pid', 'ipc', 'uts', 'net', 'cgroup', 'user'), '1'),
@@ -260,8 +260,21 @@ class QualificationBoundaries(unittest.TestCase):
             return functions['process_snapshot'](dict(profile='metadata', pod_uid=uid, container_id=container),
                                                  dict(info=dict(pid=100, runtimeSpec={})), dict(sandbox_pid=50, sandbox_id='2' * 64))
         self.assertEqual(snapshot(values, cgroup)['start_ticks'], 200)
+        # systemd's TasksMax on the scope is admitted only beneath the pod slice's 4096 bound.
+        for scope in ('38411', '4096', '1'):
+            self.assertEqual(snapshot(dict(values, **{'pids.max': scope}), cgroup)['start_ticks'], 200)
+        self.assertEqual(snapshot(dict(values, **{'ancestry.pids.max': []}), cgroup)['start_ticks'], 200)
+        self.assertEqual(functions['pids_bound']('38411', '4096', ['max', '256076']), 4096)
+        self.assertEqual(functions['pids_bound']('100', '4096', ['max']), 100)
+        refused = [{'parent.pids.max': value} for value in ('max', '4095', '8192', '04096', ' 4096')]
+        refused += [{'pids.max': value} for value in ('0', '-1', '', '1 2', 38411)]
+        refused += [{'ancestry.pids.max': value} for value in ('max', ['0'], ['many'], [None], ['max'] * 15)]
+        for changed in refused:
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                snapshot(dict(values, **changed), cgroup)
+        without = dict(values); del without['ancestry.pids.max']
         for cg, path in ((dict(values, **{'cpu.weight': '10'}), cgroup), (values, cgroup.replace(b'/kubelet-kubepods-burstable-pod', b'/kubepods-burstable-pod')),
-                         (dict(values, **{'parent.pids.max': 'max'}), cgroup)):
+                         (without, cgroup)):
             with self.subTest(cg=cg, path=path), self.assertRaises(RuntimeError):
                 snapshot(cg, path)
 

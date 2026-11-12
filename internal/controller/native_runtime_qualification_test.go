@@ -498,6 +498,12 @@ def proc_mounts(raw,spec,e,meta):
  need(type(meta['tmp_bytes']) is str and meta['tmp_bytes'].isdigit() and 0<int(meta['tmp_bytes'])<=67108864)
  return len(rows)
 
+def pids_bound(scope,pod,ancestry):
+ # The scope may carry systemd's TasksMax or max; only kubelet's podPidsLimit=4096 on the pod slice bounds it.
+ need(pod=='4096' and type(ancestry) is list and len(ancestry)<=14);chain=[scope,pod]+ancestry
+ need(all(type(v) is str and (v=='max' or re.fullmatch('[1-9][0-9]{0,18}',v)) for v in chain))
+ return min(int(v) for v in chain if v!='max')
+
 def process_snapshot(e,inspection,sandbox):
  pid=inspection['info'].get('pid');need(type(pid) is int and 1<pid<4194304)
  guard=0
@@ -515,9 +521,10 @@ def process_snapshot(e,inspection,sandbox):
  need(re.fullmatch('mnt:\\[[0-9]+\\]',meta['mount_namespace']) and re.fullmatch('[0-9a-f-]{36}',meta['boot_id']))
  for key in ('tmp_device','tmp_inode'):need(type(meta[key]) is str and re.fullmatch('[0-9]{1,20}',meta[key]))
  mounts=proc_mounts(frames['mountinfo'],inspection['info']['runtimeSpec'],e,meta)
- cg=meta['cgroup_values'];fields(cg,('cpu.max','cpu.weight','memory.max','memory.swap.max','pids.max','parent.pids.max'))
+ cg=meta['cgroup_values'];fields(cg,('cpu.max','cpu.weight','memory.max','memory.swap.max','pids.max','parent.pids.max','ancestry.pids.max'))
  # runc maps 256 shares with its quadratic v2 formula: ceil(10**((64+125*8)/612-7/34)) == 35.
- need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='35' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0' and cg['pids.max']=='max' and cg['parent.pids.max'].isdigit() and 0<int(cg['parent.pids.max'])<=4096)
+ need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='35' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0')
+ need(pids_bound(cg['pids.max'],cg['parent.pids.max'],cg['ancestry.pids.max'])<=4096)
  need(frames['cgroup'].decode('ascii').endswith('/kubelet-kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
  if e['profile'] in ('pg16','pg18'):
   need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))
@@ -568,6 +575,7 @@ sub probe {
  need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubelet-kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
  for my $leaf(qw(cpu.max cpu.weight memory.max memory.swap.max pids.max)){$cg{$leaf}=raw_file('/sys/fs/cgroup'.$path.'/'.$leaf,128);$cg{$leaf} =~ s/\n\z//;}
  my $parent=$path;$parent =~ s/\/[^\/]+\z//;$cg{'parent.pids.max'}=raw_file('/sys/fs/cgroup'.$parent.'/pids.max',128);$cg{'parent.pids.max'} =~ s/\n\z//;
+ my @up;my $level=$parent;while($level ne ''){$level =~ s/\/[^\/]+\z//;my $file='/sys/fs/cgroup'.$level.'/pids.max';last if $level eq '' && !-e $file;my $v=raw_file($file,128);$v =~ s/\n\z//;push @up,$v;}$cg{'ancestry.pids.max'}=\@up;
  open(my $statpipe,'-|','/usr/bin/stat','-f','-c','%b %S',$target.'/tmp') or need(0);my $space=bounded($statpipe,128);close($statpipe) or need(0);need($space =~ /\A([0-9]+) ([0-9]+)\n\z/);my $tmpbytes=$1*$2;
  my $boot=raw_file('/proc/sys/kernel/random/boot_id',64);need($boot =~ /\A([0-9a-f-]{36})\n\z/);$boot=$1;
  my $key=defined($pairs{server})?key_stat($root.'kubernetes.io~secret/server-input'):undef;
