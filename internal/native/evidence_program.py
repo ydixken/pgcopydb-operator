@@ -722,7 +722,7 @@ class Session:
   try: return C.string_at(pointer).decode('utf-8')
   finally: self.lib.PQfreemem(pointer)
  def query(self,sql,params=(),tag='SELECT 1',state=0,rows=1,width=1,commit=False):
-  self.check(); before=0 if tag=='BEGIN' else 2 if commit else state
+  self.check(); before=0 if tag=='BEGIN' else 2 if commit or tag in ('COMMIT','ROLLBACK') else state
   need(self.lib.PQtransactionStatus(self.conn)==before,TX_STATE)
   encoded=[None if value is None else str(value).encode('utf-8') for value in params]
   need(not any(value is not None and b'\0' in value for value in encoded),RESULT)

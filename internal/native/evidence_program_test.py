@@ -1210,6 +1210,54 @@ class NativePythonTests(unittest.TestCase):
         with self.assertRaises(P.Refusal): P.exact_true(s.query('SELECT false;'))
         s.close(False)
 
+    def test_SessionTransactionState(self):
+        class PQ:
+            # PQtransactionStatus follows the statements sent, as libpq does: BEGIN opens, COMMIT/ROLLBACK close.
+            def __init__(self): self.state=0; self.pending=None; self.sent=[]
+            def PQstatus(self,_): return 0
+            def PQtransactionStatus(self,_): return self.state
+            def PQbackendPID(self,_): return 23
+            def PQsendQueryParams(self,conn,sql,*args): self.pending=sql.decode(); self.sent.append(self.pending); return 1
+            def PQflush(self,_): return 0
+            def PQconsumeInput(self,_): return 1
+            def PQisBusy(self,_): return 0
+            def PQgetResult(self,_):
+                sql,self.pending=self.pending,None
+                if sql is None: return None
+                tag=sql.split()[0].rstrip(';')
+                if tag=='BEGIN': self.state=2
+                elif tag in ('COMMIT','ROLLBACK'): self.state=0
+                return dict(status=1,tag=tag.encode())
+            def PQresultStatus(self,r): return r['status']
+            def PQresultErrorField(self,r,_): return None
+            def PQcmdStatus(self,r): return r['tag']
+            def PQcmdTuples(self,r): return b''
+            def PQntuples(self,r): return 0
+            def PQnfields(self,r): return 0
+            def PQclear(self,r): pass
+            def PQfinish(self,_): pass
+        def session():
+            from types import SimpleNamespace
+            s=P.Session.__new__(P.Session); s.lib=PQ(); s.conn=1; s.deadline=time.monotonic()+3
+            s.diag=SimpleNamespace(check=lambda:None); s.notice=False; s.sqlstate=''
+            s.connection=SimpleNamespace(check=lambda:None,close=lambda:None); s.claimed=True
+            s.commit_dispatched=False; s.commit_ack=False; s.backend=23; s.props={}; s.connection_facts=lambda:{}
+            return s
+        # The preflight replica_role probe, verbatim from preflight_checks.
+        s=session()
+        s.query('BEGIN READ ONLY;',tag='BEGIN',state=2,rows=0,width=0)
+        s.query("SET LOCAL session_replication_role TO 'replica';",tag='SET',state=2,rows=0,width=0)
+        s.query('ROLLBACK;',tag='ROLLBACK',rows=0,width=0)
+        self.assertEqual((s.lib.state,len(s.lib.sent)),(0,3)); s.close()
+        s=session()
+        s.query('BEGIN READ WRITE;',tag='BEGIN',state=2,rows=0,width=0)
+        s.query('COMMIT;',tag='COMMIT',rows=0,width=0,commit=True)
+        self.assertTrue(s.commit_ack); s.close()
+        for prior,sql,arguments in [(0,'ROLLBACK;',dict(tag='ROLLBACK',rows=0,width=0)),(0,'COMMIT;',dict(tag='COMMIT',rows=0,width=0,commit=True)),(2,'BEGIN;',dict(tag='BEGIN',state=2,rows=0,width=0)),(0,'SET x TO 1;',dict(tag='SET',state=2,rows=0,width=0)),(2,'SET x TO 1;',dict(tag='SET',rows=0,width=0))]:
+            s=session(); s.lib.state=prior
+            with self.assertRaises(P.Refusal) as failure: s.query(sql,**arguments)
+            self.assertEqual((failure.exception.error_class,s.lib.sent,s.commit_dispatched),(P.TX_STATE,[],False)); s.close(False)
+
     def test_Writer(self):
         import subprocess
         op=os.urandom(16).hex(); value=request(); value['operation_id']=op
