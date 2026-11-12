@@ -1258,11 +1258,17 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 
 func create(m *v1beta1.Migration) {
 	GinkgoHelper()
+	volume := ""
 	if nativeKindWorkVolume() {
-		provisionNativeWorkVolume(m)
+		volume = provisionNativeWorkVolume(m)
 	}
 	Expect(k8sClient.Create(ctx, m)).To(Succeed(), "failed to create Migration %s/%s", m.Namespace, m.Name)
 	waitWorkVolumeReady(m)
+	if volume != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: m.Name + "-work"}, pvc)).To(Succeed())
+		Expect(pvc.Spec.VolumeName).To(Equal(volume), "work claim of %s bound another volume", m.Name)
+	}
 }
 
 func waitWorkVolumeReady(m *v1beta1.Migration) {

@@ -137,7 +137,8 @@ The guard binds the engine, pair and full spec text into `suite-input.json`, and
 Its suite runs with the native runner and the PostgreSQL images of its pair, all pulled and verified by digest on every node during `e2e:kind:pull`.
 Its receipt names that spec and carries none of the legacy bootstrap claims; the spec asserts its own outcome.
 The sealed default class gives each volume a root-owned 0777 directory, and the native engine and evidence programs refuse that as a work volume root.
-So before each native Migration the suite makes a `work` directory with mode 0700 as uid 65532 on a default-class seed claim, and pre-binds a hostPath volume at that directory to the Migration's work claim.
+So before each native Migration the suite makes a `work` directory with mode 0700 as uid 65532 on a default-class seed claim, and offers a hostPath volume at that directory through its own `WaitForFirstConsumer` class.
+We do not pre-bind that volume with a `claimRef`, because a pre-bound claim binds at once, and a claim that binds while the operator confirms its new worker Job makes the operator refuse that attempt.
 Kubelet applies no `fsGroup` change to a hostPath volume, so a native kind run does not exercise a CSI work volume with `fsGroup`.
 The internal suite Task requires the exact guard-owned run, context, engine, and that engine's positive label.
 Do not invoke it as a context bypass.

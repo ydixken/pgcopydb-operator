@@ -21,6 +21,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -40,6 +41,15 @@ func TestKindNativeWorkVolumeSelection(t *testing.T) {
 		if got := nativeKindWorkVolume(); got != tc.want {
 			t.Errorf("nativeKindWorkVolume() with suite %+v = %t, want %t", tc.suite, got, tc.want)
 		}
+	}
+}
+
+func TestKindNativeWorkClass(t *testing.T) {
+	class := nativeWorkClass()
+	if class.Name != nativeWorkStorageClass || class.Provisioner != "kubernetes.io/no-provisioner" ||
+		class.VolumeBindingMode == nil || *class.VolumeBindingMode != storagev1.VolumeBindingWaitForFirstConsumer ||
+		class.ReclaimPolicy == nil || *class.ReclaimPolicy != corev1.PersistentVolumeReclaimRetain {
+		t.Errorf("native work class = %+v, want a static WaitForFirstConsumer class that retains", class)
 	}
 }
 
@@ -68,8 +78,11 @@ func TestKindNativeWorkPV(t *testing.T) {
 		spec.HostPath.Type == nil || *spec.HostPath.Type != corev1.HostPathDirectory {
 		t.Errorf("work volume source = %+v, want the existing seed work directory", spec.HostPath)
 	}
-	if spec.ClaimRef == nil || *spec.ClaimRef != (corev1.ObjectReference{Namespace: nsE2E, Name: "e2e-follow-auto-work"}) {
-		t.Errorf("work volume claimRef = %+v, want only the Migration's work claim", spec.ClaimRef)
+	if spec.ClaimRef != nil {
+		t.Errorf("work volume claimRef = %+v, want none so binding waits for the worker", spec.ClaimRef)
+	}
+	if pv.Name != nsE2E+"-e2e-follow-auto-work" {
+		t.Errorf("work volume name = %q", pv.Name)
 	}
 	if spec.StorageClassName != nativeWorkStorageClass ||
 		spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimRetain ||
