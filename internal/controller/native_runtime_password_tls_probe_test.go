@@ -883,10 +883,18 @@ func nativePasswordServerCommand(major int) []string {
 }
 
 func nativePasswordServer(input nativeRuntimeInput, node nativeRuntimeNode, image nativeRuntimeImage, major int) (*corev1.Pod, error) {
-	job, err := nativeRuntimeJob(input, node, image, major)
+	// The version-Job builder admits only repository@digest; the locked CNPG reference keeps its major tag.
+	repository, _, _ := strings.Cut(image.Ref, "@")
+	if slash, colon := strings.LastIndex(repository, "/"), strings.LastIndex(repository, ":"); colon > slash {
+		repository = repository[:colon]
+	}
+	builder := image
+	builder.Ref = repository + "@" + image.Digest
+	job, err := nativeRuntimeJob(input, node, builder, major)
 	if err != nil {
 		return nil, err
 	}
+	job.Spec.Template.Spec.Containers[0].Image = image.Ref
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pg%d", major), Namespace: input.Namespace, Labels: map[string]string{nativeRuntimeRunLabel: input.RunID, nativePasswordQualificationLabel: input.QualificationID, "native-probe-server": fmt.Sprint(major)}}, Spec: *job.Spec.Template.Spec.DeepCopy()}
 	// The locked CNPG images run postgres as UID 26, which ssl-cert (101) lists; initdb refuses a UID without a passwd entry.
 	uid, yes, no, grace, priority, mode := int64(26), true, false, int64(30), int32(0), int32(0o440)
@@ -1159,6 +1167,10 @@ func TestNativePasswordTLSFixedFixtureAndTerminalIncarnation(t *testing.T) {
 	}
 	if *server.Spec.SecurityContext.RunAsUser != 26 || *server.Spec.SecurityContext.RunAsGroup != 26 || *server.Spec.SecurityContext.FSGroup != 26 || *server.Spec.AutomountServiceAccountToken || !*server.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem || server.Spec.RuntimeClassName != nil || server.Spec.Volumes[1].Secret == nil || *server.Spec.Volumes[1].Secret.DefaultMode != 0o440 || server.Spec.Volumes[2].EmptyDir == nil || len(server.Spec.Containers[0].Env) != 0 {
 		t.Fatal("fixed server ownership or private-file fixture changed")
+	}
+	tagged := nativeRuntimeImage{Ref: "ghcr.io/cloudnative-pg/postgresql:16@sha256:" + strings.Repeat("5", 64), Digest: "sha256:" + strings.Repeat("5", 64), ConfigDigest: "sha256:" + strings.Repeat("6", 64)}
+	if server, err := nativePasswordServer(input, nativeRuntimeNode{Name: nativePasswordOwnedNode}, tagged, 16); err != nil || server.Spec.Containers[0].Image != tagged.Ref {
+		t.Fatal("the locked tagged CNPG reference did not reach the server container", err)
 	}
 	program, err := nativePasswordProgram()
 	if err != nil {
