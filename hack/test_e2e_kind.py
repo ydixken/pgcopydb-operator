@@ -2263,6 +2263,16 @@ LOCK_SPEC.loader.exec_module(LOCK)
 
 
 class LockGeneratorTests(unittest.TestCase):
+    def test_lock_generator_leaves_no_bytecode_in_the_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ('e2e-kind-lock.py', 'e2e-kind.py', 'e2e-kind-registry.py'):
+                (Path(directory) / name).write_bytes((LOCK_SCRIPT.parent / name).read_bytes())
+            environment = {key: value for key, value in os.environ.items() if key not in ('PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX')}
+            result = subprocess.run([sys.executable, str(Path(directory) / 'e2e-kind-lock.py'), '--help'],
+                                    capture_output=True, env=environment, timeout=60, check=False)
+            self.assertEqual(result.returncode, 0)
+            self.assertFalse((Path(directory) / '__pycache__').exists())
+
     def setUp(self):
         self.fixture = RegistryPreparationTests('test_prepare_retains_only_complete_metadata_and_check_is_read_only')
         self.fixture.setUp()
