@@ -219,7 +219,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
   `rpgmigrate` accepts only the pairs 16:16, 18:18 and 16:18, and turns off DropIfExists, filters, binary COPY, split parts and large objects in each Migration.
   It also connects each side with `sslmode=verify-full` against that CNPG cluster's `<cluster>-ca` Secret, and refuses a Migration whose connection it cannot bind to one.
   The Ginkgo label `native` selects the specs the native matrix runs.
-  `TestE2E` refuses `rpgmigrate` and names the missing prerequisite until native activation lands.
+  A kind run admits `rpgmigrate` only on those pairs with one guard-selected spec; see the [kind guide](docs/operations/e2e-kind.md).
 - `E2E_OPERATOR_TAG` (unset) is a manager image tag to install instead of the pinned release; the runner follows it.
 - `E2E_RUNNER_TAG` (unset) is the worker image tag on its own, for an unreleased `images/runner` build; building one locally pulls the pinned `pgcopydb-builder` tag from ghcr.
 - `E2E_STORAGE_CLASS` (unset) pins the fixture volumes to one StorageClass, and wins over the suite-owned one.

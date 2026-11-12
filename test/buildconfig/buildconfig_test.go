@@ -1417,7 +1417,8 @@ func TestKindTaskCommandsPreserveExplicitPrivateInputs(t *testing.T) {
 		{kindUpCommand, nil, []string{kindUpCommand, kindRunDirFlag, run, "--lease-seconds", "7200"}},
 		{kindPullCommand, nil, []string{kindPullCommand, kindRunDirFlag, run}},
 		{"legacy", nil, []string{"run", kindRunDirFlag, run, "--engine", "pgcopydb"}},
-		{"native", nil, []string{"run", kindRunDirFlag, run, "--engine", "rpgmigrate"}},
+		{"native", []string{"PAIR=16:18", "CASE=fault-suspend"},
+			[]string{"run", kindRunDirFlag, run, "--engine", "rpgmigrate", "--pair", "16:18", "--case", "fault-suspend"}},
 		{kindDownCommand, nil, []string{kindDownCommand, kindRunDirFlag, run}},
 	}
 	for _, item := range cases {
@@ -1451,6 +1452,16 @@ func TestKindTaskRefusesMissingInputsAndSupersededLoadBeforeEffects(t *testing.T
 		}
 		if _, err := os.Stat(trace); !os.IsNotExist(err) {
 			t.Fatalf("refused target reached Python: %s", target)
+		}
+	}
+	for _, vars := range [][]string{{"RUN_DIR=" + dir, "CASE=fault-suspend"}, {"RUN_DIR=" + dir, "PAIR=16:16"}} {
+		cmd := exec.Command(task, append([]string{"--dir", dir, "e2e:kind:native"}, vars...)...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("native run without a pair and case passed: %v\n%s", vars, out)
+		}
+		if _, err := os.Stat(trace); !os.IsNotExist(err) {
+			t.Fatalf("native run without a pair and case reached Python: %v", vars)
 		}
 	}
 }

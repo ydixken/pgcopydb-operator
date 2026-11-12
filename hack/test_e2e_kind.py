@@ -682,9 +682,14 @@ class LifecycleTests(GuardFixture):
 
 
 
-    def test_native_refuses_before_requests(self):
-        with self.assertRaisesRegex(MODULE.Refusal, 'native producer'):
-            self.guard.run('rpgmigrate')
+    def test_unlifted_routes_refuse_before_requests(self):
+        for args in (('rpgmigrate',), ('rpgmigrate', '16:16'), ('rpgmigrate', None, 'fault-suspend'),
+                     ('rpgmigrate', '17:17', 'fault-suspend'), ('rpgmigrate', '18:16', 'fault-suspend'),
+                     ('rpgmigrate', '16:17', 'fault-delete'), ('rpgmigrate', '16:16', 'kind-bootstrap'),
+                     ('pgcopydb', '16:16'), ('pgcopydb', '17:17', 'fault-suspend'), ('pgcopydb', None, 'fresh-clone'),
+                     ('unknown', '16:16', 'fault-suspend')):
+            with self.subTest(args=args), self.assertRaisesRegex(MODULE.Refusal, 'kind route admits'):
+                self.guard.run(*args)
         self.assertEqual(self.fake.calls, [])
 
 
@@ -1878,7 +1883,8 @@ class RegistryPullTests(unittest.TestCase):
         evidence = self.guard.private_json('pulled-image-resolution-evidence.json')
         self.assertTrue(evidence['complete'])
         self.assertEqual(set(evidence['node_bindings']), set(MODULE.registry.PULL_ROLES))
-        self.assertEqual(sum(len(nodes) for nodes in evidence['node_bindings'].values()), 24)
+        self.assertEqual(sum(len(nodes) for nodes in evidence['node_bindings'].values()), 33)
+        self.assertTrue({'native-runner', 'postgresql-16', 'postgresql-17', 'postgresql-18'} <= set(MODULE.registry.PULL_ROLES))
         expected = {(n['id'], self.images[r]['ref']) for r in MODULE.registry.PULL_ROLES for n in self.ledger['nodes']}
         self.assertEqual(len([a for a in self.calls if 'crictl' in a and 'pull' in a]), len(expected))
         before = len(self.calls)
@@ -2488,7 +2494,7 @@ class RetainedFailureReplayTests(GuardFixture):
         for name in ('require_lease', 'verify_node_limits'):
             setattr(self.guard, name, lambda *args: None)
         self.guard.kubeconfig = lambda ledger: None
-        self.guard.suite_input = lambda ledger: inputs
+        self.guard.suite_input = lambda ledger, selection: inputs
         self.guard.bootstrap = lambda ledger, source: None
         assertion = json.dumps({'Action': 'output', 'Output': '  [FAILED] Expected <int>: 0 to equal <int>: 1\n'}) + '\n'
         def suite(ledger, args, **kwargs):
@@ -2513,6 +2519,176 @@ class RetainedFailureReplayTests(GuardFixture):
         suite = taskfile[taskfile.index('  e2e:kind:suite:'):]
         self.assertIn('go test ./test/e2e -json ', suite)
         self.assertIn('> {{.RUN_DIR | shellQuote}}/go-test.json', suite)
+
+
+class SuiteRouteTests(unittest.TestCase):
+    setUp, command = RegistryPullTests.setUp, RegistryPullTests.command
+    NATIVE = ('16:16', '18:18', '16:18')
+
+    def pulled(self):
+        self.guard.require_prepared = lambda ledger: None
+        self.guard.pull()
+        return self.guard.read()
+
+    def test_selection_admits_exactly_the_lifted_pairs_and_named_specs(self):
+        self.assertEqual(MODULE.Guard.selection('pgcopydb'), MODULE.Guard.selection('pgcopydb', '17:17'))
+        self.assertEqual(MODULE.Guard.selection('pgcopydb')['spec'], MODULE.LEGACY_SPEC)
+        for pair in self.NATIVE:
+            for case, (label, spec) in MODULE.NATIVE_SPECS.items():
+                self.assertEqual(MODULE.Guard.selection('rpgmigrate', pair, case),
+                                 {'engine': 'rpgmigrate', 'pair': pair, 'label': label, 'spec': spec})
+        self.assertEqual({label for label, _ in MODULE.NATIVE_SPECS.values()}, {'native', 'native-fault'})
+        for args in (('rpgmigrate', '17:17', 'fault-suspend'), ('rpgmigrate', '18:16', 'fault-suspend'),
+                     ('rpgmigrate', '16:16', None), ('rpgmigrate', '16:16', 'fault-unknown'), ('pgcopydb', '16:16', None),
+                     ('pgcopydb', '17:17', 'fresh-clone'), ('rpgmigrate', '16:16 ', 'fault-suspend')):
+            with self.subTest(args=args), self.assertRaisesRegex(MODULE.Refusal, 'kind route admits'):
+                MODULE.Guard.selection(*args)
+
+    def test_projection_binds_engine_pair_spec_and_only_the_pulled_images_it_runs(self):
+        ledger = self.pulled()
+        common = {'manager', 'seed-tool-runner', 'otel-collector'}
+        expected = {'17:17': common | {'legacy-runner', 'postgresql-17'}, '16:16': common | {'native-runner', 'postgresql-16'},
+                    '18:18': common | {'native-runner', 'postgresql-18'},
+                    '16:18': common | {'native-runner', 'postgresql-16', 'postgresql-18'}}
+        evidence = self.guard.private_json('pulled-image-resolution-evidence.json')
+        for pair, roles in expected.items():
+            selection = MODULE.Guard.selection('pgcopydb') if pair == '17:17' else MODULE.Guard.selection('rpgmigrate', pair, 'fault-suspend')
+            projection = self.guard.suite_projection(ledger, selection)
+            with self.subTest(pair=pair):
+                self.assertEqual(set(projection['images']), roles)
+                self.assertEqual((projection['engine'], projection['pair'], projection['spec']),
+                                 (selection['engine'], pair, selection['spec']))
+                for role, image in projection['images'].items():
+                    self.assertEqual(image['node_bindings'], evidence['node_bindings'][role])
+                    self.assertEqual(image['loaded_digest'], self.images[role]['digest'])
+                self.assertEqual({role for _, role in MODULE.Guard.suite_environment(selection)}, roles)
+
+    def bound(self, selection, change=None):
+        ledger = self.pulled()
+        ledger['bootstrap'] = {'cnpg_manifest_sha256': MODULE.CNPG_SHA256, 'migration_crd_sha256': 'a' * 64,
+                               'source_tree_sha256': 'd' * 64, 'admission_verified': True, 'storage_mounted': True, 'probe_cleanup': True}
+        inputs = self.guard.suite_input(ledger, selection)
+        manager, node = inputs['images']['manager'], ledger['nodes'][0]['name']
+        receipt = {'reporter': 'ginkgo-report-after-suite', 'suite_succeeded': True, 'failures': [], 'schema_version': 2,
+                   'run_id': ledger['run_id'], 'engine': selection['engine'], 'pair': selection['pair'],
+                   'input_sha256': MODULE.registry.sha(self.guard.private_bytes('suite-input.json')),
+                   'selected_spec': selection['spec'], 'executed_specs': 1, 'passed_specs': 1, 'skipped_specs': 0, 'cleanup': True,
+                   'manager_runtime': {'namespace_uid': 'u1', 'deployment_uid': 'u2', 'replicaset_uid': 'u3', 'pod_uid': 'u4',
+                       'expected_version': 'm7-' + 'd' * 12, 'observed_version': 'm7-' + 'd' * 12, 'node_name': node,
+                       'image_ref': manager['ref'], 'image_config_id': manager['image_id'],
+                       'image_manifest_digest': manager['loaded_digest'],
+                       'container_image_id': manager['node_bindings'][node]['accepted_image_ids'][0],
+                       'container_id': 'containerd://' + '9' * 64, 'authenticated': True, 'restart_count': 0,
+                       'observed_at': MODULE.time.time(), 'cleanup': True}}
+        if selection['engine'] == 'pgcopydb':
+            receipt.update(phase='Completed', reason='DrainVerified', complete=True, complete_reason='MigrationSucceeded',
+                           cutover_completed=True, nonempty_data_verified=True, sequence_verified=True)
+        if change:
+            change(receipt)
+        self.guard.write_private('suite-receipt.json', json.dumps(receipt).encode())
+        return ledger, receipt
+
+    def test_positive_receipts_validate_against_their_own_selection(self):
+        for selection in (MODULE.Guard.selection('pgcopydb'), *[MODULE.Guard.selection('rpgmigrate', pair, 'fault-suspend')
+                                                                  for pair in self.NATIVE]):
+            with self.subTest(selection=selection['pair']):
+                self.setUp()
+                ledger, receipt = self.bound(selection)
+                self.assertEqual(self.guard.receipt(ledger, selection), receipt)
+
+    def test_native_receipt_refuses_each_misreport(self):
+        selection = MODULE.Guard.selection('rpgmigrate', '16:16', 'fault-suspend')
+        cases = {
+            'legacy claim': lambda r: r.update(phase='Completed', complete=True),
+            'legacy spec': lambda r: r.update(selected_spec=MODULE.LEGACY_SPEC),
+            'other native spec': lambda r: r.update(selected_spec=MODULE.NATIVE_SPECS['fault-delete'][1]),
+            'legacy engine': lambda r: r.update(engine='pgcopydb'), 'other pair': lambda r: r.update(pair='16:18'),
+            'schema 1': lambda r: r.update(schema_version=1), 'skipped': lambda r: r.update(skipped_specs=1),
+            'two executed': lambda r: r.update(executed_specs=2, passed_specs=2), 'not passed': lambda r: r.update(passed_specs=0),
+            'suite failed': lambda r: r.update(suite_succeeded=False), 'failure': lambda r: r.update(failures=[{'stage': 'x'}]),
+            'not cleaned': lambda r: r.update(cleanup=False), 'missing spec': lambda r: r.pop('selected_spec'),
+            'unknown field': lambda r: r.update(unexpected=True), 'other input': lambda r: r.update(input_sha256='0' * 64),
+            'unauthenticated manager': lambda r: r['manager_runtime'].update(authenticated=False),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                ledger, _ = self.bound(selection, change)
+                with self.assertRaises(MODULE.Refusal):
+                    self.guard.receipt(ledger, selection)
+
+    def test_a_receipt_never_validates_under_another_selection(self):
+        legacy = MODULE.Guard.selection('pgcopydb')
+        native = {pair: MODULE.Guard.selection('rpgmigrate', pair, 'fault-suspend') for pair in self.NATIVE}
+        for written, checked in ((legacy, native['16:16']), (native['16:16'], legacy), (native['16:16'], native['16:18']),
+                                 (native['18:18'], native['16:16']),
+                                 (native['16:16'], MODULE.Guard.selection('rpgmigrate', '16:16', 'fault-delete'))):
+            with self.subTest(written=written['pair'], checked=checked['pair']):
+                self.setUp()
+                ledger, _ = self.bound(written)
+                with self.assertRaises(MODULE.Refusal):
+                    self.guard.receipt(ledger, checked)
+
+    def test_legacy_receipt_still_requires_its_verified_cutover_claims(self):
+        legacy = MODULE.Guard.selection('pgcopydb')
+        for name, change in {'not completed': lambda r: r.update(phase='Failed'), 'no sequences': lambda r: r.update(sequence_verified=False),
+                             'unverified data': lambda r: r.pop('nonempty_data_verified')}.items():
+            with self.subTest(case=name):
+                self.setUp()
+                ledger, _ = self.bound(legacy, change)
+                with self.assertRaisesRegex(MODULE.Refusal, 'positive legacy'):
+                    self.guard.receipt(ledger, legacy)
+
+    def run_route(self, *args):
+        ledger = self.pulled()
+        guard, calls, checked = self.guard, [], []
+        guard.owned_nodes = lambda ledger: ledger['nodes']
+        guard.require_lease = guard.verify_node_limits = guard.kubeconfig = lambda *a: None
+        guard.bootstrap = lambda ledger, source: None
+        original = guard.registry_call
+        guard.registry_call = lambda ledger, argv, **kwargs: (calls.append(argv) if argv[:1] == ['task'] else
+                                                              original(ledger, argv, **kwargs))
+        guard.receipt = lambda ledger, selection: checked.append(selection)
+        guard.run(*args)
+        return calls, checked, guard.environment, guard.read()
+
+    def test_native_run_binds_its_task_label_images_and_pair(self):
+        for pair in self.NATIVE:
+            with self.subTest(pair=pair):
+                self.setUp()
+                calls, checked, env, ledger = self.run_route('rpgmigrate', pair, 'fault-suspend')
+                source, target = pair.split(':')
+                self.assertEqual(calls, [['task', 'e2e:kind:suite', 'RUN_DIR=' + str(self.directory), 'EXPECT_CONTEXT=' + ledger['context'],
+                                          'E2E_ENGINE=rpgmigrate', 'LABEL=native-fault']])
+                self.assertEqual(checked, [MODULE.Guard.selection('rpgmigrate', pair, 'fault-suspend')])
+                self.assertEqual((env['E2E_ENGINE'], env['E2E_PG_SOURCE'], env['E2E_PG_TARGET']), ('rpgmigrate', source, target))
+                self.assertEqual(env['E2E_RUNNER_IMAGE'], self.images['native-runner']['ref'])
+                images = {key for key in env if key.startswith('E2E_POSTGRES_')}
+                self.assertEqual(images, {'E2E_POSTGRES_' + major + '_IMAGE' for major in (source, target)})
+                for major in (source, target):
+                    self.assertEqual(env['E2E_POSTGRES_' + major + '_IMAGE'], self.images['postgresql-' + major]['ref'])
+                inputs = self.guard.private_json('suite-input.json')
+                self.assertEqual((inputs['engine'], inputs['pair'], inputs['spec']),
+                                 ('rpgmigrate', pair, MODULE.NATIVE_SPECS['fault-suspend'][1]))
+                self.assertEqual((ledger['phase'], ledger['suite_execution']['selection']),
+                                 ('verified', {'engine': 'rpgmigrate', 'pair': pair, 'case': 'fault-suspend'}))
+
+    def test_legacy_run_keeps_its_environment(self):
+        calls, checked, env, ledger = self.run_route('pgcopydb')
+        self.assertEqual(calls[0][-2:], ['E2E_ENGINE=pgcopydb', 'LABEL=kind-bootstrap'])
+        self.assertEqual(checked, [MODULE.Guard.selection('pgcopydb')])
+        self.assertEqual(env['E2E_RUNNER_IMAGE'], self.images['legacy-runner']['ref'])
+        self.assertEqual({key for key in env if key.startswith('E2E_POSTGRES_')}, {'E2E_POSTGRES_17_IMAGE'})
+        self.assertNotIn('E2E_PG_SOURCE', env)
+        self.assertNotIn('E2E_PG_TARGET', env)
+
+    def test_native_task_targets_pass_pair_case_engine_and_label(self):
+        taskfile = (MODULE.ROOT / 'Taskfile.yml').read_text()
+        native = taskfile[taskfile.index('  e2e:kind:native:'):taskfile.index('  e2e:kind:down:')]
+        self.assertIn('--engine rpgmigrate --pair {{.PAIR | shellQuote}} --case {{.CASE | shellQuote}}', native)
+        suite = taskfile[taskfile.index('  e2e:kind:suite:'):]
+        self.assertIn('-ginkgo.label-filter={{.LABEL | shellQuote}}', suite)
+        self.assertIn('E2E_ENGINE={{.E2E_ENGINE | shellQuote}}', suite)
 
 
 LOCK_SCRIPT = Path(__file__).with_name('e2e-kind-lock.py')

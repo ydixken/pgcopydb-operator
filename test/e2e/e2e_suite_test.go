@@ -1307,13 +1307,23 @@ var (
 	mountedFilesystemCapacity = readMountedFilesystemCapacity
 )
 
-// kindLabelFilterAllowed lists the exact positive selections a kind run may take;
-// the native ones are reachable only once suiteEngine stops refusing rpgmigrate.
+// kindLabelFilterAllowed lists the exact positive selections a kind run may take for its engine.
 func kindLabelFilterAllowed(engine v1beta1.MigrationEngine, filter string) bool {
-	if filter == kindBootstrapLabel {
-		return true
+	if engine == v1beta1.MigrationEnginePGCopyDB {
+		return filter == kindBootstrapLabel
 	}
 	return engine == v1beta1.MigrationEngineRPGMigrate && (filter == nativeLabel || filter == nativeFaultLabel)
+}
+
+// kindSuiteDescription is the RunSpecs description, which Ginkgo prefixes to the text a focus matches.
+const kindSuiteDescription = "pgcopydb-operator e2e suite"
+
+// kindFocus anchors a native kind run to the one spec its guard-bound input names; legacy keeps its label.
+func (run *kindSuite) kindFocus() []string {
+	if run.input.Engine != string(v1beta1.MigrationEngineRPGMigrate) {
+		return nil
+	}
+	return []string{"^" + regexp.QuoteMeta(kindSuiteDescription+" "+run.input.Spec) + "$"}
 }
 
 func TestE2E(t *testing.T) {
@@ -1328,12 +1338,13 @@ func TestE2E(t *testing.T) {
 	if _, err := helmImageValues(); err != nil {
 		t.Fatal(err)
 	}
+	cfg, reporterCfg := GinkgoConfiguration()
 	if activeKindSuite != nil {
-		cfg, _ := GinkgoConfiguration()
 		if !kindLabelFilterAllowed(selectedEngine(), cfg.LabelFilter) || len(cfg.FocusStrings) > 0 ||
-			len(cfg.SkipStrings) > 0 || cfg.DryRun || !cfg.FailOnEmpty {
+			len(cfg.SkipStrings) > 0 || len(cfg.FocusFiles) > 0 || len(cfg.SkipFiles) > 0 || cfg.DryRun || !cfg.FailOnEmpty {
 			t.Fatal("kind suite requires an exact positive selection for its engine and fail-on-empty")
 		}
+		cfg.FocusStrings = activeKindSuite.kindFocus()
 	}
 	if smallProfile && parallelProcs() != 1 {
 		t.Fatal("E2E_SMALL requires one Ginkgo process")
@@ -1350,7 +1361,7 @@ func TestE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "pgcopydb-operator e2e suite")
+	RunSpecs(t, kindSuiteDescription, cfg, reporterCfg)
 }
 
 // connectSuite builds this process's API client.

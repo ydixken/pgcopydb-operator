@@ -147,13 +147,6 @@ func TestNativeMajors(t *testing.T) {
 	}
 }
 
-func TestNativeRefusalNamesPrerequisite(t *testing.T) {
-	t.Setenv("E2E_ENGINE", string(v1beta1.MigrationEngineRPGMigrate))
-	if _, err := suiteEngine(); err == nil || !strings.Contains(err.Error(), nativePrerequisite) {
-		t.Fatalf("native refusal = %v, want it to name %s", err, nativePrerequisite)
-	}
-}
-
 func TestKindLabelFilterAllowed(t *testing.T) {
 	for _, tc := range []struct {
 		engine v1beta1.MigrationEngine
@@ -163,7 +156,7 @@ func TestKindLabelFilterAllowed(t *testing.T) {
 		{v1beta1.MigrationEnginePGCopyDB, kindBootstrapLabel, true},
 		{v1beta1.MigrationEnginePGCopyDB, nativeLabel, false},
 		{v1beta1.MigrationEnginePGCopyDB, nativeFaultLabel, false},
-		{v1beta1.MigrationEngineRPGMigrate, kindBootstrapLabel, true},
+		{v1beta1.MigrationEngineRPGMigrate, kindBootstrapLabel, false},
 		{v1beta1.MigrationEngineRPGMigrate, nativeLabel, true},
 		{v1beta1.MigrationEngineRPGMigrate, nativeFaultLabel, true},
 		{v1beta1.MigrationEngineRPGMigrate, nativeFaultLabel + "-copy", false},
