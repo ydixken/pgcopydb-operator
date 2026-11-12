@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+# Importing the guard must not leave bytecode, or the clean-checkout check refuses the next prepare.
+sys.dont_write_bytecode = True
 _spec = importlib.util.spec_from_file_location('e2e_kind', Path(__file__).with_name('e2e-kind.py'))
 kind = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(kind)

@@ -1,0 +1,63 @@
+{
+  "images": {
+    "native-runner": {
+      "architecture": "arm64",
+      "archive": "native-runner.tar",
+      "build_input_sha256": "692e55c3a8f4bf88a98105a6dfe4158fd7e40a654027cac2ea70af50416ad43d",
+      "config_digest": "sha256:0c755f5e36f3fb88c9bd1ecaa53759d0a741271696b552633eec20fef9b674a9",
+      "digest": "sha256:5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1",
+      "engine_source_sha256": "05dbfa84023387dbf7b26e8281d3148dd84d16830fe4832d358d52746d0986ad",
+      "index_digest": null,
+      "provenance": {
+        "original_image_config_preserved": true,
+        "original_inspect_digest": "sha256:5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1",
+        "original_repo_digests": [
+          "localhost/rpgmigrate@sha256:5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1"
+        ],
+        "runtime_binary_sha256": "4bded8d59ccef2cf73b7cc88e76ec8d9d626caf0b1fc96f879ac0be2bedc9803",
+        "source_commit": "254ab5ba103bfe75a2e1dcd8acad0b9720e88ab8",
+        "source_manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+        "source_tree": "63ad345626978f56de38674e159246ef3997473b"
+      },
+      "ref": "localhost/rpgmigrate@sha256:5af74fb39dfe31057273ae5a9d8268f5f1b982a8edd3868de392c8e69d6883f1",
+      "role": "native-runner"
+    },
+    "postgresql-16": {
+      "architecture": "arm64",
+      "archive": "postgresql-16.tar",
+      "config_digest": "sha256:94a8e6634f916ffafee47d9be81c53d964e6ed2f5175224fab66b2abacae7279",
+      "digest": "sha256:d735d89e0f050dd5efa611ad633e44e06b526da77b04a7501cece311cd032375",
+      "index_digest": "sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97",
+      "provenance": {
+        "original_image_config_preserved": true,
+        "original_inspect_digest": "sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97",
+        "original_repo_digests": [
+          "docker.io/library/postgres@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97",
+          "docker.io/library/postgres@sha256:d735d89e0f050dd5efa611ad633e44e06b526da77b04a7501cece311cd032375"
+        ],
+        "source_manifest_media_type": "application/vnd.oci.image.manifest.v1+json"
+      },
+      "ref": "docker.io/library/postgres@sha256:d735d89e0f050dd5efa611ad633e44e06b526da77b04a7501cece311cd032375",
+      "role": "postgresql-16"
+    },
+    "postgresql-18": {
+      "architecture": "arm64",
+      "archive": "postgresql-18.tar",
+      "config_digest": "sha256:91e2759ab4ea7238bc7bed3893439d7abb8edd5c8ac24bab0571e4179f405235",
+      "digest": "sha256:a8be76d23699a6c366437e9f80ead007975f24c35e01c9ee0533c6930ab57ac1",
+      "index_digest": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6",
+      "provenance": {
+        "original_image_config_preserved": true,
+        "original_inspect_digest": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6",
+        "original_repo_digests": [
+          "docker.io/library/postgres@sha256:a8be76d23699a6c366437e9f80ead007975f24c35e01c9ee0533c6930ab57ac1",
+          "docker.io/library/postgres@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6"
+        ],
+        "source_manifest_media_type": "application/vnd.oci.image.manifest.v1+json"
+      },
+      "ref": "docker.io/library/postgres@sha256:a8be76d23699a6c366437e9f80ead007975f24c35e01c9ee0533c6930ab57ac1",
+      "role": "postgresql-18"
+    }
+  },
+  "schema_version": 1
+}

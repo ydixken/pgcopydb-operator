@@ -17,8 +17,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import datetime
 from fractions import Fraction
 
@@ -86,11 +88,70 @@ class CommandError(Refusal):
         super().__init__(failure_class)
 
 
+class Cancelled(CommandError):
+    def __init__(self):
+        super().__init__('Cancelled')
+
+
+class Cancellation:
+    """Children of one concurrent region; a failure or stage alarm kills them all at once."""
+    def __init__(self):
+        self.lock, self.cancelled, self.children = threading.Lock(), False, set()
+
+    def cancel(self):
+        with self.lock:
+            self.cancelled = True
+            for child in self.children:
+                child.kill()
+
+
+class Replay:
+    """Serve reads from one batched VM call, refusing any read the batch did not plan."""
+    def __init__(self, records, mismatch):
+        self.records, self.mismatch = list(records), mismatch
+
+    def __call__(self, args, timeout=120, *, private_output=False):
+        if private_output or not self.records or self.records[0][0] != args:
+            raise Refusal(self.mismatch)
+        _, status, data = self.records.pop(0)
+        if status:
+            raise CommandError('CalledProcessError', status)
+        try:
+            return data.decode('utf-8')
+        except UnicodeError:
+            raise CommandError('UnicodeDecodeError') from None
+
+
+_UNSCOPED = Cancellation()
+_LOCAL = threading.local()
+# Command substitution drops NUL bytes; none of the batched kernel files contain them.
+VM_BATCH = 'for c do o=$(eval "$c" 2>/dev/null; printf .%s "$?"); printf \'%s %s\\n\' "${o##*.}" "$(printf %s "${o%.*}" | base64 -w0)"; done'
+
+
 def execute(args, env=None, input=None, timeout=120, umask=0o077):
+    scope = getattr(_LOCAL, 'scope', None) or _UNSCOPED
     try:
-        result = subprocess.run(args, env=env, input=None if input is None else input.encode('utf-8'),
-                                capture_output=True, timeout=timeout, check=True, cwd=ROOT, umask=umask)
-        return result.stdout.decode('utf-8')
+        with scope.lock:
+            if scope.cancelled:
+                raise Cancelled()
+            child = subprocess.Popen(args, env=env, stdin=None if input is None else subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, cwd=ROOT, umask=umask)
+            scope.children.add(child)
+        try:
+            with child:
+                try:
+                    stdout, _ = child.communicate(None if input is None else input.encode('utf-8'), timeout=timeout)
+                except BaseException:
+                    child.kill()
+                    raise
+        finally:
+            with scope.lock:
+                scope.children.discard(child)
+        if scope.cancelled:
+            raise Cancelled()
+        if child.returncode:
+            raise subprocess.CalledProcessError(child.returncode, args)
+        return stdout.decode('utf-8')
     except (subprocess.SubprocessError, OSError, UnicodeError) as error:
         # Child stderr can contain registry credentials or Kubernetes Secret data.
         raise CommandError(type(error).__name__, getattr(error, 'returncode', None)) from None
@@ -328,7 +389,7 @@ class Guard:
         if actual != expected and not (cleaning and actual < expected):
             raise Refusal('node identities changed or were never recorded')
         remaining = [node for node in ledger['nodes'] if node['id'] in actual]
-        for node in remaining:
+        def owned(node):
             result = decode(self.call(['podman', 'inspect', '--type', 'container', node['id']]), 'node inspection')
             if not isinstance(result, list) or len(result) != 1:
                 raise Refusal('node inspection unavailable')
@@ -340,6 +401,7 @@ class Guard:
             if marker and self.call(['podman', 'exec', '--user', '0', node['id'], 'sh', '-c',
                                             'test "$(stat -c %u:%a ' + MARKER + ')" = 0:600 && cat ' + MARKER]).strip() != ledger['run_id']:
                 raise Refusal('node run marker mismatch')
+        self.each(owned, remaining)
         return remaining
 
     def volume_inventory(self, ledger):
@@ -469,8 +531,8 @@ class Guard:
     def tools(self):
         if not self.call(['kind', 'version']).startswith('kind v0.33.0 '):
             raise Refusal('kind 0.33.0 is required')
-        if self.call(['podman', '--version']).strip() != 'podman version 6.1.4':
-            raise Refusal('Podman 6.1.4 is required')
+        if self.call(['podman', '--version']).strip() != 'podman version 6.2.0':
+            raise Refusal('Podman 6.2.0 is required')
         for tool in [['kubectl', 'version', '--client', '-o', 'json'], ['helm', 'version', '--short'], ['task', '--version']]:
             self.call(tool)
 
@@ -486,8 +548,49 @@ class Guard:
             args = ['sh', '-c', 'umask 077; exec \"$@\"', 'm7-private', *args]
         return self.call(['podman', 'machine', 'ssh', '--', shlex.join(args)], timeout=timeout)
 
-    def disk(self):
-        raw = self.vm(['df', '-B1', '--output=avail', '/var'])
+    def vm_batch(self, commands, mismatch):
+        raw = self.vm(['sh', '-c', VM_BATCH, 'm7-batch', *(shlex.join(command) for command in commands)])
+        lines = raw.split('\n')
+        records = []
+        try:
+            if len(lines) != len(commands) + 1 or lines[-1]:
+                raise ValueError
+            for command, line in zip(commands, lines):
+                status, separator, data = line.partition(' ')
+                if not separator or not re.fullmatch('[0-9]{1,3}', status) or int(status) > 255:
+                    raise ValueError
+                records.append((command, int(status), base64.b64decode(data, validate=True)))
+        except ValueError:
+            raise Refusal('batched VM read framing is invalid') from None
+        return Replay(records, mismatch)
+
+    def each(self, function, items):
+        """Run independent per-node work concurrently; the first real failure cancels the rest."""
+        items = list(items)
+        if len(items) < 2:
+            return [function(item) for item in items]
+        scope = getattr(_LOCAL, 'scope', None) or Cancellation()
+        def work(item):
+            _LOCAL.scope = scope
+            return function(item)
+        pool = ThreadPoolExecutor(len(items))
+        try:
+            futures = [pool.submit(work, item) for item in items]
+            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+            if any(future.exception() for future in done):
+                scope.cancel()
+        except BaseException:
+            scope.cancel()
+            raise
+        finally:
+            pool.shutdown(wait=True)
+        errors = [future.exception() for future in futures if future.exception() is not None]
+        if errors:
+            raise next((error for error in errors if not isinstance(error, Cancelled)), errors[0])
+        return [future.result() for future in futures]
+
+    def disk(self, vm=None):
+        raw = (vm or self.vm)(['df', '-B1', '--output=avail', '/var'])
         lines = raw.splitlines()
         if len(lines) != 2 or not lines[1].strip().isdigit() or int(lines[1]) < 10 * 1024 ** 3:
             raise Refusal('VM disk availability is unavailable or below 10 GiB')
@@ -555,8 +658,9 @@ class Guard:
                 lease['m7_cpus'] != 6 or lease['m7_memory_mib'] != 12288 or
                 lease['m3_reserved_cpus'] != 6 or lease['m3_reserved_memory_mib'] != 6144):
             raise Refusal('leader-authorized live resource lease is missing, invalid, or expired')
-        self.capacity(dict(lease, m3_reserved_cpus=8, m3_reserved_memory_mib=12288))
-        self.disk()
+        reads = self.vm_batch([['cat', '/proc/meminfo'], ['df', '-B1', '--output=avail', '/var']], 'VM capacity reads changed')
+        self.capacity(dict(lease, m3_reserved_cpus=8, m3_reserved_memory_mib=12288), reads)
+        self.disk(reads)
 
     def hold_awake(self):
         # shortcut: macOS only; the Linux-native-host transport (M7-HOSTED) needs its own sleep policy.
@@ -575,13 +679,13 @@ class Guard:
         child.kill()
         raise Refusal('host sleep assertion is not active')
 
-    def capacity(self, lease):
+    def capacity(self, lease, vm=None):
         info = decode(self.call(['podman', 'info', '--format', 'json']), 'Podman capacity')
         host = info.get('host', {})
         if any(type(host.get(key)) is not int or host[key] <= 0 for key in ('cpus', 'memTotal')):
             raise Refusal('VM usable capacity is unavailable')
         memory = {}
-        raw = self.call(['podman', 'machine', 'ssh', '--', 'cat', '/proc/meminfo'])
+        raw = vm(['cat', '/proc/meminfo']) if vm else self.call(['podman', 'machine', 'ssh', '--', 'cat', '/proc/meminfo'])
         for line in raw.splitlines():
             if not line.startswith(('MemTotal:', 'MemAvailable:')):
                 continue
@@ -662,9 +766,10 @@ class Guard:
         identity = {'id': node['id'], 'role': node['role'], 'image_id': image, 'pid': state['Pid'], 'started_at': started}
         return identity, {key: host[key] for key in ('CpuQuota', 'CpuPeriod', 'NanoCpus', 'Memory', 'MemorySwap')}
 
-    def process_identity(self, identity):
+    def process_identity(self, identity, vm=None):
+        vm = vm or self.vm
         pid, cid = identity['pid'], identity['id']
-        raw = self.vm(['cat', '/proc/' + str(pid) + '/cgroup'])
+        raw = vm(['cat', '/proc/' + str(pid) + '/cgroup'])
         lines = raw.splitlines()
         if len(lines) != 1 or not lines[0].startswith('0::'):
             raise Refusal('node init process has no unambiguous cgroup-v2 binding')
@@ -676,9 +781,9 @@ class Guard:
                 path.split('/').count(scope) != 1 or any(part.startswith('libpod-') and part != scope for part in path.split('/'))):
             raise Refusal('node init cgroup does not match the supported exact-CID ownership shape')
         full = '/sys/fs/cgroup' + path
-        if self.vm(['realpath', '-e', '--', full]).splitlines() != [full]:
+        if vm(['realpath', '-e', '--', full]).splitlines() != [full]:
             raise Refusal('node init cgroup path is linked or unavailable')
-        raw_stat = self.vm(['cat', '/proc/' + str(pid) + '/stat'])
+        raw_stat = vm(['cat', '/proc/' + str(pid) + '/stat'])
         head, separator, tail = raw_stat.rpartition(') ')
         fields = tail.split()
         if (not separator or not head.startswith(str(pid) + ' (') or len(fields) < 20 or
@@ -694,13 +799,14 @@ class Guard:
             raise Refusal('cgroup limit is malformed')
         return int(raw)
 
-    def cgroup_root(self):
+    def cgroup_root(self, vm=None):
+        vm = vm or self.vm
         root = '/sys/fs/cgroup'
-        if (self.vm(['stat', '-fc', '%T', root]).strip() != 'cgroup2fs' or
-                self.vm(['realpath', '-e', '--', root]).splitlines() != [root]):
+        if (vm(['stat', '-fc', '%T', root]).strip() != 'cgroup2fs' or
+                vm(['realpath', '-e', '--', root]).splitlines() != [root]):
             raise Refusal('canonical cgroup-v2 hierarchy root is unavailable')
         matches = []
-        for line in self.vm(['cat', '/proc/self/mountinfo']).splitlines():
+        for line in vm(['cat', '/proc/self/mountinfo']).splitlines():
             before, separator, after = line.partition(' - ')
             fields, filesystem = before.split(), after.split()
             if len(fields) < 5 or fields[4] != root:
@@ -715,26 +821,45 @@ class Guard:
             raise Refusal('cgroup-v2 hierarchy root mount is missing or ambiguous')
         return matches[0]
 
+    @staticmethod
+    def cgroup_paths(cgroup_path):
+        relative = Path(cgroup_path)
+        return ['/sys/fs/cgroup' + (str(path) if str(path) != '/' else '') for path in reversed([relative, *relative.parents])]
+
+    def node_reads(self, pid, expected):
+        """Plan every read of one observation from the recorded cgroup path and fetch them in one VM call."""
+        changed = 'node image, PID, start time, or cgroup identity changed'
+        path = expected.get('cgroup_path') if isinstance(expected, dict) else None
+        if not isinstance(path, str) or not path.startswith('/'):
+            raise Refusal(changed)
+        paths = self.cgroup_paths(path)
+        identity = [['cat', '/proc/' + str(pid) + '/cgroup'], ['realpath', '-e', '--', '/sys/fs/cgroup' + path],
+                    ['cat', '/proc/' + str(pid) + '/stat']]
+        root = [['stat', '-fc', '%T', '/sys/fs/cgroup'], ['realpath', '-e', '--', '/sys/fs/cgroup'], ['cat', '/proc/self/mountinfo']]
+        limits = [['realpath', '-e', '--', *paths],
+                  ['cat', *(path + '/' + key for path in paths[1:] for key in ('cpu.max', 'memory.max', 'memory.swap.max'))]]
+        return self.vm_batch(identity + root + limits + identity + root, changed)
+
     def node_limit_observation(self, ledger, node, expected):
         identity, host = self.node_state(ledger, node)
-        identity = self.process_identity(identity)
+        reads = self.node_reads(identity['pid'], expected)
+        identity = self.process_identity(identity, reads)
         if identity != expected:
             raise Refusal('node image, PID, start time, or cgroup identity changed')
         if (host['CpuQuota'] <= 0 or host['CpuPeriod'] <= 0 or Fraction(host['CpuQuota'], host['CpuPeriod']) != 2 or
                 host['NanoCpus'] != 2000000000 or host['Memory'] != 4294967296 or host['MemorySwap'] != 4294967296):
             raise Refusal('node provider limits do not match two CPUs, four GiB, and zero additional swap')
-        root = self.cgroup_root()
+        root = self.cgroup_root(reads)
         if root != ledger['node_limits'].get('cgroup_root'):
             raise Refusal('cgroup-v2 hierarchy root mount changed')
-        relative = Path(identity['cgroup_path'])
-        paths = ['/sys/fs/cgroup' + (str(path) if str(path) != '/' else '') for path in reversed([relative, *relative.parents])]
-        canonical = self.vm(['realpath', '-e', '--', *paths]).splitlines()
+        paths = self.cgroup_paths(identity['cgroup_path'])
+        canonical = reads(['realpath', '-e', '--', *paths]).splitlines()
         if canonical != paths:
             raise Refusal('cgroup limit path is unavailable, linked, or noncanonical')
         # The kernel exposes controller limit files on non-root cgroups only.
         paths = paths[1:]
         files = [path + '/' + key for path in paths for key in ('cpu.max', 'memory.max', 'memory.swap.max')]
-        values = self.vm(['cat', *files]).splitlines()
+        values = reads(['cat', *files]).splitlines()
         if len(values) != len(files) or any(len(value) > 128 for value in values):
             raise Refusal('cgroup limit inventory is incomplete or malformed')
         cpus, memories, swaps, observations = [], [], [], []
@@ -758,8 +883,11 @@ class Guard:
             observations.append({'path': path, 'cpu.max': cpu, 'memory.max': memory, 'memory.swap.max': swap})
         if (not cpus or not memories or not swaps or min(cpus) != 2 or min(memories) != 4294967296 or min(swaps) != 0):
             raise Refusal('effective node CPU, memory, or swap limit differs from the fixed allocation')
+        # The batch read the after-identity last, so this inspection still brackets every cgroup read.
+        # A new PID asks for reads the batch never planned, which the replay refuses with the same message.
         after, after_host = self.node_state(ledger, node)
-        if self.process_identity(after) != expected or after_host != host or self.cgroup_root() != root:
+        reads.mismatch = 'node process or provider limits changed while reading cgroups'
+        if self.process_identity(after, reads) != expected or after_host != host or self.cgroup_root(reads) != root:
             raise Refusal('node process or provider limits changed while reading cgroups')
         return {'cpu': '2', 'memory': 4294967296, 'swap': 0, 'host_config': host, 'cgroups': observations}
 
@@ -769,12 +897,13 @@ class Guard:
         if (not isinstance(proofs, list) or len(proofs) != 3 or any(not isinstance(proof, dict) for proof in proofs) or
                 {proof.get('id') for proof in proofs} != {node['id'] for node in nodes}):
             raise Refusal('three matching node-cap proofs are required')
-        observed = []
+        expected = {}
         for node in nodes:
             proof = next(proof for proof in proofs if proof['id'] == node['id'])
             if proof.get('role') != node['role'] or proof.get('update') != 'verified':
                 raise Refusal('node cap application is incomplete')
-            observed.append(self.node_limit_observation(ledger, node, proof.get('identity')))
+            expected[node['id']] = proof.get('identity')
+        observed = self.each(lambda node: self.node_limit_observation(ledger, node, expected[node['id']]), nodes)
         if sum(Fraction(value['cpu']) for value in observed) != 6 or sum(value['memory'] for value in observed) != 12884901888:
             raise Refusal('aggregate owned node limits differ from six CPUs and twelve GiB')
         return observed
@@ -1661,43 +1790,53 @@ class Guard:
 
     def perform_pulls(self, ledger, images, roles, directory, name, deadline, proof, admit=None, monotonic_deadline=None):
         admit = (lambda: self.registry_admit(ledger)) if admit is None else admit
+        lock = threading.Lock()
         def retain(exclusive=False):
-            self._write_private_at(directory, name, registry.canonical(proof) + b'\n', exclusive=exclusive)
+            with lock:
+                self._write_private_at(directory, name, registry.canonical(proof) + b'\n', exclusive=exclusive)
         retain(exclusive=True)
         pulled = set()
-        for role in roles:
-            image = images[role]
-            proof['node_bindings'][role] = {}
-            for node in ledger['nodes']:
-                admit()
-                if time.time() >= deadline:
-                    raise Refusal('component original deadline expired')
-                key = (node['id'], image['ref'])
-                if key not in pulled:
-                    attempt = {'node_id': node['id'], 'requested_ref': image['ref'], 'status': 'pending'}
+        def node_pull(role, image, node):
+            admit()
+            if time.time() >= deadline:
+                raise Refusal('component original deadline expired')
+            key = (node['id'], image['ref'])
+            if key not in pulled:
+                attempt = {'node_id': node['id'], 'requested_ref': image['ref'], 'status': 'pending'}
+                with lock:
                     proof['pulls'].append(attempt)
-                    retain()
+                retain()
+                try:
+                    admit()
                     try:
-                        admit()
-                        try:
-                            self.registry_call(ledger, self.cri_prefix(node['id']) + ['pull', image['ref']], deadline=deadline, monotonic_deadline=monotonic_deadline, timeout=min(300, deadline - time.time()))
-                        except CommandError as error:
-                            failure = error.failure_class if error.failure_class in ('CalledProcessError', 'TimeoutExpired',
-                                'OSError', 'FileNotFoundError', 'PermissionError', 'UnicodeDecodeError') else 'CommandError'
-                            returncode = error.returncode
-                            if type(returncode) is not int or not -255 <= returncode <= 255:
-                                returncode = None
+                        self.registry_call(ledger, self.cri_prefix(node['id']) + ['pull', image['ref']], deadline=deadline, monotonic_deadline=monotonic_deadline, timeout=min(300, deadline - time.time()))
+                    except Cancelled:
+                        raise
+                    except CommandError as error:
+                        failure = error.failure_class if error.failure_class in ('CalledProcessError', 'TimeoutExpired',
+                            'OSError', 'FileNotFoundError', 'PermissionError', 'UnicodeDecodeError') else 'CommandError'
+                        returncode = error.returncode
+                        if type(returncode) is not int or not -255 <= returncode <= 255:
+                            returncode = None
+                        with lock:
                             attempt.update(operation='cri-pull', error_class=failure, returncode=returncode)
-                            raise Refusal(f'cri-pull failed (class={failure}, returncode={returncode})') from None
-                        admit()
+                        raise Refusal(f'cri-pull failed (class={failure}, returncode={returncode})') from None
+                    admit()
+                    with lock:
                         attempt['status'] = 'verified'
                         pulled.add(key)
-                    except BaseException:
+                except BaseException:
+                    with lock:
                         attempt['status'] = 'failed'
-                        retain()
-                        raise
-                proof['node_bindings'][role][node['name']] = self._verify_pulled(image, node['id'], deadline, monotonic_deadline)
-                retain()
+                    retain()
+                    raise
+            binding = self._verify_pulled(image, node['id'], deadline, monotonic_deadline)
+            with lock:
+                proof['node_bindings'][role][node['name']] = binding
+            retain()
+        for role in roles:
+            proof['node_bindings'][role] = {}
+            self.each(lambda node, role=role: node_pull(role, images[role], node), ledger['nodes'])
         admit()
         if time.time() >= deadline:
             raise Refusal('component original deadline expired')
@@ -1741,11 +1880,13 @@ class Guard:
         registry.closed(node_bindings, set(roles), 'logical role binding matrix')
         for role in roles:
             registry.closed(node_bindings[role], {node['name'] for node in ledger['nodes']}, 'node binding matrix')
-            for node in ledger['nodes']:
+        def verify_node(node):
+            for role in roles:
                 binding = node_bindings[role][node['name']]
                 registry.validate_binding(binding, images[role], node['id'])
                 if self._verify_pulled(images[role], node['id'], deadline, monotonic_deadline) != binding:
                     raise Refusal('current node-local binding differs from completed pull evidence')
+        self.each(verify_node, ledger['nodes'])
 
     def pulled_image_binding(self, ledger, role):
         if ledger['phase'] not in ('pulled', 'verified') or role not in registry.PULL_ROLES:

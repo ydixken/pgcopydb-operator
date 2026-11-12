@@ -1472,7 +1472,7 @@ func TestKindOfflineWorkflowKeepsRuntimeActivationSeparate(t *testing.T) {
 	for _, required := range []string{
 		"runs-on: ubuntu-24.04", "contents: read", "selected.countTestCases() == 0",
 		"not result.wasSuccessful() or result.skipped", "if not completed", "-count=1 -json",
-		"hack/test_native_term_receipt.py",
+		"hack/test_native_term_receipt.py", "hack/test_native_runtime_qualification.py",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("offline workflow missing %q", required)

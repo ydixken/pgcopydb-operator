@@ -59,8 +59,10 @@ Release tags, `latest`, main pushes, and package changes outside these two appro
 
 ## Run the guarded lifecycle
 
-The host requires the qualified Podman VM transport and the pinned tool versions in the guard.
+The host requires the qualified Podman VM transport and the pinned tool versions in the guard, including the Podman 6.2.0 client.
 The guard checks VM capacity, cgroups, source identity, and private paths before effects.
+We read each node's cgroup facts in one `podman machine ssh` call per check, because the qualification stages repeat the full admission hundreds of times and every VM session costs a round trip.
+The three nodes' observations, pulls and image verifications run concurrently, and the first failure or stage alarm kills the sibling commands.
 Set `IMAGE_LOCK` and `RECEIPT_DIR` to the verified external lock and receipt directory from the admitted publication handoff.
 Use the same `RUN_DIR` in all subsequent commands.
 
@@ -127,6 +129,40 @@ On pair 16:16 the native suspend and delete fault specs also write `native-term-
 > Preserve historical failed receipts and old run identities.
 > Use a fresh source freeze and run after an input change.
 > Do not use generic kind deletion, pruning, ownership repair, or cleanup of another run's resources.
+
+## Qualify the native runner profile and delivery
+
+`hack/native-runtime-qualification.py` runs test-only native observations against a guarded run that has reached `pulled`.
+It never activates the native engine and grants no production admission.
+Run it from a second checkout, and pass the clean checkout that owns the run as `--legacy-source-root`, because the guard refuses any source that differs from the image lock.
+Each phase writes its private inputs and receipts into a separate `QUAL_DIR` outside Git.
+
+1. Bind the run's image lock and the native runner, PostgreSQL 16 and PostgreSQL 18 images to a fresh qualification.
+
+   ```sh
+   python3 -B hack/native-runtime-qualification.py --run-dir "$RUN_DIR" \
+     --legacy-source-root "$GUARD_ROOT" --qual-dir "$QUAL_DIR" --phase prepare
+   ```
+
+2. Run each phase with the run's original lease clocks as the parent deadline.
+
+   ```sh
+   for phase in metadata password_tls_probe delivery; do
+     python3 -B hack/native-runtime-qualification.py --run-dir "$RUN_DIR" \
+       --legacy-source-root "$GUARD_ROOT" --qual-dir "$QUAL_DIR" --phase "$phase" \
+       --parent-deadline "$LEASE_EXPIRES_AT" --parent-monotonic-deadline "$LEASE_MONOTONIC_EXPIRES_AT"
+   done
+   ```
+
+The first phase after `prepare` pulls the component images on every node and needs 3300 seconds left on the lease.
+Later phases reuse that complete pull receipt and need 2400 seconds.
+`metadata` reads the active CRI profile, resolver, HOME and provider facts on all three nodes.
+`password_tls_probe` connects to disposable PostgreSQL 16 and 18 servers with SCRAM and verify-full TLS.
+`delivery` drives the canonical checked-exec relay and terminal Job proof through fault cases, and remounts a PVC read-only.
+
+> [!important]
+> A failed phase keeps its private artifacts and refuses a rerun into the same `QUAL_DIR`.
+> Start a new `QUAL_DIR` instead of deleting or overwriting evidence.
 
 ## Hosted checks and remaining runtime gate
 
