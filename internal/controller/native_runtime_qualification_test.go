@@ -289,11 +289,11 @@ def checked_spec(value,e,sandbox):
  need(process.get('terminal',False) is False and process.get('rlimits',[])==[] and process.get('apparmorProfile','')==process.get('selinuxLabel','')=='')
  need(process['noNewPrivileges'] is True and type(process['oomScoreAdj']) is int and process['oomScoreAdj']==e['oom_score_adj'])
  need(type(process['args']) is list and process['args']==e['command'] and environment(process['env'])==e['environment'])
- uid=999 if e['profile'] in ('pg16','pg18') else 65532;groups=[101,999] if uid==999 else [65532]
+ uid=26 if e['profile'] in ('pg16','pg18') else 65532;groups=[26,101] if uid==26 else [65532]
  user=process['user'];fields(user,('uid','gid'),('additionalGids','username'))
  need(type(user['uid']) is type(user['gid']) is int and user['uid']==user['gid']==uid and user.get('username','')=='')
  need(type(user.get('additionalGids',[])) is list and all(type(g) is int for g in user.get('additionalGids',[])) and sorted(set([uid]+user.get('additionalGids',[])))==groups)
- need(process['cwd']==('/' if uid==999 else '/work'))
+ need(process['cwd']==('/' if uid==26 else '/work'))
  caps=process['capabilities'];fields(caps,(),('bounding','effective','inheritable','permitted','ambient'));need(all(type(v) is list and not v for v in caps.values()))
  linux=value['linux'];fields(linux,('namespaces','resources','cgroupsPath','maskedPaths','readonlyPaths','seccomp'),('devices','sysctl','rootfsPropagation','uidMappings','gidMappings'))
  need(linux.get('devices',[])==[] and linux.get('sysctl',{})=={} and linux.get('rootfsPropagation','')=='' and linux.get('uidMappings',[])==linux.get('gidMappings',[])==[])
@@ -318,14 +318,11 @@ def checked_spec(value,e,sandbox):
  binds=[dict(destination='/dev/shm',source='/run/containerd/io.containerd.grpc.v1.cri/sandboxes/'+sid+'/shm',readonly=False),dict(destination='/etc/hostname',source=cri+'/sandboxes/'+sid+'/hostname',readonly=True),dict(destination='/etc/resolv.conf',source=cri+'/sandboxes/'+sid+'/resolv.conf',readonly=True),dict(destination='/etc/hosts',source=root+'/etc-hosts',readonly=False)]+e['mounts']
  for row in binds:
   target=row['destination'];need(target not in expected);expected[target]=dict(destination=target,type='bind',source=row['source'],options=['rbind','rprivate','ro' if row['readonly'] else 'rw'])
- mounts=value['mounts'];need(type(mounts) is list and len(mounts)==len(expected)+1+(e['profile']=='pg16'));seen=set();binding=dict(termination_log_id=None,image_volume_id=None)
+ mounts=value['mounts'];need(type(mounts) is list and len(mounts)==len(expected)+1);seen=set();binding=dict(termination_log_id=None,image_volume_id=None)
  for mount in mounts:
   fields(mount,('destination','type','source','options'));target=mount['destination'];need(type(target) is str and target not in seen and os.path.normpath(target)==target and target.startswith('/'));seen.add(target)
   if target=='/dev/termination-log':
    match=re.fullmatch(re.escape(root+'/containers/'+e['container_name']+'/')+'([0-9a-f]{8})',mount['source']);need(match is not None);binding['termination_log_id']=match[1]
-   need(mount['type']=='bind' and mount['options']==['rbind','rprivate','rw'])
-  elif target=='/var/lib/postgresql/data' and e['profile']=='pg16':
-   match=re.fullmatch(re.escape(cri+'/containers/'+e['container_id']+'/volumes/')+'([0-9a-f]{64})',mount['source']);need(match is not None);binding['image_volume_id']=match[1]
    need(mount['type']=='bind' and mount['options']==['rbind','rprivate','rw'])
   else:need(target in expected and mount==expected[target])
  need(set(expected)<=seen and binding['termination_log_id'] is not None)
@@ -340,9 +337,9 @@ def proc_values(e,args,env,status):
   actual_env=environment([part.decode('utf-8') for part in env[:-1].split(b'\0')])
  except UnicodeError:raise RuntimeError('active_profile_refused') from None
  need(actual_args==e['running_args'] and actual_env==e['process_environment'])
- uid=999 if e['profile'] in ('pg16','pg18') else 65532
+ uid=26 if e['profile'] in ('pg16','pg18') else 65532
  for key in ('Uid','Gid'):need(status.get(key,'').split()==[str(uid)]*4)
- need(sorted(set(status.get('Groups','').split()+[str(uid)]))==(['101','999'] if uid==999 else ['65532']))
+ need(sorted(set(status.get('Groups','').split()+[str(uid)]))==(['101','26'] if uid==26 else ['65532']))
  for key in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):need(re.fullmatch('[0-9a-fA-F]{1,16}',status.get(key,'')) and int(status[key],16)==0)
  need(status.get('NoNewPrivs')=='1' and status.get('Seccomp')=='2')
 
@@ -517,7 +514,7 @@ def process_snapshot(e,inspection,sandbox):
  need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='10' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0' and cg['pids.max']=='max' and cg['parent.pids.max'].isdigit() and 0<int(cg['parent.pids.max'])<=4096)
  need(frames['cgroup'].decode('ascii').endswith('/kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
  if e['profile'] in ('pg16','pg18'):
-  need(meta['key_stat']==dict(uid='0',gid='999',mode='288',links='1'))
+  need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))
  else:need(meta['key_stat'] is None)
  if e.get('self') is not None:need(e['self']['start_ticks']==ticks and e['self']['mount_namespace']==meta['mount_namespace'] and status.get('NSpid','').split()[-1]==str(e['self']['pid']))
  return dict(container_id=e['container_id'],pod_uid=e['pod_uid'],sandbox_id=sandbox['sandbox_id'],pid=pid,start_ticks=ticks,boot_id=meta['boot_id'],mount_namespace=meta['mount_namespace'],admitted_mount_count=mounts,tmp_device=meta['tmp_device'],tmp_inode=meta['tmp_inode'],key_stat_verified=e['profile'] in ('pg16','pg18'))
@@ -559,7 +556,7 @@ sub probe {
  my %ns;for my $kind(qw(mnt pid ipc uts net cgroup user)){my $link=readlink('/proc/'.$p.'/ns/'.$kind);need(defined($link) && $link =~ /\A([a-z]+:\[[0-9]+\])\z/);$ns{$kind}=$1;}
  my %matches;for my $kind(qw(net ipc uts)){my $other=readlink('/proc/'.$sandbox.'/ns/'.$kind);$matches{$kind}=defined($other) && $other eq $ns{$kind}?'1':'0';}
  for my $kind(qw(mnt pid cgroup user)){my $own=readlink('/proc/self/ns/'.$kind);$matches{$kind}=defined($own) && (($kind eq 'user')?($own eq $ns{$kind}):($own ne $ns{$kind}))?'1':'0';}
- my $exe=readlink('/proc/'.$p.'/exe');my %known=('/usr/bin/python3.13'=>['python313','273cb29e073b748379ba546affa562283ed795f84ff230349e12ce610e60975c'],'/usr/lib/postgresql/16/bin/postgres'=>['pg16','a3b0418538ae54f287fe31f3a5ca78a0b506e897617cd55731cd4e036dce4915'],'/usr/lib/postgresql/18/bin/postgres'=>['pg18','c567d1861c8206bb5b0e04b44b65c5c48435b0b836cfb01b8b4f3d542fbdf324']);need(defined($exe) && exists($known{$exe}));$exe=($exe =~ /\A(\/[-a-zA-Z0-9_.\/]+)\z/)[0];
+ my $exe=readlink('/proc/'.$p.'/exe');my %known=('/usr/bin/python3.13'=>['python313','273cb29e073b748379ba546affa562283ed795f84ff230349e12ce610e60975c'],'/usr/lib/postgresql/16/bin/postgres'=>['pg16','af0258f6b3cf8857f5fdd55e30f0fd07de1f0f90b8b625ca6fbf0e34f1359c0e'],'/usr/lib/postgresql/18/bin/postgres'=>['pg18','fc77699680778ae0440b4ea9669aa17773cb9641855f6a3f048c50c9fe39c765']);need(defined($exe) && exists($known{$exe}));$exe=($exe =~ /\A(\/[-a-zA-Z0-9_.\/]+)\z/)[0];
  sysopen(my $binary,'/proc/'.$p.'/exe',O_RDONLY) or need(0);my @binary=stat($binary);need(S_ISREG($binary[2]) && $binary[4]==0 && $binary[5]==0 && ($binary[2]&022)==0 && $binary[3]==1 && $binary[7]<=16777216 && pair($binary,$target.$exe) eq '1');need(hash_fd($binary) eq $known{$exe}[1]);close($binary) or need(0);
  my %dmi;for my $leaf(qw(product_name product_uuid)){for my $dir('/sys/class/dmi/id/','/sys/devices/virtual/dmi/id/'){$dmi{$dir.$leaf}=pair($target.'/'.$leaf,$target.$dir.$leaf);}}
  need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
@@ -1327,11 +1324,8 @@ func nativeRuntimeExpectedCommand(pod *corev1.Pod, profile string, value *native
 		}
 		binary := fmt.Sprintf("/usr/lib/postgresql/%d/bin/postgres", major)
 		value.RunningArgs = []string{binary, "-D", "/var/lib/postgresql/probe-data", "-c", "listen_addresses=*", "-c", "unix_socket_directories=/tmp", "-c", "ssl=on", "-c", "ssl_cert_file=/run/server-input/server.crt", "-c", "ssl_key_file=/run/server-input/server.key", "-c", "password_encryption=scram-sha-256", "-c", "log_min_error_statement=panic"}
-		version, data := "16.15-1.pgdg13+2", "/var/lib/postgresql/data"
-		if major == 18 {
-			version, data = "18.6-1.pgdg13+2", "/var/lib/postgresql/18/docker"
-		}
-		value.Environment = map[string]string{"PATH": fmt.Sprintf("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/%d/bin", major), "GOSU_VERSION": "1.19", nativeLangEnv: "en_US.utf8", "PG_MAJOR": fmt.Sprint(major), "PG_VERSION": version, "PGDATA": data}
+		// The CNPG image config carries only these two variables.
+		value.Environment = map[string]string{"PATH": fmt.Sprintf("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/%d/bin", major), "PIP_BREAK_SYSTEM_PACKAGES": "1"}
 	} else {
 		program := nativeRuntimeMetadataProgram
 		if profile != nativeRuntimePhase {
@@ -1429,8 +1423,11 @@ func nativeRuntimeExpected(ctx context.Context, clientset kubernetes.Interface, 
 		}
 	}
 	maps.Copy(value.ProcessEnvironment, value.Environment)
+	// runc adds HOME from the image passwd at init, or "/" when the UID has no entry (65532 in the runner).
+	value.ProcessEnvironment["HOME"] = "/"
 	if strings.HasPrefix(profile, "pg") {
 		value.ProcessEnvironment["PWD"] = "/"
+		value.ProcessEnvironment["HOME"] = "/var/lib/postgresql"
 	}
 	value.Mounts, err = nativeRuntimeExpectedMounts(pod)
 	if err != nil {
@@ -2326,6 +2323,9 @@ func TestNativeRuntimeActiveExpectedUsesIndependentServiceAndPodInputs(t *testin
 	expected, err := nativeRuntimeExpected(context.Background(), clientset, pod, nativeRuntimePhase, nil)
 	if err != nil || expected.Environment["KUBERNETES_SERVICE_HOST"] != "10.97.42.1" || expected.Environment["HOSTNAME"] != pod.Name || expected.Environment["HOME"] != "" {
 		t.Fatal("independent Service/Pod environment derivation failed")
+	}
+	if expected.ProcessEnvironment["HOME"] != "/" {
+		t.Fatal("runc HOME for a UID without a passwd entry is not expected")
 	}
 	if len(expected.Command) != 10 || !slices.Equal(expected.RunningArgs, expected.Command[5:]) || expected.OOMScoreAdj != 980 {
 		t.Fatal("fixed command or pinned burstable OOM derivation changed")

@@ -209,6 +209,19 @@ class QualificationBoundaries(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(RuntimeError):
                 functions['same_incarnation'](binding,dict(binding,**{key:value}))
 
+    def test_server_process_identity_is_the_locked_cnpg_postgres_user(self):
+        functions = node_functions()
+        expected = json.loads((Q.ROOT / 'hack/testdata/native-runtime-active-profile.json').read_bytes())['expected']
+        expected = dict(expected, profile='pg16')
+        args = ('\0'.join(expected['running_args']) + '\0').encode()
+        env = ('\0'.join(key+'='+value for key,value in expected['process_environment'].items())+'\0').encode()
+        status = dict(Uid='26 26 26 26', Gid='26 26 26 26', Groups='26 101',
+                      CapInh='0', CapPrm='0', CapEff='0', CapBnd='0', CapAmb='0', NoNewPrivs='1', Seccomp='2')
+        functions['proc_values'](expected, args, env, status)
+        for key, value in [('Uid', '999 999 999 999'), ('Gid', '999 999 999 999'), ('Groups', '101 999'), ('Groups', '26')]:
+            with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
+                functions['proc_values'](expected, args, env, dict(status, **{key: value}))
+
     def test_release_path_is_only_the_matching_owned_tmp_volume(self):
         functions = node_functions()
         self.assertTrue(callable(functions.get('release_root')), 'fixed release derivation missing')

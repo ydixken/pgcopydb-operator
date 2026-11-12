@@ -875,7 +875,8 @@ func nativePasswordServer(input nativeRuntimeInput, node nativeRuntimeNode, imag
 		return nil, err
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pg%d", major), Namespace: input.Namespace, Labels: map[string]string{nativeRuntimeRunLabel: input.RunID, nativePasswordQualificationLabel: input.QualificationID, "native-probe-server": fmt.Sprint(major)}}, Spec: *job.Spec.Template.Spec.DeepCopy()}
-	uid, yes, no, grace, priority, mode := int64(999), true, false, int64(30), int32(0), int32(0o440)
+	// The locked CNPG images run postgres as UID 26, which ssl-cert (101) lists; initdb refuses a UID without a passwd entry.
+	uid, yes, no, grace, priority, mode := int64(26), true, false, int64(30), int32(0), int32(0o440)
 	pod.Spec.HostUsers = &yes
 	pod.Spec.SecurityContext.RunAsUser = &uid
 	pod.Spec.SecurityContext.RunAsGroup = &uid
@@ -1143,7 +1144,7 @@ func TestNativePasswordTLSFixedFixtureAndTerminalIncarnation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *server.Spec.SecurityContext.RunAsUser != 999 || *server.Spec.SecurityContext.RunAsGroup != 999 || *server.Spec.SecurityContext.FSGroup != 999 || *server.Spec.AutomountServiceAccountToken || !*server.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem || server.Spec.RuntimeClassName != nil || server.Spec.Volumes[1].Secret == nil || *server.Spec.Volumes[1].Secret.DefaultMode != 0o440 || server.Spec.Volumes[2].EmptyDir == nil || len(server.Spec.Containers[0].Env) != 0 {
+	if *server.Spec.SecurityContext.RunAsUser != 26 || *server.Spec.SecurityContext.RunAsGroup != 26 || *server.Spec.SecurityContext.FSGroup != 26 || *server.Spec.AutomountServiceAccountToken || !*server.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem || server.Spec.RuntimeClassName != nil || server.Spec.Volumes[1].Secret == nil || *server.Spec.Volumes[1].Secret.DefaultMode != 0o440 || server.Spec.Volumes[2].EmptyDir == nil || len(server.Spec.Containers[0].Env) != 0 {
 		t.Fatal("fixed server ownership or private-file fixture changed")
 	}
 	program, err := nativePasswordProgram()
