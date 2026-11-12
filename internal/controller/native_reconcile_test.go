@@ -53,6 +53,9 @@ func TestNativeReconcileEntry(t *testing.T) {
 	if err != nil || result.RequeueAfter <= 0 || f.patches != 1 || f.creates != 0 || f.storedMigration().Status.Phase != v1beta1.PhasePending {
 		t.Fatalf("first native pass did not persist only Pending: %+v %v", result, err)
 	}
+	if got := f.storedMigration().Status.NativeRunnerImage; got != nativeEvidenceTestImage {
+		t.Fatalf("admission recorded runner %q, want %q", got, nativeEvidenceTestImage)
+	}
 }
 
 func TestNativeReconcileCachedReplacement(t *testing.T) {

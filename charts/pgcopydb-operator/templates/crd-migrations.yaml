@@ -2247,6 +2247,13 @@ spec:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
                 type: string
+              nativeRunnerImage:
+                description: nativeRunnerImage is the runner image admitted for a
+                  native Migration; every later native Job runs it.
+                type: string
+                x-kubernetes-validations:
+                - message: nativeRunnerImage is immutable once recorded
+                  rule: self == oldSelf
               nativeSchemaJobUID:
                 description: nativeSchemaJobUID pins the successfully created native
                   schema helper before capture or rejoin.
@@ -2559,6 +2566,9 @@ spec:
                     type: string
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: nativeRunnerImage cannot be removed once recorded
+              rule: '!has(oldSelf.nativeRunnerImage) || has(self.nativeRunnerImage)'
         required:
         - spec
         type: object
@@ -4789,6 +4799,13 @@ spec:
                 description: nativePVCUID binds native execution to the recorded work
                   PVC incarnation.
                 type: string
+              nativeRunnerImage:
+                description: nativeRunnerImage is the runner image admitted for a
+                  native Migration; every later native Job runs it.
+                type: string
+                x-kubernetes-validations:
+                - message: nativeRunnerImage is immutable once recorded
+                  rule: self == oldSelf
               nativeSchemaJobUID:
                 description: nativeSchemaJobUID pins the successfully created native
                   schema helper before capture or rejoin.
@@ -5101,6 +5118,9 @@ spec:
                     type: string
                 type: object
             type: object
+            x-kubernetes-validations:
+            - message: nativeRunnerImage cannot be removed once recorded
+              rule: '!has(oldSelf.nativeRunnerImage) || has(self.nativeRunnerImage)'
         required:
         - spec
         type: object

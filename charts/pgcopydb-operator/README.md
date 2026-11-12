@@ -72,6 +72,7 @@ A nonempty digest takes precedence over its tag and renders as `repository@sha25
 When a digest is empty or absent, the image uses its tag, or the chart appVersion if the tag is empty.
 
 `spec.engine: rpgmigrate` runs only when the effective native image pins a qualified runner manifest; anything else fails with `UnsupportedEngine`.
+The check runs once, at admission, and the Migration then keeps the image recorded in `status.nativeRunnerImage`, so changing `runner.rpgmigrateImage` does not move an admitted Migration.
 Use one of the qualified immutable single-platform manifest pins listed in the configuration guide.
 See [Native helper image](https://github.com/ydixken/pgcopydb-operator/blob/main/docs/configuration.md#native-helper-image) for environment precedence and qualification requirements.
 

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -715,26 +716,42 @@ func TestNativeRetryUnknownCreate(t *testing.T) {
 }
 
 func TestNativeDispositionInventoryCleanup(t *testing.T) {
-	f := newNativeDispositionFixture(t, true)
-	f.m.Status.Replication = nil
-	f.m.Finalizers = []string{finalizerName}
-	if err := f.store.Update(context.Background(), f.m); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.store.Delete(context.Background(), f.m); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.reconcile(t); err != nil {
-		t.Fatal(err, "relays", f.relays, "cleanup", f.cleanupCalled)
-	}
-	if !f.cleanupCalled || f.relays != 2 || f.workerCreates != 0 || !apierrors.IsNotFound(f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), &v1beta1.Migration{})) {
-		t.Fatal("deletion skipped typed no-E inventory or cleanup")
-	}
-	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.worker), &batchv1.Job{}); err != nil {
-		t.Fatal("cleanup deleted retained original", err)
+	for _, flagMoved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flag moved %t", flagMoved), func(t *testing.T) {
+			f := newNativeDispositionFixture(t, true)
+			f.m.Status.Replication = nil
+			var images []string
+			f.r.Client = recordingJobClient{Client: f.r.Client, record: func(job *batchv1.Job) {
+				images = append(images, job.Spec.Template.Spec.Containers[0].Image)
+			}}
+			f.m.Finalizers = []string{finalizerName}
+			if err := f.store.Update(context.Background(), f.m); err != nil {
+				t.Fatal(err)
+			}
+			if flagMoved {
+				// Set after Update, which reloads status from the store; the operator flag moves after admission.
+				f.m.Status.NativeRunnerImage = f.r.RPGMigrateRunnerImage
+				f.r.RPGMigrateRunnerImage = "registry.example/native@sha256:" + strings.Repeat("b", 64)
+			}
+			if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.Delete(context.Background(), f.m); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.reconcile(t); err != nil {
+				t.Fatal(err, "relays", f.relays, "cleanup", f.cleanupCalled)
+			}
+			if !f.cleanupCalled || f.relays != 2 || f.workerCreates != 0 || !apierrors.IsNotFound(f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), &v1beta1.Migration{})) {
+				t.Fatal("deletion skipped typed no-E inventory or cleanup")
+			}
+			if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.worker), &batchv1.Job{}); err != nil {
+				t.Fatal("cleanup deleted retained original", err)
+			}
+			if len(images) == 0 || slices.ContainsFunc(images, func(image string) bool { return image != nativeEvidenceTestImage }) {
+				t.Fatalf("deletion helpers ran %q, want only %q", images, nativeEvidenceTestImage)
+			}
+		})
 	}
 }
 
