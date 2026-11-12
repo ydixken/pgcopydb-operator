@@ -1268,13 +1268,19 @@ func waitWorkVolumeReady(m *v1beta1.Migration) {
 		"Migration %s/%s has no explicit work volume size", m.Namespace, m.Name)
 	Eventually(func() error {
 		pvc := &corev1.PersistentVolumeClaim{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{
-			Namespace: m.Namespace,
-			Name:      m.Name + "-work",
-		}, pvc); err != nil {
-			return fmt.Errorf("get work PVC for Migration %s/%s: %w", m.Namespace, m.Name, err)
+		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: m.Name + "-work"}, pvc)
+		if err == nil {
+			err = pvcStorageReady(pvc, m.Spec.WorkVolume.Size)
+		} else {
+			err = fmt.Errorf("get work PVC for Migration %s/%s: %w", m.Namespace, m.Name, err)
 		}
-		return pvcStorageReady(pvc, m.Spec.WorkVolume.Size)
+		// A native Migration fails at preflight before it claims a PVC; report that, not a volume timeout.
+		current := &v1beta1.Migration{}
+		if err != nil && k8sClient.Get(ctx, client.ObjectKeyFromObject(m), current) == nil &&
+			current.Status.Phase == v1beta1.PhaseFailed {
+			StopTrying(fmt.Sprintf("migration %s/%s failed: %s", m.Namespace, m.Name, failureMessage(current))).Now()
+		}
+		return err
 	}, storageReadyTimeout, storageReadyPollInterval).Should(Succeed(),
 		"work volume for Migration %s/%s did not converge to %s",
 		m.Namespace, m.Name, m.Spec.WorkVolume.Size.String())
