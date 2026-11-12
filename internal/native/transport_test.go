@@ -1,6 +1,8 @@
 package native
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -111,7 +113,11 @@ func TestParseLinesSharedFixtures(t *testing.T) {
 			if c.Kind == fixtureTransportKind {
 				_, err = ParseReportLine(raw, c.Binding.binding())
 			} else {
-				_, err = ParseVersionLine(raw)
+				// Version payloads are JSON documents; the engine emits them compact with one newline.
+				var line bytes.Buffer
+				if err = json.Compact(&line, raw); err == nil {
+					_, err = ParseVersionLine(append(line.Bytes(), '\n'))
+				}
 			}
 			if (err == nil) != c.Accept {
 				t.Fatalf("fixture acceptance = %t, want %t: %v", err == nil, c.Accept, err)
