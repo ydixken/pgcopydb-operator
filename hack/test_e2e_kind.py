@@ -16,6 +16,9 @@ sys.dont_write_bytecode = True
 import unittest
 from unittest.mock import patch
 
+# The guard refuses volatile /tmp roots, so fixtures use the reboot-safe temporary root.
+tempfile.tempdir = str(Path('/var/tmp').resolve())
+
 SCRIPT = Path(__file__).with_name('e2e-kind.py')
 SPEC = importlib.util.spec_from_file_location('e2e_kind', SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC) if SCRIPT.exists() else None
@@ -1373,17 +1376,9 @@ class RegistryTransportTests(unittest.TestCase):
         self.assertTrue(callable(getattr(MODULE.Guard, 'verify_pulled', None)))
         self.assertTrue(callable(getattr(MODULE.Guard, 'pulled_image_binding', None)))
 
-    def test_load_refuses_before_any_run_or_command_effect(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp).resolve()
-            root.chmod(0o700)
-            guard = MODULE.Guard(root, environ={})
-            calls = []
-            guard.command = lambda *args, **kwargs: calls.append(args)
-            with self.assertRaisesRegex(MODULE.Refusal, 'superseded'):
-                guard.load()
-            self.assertEqual(calls, [])
-            self.assertEqual(list(root.iterdir()), [])
+    def test_archive_load_transport_is_deleted(self):
+        self.assertFalse(hasattr(MODULE.Guard, 'load'))
+        self.assertNotIn('e2e:kind:load', (MODULE.ROOT / 'Taskfile.yml').read_text())
 
     def test_superseded_load_cli_and_missing_prepare_inputs_create_nothing(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2108,6 +2103,230 @@ def development_receipt(image, graph, public):
         'os': 'linux', 'variant': None, 'index_digest': None, 'manifest_digest': image['digest'], 'config_digest': image['config_digest'],
         'registry_receipt': graph, 'build_input_sha256': image['source']['build_input_sha256'],
         'executable_sha256': image['source']['executable_sha256'], 'public_receipt': public, 'resolved_image': image}
+
+class EvidenceRootTests(unittest.TestCase):
+    def test_volatile_tmp_run_directories_refuse_before_creation(self):
+        for raw in ('/tmp/rpgmigrate-m7-volatile-control', '/private/tmp/rpgmigrate-m7-volatile-control'):
+            path = Path(raw)
+            with self.subTest(path=raw), self.assertRaises(MODULE.Refusal):
+                MODULE.Guard(path, environ={})
+            self.assertFalse(path.exists())
+
+    def test_prepare_defaults_to_a_fresh_reboot_safe_run_directory(self):
+        seen = []
+        def capture(directory, environ=None):
+            seen.append(directory)
+            raise MODULE.Refusal('captured')
+        with patch.object(MODULE.sys, 'argv', ['e2e-kind.py', 'prepare', '--image-lock', '/x', '--receipt-dir', '/y']), \
+                patch.object(MODULE, 'Guard', side_effect=capture), patch.object(MODULE.sys, 'stderr', io.StringIO()):
+            self.assertEqual(MODULE.main(), 1)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].parent, Path('/var/tmp').resolve())
+        self.assertRegex(seen[0].name, r'\Arpgmigrate-m7-run-[0-9a-f]{32}\Z')
+
+    def test_other_commands_still_require_an_explicit_run_directory(self):
+        with patch.object(MODULE.sys, 'argv', ['e2e-kind.py', 'check']), \
+                patch.object(MODULE, 'Guard', side_effect=AssertionError('guard must not be constructed')), \
+                patch.object(MODULE.sys, 'stderr', io.StringIO()), self.assertRaises(SystemExit) as failure:
+            MODULE.main()
+        self.assertEqual(failure.exception.code, 2)
+
+
+class HostSleepGuardTests(GuardFixture):
+    ASSERTIONS = ('   pid {pid}(caffeinate): [0x1] 00:00:00 PreventUserIdleSystemSleep named: "caffeinate command-line tool"\n'
+                  '   pid {pid}(caffeinate): [0x2] 00:00:00 PreventSystemSleep named: "caffeinate command-line tool"\n')
+
+    class Child:
+        pid = 4242
+        def __init__(self):
+            self.killed = False
+        def poll(self):
+            return None
+        def kill(self):
+            self.killed = True
+        def wait(self, timeout=None):
+            return 0
+
+    def hold(self, battery, assertions):
+        child = self.Child()
+        spawned = []
+        def command(args, **kwargs):
+            if args == ['pmset', '-g', 'batt']:
+                return battery
+            if args == ['pmset', '-g', 'assertions']:
+                return assertions.format(pid=child.pid)
+            raise AssertionError(args)
+        self.guard.command = command
+        def popen(args, **kwargs):
+            spawned.append(args)
+            return child
+        with patch.object(MODULE.platform, 'system', return_value='Darwin'), patch.object(MODULE.subprocess, 'Popen', side_effect=popen), \
+                patch.object(MODULE, 'SLEEP_ASSERTION_SECONDS', 0.05):
+            result = self.guard.hold_awake()
+        return result, child, spawned
+
+    def test_ac_power_and_live_caffeinate_assertions_admit(self):
+        result, child, spawned = self.hold("Now drawing from 'AC Power'\n", self.ASSERTIONS)
+        self.assertIs(result, child)
+        self.assertEqual(spawned, [['caffeinate', '-dims', '-w', str(os.getpid())]])
+
+    def test_battery_power_refuses_before_spawning(self):
+        with self.assertRaisesRegex(MODULE.Refusal, 'AC power'):
+            self.hold("Now drawing from 'Battery Power'\n", self.ASSERTIONS)
+
+    def test_missing_system_sleep_assertion_kills_child_and_refuses(self):
+        partial = self.ASSERTIONS.splitlines()[0] + '\n'
+        for assertions in ('', partial, self.ASSERTIONS.replace('{pid}', '1')):
+            with self.subTest(assertions=assertions):
+                child = self.Child()
+                self.guard.command = lambda args, **kwargs: ("Now drawing from 'AC Power'\n" if args[-1] == 'batt' else assertions.format(pid=child.pid))
+                with patch.object(MODULE.platform, 'system', return_value='Darwin'), \
+                        patch.object(MODULE.subprocess, 'Popen', return_value=child), \
+                        patch.object(MODULE, 'SLEEP_ASSERTION_SECONDS', 0.05), self.assertRaisesRegex(MODULE.Refusal, 'sleep assertion'):
+                    self.guard.hold_awake()
+                self.assertTrue(child.killed)
+
+
+class RetainedFailureReplayTests(GuardFixture):
+    def lease(self, wall_start, mono_start):
+        self.ledger['resource_lease'] = {'authorized': True, 'm7_cpus': 6, 'm7_memory_mib': 12288, 'm3_reserved_cpus': 6,
+            'm3_reserved_memory_mib': 6144, 'expires_at': wall_start + 7200, 'monotonic_expires_at': mono_start + 7200}
+        self.guard.save(self.ledger)
+
+    def test_29ed_wall_only_expiry_classifies_as_host_sleep(self):
+        # 29ed S2-failed-admission-proof.json, SHA-256 b658467f...e3b: original_policy and observed elapsed clocks.
+        wall_start, mono_start = 1794319491.737077, 605583.336303916
+        self.lease(wall_start, mono_start)
+        with patch.object(MODULE.time, 'time', return_value=wall_start + 15869.021349906921), \
+                patch.object(MODULE.time, 'monotonic', return_value=mono_start + 775.4935572090326), \
+                self.assertRaisesRegex(MODULE.Refusal, 'host sleep or clock step'):
+            self.guard.require_lease()
+        with patch.object(MODULE.time, 'time', return_value=wall_start + 7300), \
+                patch.object(MODULE.time, 'monotonic', return_value=mono_start + 7300), self.assertRaises(MODULE.Refusal) as both:
+            self.guard.require_lease()
+        self.assertNotIn('host sleep', str(both.exception))
+
+    def test_f59_tagged_image_id_cannot_bind_on_the_registry_path(self):
+        # f59 final-failed-gate-proof.json, SHA-256 269d0780...cc92: probe_runtime_outcome.raw_imageID.
+        repo = 'ghcr.io/ydixken/pgcopydb-operator/runner'
+        digest = 'sha256:5e5b148d63f4b3327c20d22daeef0e62fc85a530418671cc0b4a88ed2960be2a'
+        accepted = sorted([digest, 'sha256:28d72892ba637fd609b77ed36b975adb4603b60b7499287c981e800b05518ee8', repo + '@' + digest,
+            repo + '@sha256:ec9e552b833afcf08034018d98f329486c324488c61e0c4b392edc83ad5c6440'])
+        names = {node['name'] for node in self.ledger['nodes']}
+        image = {'node_bindings': {name: {'accepted_image_ids': accepted} for name in names}}
+        node = sorted(names)[0]
+        self.assertFalse(MODULE.Guard.valid_loaded_image_id(repo + ':v0.25.0@' + digest, node, image, names))
+        self.assertTrue(MODULE.Guard.valid_loaded_image_id(repo + '@' + digest, node, image, names))
+
+    def test_b5_go_gate_failure_retains_the_failing_assertion(self):
+        # b5 final-failed-Go-proof.json, SHA-256 281aaeae...0990: CalledProcessError with zero executed specs.
+        self.ledger['phase'] = 'pulled'
+        self.guard.save(self.ledger)
+        roles = ('manager', 'legacy-runner', 'seed-tool-runner', 'otel-collector', 'postgresql-17')
+        inputs = {'source_tree_sha256': 'c' * 64, 'images': {role: {'ref': 'example.invalid/' + role} for role in roles}}
+        for name in ('owned_nodes',):
+            setattr(self.guard, name, lambda ledger: ledger['nodes'])
+        for name in ('require_lease', 'verify_node_limits'):
+            setattr(self.guard, name, lambda *args: None)
+        self.guard.kubeconfig = lambda ledger: None
+        self.guard.suite_input = lambda ledger: inputs
+        self.guard.bootstrap = lambda ledger, source: None
+        assertion = json.dumps({'Action': 'output', 'Output': '  [FAILED] Expected <int>: 0 to equal <int>: 1\n'}) + '\n'
+        def suite(ledger, args, **kwargs):
+            self.assertEqual(args[:2], ['task', 'e2e:kind:suite'])
+            fd = os.open(self.directory / 'go-test.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                stream.write(assertion)
+            raise MODULE.CommandError('CalledProcessError', 1)
+        self.guard.registry_call = suite
+        with self.assertRaisesRegex(MODULE.Refusal, 'go-test.json') as refused:
+            self.guard.run('pgcopydb')
+        execution = self.guard.read()['suite_execution']
+        self.assertEqual((execution['error_class'], execution['returncode'], execution['receipt_status'], execution['go_test_json']),
+                         ('CalledProcessError', 1, 'absent', 'go-test.json'))
+        self.assertEqual((self.directory / 'go-test.json').read_text(), assertion)
+        self.assertNotIn('[FAILED]', json.dumps(execution) + str(refused.exception))
+        with self.assertRaisesRegex(MODULE.Refusal, 'go-test.json'):
+            self.guard.run('pgcopydb')
+
+    def test_suite_task_streams_go_test_json_into_the_run(self):
+        taskfile = (MODULE.ROOT / 'Taskfile.yml').read_text()
+        suite = taskfile[taskfile.index('  e2e:kind:suite:'):]
+        self.assertIn('go test ./test/e2e -json ', suite)
+        self.assertIn('> {{.RUN_DIR | shellQuote}}/go-test.json', suite)
+
+
+LOCK_SCRIPT = Path(__file__).with_name('e2e-kind-lock.py')
+LOCK_SPEC = importlib.util.spec_from_file_location('e2e_kind_lock', LOCK_SCRIPT)
+LOCK = importlib.util.module_from_spec(LOCK_SPEC)
+LOCK_SPEC.loader.exec_module(LOCK)
+
+
+class LockGeneratorTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RegistryPreparationTests('test_prepare_retains_only_complete_metadata_and_check_is_read_only')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        for name, value in (('kind', MODULE), ('registry', MODULE.registry), ('Refusal', MODULE.Refusal)):
+            module_patch = patch.object(LOCK, name, value)
+            module_patch.start()
+            self.addCleanup(module_patch.stop)
+        self.output = self.fixture.root / 'lock'
+        self.guard = MODULE.Guard(self.output, environ={})
+        self.guard.architecture = lambda: 'arm64'
+        self.anchors = [self.fixture.receipts / ('legacy-runner-original-' + name + suffix) for name, suffix in MODULE.LEGACY_ORIGINALS]
+        self.blobs = {}
+        for role, graph in self.fixture.graphs.items():
+            image = self.fixture.lock['images'][role]
+            for digest, key in ((image['digest'], 'manifest_base64'), (image['config_digest'], 'config_base64')):
+                self.blobs[(MODULE.registry.repository(image['ref']), digest)] = base64.b64decode(graph[key])
+        self.layer = 200
+
+    def fetch(self, repository, path, method='GET'):
+        digest = path.rsplit('/', 1)[1]
+        if method == 'HEAD':
+            return self.layer, {'content-length': '37'}, b''
+        body = self.blobs.get((repository, digest))
+        return (200, {}, body) if body is not None else (404, {}, b'{}')
+
+    def download(self, role):
+        return (self.fixture.receipts / (role + '-publication-receipt.json')).read_bytes()
+
+    def generate(self, **overrides):
+        return LOCK.generate(self.guard, self.fixture.lock_path, overrides.get('anchors', self.anchors),
+                             overrides.get('fetch', self.fetch), overrides.get('download', self.download))
+
+    def test_regenerated_lock_matches_pins_and_passes_the_guard_receipt_inputs(self):
+        lock = self.generate()
+        self.assertEqual(lock, self.fixture.lock)
+        written, outputs, _ = self.fixture.guard.receipt_inputs(self.output / 'image-lock.json', self.output)
+        self.assertEqual(written, lock)
+        manifest = json.loads((self.output / 'lock-manifest.json').read_bytes())
+        self.assertEqual(manifest['image-lock.json'], MODULE.registry.sha((self.output / 'image-lock.json').read_bytes()))
+        self.assertTrue(set(outputs) - {'node-default-storage.yaml'} <= set(manifest) | {'storage-registry-receipt.json'})
+
+    def test_changed_registry_bytes_missing_blob_or_receipt_refuse_before_any_output(self):
+        image = self.fixture.lock['images']['postgresql-17']
+        def tampered(repository, path, method='GET'):
+            status, headers, body = self.fetch(repository, path, method)
+            return (status, headers, body + b' ') if path.endswith(image['digest']) else (status, headers, body)
+        def foreign(role):
+            receipt = json.loads(self.download(role))
+            receipt['resolved_image']['digest'] = 'sha256:' + 'f' * 64
+            return json.dumps(receipt).encode()
+        cases = {'bytes': {'fetch': tampered}, 'receipt': {'download': foreign}, 'anchor': {'anchors': self.anchors[:1] * 3}}
+        for name, overrides in cases.items():
+            with self.subTest(case=name), self.assertRaises(MODULE.Refusal):
+                self.generate(**overrides)
+            self.assertEqual(list(self.output.iterdir()), [])
+        self.layer = 404
+        with self.assertRaisesRegex(MODULE.Refusal, 'not anonymously public'):
+            self.generate()
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_task_target_runs_the_generator(self):
+        taskfile = (MODULE.ROOT / 'Taskfile.yml').read_text()
+        self.assertTrue('python3 hack/e2e-kind-lock.py --pins {{.PINS | shellQuote}}' in taskfile)
 
 if __name__ == '__main__':
     unittest.main()

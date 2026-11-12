@@ -28,6 +28,24 @@ The suite independently checks the SHA-256 of the exact `RUN/image-lock.json` by
 > Require anonymous manifest, config, and blob checks plus a full pull on every owned node.
 > Do not add registry credentials, a local registry, image imports, or image aliases to bypass a refusal.
 
+## Regenerate the image lock
+
+We rebuild the lock from public data, so a lost lock directory is not lost evidence.
+`task e2e:kind:lock` keeps the upstream digests of an earlier schema 2 lock, given as `PINS`, and reads their index, manifest, and config bytes anonymously from the registries.
+It checks each layer blob with an anonymous `HEAD` request.
+It takes the manager and native-runner entries from the publication receipts of the hosted runs `MANAGER_RUN` and `NATIVE_RUN`, which `gh run download` fetches again.
+`LEGACY_ANCHORS` names the three original legacy evidence files, which the generator matches by their catalog SHA-256 values.
+The generator writes the lock, every receipt, and `lock-manifest.json` with file hashes into a fresh private directory.
+Without `OUTPUT_DIR`, that directory is `/var/tmp/rpgmigrate-m7-lock-<uuid>`.
+
+```sh
+task e2e:kind:lock PINS="$OLD_LOCK" MANAGER_RUN="$MANAGER_RUN" NATIVE_RUN="$NATIVE_RUN" \
+  LEGACY_ANCHORS="$EVIDENCE $QUALIFICATION $PROBE"
+```
+
+Run it without `KUBECONFIG`, proxy, or registry overrides, as for the other kind commands.
+The output directory is the `IMAGE_LOCK` parent and the `RECEIPT_DIR` for `e2e:kind:prepare`.
+
 ## Development publication
 
 The approved feature-branch workflow calls `task image:dev:publish` for the exact checkout and architecture.
@@ -46,44 +64,42 @@ The guard checks VM capacity, cgroups, source identity, and private paths before
 Set `IMAGE_LOCK` and `RECEIPT_DIR` to the verified external lock and receipt directory from the admitted publication handoff.
 Use the same `RUN_DIR` in all subsequent commands.
 
-1. Create a fresh private run directory.
+> [!warning]
+> The guard refuses a `RUN_DIR` under `/tmp`, because a reboot wipes it and the evidence with it.
+> Keep runs, locks, and receipts under `/var/tmp` or another persistent private directory.
+
+1. Bind a new run to the explicit lock and receipts.
+   Without `RUN_DIR`, the guard creates `/var/tmp/rpgmigrate-m7-run-<uuid>` and prints it as `run_dir`.
 
    ```sh
-   RUN_DIR=$(mktemp -d)
-   chmod 700 "$RUN_DIR"
+   task e2e:kind:prepare IMAGE_LOCK="$IMAGE_LOCK" RECEIPT_DIR="$RECEIPT_DIR"
    ```
 
-2. Bind the new run to the explicit lock and receipts.
-
-   ```sh
-   task e2e:kind:prepare RUN_DIR="$RUN_DIR" IMAGE_LOCK="$IMAGE_LOCK" RECEIPT_DIR="$RECEIPT_DIR"
-   ```
-
-3. Check the prepared inputs.
+2. Set `RUN_DIR` to the printed `run_dir`, then check the prepared inputs.
 
    ```sh
    task e2e:kind:check RUN_DIR="$RUN_DIR"
    ```
 
-4. Create the owned cluster with a finite lease.
+3. Create the owned cluster with a finite lease.
 
    ```sh
    task e2e:kind:up RUN_DIR="$RUN_DIR" LEASE_SECONDS=7200
    ```
 
-5. Pull and check the public workload images on each owned node.
+4. Pull and check the public workload images on each owned node.
 
    ```sh
    task e2e:kind:pull RUN_DIR="$RUN_DIR"
    ```
 
-6. Run the positive legacy bootstrap selection.
+5. Run the positive legacy bootstrap selection.
 
    ```sh
    task e2e:kind:legacy RUN_DIR="$RUN_DIR"
    ```
 
-7. Remove only the resources admitted by the guard and retain the evidence.
+6. Remove only the resources admitted by the guard and retain the evidence.
 
    ```sh
    task e2e:kind:down RUN_DIR="$RUN_DIR"
@@ -92,10 +108,19 @@ Use the same `RUN_DIR` in all subsequent commands.
 The lease accepts 30 to 7200 seconds.
 The Task default is 7200.
 No command renews the original clocks or converts an older run.
-`e2e:kind:load` refuses before effects because public digest pulls replace archive transport.
+The lease records a wall and a monotonic expiry.
+macOS pauses the monotonic clock while the host sleeps, so a wall-only expiry is refused as a host sleep or clock step.
+
+On macOS, `up`, `pull`, and the legacy run require AC power and hold a `caffeinate -dims` child for the command's lifetime.
+The guard refuses when `pmset` does not show that child's system-sleep assertions.
+The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
 `e2e:kind:native` requests the native route and refuses while its gates remain closed.
 The internal suite Task requires the exact guard-owned run, context, engine, and nonempty positive selection.
 Do not invoke it as a context bypass.
+It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go gate keeps its failing assertion.
+The ledger records only whether that file exists.
+The stream can contain fixture output, so keep it in the private run directory and do not publish it.
+A run refuses to start over an existing `go-test.json` or `suite-receipt.json`.
 
 > [!caution]
 > Preserve historical failed receipts and old run identities.
