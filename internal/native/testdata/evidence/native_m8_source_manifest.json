@@ -1,0 +1,19 @@
+{
+  "generated": true,
+  "runtime_qualified": false,
+  "source": "src/apply/metadata.rs",
+  "source_commit": "daeac05a3360defab2671f41e60493bc8168838d",
+  "source_tree": "6577ffc66c9ec21632be214b3ae092addf665ce5",
+  "source_sha256": "1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1",
+  "native_format": 9,
+  "metadata_version": 7,
+  "files": {
+    "native_m8_catalog_16.sql": "a076115a8c8c810cf8584b7f946c062c126639244abb95ef57480e27bf4b5373",
+    "native_m8_marker_catalog_16.sql": "17c74d591eec48f7f657b82e7b8192436dff971dbedc8640c1422f36bfbc05d8",
+    "native_m8_large_object_catalog_16.sql": "8469ffcdad00b66da4670fce5327eff7e93a2bc2da3565edd3687ee8cb226933",
+    "native_m8_catalog_18.sql": "dc639d90b75218bb0d28174fd53ffe71b7fab55eaf999c1a4b8163520dbb56e2",
+    "native_m8_marker_catalog_18.sql": "17c74d591eec48f7f657b82e7b8192436dff971dbedc8640c1422f36bfbc05d8",
+    "native_m8_large_object_catalog_18.sql": "8469ffcdad00b66da4670fce5327eff7e93a2bc2da3565edd3687ee8cb226933",
+    "native_m8_columns.json": "5dd285a78b974037752e6a5a541a03f180e6cfeed149ca102352ccdf96e2a65c"
+  }
+}
