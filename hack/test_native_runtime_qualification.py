@@ -222,6 +222,49 @@ class QualificationBoundaries(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(RuntimeError):
                 functions['proc_values'](expected, args, env, dict(status, **{key: value}))
 
+    def test_mountinfo_admits_only_runc_bound_default_devices(self):
+        functions = node_functions()
+        spec = dict(mounts=[dict(destination='/tmp', type='bind', options=['rbind', 'rprivate', 'rw'])],
+                    linux=dict(maskedPaths=[], readonlyPaths=[]))
+        dmi = dict.fromkeys(('/sys/class/dmi/id/product_name', '/sys/class/dmi/id/product_uuid',
+                             '/sys/devices/virtual/dmi/id/product_name', '/sys/devices/virtual/dmi/id/product_uuid'), '1')
+        meta = dict(dmi_pairs=dmi, volume_pairs=dict(tmp='1', client=None, server=None, pgdata=None), tmp_bytes='67108864')
+        rows = ['1 0 0:1 / / ro,relatime - overlay overlay ro', '2 1 0:2 / /tmp rw,nosuid - tmpfs tmpfs rw']
+        devices = ['%d 1 0:5 /%s /dev/%s rw,nosuid,noexec - devtmpfs devtmpfs rw' % (3 + number, name, name)
+                   for number, name in enumerate(('null', 'zero', 'full', 'random', 'urandom', 'tty'))]
+        raw = lambda lines: ('\n'.join(lines) + '\n').encode()
+        self.assertEqual(functions['proc_mounts'](raw(rows + devices), spec, {}, meta), 8)
+        for changed in (devices[:1] + [devices[0]], [devices[0].replace(',noexec', '')],
+                        [devices[0].replace('devtmpfs devtmpfs', 'tmpfs tmpfs')], [devices[0].replace('/dev/null', '/dev/kmsg')]):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                functions['proc_mounts'](raw(rows + changed), spec, {}, meta)
+
+    def test_cgroup_values_follow_runc_weight_and_kubelet_slices(self):
+        functions = node_functions()
+        uid, container = 'owned-pod', '1' * 64
+        stat = b'100 (python3) ' + b' '.join([b'S'] + [b'0'] * 18 + [b'200'] + [b'0'] * 5)
+        cgroup = ('0::/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-burstable.slice/kubelet-kubepods-burstable-pod'
+                  + uid.replace('-', '_') + '.slice/cri-containerd-' + container + '.scope\n').encode()
+        values = {'cpu.max': '100000 100000', 'cpu.weight': '35', 'memory.max': '536870912', 'memory.swap.max': '0',
+                  'pids.max': 'max', 'parent.pids.max': '4096'}
+        def frames(cg, path):
+            meta = dict(boot_id='00000000-0000-0000-0000-000000000001', mount_namespace='mnt:[3]',
+                        namespace_matches=dict.fromkeys(('mnt', 'pid', 'ipc', 'uts', 'net', 'cgroup', 'user'), '1'),
+                        binary_kind='python313', tmp_device='1', tmp_inode='2', tmp_bytes='67108864', volume_pairs={},
+                        dmi_pairs={}, cgroup_values=cg, key_stat=None)
+            return dict(meta=meta, stat_before=stat, stat_after=stat, status=b'Name:\tpython3\n', cmdline=b'', environ=b'',
+                        mountinfo=b'', cgroup=path)
+        functions.update(proc_values=lambda *args: None, proc_mounts=lambda *args: 20)
+        def snapshot(cg, path):
+            functions['primitive'] = lambda *args: frames(cg, path)
+            return functions['process_snapshot'](dict(profile='metadata', pod_uid=uid, container_id=container),
+                                                 dict(info=dict(pid=100, runtimeSpec={})), dict(sandbox_pid=50, sandbox_id='2' * 64))
+        self.assertEqual(snapshot(values, cgroup)['start_ticks'], 200)
+        for cg, path in ((dict(values, **{'cpu.weight': '10'}), cgroup), (values, cgroup.replace(b'/kubelet-kubepods-burstable-pod', b'/kubepods-burstable-pod')),
+                         (dict(values, **{'parent.pids.max': 'max'}), cgroup)):
+            with self.subTest(cg=cg, path=path), self.assertRaises(RuntimeError):
+                snapshot(cg, path)
+
     def test_release_path_is_only_the_matching_owned_tmp_volume(self):
         functions = node_functions()
         self.assertTrue(callable(functions.get('release_root')), 'fixed release derivation missing')

@@ -299,8 +299,10 @@ def checked_spec(value,e,sandbox):
  need(linux.get('devices',[])==[] and linux.get('sysctl',{})=={} and linux.get('rootfsPropagation','')=='' and linux.get('uidMappings',[])==linux.get('gidMappings',[])==[])
  need(normalized_seccomp(linux['seccomp'])==normalized_seccomp(expected_seccomp()))
  baseline=stock_base()['linux']
- for name in ('maskedPaths','readonlyPaths'):
-  need(type(linux[name]) is list and len(linux[name])==len(set(linux[name])) and set(linux[name])==set(baseline[name]))
+ # kubelet v1.36.4 supplies maskedPaths (pkg/securitycontext defaultMaskedPaths), which adds /proc/interrupts to the base spec.
+ masked=['/proc/asound','/proc/acpi','/proc/interrupts','/proc/kcore','/proc/keys','/proc/latency_stats','/proc/timer_list','/proc/timer_stats','/proc/sched_debug','/proc/scsi','/sys/firmware','/sys/devices/virtual/powercap']
+ for name,paths in (('maskedPaths',masked),('readonlyPaths',baseline['readonlyPaths'])):
+  need(type(linux[name]) is list and len(linux[name])==len(set(linux[name])) and set(linux[name])==set(paths))
  ns=linux['namespaces'];need(type(ns) is list and len(ns)==6);seen=set()
  for row in ns:
   fields(row,('type',),('path',));kind=row['type'];need(kind in ('pid','ipc','uts','mount','network','cgroup') and kind not in seen);seen.add(kind)
@@ -308,8 +310,8 @@ def checked_spec(value,e,sandbox):
   need(row.get('path','')==expected)
  resources=linux['resources'];fields(resources,('devices','cpu','memory'),('unified',))
  need(resources['devices']==baseline['resources']['devices'] and resources['cpu']==dict(period=100000,quota=100000,shares=256))
- need(resources['memory']==dict(limit=536870912,swap=536870912) and resources.get('unified',{}) in ({},{'memory.swap.max':'0'}))
- need(linux['cgroupsPath']=='kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice:cri-containerd:'+e['container_id'])
+ need(resources['memory']==dict(limit=536870912,swap=536870912) and resources.get('unified',{}) in ({'memory.oom.group':'1'},{'memory.oom.group':'1','memory.swap.max':'0'}))
+ need(linux['cgroupsPath']=='kubelet-kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice:cri-containerd:'+e['container_id'])
  annotations={'io.kubernetes.cri.'+k:v for k,v in {'sandbox-id':sandbox['sandbox_id'],'sandbox-namespace':e['namespace'],'sandbox-uid':e['pod_uid'],'sandbox-name':e['pod_name'],'container-name':e['container_name'],'image-name':e['image_ref'],'container-type':'container'}.items()}
  need(value['annotations']==annotations)
  expected={m['destination']:m for m in stock_base()['mounts'] if m['destination'] not in ('/run','/dev/shm')}
@@ -474,9 +476,12 @@ def proc_mounts(raw,spec,e,meta):
   rows.append(dict(target=target,flags=words[5].split(','),fstype=words[mark+1]))
  need(0<len(rows)<=128)
  allowed={row['destination'] for row in spec['mounts']}|{'/'}|set(spec['linux']['maskedPaths'])|set(spec['linux']['readonlyPaths']);seen={}
+ # runc inside the rootless kind node cannot mknod, so it bind-mounts its six default device nodes.
+ devices={'/dev/null','/dev/zero','/dev/full','/dev/random','/dev/urandom','/dev/tty'}
  dmi=meta['dmi_pairs'];fields(dmi,('/sys/class/dmi/id/product_name','/sys/class/dmi/id/product_uuid','/sys/devices/virtual/dmi/id/product_name','/sys/devices/virtual/dmi/id/product_uuid'))
  for row in rows:
-  target=row['target'];need(target in allowed or target in dmi);seen[target]=seen.get(target,0)+1;need(seen[target]<=(2 if target in dmi and target.endswith('product_uuid') else 1))
+  target=row['target'];need(target in allowed or target in dmi or target in devices);seen[target]=seen.get(target,0)+1;need(seen[target]<=(2 if target in dmi and target.endswith('product_uuid') else 1))
+  if target in devices:need(row['fstype']=='devtmpfs' and 'nosuid' in row['flags'] and 'noexec' in row['flags'])
   if target in dmi:need(dmi[target]=='1' and 'ro' in row['flags'])
  roots=[row for row in rows if row['target']=='/'];need(len(roots)==1 and roots[0]['fstype']=='overlay' and 'ro' in roots[0]['flags'])
  pairs=meta['volume_pairs'];fields(pairs,('tmp','client','server','pgdata'))
@@ -511,8 +516,9 @@ def process_snapshot(e,inspection,sandbox):
  for key in ('tmp_device','tmp_inode'):need(type(meta[key]) is str and re.fullmatch('[0-9]{1,20}',meta[key]))
  mounts=proc_mounts(frames['mountinfo'],inspection['info']['runtimeSpec'],e,meta)
  cg=meta['cgroup_values'];fields(cg,('cpu.max','cpu.weight','memory.max','memory.swap.max','pids.max','parent.pids.max'))
- need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='10' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0' and cg['pids.max']=='max' and cg['parent.pids.max'].isdigit() and 0<int(cg['parent.pids.max'])<=4096)
- need(frames['cgroup'].decode('ascii').endswith('/kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
+ # runc maps 256 shares with its quadratic v2 formula: ceil(10**((64+125*8)/612-7/34)) == 35.
+ need(cg['cpu.max']=='100000 100000' and cg['cpu.weight']=='35' and cg['memory.max']=='536870912' and cg['memory.swap.max']=='0' and cg['pids.max']=='max' and cg['parent.pids.max'].isdigit() and 0<int(cg['parent.pids.max'])<=4096)
+ need(frames['cgroup'].decode('ascii').endswith('/kubelet-kubepods-burstable-pod'+e['pod_uid'].replace('-','_')+'.slice/cri-containerd-'+e['container_id']+'.scope\n'))
  if e['profile'] in ('pg16','pg18'):
   need(meta['key_stat']==dict(uid='0',gid='26',mode='288',links='1'))
  else:need(meta['key_stat'] is None)
@@ -559,7 +565,7 @@ sub probe {
  my $exe=readlink('/proc/'.$p.'/exe');my %known=('/usr/bin/python3.13'=>['python313','273cb29e073b748379ba546affa562283ed795f84ff230349e12ce610e60975c'],'/usr/lib/postgresql/16/bin/postgres'=>['pg16','af0258f6b3cf8857f5fdd55e30f0fd07de1f0f90b8b625ca6fbf0e34f1359c0e'],'/usr/lib/postgresql/18/bin/postgres'=>['pg18','fc77699680778ae0440b4ea9669aa17773cb9641855f6a3f048c50c9fe39c765']);need(defined($exe) && exists($known{$exe}));$exe=($exe =~ /\A(\/[-a-zA-Z0-9_.\/]+)\z/)[0];
  sysopen(my $binary,'/proc/'.$p.'/exe',O_RDONLY) or need(0);my @binary=stat($binary);need(S_ISREG($binary[2]) && $binary[4]==0 && $binary[5]==0 && ($binary[2]&022)==0 && $binary[3]==1 && $binary[7]<=16777216 && pair($binary,$target.$exe) eq '1');need(hash_fd($binary) eq $known{$exe}[1]);close($binary) or need(0);
  my %dmi;for my $leaf(qw(product_name product_uuid)){for my $dir('/sys/class/dmi/id/','/sys/devices/virtual/dmi/id/'){$dmi{$dir.$leaf}=pair($target.'/'.$leaf,$target.$dir.$leaf);}}
- need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
+ need($cgroup =~ /\A0::(\/[-a-zA-Z0-9_.\/@]+)\n\z/);my $path=$1;need(!grep {$_ eq '..'} split /\//,$path);my $under=$pod;$under =~ s/-/_/g;need($path =~ /\/kubelet-kubepods-burstable-pod\Q$under\E\.slice\/cri-containerd-[0-9a-f]{64}\.scope\z/);my %cg;
  for my $leaf(qw(cpu.max cpu.weight memory.max memory.swap.max pids.max)){$cg{$leaf}=raw_file('/sys/fs/cgroup'.$path.'/'.$leaf,128);$cg{$leaf} =~ s/\n\z//;}
  my $parent=$path;$parent =~ s/\/[^\/]+\z//;$cg{'parent.pids.max'}=raw_file('/sys/fs/cgroup'.$parent.'/pids.max',128);$cg{'parent.pids.max'} =~ s/\n\z//;
  open(my $statpipe,'-|','/usr/bin/stat','-f','-c','%b %S',$target.'/tmp') or need(0);my $space=bounded($statpipe,128);close($statpipe) or need(0);need($space =~ /\A([0-9]+) ([0-9]+)\n\z/);my $tmpbytes=$1*$2;

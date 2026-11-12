@@ -69,19 +69,20 @@
       ]
     },
     "linux": {
-      "cgroupsPath": "kubepods-burstable-podowned_pod.slice:cri-containerd:1111111111111111111111111111111111111111111111111111111111111111",
+      "cgroupsPath": "kubelet-kubepods-burstable-podowned_pod.slice:cri-containerd:1111111111111111111111111111111111111111111111111111111111111111",
       "maskedPaths": [
-        "/proc/acpi",
         "/proc/asound",
+        "/proc/acpi",
+        "/proc/interrupts",
         "/proc/kcore",
         "/proc/keys",
         "/proc/latency_stats",
         "/proc/timer_list",
         "/proc/timer_stats",
         "/proc/sched_debug",
+        "/proc/scsi",
         "/sys/firmware",
-        "/sys/devices/virtual/powercap",
-        "/proc/scsi"
+        "/sys/devices/virtual/powercap"
       ],
       "namespaces": [
         {
@@ -130,6 +131,7 @@
           "swap": 536870912
         },
         "unified": {
+          "memory.oom.group": "1",
           "memory.swap.max": "0"
         }
       },
