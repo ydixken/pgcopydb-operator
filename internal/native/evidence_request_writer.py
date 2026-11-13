@@ -114,8 +114,9 @@ def deliver(operation):
   fcntl.flock(directory,fcntl.LOCK_EX|fcntl.LOCK_NB)
   # The raw directory descriptor keeps this lease until actual process exit.
   names={'request.fifo','stdout.fifo','stderr.fifo'}
-  while set(os.listdir(directory))!=names:
-   present=set(os.listdir(directory));need(present<names and (not present or 'request.fifo' in present))
+  # One listing per poll: the program may add a FIFO between two listings.
+  while (present:=set(os.listdir(directory)))!=names:
+   need(present<names and (not present or 'request.fifo' in present))
    need(private_dir(directory)==original_dir)
    select.select([],[],[],min(.02,remaining(injection)))
   for name in names:identities[name]=fifo(os.stat(name,dir_fd=directory,follow_symlinks=False))
@@ -129,8 +130,11 @@ def deliver(operation):
     need((info.st_dev,info.st_ino)==original_dir and private_dir(directory)==original_dir)
     need(present==names if initial else present<=names)
    except FileNotFoundError:
-    need(not initial and not present and private_dir(directory)==original_dir)
-   for name in present:need(fifo(os.stat(name,dir_fd=directory,follow_symlinks=False))==identities[name])
+    # The program unlinks every FIFO before rmdir, so a gone path leaves nothing to list; an earlier listing may be stale.
+    need(not initial and not os.listdir(directory) and private_dir(directory)==original_dir)
+   for name in present:
+    try:need(fifo(os.stat(name,dir_fd=directory,follow_symlinks=False))==identities[name])
+    except FileNotFoundError:need(not initial)
    for name,fd in readers.items():
     info=os.fstat(fd);need((info.st_dev,info.st_ino)==identities[name] and info.st_nlink in (0,1))
   check(True)

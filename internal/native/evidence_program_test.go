@@ -120,7 +120,7 @@ func TestNativePythonDescriptorMutation(t *testing.T) {
 func TestNativePythonConnectPolling(t *testing.T) { pythonMechanismCase(t, "test_ConnectPolling") }
 
 func TestNativePythonRelay(t *testing.T) {
-	for _, method := range []string{"test_RelayProtocol", "test_RelayFaults", "test_RelayLifetime", "test_RelayDuplicate", "test_RelayDeadline", "test_RelayModeSettle", "test_RelayMainQuiet", "test_RelayClosureOrder", "test_RelayCloseFault", "test_RelayReplacement", "test_RelayOverflow"} {
+	for _, method := range []string{"test_RelayProtocol", "test_RelayFifoArrival", "test_RelayTeardownArrival", "test_RelayEarlyTeardown", "test_RelayFaults", "test_RelayLifetime", "test_RelayDuplicate", "test_RelayDeadline", "test_RelayModeSettle", "test_RelayMainQuiet", "test_RelayClosureOrder", "test_RelayCloseFault", "test_RelayReplacement", "test_RelayOverflow"} {
 		t.Run(method, func(t *testing.T) { pythonMechanismCase(t, method) })
 	}
 }
@@ -287,7 +287,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 63 || len(registered) != 63 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 66 || len(registered) != 66 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)
