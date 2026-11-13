@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -56,8 +57,15 @@ const (
 	nativeControlCanary                     = "private-control-diagnostic-canary"
 )
 
+// nativeControlT is what the fixture needs from *testing.T, so envtest specs can pass GinkgoT().
+type nativeControlT interface {
+	Helper()
+	Fatal(...any)
+	Error(...any)
+}
+
 type nativeControlFixture struct {
-	t                    *testing.T
+	t                    nativeControlT
 	r                    *MigrationReconciler
 	store                client.WithWatch
 	m                    *v1beta1.Migration
@@ -112,7 +120,7 @@ func newNativeControlFixture(t *testing.T) *nativeControlFixture {
 		t.Fatal(err)
 	}
 	f := &nativeControlFixture{t: t, m: m, pvc: pvc, worker: worker, pod: pod, store: store, head: nativeControlTestEnd}
-	f.r = &MigrationReconciler{Scheme: scheme, RPGMigrateRunnerImage: nativeEvidenceTestImage}
+	f.r = &MigrationReconciler{Scheme: scheme, RPGMigrateRunnerImage: nativeEvidenceTestImage, Recorder: events.NewFakeRecorder(16)}
 	f.r.APIReader = nativeControlAPIReader{f}
 	f.r.Client = interceptor.NewClient(store, interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
@@ -287,7 +295,7 @@ func (f *nativeControlFixture) exec(w http.ResponseWriter, r *http.Request) {
 	_ = conn.WriteMessage(websocket.BinaryMessage, append([]byte{3}, status...))
 	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 }
-func nativeControlSourceReply(t *testing.T, body []byte, head string) []byte {
+func nativeControlSourceReply(t nativeControlT, body []byte, head string) []byte {
 	t.Helper()
 	var request map[string]json.RawMessage
 	if json.Unmarshal(body, &request) != nil {

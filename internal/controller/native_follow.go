@@ -51,10 +51,25 @@ func (r *MigrationReconciler) persistNativeEnd(ctx context.Context, m *v1beta1.M
 	desired.Status.Replication.Endpos = end
 	desired.Status.Phase = v1beta1.PhaseCuttingOver
 	if err := r.patchNativeControlStatus(ctx, desired, base); err != nil {
+		// A lost reply may still have saved E, and no later pass announces an E it finds saved.
+		if !apierrors.IsConflict(err) && r.nativeEndSaved(ctx, desired, end) {
+			r.announceNativeCutover(desired, end)
+		}
 		return ctrl.Result{}, err
 	}
+	r.announceNativeCutover(desired, end)
 	// Returning leaves the caller's pre-E snapshot untouched, including after an unknown patch reply.
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
+}
+
+// announceNativeCutover runs only once E is saved in status, the legacy event with the legacy wording.
+func (r *MigrationReconciler) announceNativeCutover(m *v1beta1.Migration, end string) {
+	r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "CutoverStarted", "Cutover", "stream frozen at endpos %s, draining", end)
+}
+
+func (r *MigrationReconciler) nativeEndSaved(ctx context.Context, m *v1beta1.Migration, end string) bool {
+	live := &v1beta1.Migration{}
+	return r.APIReader.Get(ctx, client.ObjectKeyFromObject(m), live) == nil && live.UID == m.UID && nativeControlEnd(live) == end
 }
 
 func (r *MigrationReconciler) setNativePersistedEnd(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, control *native.Client) ([]byte, error) {
