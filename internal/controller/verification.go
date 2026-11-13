@@ -51,13 +51,24 @@ const (
 // for the length of one check; nothing outside the Job reads it.
 const compareReportPath = "/tmp/compare-data.json"
 
+const emptyCompareReportMessage = "the report lists no table, so nothing was compared"
+
+// Empty reports need live inventories, not the comparator's cached selection.
+const emptyDatabaseQuery = `select not exists (
+  select 1
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+   where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'
+     and c.relkind in ('r', 'p', 'f', 'm', 'S')
+) and not exists (select 1 from pg_catalog.pg_largeobject_metadata);`
+
 // compareReportQuery names every table the report does not show as matching.
 // An absent source side and an empty array count as unmatched, since NULL
 // against NULL would read as a clean match. A row's status, which the bundled
 // runner adds and older runners lack, fails it unless it is match. psql reads
 // the report from the file, not through -v: Linux caps one argv string at
 // 128 KiB, which a pretty-printed report crosses at about 480 tables.
-var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select 'the report lists no table, so nothing was compared'
+var compareReportQuery = "\\set r `cat " + compareReportPath + "`\n" + `select '` + emptyCompareReportMessage + `'
  where json_array_length(:'r'::json) = 0;
 select format('%s.%s: source %s rows (checksum %s), target %s rows (checksum %s)%s',
               t->>'schema', t->>'name',
@@ -80,8 +91,8 @@ const (
 	compareStatusPath = "/tmp/compare.status"
 )
 
-// Validate the report even after exit 0: empty or incomplete output proves
-// no match, and some runner overrides exit 0 on content differences.
+// Validate the report even after exit 0: incomplete output proves no match,
+// and an empty array needs both databases to have no data-bearing objects.
 // psql parses JSON because the runner image ships no jq or python.
 // The progress and clone-progress lines go last because the report can push
 // them out of the log window the operator reads.
@@ -96,6 +107,18 @@ var compareDataStrict = `compare_data_strict() {
 ` + compareReportQuery + `SQL
   ); then
     echo "compare data report could not be evaluated; refusing to read that as a match"
+  elif [ "$unmatched" = "` + emptyCompareReportMessage + `" ]; then
+    if source_empty=$(psql "$PGCOPYDB_SOURCE_PGURI" -tAX -v ON_ERROR_STOP=1 -c "` + emptyDatabaseQuery + `") &&
+       target_empty=$(psql "$PGCOPYDB_TARGET_PGURI" -tAX -v ON_ERROR_STOP=1 -c "` + emptyDatabaseQuery + `"); then
+      if [ "$source_empty" = t ] && [ "$target_empty" = t ]; then
+        echo "empty databases verified: neither source nor target has data-bearing objects"
+        verdict=0
+      else
+        echo "empty compare report cannot prove a match: source or target has data-bearing objects"
+      fi
+    else
+      echo "empty compare report cannot be verified: live database inventory failed"
+    fi
   elif [ -n "$unmatched" ]; then
     echo "compare data did not find every table matching between source and target:"
     echo "$unmatched"
@@ -154,7 +177,8 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 		if m.Spec.Clone.AllDatabases {
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
-		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript, false)
+		script := "set -eu\n" + dataComparisonPrelude(m) + dataComparisonStrict(m) + "compare_data_strict\n"
+		return scriptJob(m, runnerImage, compareJobName(m, check), script, false)
 	}
 	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(m.Spec.Clone.AllDatabases), "", 1, false)
 	if err != nil {
@@ -295,10 +319,12 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 	}
 
 	if len(mismatched) == 0 {
-		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed",
-			"pgcopydb compare found source and target matching")
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Verified", "Verify",
-			"pgcopydb compare found source and target matching")
+		msg := "pgcopydb compare found source and target matching"
+		if hasPartialTables(m) {
+			msg = "Requested comparisons passed for their configured scope. " + unloggedPolicyMessage(m)
+		}
+		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed", msg)
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Verified", "Verify", "%s", msg)
 		return true, nil
 	}
 	// A schema mismatch outranks a data one: it usually explains it.

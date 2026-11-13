@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -33,6 +34,7 @@ import (
 // reached. The report ends in a newline, as pgcopydb's does.
 const stubVerifyPgcopydb = `#!/bin/sh
 case "$*" in
+  "list tables "*) ;;
   *--endpos*) echo "$STUB_ENDPOS" ;;
   *--replay-lsn*) echo "$STUB_REPLAY" ;;
   *"compare data"*)
@@ -54,6 +56,12 @@ const stubVerifyPsql = `#!/bin/sh
 case "$*" in
   *pg_replication_origin_progress*) echo "$STUB_PROGRESS" ;;
   *pg_wal_lsn_diff*) echo "$STUB_GAP" ;;
+  *pg_largeobject_metadata*)
+    case "$1" in
+      src) echo "${STUB_SOURCE_EMPTY:-f}" ;;
+      tgt) echo "${STUB_TARGET_EMPTY:-f}" ;;
+      *) exit 9 ;;
+    esac ;;
   *)
     sql=$(cat)
     case "$sql" in
@@ -82,6 +90,11 @@ func runVerifyScript(t *testing.T, report string, env ...string) (string, int) {
 // runGatedVerifyScript is runVerifyScript for a verify Job built with a progress gate.
 func runGatedVerifyScript(t *testing.T, gate, report string, env ...string) (string, int) {
 	t.Helper()
+	return runMigrationVerifyScript(t, passwordMigration(), gate, report, env...)
+}
+
+func runMigrationVerifyScript(t *testing.T, migration *v1beta1.Migration, gate, report string, env ...string) (string, int) {
+	t.Helper()
 	dir := t.TempDir()
 	// The worker container is named after the binary, so the constant doubles
 	// as the stub's file name.
@@ -95,13 +108,14 @@ func runGatedVerifyScript(t *testing.T, gate, report string, env ...string) (str
 		t.Fatal(err)
 	}
 
-	job, err := buildVerifyJob(passwordMigration(), testRunnerImage, gate)
+	job, err := buildVerifyJob(migration, testRunnerImage, gate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(shellPath, "-c", inDir(job.Spec.Template.Spec.Containers[0].Args[1], dir))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
+		"PGCOPYDB_SOURCE_PGURI=src",
 		"PGCOPYDB_TARGET_PGURI=tgt",
 		"STUB_REPORT="+reportPath,
 	)
@@ -167,6 +181,22 @@ func TestVerifyScript_Verdict(t *testing.T) {
 			env:         []string{"STUB_PROGRESS=0/92D00000", "STUB_GAP=1186480"},
 			code:        0,
 			wantLog:     wantContentPass,
+			wantCompare: true,
+		},
+		{
+			name:        "empty databases with publication-filtered WAL",
+			report:      "[]",
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", stubTargetEmpty},
+			code:        0,
+			wantLog:     "empty databases verified",
+			wantCompare: true,
+		},
+		{
+			name:        "an empty cached selection in a nonempty source",
+			report:      "[]",
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=f", stubTargetEmpty},
+			code:        1,
+			wantLog:     wantRefused,
 			wantCompare: true,
 		},
 		{

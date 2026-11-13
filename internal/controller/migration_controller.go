@@ -271,7 +271,7 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	// Only past the gate: while the preflight runs the condition stays Unknown,
 	// so a stuck gate never reads as a validated migration.
-	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly and the preflight passed")
+	r.setValidatedConditions(m)
 
 	if m.Spec.DryRun {
 		return r.completeDryRun(ctx, m, base)
@@ -312,6 +312,13 @@ func (r *MigrationReconciler) reconcile(ctx context.Context, req ctrl.Request) (
 
 	observing = true
 	return r.observeRunningJob(ctx, m, base, job, reconcileStart)
+}
+
+func (r *MigrationReconciler) setValidatedConditions(m *v1beta1.Migration) {
+	r.setCondition(m, v1beta1.ConditionValidated, metav1.ConditionTrue, "SpecValid", "connection and clone options materialize cleanly and the preflight passed")
+	if hasPartialTables(m) {
+		r.setCondition(m, unloggedCondition, metav1.ConditionTrue, "ExplicitPolicy", unloggedPolicyMessage(m))
+	}
 }
 
 func (r *MigrationReconciler) stopSampling(key types.NamespacedName) {

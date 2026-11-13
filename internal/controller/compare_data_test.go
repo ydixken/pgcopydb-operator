@@ -19,11 +19,13 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 )
@@ -42,6 +44,9 @@ const (
 const (
 	stubRowcountDiffers = "STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"
 	stubCompareExit12   = "STUB_COMPARE_EXIT=12"
+	stubCompareFailure  = "compare data exited 12"
+	stubPsqlFail        = "STUB_PSQL_FAIL=1"
+	stubTargetEmpty     = "STUB_TARGET_EMPTY=t"
 )
 
 // The stand-in for the runner image's pgcopydb: it logs the case's lines,
@@ -64,6 +69,15 @@ exit "${STUB_COMPARE_EXIT:-0}"
 // against a real Postgres. The sed pulls the report path back out of the
 // \set line through which psql reads it.
 const stubPsql = `#!/bin/sh
+case "$*" in
+  *pg_largeobject_metadata*)
+    case "$1" in
+      src) [ -z "${STUB_EMPTY_SOURCE_FAIL:-}" ] || exit 3; echo "${STUB_SOURCE_EMPTY:-f}" ;;
+      tgt) [ -z "${STUB_EMPTY_TARGET_FAIL:-}" ] || exit 3; echo "${STUB_TARGET_EMPTY:-f}" ;;
+      *) echo "psql stub: unexpected database" >&2; exit 9 ;;
+    esac
+    exit 0 ;;
+esac
 sql=$(cat)
 case "$sql" in *json_array_elements*) ;; *) echo "psql stub: no query" >&2; exit 9 ;; esac
 path=$(printf '%s' "$sql" | sed -n 's/^.set r .cat \(.*\).$/\1/p')
@@ -107,6 +121,7 @@ func runCompareScript(t *testing.T, report string, env ...string) (string, int) 
 	cmd := exec.Command(shellPath, "-c", inDir(compareDataScript, dir))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+":"+os.Getenv("PATH"),
+		"PGCOPYDB_SOURCE_PGURI=src",
 		"PGCOPYDB_TARGET_PGURI=tgt",
 		"STUB_REPORT="+reportPath,
 	)
@@ -125,7 +140,7 @@ func runCompareScript(t *testing.T, report string, env ...string) (string, int) 
 }
 
 // Successful process exit alone cannot prove a match: older comparators can
-// exit 0 on differences, and empty or incomplete reports remain invalid.
+// exit 0 on differences, and incomplete reports remain invalid.
 func TestCompareDataScript_Verdict(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -159,12 +174,12 @@ func TestCompareDataScript_Verdict(t *testing.T) {
 			report:  reportMatching,
 			env:     []string{"STUB_PGCOPYDB_FAIL=1"},
 			code:    1,
-			wantLog: "compare data exited 12",
+			wantLog: stubCompareFailure,
 		},
 		{
 			name:    "the report cannot be evaluated",
 			report:  reportMatching,
-			env:     []string{"STUB_PSQL_FAIL=1"},
+			env:     []string{stubPsqlFail},
 			code:    1,
 			wantLog: "could not be evaluated",
 		},
@@ -191,6 +206,77 @@ func TestCompareDataScript_ReportIsLogged(t *testing.T) {
 	}
 }
 
+func TestCompareDataScript_EmptyDatabases(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		code int
+		log  string
+	}{
+		{"both databases are empty", nil, 0, "empty databases verified"},
+		{"source has objects", []string{"STUB_SOURCE_EMPTY=f"}, 1, "has data-bearing objects"},
+		{"target has objects", []string{"STUB_TARGET_EMPTY=f"}, 1, "has data-bearing objects"},
+		{"source inventory fails", []string{"STUB_EMPTY_SOURCE_FAIL=1"}, 1, "live database inventory failed"},
+		{"target inventory fails", []string{"STUB_EMPTY_TARGET_FAIL=1"}, 1, "live database inventory failed"},
+		{"inventory gives no verdict", []string{"STUB_SOURCE_EMPTY=unknown"}, 1, "cannot prove a match"},
+		{"compare fails on empty databases", []string{stubCompareExit12}, 1, stubCompareFailure},
+		{"report evaluation fails", []string{stubPsqlFail}, 1, "report could not be evaluated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", stubTargetEmpty}
+			out, code := runCompareScript(t, "[]", append(env, tc.env...)...)
+			if code != tc.code || !strings.Contains(out, tc.log) {
+				t.Fatalf("exit %d, want %d with %q:\n%s", code, tc.code, tc.log, out)
+			}
+		})
+	}
+}
+
+func TestEmptyDatabaseQuery(t *testing.T) {
+	admin := os.Getenv("PGCOPYDB_TEST_PGURI")
+	if admin == "" {
+		t.Skip("set PGCOPYDB_TEST_PGURI to exercise the empty database inventory")
+	}
+	run := func(t *testing.T, uri, sql string) string {
+		t.Helper()
+		out, err := exec.Command("psql", uri, "-XAtq", "-v", "ON_ERROR_STOP=1", "-c", sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("inventory SQL: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	u, err := url.Parse(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := fmt.Sprintf("pgm_empty_%d", time.Now().UnixNano())
+	run(t, admin, "CREATE DATABASE "+db+" TEMPLATE template0")
+	t.Cleanup(func() { run(t, admin, "DROP DATABASE "+db+" WITH (FORCE)") })
+	u.Path = "/" + db
+	for _, tc := range []struct {
+		name  string
+		setup string
+		want  string
+	}{
+		{"empty database", "", "t"},
+		{"view only", "CREATE VIEW public.v AS SELECT 1;", "t"},
+		{"empty table", "CREATE TABLE public.t (id int);", "f"},
+		{"table outside public", "CREATE SCHEMA other; CREATE TABLE other.t (id int);", "f"},
+		{"partitioned table without partitions", "CREATE TABLE public.t (id int) PARTITION BY RANGE (id);", "f"},
+		{"sequence only", "CREATE SEQUENCE public.s;", "f"},
+		{"materialized view", "CREATE MATERIALIZED VIEW public.v AS SELECT 1 WITH NO DATA;", "f"},
+		{"foreign table", "CREATE FOREIGN DATA WRAPPER empty_fdw; CREATE SERVER empty_srv FOREIGN DATA WRAPPER empty_fdw; CREATE FOREIGN TABLE public.t (id int) SERVER empty_srv;", "f"},
+		{"large object only", "DO $$ BEGIN PERFORM lo_create(0); END $$;", "f"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := run(t, u.String(), "BEGIN; "+tc.setup+emptyDatabaseQuery+" ROLLBACK;")
+			if got != tc.want {
+				t.Fatalf("inventory = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // The report and the verdict can push compare data's final progress line out
 // of the log window the operator reads, so the wrapper prints it again last.
 // The tee that keeps the line must not lose compare data's exit status.
@@ -207,8 +293,8 @@ func TestCompareDataScript_ProgressStaysAtTheEnd(t *testing.T) {
 			stubRowcountDiffers,
 		}, 1, "did not find every table matching"},
 		// psql would pass this report, so only the kept status fails the check.
-		"compare data exits 12 after a matching report": {reportMatching, []string{stubCompareExit12}, 1, "compare data exited 12"},
-		"the report cannot be evaluated":                {reportMatching, []string{"STUB_PSQL_FAIL=1"}, 1, "could not be evaluated"},
+		"compare data exits 12 after a matching report": {reportMatching, []string{stubCompareExit12}, 1, stubCompareFailure},
+		"the report cannot be evaluated":                {reportMatching, []string{stubPsqlFail}, 1, "could not be evaluated"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out, code := runCompareScript(t, tc.report, append(tc.env, compareLog)...)
