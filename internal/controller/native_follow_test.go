@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -426,5 +427,83 @@ func TestNativeEndUnknownEffectNeverResamples(t *testing.T) {
 	}
 	if f.heads != 1 || f.patches != 1 || f.sets != 2 || nativeControlEnd(f.current()) != nativeControlTestEnd || !slices.Equal(f.sentEnds, []string{nativeControlTestEnd, nativeControlTestEnd}) {
 		t.Fatal("unknown setter effect sampled a different boundary")
+	}
+}
+
+const nativeCutoverStartedEvent = "Normal CutoverStarted stream frozen at endpos " + nativeControlTestEnd + ", draining"
+
+// TestNativeCutoverStartedEvent: the event follows only a saved E, and a requeue that finds E saved never repeats it.
+func TestNativeCutoverStartedEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply func(context.Context, client.Client, client.Object, client.Patch) error
+		want  []string // events after the first pass, then after each of two requeues
+	}{
+		{name: "saved", want: []string{nativeCutoverStartedEvent, "", ""}},
+		{name: nativeControlLostPatchCase, reply: func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+			if c.Status().Patch(ctx, obj, p) != nil {
+				t.Fatal("lost reply fixture failed")
+			}
+			return errors.New(nativeControlCanary)
+		}, want: []string{nativeCutoverStartedEvent, "", ""}},
+		{name: "patch refused unsaved", reply: func(context.Context, client.Client, client.Object, client.Patch) error {
+			return errors.New(nativeControlCanary)
+		}, want: []string{"", nativeCutoverStartedEvent, ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeControlFixture(t)
+			rec := f.r.Recorder.(*events.FakeRecorder)
+			first := true
+			f.patch = func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+				if len(rec.Events) != 0 {
+					t.Fatal("CutoverStarted was recorded before its E was submitted")
+				}
+				if first && tc.reply != nil {
+					first = false
+					return tc.reply(ctx, c, obj, p)
+				}
+				if err := c.Status().Patch(ctx, obj, p); err != nil {
+					return err
+				}
+				if len(rec.Events) != 0 {
+					t.Fatal("CutoverStarted was recorded before the status patch returned")
+				}
+				return nil
+			}
+			for pass, want := range tc.want {
+				_, _ = f.r.persistNativeEnd(context.Background(), f.m, f.worker, f.pvc, f.control)
+				got := strings.Join(drainEvents(rec), "\n")
+				if got != want {
+					t.Fatalf("pass %d recorded %q, want %q", pass, got, want)
+				}
+				if got != "" && nativeControlEnd(f.current()) != nativeControlTestEnd {
+					t.Fatal("CutoverStarted announced an E the API server does not hold")
+				}
+				f.m = f.current()
+			}
+		})
+	}
+	// The winner announced its own E, even when it sampled the same one.
+	for _, end := range []string{nativeControlLaterEnd, nativeControlTestEnd} {
+		t.Run(nativeControlConflictCase+"/"+end, func(t *testing.T) { testNativeCutoverConflict(t, end) })
+	}
+}
+
+func testNativeCutoverConflict(t *testing.T, end string) {
+	t.Helper()
+	f := newNativeControlFixture(t)
+	f.patch = func(ctx context.Context, c client.Client, obj client.Object, p client.Patch) error {
+		winner := f.current()
+		winner.Status.Replication = &v1beta1.ReplicationStatus{Endpos: end}
+		if f.store.Status().Update(ctx, winner) != nil {
+			t.Fatal("winner fixture failed")
+		}
+		return c.Status().Patch(ctx, obj, p)
+	}
+	if _, err := f.r.persistNativeEnd(context.Background(), f.m, f.worker, f.pvc, f.control); !apierrors.IsConflict(err) {
+		t.Fatal("conflict fixture did not conflict", err)
+	}
+	if got := drainEvents(f.r.Recorder.(*events.FakeRecorder)); len(got) != 0 {
+		t.Fatalf("a lost race announced %q", got)
 	}
 }

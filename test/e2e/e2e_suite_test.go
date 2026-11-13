@@ -1361,7 +1361,46 @@ func TestE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	RegisterFailHandler(Fail)
+	suiteDeadline = time.Now().Add(cfg.Timeout)
 	RunSpecs(t, kindSuiteDescription, cfg, reporterCfg)
+}
+
+// suiteDeadline is when -ginkgo.timeout interrupts the run; zero outside TestE2E.
+var suiteDeadline time.Time
+
+// suiteCleanupReserve keeps room for a spec's deferred slot and origin waits, 3m each.
+const suiteCleanupReserve = 6 * time.Minute
+
+// suiteWait caps a spec's wait so a stall fails with that wait's own message inside the suite timeout.
+func suiteWait(timeout time.Duration) time.Duration {
+	return boundedWait(timeout, time.Now(), suiteDeadline)
+}
+
+func boundedWait(timeout time.Duration, now, deadline time.Time) time.Duration {
+	if deadline.IsZero() {
+		return timeout
+	}
+	return max(min(timeout, deadline.Sub(now)-suiteCleanupReserve), time.Second)
+}
+
+func TestBoundedWait(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, tc := range []struct {
+		name     string
+		timeout  time.Duration
+		deadline time.Time
+		want     time.Duration
+	}{
+		{"no suite deadline", 30 * time.Minute, time.Time{}, 30 * time.Minute},
+		{"fits before the reserve", 5 * time.Minute, now.Add(29 * time.Minute), 5 * time.Minute},
+		{"capped at the reserve", 30 * time.Minute, now.Add(29 * time.Minute), 23 * time.Minute},
+		{"reserve already reached", 30 * time.Minute, now.Add(suiteCleanupReserve), time.Second},
+		{"deadline passed", 30 * time.Minute, now.Add(-time.Minute), time.Second},
+	} {
+		if got := boundedWait(tc.timeout, now, tc.deadline); got != tc.want {
+			t.Errorf("%s: boundedWait = %s, want %s", tc.name, got, tc.want)
+		}
+	}
 }
 
 // connectSuite builds this process's API client.

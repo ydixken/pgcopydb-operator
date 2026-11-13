@@ -189,7 +189,7 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `PreflightWarning` | Warning | A passing preflight logged findings that do not block. A finding can be a `superuserSecretRef` role without `rolsuper`, or a source `wal_sender_timeout` below 60s (or unreadable). A finding can also be a migration role without `TEMPORARY` on the target database (or unreadable). The test commit of the retry gate needs that grant. One event lists them all. |
 | `PreflightWouldRemediate` | Normal | A dry run found grants that `superuserSecretRef` would apply, and applied none. There is one event per tier, and each message lists the statements of that tier. |
 | `DryRunSucceeded` | Normal | A dry run's preflight passed. The Migration completed without a worker Job. |
-| `CutoverStarted` | Normal | The controller set the cutover LSN. The stream is frozen and draining. |
+| `CutoverStarted` | Normal | The controller set the cutover LSN. The stream is frozen and draining. With engine `rpgmigrate`, the event follows only once `status.replication.endpos` holds the LSN, once per cutover. |
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently. The controller tries again on the next pass. |
 | `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The controller created the cleanup Job (slot, publication, origin). |

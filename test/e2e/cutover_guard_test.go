@@ -33,6 +33,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -45,6 +46,18 @@ func slotSenderPID(output string) (int64, error) {
 		return 0, fmt.Errorf("expected one positive slot walsender PID")
 	}
 	return pid, nil
+}
+
+// ownedSlotMatch is the SQL predicate on s.slot_name for the source slots mig owns under its engine.
+func ownedSlotMatch(mig *v1beta1.Migration) (string, error) {
+	if mig.Spec.Engine != v1beta1.MigrationEngineRPGMigrate {
+		return "s.slot_name = " + sqlLiteral(pgcopydb.SlotName(mig.Namespace, mig.Name)), nil
+	}
+	run, err := nativeFaultRunID(mig.UID)
+	if err != nil {
+		return "", err
+	}
+	return "starts_with(s.slot_name, " + sqlLiteral(nativeSlotPrefix(run)) + ")", nil
 }
 
 func signalSlotSender(pod, database, query string, pid int64, signal string) error {
@@ -92,6 +105,58 @@ func TestSlotSenderPID(t *testing.T) {
 	}
 }
 
+// stopIfFailed ends a poll at once on Failed, which no later pass leaves, instead of spending its timeout.
+func stopIfFailed(m *v1beta1.Migration) {
+	if m.Status.Phase == v1beta1.PhaseFailed {
+		StopTrying(fmt.Sprintf("migration %s failed at attempt %d: %s", m.Name, m.Status.Attempts, failureMessage(m))).Now()
+	}
+}
+
+func TestStopIfFailed(t *testing.T) {
+	for _, phase := range []v1beta1.MigrationPhase{v1beta1.PhaseFailed, v1beta1.PhaseCloning} {
+		m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Name: "e2e-follow-early"}}
+		m.Status.Phase, m.Status.Attempts = phase, 1
+		m.Status.Conditions = []metav1.Condition{{Type: v1beta1.ConditionFailed, Message: "native clone refused"}}
+		polls, failure := 0, ""
+		g := NewGomega(func(message string, _ ...int) { failure = message })
+		g.Eventually(func(g Gomega) {
+			polls++
+			stopIfFailed(m)
+			g.Expect(m.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		}, 200*time.Millisecond, 10*time.Millisecond).Should(Succeed())
+		want := "migration e2e-follow-early failed at attempt 1: native clone refused"
+		if phase == v1beta1.PhaseFailed && (polls != 1 || !strings.Contains(failure, want)) {
+			t.Errorf("Failed: polls=%d failure=%q, want one poll naming %q", polls, failure, want)
+		}
+		if phase != v1beta1.PhaseFailed && (polls < 2 || strings.Contains(failure, want)) {
+			t.Errorf("%s: polls=%d failure=%q, want polling until the timeout", phase, polls, failure)
+		}
+	}
+}
+
+func TestOwnedSlotMatch(t *testing.T) {
+	legacy := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Namespace: "e2e", Name: "e2e-follow-early"}}
+	got, err := ownedSlotMatch(legacy)
+	if want := "s.slot_name = '" + pgcopydb.SlotName("e2e", "e2e-follow-early") + "'"; err != nil || got != want {
+		t.Fatalf("legacy match = %q, %v, want %q", got, err, want)
+	}
+	native := legacy.DeepCopy()
+	native.Spec.Engine = v1beta1.MigrationEngineRPGMigrate
+	native.UID = "0123abcd-0000-4000-8000-00000000beef"
+	got, err = ownedSlotMatch(native)
+	if want := "starts_with(s.slot_name, 'rpgm_s_0123abcd00004000800000000000beef_')"; err != nil || got != want {
+		t.Fatalf("native match = %q, %v, want %q", got, err, want)
+	}
+	for _, uid := range []types.UID{
+		"", "00000000-0000-0000-0000-000000000000", "0123ABCD-0000-4000-8000-00000000BEEF", "x' OR true --",
+	} {
+		native.UID = uid
+		if got, err := ownedSlotMatch(native); err == nil {
+			t.Errorf("native UID %q matched %q, want an error", uid, got)
+		}
+	}
+}
+
 //nolint:gocyclo // Keep this ordered scenario and its bounded failure diagnostics together.
 func earlyManualCutover() {
 	requireCNPGFixtures()
@@ -115,13 +180,14 @@ func earlyManualCutover() {
 	m := &v1beta1.Migration{}
 	readMigration := func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mig), m)).To(Succeed())
-		g.Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed), failureMessage(m))
+		stopIfFailed(m)
 	}
-	slot := pgcopydb.SlotName(mig.Namespace, mig.Name)
+	slot, err := ownedSlotMatch(mig)
+	Expect(err).NotTo(HaveOccurred())
 	// A slot being created also has an active PID; wait until its snapshot is usable.
-	query := fmt.Sprintf("SELECT s.active_pid FROM pg_replication_slots s JOIN pg_stat_replication r "+
-		"ON r.pid=s.active_pid WHERE s.slot_name='%s' AND s.database=current_database() "+
-		"AND s.slot_type='logical' AND s.confirmed_flush_lsn IS NOT NULL AND r.state='streaming'", slot)
+	query := "SELECT s.active_pid FROM pg_replication_slots s JOIN pg_stat_replication r " +
+		"ON r.pid=s.active_pid WHERE " + slot + " AND s.database=current_database() " +
+		"AND s.slot_type='logical' AND s.confirmed_flush_lsn IS NOT NULL AND r.state='streaming'"
 	var pid int64
 	By("finding this migration's walsender before the base copy completes")
 	Eventually(func(g Gomega) {
@@ -132,8 +198,8 @@ func earlyManualCutover() {
 		out, err := psqlDBErr(sourceCluster, appDatabase(sourceCluster), query)
 		g.Expect(err).NotTo(HaveOccurred())
 		pid, err = slotSenderPID(out)
-		g.Expect(err).NotTo(HaveOccurred())
-	}, migrationTimeout, 200*time.Millisecond).Should(Succeed())
+		g.Expect(err).NotTo(HaveOccurred(), "phase=%s attempts=%d", m.Status.Phase, m.Status.Attempts)
+	}, suiteWait(migrationTimeout), 200*time.Millisecond).Should(Succeed())
 	pod := primaryPod(sourceCluster)
 	signalSender := func(signal string) error {
 		return signalSlotSender(pod, appDatabase(sourceCluster), query, pid, signal)
@@ -145,7 +211,8 @@ func earlyManualCutover() {
 		}
 	})
 	Expect(signalSender("STOP")).To(Succeed())
-	readMigration(Default)
+	Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mig), m)).To(Succeed())
+	Expect(m.Status.Phase).NotTo(Equal(v1beta1.PhaseFailed), failureMessage(m))
 	Expect(apimeta.IsStatusConditionTrue(m.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeFalse(),
 		"the walsender must be paused before clone completion")
 
@@ -193,13 +260,13 @@ func earlyManualCutover() {
 		g.Expect(*m.Status.Replication.LagBytes).To(BeNumerically(">", threshold.Value()))
 		g.Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		g.Expect(cutoverEvents(g)).To(BeZero())
-	}, migrationTimeout, time.Second).Should(Succeed())
+	}, suiteWait(migrationTimeout), time.Second).Should(Succeed())
 
 	By("resuming the sender with source writes stopped and observing automatic use of the existing approval")
 	Expect(signalSender("CONT")).To(Succeed())
 	resumed = true
 	diagnosticStart := time.Now()
-	diagnosticDeadline := diagnosticStart.Add(backlogDrainTimeout)
+	diagnosticDeadline := diagnosticStart.Add(suiteWait(backlogDrainTimeout))
 	const missingValue = "missing"
 	lsnPattern := `(?:[0-9A-F]{1,8}/[0-9A-F]{1,8}|missing)`
 	lsnValid := regexp.MustCompile("^" + lsnPattern + "$")
@@ -216,8 +283,8 @@ func earlyManualCutover() {
 		return value
 	}
 	sourceSQL := cutoverSourceProjection + " FROM pg_replication_slots s " +
-		"LEFT JOIN pg_stat_replication r ON r.pid=s.active_pid WHERE s.slot_name='" + slot +
-		"' AND s.database=current_database() AND s.slot_type='logical'"
+		"LEFT JOIN pg_stat_replication r ON r.pid=s.active_pid WHERE " + slot +
+		" AND s.database=current_database() AND s.slot_type='logical'"
 	lastSnapshot := "snapshot_unavailable"
 	snapshot := func() {
 		remaining := time.Until(diagnosticDeadline)
@@ -316,8 +383,8 @@ func earlyManualCutover() {
 		g.Expect(drain).NotTo(BeNil())
 		g.Expect(drain.Status).To(Equal(metav1.ConditionTrue))
 		g.Expect(drain.Reason).To(Equal("DrainVerified"))
-	}, followTimeout, time.Second).Should(Succeed())
-	m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
+	}, suiteWait(followTimeout), time.Second).Should(Succeed())
+	m = waitPhase(name, nsE2E, suiteWait(followTimeout), v1beta1.PhaseCompleted)
 	complete := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionComplete)
 	Expect(complete).NotTo(BeNil())
 	Expect(complete.Status).To(Equal(metav1.ConditionTrue))
@@ -327,6 +394,8 @@ func earlyManualCutover() {
 	Expect(cutoverEvents(Default)).To(Equal(int32(1)))
 	Expect(psql(targetCluster, "SELECT count(*) FROM orders WHERE note LIKE '"+marker+"%'")).
 		To(Equal(strconv.Itoa(backlogRows)))
+	Expect(psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots s WHERE "+slot)).To(Equal("0"),
+		"the slot this migration streamed from is left on the source")
 	Expect(sourceSlotCount()).To(Equal("0"))
 	Expect(targetOriginCount()).To(Equal("0"))
 }
