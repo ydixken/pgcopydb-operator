@@ -7,6 +7,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -38,7 +39,7 @@ func (r *MigrationReconciler) readNativeFollowCompletion(ctx context.Context, m 
 		return nil, errNativeFollowCompletion
 	}
 	confirmed, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
-	if err != nil || ctx.Err() != nil || !nativePreflightSamePod(original, confirmed) || !apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !apiequality.Semantic.DeepEqual(original.Status, confirmed.Status) {
+	if err != nil || ctx.Err() != nil || !nativePreflightSamePod(original, confirmed) || !apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !podexec.SamePodState(original, confirmed, workerContainer) {
 		return nil, errNativeFollowCompletion
 	}
 	return observation, nil

@@ -34,7 +34,7 @@ func (r *MigrationReconciler) nativeRecoveryQuiescentCurrent(ctx context.Context
 	}
 	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
 	if err != nil || ctx.Err() != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation ||
-		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !apiequality.Semantic.DeepEqual(original.Status, pod.Status)) {
+		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
 		return nil, nil, errNativeRecovery
 	}
 	return live, pod, nil

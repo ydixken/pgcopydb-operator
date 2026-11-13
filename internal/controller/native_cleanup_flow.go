@@ -358,7 +358,7 @@ func (r *MigrationReconciler) nativeCleanupCaptureUnchanged(ctx context.Context,
 		return false
 	}
 	pod, err := r.nativePreflightPod(ctx, job)
-	return err == nil && pod != nil && ctx.Err() == nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(capture.pod, pod) && capture.pod.Generation == pod.Generation && apiequality.Semantic.DeepEqual(capture.pod.Spec, pod.Spec) && apiequality.Semantic.DeepEqual(capture.pod.Status, pod.Status)
+	return err == nil && pod != nil && ctx.Err() == nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(capture.pod, pod) && capture.pod.Generation == pod.Generation && apiequality.Semantic.DeepEqual(capture.pod.Spec, pod.Spec) && podexec.SamePodState(capture.pod, pod, workerContainer)
 }
 
 func (r *MigrationReconciler) consumeNativeCompletedHelper(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod, capture *nativeStateHelper) error {
