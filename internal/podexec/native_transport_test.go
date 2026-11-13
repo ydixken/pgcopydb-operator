@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -434,6 +435,26 @@ func TestNativeHelperResultBinding(t *testing.T) {
 		{"post exit change", func(s *nativeAPI, _ *NativeContainerBinding) {
 			s.after = func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.ExitCode = 1 }
 		}},
+		{"post terminated reason change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.Reason = "Error" }
+		}},
+		{"post terminated message change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.Message = nativeFixtureOther }
+		}},
+		{"post start time change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.StartedAt = metav1.Unix(1, 0) }
+		}},
+		{"post finish time change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.Unix(1, 0) }
+		}},
+		{"post terminated container change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) {
+				s.pod.Status.ContainerStatuses[0].State.Terminated.ContainerID = nativeFixtureReplacement
+			}
+		}},
+		{"post phase change", func(s *nativeAPI, _ *NativeContainerBinding) {
+			s.after = func(s *nativeAPI) { s.pod.Status.Phase = corev1.PodFailed }
+		}},
 		{"still running", func(s *nativeAPI, _ *NativeContainerBinding) {
 			s.pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 		}},
@@ -465,6 +486,31 @@ func TestNativeHelperResultBinding(t *testing.T) {
 			nativeRefused(t, out, err)
 		})
 	}
+	t.Run("kubelet status drift after success", func(t *testing.T) {
+		for name, drift := range map[string]func(*corev1.PodStatus){
+			"pod resources": func(p *corev1.PodStatus) { p.Resources = nil },
+			"container resources": func(p *corev1.PodStatus) {
+				p.ContainerStatuses[0].Resources, p.ContainerStatuses[0].AllocatedResources = nil, nil
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				s, want := newNativeAPI(t, true)
+				requests := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("489m")}
+				s.pod.Status.Resources = &corev1.ResourceRequirements{Requests: requests}
+				s.pod.Status.ContainerStatuses[0].Resources = &corev1.ResourceRequirements{Requests: requests.DeepCopy()}
+				s.pod.Status.ContainerStatuses[0].AllocatedResources = requests.DeepCopy()
+				s.pod.Status.ContainerStatuses[0].State.Terminated.StartedAt = metav1.Unix(1700000000, 0)
+				s.pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.Unix(1700000001, 0)
+				s.after = func(s *nativeAPI) { drift(&s.pod.Status) }
+				out, err := newExec(t, s.URL).JobCompletedNative(context.Background(), "ns", nativeFixtureJobUID, want)
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if err != nil || !out.Successful() || out.Payload() != nil || s.after != nil || s.gets != 2 {
+					t.Fatalf("successful=%v drift applied=%v pod reads=%d error=%v", out.Successful(), s.after == nil, s.gets, err)
+				}
+			})
+		}
+	})
 	t.Run("zero outcome", func(t *testing.T) {
 		var out NativeOutcome
 		if out.Successful() || out.Payload() != nil {

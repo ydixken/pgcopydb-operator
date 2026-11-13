@@ -159,7 +159,7 @@ func (e *Exec) JobCompletedNative(ctx context.Context, namespace string, jobUID 
 		return NativeOutcome{}, errNativeTransport
 	}
 	after, err := e.nativeJobPod(ctx, namespace, jobUID, want)
-	if err != nil || !before.same(after) || !reflect.DeepEqual(before.pod.Status, after.pod.Status) || ctx.Err() != nil {
+	if err != nil || !before.same(after) || !before.sameTerminal(after) || ctx.Err() != nil {
 		return NativeOutcome{}, errNativeTransport
 	}
 	if ready, err := after.completed(); err != nil || !ready {
@@ -221,6 +221,11 @@ func (e *Exec) nativeJobPod(ctx context.Context, namespace string, jobUID types.
 
 func (n nativeIncarnation) same(other nativeIncarnation) bool {
 	return n.pod.UID == other.pod.UID && n.job.UID == other.job.UID && n.pod.Name == other.pod.Name && n.job.Name == other.job.Name && n.pod.Generation == other.pod.Generation && n.job.Generation == other.job.Generation && reflect.DeepEqual(n.pod.Spec, other.pod.Spec) && reflect.DeepEqual(n.job.Spec, other.job.Spec) && reflect.DeepEqual(n.pod.OwnerReferences, other.pod.OwnerReferences) && reflect.DeepEqual(n.job.OwnerReferences, other.job.OwnerReferences) && reflect.DeepEqual(n.pod.Labels, other.pod.Labels) && reflect.DeepEqual(n.pod.Annotations, other.pod.Annotations) && reflect.DeepEqual(n.job.Labels, other.job.Labels) && reflect.DeepEqual(n.job.Annotations, other.job.Annotations)
+}
+
+// sameTerminal compares only the container state: the kubelet still rewrites other status fields, such as status.resources, after the pod Succeeded.
+func (n nativeIncarnation) sameTerminal(other nativeIncarnation) bool {
+	return reflect.DeepEqual(n.pod.Status.ContainerStatuses[0].State, other.pod.Status.ContainerStatuses[0].State)
 }
 
 func (n nativeIncarnation) execState(allowTerminated bool) bool {
