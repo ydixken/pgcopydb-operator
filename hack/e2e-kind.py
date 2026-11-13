@@ -1461,7 +1461,9 @@ class Guard:
             self.save(ledger)
             raise Refusal(f'suite execution failed within 1800s budget: {failure} '
                           f'(returncode={returncode}, receipt={execution["receipt_status"]}, go_test_json={execution["go_test_json"]})') from None
-        ledger['suite_execution'].update(result='passed', go_test_json=self.go_test_json())
+        # down() runs after the nodes are gone, so it can only prove these exact validated bytes.
+        ledger['suite_execution'].update(result='passed', go_test_json=self.go_test_json(),
+                                         receipt_sha256=registry.sha(self.private_bytes('suite-receipt.json')))
         ledger['phase'] = 'verified'
         self.save(ledger)
 
@@ -1510,10 +1512,13 @@ class Guard:
         ledger['teardown'] = {'nodes_absent': True, 'volumes_absent': True}
         ledger['phase'] = 'down'
         self.save(ledger)
-        if (self.directory / 'suite-receipt.json').exists():
-            selection = (ledger.get('suite_execution') or {}).get('selection') or {}
-            receipt = dict(self.receipt(ledger, self.selection(selection.get('engine'), selection.get('pair'), selection.get('case'))),
-                           cluster_teardown=True)
+        execution = ledger.get('suite_execution') or {}
+        if (self.directory / 'suite-receipt.json').exists() and execution.get('result') == 'passed':
+            raw = self.private_bytes('suite-receipt.json')
+            if not isinstance(execution.get('receipt_sha256'), str) or registry.sha(raw) != execution['receipt_sha256']:
+                raise Refusal('suite receipt differs from the bytes run() validated')
+            receipt = dict(decode(raw, 'suite receipt'), cluster_teardown=True, teardown=ledger['teardown'],
+                           suite_receipt_sha256=execution['receipt_sha256'])
             self.write_private('final-receipt.json', (json.dumps(receipt, sort_keys=True) + '\n').encode())
 
 

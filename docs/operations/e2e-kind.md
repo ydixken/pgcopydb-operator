@@ -146,6 +146,10 @@ It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go g
 The ledger records only whether that file exists.
 The stream can contain fixture output, so keep it in the private run directory and do not publish it.
 A run refuses to start over an existing `go-test.json` or `suite-receipt.json`.
+A passing run records the sha256 of the receipt it validated in the ledger.
+After teardown, `down` writes `final-receipt.json` only when `suite-receipt.json` still has exactly that sha256, and adds the teardown proof.
+It does not validate the receipt again, because those checks need the nodes it has just removed.
+After a failed run, `down` tears down and writes no `final-receipt.json`.
 On pair 16:16 the native suspend and delete fault specs also write `native-term-16-16-<case>.json` there, and fail unless `hack/native-term-receipt.py` accepts it.
 
 > [!caution]

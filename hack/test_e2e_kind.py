@@ -2646,8 +2646,8 @@ class SuiteRouteTests(unittest.TestCase):
         guard.require_lease = guard.verify_node_limits = guard.kubeconfig = lambda *a: None
         guard.bootstrap = lambda ledger, source: None
         original = guard.registry_call
-        guard.registry_call = lambda ledger, argv, **kwargs: (calls.append(argv) if argv[:1] == ['task'] else
-                                                              original(ledger, argv, **kwargs))
+        guard.registry_call = lambda ledger, argv, **kwargs: ((calls.append(argv), guard.write_private('suite-receipt.json', b'{}'))
+                                                              if argv[:1] == ['task'] else original(ledger, argv, **kwargs))
         guard.receipt = lambda ledger, selection: checked.append(selection)
         guard.run(*args)
         return calls, checked, guard.environment, guard.read()
@@ -2672,6 +2672,56 @@ class SuiteRouteTests(unittest.TestCase):
                                  ('rpgmigrate', pair, MODULE.NATIVE_SPECS['fault-suspend'][1]))
                 self.assertEqual((ledger['phase'], ledger['suite_execution']['selection']),
                                  ('verified', {'engine': 'rpgmigrate', 'pair': pair, 'case': 'fault-suspend'}))
+
+    def test_run_records_the_digest_of_the_receipt_it_validated(self):
+        _, _, _, ledger = self.run_route('rpgmigrate', '16:16', 'fault-suspend')
+        self.assertEqual(ledger['suite_execution']['receipt_sha256'], MODULE.registry.sha(b'{}'))
+
+    def torn_down(self, change=None, result='passed'):
+        selection = MODULE.Guard.selection('rpgmigrate', '16:16', 'fault-suspend')
+        ledger, receipt = self.bound(selection)
+        raw = self.guard.private_bytes('suite-receipt.json')
+        ledger['suite_execution'] = {'result': result, 'receipt_sha256': MODULE.registry.sha(raw),
+                                     'selection': {'engine': 'rpgmigrate', 'pair': '16:16', 'case': 'fault-suspend'}}
+        ledger['phase'] = 'verified' if result == 'passed' else 'pulled'
+        self.guard.save(ledger)
+        if change:
+            change()
+        # Node-dependent checks must not run once the nodes are gone.
+        self.guard.receipt = self.guard.kubernetes_ownership = lambda *a: self.fail('live-node check after teardown')
+        self.guard.owned_nodes = self.guard.owned_volumes = lambda *a: []
+        return receipt, raw
+
+    def test_down_writes_the_final_receipt_from_the_validated_bytes_without_live_nodes(self):
+        receipt, raw = self.torn_down()
+        self.guard.down()
+        final = self.guard.private_json('final-receipt.json')
+        self.assertEqual(final, dict(receipt, cluster_teardown=True, suite_receipt_sha256=MODULE.registry.sha(raw),
+                                     teardown={'nodes_absent': True, 'volumes_absent': True}))
+        self.assertEqual(self.guard.read()['phase'], 'down')
+
+    def test_down_refuses_a_receipt_changed_after_run_validated_it(self):
+        self.torn_down(lambda: self.guard.write_private('suite-receipt.json', b'{"suite_succeeded": true}'))
+        with self.assertRaisesRegex(MODULE.Refusal, 'differs from the bytes run'):
+            self.guard.down()
+        self.assertFalse((self.directory / 'final-receipt.json').exists())
+        self.assertEqual(self.guard.read()['teardown'], {'nodes_absent': True, 'volumes_absent': True})
+
+    def test_down_refuses_a_passed_run_without_a_recorded_digest(self):
+        def drop():
+            ledger = self.guard.read()
+            del ledger['suite_execution']['receipt_sha256']
+            self.guard.save(ledger)
+        self.torn_down(drop)
+        with self.assertRaisesRegex(MODULE.Refusal, 'differs from the bytes run'):
+            self.guard.down()
+        self.assertFalse((self.directory / 'final-receipt.json').exists())
+
+    def test_down_after_a_failed_run_tears_down_without_a_final_receipt(self):
+        self.torn_down(result='failed')
+        self.guard.down()
+        self.assertFalse((self.directory / 'final-receipt.json').exists())
+        self.assertEqual(self.guard.read()['phase'], 'down')
 
     def test_legacy_run_keeps_its_environment(self):
         calls, checked, env, ledger = self.run_route('pgcopydb')
