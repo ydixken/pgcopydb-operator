@@ -39,6 +39,7 @@ const (
 	labelFeatureE2ERun = "pgcopydb-operator.io/feature-e2e-run"
 	labelManagedBy     = "app.kubernetes.io/managed-by"
 	managerName        = "pgcopydb-operator"
+	flagDir            = "--dir"
 
 	// annotationWorkNode on the Migration names the node of the newest pod
 	// on the work PVC. The operator has no PVC patch right, so it lives here.
@@ -239,7 +240,7 @@ func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, er
 // origins accumulate while slots are dropped). Slot names are [a-z0-9_] only.
 func cleanupArgs(m *v1beta1.Migration) []string {
 	slot := effectiveSlotName(m)
-	return []string{"stream", "cleanup", "--dir", pgcopydb.WorkDir, "--slot-name", slot, "--origin", slot}
+	return []string{"stream", "cleanup", flagDir, pgcopydb.WorkDir, "--slot-name", slot, "--origin", slot}
 }
 
 // verifyProgressPrefix opens the verify Job's one-line copy-counter contract:
@@ -317,11 +318,11 @@ const (
 // with the Migration's selection, and compare data reuses that catalog. The TERM
 // trap ends the compare's queries on both sides, which pgcopydb alone does not.
 func rehearsalScript(m *v1beta1.Migration) string {
-	list := append([]string{"list", "tables", "--dir", pgcopydb.WorkDir}, pgcopydb.FiltersArgs(m.Spec.Clone.Filters)...)
+	list := append([]string{"list", "tables", flagDir, pgcopydb.WorkDir}, pgcopydb.FiltersArgs(m.Spec.Clone.Filters)...)
 	compare := pgcopydb.CompareDataArgs()
 	if hasPartialTables(m) {
-		list = []string{"list", "tables", "--dir", dataCompareDir, "--filters", dataFiltersPath}
-		compare = []string{"compare", "data", "--dir", dataCompareDir, "--json"}
+		list = []string{"list", "tables", flagDir, dataCompareDir, "--filters", dataFiltersPath}
+		compare = []string{"compare", "data", flagDir, dataCompareDir, "--json"}
 	}
 	return `set -u
 pid=
