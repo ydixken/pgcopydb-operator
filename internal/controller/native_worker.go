@@ -62,10 +62,21 @@ func (r *MigrationReconciler) nativeWorkerCurrent(ctx context.Context, expected 
 	if _, err := nativeWorkIdentity(live, claim); err != nil {
 		return nil, nil, errNativeWorkerAdmission
 	}
-	if pvc != nil && (claim.UID != pvc.UID || !apiequality.Semantic.DeepEqual(claim.Spec, pvc.Spec) || !apiequality.Semantic.DeepEqual(claim.OwnerReferences, pvc.OwnerReferences)) {
+	if pvc != nil && !nativeWorkerSameClaim(pvc, claim) {
 		return nil, nil, errNativeWorkerAdmission
 	}
 	return live, claim, nil
+}
+
+// nativeWorkerSameClaim admits only the volume binder setting a previously empty volumeName;
+// a change between two volumes, or any other drift, is a different work volume.
+func nativeWorkerSameClaim(before, after *corev1.PersistentVolumeClaim) bool {
+	spec := before.Spec.DeepCopy()
+	if spec.VolumeName == "" {
+		spec.VolumeName = after.Spec.VolumeName
+	}
+	return after.UID == before.UID && apiequality.Semantic.DeepEqual(after.OwnerReferences, before.OwnerReferences) &&
+		apiequality.Semantic.DeepEqual(after.Spec, *spec)
 }
 
 func (r *MigrationReconciler) startNativeAttempt(ctx context.Context, m, base *v1beta1.Migration) (ctrl.Result, error) {
