@@ -79,7 +79,7 @@ def errno_of(action):
 def stage_library(P):
     c = Checks()
     library = P.load_runtime()
-    c.add('runtime_metadata_and_abi_180006', library.PQlibVersion(), 180006)
+    c.add('runtime_metadata_and_abi_180007', library.PQlibVersion(), 180007)
 
     parse = lambda raw: P.parse_connection_options(library, raw)
     uri = parse(b'postgresql://u%40x:p%2Bw@localhost:5432/db%20n?application_name=a+b&options=-c%20x%3Dy')

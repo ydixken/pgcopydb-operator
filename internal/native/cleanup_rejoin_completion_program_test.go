@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-const rejoinCanonicalSHA = "c6bca34e7a0801419f887dc291d8cc4fa2c72afa54abd8994ebd7839f9a480be"
+const rejoinCanonicalSHA = "5d054ec20143aa13240d91f44f56d5d4ecef7b78b678360774cd3ad621ad41bb"
 
 func TestNativeCleanupRejoinCompletionProgram(t *testing.T) {
 	f := newCleanupRejoinFixture(t)

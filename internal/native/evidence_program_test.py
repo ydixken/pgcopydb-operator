@@ -1049,17 +1049,17 @@ class NativePythonTests(unittest.TestCase):
         self.assertGreaterEqual(len(P.ABI), 35)
         self.assertNotIn('PQexec', P.ABI)
         class Function:
-            def __call__(self, *args): return 180006
+            def __call__(self, *args): return 180007
         class Library: pass
         library = Library()
         for name in P.ABI: setattr(library, name, Function())
-        bound = P.bind_abi(library, 180006)
+        bound = P.bind_abi(library, 180007)
         self.assertIs(bound, library)
         for name, (restype, argtypes) in P.ABI.items():
             self.assertEqual(getattr(library, name).argtypes, argtypes)
             self.assertIs(getattr(library, name).restype, restype)
-        with self.assertRaises(P.Refusal): P.bind_abi(Library(), 180006)
-        with self.assertRaises(P.Refusal): P.bind_abi(library, 180007)
+        with self.assertRaises(P.Refusal): P.bind_abi(Library(), 180007)
+        with self.assertRaises(P.Refusal): P.bind_abi(library, 180006)
 
     def test_OrderedGuards(self):
         expected = 'target_settings target_identity configure_durability target_fence idle_guard begin lock_checkpoint lock_marker catalog_checkpoint catalog_marker row_read same_value_update deferred_effects row_comparison precommit_guard commit idle_guard unlock closure_guard'.split()
