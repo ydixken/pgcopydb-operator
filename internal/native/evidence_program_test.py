@@ -1614,6 +1614,136 @@ class NativePythonTests(unittest.TestCase):
                 path.rmdir()
 
 
+    def test_RelayFifoArrival(self):
+        # A FIFO the program makes between two of the relay's listings is a normal arrival, not a foreign entry.
+        import subprocess,select
+        op=os.urandom(16).hex();value=request();value['operation_id']=op;raw=json.dumps(value).encode()
+        path=Path('/tmp')/('rpgmigrate-evidence-'+op);path.mkdir(mode=0o700);os.mkfifo(path/'request.fifo',0o600)
+        announce_r,announce_w=os.pipe();gate_r,gate_w=os.pipe();readers={};writers={}
+        source=(HERE/'evidence_request_writer.py').read_text().rsplit("if __name__=='__main__':",1)[0]
+        source+=f"held=[]\nlisted=os.listdir\ndef gated(d):\n r=listed(d)\n if r==['request.fifo'] and not held:held.append(1);os.write({announce_w},b'L');os.read({gate_r},1)\n return r\nos.listdir=gated\nraise SystemExit(main(sys.argv))\n"
+        proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment(),pass_fds=(announce_w,gate_r))
+        os.close(announce_w);os.close(gate_r)
+        try:
+            proc.stdin.write(raw);proc.stdin.close();proc.stdin=None
+            self.assertTrue(select.select([announce_r],[],[],3)[0]);self.assertEqual(os.read(announce_r,1),b'L')
+            for name in ('stdout.fifo','stderr.fifo'):os.mkfifo(path/name,0o600)
+            for name in ('request.fifo','stdout.fifo','stderr.fifo'):
+                readers[name]=os.open(path/name,os.O_RDONLY|os.O_NONBLOCK);writers[name]=os.open(path/name,os.O_WRONLY|os.O_NONBLOCK)
+            os.write(gate_w,b'G')
+            framed=bytearray();deadline=time.monotonic()+3
+            while len(framed)<len(raw)+4 and time.monotonic()<deadline and proc.poll() is None:
+                try:framed.extend(os.read(readers['request.fifo'],8192))
+                except BlockingIOError:time.sleep(.005)
+            self.assertEqual(bytes(framed),struct.pack('!I',len(raw))+raw)
+            os.close(writers.pop('request.fifo'));os.close(readers.pop('request.fifo'));os.unlink(path/'request.fifo')
+            payload=json.dumps(response(value,raw),separators=(',',':')).encode()+b'\n'
+            for name in ('stdout.fifo','stderr.fifo'):os.unlink(path/name);os.close(readers.pop(name))
+            path.rmdir();os.write(writers['stdout.fifo'],payload)
+            for fd in writers.values():os.close(fd)
+            writers.clear()
+            stdout,stderr=proc.communicate(timeout=5)
+            self.assertEqual(proc.returncode,0,stderr);self.assertEqual(stdout,payload);self.assertEqual(stderr,b'')
+        finally:
+            for fd in [announce_r,gate_w]+list(readers.values())+list(writers.values()):os.close(fd)
+            if proc.poll() is None:proc.kill()
+            proc.communicate(timeout=3)
+            if path.exists():
+                for child in path.iterdir():child.unlink()
+                path.rmdir()
+
+
+    def test_RelayTeardownArrival(self):
+        # The program may unlink the output FIFOs, and remove the directory, between the relay's listing and its next stat.
+        import subprocess,select
+        for mode in ('unlinked','removed','moved'):
+            with self.subTest(mode=mode):
+                op=os.urandom(16).hex();value=request();value['operation_id']=op;raw=json.dumps(value).encode()
+                channel=P.InputChannel(op,time.monotonic()+5);announce_r,announce_w=os.pipe();gate_r,gate_w=os.pipe()
+                source=(HERE/'evidence_request_writer.py').read_text().rsplit("if __name__=='__main__':",1)[0]
+                source+=f"held=[]\nlisted=os.listdir\ndef gated(d):\n r=listed(d)\n if sorted(r)==['stderr.fifo','stdout.fifo'] and not held:held.append(1);os.write({announce_w},b'L');os.read({gate_r},1)\n return r\nos.listdir=gated\nraise SystemExit(main(sys.argv))\n"
+                proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment(),pass_fds=(announce_w,gate_r))
+                os.close(announce_w);os.close(gate_r)
+                try:
+                    proc.stdin.write(raw);proc.stdin.close();proc.stdin=None
+                    self.assertEqual(channel.consume(),raw)
+                    self.assertTrue(select.select([announce_r],[],[],3)[0]);self.assertEqual(os.read(announce_r,1),b'L')
+                    if mode=='moved':
+                        # A directory renamed away while it still holds the FIFOs is not the program's teardown.
+                        os.rename(channel.path,channel.path+'-moved');os.write(gate_w,b'G');stdout,stderr=proc.communicate(timeout=5)
+                        self.assertNotEqual(proc.returncode,0);self.assertEqual(stdout,b'');self.assertEqual(stderr,b'')
+                        os.rename(channel.path+'-moved',channel.path);continue
+                    for name in ('stdout.fifo','stderr.fifo'):os.unlink(name,dir_fd=channel.directory);channel.remaining.remove(name)
+                    if mode=='removed':os.rmdir(channel.path)
+                    os.write(gate_w,b'G')
+                    payload=json.dumps(response(value,raw),separators=(',',':')).encode()+b'\n'
+                    if mode=='unlinked':channel.finish(payload)
+                    else:
+                        os.write(channel.writers['stdout.fifo'],payload)
+                        for collection in (channel.writers,channel.readers):
+                            for fd in collection.values():os.close(fd)
+                            collection.clear()
+                        os.close(channel.directory);channel.directory=None
+                    stdout,stderr=proc.communicate(timeout=5)
+                    self.assertEqual(proc.returncode,0,stderr);self.assertEqual(stdout,payload);self.assertEqual(stderr,b'')
+                finally:
+                    os.close(announce_r);os.close(gate_w)
+                    if proc.poll() is None:proc.kill()
+                    proc.communicate(timeout=3)
+                    channel.close()
+
+
+    def test_RelayEarlyTeardown(self):
+        # Before the request is delivered every FIFO must stay: one that vanishes after the last full listing refuses.
+        import subprocess,select
+        op=os.urandom(16).hex();value=request();value['operation_id']=op;raw=json.dumps(value).encode()
+        channel=P.InputChannel(op,time.monotonic()+5);announce_r,announce_w=os.pipe();gate_r,gate_w=os.pipe()
+        source=(HERE/'evidence_request_writer.py').read_text().rsplit("if __name__=='__main__':",1)[0]
+        # Full listings: names loop exit, then check(True) after the readers, the body and the request write.
+        source+=f"full=[]\nlisted=os.listdir\ndef gated(d):\n r=listed(d)\n if len(r)==3:\n  full.append(1)\n  if len(full)==4:os.write({announce_w},b'L');os.read({gate_r},1)\n return r\nos.listdir=gated\nraise SystemExit(main(sys.argv))\n"
+        proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment(),pass_fds=(announce_w,gate_r))
+        os.close(announce_w);os.close(gate_r)
+        try:
+            proc.stdin.write(raw);proc.stdin.close();proc.stdin=None
+            self.assertTrue(select.select([announce_r],[],[],3)[0]);self.assertEqual(os.read(announce_r,1),b'L')
+            os.unlink('stdout.fifo',dir_fd=channel.directory);channel.remaining.remove('stdout.fifo')
+            os.write(gate_w,b'G')
+            stdout,stderr=proc.communicate(timeout=5)
+            self.assertNotEqual(proc.returncode,0);self.assertEqual(stdout,b'');self.assertEqual(stderr,b'')
+        finally:
+            os.close(announce_r);os.close(gate_w)
+            if proc.poll() is None:proc.kill()
+            proc.communicate(timeout=3)
+            channel.close()
+
+
+    def test_RelayUnlinkingFifo(self):
+        # After delivery a stat can catch an output FIFO mid-unlink at nlink 0; that is absence, not a foreign FIFO.
+        import subprocess
+        spec=importlib.util.spec_from_file_location('relay',HERE/'evidence_request_writer.py');relay=importlib.util.module_from_spec(spec);spec.loader.exec_module(relay)
+        with tempfile.TemporaryDirectory() as root:
+            os.mkfifo(root+'/f',0o600);info=os.stat(root+'/f')
+            for links,gone,admitted in ((1,False,True),(0,False,False),(0,True,True),(2,True,False)):
+                fake=os.stat_result(info[:3]+(links,)+info[4:10])
+                if admitted:self.assertEqual(relay.fifo(fake,gone),(info.st_dev,info.st_ino))
+                else:self.assertRaises(ValueError,relay.fifo,fake,gone)
+        op=os.urandom(16).hex();value=request();value['operation_id']=op;raw=json.dumps(value).encode()
+        channel=P.InputChannel(op,time.monotonic()+5)
+        source=(HERE/'evidence_request_writer.py').read_text().rsplit("if __name__=='__main__':",1)[0]
+        source+=f"seen=[]\nreal=os.stat\ndef caught(p,*a,**k):\n r=real(p,*a,**k)\n if p=='stdout.fifo' and not seen and not os.path.lexists('{channel.path}/request.fifo'):seen.append(1);r=os.stat_result(r[:3]+(0,)+r[4:10])\n return r\nos.stat=caught\nraise SystemExit(main(sys.argv))\n"
+        proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment())
+        try:
+            proc.stdin.write(raw);proc.stdin.close();proc.stdin=None
+            self.assertEqual(channel.consume(),raw);time.sleep(.1)
+            payload=json.dumps(response(value,raw),separators=(',',':')).encode()+b'\n';channel.finish(payload)
+            stdout,stderr=proc.communicate(timeout=5)
+            self.assertEqual(proc.returncode,0,stderr);self.assertEqual(stdout,payload);self.assertEqual(stderr,b'')
+        finally:
+            if proc.poll() is None:proc.kill()
+            proc.communicate(timeout=3)
+            channel.close()
+
+
     def relay_environment(self):
         env=dict(os.environ,LANG='C',LC_ALL='C')
         for key in list(env):
