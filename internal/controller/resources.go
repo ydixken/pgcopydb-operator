@@ -197,6 +197,7 @@ func buildNativeWorkerJob(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClai
 	automount := false
 	pod.AutomountServiceAccountToken = &automount
 	pod.DNSPolicy = corev1.DNSClusterFirst
+	pod.SecurityContext.FSGroupChangePolicy = nativeFSGroupChangePolicy()
 	container := &pod.Containers[0]
 	container.Command[len(container.Command)-1] = "/usr/local/bin/rpgmigrate"
 	container.Env = append(container.Env, nativeIdentityEnv(work)...)
@@ -1610,7 +1611,7 @@ func buildNativeVersionJob(m *v1beta1.Migration, runnerImage, name string) (*bat
 					RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: &deny,
 					DNSPolicy: corev1.DNSClusterFirst,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
+						RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, FSGroupChangePolicy: nativeFSGroupChangePolicy(),
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					NodeSelector: m.Spec.Runner.NodeSelector, Tolerations: m.Spec.Runner.Tolerations,
@@ -1657,6 +1658,13 @@ func buildNativePreflightJob(m *v1beta1.Migration, runnerImage, name, operationI
 	return job, nil
 }
 
+// The default policy makes kubelet add group bits to every file on each mount,
+// which turns the private /work/pgcopydb tree into one the native helpers refuse.
+func nativeFSGroupChangePolicy() *corev1.PodFSGroupChangePolicy {
+	policy := corev1.FSGroupChangeOnRootMismatch
+	return &policy
+}
+
 func buildNativeEvidenceJob(m *v1beta1.Migration, runnerImage string, want native.ExecutionRequest) (*batchv1.Job, error) {
 	if m == nil || m.Spec.Engine != v1beta1.MigrationEngineRPGMigrate || m.Namespace != want.Namespace || m.Name != want.MigrationName || want.JobName != "rpgmigrate-evidence-"+want.OperationID || runnerImageFor(m, runnerImage) != want.ImageRef || want.ImageRef == "" {
 		return nil, errors.New("native evidence job configuration invalid")
@@ -1680,6 +1688,7 @@ func buildNativeEvidenceJob(m *v1beta1.Migration, runnerImage string, want nativ
 	pod := &job.Spec.Template.Spec
 	pod.AutomountServiceAccountToken = &automount
 	pod.DNSPolicy = corev1.DNSClusterFirst
+	pod.SecurityContext.FSGroupChangePolicy = nativeFSGroupChangePolicy()
 	pod.Volumes = volumes
 	container := &pod.Containers[0]
 	container.Command, container.Args, container.Env, container.VolumeMounts = command, args, env, mounts
