@@ -367,6 +367,8 @@ const PluginWal2json = "wal2json"
 // FollowOptions enables live migration: clone under a replication slot, then
 // stream and apply changes until cutover (pgcopydb clone --follow).
 // +kubebuilder:validation:XValidation:rule="!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString) || (has(self.plugin) && self.plugin == 'wal2json')",message="wal2jsonNumericAsString configures the wal2json plugin and does nothing under any other; set plugin: wal2json or drop the field"
+// +kubebuilder:validation:XValidation:rule="!has(self.unloggedTables) || size(self.unloggedTables) == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && !has(self.slotName))",message="unloggedTables requires pgoutput follow with an operator-managed slot and publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.insertOnlyTables) || size(self.insertOnlyTables) == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin) || self.plugin == 'pgoutput') && !has(self.publication) && !has(self.slotName))",message="insertOnlyTables requires pgoutput follow with an operator-managed slot and publication"
 type FollowOptions struct {
 	// enabled turns the migration into a live one.
 	// +optional
@@ -420,11 +422,45 @@ type FollowOptions struct {
 	// +optional
 	AllowMissingReplicaIdentity []string `json:"allowMissingReplicaIdentity,omitempty"`
 
+	// unloggedTables acknowledges tables that MUST NOT participate in follow
+	// or content verification. SchemaOnly restores an empty table. CopyOnce
+	// copies its initial rows, which can become stale before cutover.
+	// Tables MUST be ordinary, non-partitioned UNLOGGED source tables.
+	// Immutable with follow. See docs/configuration.md.
+	// +kubebuilder:validation:MaxItems=64
+	// +listType=map
+	// +listMapKey=table
+	// +optional
+	UnloggedTables []UnloggedTable `json:"unloggedTables,omitempty"`
+
+	// insertOnlyTables copies the initial rows and follows INSERTs only.
+	// UPDATE, DELETE and TRUNCATE are not replicated. The operator excludes
+	// these tables from content verification and reports the partial policy.
+	// Tables MUST be ordinary, non-partitioned LOGGED source tables.
+	// This does not change allowMissingReplicaIdentity.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Pattern=`^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$`
+	// +listType=set
+	// +optional
+	InsertOnlyTables []string `json:"insertOnlyTables,omitempty"`
+
 	// maxCatchupLag is the replication lag under which the migration counts
 	// as caught up (the CaughtUp condition and Automatic cutover trigger).
 	// +kubebuilder:default="16Mi"
 	// +optional
 	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
+}
+
+// UnloggedTable selects one table that has no change stream.
+type UnloggedTable struct {
+	// table is an exact, lowercase schema-qualified name. Patterns are not supported.
+	// +kubebuilder:validation:Pattern=`^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$`
+	// +required
+	Table string `json:"table"`
+	// mode selects whether the initial copy includes rows.
+	// +kubebuilder:validation:Enum=SchemaOnly;CopyOnce
+	// +required
+	Mode string `json:"mode"`
 }
 
 // PreflightOptions enables preflight gates that are off by default. Mutable
@@ -666,6 +702,8 @@ const (
 // +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal) || (has(self.follow) && has(self.follow.enabled) && self.follow.enabled)",message="verification.rehearsal requires follow.enabled: it compares while a live migration streams"
 // +kubebuilder:validation:XValidation:rule="!(has(self.verification) && has(self.verification.rehearsal) && self.verification.rehearsal && has(self.cutover) && has(self.cutover.mode) && self.cutover.mode == 'Automatic')",message="verification.rehearsal requires cutover.mode Manual: an Automatic cutover starts at catch-up and cancels the rehearsal"
 // +kubebuilder:validation:XValidation:rule="(has(self.engine) ? self.engine : 'pgcopydb') == (has(oldSelf.engine) ? oldSelf.engine : 'pgcopydb')",message="engine is immutable: create a separate Migration"
+// +kubebuilder:validation:XValidation:rule="!has(self.follow) || !has(self.follow.unloggedTables) || size(self.follow.unloggedTables) == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone) && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters)) || self.clone.filters == oldSelf.clone.filters))",message="clone.filters is immutable with unloggedTables"
+// +kubebuilder:validation:XValidation:rule="!has(self.follow) || !has(self.follow.insertOnlyTables) || size(self.follow.insertOnlyTables) == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone) && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters)) || self.clone.filters == oldSelf.clone.filters))",message="clone.filters is immutable with insertOnlyTables"
 type MigrationSpec struct {
 	// engine defaults to pgcopydb; rpgmigrate requires explicit selection.
 	// The effective engine is immutable, including for existing Migrations that omit it.

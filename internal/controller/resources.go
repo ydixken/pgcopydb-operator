@@ -107,8 +107,14 @@ func buildWorkPVC(m *v1beta1.Migration) *corev1.PersistentVolumeClaim {
 
 // buildFiltersConfigMap renders the --filters INI, or nil when unused.
 func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
-	ini := pgcopydb.RenderFilters(m.Spec.Clone.Filters)
-	if ini == "" {
+	data := map[string]string{}
+	if ini := pgcopydb.RenderFilters(pgcopydb.CloneFilters(&m.Spec)); ini != "" {
+		data["filters.ini"] = ini
+	}
+	if hasPartialTables(m) {
+		data["data-filters.ini"] = pgcopydb.RenderFilters(pgcopydb.DataFilters(&m.Spec))
+	}
+	if len(data) == 0 {
 		return nil
 	}
 	return &corev1.ConfigMap{
@@ -117,7 +123,7 @@ func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
 			Namespace: m.Namespace,
 			Labels:    labels(m),
 		},
-		Data: map[string]string{"filters.ini": ini},
+		Data: data,
 	}
 }
 
@@ -125,6 +131,9 @@ func buildFiltersConfigMap(m *v1beta1.Migration) *corev1.ConfigMap {
 // retries are operator-driven so the attempt count and reasons live in the
 // Migration status, and a retry resumes from the work-dir catalogs or starts over.
 func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1.Job, error) {
+	if err := validatePartialTables(m); err != nil {
+		return nil, err
+	}
 	// Older CRDs may lack CEL rules; Reconcile persists builder errors as terminal InvalidSpec.
 	if m.Spec.Clone.AllDatabases {
 		switch {
@@ -142,11 +151,15 @@ func buildJob(m *v1beta1.Migration, runnerImage string, attempt int32) (*batchv1
 	fresh := attempt == 1 || (snapshotLost(m) && m.Spec.Clone.DropIfExists)
 	args := pgcopydb.CloneArgs(&m.Spec, fresh, !fresh, !fresh)
 	args = append(args, pgcopydb.FollowArgs(&m.Spec, m.Namespace, m.Name)...)
-	setup := publicationDropGuard(m, attempt)
+	setup := publicationDropGuard(m, attempt) + managedPublicationSetup(m, fresh)
 	if fresh && attempt > 1 {
 		// --restart wipes the catalog that records whether the publication is
 		// ours, so the old slot, publication and origin go before it runs.
-		setup = "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
+		guard := ""
+		if hasPartialTables(m) {
+			guard = managedPublicationCleanup(m, false)
+		}
+		setup = guard + "pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + setup
 	}
 	job, err := jobSkeleton(m, runnerImage, jobName(m, attempt), args, setup, 0, true)
 	if err != nil {
@@ -175,7 +188,7 @@ const publicationRetryDollarTag = "$publication_retry$"
 // resuming saved slot state. Only an orphan without a source slot is safe to drop;
 // an existing slot without its publication must not start a silent no-op stream.
 func publicationDropGuard(m *v1beta1.Migration, attempt int32) string {
-	if attempt <= 1 || !followEnabled(m) || m.Spec.Follow.Publication != "" {
+	if attempt <= 1 || !followEnabled(m) || m.Spec.Follow.Publication != "" || hasPartialTables(m) {
 		return ""
 	}
 	if plugin := m.Spec.Follow.Plugin; plugin != "" && plugin != "pgoutput" {
@@ -202,6 +215,17 @@ PUBLICATION_RETRY`
 // origin after a live migration, abort or deletion. It reuses the worker pod
 // shape for the work-dir catalogs. Job retries are safe: it is idempotent.
 func buildCleanupJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
+	if hasPartialTables(m) {
+		script := "set -eu\n" + managedPublicationCleanup(m, false) +
+			"pgcopydb " + strings.Join(cleanupArgs(m), " ") + "\n" + managedPublicationCleanup(m, true)
+		job, err := scriptJob(m, runnerImage, cleanupJobName(m), script, false)
+		if err != nil {
+			return nil, err
+		}
+		backoff := int32(2)
+		job.Spec.BackoffLimit = &backoff
+		return job, nil
+	}
 	job, err := jobSkeleton(m, runnerImage, cleanupJobName(m), cleanupArgs(m), "", 2, false)
 	if err != nil {
 		return nil, err
@@ -246,7 +270,7 @@ func buildVerifyJob(m *v1beta1.Migration, runnerImage, progressGate string) (*ba
 	// Require exact nonzero endpos or validated content, including report checks.
 	// See docs/research/measurements.md#cutover-verification.
 	script := `set -eu
-` + compareDataStrict + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
+` + dataComparisonPrelude(m) + dataComparisonStrict(m) + `endpos=$(pgcopydb stream sentinel get --endpos --dir ` + pgcopydb.WorkDir + `)
 replay=$(pgcopydb stream sentinel get --replay-lsn --dir ` + pgcopydb.WorkDir + `)
 progress=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select coalesce(pg_replication_origin_progress('` + origin + `', true)::text, '` + sentinel.ZeroLSN + `')")
 gap=$(psql "$PGCOPYDB_TARGET_PGURI" -tAc "select pg_wal_lsn_diff('$endpos'::pg_lsn, '$progress'::pg_lsn)")
@@ -259,7 +283,7 @@ elif [ "$gap" -eq 0 ]; then
 else
   echo "the origin is $gap bytes from endpos, and no distance decides the drain in either direction: unapplied commits and publication-filtered WAL measure alike. Deciding by content."
 fi
-if compare_data_strict; then
+` + partialDrainGuard(m) + `if compare_data_strict; then
   echo "drain verified: pgcopydb compare data found all migrated tables matching"
   exit 0
 fi
@@ -294,6 +318,11 @@ const (
 // trap ends the compare's queries on both sides, which pgcopydb alone does not.
 func rehearsalScript(m *v1beta1.Migration) string {
 	list := append([]string{"list", "tables", "--dir", pgcopydb.WorkDir}, pgcopydb.FiltersArgs(m.Spec.Clone.Filters)...)
+	compare := pgcopydb.CompareDataArgs()
+	if hasPartialTables(m) {
+		list = []string{"list", "tables", "--dir", dataCompareDir, "--filters", dataFiltersPath}
+		compare = []string{"compare", "data", "--dir", dataCompareDir, "--json"}
+	}
 	return `set -u
 pid=
 stop() {
@@ -312,7 +341,7 @@ if ! pgcopydb ` + strings.Join(list, " ") + ` >/dev/null; then
   echo "rehearsal: pgcopydb list tables could not read the source catalog"
   exit 1
 fi
-pgcopydb ` + strings.Join(pgcopydb.CompareDataArgs(), " ") + ` >` + rehearsalReportPath + ` &
+pgcopydb ` + strings.Join(compare, " ") + ` >` + rehearsalReportPath + ` &
 pid=$!
 wait "$pid" || :
 pid=
@@ -1066,7 +1095,11 @@ const tableScopeEnv = "PREFLIGHT_TABLE_SCOPE"
 // tableScopeQuery lists user tables by exact name that pass include and the excludes.
 func tableScopeQuery(include string) string {
 	return `select string_agg(format('%I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
-from pg_class c join pg_namespace n on n.oid = c.relnamespace,
+` + tableScopeFromQuery(include)
+}
+
+func tableScopeFromQuery(include string) string {
+	return `from pg_class c join pg_namespace n on n.oid = c.relnamespace,
 (select :'list'::jsonb as f) s
 where n.nspname !~ '^pg_' and n.nspname not in ('information_schema', 'pgcopydb')
 and ` + include + `
@@ -1392,8 +1425,8 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(replicationAttrBlock(superSrc, dry))
 		b.WriteString(originGrantsBlock(superTgt, dry))
 		b.WriteString(srrBlock(superTgt, dry))
-		b.WriteString(unloggedAuditBlock)
-		b.WriteString(riAuditBlock)
+		b.WriteString(unloggedPreflightBlock(m))
+		b.WriteString(replicaIdentityAuditFor(m))
 		if m.Spec.Follow.Plugin == v1beta1.PluginWal2json {
 			b.WriteString(preflightWal2jsonNote)
 		}
@@ -1411,6 +1444,9 @@ echo "preflight: note: wal2json presence on the source cannot be verified from S
 // before the first worker Job. backoffLimit 1 absorbs one transient blip; a
 // deterministic check failure fails twice and is terminal.
 func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, error) {
+	if err := validatePartialTables(m); err != nil {
+		return nil, err
+	}
 	// Superuser credentials ride only in this Job: every other Job stays at
 	// the migration role's privileges. Super preludes run after the primary
 	// ones (they derive their URI from the composed primary URI).
@@ -1462,7 +1498,7 @@ func buildPreflightJob(m *v1beta1.Migration, runnerImage string) (*batchv1.Job, 
 	}
 	if !m.Spec.Clone.AllDatabases {
 		c := &job.Spec.Template.Spec.Containers[0]
-		c.Env = append(c.Env, corev1.EnvVar{Name: tableScopeEnv, Value: tableScope(m.Spec.Clone.Filters)})
+		c.Env = append(c.Env, corev1.EnvVar{Name: tableScopeEnv, Value: migrationTableScope(m)})
 	}
 	// Bounds true wedges: hung checks and pods that never start. Slow pulls
 	// surface via PreflightRunning long before 30 minutes, and the deadline

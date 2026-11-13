@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
 
@@ -33,6 +34,7 @@ import (
 // reached. The report ends in a newline, as pgcopydb's does.
 const stubVerifyPgcopydb = `#!/bin/sh
 case "$*" in
+  "list tables "*) ;;
   *--endpos*) echo "$STUB_ENDPOS" ;;
   *--replay-lsn*) echo "$STUB_REPLAY" ;;
   *"compare data"*)
@@ -82,6 +84,11 @@ func runVerifyScript(t *testing.T, report string, env ...string) (string, int) {
 // runGatedVerifyScript is runVerifyScript for a verify Job built with a progress gate.
 func runGatedVerifyScript(t *testing.T, gate, report string, env ...string) (string, int) {
 	t.Helper()
+	return runMigrationVerifyScript(t, passwordMigration(), gate, report, env...)
+}
+
+func runMigrationVerifyScript(t *testing.T, migration *v1beta1.Migration, gate, report string, env ...string) (string, int) {
+	t.Helper()
 	dir := t.TempDir()
 	// The worker container is named after the binary, so the constant doubles
 	// as the stub's file name.
@@ -95,7 +102,7 @@ func runGatedVerifyScript(t *testing.T, gate, report string, env ...string) (str
 		t.Fatal(err)
 	}
 
-	job, err := buildVerifyJob(passwordMigration(), testRunnerImage, gate)
+	job, err := buildVerifyJob(migration, testRunnerImage, gate)
 	if err != nil {
 		t.Fatal(err)
 	}

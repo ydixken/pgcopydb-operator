@@ -44,6 +44,31 @@ const testOwnerRole = "app_owner"
 var _ = Describe("Migration CRD validation", func() {
 	ctx := context.Background()
 
+	It("admits partial table policies, rejects invalid modes and preserves their immutability", func() {
+		m := validMigration("val-partial-tables")
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true,
+			UnloggedTables:   []v1beta1.UnloggedTable{{Table: "app.cache", Mode: "SchemaOnly"}},
+			InsertOnlyTables: []string{"app.events"},
+		}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		base := m.DeepCopy()
+		m.Spec.Follow.UnloggedTables[0].Mode = "CopyOnce"
+		Expect(apierrors.IsInvalid(k8sClient.Update(ctx, m))).To(BeTrue())
+		m = base.DeepCopy()
+		m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeTables: []string{"app.items"}}
+		Expect(apierrors.IsInvalid(k8sClient.Update(ctx, m))).To(BeTrue())
+		Expect(k8sClient.Delete(ctx, base)).To(Succeed())
+
+		m = validMigration("val-partial-invalid")
+		m.Spec.Follow = &v1beta1.FollowOptions{Enabled: true,
+			UnloggedTables: []v1beta1.UnloggedTable{{Table: "app.cache", Mode: "Ignore"}},
+		}
+		Expect(apierrors.IsInvalid(k8sClient.Create(ctx, m))).To(BeTrue())
+		m.Spec.Follow.UnloggedTables[0].Mode = "CopyOnce"
+		m.Spec.Follow.Publication = "foreign"
+		Expect(apierrors.IsInvalid(k8sClient.Create(ctx, m))).To(BeTrue())
+	})
+
 	It("rejects wal2jsonNumericAsString under any non-wal2json plugin", func() {
 		m := validMigration("val-wal2json-reject")
 		// Plugin left empty: defaulting fills in pgoutput before validation.

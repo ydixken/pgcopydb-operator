@@ -696,6 +696,9 @@ Schema and workload contract:
   Use schema-qualified names, exactly as the preflight prints them.
   `["*"]` acknowledges every offender.
   The acknowledgement downgrades these tables to a warning.
+  To replicate only INSERTs, use [`spec.follow.insertOnlyTables`](../configuration.md#partial-table-policies) instead.
+  That policy deliberately omits UPDATE, DELETE, and TRUNCATE from replication.
+  It does not change the acknowledgement option.
   The bundled runner keeps `REPLICA IDENTITY USING INDEX` and `REPLICA IDENTITY FULL` on the target as the source has them.
   Where the source uses `USING INDEX`, stock pgcopydb uses the default identity instead.
 - pgcopydb replicates `TRUNCATE`.
@@ -725,7 +728,7 @@ Schema and workload contract:
   The worker log then shows `[42703] ERROR:  column ... does not exist` (two spaces after `ERROR:`).
   Every retry would stop at the same change, so the Migration fails with `SchemaDrift` on that attempt.
   The [`limitations/ddl_add_column`](coverage.md#postgresql-feature-coverage) coverage case pins this.
-- Unlogged tables MUST NOT be in scope.
+- Unlogged tables MUST NOT be in scope without an explicit partial policy.
   They write no WAL, so logical decoding never sees their changes.
   With the automatic publication, pgcopydb's `CREATE PUBLICATION ... FOR TABLE` refuses them and the first attempt fails before any copy.
   With `spec.follow.publication` or `wal2json`, their changes during the window are lost, and only `spec.verification.data` notices.
@@ -737,6 +740,11 @@ Schema and workload contract:
   Run `ALTER TABLE ... SET LOGGED` on the source, or exclude the tables with `excludeTables` or `excludeSchemas`.
   Together with `includeOnlySchemas`, use `excludeTables`, because `excludeSchemas` cannot be combined with it.
   `excludeTableData` does not help, because pgcopydb still publishes those tables.
+  Alternatively, select each table in [`spec.follow.unloggedTables`](../configuration.md#partial-table-policies).
+  `SchemaOnly` restores an empty table.
+  `CopyOnce` copies its initial rows.
+  Neither policy replicates later changes or changes the source table to LOGGED.
+  These policies use operator-managed publications and retain the default refusal for other UNLOGGED tables.
   The [`limitations/unlogged_writes`](coverage.md#postgresql-feature-coverage) coverage case pins the refusal.
 - Large-object changes during the window are not replicated (base copy only).
   A large object written or unlinked during the window keeps its base-copy content on the target.

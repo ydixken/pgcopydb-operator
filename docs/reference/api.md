@@ -200,6 +200,8 @@ _Appears in:_
 | `replayNoOpUpdates` _boolean_ | replayNoOpUpdates replays UPDATEs that change no columns<br />(--replay-no-op-updates), needed when target triggers must fire. |  | Optional: \{\} <br /> |
 | `applyGroupTransactions` _integer_ | applyGroupTransactions caps how many source transactions apply commits<br />in one target transaction (PGCOPYDB_APPLY_GROUP_TXNS). Unset leaves<br />pgcopydb's default of 100; 1 commits every source transaction on its own. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `allowMissingReplicaIdentity` _string array_ | allowMissingReplicaIdentity acknowledges tables the preflight replica-identity audit<br />would otherwise fail on, as schema-qualified names exactly as the preflight prints them<br />("*" covers every offender). UPDATE or DELETE on an acknowledged table still fails on the<br />source at write time, so acknowledge only read-only or insert-only ones. Immutable with follow. |  | Optional: \{\} <br /> |
+| `unloggedTables` _[UnloggedTable](#unloggedtable) array_ | unloggedTables acknowledges tables that MUST NOT participate in follow<br />or content verification. SchemaOnly restores an empty table. CopyOnce<br />copies its initial rows, which can become stale before cutover.<br />Tables MUST be ordinary, non-partitioned UNLOGGED source tables.<br />Immutable with follow. See docs/configuration.md. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
+| `insertOnlyTables` _string array_ | insertOnlyTables copies the initial rows and follows INSERTs only.<br />UPDATE, DELETE and TRUNCATE are not replicated. The operator excludes<br />these tables from content verification and reports the partial policy.<br />Tables MUST be ordinary, non-partitioned LOGGED source tables.<br />This does not change allowMissingReplicaIdentity. |  | MaxItems: 64 <br />items:Pattern: `^[a-z_][a-z0-9_]\{0,62\}\.[a-z_][a-z0-9_]\{0,62\}$` <br />Optional: \{\} <br /> |
 | `maxCatchupLag` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#quantity-resource-api)_ | maxCatchupLag is the replication lag under which the migration counts<br />as caught up (the CaughtUp condition and Automatic cutover trigger). | 16Mi | Optional: \{\} <br /> |
 
 
@@ -469,6 +471,23 @@ _Appears in:_
 | `rootCA` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | rootCA is the server CA bundle (libpq sslrootcert). |  | Optional: \{\} <br /> |
 | `cert` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | cert is the client certificate (libpq sslcert). |  | Optional: \{\} <br /> |
 | `key` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#secretkeyselector-v1-core)_ | key is the client private key (libpq sslkey). |  | Optional: \{\} <br /> |
+
+
+#### UnloggedTable
+
+
+
+UnloggedTable selects one table that has no change stream.
+
+
+
+_Appears in:_
+- [FollowOptions](#followoptions)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `table` _string_ | table is an exact, lowercase schema-qualified name. Patterns are not supported. |  | Pattern: `^[a-z_][a-z0-9_]\{0,62\}\.[a-z_][a-z0-9_]\{0,62\}$` <br />Required: \{\} <br /> |
+| `mode` _string_ | mode selects whether the initial copy includes rows. |  | Enum: [SchemaOnly CopyOnce] <br />Required: \{\} <br /> |
 
 
 #### VerificationOptions

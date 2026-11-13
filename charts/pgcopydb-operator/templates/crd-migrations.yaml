@@ -363,6 +363,19 @@ spec:
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
+                  insertOnlyTables:
+                    description: |-
+                      insertOnlyTables copies the initial rows and follows INSERTs only.
+                      UPDATE, DELETE and TRUNCATE are not replicated. The operator excludes
+                      these tables from content verification and reports the partial policy.
+                      Tables MUST be ordinary, non-partitioned LOGGED source tables.
+                      This does not change allowMissingReplicaIdentity.
+                    items:
+                      pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
                   maxCatchupLag:
                     anyOf:
                     - type: integer
@@ -400,6 +413,38 @@ spec:
                     maxLength: 63
                     pattern: ^[a-z0-9_]+$
                     type: string
+                  unloggedTables:
+                    description: |-
+                      unloggedTables acknowledges tables that MUST NOT participate in follow
+                      or content verification. SchemaOnly restores an empty table. CopyOnce
+                      copies its initial rows, which can become stale before cutover.
+                      Tables MUST be ordinary, non-partitioned UNLOGGED source tables.
+                      Immutable with follow. See docs/configuration.md.
+                    items:
+                      description: UnloggedTable selects one table that has no change
+                        stream.
+                      properties:
+                        mode:
+                          description: mode selects whether the initial copy includes
+                            rows.
+                          enum:
+                          - SchemaOnly
+                          - CopyOnce
+                          type: string
+                        table:
+                          description: table is an exact, lowercase schema-qualified
+                            name. Patterns are not supported.
+                          pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                          type: string
+                      required:
+                      - mode
+                      - table
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - table
+                    x-kubernetes-list-type: map
                   wal2jsonNumericAsString:
                     description: |-
                       wal2jsonNumericAsString makes wal2json emit numeric values as JSON
@@ -416,6 +461,16 @@ spec:
                     the field'
                   rule: '!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString)
                     || (has(self.plugin) && self.plugin == ''wal2json'')'
+                - message: unloggedTables requires pgoutput follow with an operator-managed
+                    slot and publication
+                  rule: '!has(self.unloggedTables) || size(self.unloggedTables) ==
+                    0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
+                    || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
+                - message: insertOnlyTables requires pgoutput follow with an operator-managed
+                    slot and publication
+                  rule: '!has(self.insertOnlyTables) || size(self.insertOnlyTables)
+                    == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
+                    || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -2151,6 +2206,16 @@ spec:
             - message: 'engine is immutable: create a separate Migration'
               rule: '(has(self.engine) ? self.engine : ''pgcopydb'') == (has(oldSelf.engine)
                 ? oldSelf.engine : ''pgcopydb'')'
+            - message: clone.filters is immutable with unloggedTables
+              rule: '!has(self.follow) || !has(self.follow.unloggedTables) || size(self.follow.unloggedTables)
+                == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone)
+                && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters))
+                || self.clone.filters == oldSelf.clone.filters))'
+            - message: clone.filters is immutable with insertOnlyTables
+              rule: '!has(self.follow) || !has(self.follow.insertOnlyTables) || size(self.follow.insertOnlyTables)
+                == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone)
+                && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters))
+                || self.clone.filters == oldSelf.clone.filters))'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.
@@ -2886,6 +2951,19 @@ spec:
                   enabled:
                     description: enabled turns the migration into a live one.
                     type: boolean
+                  insertOnlyTables:
+                    description: |-
+                      insertOnlyTables copies the initial rows and follows INSERTs only.
+                      UPDATE, DELETE and TRUNCATE are not replicated. The operator excludes
+                      these tables from content verification and reports the partial policy.
+                      Tables MUST be ordinary, non-partitioned LOGGED source tables.
+                      This does not change allowMissingReplicaIdentity.
+                    items:
+                      pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                      type: string
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-type: set
                   maxCatchupLag:
                     anyOf:
                     - type: integer
@@ -2923,6 +3001,38 @@ spec:
                     maxLength: 63
                     pattern: ^[a-z0-9_]+$
                     type: string
+                  unloggedTables:
+                    description: |-
+                      unloggedTables acknowledges tables that MUST NOT participate in follow
+                      or content verification. SchemaOnly restores an empty table. CopyOnce
+                      copies its initial rows, which can become stale before cutover.
+                      Tables MUST be ordinary, non-partitioned UNLOGGED source tables.
+                      Immutable with follow. See docs/configuration.md.
+                    items:
+                      description: UnloggedTable selects one table that has no change
+                        stream.
+                      properties:
+                        mode:
+                          description: mode selects whether the initial copy includes
+                            rows.
+                          enum:
+                          - SchemaOnly
+                          - CopyOnce
+                          type: string
+                        table:
+                          description: table is an exact, lowercase schema-qualified
+                            name. Patterns are not supported.
+                          pattern: ^[a-z_][a-z0-9_]{0,62}\.[a-z_][a-z0-9_]{0,62}$
+                          type: string
+                      required:
+                      - mode
+                      - table
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - table
+                    x-kubernetes-list-type: map
                   wal2jsonNumericAsString:
                     description: |-
                       wal2jsonNumericAsString makes wal2json emit numeric values as JSON
@@ -2939,6 +3049,16 @@ spec:
                     the field'
                   rule: '!(has(self.wal2jsonNumericAsString) && self.wal2jsonNumericAsString)
                     || (has(self.plugin) && self.plugin == ''wal2json'')'
+                - message: unloggedTables requires pgoutput follow with an operator-managed
+                    slot and publication
+                  rule: '!has(self.unloggedTables) || size(self.unloggedTables) ==
+                    0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
+                    || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
+                - message: insertOnlyTables requires pgoutput follow with an operator-managed
+                    slot and publication
+                  rule: '!has(self.insertOnlyTables) || size(self.insertOnlyTables)
+                    == 0 || (has(self.enabled) && self.enabled && (!has(self.plugin)
+                    || self.plugin == ''pgoutput'') && !has(self.publication) && !has(self.slotName))'
               preflight:
                 description: preflight tunes optional preflight gates.
                 properties:
@@ -4674,6 +4794,16 @@ spec:
             - message: 'engine is immutable: create a separate Migration'
               rule: '(has(self.engine) ? self.engine : ''pgcopydb'') == (has(oldSelf.engine)
                 ? oldSelf.engine : ''pgcopydb'')'
+            - message: clone.filters is immutable with unloggedTables
+              rule: '!has(self.follow) || !has(self.follow.unloggedTables) || size(self.follow.unloggedTables)
+                == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone)
+                && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters))
+                || self.clone.filters == oldSelf.clone.filters))'
+            - message: clone.filters is immutable with insertOnlyTables
+              rule: '!has(self.follow) || !has(self.follow.insertOnlyTables) || size(self.follow.insertOnlyTables)
+                == 0 || ((has(self.clone) && has(self.clone.filters)) == (has(oldSelf.clone)
+                && has(oldSelf.clone.filters)) && (!(has(self.clone) && has(self.clone.filters))
+                || self.clone.filters == oldSelf.clone.filters))'
           status:
             description: status reports progress. Conditions are authoritative; phase
               summarizes them.

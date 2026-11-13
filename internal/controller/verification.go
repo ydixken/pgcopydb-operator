@@ -154,7 +154,8 @@ func buildCompareJob(m *v1beta1.Migration, runnerImage, check string) (*batchv1.
 		if m.Spec.Clone.AllDatabases {
 			return nil, fmt.Errorf("allDatabases cannot be combined with verification.data: pgcopydb produces no JSON verdict in this mode")
 		}
-		return scriptJob(m, runnerImage, compareJobName(m, check), compareDataScript, false)
+		script := "set -eu\n" + dataComparisonPrelude(m) + dataComparisonStrict(m) + "compare_data_strict\n"
+		return scriptJob(m, runnerImage, compareJobName(m, check), script, false)
 	}
 	job, err := jobSkeleton(m, runnerImage, compareJobName(m, check), pgcopydb.CompareSchemaArgs(m.Spec.Clone.AllDatabases), "", 1, false)
 	if err != nil {
@@ -295,10 +296,12 @@ func (r *MigrationReconciler) ensureVerification(ctx context.Context, m *v1beta1
 	}
 
 	if len(mismatched) == 0 {
-		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed",
-			"pgcopydb compare found source and target matching")
-		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Verified", "Verify",
-			"pgcopydb compare found source and target matching")
+		msg := "pgcopydb compare found source and target matching"
+		if hasPartialTables(m) {
+			msg = "Requested comparisons passed for their configured scope. " + unloggedPolicyMessage(m)
+		}
+		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed", msg)
+		r.Recorder.Eventf(m, nil, corev1.EventTypeNormal, "Verified", "Verify", "%s", msg)
 		return true, nil
 	}
 	// A schema mismatch outranks a data one: it usually explains it.
