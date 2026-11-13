@@ -83,6 +83,7 @@ NATIVE_SPECS = {
     'early-manual': ('native', 'Migration holds early Manual approval until a paused backlog catches up'),
     'live-writer': ('native', 'Migration loses no committed transaction when the source is written throughout'),
     'automatic-cutover': ('native', 'Migration runs an Automatic cutover to completion unattended'),
+    'native-refusal': ('native', 'Migration refuses the legacy-only fixture before any database change and deletes cleanly'),
     'fault-copy': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-copy'),
     'fault-stream': ('native-fault', 'Native faults resumes or fails closed when the runner is killed mid-stream'),
     'fault-drain': ('native-fault', 'Native faults completes or fails closed when the runner is killed mid-drain'),

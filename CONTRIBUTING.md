@@ -152,7 +152,7 @@ With the `E2E_SOURCE_*` and `E2E_TARGET_*` variables set it runs in external mod
 That script applies `schema.sql`, runs the three base seed stages concurrently, and starts `E2E_EXTRA_JOBS` extra-table workers before applying `finish.sql`.
 For the `pgcopydb` engine it also applies `legacy.sql` after the loads and before `finish.sql`.
 That file holds the objects the native engine refuses before any database change: the materialized view, the generated column, the domain `CHECK`, the citext `UNIQUE` index, and the expression and partial indexes.
-We keep them out of the native fixture so a native run qualifies on what the engine supports.
+We keep them out of the native fixture so a native run qualifies on what the engine supports, and the native `native-refusal` spec applies the file to prove the refusal.
 The seed Job passes the engine as `SEED_ENGINE`, `run.sh` refuses any other value, and the engine is part of the seed profile, so switching engines recreates a kept source.
 The two bulk tables are 92% of the base seed and are bound by different resources, `events` per row and `documents` per byte, so they overlap instead of queueing.
 The non-unique secondary indexes are built once by `finish.sql` rather than maintained per insert.
