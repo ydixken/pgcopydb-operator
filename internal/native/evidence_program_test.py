@@ -1717,6 +1717,33 @@ class NativePythonTests(unittest.TestCase):
             channel.close()
 
 
+    def test_RelayUnlinkingFifo(self):
+        # After delivery a stat can catch an output FIFO mid-unlink at nlink 0; that is absence, not a foreign FIFO.
+        import subprocess
+        spec=importlib.util.spec_from_file_location('relay',HERE/'evidence_request_writer.py');relay=importlib.util.module_from_spec(spec);spec.loader.exec_module(relay)
+        with tempfile.TemporaryDirectory() as root:
+            os.mkfifo(root+'/f',0o600);info=os.stat(root+'/f')
+            for links,gone,admitted in ((1,False,True),(0,False,False),(0,True,True),(2,True,False)):
+                fake=os.stat_result(info[:3]+(links,)+info[4:10])
+                if admitted:self.assertEqual(relay.fifo(fake,gone),(info.st_dev,info.st_ino))
+                else:self.assertRaises(ValueError,relay.fifo,fake,gone)
+        op=os.urandom(16).hex();value=request();value['operation_id']=op;raw=json.dumps(value).encode()
+        channel=P.InputChannel(op,time.monotonic()+5)
+        source=(HERE/'evidence_request_writer.py').read_text().rsplit("if __name__=='__main__':",1)[0]
+        source+=f"seen=[]\nreal=os.stat\ndef caught(p,*a,**k):\n r=real(p,*a,**k)\n if p=='stdout.fifo' and not seen and not os.path.lexists('{channel.path}/request.fifo'):seen.append(1);r=os.stat_result(r[:3]+(0,)+r[4:10])\n return r\nos.stat=caught\nraise SystemExit(main(sys.argv))\n"
+        proc=subprocess.Popen([sys.executable,'-I','-B','-W','error','-c',source,op],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=self.relay_environment())
+        try:
+            proc.stdin.write(raw);proc.stdin.close();proc.stdin=None
+            self.assertEqual(channel.consume(),raw);time.sleep(.1)
+            payload=json.dumps(response(value,raw),separators=(',',':')).encode()+b'\n';channel.finish(payload)
+            stdout,stderr=proc.communicate(timeout=5)
+            self.assertEqual(proc.returncode,0,stderr);self.assertEqual(stdout,payload);self.assertEqual(stderr,b'')
+        finally:
+            if proc.poll() is None:proc.kill()
+            proc.communicate(timeout=3)
+            channel.close()
+
+
     def relay_environment(self):
         env=dict(os.environ,LANG='C',LC_ALL='C')
         for key in list(env):

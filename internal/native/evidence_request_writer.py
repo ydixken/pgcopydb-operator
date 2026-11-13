@@ -56,8 +56,8 @@ def private_dir(fd):
  return info.st_dev,info.st_ino
 
 
-def fifo(info):
- need(stat.S_ISFIFO(info.st_mode) and info.st_uid==os.geteuid() and info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600)
+def fifo(info,gone=False):
+ need(stat.S_ISFIFO(info.st_mode) and info.st_uid==os.geteuid() and (info.st_nlink==1 or gone and not info.st_nlink) and stat.S_IMODE(info.st_mode)==0o600)
  return info.st_dev,info.st_ino
 
 
@@ -132,8 +132,9 @@ def deliver(operation):
    except FileNotFoundError:
     # The program unlinks every FIFO before rmdir, so a gone path leaves nothing to list; an earlier listing may be stale.
     need(not initial and not os.listdir(directory) and private_dir(directory)==original_dir)
+   # After delivery the program may be unlinking a listed FIFO: stat misses it or catches it at nlink 0.
    for name in present:
-    try:need(fifo(os.stat(name,dir_fd=directory,follow_symlinks=False))==identities[name])
+    try:need(fifo(os.stat(name,dir_fd=directory,follow_symlinks=False),not initial)==identities[name])
     except FileNotFoundError:need(not initial)
    for name,fd in readers.items():
     info=os.fstat(fd);need((info.st_dev,info.st_ino)==identities[name] and info.st_nlink in (0,1))
