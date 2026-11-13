@@ -172,7 +172,12 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 			Expect(matviewState(targetCluster)).To(Equal(matviewState(sourceCluster)),
 				"materialized view not repopulated identically on the target")
 		}
-		Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
+		if selectedEngine() == v1beta1.MigrationEngineRPGMigrate {
+			// Native runs with large objects off, so the seeded ones must not reach the target.
+			Expect(largeObjectCount(targetCluster)).To(Equal("0"), "large objects reached the target with large objects off")
+		} else {
+			Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
+		}
 		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 	})
 

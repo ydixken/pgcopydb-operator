@@ -142,6 +142,7 @@ A native follow spec proves its cleanup positively.
 The operator deletes the `rpgmigrate-cleanup-<operation>` Job before the Migration completes, so the suite watches the namespace's Jobs from the first native Migration on and requires one owned by the Migration to have succeeded.
 It also requires the status to record the finalized worker, no `rpgm_s_<run>_` slot, `rpgm_p_<run>_` publication or source `_rpgmigrate_<run>` schema, and the target `_rpgmigrate_<run>` schema that cleanup retains.
 The shared slot and origin counts follow the engine, and each refuses to count when its filter would not match a name that engine creates.
+A native fresh clone expects the seeded large objects to stay on the source, because native runs with large objects off.
 The guard binds the engine, pair and full spec text into `suite-input.json`, and `TestE2E` focuses on exactly that spec, so a native run never executes a second one.
 Its suite runs with the native runner and the PostgreSQL images of its pair, all pulled and verified by digest on every node during `e2e:kind:pull`.
 Its receipt names that spec and carries none of the legacy bootstrap claims; the spec asserts its own outcome.
