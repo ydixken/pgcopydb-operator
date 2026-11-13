@@ -203,10 +203,10 @@ func TestNativeOwnedInventoryPython(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path).CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte("Ran 9 tests")) || !bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("Ran 0 tests")) || bytes.Contains(output, []byte("skipped=")) {
+	if err != nil || !bytes.Contains(output, []byte("Ran 10 tests")) || !bytes.Contains(output, []byte("\nOK\n")) || bytes.Contains(output, []byte("Ran 0 tests")) || bytes.Contains(output, []byte("skipped=")) {
 		t.Fatalf("required nonempty inventory Python suite failed: %s", output)
 	}
-	for _, name := range []string{"ConfirmedPhases", "PendingRefusals", "NoEndposAuthority", "SourceReplacement", "ClosedSessions", "ResolverPolicy", "CompositeDelivery", "RelayPolicy", "WorkRoot"} {
+	for _, name := range []string{"ConfirmedPhases", "PendingRefusals", "NoEndposAuthority", "SourceReplacement", "ClosedSessions", "ResolverPolicy", "CompositeDelivery", "RelayPolicy", "WorkRoot", "Unprovisioned"} {
 		if !bytes.Contains(output, []byte("test_Inventory"+name+" (")) {
 			t.Fatalf("required inventory Python case %s did not run: %s", name, output)
 		}

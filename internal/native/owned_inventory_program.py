@@ -13,12 +13,14 @@ def validate_inventory_request(raw,op,sha):
  execution=execution_data_fields(value);work_identity(execution['work'])
  need(execution['role']=='cleanup' and execution['job_uid']!=execution['worker_job_uid'],INPUT)
  return value
-def validate_inventory_manifest(m,req,d):
+def validate_inventory_manifest(m,req,d,unprovisioned=False):
  keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
  work=req['execution']['work'];need(m['magic']=='RPGMIGRATE' and native_format(m) in (8,9) and m['canonical_path']=='/work/pgcopydb')
  run=nonce(m['run']);need(run.hex()==work['run_id'] and (uint(m['directory_device']),uint(m['directory_inode']))==identity(d))
  operator=m['operator'];keys(operator,'migration_uid run workdir_id checkpoint_generation');uint(operator['checkpoint_generation'],1,True)
  need(same(operator,dict(migration_uid=work['migration_uid'],run=list(run),workdir_id=work['workdir_id'],checkpoint_generation=1)))
+ # The engine records each creation intent first, so this initial record proves it tried none.
+ if unprovisioned and same(m,dict(m,copy_complete=None,target_provenance=[],source_slot=None,clone_state=None,follow_state=dict.fromkeys('cleanup origin_name publication binding restart preliminary'.split()))): return
  if m['copy_complete'] is not None:
   keys(m['copy_complete'],'tables rows bytes')
   for count in m['copy_complete'].values(): uint(count)
@@ -98,7 +100,7 @@ class InventoryState:
    self.names=set(os.listdir(self.root));need(self.names in ({'manifest.json'},{'manifest.json','control'}))
    self.file=StableFile('manifest.json',1048576,True,self.root);self.files.append(self.file)
    self.manifest=inventory_json(self.file.raw,1048576)
-   self.target=validate_inventory_manifest(self.manifest,req,os.fstat(self.root))
+   self.target=validate_inventory_manifest(self.manifest,req,os.fstat(self.root),self.names=={'manifest.json'})
    self.control=None;self.control_names=set()
    if 'control' in self.names:
     self.control=self.open('control',True,self.root);self.control_names=set(os.listdir(self.control))
@@ -117,7 +119,7 @@ class InventoryState:
   need(set(os.listdir(self.root))==self.names)
   if self.control is not None: need(set(os.listdir(self.control))==self.control_names)
   for file in self.files: file.check()
- resources=PrivateState.resources
+ def resources(self): return PrivateState.resources(self) if self.target else [dict(kind='workdir',name='/work/pgcopydb',owned=True,retain=True)]
  close=SourceState.close
 def inventory_source(session,state):
  p=state.manifest['clone_state']['plan'];follow=state.manifest['follow_state'];b=follow['binding']
@@ -130,6 +132,9 @@ def inventory_source(session,state):
  expected=[[t['source_oid'],t['name']['schema'],t['name']['table'],t['all_columns']] for t in sorted(p['tables'],key=lambda t:t['source_oid'])]
  exact_true(session.query("SELECT NOT EXISTS(SELECT 1 FROM @pg_publication WHERE pubname=$1::name) OR (count(*)<=4096 AND COALESCE(bool_and(p.rowfilter IS NULL AND NOT EXISTS(SELECT 1 FROM @pg_attribute a WHERE a.attrelid=p.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>'')),true) AND COALESCE(@jsonb_agg(@jsonb_build_array(p.oid,p.schemaname,p.tablename,p.attnames) ORDER BY p.oid),'[]'::jsonb)=$2::jsonb) FROM (SELECT c.oid,p.* FROM @pg_publication_tables p JOIN @pg_namespace n ON n.nspname=p.schemaname JOIN @pg_class c ON c.relnamespace=n.oid AND c.relname=p.tablename WHERE p.pubname=$1::name ORDER BY c.oid LIMIT 4097) p;",(pub['name'],json.dumps(expected,separators=(',',':')))))
  return pinned
+def inventory_absent(session,state):
+ run=state.req['execution']['work']['run_id'];session_role(session)
+ exact_true(session.query("SELECT NOT EXISTS(SELECT FROM @pg_replication_slots WHERE slot_name~$1)AND NOT EXISTS(SELECT FROM @pg_publication WHERE pubname~$1)AND NOT EXISTS(SELECT FROM @pg_namespace WHERE nspname=$2);",('^rpgm_[sp]_'+run+'_','_rpgmigrate_'+run)));return run
 def inventory_target(session,state):
  target=state.target;b=target['intent']['binding'];p=state.manifest['clone_state']['plan']
  session_role(session)
@@ -149,9 +154,10 @@ def observe_inventory(state,library,mat,deadline,diag):
     remaining=int((deadline-time.monotonic())*1000);need(remaining>0,'timeout')
     session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
    session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
-  pinned=(inventory_source(sessions[0],state),inventory_target(sessions[1],state))
+  src,tgt=(inventory_source,inventory_target) if state.target else (inventory_absent,)*2
+  pinned=(src(sessions[0],state),tgt(sessions[1],state))
   state.revalidate();mat.check();diag.check()
-  need((inventory_source(sessions[0],state),inventory_target(sessions[1],state))==pinned,CONN)
+  need((src(sessions[0],state),tgt(sessions[1],state))==pinned,CONN)
   state.revalidate();mat.check();diag.check()
   while sessions: sessions.pop().close()
  except BaseException:

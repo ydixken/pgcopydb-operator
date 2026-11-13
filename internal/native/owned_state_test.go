@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 
 const ownedFixtureWorkPath = "/work/pgcopydb"
 const ownedFixtureCheckpointKey = "checkpoint"
+const ownedFixtureOrigin = "recorded_origin"
 
 func ownedWant() ExecutionData {
 	w := retryWant()
@@ -238,6 +240,89 @@ func TestNativeOwnedStateClosure(t *testing.T) {
 		_, err = parseOwnedResult(append(raw, '\n'), w, body)
 		if (err == nil) != (len(name) <= 63) {
 			t.Fatal("unowned origin differs from the native FollowState byte bound")
+		}
+	}
+}
+
+func TestNativeOwnedStateUnprovisioned(t *testing.T) {
+	workdir := resourceWire{Kind: resourceKindWorkdir, Name: ownedFixtureWorkPath, Owned: true, Retain: true}
+	t.Run("read", func(t *testing.T) {
+		api, r, w := newOwnedReaderAPI(t)
+		mutate := api.mutateResult
+		api.mutateResult = func(raw []byte) []byte {
+			var v ownedResultWire
+			_ = json.Unmarshal(mutate(raw), &v)
+			v.Resources = []resourceWire{workdir}
+			edited, _ := json.Marshal(v)
+			return append(edited, '\n')
+		}
+		got, err := r.ReadOwnedState(context.Background(), w)
+		if err != nil || got.Work() != w.Work || !got.Unprovisioned() || !reflect.DeepEqual(got.Resources(), []ResourceObligation{ResourceObligation(workdir)}) || api.writerCalls != 1 || api.logCalls != 1 {
+			t.Fatalf("checked unprovisioned inventory refused: %v", err)
+		}
+		resources := got.Resources()
+		resources[0].Retain = false
+		if !got.Unprovisioned() {
+			t.Fatal("unprovisioned proof aliases its resources")
+		}
+	})
+	w := ownedWant()
+	body, err := ownedRequest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var full ownedResultWire
+	if err := json.Unmarshal(ownedResult(t, w, body), &full); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		resources []resourceWire
+	}{
+		{"slot only", full.Resources[:1]},
+		{"publication only", full.Resources[1:2]},
+		{"origin only", []resourceWire{{Kind: nativeResourceOrigin, Name: ownedFixtureOrigin}}},
+		{"workdir and slot", []resourceWire{workdir, full.Resources[0]}},
+		{"workdir and origin", []resourceWire{workdir, {Kind: nativeResourceOrigin, Name: ownedFixtureOrigin}}},
+		{"workdir twice", []resourceWire{workdir, workdir}},
+		{"unowned workdir", []resourceWire{{Kind: resourceKindWorkdir, Name: ownedFixtureWorkPath, Retain: true}}},
+		{"discarded workdir", []resourceWire{{Kind: resourceKindWorkdir, Name: ownedFixtureWorkPath, Owned: true}}},
+		{"foreign workdir", []resourceWire{{Kind: resourceKindWorkdir, Name: "/work/foreign", Owned: true, Retain: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := full
+			v.Resources = tc.resources
+			raw, _ := json.Marshal(v)
+			if _, err := parseOwnedResult(append(raw, '\n'), w, body); err == nil {
+				t.Fatal("partial inventory admitted as unprovisioned")
+			}
+		})
+	}
+	v := full
+	v.Resources = []resourceWire{workdir}
+	raw, _ := json.Marshal(v)
+	if _, err := parseOwnedResult(append(raw, '\n'), w, body); err != nil {
+		t.Fatal("workdir-only inventory refused", err)
+	}
+	for _, closure := range []string{preflightSourceClosedKey, preflightTargetClosedKey, retryMaterializationClosedKey, sourcePrivateClosedKey, preflightDiagnosticsKey} {
+		var object map[string]any
+		_ = json.Unmarshal(raw, &object)
+		object[closure] = false
+		bad, _ := json.Marshal(object)
+		if _, err := parseOwnedResult(append(bad, '\n'), w, body); err == nil {
+			t.Fatalf("unprovisioned inventory admitted without %s", closure)
+		}
+	}
+	if (AdmittedOwnedState{}).Unprovisioned() || (AdmittedOwnedState{resources: []ResourceObligation{ResourceObligation(workdir)}}).Unprovisioned() {
+		t.Fatal("unadmitted state reads as unprovisioned")
+	}
+	for _, resources := range [][]resourceWire{full.Resources, append(slices.Clone(full.Resources), resourceWire{Kind: nativeResourceOrigin, Name: ownedFixtureOrigin})} {
+		obligations := make([]ResourceObligation, len(resources))
+		for i, r := range resources {
+			obligations[i] = ResourceObligation(r)
+		}
+		if (AdmittedOwnedState{resources: obligations, admitted: true}).Unprovisioned() {
+			t.Fatal("provisioned inventory reads as unprovisioned")
 		}
 	}
 }

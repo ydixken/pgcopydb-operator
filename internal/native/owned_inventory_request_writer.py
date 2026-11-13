@@ -24,9 +24,9 @@ def result_envelope(r,b,o):
  iv(v,o);need(v['program_sha256']==q['program_sha256'])
  h=hashlib.sha256(b).digest();need(v['request_sha256']==h.hex()and v['execution_sha256']==hashlib.sha256(b'rpgmigrate.native.execution.v1\0'+h).hexdigest()and json.dumps(v['work'],sort_keys=True)==json.dumps(q['execution']['work'],sort_keys=True))
  for k in 'source_closed target_closed materialization_closed private_closed diagnostics_clean'.split():need(v[k]is True)
- a=v['resources'];need(type(a)is list and len(a)in(3,4));s=set()
+ a=v['resources'];need(type(a)is list and len(a)in(1,3,4));s=set()
  for x in a:
   ik(x,'kind name owned retain');k=x['kind'];ix(x['name']);need(k not in s);s.add(k)
   need(k in('replication_slot','publication','workdir','replication_origin')and x['owned']is(k!='replication_origin')and x['retain']is(k=='workdir'))
   need(x['name']=='/work/pgcopydb'if k=='workdir'else len(x['name'].encode())<=63)
- need({'replication_slot','publication','workdir'}<=s);return True
+ need(s=={'workdir'}or{'replication_slot','publication','workdir'}<=s);return True

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
@@ -163,7 +164,7 @@ func parseOwnedResult(raw []byte, w ExecutionData, body []byte) (*ownedResultWir
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	digest, execution := requestDigests(body)
-	if v.Version != 1 || v.Kind != ownedInventoryKind || v.OperationID != w.OperationID || v.ProgramSHA256 != hex.EncodeToString(w.ProgramSHA256[:]) || v.RequestSHA256 != hex.EncodeToString(digest[:]) || v.ExecutionSHA256 != hex.EncodeToString(execution[:]) || v.Work != w.Work || !v.SourceClosed || !v.TargetClosed || !v.MaterializationClosed || !v.PrivateClosed || !v.DiagnosticsClean || !validEvidenceInventory(v.Resources) {
+	if v.Version != 1 || v.Kind != ownedInventoryKind || v.OperationID != w.OperationID || v.ProgramSHA256 != hex.EncodeToString(w.ProgramSHA256[:]) || v.RequestSHA256 != hex.EncodeToString(digest[:]) || v.ExecutionSHA256 != hex.EncodeToString(execution[:]) || v.Work != w.Work || !v.SourceClosed || !v.TargetClosed || !v.MaterializationClosed || !v.PrivateClosed || !v.DiagnosticsClean || !validEvidenceInventory(v.Resources) && !slices.Equal(v.Resources, []resourceWire{unprovisionedWorkdir}) {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	// Native FollowState also bounds the recorded unowned origin name to 63 bytes.

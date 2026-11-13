@@ -76,6 +76,14 @@ func (s AdmittedOwnedState) Resources() []ResourceObligation {
 	return slices.Clone(s.resources)
 }
 
+// The helper reports only the retained workdir after it proves the run created no slot, publication or target schema.
+var unprovisionedWorkdir = resourceWire{Kind: resourceKindWorkdir, Name: "/work/pgcopydb", Owned: true, Retain: true}
+
+// Unprovisioned reports a complete inventory that found nothing to remove on either database.
+func (s AdmittedOwnedState) Unprovisioned() bool {
+	return s.admitted && slices.Equal(s.resources, []ResourceObligation{ResourceObligation(unprovisionedWorkdir)})
+}
+
 type CompletedObservation struct {
 	checkpoint ConfirmedCheckpoint
 	owned      AdmittedOwnedState
