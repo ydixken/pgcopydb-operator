@@ -153,11 +153,11 @@ if lookup_safe:
 need(pwdhome is None or pwdhome.startswith('/') and len(pwdhome.encode())<=1024 and '\0' not in pwdhome)
 home_result=dict(home_present='HOME' in os.environ,home=home,pwd_lookup_performed=lookup_safe,uid_found=found,uid_home=pwdhome,selected_home=home if home else pwdhome,pwd_lookup_files_only=lookup_safe)
 metadata_raw,_=safe('/usr/share/rpgmigrate/python-libpq-runtime.json',4096);library_metadata=json.loads(metadata_raw)
-need(library_metadata['architecture']=='arm64' and library_metadata['libpq_version']==180006)
+need(library_metadata['architecture']=='arm64' and library_metadata['libpq_version']==180007)
 library_path=library_metadata['library_path'];need(library_path.startswith('/usr/lib/aarch64-linux-gnu/libpq.so.5.') and os.path.realpath(library_path)==library_path)
 library_raw,_=safe(library_path,16777216);need(hashlib.sha256(library_raw).hexdigest()==library_metadata['library_sha256'])
 library=ctypes.CDLL(library_path);library.PQlibVersion.argtypes=[];library.PQlibVersion.restype=ctypes.c_int
-need(library.PQlibVersion()==180006)
+need(library.PQlibVersion()==180007)
 libc=ctypes.CDLL(None);libc.gnu_get_libc_version.argtypes=[];libc.gnu_get_libc_version.restype=ctypes.c_char_p
 version=libc.gnu_get_libc_version().decode('ascii');need(version=='2.41')
 engine=subprocess.run(['/usr/local/bin/rpgmigrate','version','--json'],capture_output=True,timeout=10,check=False)
@@ -166,7 +166,7 @@ engine_version=json.loads(engine.stdout)
 packages=subprocess.run(['/usr/bin/dpkg-query','-W','-f=${Package}\t${Version}\t${Architecture}\t${Status}\n','libpq5','libc6','python3.13-minimal'],capture_output=True,timeout=5,check=False)
 need(packages.returncode==0 and not packages.stderr and len(packages.stdout)<=4096)
 package_lines=packages.stdout.decode('ascii').splitlines()
-need('libpq5\t18.6-1.pgdg13+2\tarm64\tinstall ok installed' in package_lines and 'libc6\t2.41-12+deb13u4\tarm64\tinstall ok installed' in package_lines and 'python3.13-minimal\t3.13.5-2+deb13u5\tarm64\tinstall ok installed' in package_lines)
+need('libpq5\t18.7-1.pgdg13+2\tarm64\tinstall ok installed' in package_lines and 'libc6\t2.41-12+deb13u4\tarm64\tinstall ok installed' in package_lines and 'python3.13-minimal\t3.13.5-2+deb13u5\tarm64\tinstall ok installed' in package_lines)
 paths=['/etc/passwd','/etc/nsswitch.conf','/etc/krb5.conf','/etc/krb5.keytab','/tmp/krb5cc_65532','/usr/share/rpgmigrate/.native-file-absent','/etc/ssl/certs','/usr/lib/ssl/openssl.cnf','/etc/ssl/openssl.cnf','/etc/postgresql-common/pg_service.conf']
 provider=dict(nss_passwd_services=services,nss_lookup_safe=lookup_safe,nss_modules=modules,default_paths={path:metadata(path) for path in paths},configuration_files={path:configuration(path,mounts) for path in ['/etc/krb5.conf','/etc/ssl/openssl.cnf']},environment_presence={key:key in os.environ for key in ['PGSERVICE','PGSERVICEFILE','PGSYSCONFDIR','KRB5_CONFIG','KRB5CCNAME','KRB5_KTNAME','KRB5_CLIENT_KTNAME','OPENSSL_CONF','OPENSSL_MODULES','OPENSSL_ENGINES','OAUTHBEARER_TOKEN']},authentication_qualified=False)
 runtime=dict(uid=os.geteuid(),gid=os.getegid(),architecture=platform.machine(),python=platform.python_version(),glibc=version,libpq=library_metadata,packages=package_lines,engine_version=engine_version,image_files=files,observation_only=True,root_readonly=bool(os.statvfs('/').f_flag&os.ST_RDONLY),tmp_bytes=os.statvfs('/tmp').f_blocks*os.statvfs('/tmp').f_frsize)

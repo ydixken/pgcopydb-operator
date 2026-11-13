@@ -36,6 +36,15 @@ Two values control it:
 - `crds.keep` (default `true`): annotate the CRD with `helm.sh/resource-policy: keep`.
   `helm uninstall` then leaves the CRD in place.
 
+### Upgrades
+
+Each operator release compiles in the runner digests it qualifies, and every native reconcile checks `status.nativeRunnerImage` against that list.
+
+> [!warning]
+> Before an upgrade, let every native Migration finish or delete it while its admitted runner is still qualified.
+> A release that drops that runner refuses the Migration on every reconcile, deletion included, and its source slot and publication stay in place.
+> Rolling back to the admitting release resumes it.
+
 ### Downgrades
 
 An operator release without the [retry gate](operations/lifecycle.md#the-retry-gate) ignores `status.exemptAttempts` and counts every attempt against `spec.backoffLimit`.

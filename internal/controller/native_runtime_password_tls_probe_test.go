@@ -1014,7 +1014,7 @@ start=time.monotonic();limit=start+120;files=[];inputs=[];cwd=None;diag=None
 try:
  need(os.geteuid()==65532 and os.getegid()==65532 and os.uname().machine=='aarch64');P.validate_environment(os.environ)
  original_mounts,rows=mounts()
- expected={'/etc/passwd':'21352194cc533bc5878721507450d867d28ccb1c2f5cd773c792251fa1e63185','/etc/nsswitch.conf':'eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb','/usr/share/rpgmigrate/python-libpq-runtime.json':'122ec42c730898d3f9680b394b0a521ef6f808e29c6db013c0c495caa34dab44','/usr/lib/aarch64-linux-gnu/libpq.so.5.18':'094cbe08c8c6134b91b1946e42012318728003cf2dd2fcc0ab1ee9821ba38f58'}
+ expected={'/etc/passwd':'21352194cc533bc5878721507450d867d28ccb1c2f5cd773c792251fa1e63185','/etc/nsswitch.conf':'eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb','/usr/share/rpgmigrate/python-libpq-runtime.json':'61124886478b6e868a814a42286f96e95e516c4da6407f2dbb77e690efcf4b3f','/usr/lib/aarch64-linux-gnu/libpq.so.5.18':'470b5e466a8d2a93e6db4046a8c30a192ea8a1984c6da7021286f1ca01f341bf'}
  for path,digest in expected.items():
   file=image(path,rows);files.append(file);need(hashlib.sha256(file.raw).hexdigest()==digest)
  for path in ('/etc/ssl/openssl.cnf','/usr/lib/aarch64-linux-gnu/libc.so.6','/usr/bin/python3.13'):files.append(image(path,rows))

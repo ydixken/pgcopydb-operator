@@ -127,10 +127,10 @@ type OwnedResource struct {
 	Removed *bool  `json:"removed"`
 }
 
-// Engine 908ada6 runner publications, one single-platform manifest per architecture.
+// Engine 42866da runner publications, one single-platform manifest per architecture.
 var qualifiedRunnerDigests = []string{
-	"sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b", // arm64
-	"sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b", // amd64
+	"sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f", // arm64
+	"sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2", // amd64
 }
 
 // QualifiedRunner reports whether image pins a qualified runner manifest by digest; the reference shape is checked separately.

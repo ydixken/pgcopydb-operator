@@ -80,11 +80,11 @@ def image_files():
     hashes = {
         '/etc/passwd': '21352194cc533bc5878721507450d867d28ccb1c2f5cd773c792251fa1e63185',
         '/etc/nsswitch.conf': 'eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb',
-        '/usr/share/rpgmigrate/python-libpq-runtime.json': '122ec42c730898d3f9680b394b0a521ef6f808e29c6db013c0c495caa34dab44',
-        '/usr/lib/aarch64-linux-gnu/libpq.so.5.18': '094cbe08c8c6134b91b1946e42012318728003cf2dd2fcc0ab1ee9821ba38f58',
+        '/usr/share/rpgmigrate/python-libpq-runtime.json': '61124886478b6e868a814a42286f96e95e516c4da6407f2dbb77e690efcf4b3f',
+        '/usr/lib/aarch64-linux-gnu/libpq.so.5.18': '470b5e466a8d2a93e6db4046a8c30a192ea8a1984c6da7021286f1ca01f341bf',
         '/usr/lib/aarch64-linux-gnu/libc.so.6': '5' * 64,
         '/usr/bin/python3.13': '6' * 64,
-        '/usr/local/bin/rpgmigrate': '46dcc819e2ff401501aa5f907324c6612ee1331074a61454edc5eb4fc64a1a4c',
+        '/usr/local/bin/rpgmigrate': 'c244a35d4d1656a23a141a0b24cba8f8c0d2eb59b8bdbf025b13f710dfc2de6f',
     }
     return {path: dict(sha256=digest, uid=0, gid=0, mode=0o644, links=1,
                        root_readonly=True, shadow_mounts=[], mount_id='1', size=100,

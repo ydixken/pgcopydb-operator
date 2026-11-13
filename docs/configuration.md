@@ -252,8 +252,8 @@ We preserve image values exactly, without trimming or normalization.
 Native worker Jobs set `LC_ALL=C` and `LANG=C`.
 
 > [!important]
-> `spec.engine: rpgmigrate` runs only when the effective image pins one of the qualified engine `908ada6` runner manifests.
-> These are `ghcr.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b` for arm64 and `ghcr.io/ydixken/rpgmigrate@sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b` for amd64.
+> `spec.engine: rpgmigrate` runs only when the effective image pins one of the qualified engine `42866da` runner manifests.
+> These are `ghcr.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f` for arm64 and `ghcr.io/ydixken/rpgmigrate@sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2` for amd64.
 > An empty value, a tag, or any other digest fails with `UnsupportedEngine` before the controller creates resources or executes commands.
 
 We hold the qualified digests in the operator binary, so an administrator cannot qualify a runner by configuration alone.
