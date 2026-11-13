@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 import tempfile
@@ -2538,6 +2539,19 @@ class SuiteRouteTests(unittest.TestCase):
                 self.assertEqual(MODULE.Guard.selection('rpgmigrate', pair, case),
                                  {'engine': 'rpgmigrate', 'pair': pair, 'label': label, 'spec': spec})
         self.assertEqual({label for label, _ in MODULE.NATIVE_SPECS.values()}, {'native', 'native-fault'})
+        # Each case must name one labelled It in the suite, or the focused run executes nothing.
+        sources = ''.join(path.read_text() for path in sorted((MODULE.ROOT / 'test/e2e').glob('*_test.go')))
+        labels = {'native': 'nativeLabel', 'native-fault': 'nativeFaultLabel'}
+        for case, (label, spec) in MODULE.NATIVE_SPECS.items():
+            container, _, text = spec.partition(' ')
+            if label == 'native-fault':
+                container, _, text = text.partition(' ')
+                container = 'Native ' + container
+            with self.subTest(case=case):
+                it = re.escape(f'It("{text}",') + r'\s*Label\('
+                self.assertEqual(len(re.findall(it, sources)), 1)
+                self.assertRegex(sources, rf'Describe\("{container}"')
+                self.assertRegex(sources, it + rf'(?:{labels[label]}|"{label}-[a-z-]+")')
         for args in (('rpgmigrate', '17:17', 'fault-suspend'), ('rpgmigrate', '18:16', 'fault-suspend'),
                      ('rpgmigrate', '16:16', None), ('rpgmigrate', '16:16', 'fault-unknown'), ('pgcopydb', '16:16', None),
                      ('pgcopydb', '17:17', 'fresh-clone'), ('rpgmigrate', '16:16 ', 'fault-suspend')):

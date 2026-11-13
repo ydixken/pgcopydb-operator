@@ -150,8 +150,8 @@ func TestSeedProfileTracksTheRequestedShape(t *testing.T) {
 	// Unset, the skew must leave the profile byte-identical, or every kept
 	// fixture would be rebuilt for a knob nobody turned.
 	extraTables, extraSizeMB = 40, 8192
-	if got := seedProfile(); got != "v4+x40x8192MB" {
-		t.Errorf("no skew: seedProfile() = %q, want %q", got, "v4+x40x8192MB")
+	if got := seedProfile(); got != "v5+x40x8192MB" {
+		t.Errorf("no skew: seedProfile() = %q, want %q", got, "v5+x40x8192MB")
 	}
 	extraSkew = 1.5
 	skewed := seedProfile()

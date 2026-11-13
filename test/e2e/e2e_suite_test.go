@@ -154,7 +154,7 @@ const (
 
 	// seedProfile names the fixture generation; bump it when the schema,
 	// seeded shapes, or seed preparation changes so kept clusters get recreated.
-	baseSeedProfile = "v4"
+	baseSeedProfile = "v5"
 	// seedConfigMap is the SQL every pair's seed Job mounts.
 	seedConfigMap = "e2e-fixtures"
 	// seedLogTail is generous because the log is the seed's profile, not just
@@ -906,10 +906,15 @@ func scaledSize(fullScaleGi int) string {
 // match and the source is rebuilt rather than silently reused at the old
 // shape.
 func seedProfile() string {
-	if extraTables == 0 {
-		return baseSeedProfile
+	// The native fixture lacks legacy.sql, so an engine switch rebuilds a kept source too.
+	p := baseSeedProfile
+	if selectedEngine() == v1beta1.MigrationEngineRPGMigrate {
+		p += "+native"
 	}
-	p := fmt.Sprintf("%s+x%dx%dMB", baseSeedProfile, extraTables, extraSizeMB)
+	if extraTables == 0 {
+		return p
+	}
+	p = fmt.Sprintf("%s+x%dx%dMB", p, extraTables, extraSizeMB)
 	if extraSkew > 0 {
 		p += "+skew" + skewArg()
 	}
@@ -1067,7 +1072,7 @@ func TestExtraFixtureRejectsJobCountAbovePostgresInt(t *testing.T) {
 
 func TestExtraFixtureAcceptsSkew(t *testing.T) {
 	if os.Getenv("E2E_TEST_CHILD") == "skew" {
-		if extraSkew != 1.5 || seedProfile() != "v4+x30x30720MB+skew1.5" {
+		if extraSkew != 1.5 || seedProfile() != "v5+x30x30720MB+skew1.5" {
 			t.Errorf("extraSkew = %v, seedProfile() = %q", extraSkew, seedProfile())
 		}
 		return
@@ -1125,6 +1130,28 @@ func TestExtraFixtureRejectsSkewWithoutTables(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "E2E_EXTRA_SKEW requires E2E_EXTRA_TABLES") {
 		t.Fatalf("unexpected rejection: %v\n%s", err, out)
+	}
+}
+
+func TestSeedFixtureFollowsTheEngine(t *testing.T) {
+	for engine, want := range map[v1beta1.MigrationEngine][2]string{
+		v1beta1.MigrationEnginePGCopyDB:   {"v5", legacyFixtureObjects},
+		v1beta1.MigrationEngineRPGMigrate: {"v5+native", nativeFixtureObjects},
+	} {
+		t.Setenv("E2E_ENGINE", string(engine))
+		if got := seedProfile(); got != want[0] {
+			t.Errorf("%s: seedProfile() = %q, want %q", engine, got, want[0])
+		}
+		if got := seededFixtureObjects(engine); got != want[1] {
+			t.Errorf("%s: seededFixtureObjects() = %q, want %q", engine, got, want[1])
+		}
+		env := map[string]string{}
+		for _, e := range buildSeedJob().Spec.Template.Spec.Containers[0].Env {
+			env[e.Name] = e.Value
+		}
+		if env["SEED_ENGINE"] != string(engine) || env["SEED_PROFILE"] != want[0] {
+			t.Errorf("%s: seed Job env SEED_ENGINE=%q SEED_PROFILE=%q", engine, env["SEED_ENGINE"], env["SEED_PROFILE"])
+		}
 	}
 }
 
@@ -2474,6 +2501,7 @@ func buildSeedJob() *batchv1.Job {
 							{Name: "SEED_EXTRA_MB", Value: strconv.Itoa(extraSizeMB)},
 							{Name: "SEED_EXTRA_JOBS", Value: strconv.Itoa(extraJobs)},
 							{Name: "SEED_EXTRA_SKEW", Value: skewArg()},
+							{Name: "SEED_ENGINE", Value: string(selectedEngine())},
 						},
 						VolumeMounts: []corev1.VolumeMount{{Name: "fixtures", MountPath: "/fixtures", ReadOnly: true}},
 					}},

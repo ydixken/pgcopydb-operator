@@ -132,7 +132,12 @@ macOS pauses the monotonic clock while the host sleeps, so a wall-only expiry is
 On macOS, `up`, `pull`, and the legacy and native runs require AC power and hold a `caffeinate -dims` child for the command's lifetime.
 The guard refuses when `pmset` does not show that child's system-sleep assertions.
 The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
-`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
+`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
+A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the objects the native engine refuses before any database change.
+`native-refusal`, which we run on pair 16:16, applies that file to the source and expects the Migration to fail with reason `NativeBadConfig`, with neither database changed.
+Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
+It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
+It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
 The guard binds the engine, pair and full spec text into `suite-input.json`, and `TestE2E` focuses on exactly that spec, so a native run never executes a second one.
 Its suite runs with the native runner and the PostgreSQL images of its pair, all pulled and verified by digest on every node during `e2e:kind:pull`.
 Its receipt names that spec and carries none of the legacy bootstrap claims; the spec asserts its own outcome.
