@@ -785,6 +785,91 @@ func TestNativeCleanupUnsupportedDisposition(t *testing.T) {
 	}
 }
 
+// nativeUnprovisionedInventory makes inventory reads, from the given read on, report only the retained workdir.
+func nativeUnprovisionedInventory(f *nativeDispositionFixture, from int, edit func(map[string]any)) {
+	reads := 0
+	f.edit = func(v map[string]any) {
+		if v[lifecycleKindKey] != finishOwnedInventoryKind {
+			return
+		}
+		if reads++; reads >= from {
+			v["resources"] = []map[string]any{{lifecycleKindKey: workdirVolume, lifecycleNameKey: nativeCleanupTestWorkdir, lifecycleOwnedKey: true, lifecycleRetainKey: true}}
+		}
+		if edit != nil {
+			edit(v)
+		}
+	}
+}
+
+func deleteNativeDispositionMigration(t *testing.T, f *nativeDispositionFixture) {
+	t.Helper()
+	f.m.Finalizers = []string{finalizerName}
+	if err := f.store.Update(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Delete(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeDispositionUnprovisionedDeletion(t *testing.T) {
+	f := newNativeDispositionFixture(t, true)
+	deleteNativeDispositionMigration(t, f)
+	nativeUnprovisionedInventory(f, 1, nil)
+	if err := f.reconcile(t); err != nil {
+		t.Fatal(err, "relays", f.relays)
+	}
+	if f.cleanupCalled || f.relays != 2 || f.workerCreates != 0 || !apierrors.IsNotFound(f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), &v1beta1.Migration{})) {
+		t.Fatal("unprovisioned deletion ran cleanup, skipped the second inventory, or kept the finalizer")
+	}
+	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.worker), &batchv1.Job{}); err != nil {
+		t.Fatal("deletion removed the retained original", err)
+	}
+}
+
+func TestNativeDispositionUnprovisionedRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		from    int
+		edit    func(map[string]any)
+		cleanup bool
+	}{
+		// A first read that names a slot and publication runs cleanup, and the later empty read then differs.
+		{name: "provisioned then empty", from: 2, cleanup: true},
+		{name: "empty then provisioned", from: 1, edit: func() func(map[string]any) {
+			reads := 0
+			return func(v map[string]any) {
+				if reads++; reads == 2 {
+					v["resources"] = []map[string]any{{lifecycleKindKey: nativeDispositionSlotKind, lifecycleNameKey: nativeDispositionSlot, lifecycleOwnedKey: true, lifecycleRetainKey: false}, {lifecycleKindKey: nativeDispositionPublicationKind, lifecycleNameKey: nativeDispositionPublication, lifecycleOwnedKey: true, lifecycleRetainKey: false}, {lifecycleKindKey: workdirVolume, lifecycleNameKey: nativeCleanupTestWorkdir, lifecycleOwnedKey: true, lifecycleRetainKey: true}}
+				}
+			}
+		}()},
+		{name: "source not closed", from: 1, edit: func(v map[string]any) { v[nativeControlSourceClosedKey] = false }},
+		{name: "target not closed", from: 1, edit: func(v map[string]any) { v[nativeTargetClosedKey] = false }},
+		{name: "diagnostics dirty", from: 1, edit: func(v map[string]any) { v[nativeControlDiagnosticsKey] = false }},
+		{name: "foreign work identity", from: 1, edit: func(v map[string]any) {
+			work := maps.Clone(v[nativeControlWorkKey].(map[string]any))
+			work["workdir_id"] = "foreign-pvc"
+			v[nativeControlWorkKey] = work
+		}},
+		{name: "workdir not retained", from: 1, edit: func(v map[string]any) {
+			v["resources"] = []map[string]any{{lifecycleKindKey: workdirVolume, lifecycleNameKey: nativeCleanupTestWorkdir, lifecycleOwnedKey: true, lifecycleRetainKey: false}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeDispositionFixture(t, true)
+			deleteNativeDispositionMigration(t, f)
+			nativeUnprovisionedInventory(f, tc.from, tc.edit)
+			if err := f.reconcile(t); err == nil {
+				t.Fatal("deletion accepted an inventory that does not prove nothing is owned")
+			}
+			if !controllerutil.ContainsFinalizer(f.m, finalizerName) || f.workerCreates != 0 || f.cleanupCalled != tc.cleanup {
+				t.Fatal("refused deletion lost the finalizer or changed cleanup", f.cleanupCalled)
+			}
+		})
+	}
+}
+
 func installRecoveryCompare(t *testing.T, f *nativeDispositionFixture, check string) *batchv1.Job {
 	t.Helper()
 	f.m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}

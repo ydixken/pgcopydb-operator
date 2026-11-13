@@ -1,4 +1,5 @@
 # Read-only inventory policy.
+U32=(1<<32)-1
 def inventory_json(raw,cap):
  value=strict_json(raw,cap)
  def integer(s):
@@ -12,12 +13,14 @@ def validate_inventory_request(raw,op,sha):
  execution=execution_data_fields(value);work_identity(execution['work'])
  need(execution['role']=='cleanup' and execution['job_uid']!=execution['worker_job_uid'],INPUT)
  return value
-def validate_inventory_manifest(m,req,d):
+def validate_inventory_manifest(m,req,d,unprovisioned=False):
  keys(m,'magic format_version run canonical_path directory_device directory_inode copy_complete target_provenance source_slot clone_state follow_state operator')
  work=req['execution']['work'];need(m['magic']=='RPGMIGRATE' and native_format(m) in (8,9) and m['canonical_path']=='/work/pgcopydb')
  run=nonce(m['run']);need(run.hex()==work['run_id'] and (uint(m['directory_device']),uint(m['directory_inode']))==identity(d))
  operator=m['operator'];keys(operator,'migration_uid run workdir_id checkpoint_generation');uint(operator['checkpoint_generation'],1,True)
  need(same(operator,dict(migration_uid=work['migration_uid'],run=list(run),workdir_id=work['workdir_id'],checkpoint_generation=1)))
+ # The engine records each creation intent first, so this initial record proves it tried none.
+ if unprovisioned and same(m,dict(m,copy_complete=None,target_provenance=[],source_slot=None,clone_state=None,follow_state=dict.fromkeys('cleanup origin_name publication binding restart preliminary'.split()))): return
  if m['copy_complete'] is not None:
   keys(m['copy_complete'],'tables rows bytes')
   for count in m['copy_complete'].values(): uint(count)
@@ -25,7 +28,7 @@ def validate_inventory_manifest(m,req,d):
  stream(b['stream']);need(b['stream']['run']==m['run'])
  need(b['schema_name']=='_rpgmigrate_'+work['run_id'] and b['table_name']=='checkpoint')
  name(b['schema_name']);name(b['table_name']);uint(b['target_system_identifier'],U64,True)
- for key in ('target_database_oid','owner_oid'): uint(b[key],(1<<32)-1,True)
+ for key in ('target_database_oid','owner_oid'): uint(b[key],U32,True)
  keys(m['source_slot'],'phase record');need(m['source_slot']['phase']=='confirmed');slot=m['source_slot']['record'];slot_record(slot)
  need(slot['intent']['binding']['stream']==b['stream'])
  clone=m['clone_state'];keys(clone,'plan ticket phase owned_objects owned_tables completion')
@@ -34,7 +37,7 @@ def validate_inventory_manifest(m,req,d):
  keys(p['source'],'identity timeline major');keys(p['target'],'identity major')
  source_identity(p['source']['identity']);source_identity(p['target']['identity'])
  need(p['source']['identity']==b['stream']['source'] and p['target']['identity']==dict(system_identifier=b['target_system_identifier'],database_oid=b['target_database_oid']))
- uint(p['source']['timeline'],(1<<32)-1,True);uint(p['generation'],U64,True)
+ uint(p['source']['timeline'],U32,True);uint(p['generation'],U64,True)
  need(slot['intent']['binding']['catalog_epoch']==p['generation'])
  for side in ('source','target'): need(uint(p[side]['major'],18,True) in (16,18))
  need(p['source']['major']<=p['target']['major'])
@@ -50,9 +53,9 @@ def validate_inventory_manifest(m,req,d):
  objects=bounded_array(clone['owned_objects'],65536);object_ids=set()
  for obj in objects:
   keys(obj,'class_oid object_oid object_sub_id namespace_oid namespace_name name kind owner_oid')
-  for key in ('class_oid','object_oid','owner_oid'): uint(obj[key],(1<<32)-1,True)
+  for key in ('class_oid','object_oid','owner_oid'): uint(obj[key],U32,True)
   uint(obj['object_sub_id'],(1<<31)-1);text(obj['name'],1048576);text(obj['kind'],256,True)
-  if obj['namespace_oid'] is not None: need(uint(obj['namespace_oid'],(1<<32)-1,True)!=target['schema_oid'])
+  if obj['namespace_oid'] is not None: need(uint(obj['namespace_oid'],U32,True)!=target['schema_oid'])
   if obj['namespace_name'] is not None: text(obj['namespace_name'],1048576,True)
   need(obj['class_oid']!=2615 or obj['object_oid']!=target['schema_oid'])
   identifier=tuple(obj[k] for k in ('class_oid','object_oid','object_sub_id'));need(identifier not in object_ids);object_ids.add(identifier)
@@ -60,7 +63,7 @@ def validate_inventory_manifest(m,req,d):
  need(not objects and not owned if early else len(owned)==len(tables));targets_seen=set();sources_seen=set()
  for obj in owned:
   keys(obj,'table target_oid target_namespace_oid target_owner_oid generation');table_plan(obj['table'])
-  for key in ('target_oid','target_namespace_oid','target_owner_oid'): uint(obj[key],(1<<32)-1,True)
+  for key in ('target_oid','target_namespace_oid','target_owner_oid'): uint(obj[key],U32,True)
   need(uint(obj['generation'],U64,True)==p['generation'] and obj['table'] in tables)
   need(obj['target_oid'] not in targets_seen and obj['table']['source_oid'] not in sources_seen)
   targets_seen.add(obj['target_oid']);sources_seen.add(obj['table']['source_oid'])
@@ -77,10 +80,10 @@ def validate_inventory_manifest(m,req,d):
   for flag in follow['cleanup'].values(): boolean(flag)
  if follow['origin_name'] is not None: name(follow['origin_name'])
  fb=follow['binding'];keys(fb,'slot publication source_timeline copy_generation source_types');slot_record(fb['slot']);publication(fb['publication'])
- need(same(fb['slot'],slot) and uint(fb['copy_generation'],U64,True)==p['generation'] and uint(fb['source_timeline'],(1<<32)-1,True)==p['source']['timeline'])
+ need(same(fb['slot'],slot) and uint(fb['copy_generation'],U64,True)==p['generation'] and uint(fb['source_timeline'],U32,True)==p['source']['timeline'])
  types=bounded_array(fb['source_types'],16384);types_seen=set()
  for item in types:
-  keys(item,'oid schema name');oid=uint(item['oid'],(1<<32)-1,True);name(item['schema']);name(item['name'])
+  keys(item,'oid schema name');oid=uint(item['oid'],U32,True);name(item['schema']);name(item['name'])
   need(oid not in types_seen);types_seen.add(oid)
  pub=follow['publication'];keys(pub,'phase intent receipt');need(pub['phase']=='confirmed')
  keys(pub['intent'],'run name nonce');nonce(pub['intent']['nonce'])
@@ -97,7 +100,7 @@ class InventoryState:
    self.names=set(os.listdir(self.root));need(self.names in ({'manifest.json'},{'manifest.json','control'}))
    self.file=StableFile('manifest.json',1048576,True,self.root);self.files.append(self.file)
    self.manifest=inventory_json(self.file.raw,1048576)
-   self.target=validate_inventory_manifest(self.manifest,req,os.fstat(self.root))
+   self.target=validate_inventory_manifest(self.manifest,req,os.fstat(self.root),self.names=={'manifest.json'})
    self.control=None;self.control_names=set()
    if 'control' in self.names:
     self.control=self.open('control',True,self.root);self.control_names=set(os.listdir(self.control))
@@ -116,7 +119,7 @@ class InventoryState:
   need(set(os.listdir(self.root))==self.names)
   if self.control is not None: need(set(os.listdir(self.control))==self.control_names)
   for file in self.files: file.check()
- resources=PrivateState.resources
+ def resources(self): return PrivateState.resources(self) if self.target else [dict(kind='workdir',name='/work/pgcopydb',owned=True,retain=True)]
  close=SourceState.close
 def inventory_source(session,state):
  p=state.manifest['clone_state']['plan'];follow=state.manifest['follow_state'];b=follow['binding']
@@ -129,13 +132,16 @@ def inventory_source(session,state):
  expected=[[t['source_oid'],t['name']['schema'],t['name']['table'],t['all_columns']] for t in sorted(p['tables'],key=lambda t:t['source_oid'])]
  exact_true(session.query("SELECT NOT EXISTS(SELECT 1 FROM @pg_publication WHERE pubname=$1::name) OR (count(*)<=4096 AND COALESCE(bool_and(p.rowfilter IS NULL AND NOT EXISTS(SELECT 1 FROM @pg_attribute a WHERE a.attrelid=p.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated<>'')),true) AND COALESCE(@jsonb_agg(@jsonb_build_array(p.oid,p.schemaname,p.tablename,p.attnames) ORDER BY p.oid),'[]'::jsonb)=$2::jsonb) FROM (SELECT c.oid,p.* FROM @pg_publication_tables p JOIN @pg_namespace n ON n.nspname=p.schemaname JOIN @pg_class c ON c.relnamespace=n.oid AND c.relname=p.tablename WHERE p.pubname=$1::name ORDER BY c.oid LIMIT 4097) p;",(pub['name'],json.dumps(expected,separators=(',',':')))))
  return pinned
+def inventory_absent(session,state):
+ run=state.req['execution']['work']['run_id'];session_role(session)
+ exact_true(session.query("SELECT NOT EXISTS(SELECT FROM @pg_replication_slots WHERE slot_name~$1)AND NOT EXISTS(SELECT FROM @pg_publication WHERE pubname~$1)AND NOT EXISTS(SELECT FROM @pg_namespace WHERE nspname=$2);",('^rpgm_[sp]_'+run+'_','_rpgmigrate_'+run)));return run
 def inventory_target(session,state):
  target=state.target;b=target['intent']['binding'];p=state.manifest['clone_state']['plan']
  session_role(session)
  rows=session.query("SELECT c.system_identifier::@text,d.oid,r.oid,u.oid,@pg_backend_pid(),@current_setting('server_version_num'),NOT @pg_is_in_recovery() AND @current_setting('fsync')='on' AND @current_setting('full_page_writes')='on' FROM @pg_control_system() c CROSS JOIN @pg_database d CROSS JOIN @pg_roles r CROSS JOIN @pg_roles u WHERE d.datname=@current_database() AND r.rolname=CURRENT_USER AND u.rolname=SESSION_USER;",width=7)
  need(len(rows)==1 and len(rows[0])==7,RESULT);values=[v.decode('ascii') if type(v) is bytes else '' for v in rows[0]]
  need(values[:2]==[str(b['target_system_identifier']),str(b['target_database_oid'])] and values[4]==str(session.backend) and decimal(values[5],189999,True)//10000==p['target']['major'] and values[6]=='t',CONN)
- decimal(values[2],(1<<32)-1,True);decimal(values[3],(1<<32)-1,True)
+ decimal(values[2],U32,True);decimal(values[3],U32,True)
  for marker in ((False,True,'large_object') if b['metadata_version']==7 else (False,True)):
   exact_true(session.query(catalog_sql(marker,p['target']['major'],b['metadata_version']),catalog_params(target,marker)))
  return values
@@ -148,9 +154,10 @@ def observe_inventory(state,library,mat,deadline,diag):
     remaining=int((deadline-time.monotonic())*1000);need(remaining>0,'timeout')
     session.query("SET %s TO '%dms';"%(setting,min(milliseconds,remaining)),tag='SET',rows=0,width=0)
    session.query('SET search_path TO pg_catalog;',tag='SET',rows=0,width=0)
-  pinned=(inventory_source(sessions[0],state),inventory_target(sessions[1],state))
+  src,tgt=(inventory_source,inventory_target) if state.target else (inventory_absent,)*2
+  pinned=(src(sessions[0],state),tgt(sessions[1],state))
   state.revalidate();mat.check();diag.check()
-  need((inventory_source(sessions[0],state),inventory_target(sessions[1],state))==pinned,CONN)
+  need((src(sessions[0],state),tgt(sessions[1],state))==pinned,CONN)
   state.revalidate();mat.check();diag.check()
   while sessions: sessions.pop().close()
  except BaseException:

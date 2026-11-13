@@ -56,9 +56,16 @@ def manifest(info, phase='analyzing', table=False):
     return req, value
 
 
+def unprovisioned(info):
+    # The record the 908ada6 engine leaves when it refuses before any creation intent.
+    req = request(); work = req['execution']['work']; run = list(bytes.fromhex(work['run_id']))
+    follow = dict.fromkeys('cleanup origin_name publication binding restart preliminary'.split())
+    return req, dict(magic='RPGMIGRATE', format_version=9, run=run, canonical_path='/work/pgcopydb', directory_device=info.st_dev, directory_inode=info.st_ino, copy_complete=None, target_provenance=[], source_slot=None, clone_state=None, follow_state=follow, operator=dict(migration_uid=work['migration_uid'], run=run, workdir_id=work['workdir_id'], checkpoint_generation=1))
+
+
 class PrivateTree:
-    def __init__(self, phase='analyzing', table=False, control=None):
-        self.phase, self.table, self.control = phase, table, control
+    def __init__(self, phase='analyzing', table=False, control=None, empty=False):
+        self.phase, self.table, self.control, self.empty = phase, table, control, empty
 
     def __enter__(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -66,7 +73,7 @@ class PrivateTree:
         self.parent.mkdir(mode=0o700)
         self.root = self.parent / 'pgcopydb'
         self.root.mkdir(mode=0o700)
-        self.req, self.value = manifest(self.root.stat(), self.phase, self.table)
+        self.req, self.value = (unprovisioned if self.empty else lambda info, *_: manifest(info, self.phase, self.table))(self.root.stat())
         self.write()
         if self.control is not None:
             control = self.root / 'control'
@@ -125,7 +132,7 @@ class InventoryPQ:
         return self.next
 
     def PQsetNoticeReceiver(self, conn, callback, _): self.callback[conn] = callback
-    def PQconnectPoll(self, conn): return 3
+    def PQconnectPoll(self, conn): return 0 if self.fault == self.roles[conn] + '-connect' else 3
     def PQsetnonblocking(self, conn, value): return 0
     def PQstatus(self, conn): return 0
     def PQtransactionStatus(self, conn): return 0
@@ -149,7 +156,7 @@ class InventoryPQ:
         self.queries.append((role, sql, [params[i] for i in range(count)]))
         if sql.startswith('SET '): result = dict(status=1, tag=b'SET', count=b'', rows=[], width=0)
         else:
-            if 'CURRENT_USER, SESSION_USER' in sql: rows = [[b'fixture', b'fixture', b'fixture', b'f']]
+            if 'CURRENT_USER, SESSION_USER' in sql: rows = [[b'other' if self.fault == role + '-role' else b'fixture', b'fixture', b'fixture', b'f']]
             elif 'pg_control_system' in sql:
                 if role == 'source': rows = [[b'123', b'11', b'1', b'160006', str(23 + conn).encode(), b'33', b'33', b't', b'off']]
                 else: rows = [[b'456', b'22', b'33', b'33', str(23 + conn).encode(), b'180006', b't']]
@@ -442,6 +449,69 @@ class InventoryTests(unittest.TestCase):
         for raw in (body.replace(b'"restart_count": 0', b'"restart_count": -0'), body[:-1] + b',"version":1}', body + b'{}'):
             with self.assertRaises(Exception): validate(raw, req['operation_id'], req['program_sha256'])
             with self.assertRaises(Exception): relay['strict_body'](raw, req['operation_id'])
+
+    def test_InventoryUnprovisioned(self):
+        validate = self.required('validate_inventory_manifest')
+        workdir = dict(kind='workdir', name='/work/pgcopydb', owned=True, retain=True)
+        with tempfile.TemporaryDirectory() as directory:
+            info = os.stat(directory); req, original = unprovisioned(info)
+            self.assertIsNone(validate(copy.deepcopy(original), req, info, True))
+            with self.assertRaises(SCOPE['Refusal']): validate(copy.deepcopy(original), req, info)
+            mutations = [
+                lambda m: m.update(copy_complete=dict(tables=0, rows=0, bytes=0)),
+                lambda m: m.update(target_provenance=[{}]),
+                lambda m: m.update(source_slot={}),
+                lambda m: m.update(clone_state={}),
+                lambda m: m.update(follow_state=None),
+                lambda m: m['follow_state'].update(extra=None),
+                lambda m: m['follow_state'].pop('restart'),
+                lambda m: m['operator'].update(workdir_id='foreign'),
+                lambda m: m['operator'].update(checkpoint_generation=2),
+                lambda m: m.update(run=[1] * 16),
+                lambda m: m.update(directory_inode=m['directory_inode'] + 1),
+                lambda m: m.update(format_version=7),
+                lambda m: m.update(canonical_path='/work/other'),
+                lambda m: m.update(extra=None),
+            ] + [lambda m, k=k: m['follow_state'].update({k: {}}) for k in ('cleanup', 'publication', 'binding', 'restart', 'preliminary')] + [lambda m: m['follow_state'].update(origin_name='external_origin')]
+            for index, mutate in enumerate(mutations):
+                value = copy.deepcopy(original); mutate(value)
+                with self.subTest(case=index), self.assertRaises(SCOPE['Refusal']): validate(value, req, info, True)
+        with PrivateTree(empty=True) as fixture:
+            state = SCOPE['InventoryState'](fixture.req)
+            self.assertIsNone(state.target); self.assertEqual(state.resources(), [workdir]); state.close()
+        for control in ({}, {'lock': b''}):
+            with PrivateTree(empty=True, control=control) as fixture:
+                with self.assertRaises(SCOPE['Refusal']): SCOPE['InventoryState'](fixture.req)
+        with PrivateTree(empty=True) as fixture:
+            (fixture.root / 'foreign').write_bytes(b'private')
+            with self.assertRaises(SCOPE['Refusal']): SCOPE['InventoryState'](fixture.req)
+        run = request()['execution']['work']['run_id']
+        for fault in (None, 'pg_replication_slots', 'pg_publication', 'pg_namespace', 'source-role', 'target-role', 'source-connect', 'target-connect', 'source-close', 'target-close', 'notice', 'unknown-commit', 'timeout'):
+            with self.subTest(fault=fault), PrivateTree(empty=True) as fixture:
+                state = SCOPE['InventoryState'](fixture.req); library, materials = InventoryPQ(fault), Materials()
+                deadline = time.monotonic() + (-1 if fault == 'timeout' else 5)
+                try:
+                    if fault is None:
+                        SCOPE['observe_inventory'](state, library, materials, deadline, types.SimpleNamespace(check=lambda: None))
+                        absent = [(role, params) for role, sql, params in library.queries if 'pg_namespace' in sql]
+                        self.assertEqual(absent, [(role, [('^rpgm_[sp]_' + run + '_').encode(), ('_rpgmigrate_' + run).encode()]) for role in ('source', 'target')] * 2)
+                        self.assertEqual(sum('CURRENT_USER, SESSION_USER' in sql for _, sql, _ in library.queries), 4)
+                        self.assertFalse(any('pg_control_system' in sql for _, sql, _ in library.queries))
+                        self.assertEqual(sorted(library.closed), ['source', 'target'])
+                    else:
+                        with self.assertRaises((SCOPE['Refusal'], OSError)): SCOPE['observe_inventory'](state, library, materials, deadline, types.SimpleNamespace(check=lambda: None))
+                    self.assertEqual(sorted(library.closed), sorted(materials.closes))
+                    for _, sql, _ in library.queries:
+                        self.assertTrue(sql.startswith(('SET ', 'SELECT ')))
+                finally: state.close()
+        relay = relay_scope(); req = request(); body = json.dumps(req).encode(); valid = result(req, body)
+        def envelope(resources):
+            value = copy.deepcopy(valid); value['resources'] = resources
+            return relay['result_envelope'](json.dumps(value).encode() + b'\n', body, req['operation_id'])
+        self.assertTrue(envelope([workdir]))
+        slot, publication, _ = valid['resources']; origin = dict(kind='replication_origin', name='external_origin', owned=False, retain=False)
+        for resources in ([], [slot], [publication], [origin], [workdir, slot], [workdir, origin], [workdir, workdir], [dict(workdir, owned=False)], [dict(workdir, retain=False)], [dict(workdir, name='/work/foreign')]):
+            with self.subTest(resources=resources), self.assertRaises(Exception): envelope(resources)
 
 
 if __name__ == '__main__':
