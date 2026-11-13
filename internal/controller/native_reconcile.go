@@ -286,6 +286,11 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 		r.stopSampling(key)
 		return r.reconcileNativeFollowCutover(ctx, m, worker, pvc, false)
 	}
+	if nativeWorkerStarting(worker) {
+		// Admission needs a running worker pod; the owned Job's status change wakes this pass.
+		logf.FromContext(ctx).V(1).Info("native worker pod is not ready yet", "job", worker.Name)
+		return ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
 	got, _, sampleErr := r.observeNativeProgress(ctx, m, worker, pvc)
 	if ctx.Err() != nil {
 		return ctrl.Result{}, native.ErrNativeControlUnavailable

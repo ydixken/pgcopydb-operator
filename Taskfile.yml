@@ -401,7 +401,8 @@ tasks:
       - sh: >-
           test {{.E2E_ENGINE | shellQuote}} = "$E2E_ENGINE" &&
           { { test "$E2E_ENGINE" = pgcopydb && test {{.LABEL | shellQuote}} = kind-bootstrap; } ||
-          { test "$E2E_ENGINE" = rpgmigrate && { test {{.LABEL | shellQuote}} = native || test {{.LABEL | shellQuote}} = native-fault; }; }; }
+          { test "$E2E_ENGINE" = rpgmigrate &&
+          { test {{.LABEL | shellQuote}} = native || test {{.LABEL | shellQuote}} = native-fault; }; }; }
         msg: The suite requires the guard-selected engine and that engine's own positive label.
       - sh: >-
           test -z {{.E2E_CONTEXT | default "" | shellQuote}} ||
