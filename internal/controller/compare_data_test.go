@@ -44,6 +44,9 @@ const (
 const (
 	stubRowcountDiffers = "STUB_DIFFERING=public.orders: source 338 rows (checksum a1), target 333 rows (checksum a1)"
 	stubCompareExit12   = "STUB_COMPARE_EXIT=12"
+	stubCompareFailure  = "compare data exited 12"
+	stubPsqlFail        = "STUB_PSQL_FAIL=1"
+	stubTargetEmpty     = "STUB_TARGET_EMPTY=t"
 )
 
 // The stand-in for the runner image's pgcopydb: it logs the case's lines,
@@ -171,12 +174,12 @@ func TestCompareDataScript_Verdict(t *testing.T) {
 			report:  reportMatching,
 			env:     []string{"STUB_PGCOPYDB_FAIL=1"},
 			code:    1,
-			wantLog: "compare data exited 12",
+			wantLog: stubCompareFailure,
 		},
 		{
 			name:    "the report cannot be evaluated",
 			report:  reportMatching,
-			env:     []string{"STUB_PSQL_FAIL=1"},
+			env:     []string{stubPsqlFail},
 			code:    1,
 			wantLog: "could not be evaluated",
 		},
@@ -216,11 +219,11 @@ func TestCompareDataScript_EmptyDatabases(t *testing.T) {
 		{"source inventory fails", []string{"STUB_EMPTY_SOURCE_FAIL=1"}, 1, "live database inventory failed"},
 		{"target inventory fails", []string{"STUB_EMPTY_TARGET_FAIL=1"}, 1, "live database inventory failed"},
 		{"inventory gives no verdict", []string{"STUB_SOURCE_EMPTY=unknown"}, 1, "cannot prove a match"},
-		{"compare fails on empty databases", []string{stubCompareExit12}, 1, "compare data exited 12"},
-		{"report evaluation fails", []string{"STUB_PSQL_FAIL=1"}, 1, "report could not be evaluated"},
+		{"compare fails on empty databases", []string{stubCompareExit12}, 1, stubCompareFailure},
+		{"report evaluation fails", []string{stubPsqlFail}, 1, "report could not be evaluated"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env := []string{"STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", "STUB_TARGET_EMPTY=t"}
+			env := []string{"STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", stubTargetEmpty}
 			out, code := runCompareScript(t, "[]", append(env, tc.env...)...)
 			if code != tc.code || !strings.Contains(out, tc.log) {
 				t.Fatalf("exit %d, want %d with %q:\n%s", code, tc.code, tc.log, out)
@@ -290,8 +293,8 @@ func TestCompareDataScript_ProgressStaysAtTheEnd(t *testing.T) {
 			stubRowcountDiffers,
 		}, 1, "did not find every table matching"},
 		// psql would pass this report, so only the kept status fails the check.
-		"compare data exits 12 after a matching report": {reportMatching, []string{stubCompareExit12}, 1, "compare data exited 12"},
-		"the report cannot be evaluated":                {reportMatching, []string{"STUB_PSQL_FAIL=1"}, 1, "could not be evaluated"},
+		"compare data exits 12 after a matching report": {reportMatching, []string{stubCompareExit12}, 1, stubCompareFailure},
+		"the report cannot be evaluated":                {reportMatching, []string{stubPsqlFail}, 1, "could not be evaluated"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out, code := runCompareScript(t, tc.report, append(tc.env, compareLog)...)

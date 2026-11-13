@@ -186,7 +186,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 		{
 			name:        "empty databases with publication-filtered WAL",
 			report:      "[]",
-			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", "STUB_TARGET_EMPTY=t"},
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=t", stubTargetEmpty},
 			code:        0,
 			wantLog:     "empty databases verified",
 			wantCompare: true,
@@ -194,7 +194,7 @@ func TestVerifyScript_Verdict(t *testing.T) {
 		{
 			name:        "an empty cached selection in a nonempty source",
 			report:      "[]",
-			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=f", "STUB_TARGET_EMPTY=t"},
+			env:         []string{"STUB_PROGRESS=0/92000000", "STUB_GAP=1477808", "STUB_DIFFERING=" + emptyCompareReportMessage, "STUB_SOURCE_EMPTY=f", stubTargetEmpty},
 			code:        1,
 			wantLog:     wantRefused,
 			wantCompare: true,
