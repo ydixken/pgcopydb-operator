@@ -12,6 +12,17 @@ set -euo pipefail
 # in the Job spec alone and the stages can also be run by hand from here.
 cd "$(dirname "$0")"
 
+# legacy.sql holds what the native engine refuses, so only the pgcopydb engine
+# seeds it. An unknown engine stops here rather than seeding the wrong shape.
+case "${SEED_ENGINE:-}" in
+    pgcopydb) legacy=on ;;
+    rpgmigrate) legacy=off ;;
+    *)
+        echo "seed: SEED_ENGINE must be pgcopydb or rpgmigrate" >&2
+        exit 2
+        ;;
+esac
+
 # stage runs one SQL file and prefixes its output, because the concurrent
 # stages share this pod's log and psql cannot label its own lines. The return
 # is psql's status, not sed's.
@@ -57,5 +68,11 @@ fi
 for p in "${pids[@]}"; do
     wait "$p"
 done
+
+# After the loads, so its indexes are built once like finish.sql's, and before
+# finish, whose VACUUM and marker must cover it.
+if [ "$legacy" = on ]; then
+    stage legacy
+fi
 
 stage finish

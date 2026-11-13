@@ -11,15 +11,10 @@
 -- it without superuser.
 CREATE EXTENSION IF NOT EXISTS citext;
 
--- Custom types: an enum, a domain, and a composite. CREATE TYPE/DOMAIN have
--- no IF NOT EXISTS, hence the exception wrappers.
+-- Custom types: an enum and a composite. CREATE TYPE has no IF NOT EXISTS,
+-- hence the exception wrappers. The e2e_percent domain is in legacy.sql.
 DO $$ BEGIN
     CREATE TYPE e2e_severity AS ENUM ('debug', 'info', 'warning', 'error', 'critical');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE DOMAIN e2e_percent AS numeric CHECK (VALUE >= 0 AND VALUE <= 100);
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
@@ -59,12 +54,13 @@ CREATE TABLE IF NOT EXISTS audit.access_log (
     occurred_at timestamptz NOT NULL
 );
 
--- citext, domain, arrays, jsonb, and an update trigger.
+-- citext, arrays, jsonb, and an update trigger. legacy.sql adds the UNIQUE
+-- on email and retypes quota_percent to its CHECK domain.
 CREATE TABLE IF NOT EXISTS app_users (
     id bigint PRIMARY KEY,
-    email citext NOT NULL UNIQUE,
+    email citext NOT NULL,
     display_name text NOT NULL,
-    quota_percent e2e_percent NOT NULL DEFAULT 100,
+    quota_percent numeric NOT NULL DEFAULT 100,
     tags text[] NOT NULL DEFAULT '{}',
     prefs jsonb NOT NULL DEFAULT '{}'::jsonb,
     updated_at timestamptz
@@ -112,8 +108,8 @@ CREATE TABLE IF NOT EXISTS events_2026_08 PARTITION OF events
     FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00');
 CREATE TABLE IF NOT EXISTS events_default PARTITION OF events DEFAULT;
 
--- Arrays, a generated STORED column, and a composite-typed column. Its partial
--- index is built after the load, in finish.sql.
+-- Arrays and a composite-typed column; legacy.sql adds a generated STORED
+-- column and a partial index.
 CREATE TABLE IF NOT EXISTS readings (
     id bigint PRIMARY KEY,
     sensor text NOT NULL,
@@ -121,7 +117,6 @@ CREATE TABLE IF NOT EXISTS readings (
     samples double precision[] NOT NULL,
     unit_price numeric(12,4) NOT NULL,
     quantity integer NOT NULL,
-    total_price numeric(14,4) GENERATED ALWAYS AS (unit_price * quantity) STORED,
     dimensions e2e_dimensions
 );
 
@@ -141,13 +136,6 @@ ALTER TABLE documents ALTER COLUMN attachment SET STORAGE EXTERNAL;
 -- Custom-start sequences; their state must survive the clone.
 CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 720001 INCREMENT BY 10;
 CREATE SEQUENCE IF NOT EXISTS ticket_number_seq START WITH 5000 INCREMENT BY 5 MINVALUE 5000;
-
--- Materialized view; created empty here, refreshed by seed.sql. pg_restore
--- re-populates it on the target with REFRESH, which is what the suite checks.
-CREATE MATERIALIZED VIEW IF NOT EXISTS event_daily_counts AS
-    SELECT occurred_at::date AS day, severity, count(*) AS n
-    FROM events
-    GROUP BY 1, 2;
 
 -- Seed bookkeeping. e2e_scaled is the one row-count formula shared with the
 -- Go suite (scaled() in e2e_suite_test.go); the two must stay in sync.

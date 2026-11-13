@@ -126,6 +126,17 @@ stages+=(seed_late)`
 
 func runFixtureScript(t *testing.T, tables, jobs string) string {
 	t.Helper()
+	staged, err := runFixtureScriptFor(t, "pgcopydb", tables, jobs)
+	if err != nil {
+		t.Fatalf("run.sh failed: %v\n%s", err, staged)
+	}
+	return staged
+}
+
+// runFixtureScriptFor runs run.sh for engine against a fake psql and returns
+// the stages it ran in order, or run.sh's output when it failed.
+func runFixtureScriptFor(t *testing.T, engine, tables, jobs string) (string, error) {
+	t.Helper()
 	tmp := t.TempDir()
 	log := filepath.Join(tmp, "psql.log")
 	psql := `#!/bin/sh
@@ -167,15 +178,51 @@ printf 'f\n'`
 		"SEED_EXTRA_TABLES="+tables,
 		"SEED_EXTRA_MB="+tables,
 		"SEED_EXTRA_JOBS="+jobs,
+		"SEED_ENGINE="+engine,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run.sh failed: %v\n%s", err, out)
+		return string(out), err
 	}
 	staged, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatalf("reading psql log: %v", err)
 	}
-	return string(staged)
+	return string(staged), nil
+}
+
+// TestRunShStagesLegacyOnlyForPgcopydb pins the engine split: legacy.sql runs
+// for pgcopydb alone, after every load and before finish, and an engine run.sh
+// does not know stops the seed before any stage.
+func TestRunShStagesLegacyOnlyForPgcopydb(t *testing.T) {
+	stagedFiles := func(log string) []string {
+		var files []string
+		for line := range strings.SplitSeq(strings.TrimSpace(log), "\n") {
+			files = append(files, strings.Fields(line)[0])
+		}
+		return files
+	}
+	legacy, err := runFixtureScriptFor(t, "pgcopydb", "0", "4")
+	if err != nil {
+		t.Fatalf("run.sh failed for pgcopydb: %v\n%s", err, legacy)
+	}
+	files := stagedFiles(legacy)
+	at := slices.Index(files, "legacy.sql")
+	if at < 0 || slices.Index(files, "finish.sql") != at+1 || slices.Index(files, "seed_small.sql") > at ||
+		slices.Index(files, "seed_events.sql") > at || slices.Index(files, "seed_documents.sql") > at {
+		t.Errorf("pgcopydb stages %v, want legacy.sql after every load and right before finish.sql", files)
+	}
+	native, err := runFixtureScriptFor(t, "rpgmigrate", "0", "4")
+	if err != nil {
+		t.Fatalf("run.sh failed for rpgmigrate: %v\n%s", err, native)
+	}
+	if files := stagedFiles(native); slices.Contains(files, "legacy.sql") || !slices.Contains(files, "finish.sql") {
+		t.Errorf("rpgmigrate stages %v, want every stage but legacy.sql", files)
+	}
+	for _, engine := range []string{"", "pgcopydb ", "native"} {
+		if out, err := runFixtureScriptFor(t, engine, "0", "4"); err == nil || !strings.Contains(out, "SEED_ENGINE must be") {
+			t.Errorf("SEED_ENGINE=%q seeded instead of stopping: %v\n%s", engine, err, out)
+		}
+	}
 }
 
 func TestRunShSkipsExtraConnectionsWithoutTables(t *testing.T) {
@@ -266,10 +313,34 @@ func TestSecondaryIndexesAreDeferred(t *testing.T) {
 		t.Error("schema.sql creates an index: secondary indexes belong in finish.sql, " +
 			"or the bulk loads pay for maintaining them per row")
 	}
-	finish := read(t, "finish.sql")
+	// legacy.sql runs after the loads too (TestRunShStagesLegacyOnlyForPgcopydb).
+	after := read(t, "finish.sql") + read(t, "legacy.sql")
 	for _, idx := range deferredIndexes {
-		if !strings.Contains(finish, idx) {
-			t.Errorf("finish.sql never creates %s", idx)
+		if !strings.Contains(after, "CREATE INDEX IF NOT EXISTS "+idx+" ") {
+			t.Errorf("neither finish.sql nor legacy.sql creates %s", idx)
+		}
+	}
+}
+
+// TestLegacyOnlyObjectsStayOutOfTheSharedFixture keeps every object the native
+// engine refuses in legacy.sql, so the native fixture never seeds one.
+func TestLegacyOnlyObjectsStayOutOfTheSharedFixture(t *testing.T) {
+	code := func(name string) string {
+		return regexp.MustCompile(`(?m)--.*$`).ReplaceAllString(read(t, name), "")
+	}
+	legacy := code("legacy.sql")
+	for _, marker := range []string{
+		"CREATE MATERIALIZED VIEW", "GENERATED ALWAYS AS (", "CREATE DOMAIN", "UNIQUE",
+		"(lower(", "WHERE quantity",
+	} {
+		if !strings.Contains(legacy, marker) {
+			t.Errorf("legacy.sql has no %q", marker)
+		}
+		for _, shared := range []string{"schema.sql", "finish.sql", "seed_small.sql", "seed_events.sql",
+			"seed_documents.sql", "seed_extra.sql", "prelude.sql"} {
+			if strings.Contains(code(shared), marker) {
+				t.Errorf("%s has %q, which the native engine refuses: it belongs in legacy.sql", shared, marker)
+			}
 		}
 	}
 }
@@ -277,7 +348,6 @@ func TestSecondaryIndexesAreDeferred(t *testing.T) {
 func TestFinishVacuumsBeforeStampingTheSeed(t *testing.T) {
 	finish := regexp.MustCompile(`(?m)--.*$`).ReplaceAllString(read(t, "finish.sql"), "")
 	steps := []string{
-		"REFRESH MATERIALIZED VIEW event_daily_counts;",
 		"VACUUM (ANALYZE);",
 		"BEGIN;",
 		"DELETE FROM e2e_seed;",

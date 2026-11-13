@@ -159,10 +159,19 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 			"source row counts do not match the scale formula; seed and suite disagree")
 		Expect(largeObjectCount(sourceCluster)).To(Equal(fmt.Sprint(scaled(40))))
 
+		By("checking both sides hold exactly the fixture objects this engine seeds")
+		want := seededFixtureObjects(selectedEngine())
+		Expect(fixtureObjects(sourceCluster)).To(Equal(want), "the source fixture is not the %s shape", selectedEngine())
+		Expect(fixtureObjects(targetCluster)).To(Equal(want), "the clone did not reproduce the fixture objects")
+
 		By("comparing table groups, matview, large objects, and sequences on both sides")
 		Expect(seedTableCounts(targetCluster)).To(Equal(seedTableCounts(sourceCluster)))
-		Expect(matviewState(targetCluster)).To(Equal(matviewState(sourceCluster)),
-			"materialized view not repopulated identically on the target")
+		if selectedEngine() == v1beta1.MigrationEnginePGCopyDB {
+			Expect(matviewState(sourceCluster)).To(MatchRegexp(`^true/[1-9][0-9]*$`),
+				"the source materialized view is unpopulated or empty")
+			Expect(matviewState(targetCluster)).To(Equal(matviewState(sourceCluster)),
+				"materialized view not repopulated identically on the target")
+		}
 		Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
 		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 	})
@@ -1476,6 +1485,50 @@ func matviewState(cluster string) string {
 	GinkgoHelper()
 	return psql(cluster, "SELECT ispopulated || '/' || (SELECT count(*) FROM event_daily_counts)"+
 		" FROM pg_matviews WHERE matviewname = 'event_daily_counts'")
+}
+
+// fixtureObjectSQL names, in a fixed order, which shared and legacy-only
+// (fixtures/legacy.sql) fixture objects exist. A missing fixture table errors.
+const fixtureObjectSQL = `SELECT concat_ws(',',
+ CASE WHEN EXISTS (SELECT FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+  WHERE a.attrelid = 'public.app_users'::regclass AND a.attname = 'email' AND t.typname = 'citext')
+  THEN 'citext-column' END,
+ CASE WHEN EXISTS (SELECT FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+  WHERE a.attrelid = 'public.readings'::regclass AND a.attname = 'dimensions'
+  AND t.typname = 'e2e_dimensions' AND t.typtype = 'c') THEN 'composite-column' END,
+ CASE WHEN EXISTS (SELECT FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
+  JOIN pg_constraint c ON c.contypid = t.oid WHERE a.attrelid = 'public.app_users'::regclass
+  AND a.attname = 'quota_percent' AND t.typname = 'e2e_percent' AND c.contype = 'c') THEN 'domain-check' END,
+ CASE WHEN EXISTS (SELECT FROM pg_constraint WHERE conrelid = 'public.app_users'::regclass
+  AND conname = 'app_users_email_key' AND contype = 'u') THEN 'citext-unique' END,
+ CASE WHEN EXISTS (SELECT FROM pg_attribute WHERE attrelid = 'public.readings'::regclass
+  AND attname = 'total_price' AND attgenerated = 's' AND NOT attisdropped) THEN 'generated-column' END,
+ CASE WHEN EXISTS (SELECT FROM pg_index WHERE indexrelid = to_regclass('public.app_users_name_lower_idx')
+  AND indrelid = 'public.app_users'::regclass AND indexprs IS NOT NULL) THEN 'expression-index-users' END,
+ CASE WHEN EXISTS (SELECT FROM pg_index WHERE indexrelid = to_regclass('public.documents_title_lower_idx')
+  AND indrelid = 'public.documents'::regclass AND indexprs IS NOT NULL) THEN 'expression-index-documents' END,
+ CASE WHEN EXISTS (SELECT FROM pg_index WHERE indexrelid = to_regclass('public.readings_recent_partial_idx')
+  AND indrelid = 'public.readings'::regclass AND indpred IS NOT NULL) THEN 'partial-index' END,
+ CASE WHEN EXISTS (SELECT FROM pg_matviews WHERE schemaname = 'public'
+  AND matviewname = 'event_daily_counts' AND ispopulated) THEN 'matview' END)`
+
+const (
+	nativeFixtureObjects = "citext-column,composite-column"
+	legacyFixtureObjects = nativeFixtureObjects + ",domain-check,citext-unique,generated-column," +
+		"expression-index-users,expression-index-documents,partial-index,matview"
+)
+
+func fixtureObjects(cluster string) string {
+	GinkgoHelper()
+	return psql(cluster, fixtureObjectSQL)
+}
+
+// seededFixtureObjects is fixtureObjects for a source the seed Job built for engine.
+func seededFixtureObjects(engine v1beta1.MigrationEngine) string {
+	if engine == v1beta1.MigrationEngineRPGMigrate {
+		return nativeFixtureObjects
+	}
+	return legacyFixtureObjects
 }
 
 // largeObjectCount counts large objects; pg_largeobject_metadata is
