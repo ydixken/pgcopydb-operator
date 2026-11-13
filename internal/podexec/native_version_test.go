@@ -335,7 +335,9 @@ func testNativeOutputFinalRead(t *testing.T) {
 			s.pod.Spec.Containers[0].Env[0].Value = nativeFixtureOther
 			s.job.Spec.Template.Spec.Containers[0].Env[0].Value = nativeFixtureOther
 		}},
-		{"pod status", func(s *nativeAPI) { s.pod.Status.Message = nativeFixtureWrong }},
+		{"phase", func(s *nativeAPI) { s.pod.Status.Phase = corev1.PodFailed }},
+		{"terminated message", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.Message = nativeFixtureWrong }},
+		{"terminated finish time", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.Unix(1, 0) }},
 		{"job status", func(s *nativeAPI) { s.job.Status.CompletedIndexes = "0" }},
 		{"container id", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].ContainerID = nativeFixtureOther }},
 		{"later restart", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].RestartCount = 1 }},
@@ -355,6 +357,17 @@ func testNativeOutputFinalRead(t *testing.T) {
 			}
 		})
 	}
+	t.Run("captured kubelet drift", func(t *testing.T) {
+		s, want := newNativeOutputAPI(t)
+		s.stdout = []byte("{\"result\":true}\n")
+		before, after := withCapturedDrift(t, &s.pod)
+		s.pod.Status = before.Status
+		s.after = func(s *nativeAPI) { s.pod.Status = after.Status }
+		out, err := nativeVersionCall(t, newExec(t, s.URL))(context.Background(), "ns", nativeFixtureJobUID, want)
+		if err != nil || !out.Successful() || string(out.Payload()) != string(s.stdout) || s.after != nil {
+			t.Fatalf("successful=%v drift applied=%v error=%v", out.Successful(), s.after == nil, err)
+		}
+	})
 }
 
 type nativeLogRoundTripper struct {

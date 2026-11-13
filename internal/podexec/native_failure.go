@@ -32,7 +32,7 @@ func (e *Exec) JobFailureNative(ctx context.Context, namespace string, jobUID ty
 		return NativeOutcome{}, errNativeTransport
 	}
 	after, err := e.nativeOutputIncarnation(ctx, namespace, jobUID, want)
-	if err != nil || !before.same(after) || !after.failureOutputBinding(want) || !reflect.DeepEqual(before.pod.Status, after.pod.Status) || !reflect.DeepEqual(before.job.Status, after.job.Status) || ctx.Err() != nil {
+	if err != nil || !before.same(after) || !after.failureOutputBinding(want) || !SamePodState(before.pod, after.pod, want.ContainerName) || !reflect.DeepEqual(before.job.Status, after.job.Status) || ctx.Err() != nil {
 		return NativeOutcome{}, errNativeTransport
 	}
 	return NativeOutcome{payload: payload, successful: true}, nil
