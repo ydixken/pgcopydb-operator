@@ -172,7 +172,7 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 			}
 			out, err := psqlDBErr(sourceCluster, appDatabase(sourceCluster),
 				"SELECT count(*) FROM pg_replication_slots WHERE NOT active AND starts_with(slot_name, "+
-					sqlLiteral("rpgm_s_"+c.run+"_")+")")
+					sqlLiteral(nativeSlotPrefix(c.run))+")")
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(out).To(Equal("1"), "the owned slot is gone or still streaming")
 			out, err = psqlDBErr(c.target, appDatabase(c.target), nativeFaultSessionSQL)

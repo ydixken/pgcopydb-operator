@@ -40,6 +40,9 @@ func nativeFaultRunID(uid types.UID) (string, error) {
 	return strings.ReplaceAll(string(uid), "-", ""), nil
 }
 
+// nativeSlotPrefix starts the name of every replication slot the native engine creates for run.
+func nativeSlotPrefix(run string) string { return "rpgm_s_" + run + "_" }
+
 // nativeFaultOutcome is the invariant every fault ends in: Completed with the cutover
 // done and the owned slot dropped (resumed), or Failed claiming nothing done while the
 // owned slot still holds the unapplied WAL (failed closed).

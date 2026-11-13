@@ -66,7 +66,7 @@ echo "killed $n"
 
 var (
 	nativeFaultContainerID  = regexp.MustCompile(`^containerd://([0-9a-f]{64})$`)
-	nativeFaultForeignSlots = []string{nativeFaultForeignName, "rpgm_s_" + nativeFaultDecoyRun + "_1"}
+	nativeFaultForeignSlots = []string{nativeFaultForeignName, nativeSlotPrefix(nativeFaultDecoyRun) + "1"}
 	nativeFaultForeignPubs  = []string{nativeFaultForeignName, "rpgm_p_" + nativeFaultDecoyRun + "_1"}
 )
 
@@ -148,7 +148,7 @@ func startNativeFault(name, target string, configure func(*v1beta1.Migration)) *
 func (c *nativeFaultCase) ownedSlots() int {
 	GinkgoHelper()
 	return psqlInt(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE starts_with(slot_name, "+
-		sqlLiteral("rpgm_s_"+c.run+"_")+")")
+		sqlLiteral(nativeSlotPrefix(c.run))+")")
 }
 
 func (c *nativeFaultCase) ownedPublications() int {
