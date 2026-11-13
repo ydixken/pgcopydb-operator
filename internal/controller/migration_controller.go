@@ -174,7 +174,7 @@ type MigrationReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create;get
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
 // Reconcile drives one Migration toward completion. A residual write conflict
