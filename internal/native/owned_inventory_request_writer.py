@@ -13,9 +13,9 @@ def strict_body(r,o):
  e=v['execution'];c=v['container'];w=e['work']
  ik(e,'namespace migration_name pvc_name job_name migration_uid pvc_uid job_uid worker_job_uid migration_generation attempt role work image_ref platform_image_id template_sha256 connection_reference_sha256')
  ik(c,'pod_uid container_name container_id restart_count image_id template_sha256');ik(w,'migration_uid run_id workdir_id checkpoint_generation')
- for d,skip in ((e,('work','attempt','migration_generation')),(c,('restart_count',)),(w,('checkpoint_generation',))):
+ for d,s in ((e,('work','attempt','migration_generation')),(c,('restart_count',)),(w,('checkpoint_generation',))):
   for k in d:
-   if k not in skip:ix(d[k])
+   if k not in s:ix(d[k])
  for k in ('attempt','migration_generation'):need(type(e[k])is int and e[k]>0)
  need(e['role']=='cleanup' and e['job_uid']!=e['worker_job_uid'] and type(c['restart_count'])is int and c['restart_count']==0 and type(w['checkpoint_generation'])is int and w['checkpoint_generation']==1);ix(v['pod_name']);return v
 def result_envelope(r,b,o):
@@ -24,9 +24,9 @@ def result_envelope(r,b,o):
  iv(v,o);need(v['program_sha256']==q['program_sha256'])
  h=hashlib.sha256(b).digest();need(v['request_sha256']==h.hex()and v['execution_sha256']==hashlib.sha256(b'rpgmigrate.native.execution.v1\0'+h).hexdigest()and json.dumps(v['work'],sort_keys=True)==json.dumps(q['execution']['work'],sort_keys=True))
  for k in 'source_closed target_closed materialization_closed private_closed diagnostics_clean'.split():need(v[k]is True)
- a=v['resources'];need(type(a)is list and len(a)in(3,4));seen=set()
+ a=v['resources'];need(type(a)is list and len(a)in(3,4));s=set()
  for x in a:
-  ik(x,'kind name owned retain');k=x['kind'];ix(x['name']);need(k not in seen);seen.add(k)
+  ik(x,'kind name owned retain');k=x['kind'];ix(x['name']);need(k not in s);s.add(k)
   need(k in('replication_slot','publication','workdir','replication_origin')and x['owned']is(k!='replication_origin')and x['retain']is(k=='workdir'))
   need(x['name']=='/work/pgcopydb'if k=='workdir'else len(x['name'].encode())<=63)
- need({'replication_slot','publication','workdir'}<=seen);return True
+ need({'replication_slot','publication','workdir'}<=s);return True
