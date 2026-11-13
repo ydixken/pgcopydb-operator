@@ -380,8 +380,8 @@ func admittedPodSpec(spec *corev1.PodSpec, image string) bool {
 	if !admittedPodIsolation(spec) {
 		return false
 	}
-	uid, nonroot, deny, readonly := int64(65532), true, false, true
-	podSecurity := &corev1.PodSecurityContext{RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
+	uid, nonroot, deny, readonly, fsPolicy := int64(65532), true, false, true, corev1.FSGroupChangeOnRootMismatch
+	podSecurity := &corev1.PodSecurityContext{RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, FSGroupChangePolicy: &fsPolicy, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
 	containerSecurity := &corev1.SecurityContext{AllowPrivilegeEscalation: &deny, ReadOnlyRootFilesystem: &readonly, Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}
 	c := spec.Containers[0]
 	if !reflect.DeepEqual(spec.SecurityContext, podSecurity) || !reflect.DeepEqual(c.SecurityContext, containerSecurity) || c.Name != nativeContainerName || c.Image != image || len(c.EnvFrom) != 0 || len(c.VolumeDevices) != 0 || c.Lifecycle != nil || c.LivenessProbe != nil || c.ReadinessProbe != nil || c.StartupProbe != nil || c.Stdin || c.TTY {

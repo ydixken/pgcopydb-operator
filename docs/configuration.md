@@ -190,8 +190,13 @@ A setgid, group-writable root such as `root:65532` with mode `2775` passes.
 We give only the root this leeway, because the volume driver and kubelet own it.
 Everything below it, from `/work/pgcopydb` down, must be owned by uid 65532, with directories at mode `0700` and files at mode `0600`.
 
+Every native Job pod sets `fsGroupChangePolicy: OnRootMismatch`, and native admission refuses a work-volume pod without it.
+On a volume whose driver applies `fsGroup`, the default policy makes kubelet add group permissions to every file each time a Pod mounts it.
+`/work/pgcopydb` would then lose mode `0700`, and the native helpers would refuse it.
+With `OnRootMismatch`, kubelet changes permissions only while the volume root does not yet match the `fsGroup`.
+
 > [!warning]
-> On a volume whose driver applies `fsGroup`, the default `fsGroupChangePolicy` makes kubelet add group permissions to every file on the volume each time a Pod mounts it.
+> A CSI driver that applies `fsGroup` itself, through the `VOLUME_MOUNT_GROUP` node capability, does not follow `fsGroupChangePolicy` and can still change permissions on every mount.
 > The native helpers then refuse `/work/pgcopydb`, because its mode is no longer `0700`.
 
 ### Which node the Jobs prefer

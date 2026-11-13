@@ -228,8 +228,8 @@ func assertNativeEvidencePodIsolation(t *testing.T, spec corev1.PodSpec) {
 
 func assertNativeEvidencePodSecurity(t *testing.T, spec corev1.PodSpec) {
 	t.Helper()
-	uid, nonroot := int64(65532), true
-	security := &corev1.PodSecurityContext{RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
+	uid, nonroot, policy := int64(65532), true, corev1.FSGroupChangeOnRootMismatch
+	security := &corev1.PodSecurityContext{RunAsNonRoot: &nonroot, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid, FSGroupChangePolicy: &policy, SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}
 	if !reflect.DeepEqual(spec.SecurityContext, security) {
 		t.Fatal("evidence helper changed native pod security")
 	}
