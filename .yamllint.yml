@@ -12,6 +12,8 @@ ignore:
   # Helm templates carry Go template syntax and are not plain YAML;
   # `helm lint` covers them instead.
   - charts/*/templates/
+  # Byte-identical to the pinned kind node image's manifest; e2e-kind.py seals its sha256.
+  - test/e2e/kind/default-storage.yaml
 
 rules:
   document-start:
