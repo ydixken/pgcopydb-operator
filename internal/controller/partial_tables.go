@@ -45,7 +45,7 @@ func validatePartialTables(m *v1beta1.Migration) error {
 		return nil
 	}
 	f := m.Spec.Follow
-	if !f.Enabled || (f.Plugin != "" && f.Plugin != "pgoutput") || f.Publication != "" || f.SlotName != "" ||
+	if !f.Enabled || (f.Plugin != "" && f.Plugin != v1beta1.PluginPGOutput) || f.Publication != "" || f.SlotName != "" ||
 		m.Spec.Clone.AllDatabases || (m.Spec.Engine != "" && m.Spec.Engine != v1beta1.MigrationEnginePGCopyDB) {
 		return fmt.Errorf("partial table policies require single-database pgcopydb pgoutput follow with an operator-managed slot and publication")
 	}
@@ -62,7 +62,7 @@ func validatePartialSelection(f *v1beta1.FollowOptions) error {
 	seen := map[string]bool{}
 	for _, table := range f.UnloggedTables {
 		if !exactTable.MatchString(table.Table) || seen[table.Table] ||
-			(table.Mode != "SchemaOnly" && table.Mode != "CopyOnce") {
+			(table.Mode != v1beta1.UnloggedSchemaOnly && table.Mode != v1beta1.UnloggedCopyOnce) {
 			return fmt.Errorf("unloggedTables needs unique exact lowercase schema.table names and modes SchemaOnly or CopyOnce")
 		}
 		seen[table.Table] = true
@@ -97,7 +97,7 @@ func validatePartialFilters(m *v1beta1.Migration) error {
 			}
 		}
 		for _, table := range f.UnloggedTables {
-			if table.Mode == "CopyOnce" && slices.Contains(filters.ExcludeTableData, table.Table) {
+			if table.Mode == v1beta1.UnloggedCopyOnce && slices.Contains(filters.ExcludeTableData, table.Table) {
 				return fmt.Errorf("CopyOnce conflicts with excludeTableData for %s", table.Table)
 			}
 		}
@@ -331,7 +331,7 @@ func dataComparisonStrict(m *v1beta1.Migration) string {
 }
 
 func unloggedPolicyMessage(m *v1beta1.Migration) string {
-	var entries []string
+	entries := make([]string, 0, len(m.Spec.Follow.UnloggedTables)+len(m.Spec.Follow.InsertOnlyTables))
 	for _, table := range m.Spec.Follow.UnloggedTables {
 		entries = append(entries, table.Table+" ("+table.Mode+")")
 	}

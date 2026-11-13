@@ -29,7 +29,7 @@ func TestPartialTableFilters(t *testing.T) {
 	const empty, once, inserts, full = "app.locks", "app.cache", "app.events", "app.items"
 	spec := &v1beta1.MigrationSpec{Follow: &v1beta1.FollowOptions{
 		Enabled:          true,
-		UnloggedTables:   []v1beta1.UnloggedTable{{Table: empty, Mode: "SchemaOnly"}, {Table: once, Mode: "CopyOnce"}},
+		UnloggedTables:   []v1beta1.UnloggedTable{{Table: empty, Mode: v1beta1.UnloggedSchemaOnly}, {Table: once, Mode: v1beta1.UnloggedCopyOnce}},
 		InsertOnlyTables: []string{inserts},
 	}}
 	for _, include := range []bool{false, true} {
@@ -62,7 +62,7 @@ func TestPartialTablePublicationArguments(t *testing.T) {
 	if names := ManagedPublications(spec, "ns", "migration"); names != nil {
 		t.Fatal(names)
 	}
-	spec.Follow.UnloggedTables = []v1beta1.UnloggedTable{{Table: "app.cache", Mode: "CopyOnce"}}
+	spec.Follow.UnloggedTables = []v1beta1.UnloggedTable{{Table: "app.cache", Mode: v1beta1.UnloggedCopyOnce}}
 	names := ManagedPublications(spec, "ns", strings.Repeat("x", 200))
 	if len(names) != 1 {
 		t.Fatal(names)
@@ -82,7 +82,7 @@ func TestPartialTablePublicationArguments(t *testing.T) {
 		t.Fatal(args)
 	}
 	spec.Clone.Filters = nil
-	spec.Follow.UnloggedTables[0].Mode = "SchemaOnly"
+	spec.Follow.UnloggedTables[0].Mode = v1beta1.UnloggedSchemaOnly
 	if !slices.Contains(CloneArgs(spec, true, false, false), "--filters") {
 		t.Fatal("SchemaOnly needs an INI even without user filters")
 	}

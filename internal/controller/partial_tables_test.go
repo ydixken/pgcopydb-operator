@@ -26,7 +26,10 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 )
+
+const partialEventsTable = "partial_policy.events"
 
 func partialTableMigration() *v1beta1.Migration {
 	m := passwordMigration()
@@ -34,10 +37,10 @@ func partialTableMigration() *v1beta1.Migration {
 	m.Spec.Follow = &v1beta1.FollowOptions{
 		Enabled: true,
 		UnloggedTables: []v1beta1.UnloggedTable{
-			{Table: "partial_policy.empty", Mode: "SchemaOnly"},
-			{Table: "partial_policy.cache", Mode: "CopyOnce"},
+			{Table: "partial_policy.empty", Mode: v1beta1.UnloggedSchemaOnly},
+			{Table: "partial_policy.cache", Mode: v1beta1.UnloggedCopyOnce},
 		},
-		InsertOnlyTables: []string{"partial_policy.events"},
+		InsertOnlyTables: []string{partialEventsTable},
 	}
 	m.Spec.Clone.Filters = &v1beta1.Filters{IncludeOnlySchemas: []string{"partial_policy"}}
 	return m
@@ -49,19 +52,19 @@ func TestPartialTableValidation(t *testing.T) {
 		change func(*v1beta1.Migration)
 	}{
 		{"disabled follow", func(m *v1beta1.Migration) { m.Spec.Follow.Enabled = false }},
-		{"wal2json", func(m *v1beta1.Migration) { m.Spec.Follow.Plugin = "wal2json" }},
-		{"foreign publication", func(m *v1beta1.Migration) { m.Spec.Follow.Publication = "other" }},
-		{"custom slot", func(m *v1beta1.Migration) { m.Spec.Follow.SlotName = "other" }},
+		{v1beta1.PluginWal2json, func(m *v1beta1.Migration) { m.Spec.Follow.Plugin = v1beta1.PluginWal2json }},
+		{"foreign publication", func(m *v1beta1.Migration) { m.Spec.Follow.Publication = "foreign_publication" }},
+		{"custom slot", func(m *v1beta1.Migration) { m.Spec.Follow.SlotName = "foreign_slot" }},
 		{"invalid mode", func(m *v1beta1.Migration) { m.Spec.Follow.UnloggedTables[0].Mode = "Ignore" }},
 		{"pattern", func(m *v1beta1.Migration) { m.Spec.Follow.UnloggedTables[0].Table = "~/x/.y" }},
 		{"overlap", func(m *v1beta1.Migration) { m.Spec.Follow.InsertOnlyTables[0] = m.Spec.Follow.UnloggedTables[0].Table }},
 		{"ambiguous filters", func(m *v1beta1.Migration) { m.Spec.Clone.Filters.IncludeOnlySchemas = []string{"~/x/"} }},
 		{"no fully followed table", func(m *v1beta1.Migration) {
-			m.Spec.Clone.Filters.IncludeOnlyTables = []string{"partial_policy.events"}
+			m.Spec.Clone.Filters.IncludeOnlyTables = []string{partialEventsTable}
 		}},
 		{"skipped insert-only data", func(m *v1beta1.Migration) {
 			m.Spec.Follow.UnloggedTables = nil
-			m.Spec.Clone.Filters.ExcludeTableData = []string{"partial_policy.events"}
+			m.Spec.Clone.Filters.ExcludeTableData = []string{partialEventsTable}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,9 +131,9 @@ func TestInsertOnlyDrainRequiresExactOrigin(t *testing.T) {
 		name, endpos, progress, gap, want string
 		code                              int
 	}{
-		{"exact nonzero origin", "0/100", "0/100", "0", "drain verified: origin progress", 0},
-		{"partial checksums cannot prove missing inserts", "0/100", "0/80", "128", "drain unproven: INSERT-only", 1},
-		{"zero positions prove nothing", "0/0", "0/0", "0", "drain unproven: INSERT-only", 1},
+		{"exact nonzero origin", caughtUpLSN, caughtUpLSN, "0", "drain verified: origin progress", 0},
+		{"partial checksums cannot prove missing inserts", caughtUpLSN, "0/80", "128", "drain unproven: INSERT-only", 1},
+		{"zero positions prove nothing", sentinel.ZeroLSN, sentinel.ZeroLSN, "0", "drain unproven: INSERT-only", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, code := runMigrationVerifyScript(t, partialTableMigration(), "", reportMatching,
@@ -144,6 +147,7 @@ func TestInsertOnlyDrainRequiresExactOrigin(t *testing.T) {
 }
 
 func TestPartialTablePolicyQueries(t *testing.T) {
+	const expectedOrdinary = "expected an included ordinary"
 	uri := os.Getenv("PGCOPYDB_TEST_PGURI")
 	if uri == "" {
 		t.Fatal("set PGCOPYDB_TEST_PGURI to a disposable PostgreSQL instance")
@@ -159,15 +163,15 @@ CREATE UNLOGGED TABLE partial_policy.cache (id int);
 		change            func(*v1beta1.Migration)
 	}{
 		{"both modes and insert-only", "", "", func(*v1beta1.Migration) {}},
-		{"missing table", "", "expected an included ordinary", func(m *v1beta1.Migration) {
+		{"missing table", "", expectedOrdinary, func(m *v1beta1.Migration) {
 			m.Spec.Follow.UnloggedTables[0].Table = "partial_policy.missing"
 		}},
-		{"logged table mislabeled", "", "expected an included ordinary", func(m *v1beta1.Migration) {
+		{"logged table mislabeled", "", expectedOrdinary, func(m *v1beta1.Migration) {
 			m.Spec.Follow.UnloggedTables[0].Table = "partial_policy.items"
 		}},
 		{"other publication rejects source updates", "CREATE PUBLICATION partial_other FOR TABLE partial_policy.events;",
 			"still publishes UPDATE or DELETE", func(*v1beta1.Migration) {}},
-		{"insert-only table is unlogged", "", "expected an included ordinary", func(m *v1beta1.Migration) {
+		{"insert-only table is unlogged", "", expectedOrdinary, func(m *v1beta1.Migration) {
 			m.Spec.Follow.InsertOnlyTables[0] = "partial_policy.empty"
 		}},
 		{"no comparable fully followed table", "", "at least one LOGGED table", func(m *v1beta1.Migration) {

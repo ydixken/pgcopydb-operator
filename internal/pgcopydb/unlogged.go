@@ -32,15 +32,15 @@ func CloneFilters(spec *v1beta1.MigrationSpec) *v1beta1.Filters {
 		f = &v1beta1.Filters{}
 	}
 	for _, table := range spec.Follow.UnloggedTables {
-		if table.Mode == "SchemaOnly" && !slices.Contains(f.ExcludeTableData, table.Table) {
+		if table.Mode == v1beta1.UnloggedSchemaOnly && !slices.Contains(f.ExcludeTableData, table.Table) {
 			f.ExcludeTableData = append(f.ExcludeTableData, table.Table)
 		}
 	}
 	return f
 }
 
-// DataFilters excludes opted-in tables from live content comparisons. Admission
-// and the worker builder reject a selection with no remaining included table.
+// DataFilters excludes opted-in tables from live content comparisons. Worker
+// validation rejects a selection with no remaining included table.
 func DataFilters(spec *v1beta1.MigrationSpec) *v1beta1.Filters {
 	f := CloneFilters(spec)
 	if spec.Follow == nil || (len(spec.Follow.UnloggedTables) == 0 && len(spec.Follow.InsertOnlyTables) == 0) {

@@ -359,6 +359,9 @@ type RunnerSpec struct {
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 }
 
+// PluginPGOutput names PostgreSQL's built-in logical decoding plugin.
+const PluginPGOutput = "pgoutput"
+
 // PluginWal2json is the one decoding plugin the operator special-cases: it
 // ships outside PostgreSQL, so it carries both the preflight's cannot-verify
 // note and the numeric-as-string knob.
@@ -450,6 +453,12 @@ type FollowOptions struct {
 	// +optional
 	MaxCatchupLag *resource.Quantity `json:"maxCatchupLag,omitempty"`
 }
+
+// UnloggedSchemaOnly and UnloggedCopyOnce select the initial copy scope.
+const (
+	UnloggedSchemaOnly = "SchemaOnly"
+	UnloggedCopyOnce   = "CopyOnce"
+)
 
 // UnloggedTable selects one table that has no change stream.
 type UnloggedTable struct {

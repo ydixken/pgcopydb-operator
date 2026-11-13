@@ -46,7 +46,7 @@ var _ = Describe("Explicit partial table policies", SpecPriority(2), func() {
 			" VALUES (1, 'discard'); INSERT INTO "+once+" VALUES (1, 'initial')")
 		m.Spec.Clone.Filters.IncludeOnlyTables = []string{full, empty, once}
 		m.Spec.Follow.UnloggedTables = []v1beta1.UnloggedTable{
-			{Table: empty, Mode: "SchemaOnly"}, {Table: once, Mode: "CopyOnce"},
+			{Table: empty, Mode: v1beta1.UnloggedSchemaOnly}, {Table: once, Mode: v1beta1.UnloggedCopyOnce},
 		}
 		m.Spec.Verification = &v1beta1.VerificationOptions{Schema: true, Data: true}
 		create(m)
