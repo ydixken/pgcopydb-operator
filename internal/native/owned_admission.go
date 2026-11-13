@@ -196,11 +196,26 @@ func (a *ownedAdmission) same(b *ownedAdmission) bool {
 	if a == nil || b == nil || !a.helper.sameExecution(b.helper) {
 		return false
 	}
-	for _, pair := range [][2]metav1.Object{{a.helper.migration, b.helper.migration}, {a.helper.pvc, b.helper.pvc}, {a.helper.job, b.helper.job}, {a.helper.worker, b.helper.worker}, {a.helper.pod, b.helper.pod}, {a.workerPod, b.workerPod}} {
-		x, y := pair[0], pair[1]
-		if x.GetNamespace() != y.GetNamespace() || x.GetName() != y.GetName() || x.GetUID() != y.GetUID() || x.GetGeneration() != y.GetGeneration() || !reflect.DeepEqual(x.GetDeletionTimestamp(), y.GetDeletionTimestamp()) || !reflect.DeepEqual(x.GetDeletionGracePeriodSeconds(), y.GetDeletionGracePeriodSeconds()) || !slices.Equal(x.GetFinalizers(), y.GetFinalizers()) || !reflect.DeepEqual(x.GetOwnerReferences(), y.GetOwnerReferences()) || !reflect.DeepEqual(x.GetLabels(), y.GetLabels()) || !reflect.DeepEqual(x.GetAnnotations(), y.GetAnnotations()) {
+	for _, pair := range []struct {
+		x, y metav1.Object
+		job  *batchv1.Job
+	}{{a.helper.migration, b.helper.migration, nil}, {a.helper.pvc, b.helper.pvc, nil}, {a.helper.job, b.helper.job, nil}, {a.helper.worker, b.helper.worker, nil}, {a.helper.pod, b.helper.pod, b.helper.job}, {a.workerPod, b.workerPod, b.helper.worker}} {
+		x, y := pair.x, pair.y
+		if x.GetNamespace() != y.GetNamespace() || x.GetName() != y.GetName() || x.GetUID() != y.GetUID() || x.GetGeneration() != y.GetGeneration() || !reflect.DeepEqual(x.GetDeletionTimestamp(), y.GetDeletionTimestamp()) || !reflect.DeepEqual(x.GetDeletionGracePeriodSeconds(), y.GetDeletionGracePeriodSeconds()) || !finalizersHeld(x, y, pair.job) || !reflect.DeepEqual(x.GetOwnerReferences(), y.GetOwnerReferences()) || !reflect.DeepEqual(x.GetLabels(), y.GetLabels()) || !reflect.DeepEqual(x.GetAnnotations(), y.GetAnnotations()) {
 			return false
 		}
 	}
 	return reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.pvc.Status, b.helper.pvc.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && reflect.DeepEqual(a.workerPod.Status, b.workerPod.Status)
+}
+
+// finalizersHeld admits one drift only: the Job controller dropping its tracking
+// finalizer from a pod it controls once that pod has ended.
+func finalizersHeld(before, after metav1.Object, job *batchv1.Job) bool {
+	was, now := before.GetFinalizers(), after.GetFinalizers()
+	if slices.Equal(was, now) {
+		return true
+	}
+	pod, ok := after.(*corev1.Pod)
+	kept := slices.DeleteFunc(slices.Clone(was), func(f string) bool { return f == batchv1.JobTrackingFinalizer })
+	return ok && job != nil && (pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed) && slices.Equal(kept, now) && metav1.IsControlledBy(before, job) && metav1.IsControlledBy(after, job)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +268,161 @@ func ownedAdmissionBoundaries(t *testing.T) {
 		if got, err := r.ReadOwnedState(context.Background(), w); err == nil || got.Resources() != nil || a.writerCalls != 0 {
 			t.Fatal("partial census admitted inventory")
 		}
+	})
+}
+
+const ownedForeignFinalizer = "example.invalid/hold"
+
+func cloneOwnedAdmission(a *ownedAdmission) *ownedAdmission {
+	h := *a.helper
+	h.migration, h.pvc, h.job, h.worker, h.pod = a.helper.migration.DeepCopy(), a.helper.pvc.DeepCopy(), a.helper.job.DeepCopy(), a.helper.worker.DeepCopy(), a.helper.pod.DeepCopy()
+	return &ownedAdmission{helper: &h, workerPod: a.workerPod.DeepCopy()}
+}
+
+func TestNativeOwnedJobTrackingRelease(t *testing.T) {
+	f := newOwnedFixture(t)
+	base, err := validateOwnedObjects(f.want, f.base.m, f.base.pvc, f.base.job, f.base.worker, f.base.pod, f.workerPod, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracking := batchv1.JobTrackingFinalizer
+	ended := func(b *ownedAdmission) { b.helper.pod.Status.Phase = corev1.PodSucceeded }
+	for _, tc := range []struct {
+		name     string
+		edit     func(a, b *ownedAdmission)
+		admitted bool
+	}{
+		{"unchanged", func(a, b *ownedAdmission) {}, true},
+		{"helper_released", func(a, b *ownedAdmission) { a.helper.pod.Finalizers = []string{tracking}; ended(b) }, true},
+		{"helper_released_after_failure", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{tracking}
+			b.helper.pod.Status.Phase = corev1.PodFailed
+		}, true},
+		{"helper_released_others_kept", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{ownedForeignFinalizer, tracking, "example.invalid/other"}
+			b.helper.pod.Finalizers = []string{ownedForeignFinalizer, "example.invalid/other"}
+			ended(b)
+		}, true},
+		{"worker_released", func(a, b *ownedAdmission) { a.workerPod.Finalizers = []string{tracking} }, true},
+		{"helper_released_while_running", func(a, b *ownedAdmission) { a.helper.pod.Finalizers = []string{tracking} }, false},
+		{"helper_foreign_added", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{tracking}
+			b.helper.pod.Finalizers = []string{tracking, ownedForeignFinalizer}
+			ended(b)
+		}, false},
+		{"helper_foreign_added_with_release", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{tracking}
+			b.helper.pod.Finalizers = []string{ownedForeignFinalizer}
+			ended(b)
+		}, false},
+		{"helper_foreign_removed", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{ownedForeignFinalizer, tracking}
+			b.helper.pod.Finalizers = []string{tracking}
+			ended(b)
+		}, false},
+		{"helper_foreign_removed_with_release", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{ownedForeignFinalizer, tracking}
+			ended(b)
+		}, false},
+		{"helper_tracking_added", func(a, b *ownedAdmission) { b.helper.pod.Finalizers = []string{tracking}; ended(b) }, false},
+		{"helper_released_with_label_drift", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{tracking}
+			b.helper.pod.Labels = map[string]string{"drift": "x"}
+			ended(b)
+		}, false},
+		{"helper_released_from_foreign_controller", func(a, b *ownedAdmission) {
+			a.helper.pod.Finalizers = []string{tracking}
+			a.helper.pod.OwnerReferences[0].UID = readerReplacementUID
+			b.helper.pod.OwnerReferences[0].UID = readerReplacementUID
+			ended(b)
+		}, false},
+		{"worker_released_judged_against_helper_job", func(a, b *ownedAdmission) {
+			a.workerPod.Finalizers = []string{tracking}
+			for _, p := range []*corev1.Pod{a.workerPod, b.workerPod} {
+				p.OwnerReferences = a.helper.pod.DeepCopy().OwnerReferences
+			}
+		}, false},
+		{"helper_job_released", func(a, b *ownedAdmission) { a.helper.job.Finalizers = []string{tracking} }, false},
+		{"worker_job_released", func(a, b *ownedAdmission) { a.helper.worker.Finalizers = []string{tracking} }, false},
+		{"migration_released", func(a, b *ownedAdmission) { a.helper.migration.Finalizers = []string{tracking} }, false},
+		{"pvc_released", func(a, b *ownedAdmission) { a.helper.pvc.Finalizers = []string{tracking} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := cloneOwnedAdmission(base), cloneOwnedAdmission(base)
+			a.helper.pod.Finalizers, b.helper.pod.Finalizers = nil, nil
+			tc.edit(a, b)
+			if a.same(b) != tc.admitted {
+				t.Fatalf("same admitted %v, want %v", !tc.admitted, tc.admitted)
+			}
+		})
+	}
+}
+
+func TestNativeJobTrackingReleaseOnlyOnPods(t *testing.T) {
+	f := newOwnedFixture(t)
+	owned := metav1.ObjectMeta{Name: "child", OwnerReferences: f.base.pod.DeepCopy().OwnerReferences, Finalizers: []string{batchv1.JobTrackingFinalizer}}
+	released := *owned.DeepCopy()
+	released.Finalizers = nil
+	before, after := &batchv1.Job{ObjectMeta: owned}, &batchv1.Job{ObjectMeta: released, Status: batchv1.JobStatus{Succeeded: 1}}
+	if !metav1.IsControlledBy(after, f.base.job) || finalizersHeld(before, after, f.base.job) {
+		t.Fatal("tracking release admitted on a non-pod object")
+	}
+	pod, ended := &corev1.Pod{ObjectMeta: owned}, &corev1.Pod{ObjectMeta: released, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+	if !finalizersHeld(pod, ended, f.base.job) || finalizersHeld(pod, ended, nil) {
+		t.Fatal("tracking release not bound to the controlling Job")
+	}
+}
+
+// checkHelperFinalizerDrift runs one caller against the Job controller's real release and against foreign drift.
+func checkHelperFinalizerDrift(t *testing.T, newAPI func(*testing.T) (*readerAPI, *Reader, ExecutionData), read func(*Reader, ExecutionData) error) {
+	t.Helper()
+	tracking := batchv1.JobTrackingFinalizer
+	for _, tc := range []struct {
+		name     string
+		before   []string
+		drift    func(*admissionFixture)
+		admitted bool
+	}{
+		{"tracking_released", []string{tracking}, nil, true},
+		{"tracking_released_foreign_kept", []string{ownedForeignFinalizer, tracking}, nil, true},
+		{"foreign_added", []string{tracking}, func(f *admissionFixture) { f.pod.Finalizers = append(f.pod.Finalizers, ownedForeignFinalizer) }, false},
+		{"foreign_removed", []string{ownedForeignFinalizer, tracking}, func(f *admissionFixture) {
+			f.pod.Finalizers = slices.DeleteFunc(f.pod.Finalizers, func(s string) bool { return s == ownedForeignFinalizer })
+		}, false},
+		{"label_drift", []string{tracking}, func(f *admissionFixture) { f.pod.Labels["drift"] = "x" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, r, w := newAPI(t)
+			api.fixture.pod.Finalizers = slices.Clone(tc.before)
+			api.afterResult = tc.drift
+			err := read(r, w)
+			if (err == nil) != tc.admitted || api.writerCalls != 1 {
+				t.Fatalf("admitted %v, want %v: %v", err == nil, tc.admitted, err)
+			}
+			if slices.Contains(api.fixture.pod.Finalizers, tracking) {
+				t.Fatal("fixture never released job tracking")
+			}
+		})
+	}
+}
+
+func TestNativeOwnedStateJobTrackingRelease(t *testing.T) {
+	checkHelperFinalizerDrift(t, newOwnedReaderAPI, func(r *Reader, w ExecutionData) error {
+		_, err := r.ReadOwnedState(context.Background(), w)
+		return err
+	})
+}
+
+func TestNativeCleanedJobTrackingRelease(t *testing.T) {
+	checkHelperFinalizerDrift(t, newCleanedReaderAPI, func(r *Reader, w ExecutionData) error {
+		_, err := r.ReadCleanedCompleted(context.Background(), w, fixtureEndLSN)
+		return err
+	})
+}
+
+func TestNativeCleanupRejoinJobTrackingRelease(t *testing.T) {
+	checkHelperFinalizerDrift(t, newCleanupRejoinReaderAPI, func(r *Reader, w ExecutionData) error {
+		_, err := r.ReadCleanupRejoinCompleted(context.Background(), w, fixtureEndLSN)
+		return err
 	})
 }

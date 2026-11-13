@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -216,6 +217,8 @@ func newReaderAPI(t *testing.T) (*readerAPI, *Reader) {
 func (s *readerAPI) complete() {
 	f := &s.fixture
 	f.pod.Status.Phase = corev1.PodSucceeded
+	// The Job controller drops its tracking finalizer once it has counted the ended pod.
+	f.pod.Finalizers = slices.DeleteFunc(f.pod.Finalizers, func(f string) bool { return f == batchv1.JobTrackingFinalizer })
 	c := &f.pod.Status.ContainerStatuses[0]
 	c.State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ContainerID: c.ContainerID, ExitCode: 0}}
 	f.job.Status = batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}
