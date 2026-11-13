@@ -688,7 +688,7 @@ class LifecycleTests(GuardFixture):
                      ('rpgmigrate', '17:17', 'fault-suspend'), ('rpgmigrate', '18:16', 'fault-suspend'),
                      ('rpgmigrate', '16:17', 'fault-delete'), ('rpgmigrate', '16:16', 'kind-bootstrap'),
                      ('pgcopydb', '16:16'), ('pgcopydb', '17:17', 'fault-suspend'), ('pgcopydb', None, 'fresh-clone'),
-                     ('unknown', '16:16', 'fault-suspend')):
+                     ('unknown', '16:16', 'fault-suspend'), ('rpgmigrate', '18:18', 'native-refusal')):
             with self.subTest(args=args), self.assertRaisesRegex(MODULE.Refusal, 'kind route admits'):
                 self.guard.run(*args)
         self.assertEqual(self.fake.calls, [])
@@ -2536,6 +2536,8 @@ class SuiteRouteTests(unittest.TestCase):
         self.assertEqual(MODULE.Guard.selection('pgcopydb')['spec'], MODULE.LEGACY_SPEC)
         for pair in self.NATIVE:
             for case, (label, spec) in MODULE.NATIVE_SPECS.items():
+                if case == 'native-refusal' and pair != '16:16':
+                    continue
                 self.assertEqual(MODULE.Guard.selection('rpgmigrate', pair, case),
                                  {'engine': 'rpgmigrate', 'pair': pair, 'label': label, 'spec': spec})
         self.assertEqual({label for label, _ in MODULE.NATIVE_SPECS.values()}, {'native', 'native-fault'})
@@ -2554,7 +2556,8 @@ class SuiteRouteTests(unittest.TestCase):
                 self.assertRegex(sources, it + rf'(?:{labels[label]}|"{label}-[a-z-]+")')
         for args in (('rpgmigrate', '17:17', 'fault-suspend'), ('rpgmigrate', '18:16', 'fault-suspend'),
                      ('rpgmigrate', '16:16', None), ('rpgmigrate', '16:16', 'fault-unknown'), ('pgcopydb', '16:16', None),
-                     ('pgcopydb', '17:17', 'fresh-clone'), ('rpgmigrate', '16:16 ', 'fault-suspend')):
+                     ('pgcopydb', '17:17', 'fresh-clone'), ('rpgmigrate', '16:16 ', 'fault-suspend'),
+                     ('rpgmigrate', '18:18', 'native-refusal'), ('rpgmigrate', '16:18', 'native-refusal')):
             with self.subTest(args=args), self.assertRaisesRegex(MODULE.Refusal, 'kind route admits'):
                 MODULE.Guard.selection(*args)
 

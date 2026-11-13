@@ -1320,10 +1320,11 @@ class Guard:
     def selection(engine, pair=None, case=None):
         if engine == 'pgcopydb' and pair in (None, '17:17') and case is None:
             return {'engine': engine, 'pair': '17:17', 'label': 'kind-bootstrap', 'spec': LEGACY_SPEC}
-        if engine == 'rpgmigrate' and pair in NATIVE_PAIRS and case in NATIVE_SPECS:
+        # native-refusal's legacy-only fixture is qualified on 16:16 alone.
+        if engine == 'rpgmigrate' and pair in NATIVE_PAIRS and case in NATIVE_SPECS and (case != 'native-refusal' or pair == '16:16'):
             label, spec = NATIVE_SPECS[case]
             return {'engine': engine, 'pair': pair, 'label': label, 'spec': spec}
-        raise Refusal('kind route admits legacy pgcopydb 17:17, or native rpgmigrate 16:16, 18:18 or 16:18 with one named spec')
+        raise Refusal('kind route admits legacy pgcopydb 17:17, or native rpgmigrate 16:16, 18:18 or 16:18 with one named spec (native-refusal on 16:16 only)')
 
     def receipt(self, ledger, selection):
         path = self.directory / 'suite-receipt.json'
