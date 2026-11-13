@@ -269,6 +269,14 @@ Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
   It then runs the cleanup Job, which drops the slot, the auto-created publication, and the target origin.
   Last, it releases the CR to garbage collection.
   Deletion therefore takes a few reconcile cycles, not milliseconds.
+- **Native live Migration that ever started** (`spec.engine: rpgmigrate`): the finalizer routes deletion through an inventory helper.
+  The helper reads the retained work volume and connects to the source and the target.
+  When the work volume records a slot or a publication, the operator runs the cleanup Job, then reads the inventory again.
+  Sometimes the engine stopped before it recorded a creation.
+  Then the helper must also find no slot, publication or target schema with the names of the run.
+  Two such complete inventories release the Migration without a cleanup Job, so the operator changes neither database.
+  An inventory that does not run, does not complete in time, or cannot connect keeps the finalizer.
+  An inventory that finds such a resource also keeps it, and the operator tries again.
 - **Cleanup that cannot finish**: if cleanup uses all its retries, the operator emits a `CleanupFailed` warning that names the slot.
   It then releases the Migration anyway.
   This occurs, for instance, when the source is gone.

@@ -335,8 +335,11 @@ func (r *MigrationReconciler) cleanupNativeDeletion(ctx context.Context, m *v1be
 	if err != nil {
 		return errNativeDisposition
 	}
-	if err := r.runNativeDeletionCleanup(ctx, m, worker, pvc, original, owned); err != nil {
-		return err
+	// A complete inventory that found only the retained workdir leaves nothing to drop; the second read must agree.
+	if !owned.Unprovisioned() {
+		if err := r.runNativeDeletionCleanup(ctx, m, worker, pvc, original, owned); err != nil {
+			return err
+		}
 	}
 	after, err := r.readNativeDeletionInventory(ctx, m, worker, pvc, original)
 	if err != nil || after.Work() != owned.Work() || !slices.Equal(after.Resources(), owned.Resources()) {

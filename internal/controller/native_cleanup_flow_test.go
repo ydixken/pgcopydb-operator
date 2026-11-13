@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -395,6 +396,18 @@ func TestNativeTerminalInventoryCleanup(t *testing.T) {
 	}
 	if len(f.created) == 0 || f.patches != 0 {
 		t.Fatal("cleanup skipped actual Jobs or patched completion")
+	}
+}
+
+func TestNativeTerminalInventoryUnprovisionedRefused(t *testing.T) {
+	f := newNativeFinishFixture(t)
+	f.editResult = func(kind string, v map[string]any) {
+		if kind == finishOwnedInventoryKind {
+			v["resources"] = []map[string]any{{lifecycleKindKey: workdirVolume, lifecycleNameKey: nativeCleanupTestWorkdir, lifecycleOwnedKey: true, lifecycleRetainKey: true}}
+		}
+	}
+	if done, err := cleanupFlow(t, f).ensureNativeCleanup(context.Background(), f.m, f.worker, f.pvc); err == nil || done || f.cleaned || slices.Contains(f.created, jobKindCleanup) {
+		t.Fatalf("completed worker cleanup accepted an unprovisioned inventory: done=%t err=%v created=%v", done, err, f.created)
 	}
 }
 
