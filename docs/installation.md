@@ -21,6 +21,20 @@ The chart can also install a ServiceMonitor for the scrape, alert rules, and Gra
 Each of these parts has its own value.
 See [Monitoring](operations/monitoring.md).
 
+## Manager RBAC
+
+The manager needs `get` and `create` on `pods/exec`.
+The native engine opens each exec with a WebSocket `GET` and has no fallback, so without `get` every native exec is refused.
+The pgcopydb engine falls back to a SPDY `POST`, which needs only `create`.
+With `rbac.create=true` (the default) the chart's ClusterRole grants both verbs.
+With `rbac.create=false` the cluster admin supplies the manager's role, and that role MUST grant both verbs:
+
+```yaml
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+```
+
 ## CRD lifecycle
 
 The CRD renders as a regular chart template, so `helm upgrade` updates it in place.
@@ -44,6 +58,9 @@ Each operator release compiles in the runner digests it qualifies, and every nat
 > Before an upgrade, let every native Migration finish or delete it while its admitted runner is still qualified.
 > A release that drops that runner refuses the Migration on every reconcile, deletion included, and its source slot and publication stay in place.
 > Rolling back to the admitting release resumes it.
+
+With `rbac.create=false`, add `get` on `pods/exec` to the manager's role before the upgrade, as [Manager RBAC](#manager-rbac) describes.
+`helm upgrade` adds it for you when the chart creates the RBAC.
 
 ### Downgrades
 

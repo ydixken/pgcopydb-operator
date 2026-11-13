@@ -229,6 +229,7 @@ The suite has two tiers, default and stress, and a run reads these environment v
 - `E2E_STORAGE_CLASS` (unset) pins the fixture volumes to one StorageClass, and wins over the suite-owned one.
   Setting it also skips the capacity check.
 - `E2E_MANAGE_NAMESPACES` (`true`) set to `false` works inside namespaces someone else owns: it creates and deletes none, and installs with `rbac.create=false`.
+  The manager role the cluster admin supplies then needs `get` and `create` on `pods/exec`; see [Manager RBAC](docs/installation.md#manager-rbac).
 - `E2E_PROMETHEUS_URL` (unset) is the base URL of a Prometheus that scrapes the suite's operator install, and enables the metrics specs.
 - `E2E_PROMETHEUS_PORT_FORWARD` (unset) is the `namespace/service:port` of a Prometheus Service; the suite spawns and owns the kubectl port-forward to it.
 - `E2E_SOURCE_URI` (unset) switches to external mode, which runs against an existing database pair instead of CNPG fixtures; use `task e2e:external`.

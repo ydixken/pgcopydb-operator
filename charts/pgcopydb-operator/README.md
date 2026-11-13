@@ -80,6 +80,7 @@ See [Native helper image](https://github.com/ydixken/pgcopydb-operator/blob/main
 
 `rbac.create` and `serviceAccount.*` configure the controller manager, not the external CI runner that installs the chart and creates E2E fixtures.
 With `rbac.create=false`, supply the manager's permissions and bindings outside Helm.
+Those permissions MUST include `get` and `create` on `pods/exec`: the native engine opens each exec with a WebSocket `GET` and has no fallback.
 With `serviceAccount.create=false`, set `serviceAccount.name` to an existing manager ServiceAccount in the release namespace, or leave it empty to use `default`.
 The manager does not use CNPG Poolers, so its ClusterRole grants no CNPG fixture permissions.
 E2E runner permissions belong in the runner's own RBAC; see the [E2E guide](https://github.com/ydixken/pgcopydb-operator/blob/main/CONTRIBUTING.md#e2e-tests).
