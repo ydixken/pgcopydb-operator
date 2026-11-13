@@ -369,6 +369,46 @@ func TestNativeReconcileCanceledRunning(t *testing.T) {
 	}
 }
 
+func TestNativeWorkerStarting(t *testing.T) {
+	ready := func(n int32) *int32 { return &n }
+	for name, c := range map[string]struct {
+		status batchv1.JobStatus
+		want   bool
+	}{
+		"unobserved":         {batchv1.JobStatus{}, true},
+		"pod not ready":      {batchv1.JobStatus{Active: 1, Ready: ready(0)}, true},
+		"not yet counted":    {batchv1.JobStatus{Ready: ready(0)}, true},
+		"pod ready":          {batchv1.JobStatus{Active: 1, Ready: ready(1)}, false},
+		"unknown ready":      {batchv1.JobStatus{Active: 1}, false},
+		"pod failed":         {batchv1.JobStatus{Failed: 1, Ready: ready(0)}, false},
+		"succeeded":          {batchv1.JobStatus{Succeeded: 1, Ready: ready(0)}, false},
+		"failure target":     {batchv1.JobStatus{Active: 1, Ready: ready(0), Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue}}}, false},
+		"terminal, inactive": {batchv1.JobStatus{Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}, false},
+	} {
+		if got := nativeWorkerStarting(&batchv1.Job{Status: c.status}); got != c.want {
+			t.Errorf("%s: starting=%t, want %t", name, got, c.want)
+		}
+	}
+}
+
+func TestNativeReconcileStartingWorkerWaitsQuietly(t *testing.T) {
+	f := nativeFollowFlowFixture(t)
+	f.pod.Status.Phase = corev1.PodPending
+	f.pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}
+	if err := f.store.Status().Update(context.Background(), f.pod); err != nil {
+		t.Fatal(err)
+	}
+	none := int32(0)
+	f.worker.Status.Ready = &none
+	res, err := f.r.reconcileNativeRunning(context.Background(), f.m, f.m.DeepCopy(), f.worker, f.pvc)
+	if err != nil || res.RequeueAfter != pollInterval || f.patches != 0 || f.heads != 0 || f.sets != 0 {
+		t.Fatalf("starting worker was refused or crossed into native effects: res=%v err=%v patches=%d heads=%d sets=%d", res, err, f.patches, f.heads, f.sets)
+	}
+	if f.r.Sampler != nil && f.r.Sampler.running(client.ObjectKeyFromObject(f.m)) {
+		t.Fatal("starting worker started sampling")
+	}
+}
+
 func TestNativeReconcilePreflightPatchReturns(t *testing.T) {
 	f := newPreflightFixture(t)
 	f.m.Status.Phase = v1beta1.PhasePending

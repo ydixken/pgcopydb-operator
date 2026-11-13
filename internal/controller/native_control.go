@@ -153,6 +153,19 @@ func nativeControlJobRunning(job *batchv1.Job) bool {
 	return true
 }
 
+// nativeWorkerStarting reports a live Job whose pod is not yet ready, or not yet counted.
+// An unknown ready count (nil with an active pod) is not a wait, so admission still decides it.
+func nativeWorkerStarting(job *batchv1.Job) bool {
+	s := job.Status
+	if s.Ready != nil && *s.Ready != 0 {
+		return false
+	}
+	if s.Active == 0 {
+		return s.Succeeded == 0 && s.Failed == 0 && len(s.Conditions) == 0
+	}
+	return s.Ready != nil && nativeControlJobRunning(job)
+}
+
 func nativeControlPodRunning(pod *corev1.Pod, image string) bool {
 	if pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" || len(pod.Status.ContainerStatuses) != 1 || len(pod.Status.InitContainerStatuses) != 0 || len(pod.Status.EphemeralContainerStatuses) != 0 {
 		return false
