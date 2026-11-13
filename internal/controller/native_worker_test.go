@@ -32,6 +32,13 @@ const (
 	workerLostAckCase                     = "lost acknowledgment"
 	workerUnknownCreateCase               = "unknown before storage"
 	workerSpecCase                        = "spec"
+	workerBindCase                        = "bind"
+	workerRebindCase                      = "rebind"
+	workerUnbindCase                      = "unbind"
+	workerBindDriftCase                   = "bind and drift"
+	workerExtraOwnerCase                  = "extra owner"
+	workerOwnerCase                       = "owner or generation"
+	workerBoundVolume                     = "bound-volume"
 	workerOwnedCollisionCase              = "AlreadyExists owned"
 	workerReadMigration                   = "migration"
 	workerReadPVC                         = "pvc"
@@ -184,6 +191,17 @@ func (f *workerAttemptFixture) storedMigration() *v1beta1.Migration {
 	}
 	return m
 }
+func (f *workerAttemptFixture) updatePVC(change func(*corev1.PersistentVolumeClaim)) {
+	f.t.Helper()
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.pvc), pvc); err != nil {
+		f.t.Fatal(err)
+	}
+	change(pvc)
+	if err := f.store.Update(context.Background(), pvc); err != nil {
+		f.t.Fatal(err)
+	}
+}
 func (f *workerAttemptFixture) changeMigration(change func(*v1beta1.Migration)) {
 	f.t.Helper()
 	m := f.storedMigration()
@@ -305,11 +323,18 @@ func workerAttemptEntryRefusals(t *testing.T) {
 
 func workerAttemptBindingRaces(t *testing.T) {
 	t.Helper()
+	fields := map[string][]string{
+		workerReadMigration: {workerUIDCase, workerSpecCase, workerOwnerCase},
+		workerReadPVC:       {workerUIDCase, workerSpecCase, workerBindCase, workerRebindCase, workerUnbindCase, workerBindDriftCase, workerExtraOwnerCase, workerOwnerCase},
+	}
 	for _, kind := range []string{workerReadMigration, workerReadPVC} {
 		for _, stage := range []int{1, 2, 3} {
-			for _, field := range []string{workerUIDCase, workerSpecCase, "owner or generation"} {
+			for _, field := range fields[kind] {
 				t.Run(kind+"/"+strconv.Itoa(stage)+"/"+field, func(t *testing.T) {
 					f := newWorkerAttemptFixture(t)
+					if kind == workerReadPVC && (field == workerRebindCase || field == workerUnbindCase) {
+						f.updatePVC(func(pvc *corev1.PersistentVolumeClaim) { pvc.Spec.VolumeName = workerBoundVolume })
+					}
 					f.beforeRead = func(obj client.Object, n int) {
 						if n != stage {
 							return
@@ -327,27 +352,14 @@ func workerAttemptBindingRaces(t *testing.T) {
 							})
 						}
 						if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && kind == workerReadPVC {
-							pvc := &corev1.PersistentVolumeClaim{}
-							if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.pvc), pvc); err != nil {
-								t.Fatal(err)
-							}
-							switch field {
-							case workerUIDCase:
-								pvc.UID = "replacement-pvc"
-							case workerSpecCase:
-								pvc.Spec.VolumeName = "replacement-volume"
-							default:
-								pvc.OwnerReferences[0].UID = workerForeignIdentity
-							}
-							if err := f.store.Update(context.Background(), pvc); err != nil {
-								t.Fatal(err)
-							}
+							f.updatePVC(func(pvc *corev1.PersistentVolumeClaim) { workerClaimChange(field, pvc) })
 						}
 					}
 					_, err := f.r.startAttempt(context.Background(), f.m, f.m.DeepCopy())
-					// The first read binds the current owned claim, including a legitimate bound volume name.
-					if kind == workerReadPVC && stage == 1 && field != "owner or generation" {
-						if err != nil {
+					// The first read binds the current owned claim; later the binder may only fill an empty volumeName.
+					if kind == workerReadPVC && (stage == 1 && field != workerOwnerCase || field == workerBindCase) {
+						got := f.storedMigration()
+						if err != nil || f.creates != 1 || f.patches != 1 || got.Status.Attempts != 1 || got.Status.NativePVCUID != string(f.pvc.UID) && field != workerUIDCase {
 							t.Fatal("valid current PVC identity was refused", err)
 						}
 						return
@@ -360,6 +372,26 @@ func workerAttemptBindingRaces(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+func workerClaimChange(field string, pvc *corev1.PersistentVolumeClaim) {
+	switch field {
+	case workerUIDCase:
+		pvc.UID = "replacement-pvc"
+	case workerSpecCase:
+		pvc.Spec.StorageClassName = ptr.To("replacement-class")
+	case workerBindCase:
+		pvc.Spec.VolumeName = workerBoundVolume
+	case workerRebindCase:
+		pvc.Spec.VolumeName = "replacement-volume"
+	case workerUnbindCase:
+		pvc.Spec.VolumeName = ""
+	case workerBindDriftCase:
+		pvc.Spec.VolumeName, pvc.Spec.StorageClassName = workerBoundVolume, ptr.To("replacement-class")
+	case workerExtraOwnerCase:
+		pvc.OwnerReferences = append(pvc.OwnerReferences, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: nativePasswordForeignOwner, UID: workerForeignIdentity})
+	default:
+		pvc.OwnerReferences[0].UID = workerForeignIdentity
 	}
 }
 func TestNativeWorkerExistingJobBinding(t *testing.T) {
