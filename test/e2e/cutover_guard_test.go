@@ -261,6 +261,10 @@ func earlyManualCutover() {
 		g.Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		g.Expect(cutoverEvents(g)).To(BeZero())
 	}, suiteWait(migrationTimeout), time.Second).Should(Succeed())
+	if mig.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		Expect(nativeRunCensus(sourceCluster, mig)).To(Equal("1/1/0"),
+			"source slots/publications/schemas of %s while streaming, the count cleanup must clear", name)
+	}
 
 	By("resuming the sender with source writes stopped and observing automatic use of the existing approval")
 	Expect(signalSender("CONT")).To(Succeed())

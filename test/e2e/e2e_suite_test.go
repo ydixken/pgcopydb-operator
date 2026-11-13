@@ -1448,6 +1448,7 @@ func connectSuite() {
 	// A bounded per-request timeout so an unreachable API server aborts the
 	// suite instead of hanging.
 	cfg.Timeout = time.Minute
+	suiteRESTConfig = cfg
 
 	scheme := runtime.NewScheme()
 	Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
