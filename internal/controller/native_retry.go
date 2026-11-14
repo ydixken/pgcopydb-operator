@@ -83,6 +83,7 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 			failedAt = r.currentTime()
 		}
 		desired.Status.RetryGate = &v1beta1.RetryGateStatus{FailedAttempt: live.Status.Attempts, FailedAt: metav1.NewTime(failedAt), Failure: "Native worker failed"}
+		r.nativeCloneAttemptEnded(desired, reasonAttemptFailed)
 		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonGateProbing, "Native retry waits for fresh target authority")
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
@@ -156,6 +157,7 @@ func (r *MigrationReconciler) holdNativeRetryUnobserved(ctx context.Context, m, 
 	unobserved := held == nil || held.Reason == reasonGateProbing || held.Reason == reasonProbeFailed
 	if unobserved && !r.currentTime().Before(rg.FailedAt.Add(verdictDeadline)) {
 		desired.Status.Phase = v1beta1.PhaseFailed
+		r.nativeCloneAttemptEnded(desired, reasonCloneFailed)
 		r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionTrue, reasonNativeRetryGateUnobserved, fmt.Sprintf(
 			"The native retry-gate helper (Job rpgmigrate-retry-<operation>) gave no target observation within %s after attempt %d failed", verdictDeadline, rg.FailedAttempt))
 		r.endHold(desired, reasonHoldMigrationFailed, fmt.Sprintf("Attempt %d does not start: the Migration failed with %s", rg.FailedAttempt+1, reasonNativeRetryGateUnobserved))
@@ -168,6 +170,7 @@ func (r *MigrationReconciler) holdNativeRetryUnobserved(ctx context.Context, m, 
 
 func (r *MigrationReconciler) failNativeRetryBudget(m *v1beta1.Migration) {
 	m.Status.Phase = v1beta1.PhaseFailed
+	r.nativeCloneAttemptEnded(m, reasonCloneFailed)
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", "Native retry budget is exhausted")
 }
 
@@ -178,6 +181,16 @@ func (r *MigrationReconciler) patchNativeRetry(ctx context.Context, m, desired, 
 	}
 	desired.DeepCopyInto(m)
 	return ctrl.Result{RequeueAfter: retryGateInterval}, nil
+}
+
+// reasonAttemptFailed replaces CloneRunning while a failed native attempt awaits the retry gate.
+const reasonAttemptFailed = "AttemptFailed"
+
+// nativeCloneAttemptEnded replaces the running claim of the failed worker; a finished copy stays True.
+func (r *MigrationReconciler) nativeCloneAttemptEnded(m *v1beta1.Migration, reason string) {
+	if c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted); c != nil && (c.Reason == reasonCloneRunning || c.Reason == reasonAttemptFailed) {
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reason, fmt.Sprintf("attempt %d failed as Job %s", m.Status.Attempts, m.Status.JobName))
+	}
 }
 
 // reasonNativeRetryGateUnobserved fails a native Migration whose retry gate never read the target.

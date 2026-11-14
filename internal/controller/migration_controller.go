@@ -96,6 +96,9 @@ const (
 	reasonTablesEmptyOnTarget = "TablesEmptyOnTarget"
 )
 
+// reasonCloneFailed is CloneCompleted=False after the final attempt failed.
+const reasonCloneFailed = "CloneFailed"
+
 // reasonCloneIncomplete fails a plain clone whose worker exited 0 while
 // pgcopydb's own catalog still counts tables not done (see finishClone).
 const reasonCloneIncomplete = "CloneIncomplete"
@@ -1069,7 +1072,7 @@ func (r *MigrationReconciler) handleFailedJob(ctx context.Context, m, base *v1be
 	}
 	startOver := line != "" && terminal == reasonSnapshotLost && m.Spec.Clone.DropIfExists
 	if line != "" && !startOver {
-		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", reason)
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneFailed, reason)
 		r.fail(m, terminal, "Fail", fmt.Sprintf(
 			"attempt %d failed on %s retries cannot fix: %s%s",
 			m.Status.Attempts, what, truncate(line, maxDetailLen), remedy))

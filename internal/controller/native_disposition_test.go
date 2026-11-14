@@ -400,11 +400,26 @@ func TestNativeDispositionPodContinuity(t *testing.T) {
 	}
 }
 
+// nativeCloneRunning records what a started native attempt leaves in CloneCompleted.
+func nativeCloneRunning(m *v1beta1.Migration) {
+	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{Type: v1beta1.ConditionCloneCompleted, Status: metav1.ConditionFalse, Reason: reasonCloneRunning, Message: fmt.Sprintf("attempt %d running as Job %s", m.Status.Attempts, m.Status.JobName), ObservedGeneration: m.Generation, LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))})
+}
+
+// expectNativeCloneEnded checks that a failed native worker no longer reads as a running clone.
+func expectNativeCloneEnded(t *testing.T, m *v1beta1.Migration, reason string) {
+	t.Helper()
+	c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != reason || c.Message != fmt.Sprintf("attempt %d failed as Job %s", m.Status.Attempts, m.Status.JobName) {
+		t.Fatal("a failed native worker still reads as a running clone", c)
+	}
+}
+
 func newNativeDispositionFixture(t *testing.T, follow bool) *nativeDispositionFixture {
 	t.Helper()
 	f := &nativeDispositionFixture{nativeCloneFixture: newNativeCloneFixture(t, follow, nil), lines: map[string][]byte{}}
 	f.m.Spec.BackoffLimit = 3
 	f.m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: lifecycleEnd}
+	nativeCloneRunning(f.m)
 	f.worker.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(time.Now().Truncate(time.Second))}}}
 	f.replace(f.m)
 	f.replace(f.worker)
@@ -598,9 +613,11 @@ func nativeRetryGateUnobservedCase(t *testing.T, exits bool) {
 	failedAt := jobFailedAt(f.worker)
 	clock := failedAt
 	f.r.now = func() time.Time { return clock }
-	if _, held := f.nativeRetryHold(t); held == nil || held.Reason != reasonGateProbing || f.retryHelpers != 0 {
+	live, held := f.nativeRetryHold(t)
+	if held == nil || held.Reason != reasonGateProbing || f.retryHelpers != 0 {
 		t.Fatal("the failed attempt did not open the gate hold", held)
 	}
+	expectNativeCloneEnded(t, live, reasonAttemptFailed)
 	reads := 0
 	for elapsed := time.Duration(0); elapsed < verdictDeadline; elapsed += 5 * time.Minute {
 		clock = failedAt.Add(elapsed)
@@ -614,8 +631,9 @@ func nativeRetryGateUnobservedCase(t *testing.T, exits bool) {
 	if live, _ := f.nativeRetryHold(t); live.Status.RetryGate.Exemption != v1beta1.RetryGateCounted || f.retryHelpers != reads {
 		t.Fatal("the overdue verdict read the gate or stayed undecided")
 	}
-	live, held := f.nativeRetryHold(t)
+	live, held = f.nativeRetryHold(t)
 	expectNativeRetryGateUnobserved(t, live)
+	expectNativeCloneEnded(t, live, reasonCloneFailed)
 	if held == nil || held.Status != metav1.ConditionFalse || held.Reason != reasonHoldMigrationFailed || f.retryHelpers != reads+1 || f.workerCreates != 0 || live.Status.Attempts != 1 {
 		t.Fatal("the terminal gate kept holding or started work", held, f.retryHelpers, f.workerCreates)
 	}
@@ -650,6 +668,9 @@ func TestNativeRetryGateObservedAfterUnobserved(t *testing.T) {
 		live, held := f.nativeRetryHold(t)
 		if f.workerCreates != 1 || live.Status.Attempts != 2 || live.Status.Phase == v1beta1.PhaseFailed || held == nil || held.Reason != reasonGatePassed {
 			t.Fatal("a qualified gate did not admit the retry after unobserved reads", f.workerCreates, live.Status.Attempts, held)
+		}
+		if c := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionCloneCompleted); c == nil || c.Reason != reasonCloneRunning || !strings.Contains(c.Message, "attempt 2 running") {
+			t.Fatal("the admitted retry does not read as running", c)
 		}
 	})
 	t.Run("a held observation earns one more read past the deadline", func(t *testing.T) {
@@ -1417,6 +1438,7 @@ func newNativeFailureFixture(t *testing.T, follow bool, category string) *native
 	t.Cleanup(func() { f.r.Logs = legacyLogs })
 	f.m.Spec.BackoffLimit = 3
 	f.m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: lifecycleEnd}
+	nativeCloneRunning(f.m)
 	f.worker.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}
 	f.replace(f.m)
 	f.replace(f.worker)
@@ -1460,6 +1482,7 @@ func TestNativeFailureDisposition(t *testing.T) {
 				if !handled || err != nil || result != (ctrl.Result{}) || got.Status.Phase != v1beta1.PhaseFailed || condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "Native"+category || got.Status.RetryGate != nil || f.logs != 1 || f.patches != 1 {
 					t.Fatal("terminal native diagnostic did not persist fixed failure before retry", handled, result, err)
 				}
+				expectNativeCloneEnded(t, got, reasonCloneFailed)
 				encoded, err := json.Marshal(got.Status)
 				if err != nil || bytes.Contains(encoded, []byte("CANARY")) || bytes.Contains(encoded, []byte("postgres://")) {
 					t.Fatal("terminal status exposed private diagnostic")
@@ -1645,6 +1668,39 @@ func TestNativeFailureCaptureUnavailable(t *testing.T) {
 				t.Fatal("unavailable original failure capture became terminal or bypassed retry", handled, result, err)
 			}
 			assertNativeFailureRetained(t, f)
+		})
+	}
+}
+
+const reasonBaseCopyDoneForTest = "BaseCopyDone"
+
+func TestNativeCloneAttemptEnded(t *testing.T) {
+	r := &MigrationReconciler{}
+	for _, tc := range []struct {
+		name, before, after string
+		status              metav1.ConditionStatus
+	}{
+		{"running attempt", reasonCloneRunning, reasonCloneFailed, metav1.ConditionFalse},
+		{"held attempt", reasonAttemptFailed, reasonCloneFailed, metav1.ConditionFalse},
+		{"finished copy", reasonBaseCopyDoneForTest, reasonBaseCopyDoneForTest, metav1.ConditionTrue},
+		{"absent", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &v1beta1.Migration{Status: v1beta1.MigrationStatus{Attempts: 3, JobName: "m-run-3"}}
+			if tc.before != "" {
+				meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{Type: v1beta1.ConditionCloneCompleted, Status: tc.status, Reason: tc.before, Message: "before"})
+			}
+			r.nativeCloneAttemptEnded(m, reasonCloneFailed)
+			c := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCloneCompleted)
+			if tc.after == "" {
+				if c != nil {
+					t.Fatal("an absent condition was invented", c)
+				}
+				return
+			}
+			if c == nil || c.Status != tc.status || c.Reason != tc.after || (tc.before != tc.after) != (c.Message == "attempt 3 failed as Job m-run-3") {
+				t.Fatal("wrong CloneCompleted after a failed attempt", c)
+			}
 		})
 	}
 }

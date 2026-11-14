@@ -351,7 +351,7 @@ func (r *MigrationReconciler) settleBudget(ctx context.Context, m, base *v1beta1
 // fails the copy, as a spent budget did before the gate existed.
 func (r *MigrationReconciler) failBudget(m *v1beta1.Migration) {
 	if rg := m.Status.RetryGate; rg != nil {
-		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, "CloneFailed", rg.Failure)
+		r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneFailed, rg.Failure)
 	}
 	r.fail(m, "BackoffLimitExceeded", "Fail", budgetMessage(m))
 }
