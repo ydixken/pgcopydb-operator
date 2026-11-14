@@ -251,12 +251,15 @@ func TestReconcileEngineDispatchStatusFailure(t *testing.T) {
 }
 
 const (
-	testRunnerTag        = "ghcr.io/ydixken/rpgmigrate:dev-42866da"
-	qualifiedRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f"
-	qualifiedRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2"
+	testRunnerTag        = "ghcr.io/ydixken/rpgmigrate:dev-6f9263d43e3ba7ac7e81f3b34757f79d581dc389"
+	qualifiedRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60"
+	qualifiedRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:ad648befc155a95df25df7f7a9f91c65bfe9b08a3ff95d8b6970fa697f0c2404"
 	// 908ada6 refuses fsGroup work roots, so its manifests are no longer qualified.
 	retiredRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b"
 	retiredRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b"
+	// 42866da lacks the cap-poll and pg_attver fixes that 6f9263d carries.
+	retired42866daARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f"
+	retired42866daAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:3f35727ed0c8e2d2a3c849a8cf772502177f5844fafdea35f9daba2f423aa7f2"
 )
 
 func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
@@ -264,12 +267,15 @@ func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
 		{"empty flag", "", ""},
 		{"tag only", testRunnerTag, ""},
 		{"unqualified digest", "ghcr.io/ydixken/rpgmigrate@sha256:" + strings.Repeat("a", 64), ""},
-		{"qualified digest, tag and digest", "ghcr.io/ydixken/rpgmigrate:dev@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f", ""},
-		{"qualified digest, noncanonical repository", "GHCR.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f", ""},
+		{"qualified digest, tag and digest", "ghcr.io/ydixken/rpgmigrate:dev@sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60", ""},
+		{"qualified digest, noncanonical repository", "GHCR.io/ydixken/rpgmigrate@sha256:3a005debbc8ed6e8d6e30f8f269f608d4293fa273ff625f01a23514fdcefac60", ""},
 		{"qualified digest, extra suffix", qualifiedRunnerARM64 + "0", ""},
 		{"unqualified per-Migration override", qualifiedRunnerARM64, testRunnerTag},
 		{"retired arm64 digest", retiredRunnerARM64, ""},
 		{"retired amd64 per-Migration override", qualifiedRunnerARM64, retiredRunnerAMD64},
+		{"retired 42866da arm64 digest", retired42866daARM64, ""},
+		{"retired 42866da amd64 digest", retired42866daAMD64, ""},
+		{"retired 42866da amd64 per-Migration override", qualifiedRunnerARM64, retired42866daAMD64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := passwordMigration()

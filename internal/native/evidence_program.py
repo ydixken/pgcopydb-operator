@@ -117,7 +117,7 @@ def failure_class(failure): return failure.error_class if isinstance(failure,Ref
 def validate_environment(env):
  need(not any(k.startswith('LD_') or k in BANNED for k in env),CAP_ERR)
  need(env.get('LC_ALL')=='C' and env.get('LANG')=='C',CAP_ERR)
-# libc and libpq runtime metadata packaged in the qualified 42866da runner digests (contract.go).
+# libc and libpq runtime metadata packaged in the qualified runner digests (contract.go).
 QUALIFIED_RUNTIME={'aarch64':('70fa4c4cf57eabeb96097cce47582d02379c4cd1de3db3e98ade4dd7089a1b13','61124886478b6e868a814a42286f96e95e516c4da6407f2dbb77e690efcf4b3f'),'x86_64':('9792e3cbb541c8f44c7acf5f14f4022ea62998ecc787d326bed4d8b6547dfd92','72c22d49293634fe06b86c066646b3f16e8d91ce198a3f4dd55b762021be81fa')}
 QUALIFIED_NSS='eec30745bade42a3f3f792e4d4192e57d2bcfe8e472433b1de426fe39a39cddb'
 def packaged_sha256(path):

@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-const rejoinCanonicalSHA = "5d054ec20143aa13240d91f44f56d5d4ecef7b78b678360774cd3ad621ad41bb"
+const rejoinCanonicalSHA = "8b2cf2e2a78c18758694023cccdb77720c052c8e25bbfd0062d11340e873369c"
 
 func TestNativeCleanupRejoinCompletionProgram(t *testing.T) {
 	f := newCleanupRejoinFixture(t)
@@ -31,7 +31,7 @@ func TestNativeCleanupRejoinCompletionProgram(t *testing.T) {
 		t.Fatal("bounded fixed program unavailable")
 	}
 	canonical := EvidenceProgramSHA256()
-	if hex.EncodeToString(canonical[:]) != rejoinCanonicalSHA || len(EvidenceProgram()) != 121639 {
+	if hex.EncodeToString(canonical[:]) != rejoinCanonicalSHA || len(EvidenceProgram()) != 121631 {
 		t.Fatal("ordinary canonical source changed")
 	}
 	if !bytes.Equal(program, append(append(OwnedInventoryProgram(), []byte(cleanupRejoinCompletionSeparator)...), []byte(cleanupRejoinCompletionProgramSource)...)) {
