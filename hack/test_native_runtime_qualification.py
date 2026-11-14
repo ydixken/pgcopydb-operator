@@ -830,10 +830,15 @@ class QualificationBoundaries(unittest.TestCase):
             changed['provider'][field] = value
             with self.subTest(value=value), self.assertRaises(Q.Refusal):
                 Q.validate_profile(changed)
-        for change in ('missing', 'empty', 'shadow', 'unknown_nss', 'writable', 'claim'):
+        for change in ('missing', 'missing_engine', 'other_engine', 'empty', 'shadow', 'unknown_nss', 'writable',
+                       'claim'):
             changed = json.loads(json.dumps(observation))
             if change == 'missing':
                 del changed['runtime']['image_files']['/usr/bin/python3.13']
+            elif change == 'missing_engine':
+                del changed['runtime']['image_files']['/usr/local/bin/rpgmigrate']
+            elif change == 'other_engine':
+                changed['runtime']['image_files']['/usr/local/bin/rpgmigrate']['sha256'] = '0' * 64
             elif change == 'empty':
                 changed['runtime']['image_files']['/usr/lib/aarch64-linux-gnu/libc.so.6']['sha256'] = ''
             elif change == 'shadow':

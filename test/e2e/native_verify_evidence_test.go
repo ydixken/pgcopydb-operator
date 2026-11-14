@@ -19,6 +19,9 @@ package e2e
 import (
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"strings"
 	"testing"
@@ -228,5 +231,43 @@ func TestNativeDrainProofSQLReadsTheRecordedProof(t *testing.T) {
 	}
 	if !strings.Contains(nativeDrainProofSQL(nativeFaultDecoyRun, endpos), "FROM ONLY "+schema+".checkpoint") {
 		t.Error("the drain proof does not read the run's own checkpoint")
+	}
+}
+
+// No cluster runs the spec offline, so its source is the only place to see the native drain check.
+func TestNativeAutomaticCutoverChecksTheDrain(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "e2e_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const spec = `"runs an Automatic cutover to completion unattended"`
+	found, checked := false, false
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "It" {
+			return true
+		}
+		if lit, ok := call.Args[0].(*ast.BasicLit); !ok || lit.Value != spec {
+			return true
+		}
+		found = true
+		ast.Inspect(call.Args[len(call.Args)-1], func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "expectDrainProgress" {
+					checked = true
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if !found {
+		t.Fatal("the automatic-cutover spec is missing from e2e_test.go")
+	}
+	if !checked {
+		t.Error("the automatic-cutover spec never calls expectDrainProgress")
 	}
 }

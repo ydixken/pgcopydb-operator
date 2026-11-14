@@ -628,6 +628,9 @@ var _ = Describe("Migration", func() {
 		expectConditionTrue(m, v1beta1.ConditionCutoverComplete)
 		expectConditionTrue(m, v1beta1.ConditionVerified)
 		expectCleanupSucceeded(name)
+		if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+			expectDrainProgress(m)
+		}
 
 		By("comparing data and slot state after the unattended cutover")
 		Expect(rowCounts(targetCluster)).To(Equal(rowCounts(sourceCluster)))
