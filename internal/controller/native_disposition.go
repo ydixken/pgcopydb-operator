@@ -114,6 +114,7 @@ func (r *MigrationReconciler) reconcileNativeFailure(ctx context.Context, m *v1b
 	}
 	desired := confirmed.DeepCopy()
 	desired.Status.Phase, desired.Status.ObservedGeneration = v1beta1.PhaseFailed, desired.Generation
+	r.nativeCloneAttemptEnded(desired, reasonCloneFailed)
 	r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionTrue, reason, "Native worker reported a terminal failure; retained state is preserved")
 	r.setCondition(desired, v1beta1.ConditionComplete, metav1.ConditionFalse, reason, "Native worker did not complete")
 	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(confirmed, client.MergeFromWithOptimisticLock{})); err != nil {

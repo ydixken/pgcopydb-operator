@@ -60,10 +60,21 @@ func TestNativeRetryMaterialization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("target-only materialization inspected source: %v", err)
 	}
+	named := 0
 	for _, e := range env {
 		if strings.Contains(e.Name, "SOURCE") {
 			t.Fatal("source input projected")
 		}
+		if e.Name == "PGAPPNAME" {
+			named++
+			if e.Value != "pgm-retry-gate" {
+				t.Fatal("retry gate session carries another application name")
+			}
+		}
+	}
+	// M7-RUN3: target_retry exits 1 without output unless PGAPPNAME names the gate.
+	if named != 1 {
+		t.Fatal("retry gate env lacks exactly one PGAPPNAME")
 	}
 	if !strings.Contains(args[1], "target_retry "+f.want.OperationID) || strings.Contains(strings.Join(command, " "), "PGCOPYDB_SOURCE") {
 		t.Fatal("wrong canonical role")
