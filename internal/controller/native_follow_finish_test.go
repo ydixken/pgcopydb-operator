@@ -189,6 +189,25 @@ func TestNativeFollowFinishStaleStatus(t *testing.T) {
 	assertNativeFinished(t, f)
 }
 
+func TestNativeFollowCompletionKeepsDataProgress(t *testing.T) {
+	f := newNativeFinishFixture(t)
+	f.cleaned = true
+	f.m.Spec.Verification = &v1beta1.VerificationOptions{Data: true}
+	if err := f.store.Update(context.Background(), f.m); err != nil {
+		t.Fatal(err)
+	}
+	nativeInstallCompare(t, f.nativeCloneFixture, compareData, true)
+	if _, err := nativeFinish(t, f); err != nil {
+		t.Fatalf("checked verification: %v", err)
+	}
+	assertNativeFinished(t, f)
+	stored := f.current()
+	if !meta.IsStatusConditionTrue(stored.Status.Conditions, v1beta1.ConditionVerified) || len(stored.Status.Verification) != 1 || !stored.Status.Verification[0].Passed {
+		t.Fatal("checked data verification was lost")
+	}
+	expectNativeDataProgress(t, stored, true, true)
+}
+
 func TestNativeFollowVerificationRecapture(t *testing.T) {
 	for _, matched := range []bool{true, false} {
 		t.Run(map[bool]string{true: "match", false: "checked mismatch"}[matched], func(t *testing.T) {

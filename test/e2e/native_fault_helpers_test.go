@@ -67,7 +67,7 @@ echo "killed $n"
 var (
 	nativeFaultContainerID  = regexp.MustCompile(`^containerd://([0-9a-f]{64})$`)
 	nativeFaultForeignSlots = []string{nativeFaultForeignName, nativeSlotPrefix(nativeFaultDecoyRun) + "1"}
-	nativeFaultForeignPubs  = []string{nativeFaultForeignName, "rpgm_p_" + nativeFaultDecoyRun + "_1"}
+	nativeFaultForeignPubs  = []string{nativeFaultForeignName, nativePublicationPrefix(nativeFaultDecoyRun) + "1"}
 )
 
 // requireNativeFaultRun skips outside a private native kind run: the faults kill
@@ -130,7 +130,7 @@ func startNativeFault(name, target string, configure func(*v1beta1.Migration)) *
 	DeferCleanup(func() {
 		deleteMigration(name)
 		if c.run != "" {
-			psql(target, "DROP SCHEMA IF EXISTS "+sqlIdent("_rpgmigrate_"+c.run)+" CASCADE")
+			psql(target, "DROP SCHEMA IF EXISTS "+sqlIdent(nativeSchemaName(c.run))+" CASCADE")
 		}
 	})
 	c.writer = startLiveWriter(c.marker)
@@ -154,7 +154,7 @@ func (c *nativeFaultCase) ownedSlots() int {
 func (c *nativeFaultCase) ownedPublications() int {
 	GinkgoHelper()
 	return psqlInt(sourceCluster, "SELECT count(*) FROM pg_publication WHERE starts_with(pubname, "+
-		sqlLiteral("rpgm_p_"+c.run+"_")+")")
+		sqlLiteral(nativePublicationPrefix(c.run))+")")
 }
 
 // waitStreaming waits for caught-up streaming with positive evidence of the owned

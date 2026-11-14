@@ -23,8 +23,8 @@ def table(index, different=False):
              status='different' if different else 'match')
 
 def progress(count, differing):
- return dict(planned_tables=count, compared_tables=count, planned_bytes=0, compared_bytes=0,
-             compared_rows=count, differing_tables=differing, failed_tables=0, elapsedMs=1,
+ return dict(plannedTables=count, comparedTables=count, plannedBytes=0, comparedBytes=0,
+             comparedRows=count, differingTables=differing, failedTables=0, elapsedMs=1,
              final=True, inFlightCount=0, inFlight=[])
 
 def diagnostic():
@@ -70,11 +70,13 @@ class ComparisonTests(unittest.TestCase):
    result = self.capture(report, exit_code=3)
    self.assertFalse(result['matched']); self.assertEqual(result['engine_exit'], 3)
    self.assertEqual(result['table_count'], 2000); self.assertEqual(result['report_bytes'], len(report))
+   self.assertEqual((result['differing_tables'], result['compared_rows'], result['elapsed_ms']), (1, 2000, 1))
    self.assertNotIn('public', json.dumps(result)); self.assertNotIn('1234abcd', json.dumps(result))
   self.assertTrue(self.capture(json.dumps([table(0)]).encode()+b'\n')['matched'])
   for matched in (True, False):
    result = self.capture(json.dumps(dict(matched=matched)).encode()+b'\n', check='schema', exit_code=0 if matched else 3)
    self.assertEqual(result['matched'], matched); self.assertEqual(result['table_count'], 0)
+   self.assertEqual((result['planned_bytes'], result['compared_rows'], result['differing_tables'], result['elapsed_ms']), (0, 0, 0, 0))
 
  def test_refusals(self):
   valid = json.dumps([table(0)]).encode()+b'\n'
@@ -95,6 +97,20 @@ class ComparisonTests(unittest.TestCase):
     with self.assertRaises(Exception): self.capture(report, exit_code=exit_code, stderr=stderr)
   self.assertTrue(self.capture(valid, report_cap=len(valid))['matched'])
   with self.assertRaises(Exception): self.capture(valid, report_cap=len(valid)-1)
+
+ def test_engine_progress_shape(self):
+  # The shared golden line is what the engine logs; snake_case keys are not its shape.
+  golden = (ROOT / 'testdata/v1/payloads/compare-progress.txt').read_text()
+  sample = json.loads(golden[len('compare progress: '):])
+  final = dict(sample, comparedTables=3, comparedBytes=131072, final=True, inFlightCount=0, inFlight=[])
+  report = json.dumps([table(0), table(1), table(2)]).encode() + b'\n'
+  stderr = golden + 'compare progress: ' + json.dumps(final) + '\n'
+  result = self.capture(report, stderr=stderr)
+  self.assertTrue(result['matched'])
+  self.assertEqual((result['table_count'], result['planned_bytes'], result['compared_rows'], result['differing_tables'], result['elapsed_ms']), (3, 131072, 20, 0, 10059))
+  snake = {''.join('_' + c.lower() if c.isupper() else c for c in key) if key.endswith(('Tables', 'Bytes', 'Rows')) else key: value for key, value in final.items()}
+  self.assertIn('planned_tables', snake)
+  with self.assertRaises(Exception): self.capture(report, stderr='compare progress: ' + json.dumps(snake) + '\n')
 
  def test_report_stream(self):
   for report in (b'[{', b'[true]\n', b'[[[]]]\n', b'[{"schema":"x","schema":"y"}]\n', b'[null]\n', b'\xff\n'):

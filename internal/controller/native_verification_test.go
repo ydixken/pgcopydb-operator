@@ -12,6 +12,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,14 +45,14 @@ func nativeComparePayload(t *testing.T, f *nativeCloneFixture, check string, mat
 		t.Fatal(err)
 	}
 	hash := native.ComparisonProgramSHA256()
-	exit, count := 3, 1
+	exit, count, size, rows, differing, elapsed := 3, 1, 8192, 7, 1, 42
 	if matched {
-		exit = 0
+		exit, differing = 0, 0
 	}
 	if check == compareSchema {
-		count = 0
+		count, size, rows, differing, elapsed = 0, 0, 0, 0, 0
 	}
-	raw, err := json.Marshal(map[string]any{probeTestVersionCommand: 1, "kind": "native_comparison", probeOperationKey: op, nativeControlProgramKey: hex.EncodeToString(hash[:]), "work": work, "check": check, "matched": matched, "engine_exit": exit, "report_bytes": 19, "table_count": count, "child_closed": true, "report_closed": true, "private_closed": true, nativeControlDiagnosticsKey: true})
+	raw, err := json.Marshal(map[string]any{probeTestVersionCommand: 1, "kind": "native_comparison", probeOperationKey: op, nativeControlProgramKey: hex.EncodeToString(hash[:]), "work": work, "check": check, "matched": matched, "engine_exit": exit, "report_bytes": 19, "table_count": count, "planned_bytes": size, "compared_rows": rows, "differing_tables": differing, "elapsed_ms": elapsed, "child_closed": true, "report_closed": true, "private_closed": true, nativeControlDiagnosticsKey: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +125,14 @@ func TestNativeVerificationLifecycle(t *testing.T) {
 			if meta.IsStatusConditionTrue(f.m.Status.Conditions, v1beta1.ConditionVerified) != tc.verified || meta.IsStatusConditionTrue(f.m.Status.Conditions, v1beta1.ConditionComplete) || f.patches != 0 {
 				t.Fatal("typed verification published completion or changed a known receipt")
 			}
+			expectNativeDataProgress(t, f.m, tc.options.Data, tc.dataMatch)
+			if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+				t.Fatal(err)
+			}
+			observed := f.m.DeepCopy().Status.VerificationProgress
+			if done, err := nativeVerify(t, f); err != nil || !done || !apiequality.Semantic.DeepEqual(observed, f.m.Status.VerificationProgress) {
+				t.Fatalf("a second pass rewrote the final sample: done=%t err=%v", done, err)
+			}
 		})
 	}
 	t.Run("running helper preserves asynchronous scan", nativeVerificationRunning)
@@ -132,6 +141,30 @@ func TestNativeVerificationLifecycle(t *testing.T) {
 	t.Run("unavailable comparison", nativeVerificationRefusals)
 	t.Run("known create persists receipt and returns before capture", nativeVerificationReceiptReturn)
 	t.Run("unknown creation", nativeVerificationUnknownCreate)
+}
+
+// expectNativeDataProgress holds the data item to the native helper's final sample in nativeComparePayload.
+func expectNativeDataProgress(t *testing.T, m *v1beta1.Migration, data, matched bool) {
+	t.Helper()
+	if !data {
+		if len(m.Status.VerificationProgress) != 0 {
+			t.Fatalf("a schema-only comparison left progress %+v", m.Status.VerificationProgress)
+		}
+		return
+	}
+	if len(m.Status.VerificationProgress) != 1 {
+		t.Fatalf("progress = %+v, want one data item", m.Status.VerificationProgress)
+	}
+	p := m.Status.VerificationProgress[0]
+	differing := int64(1)
+	if matched {
+		differing = 0
+	}
+	if p.Kind != v1beta1.VerificationProgressData || p.JobName != compareJobName(m, compareData) || !p.Final || p.ObservedAt == nil ||
+		p.PlannedTables != 1 || p.ComparedTables != 1 || p.PlannedBytes.Value() != 8192 || p.ComparedBytes.Value() != 8192 ||
+		p.ComparedRows != 7 || p.DifferingTables != differing || p.FailedTables != 0 || p.Elapsed.Duration != 42*time.Millisecond || len(p.InFlight) != 0 {
+		t.Fatalf("data item = %+v, want the helper's final sample", p)
+	}
 }
 
 func nativeVerificationRefusals(t *testing.T) {

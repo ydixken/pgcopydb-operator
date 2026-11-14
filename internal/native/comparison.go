@@ -24,9 +24,22 @@ const (
 var ErrNativeComparisonUnavailable = errors.New("native comparison unavailable")
 
 // ComparisonOutcome conveys no ownership, checkpoint, or completion authority.
-type ComparisonOutcome struct{ known, matched bool }
+type ComparisonOutcome struct {
+	known, matched bool
+	progress       ComparisonProgress
+}
+
+// ComparisonProgress is a data compare's final progress sample, which saw every planned table compared.
+type ComparisonProgress struct {
+	Tables, Bytes, Rows, DifferingTables, ElapsedMs int64
+}
 
 func (o ComparisonOutcome) Result() (matched, known bool) { return o.matched, o.known }
+
+// Progress is the final sample of a known data comparison; a schema comparison has none.
+func (o ComparisonOutcome) Progress() (ComparisonProgress, bool) {
+	return o.progress, o.known && o.progress.Tables > 0
+}
 
 type comparisonWire struct {
 	Version          int64        `json:"version"`
@@ -39,6 +52,10 @@ type comparisonWire struct {
 	EngineExit       int64        `json:"engine_exit"`
 	ReportBytes      int64        `json:"report_bytes"`
 	TableCount       int64        `json:"table_count"`
+	PlannedBytes     int64        `json:"planned_bytes"`
+	ComparedRows     int64        `json:"compared_rows"`
+	DifferingTables  int64        `json:"differing_tables"`
+	ElapsedMs        int64        `json:"elapsed_ms"`
 	ChildClosed      bool         `json:"child_closed"`
 	ReportClosed     bool         `json:"report_closed"`
 	PrivateClosed    bool         `json:"private_closed"`
@@ -69,7 +86,19 @@ func parseComparisonPayload(raw []byte, work WorkIdentity, operationID, check st
 	if result.Matched && result.EngineExit != 0 || !result.Matched && result.EngineExit != 3 || check == comparisonCheckSchema && result.TableCount != 0 || check == comparisonCheckData && result.TableCount == 0 {
 		return refuse()
 	}
-	return ComparisonOutcome{known: true, matched: result.Matched}, nil
+	progress := ComparisonProgress{Tables: result.TableCount, Bytes: result.PlannedBytes, Rows: result.ComparedRows, DifferingTables: result.DifferingTables, ElapsedMs: result.ElapsedMs}
+	if !progress.valid(check, result.Matched) {
+		return refuse()
+	}
+	return ComparisonOutcome{known: true, matched: result.Matched, progress: progress}, nil
+}
+
+// A schema comparison logs no progress; a data one counts its differing tables in its verdict.
+func (p ComparisonProgress) valid(check string, matched bool) bool {
+	if check == comparisonCheckSchema {
+		return p == ComparisonProgress{}
+	}
+	return p.Bytes >= 0 && p.Rows >= 0 && p.ElapsedMs >= 0 && p.DifferingTables >= 0 && p.DifferingTables <= p.Tables && matched == (p.DifferingTables == 0)
 }
 
 func (result comparisonWire) matches(work WorkIdentity, operationID, check string, programSHA256 [32]byte) bool {
@@ -80,7 +109,7 @@ func (result comparisonWire) matches(work WorkIdentity, operationID, check strin
 }
 
 func comparisonValue(d *json.Decoder, work bool) bool {
-	keys := "version kind operation_id program_sha256 work check matched engine_exit report_bytes table_count child_closed report_closed private_closed diagnostics_clean"
+	keys := "version kind operation_id program_sha256 work check matched engine_exit report_bytes table_count planned_bytes compared_rows differing_tables elapsed_ms child_closed report_closed private_closed diagnostics_clean"
 	if work {
 		keys = sourceWorkWireKeys
 	}

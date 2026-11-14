@@ -184,6 +184,10 @@ func earlyManualCutover() {
 	}
 	slot, err := ownedSlotMatch(mig)
 	Expect(err).NotTo(HaveOccurred())
+	drainReason := "DrainVerified"
+	if mig.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		drainReason = nativeDrainReason
+	}
 	// A slot being created also has an active PID; wait until its snapshot is usable.
 	query := "SELECT s.active_pid FROM pg_replication_slots s JOIN pg_stat_replication r " +
 		"ON r.pid=s.active_pid WHERE " + slot + " AND s.database=current_database() " +
@@ -261,6 +265,10 @@ func earlyManualCutover() {
 		g.Expect(m.Status.Replication.Endpos).To(BeEmpty())
 		g.Expect(cutoverEvents(g)).To(BeZero())
 	}, suiteWait(migrationTimeout), time.Second).Should(Succeed())
+	if mig.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		Expect(nativeRunCensus(sourceCluster, mig)).To(Equal("1/1/0"),
+			"source slots/publications/schemas of %s while streaming, the count cleanup must clear", name)
+	}
 
 	By("resuming the sender with source writes stopped and observing automatic use of the existing approval")
 	Expect(signalSender("CONT")).To(Succeed())
@@ -382,7 +390,7 @@ func earlyManualCutover() {
 		drain := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionCutoverComplete)
 		g.Expect(drain).NotTo(BeNil())
 		g.Expect(drain.Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(drain.Reason).To(Equal("DrainVerified"))
+		g.Expect(drain.Reason).To(Equal(drainReason))
 	}, suiteWait(followTimeout), time.Second).Should(Succeed())
 	m = waitPhase(name, nsE2E, suiteWait(followTimeout), v1beta1.PhaseCompleted)
 	complete := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionComplete)

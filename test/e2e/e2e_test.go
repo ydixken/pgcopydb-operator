@@ -172,7 +172,12 @@ var _ = Describe("Migration", Ordered, SpecPriority(2), func() {
 			Expect(matviewState(targetCluster)).To(Equal(matviewState(sourceCluster)),
 				"materialized view not repopulated identically on the target")
 		}
-		Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
+		if selectedEngine() == v1beta1.MigrationEngineRPGMigrate {
+			// Native runs with large objects off, so the seeded ones must not reach the target.
+			Expect(largeObjectCount(targetCluster)).To(Equal("0"), "large objects reached the target with large objects off")
+		} else {
+			Expect(largeObjectCount(targetCluster)).To(Equal(largeObjectCount(sourceCluster)))
+		}
 		Expect(sequenceValues(targetCluster)).To(Equal(sequenceValues(sourceCluster)))
 	})
 
@@ -271,7 +276,11 @@ var _ = Describe("Migration", SpecPriority(3), func() {
 			"writer returned marker %d but the source reports %s for %q", last, sourceLast, marker)
 
 		By("waiting for CutoverPending (caught up, Manual gate holds)")
-		waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		pending := waitPhase(name, nsE2E, migrationTimeout, v1beta1.PhaseCutoverPending)
+		if pending.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+			Expect(nativeRunCensus(sourceCluster, pending)).To(Equal("1/1/0"),
+				"source slots/publications/schemas of %s while the Manual gate holds, the count cleanup must clear", name)
+		}
 
 		approveCutover(name)
 		// A follow migration with data verification can run two whole
@@ -1268,6 +1277,9 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 func create(m *v1beta1.Migration) {
 	GinkgoHelper()
 	volume := ""
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		startNativeJobRecorder()
+	}
 	if nativeKindWorkVolume() {
 		volume = provisionNativeWorkVolume(m)
 	}
@@ -1703,23 +1715,30 @@ func reportFailedAttempt(m *v1beta1.Migration) {
 
 // expectCleanupSucceeded asserts the <name>-cleanup Job ran pgcopydb stream
 // cleanup to success; Complete gates on it, so it must exist by now.
+// A native Migration has its own evidence, since its cleanup Job is gone by Complete.
 func expectCleanupSucceeded(name string) {
 	GinkgoHelper()
+	m := &v1beta1.Migration{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		expectNativeCleanupSucceeded(m)
+		return
+	}
 	job := &batchv1.Job{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name + "-cleanup"}, job)).
 		To(Succeed(), "cleanup Job %s-cleanup not found", name)
 	Expect(job.Status.Succeeded).To(BeNumerically(">=", 1), "cleanup Job %s-cleanup did not succeed", name)
 }
 
-// sourceSlotCount counts pgcopydb-created replication slots on the source;
-// generated names always start with pgcopydb_.
+// sourceSlotCount counts the replication slots the selected engine creates on the source.
 func sourceSlotCount() string {
 	GinkgoHelper()
-	return psql(sourceCluster, "SELECT count(*) FROM pg_replication_slots WHERE "+slotFilter())
+	filter, sample := slotCensus()
+	return census(sourceCluster, "pg_replication_slots", "slot_name", filter, sample)
 }
 
-// targetOriginCount counts pgcopydb-created replication origins on the target.
-// stream cleanup drops the generated origin (alpha.11's cleanup-origin fix), so
+// targetOriginCount counts the replication origins the selected engine leaves on the target.
+// pgcopydb stream cleanup drops the generated origin (alpha.11's cleanup-origin fix), so
 // a completed or deleted follow migration must leave none behind.
 // pg_replication_origin is a shared catalog, so the app-database connection
 // sees it.
@@ -1731,7 +1750,8 @@ func targetOriginCount() string {
 // targetOriginCountOn is targetOriginCount on another target cluster.
 func targetOriginCountOn(cluster string) string {
 	GinkgoHelper()
-	return psql(cluster, "SELECT count(*) FROM pg_replication_origin WHERE "+originFilter())
+	filter, sample := originCensus()
+	return census(cluster, "pg_replication_origin", "roname", filter, sample)
 }
 
 // copySecret merges one key into a secret, keeping any other key; CreateOrUpdate

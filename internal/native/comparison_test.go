@@ -23,14 +23,14 @@ func comparisonFixture(t *testing.T, check string, matched bool) ([]byte, WorkId
 	t.Helper()
 	w := WorkIdentity{MigrationUID: "01234567-89ab-cdef-0123-456789abcdef", RunID: "0123456789abcdef0123456789abcdef", WorkdirID: "pvc-owned", CheckpointGeneration: 1}
 	op, hash := strings.Repeat("a", 32), ComparisonProgramSHA256()
-	exit, count := 3, 1
+	exit, count, size, rows, differing, elapsed := 3, 1, 8192, 7, 1, 42
 	if matched {
-		exit = 0
+		exit, differing = 0, 0
 	}
 	if check == comparisonCheckSchema {
-		count = 0
+		count, size, rows, differing, elapsed = 0, 0, 0, 0, 0
 	}
-	raw, err := json.Marshal(map[string]any{fixtureVersionKind: 1, readerKindKey: "native_comparison", readerOperationIDKey: op, "program_sha256": hex.EncodeToString(hash[:]), "work": w, "check": check, "matched": matched, "engine_exit": exit, "report_bytes": 19, "table_count": count, "child_closed": true, "report_closed": true, "private_closed": true, "diagnostics_clean": true})
+	raw, err := json.Marshal(map[string]any{fixtureVersionKind: 1, readerKindKey: "native_comparison", readerOperationIDKey: op, "program_sha256": hex.EncodeToString(hash[:]), "work": w, "check": check, "matched": matched, "engine_exit": exit, "report_bytes": 19, "table_count": count, "planned_bytes": size, "compared_rows": rows, "differing_tables": differing, "elapsed_ms": elapsed, "child_closed": true, "report_closed": true, "private_closed": true, "diagnostics_clean": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,29 @@ func TestNativeComparisonCheckedCapture(t *testing.T) {
 	}
 }
 
+func TestNativeComparisonProgressFollowsTheCheck(t *testing.T) {
+	matched, work, op, hash := comparisonFixture(t, comparisonCheckData, true)
+	schema, _, _, _ := comparisonFixture(t, comparisonCheckSchema, true)
+	for name, payload := range map[string][]byte{
+		"matched data with a differing table": bytes.Replace(matched, []byte(`"differing_tables":0`), []byte(`"differing_tables":1`), 1),
+		"schema with bytes":                   bytes.Replace(schema, []byte(`"planned_bytes":0`), []byte(`"planned_bytes":1`), 1),
+		"schema with rows":                    bytes.Replace(schema, []byte(`"compared_rows":0`), []byte(`"compared_rows":1`), 1),
+		"schema with elapsed":                 bytes.Replace(schema, []byte(`"elapsed_ms":0`), []byte(`"elapsed_ms":1`), 1),
+	} {
+		check := comparisonCheckData
+		if strings.HasPrefix(name, "schema") {
+			check = comparisonCheckSchema
+		}
+		out, err := parseComparisonPayload(payload, work, op, check, hash)
+		if _, known := out.Result(); err != ErrNativeComparisonUnavailable || known {
+			t.Errorf("%s produced an outcome", name)
+		}
+		if _, ok := out.Progress(); ok {
+			t.Errorf("%s produced progress", name)
+		}
+	}
+}
+
 func TestNativeComparisonOutcome(t *testing.T) {
 	matched, known := (ComparisonOutcome{}).Result()
 	if matched || known {
@@ -98,6 +121,17 @@ func TestNativeComparisonOutcome(t *testing.T) {
 			got, known := out.Result()
 			if err != nil || !known || got != match {
 				t.Fatalf("check=%s match=%v known=%v error=%v", check, got, known, err)
+			}
+			progress, ok := out.Progress()
+			want := ComparisonProgress{Tables: 1, Bytes: 8192, Rows: 7, DifferingTables: 1, ElapsedMs: 42}
+			if match {
+				want.DifferingTables = 0
+			}
+			if check == comparisonCheckSchema {
+				want = ComparisonProgress{}
+			}
+			if ok != (check == comparisonCheckData) || progress != want {
+				t.Fatalf("check=%s match=%v progress=%+v ok=%v", check, match, progress, ok)
 			}
 		}
 	}
@@ -119,6 +153,24 @@ func TestNativeComparisonOutcome(t *testing.T) {
 		"duplicate":        func(b []byte) []byte { return append([]byte(`{"version":1,`), b[1:]...) },
 		readerCaseUnknown:  func(b []byte) []byte { return append([]byte(`{"secret":"canary",`), b[1:]...) },
 		"noncanonical":     func(b []byte) []byte { return bytes.Replace(b, []byte(`"version":1`), []byte(`"version":1.0`), 1) },
+		"no differing count": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"differing_tables":1`), []byte(`"differing_tables":0`), 1)
+		},
+		"more differing than compared": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"differing_tables":1`), []byte(`"differing_tables":2`), 1)
+		},
+		"negative rows": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"compared_rows":7`), []byte(`"compared_rows":-7`), 1)
+		},
+		"negative bytes": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"planned_bytes":8192`), []byte(`"planned_bytes":-1`), 1)
+		},
+		"negative elapsed": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"elapsed_ms":42`), []byte(`"elapsed_ms":-1`), 1)
+		},
+		"missing progress": func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"elapsed_ms":42,`), nil, 1)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out, err := parseComparisonPayload(edit(bytes.Clone(raw)), work, op, comparisonCheckData, hash)

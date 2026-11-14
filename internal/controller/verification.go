@@ -352,10 +352,13 @@ func (r *MigrationReconciler) recordCompareProgress(m *v1beta1.Migration, kind s
 	if compareProgressFinal(m, kind, job) {
 		return
 	}
-	p, ok := pgcopydb.LastCompareProgress(tail)
-	if !ok {
-		return
+	if p, ok := pgcopydb.LastCompareProgress(tail); ok {
+		r.setCompareProgress(m, kind, job, p)
 	}
+}
+
+// setCompareProgress puts sample p of job in the item of kind.
+func (r *MigrationReconciler) setCompareProgress(m *v1beta1.Migration, kind string, job *batchv1.Job, p pgcopydb.CompareProgress) {
 	item := v1beta1.VerificationProgress{
 		Kind:            kind,
 		JobName:         job.Name,

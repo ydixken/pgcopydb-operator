@@ -115,16 +115,16 @@ class ComparisonDiagnostics:
   if raw.startswith(prefix):
    need(self.check == 'data' and self.final is None and not self.difference, RESULT)
    value = compare_json().decode(raw[len(prefix):].decode('utf-8'))
-   compare_keys(value, 'planned_tables compared_tables planned_bytes compared_bytes compared_rows differing_tables failed_tables elapsedMs final inFlightCount inFlight')
-   for field in ('planned_tables', 'compared_tables', 'planned_bytes', 'compared_bytes', 'compared_rows', 'differing_tables', 'failed_tables', 'elapsedMs', 'inFlightCount'):
+   compare_keys(value, 'plannedTables comparedTables plannedBytes comparedBytes comparedRows differingTables failedTables elapsedMs final inFlightCount inFlight')
+   for field in ('plannedTables', 'comparedTables', 'plannedBytes', 'comparedBytes', 'comparedRows', 'differingTables', 'failedTables', 'elapsedMs', 'inFlightCount'):
     compare_uint(value[field])
-   need(value['compared_tables'] <= value['planned_tables'] and value['compared_bytes'] <= value['planned_bytes'] and value['differing_tables'] <= value['compared_tables'] and value['failed_tables'] == 0, RESULT)
+   need(value['comparedTables'] <= value['plannedTables'] and value['comparedBytes'] <= value['plannedBytes'] and value['differingTables'] <= value['comparedTables'] and value['failedTables'] == 0, RESULT)
    need(type(value['final']) is bool and type(value['inFlight']) is list and len(value['inFlight']) <= 1 and len(value['inFlight']) == value['inFlightCount'], RESULT)
    for item in value['inFlight']:
     compare_keys(item, 'schema name bytes elapsedMs'); compare_name(item['schema']); compare_name(item['name'])
     compare_uint(item['bytes']); compare_uint(item['elapsedMs'])
    if value['final']:
-    need(not value['inFlight'] and value['compared_tables'] == value['planned_tables'] and value['compared_bytes'] == value['planned_bytes'], RESULT)
+    need(not value['inFlight'] and value['comparedTables'] == value['plannedTables'] and value['comparedBytes'] == value['plannedBytes'], RESULT)
     self.final = value
   else:
    need(not self.difference, RESULT)
@@ -143,7 +143,7 @@ class ComparisonDiagnostics:
  def finish(self, matched, count, differing, exit_code):
   need(not self.buffer and exit_code == (0 if matched else 3) and self.difference == (not matched), RESULT)
   if self.check == 'data':
-   need(self.final is not None and self.final['planned_tables'] == count and self.final['differing_tables'] == differing, RESULT)
+   need(self.final is not None and self.final['plannedTables'] == count and self.final['differingTables'] == differing, RESULT)
 
 def compare_tmp_budget(directory):
  total = 0
@@ -210,9 +210,12 @@ def capture_comparison(argv, check, operation_id, program_sha256, work, director
    checked_close(report_fd); report_fd = None
    need(set(os.listdir(directory)) == before_names, CLOSE)
    checked_close(directory); directory = None
+   final = diagnostics.final or dict(plannedBytes=0, comparedRows=0, elapsedMs=0)
    return dict(version=1, kind='native_comparison', operation_id=operation_id, program_sha256=program_sha256,
                work=work, check=check, matched=matched, engine_exit=exit_code, report_bytes=size,
-               table_count=count, child_closed=True, report_closed=True, private_closed=True, diagnostics_clean=True)
+               table_count=count, planned_bytes=final['plannedBytes'], compared_rows=final['comparedRows'],
+               differing_tables=differing, elapsed_ms=final['elapsedMs'],
+               child_closed=True, report_closed=True, private_closed=True, diagnostics_clean=True)
  finally:
   try:
    with comparison_phase():

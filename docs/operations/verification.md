@@ -16,6 +16,7 @@ This measures the duration of the compare that its cutover waits for.
 See [Rehearsal](#rehearsal).
 The phase is `Verifying` while the schema compare and the data compare run.
 While the data compare runs, `status.verificationProgress` shows how far it got.
+With `spec.engine: rpgmigrate`, it shows only the final count, after the compare ends.
 See [Progress](#progress).
 The schema compare and the data compare each report separately in `status.verification`, with the `startedAt` and `completedAt` of their Jobs.
 Both also report in the `pgcopydb_migration_verification_check` metric.
@@ -219,6 +220,15 @@ The operator reads these lines from the Job's log into `status.verificationProgr
 - `data`: the `<name>-compare-data` Job of `spec.verification.data`.
 
 `compare schema` logs no progress, and a runner older than `0.18.144.g86bf908` logs none for any compare, so these runs leave no item.
+
+### Native engine
+
+With `spec.engine: rpgmigrate`, only the `data` item exists.
+The native engine has no rehearsal, and its drain is proved without a compare, so it leaves no `drain` item.
+The native compare helper checks every progress line of `rpgmigrate compare data`, but its Job logs only its sealed result.
+The operator therefore reads no sample while the compare runs.
+After the helper succeeds, the operator records the final sample from that result: `final` is true, every planned table and byte is compared, and `inFlight` is empty.
+A compare that the operator refuses leaves no item.
 
 ```sh
 kubectl get pgm billing -o jsonpath='{.status.verificationProgress}' | jq

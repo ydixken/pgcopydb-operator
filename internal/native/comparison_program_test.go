@@ -27,7 +27,7 @@ func TestNativeComparisonLargeReport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", path).CombinedOutput()
-	if err != nil || !bytes.Contains(output, []byte("Ran 9 tests")) || !bytes.Contains(output, []byte("\nOK\n")) {
+	if err != nil || !bytes.Contains(output, []byte("Ran 10 tests")) || !bytes.Contains(output, []byte("\nOK\n")) {
 		t.Fatalf("comparison mechanism failed: %s", output)
 	}
 }

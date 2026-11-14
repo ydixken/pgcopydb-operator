@@ -102,6 +102,7 @@ func nativeCloneRequestedProfile(t *testing.T) {
 	if got.Status.Phase != v1beta1.PhaseCompleted || !meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionVerified) || len(got.Status.Verification) != 2 || f.logs != 3 || got.Status.NativeSchemaJobUID != "native-clone-schema-helper" || got.Status.NativeDataJobUID != "native-clone-data-helper" {
 		t.Fatal("Complete did not retain the freshly checked profile")
 	}
+	expectNativeDataProgress(t, got, true, true)
 }
 
 func nativeCloneReceiptReturn(t *testing.T) {
