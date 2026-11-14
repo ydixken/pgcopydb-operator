@@ -22,7 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const nativeRetryTmpPath = "/tmp"
+const (
+	nativeRetryTmpPath = "/tmp"
+	// The gate program refuses any other name, which its census uses to exclude its own session.
+	nativeRetryAppNameEnv = "PGAPPNAME"
+	nativeRetryAppName    = "pgm-retry-gate"
+)
 
 type retryAdmission struct {
 	helper    *activeAdmission
@@ -219,7 +224,7 @@ func RetryMaterialization(m *v1beta1.Migration, w ExecutionData) ([]string, []st
 	if len(preludes) > 0 || len(passfiles) > 0 {
 		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
 	}
-	env = append(env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
+	env = append(env, corev1.EnvVar{Name: nativePreflightTimeoutEnv, Value: "10"}, corev1.EnvVar{Name: nativeRetryAppNameEnv, Value: nativeRetryAppName})
 	env = append(env, identityEnv(w.Work)...)
 	env = append(env, corev1.EnvVar{Name: nativePreflightLocale, Value: "C"}, corev1.EnvVar{Name: nativePreflightLang, Value: "C"})
 	command, args, err := renderRetryScripts(EvidenceProgram(), w.OperationID, w.ProgramSHA256, conn.PreludeScript(preludes, passfiles, ""))
