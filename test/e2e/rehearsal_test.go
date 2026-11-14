@@ -182,8 +182,12 @@ func verificationProgress(m *v1beta1.Migration, kind string) *v1beta1.Verificati
 }
 
 // expectFinalProgress asserts that job left the final sample of kind, with every planned table compared.
+// A native Migration records it from the checked compare result, so that result must be there too.
 func expectFinalProgress(m *v1beta1.Migration, kind, job string) {
 	GinkgoHelper()
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		Expect(nativeFinalProgressError(m, kind)).To(Succeed())
+	}
 	p := verificationProgress(m, kind)
 	Expect(p).NotTo(BeNil(), "%s has no %s item in status.verificationProgress", m.Name, kind)
 	Expect(p.JobName).To(Equal(job), "the %s item of %s describes another Job", kind, m.Name)
@@ -195,8 +199,13 @@ func expectFinalProgress(m *v1beta1.Migration, kind, job string) {
 
 // expectDrainProgress holds the drain item to the verify Job's log: a drain decided by
 // content leaves a final sample, and the exact-LSN fast path, which compares nothing, none.
+// A native drain has no verify Job; its proof is the checkpoint row the target retains.
 func expectDrainProgress(m *v1beta1.Migration) {
 	GinkgoHelper()
+	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+		expectNativeDrainProof(m)
+		return
+	}
 	job := m.Name + "-verify"
 	log := jobLogs(job, verifyLogLines)
 	switch {

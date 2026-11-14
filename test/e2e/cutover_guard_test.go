@@ -186,7 +186,7 @@ func earlyManualCutover() {
 	Expect(err).NotTo(HaveOccurred())
 	drainReason := "DrainVerified"
 	if mig.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
-		drainReason = "NativeDrainConfirmed"
+		drainReason = nativeDrainReason
 	}
 	// A slot being created also has an active PID; wait until its snapshot is usable.
 	query := "SELECT s.active_pid FROM pg_replication_slots s JOIN pg_stat_replication r " +
