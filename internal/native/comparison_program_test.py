@@ -70,11 +70,13 @@ class ComparisonTests(unittest.TestCase):
    result = self.capture(report, exit_code=3)
    self.assertFalse(result['matched']); self.assertEqual(result['engine_exit'], 3)
    self.assertEqual(result['table_count'], 2000); self.assertEqual(result['report_bytes'], len(report))
+   self.assertEqual((result['differing_tables'], result['compared_rows'], result['elapsed_ms']), (1, 2000, 1))
    self.assertNotIn('public', json.dumps(result)); self.assertNotIn('1234abcd', json.dumps(result))
   self.assertTrue(self.capture(json.dumps([table(0)]).encode()+b'\n')['matched'])
   for matched in (True, False):
    result = self.capture(json.dumps(dict(matched=matched)).encode()+b'\n', check='schema', exit_code=0 if matched else 3)
    self.assertEqual(result['matched'], matched); self.assertEqual(result['table_count'], 0)
+   self.assertEqual((result['planned_bytes'], result['compared_rows'], result['differing_tables'], result['elapsed_ms']), (0, 0, 0, 0))
 
  def test_refusals(self):
   valid = json.dumps([table(0)]).encode()+b'\n'
@@ -103,7 +105,9 @@ class ComparisonTests(unittest.TestCase):
   final = dict(sample, comparedTables=3, comparedBytes=131072, final=True, inFlightCount=0, inFlight=[])
   report = json.dumps([table(0), table(1), table(2)]).encode() + b'\n'
   stderr = golden + 'compare progress: ' + json.dumps(final) + '\n'
-  self.assertTrue(self.capture(report, stderr=stderr)['matched'])
+  result = self.capture(report, stderr=stderr)
+  self.assertTrue(result['matched'])
+  self.assertEqual((result['table_count'], result['planned_bytes'], result['compared_rows'], result['differing_tables'], result['elapsed_ms']), (3, 131072, 20, 0, 10059))
   snake = {''.join('_' + c.lower() if c.isupper() else c for c in key) if key.endswith(('Tables', 'Bytes', 'Rows')) else key: value for key, value in final.items()}
   self.assertIn('planned_tables', snake)
   with self.assertRaises(Exception): self.capture(report, stderr='compare progress: ' + json.dumps(snake) + '\n')

@@ -210,9 +210,12 @@ def capture_comparison(argv, check, operation_id, program_sha256, work, director
    checked_close(report_fd); report_fd = None
    need(set(os.listdir(directory)) == before_names, CLOSE)
    checked_close(directory); directory = None
+   final = diagnostics.final or dict(plannedBytes=0, comparedRows=0, elapsedMs=0)
    return dict(version=1, kind='native_comparison', operation_id=operation_id, program_sha256=program_sha256,
                work=work, check=check, matched=matched, engine_exit=exit_code, report_bytes=size,
-               table_count=count, child_closed=True, report_closed=True, private_closed=True, diagnostics_clean=True)
+               table_count=count, planned_bytes=final['plannedBytes'], compared_rows=final['comparedRows'],
+               differing_tables=differing, elapsed_ms=final['elapsedMs'],
+               child_closed=True, report_closed=True, private_closed=True, diagnostics_clean=True)
  finally:
   try:
    with comparison_phase():

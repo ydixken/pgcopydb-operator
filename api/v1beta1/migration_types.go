@@ -533,7 +533,8 @@ const (
 
 // VerificationProgress is the latest progress sample of one compare data run,
 // read from the compare progress lines its Job logs. Runners older than
-// 0.18.144.g86bf908 log none, so they leave no item.
+// 0.18.144.g86bf908 log none, so they leave no item. A native data compare
+// records only its final sample, from the helper's checked result.
 type VerificationProgress struct {
 	// kind is the run: rehearsal (spec.verification.rehearsal), drain (the
 	// cutover's drain verify, only when it compares), or data (spec.verification.data).

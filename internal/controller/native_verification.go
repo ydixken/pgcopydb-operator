@@ -6,6 +6,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,7 @@ type nativeVerificationCapture struct {
 	pod           *corev1.Pod
 	binding       podexec.NativeContainerBinding
 	result        v1beta1.VerificationResult
+	progress      native.ComparisonOutcome
 }
 
 // A changed ResourceVersion means a new helper receipt was persisted; the caller must return immediately.
@@ -73,6 +75,9 @@ func (r *MigrationReconciler) ensureNativeVerification(ctx context.Context, m *v
 		return false, native.ErrNativeComparisonUnavailable
 	}
 	m.Status.Phase, m.Status.Verification = v1beta1.PhaseVerifying, results
+	for _, capture := range captures {
+		r.recordNativeCompareProgress(m, capture)
+	}
 	if mismatch == "" {
 		r.setCondition(m, v1beta1.ConditionVerified, metav1.ConditionTrue, "ComparePassed", "Native comparison found source and target matching")
 	} else {
@@ -155,7 +160,7 @@ func (r *MigrationReconciler) readNativeVerificationCheck(ctx context.Context, m
 	if err != nil || !known {
 		return nil, false, native.ErrNativeComparisonUnavailable
 	}
-	capture := &nativeVerificationCapture{expected: expected, job: job, pod: pod, binding: binding, result: v1beta1.VerificationResult{Check: check, Passed: matched, StartedAt: job.Status.StartTime, CompletedAt: statusTime(jobFinishedAt(job))}}
+	capture := &nativeVerificationCapture{expected: expected, job: job, pod: pod, binding: binding, progress: outcome, result: v1beta1.VerificationResult{Check: check, Passed: matched, StartedAt: job.Status.StartTime, CompletedAt: statusTime(jobFinishedAt(job))}}
 	if !r.nativeVerificationCaptureUnchanged(ctx, m, capture) || !r.nativeVerificationOriginalUnchanged(ctx, m, worker, pvc, original) {
 		return nil, false, native.ErrNativeComparisonUnavailable
 	}
@@ -214,4 +219,22 @@ func (r *MigrationReconciler) recordNativeVerificationReceipt(ctx context.Contex
 	}
 	desired.DeepCopyInto(m)
 	return nil
+}
+
+// recordNativeCompareProgress puts a checked data comparison's final sample in the data item.
+// The helper logs only its sealed result, so a running native compare shows no sample.
+func (r *MigrationReconciler) recordNativeCompareProgress(m *v1beta1.Migration, capture *nativeVerificationCapture) {
+	p, ok := capture.progress.Progress()
+	if !ok || capture.result.Check != compareData || compareProgressFinal(m, v1beta1.VerificationProgressData, capture.job) {
+		return
+	}
+	r.setCompareProgress(m, v1beta1.VerificationProgressData, capture.job, nativeCompareSample(p))
+}
+
+// nativeCompareSample is the final sample p describes: every planned table and byte compared, none failed.
+func nativeCompareSample(p native.ComparisonProgress) pgcopydb.CompareProgress {
+	return pgcopydb.CompareProgress{
+		PlannedTables: p.Tables, ComparedTables: p.Tables, PlannedBytes: p.Bytes, ComparedBytes: p.Bytes,
+		ComparedRows: p.Rows, DifferingTables: p.DifferingTables, ElapsedMs: p.ElapsedMs, Final: true,
+	}
 }
