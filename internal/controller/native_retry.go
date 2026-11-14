@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -72,6 +73,9 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 	if err != nil {
 		return ctrl.Result{}, errNativeWorkerRetry
 	}
+	if live.Status.Phase == v1beta1.PhaseFailed && meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionFailed) {
+		return ctrl.Result{}, nil
+	}
 	if live.Status.RetryGate == nil {
 		desired := live.DeepCopy()
 		failedAt := jobFailedAt(worker)
@@ -95,9 +99,6 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
 	if rg.Exemption != "" && budgetSpent(live) {
-		if live.Status.Phase == v1beta1.PhaseFailed && meta.IsStatusConditionTrue(live.Status.Conditions, v1beta1.ConditionFailed) {
-			return ctrl.Result{}, nil
-		}
 		desired := live.DeepCopy()
 		r.failNativeRetryBudget(desired)
 		return r.patchNativeRetry(ctx, m, desired, base)
@@ -108,15 +109,16 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 		readiness, readErr = r.NativeEvidence.ReadRetryReadiness(ctx, w, nativeRetryInputs(live))
 		return readErr
 	})
-	if err != nil || readiness == nil {
-		return ctrl.Result{}, errNativeWorkerRetry
-	}
-	observation, known := readiness.Observation()
-	if !known {
-		return ctrl.Result{}, errNativeWorkerRetry
+	var observation native.RetryGateObservation
+	known := false
+	if err == nil && readiness != nil {
+		observation, known = readiness.Observation()
 	}
 	if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, live, worker, pvc, original); err != nil {
 		return ctrl.Result{}, errNativeWorkerRetry
+	}
+	if !known {
+		return r.holdNativeRetryUnobserved(ctx, m, live, base)
 	}
 	if rg.Exemption == "" {
 		desired := live.DeepCopy()
@@ -145,6 +147,25 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 	return r.startNativeRetry(ctx, live, live.DeepCopy(), a)
 }
 
+// holdNativeRetryUnobserved paces a gate read without an observation at the gate interval.
+// Past the verdict deadline, a gate that still has none fails the Migration instead of looping.
+func (r *MigrationReconciler) holdNativeRetryUnobserved(ctx context.Context, m, live, base *v1beta1.Migration) (ctrl.Result, error) {
+	rg, desired := live.Status.RetryGate, live.DeepCopy()
+	held := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionRetryHeld)
+	// Only a hold whose last read had an observation (SessionsRemain) earns one more read.
+	unobserved := held == nil || held.Reason == reasonGateProbing || held.Reason == reasonProbeFailed
+	if unobserved && !r.currentTime().Before(rg.FailedAt.Add(verdictDeadline)) {
+		desired.Status.Phase = v1beta1.PhaseFailed
+		r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionTrue, reasonNativeRetryGateUnobserved, fmt.Sprintf(
+			"The native retry-gate helper (Job rpgmigrate-retry-<operation>) gave no target observation within %s after attempt %d failed", verdictDeadline, rg.FailedAttempt))
+		r.endHold(desired, reasonHoldMigrationFailed, fmt.Sprintf("Attempt %d does not start: the Migration failed with %s", rg.FailedAttempt+1, reasonNativeRetryGateUnobserved))
+	} else {
+		r.setCondition(desired, v1beta1.ConditionRetryHeld, metav1.ConditionTrue, reasonProbeFailed, fmt.Sprintf(
+			"The native retry-gate helper (Job rpgmigrate-retry-<operation>) gave no target observation; the gate reads again in %s", retryGateInterval))
+	}
+	return r.patchNativeRetry(ctx, m, desired, base)
+}
+
 func (r *MigrationReconciler) failNativeRetryBudget(m *v1beta1.Migration) {
 	m.Status.Phase = v1beta1.PhaseFailed
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", "Native retry budget is exhausted")
@@ -158,6 +179,9 @@ func (r *MigrationReconciler) patchNativeRetry(ctx context.Context, m, desired, 
 	desired.DeepCopyInto(m)
 	return ctrl.Result{RequeueAfter: retryGateInterval}, nil
 }
+
+// reasonNativeRetryGateUnobserved fails a native Migration whose retry gate never read the target.
+const reasonNativeRetryGateUnobserved = "NativeRetryGateUnobserved"
 
 var (
 	errNativeRecovery       = errors.New("native recovery identity or execution unavailable")

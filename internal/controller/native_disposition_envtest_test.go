@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,9 +43,19 @@ type nativeDeletionEnv struct {
 	edit     func(map[string]any)
 	relays   int
 	cleanups int
+	// helperExits makes every retry-gate helper exit 1 before any output, as in M7-RUN3.
+	helperExits  bool
+	retryHelpers int
+	workers      int
 }
 
 func newNativeDeletionEnv(ctx context.Context, name string) *nativeDeletionEnv {
+	GinkgoHelper()
+	return newNativeFailedWorkerEnv(ctx, name, true)
+}
+
+// newNativeFailedWorkerEnv leaves attempt 1's worker failed; deleting also fails and deletes the Migration.
+func newNativeFailedWorkerEnv(ctx context.Context, name string, deleting bool) *nativeDeletionEnv {
 	GinkgoHelper()
 	c, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
@@ -87,9 +99,14 @@ func newNativeDeletionEnv(ctx context.Context, name string) *nativeDeletionEnv {
 	original.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{Name: workerContainer, Image: qualifiedRunnerARM64, ImageID: qualifiedRunnerARM64, ContainerID: nativePasswordOriginalContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, ContainerID: nativePasswordOriginalContainer}}}}}
 	Expect(c.Status().Update(ctx, original)).To(Succeed())
 	m.Status.Attempts, m.Status.JobName, m.Status.Phase, m.Status.ObservedGeneration = 1, worker.Name, v1beta1.PhaseFailed, m.Generation
+	if !deleting {
+		m.Status.Phase = v1beta1.PhaseCloning
+	}
 	m.Status.NativeJobUID, m.Status.NativePVCUID = string(worker.UID), string(pvc.UID)
 	Expect(c.Status().Update(ctx, m)).To(Succeed())
-	Expect(c.Delete(ctx, m)).To(Succeed())
+	if deleting {
+		Expect(c.Delete(ctx, m)).To(Succeed())
+	}
 	e.m = m
 	return e
 }
@@ -128,12 +145,30 @@ func (e *nativeDeletionEnv) create(ctx context.Context, c client.WithWatch, obj 
 		return err
 	}
 	id, now := "containerd://"+string(pod.UID), metav1.Now()
-	running := strings.HasPrefix(job.Name, "rpgmigrate-inventory-")
+	retry := strings.HasPrefix(job.Name, "rpgmigrate-retry-")
+	running := strings.HasPrefix(job.Name, "rpgmigrate-inventory-") || retry
 	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Name: workerContainer, ContainerID: id, Image: "display-alias", ImageID: qualifiedRunnerARM64, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: now}}}}}
 	// The Job controller writes status later, so the caller's object keeps its creation response.
 	live := job.DeepCopy()
 	live.Status = batchv1.JobStatus{Active: 1, StartTime: &now}
-	if !running {
+	e.mu.Lock()
+	exits := retry && e.helperExits
+	if retry {
+		e.retryHelpers++
+	}
+	if !retry && !strings.HasPrefix(job.Name, "rpgmigrate-") {
+		e.workers++
+	}
+	e.mu.Unlock()
+	switch {
+	case exits:
+		live.Status = batchv1.JobStatus{Failed: 1, StartTime: &now, Conditions: []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded, LastTransitionTime: now},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: batchv1.JobReasonBackoffLimitExceeded, LastTransitionTime: now},
+		}}
+		pod.Status.Phase = corev1.PodFailed
+		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ContainerID: id, ExitCode: 1}}
+	case !running:
 		e.complete(live, pod)
 	}
 	e.mu.Lock()
@@ -252,6 +287,12 @@ func (e *nativeDeletionEnv) relay(out http.ResponseWriter, request *http.Request
 	result := map[string]any{probeTestVersionCommand: 1, lifecycleKindKey: req[lifecycleKindKey], probeOperationKey: req[probeOperationKey], nativeControlProgramKey: req[nativeControlProgramKey], nativeControlRequestKey: hex.EncodeToString(requestSHA[:]), nativeControlExecutionKey: hex.EncodeToString(executionSHA[:]), nativeControlWorkKey: x[nativeControlWorkKey],
 		"resources":                  []map[string]any{{lifecycleKindKey: workdirVolume, lifecycleNameKey: nativeCleanupTestWorkdir, lifecycleOwnedKey: true, lifecycleRetainKey: true}},
 		nativeControlSourceClosedKey: true, nativeTargetClosedKey: true, nativeDispositionMaterializationClosedKey: true, nativeControlPrivateClosedKey: true, nativeControlDiagnosticsKey: true}
+	if req[lifecycleKindKey] == "target_retry" {
+		delete(result, "resources")
+		delete(result, nativeControlSourceClosedKey)
+		delete(result, nativeControlPrivateClosedKey)
+		maps.Copy(result, map[string]any{"observed_at_unix": time.Now().Unix(), "census_known": true, nativeDispositionTotalKey: 0, "syncrep": 0, "gate_waiting": 0, "oldest_syncrep_wait_unix": 0, "application_attribution_known": true, "target_synchronous_commit": "on", "synchronous_commit_admitted": true, "probe_attempted": true, nativeDispositionProbeCommittedKey: true})
+	}
 	e.mu.Lock()
 	e.relays++
 	edit := e.edit
@@ -308,5 +349,76 @@ var _ = Describe("Native deletion after an early engine refusal", func() {
 		Expect(live.DeletionTimestamp).NotTo(BeNil())
 		Expect(e.relays).To(Equal(2))
 		Expect(e.cleanups).To(BeZero())
+	})
+})
+
+var _ = Describe("Native retry gate without a target observation", func() {
+	ctx := context.Background()
+	reconcileAt := func(r *MigrationReconciler, name string) (reconcile.Result, *v1beta1.Migration) {
+		GinkgoHelper()
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: testNS}})
+		Expect(err).NotTo(HaveOccurred(), "an unobserved gate went through the error path")
+		live := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, live)).To(Succeed())
+		return result, live
+	}
+
+	It("fails terminal after the verdict deadline with a bounded number of helper Jobs", func() {
+		e := newNativeFailedWorkerEnv(ctx, "mig-native-retry-unobserved", false)
+		e.helperExits = true
+		r := e.reconciler()
+		clock := time.Now()
+		r.now = func() time.Time { return clock }
+		_, live := reconcileAt(r, e.m.Name)
+		Expect(live.Status.RetryGate).NotTo(BeNil())
+		failedAt := live.Status.RetryGate.FailedAt.Time
+		for elapsed := time.Duration(0); elapsed < verdictDeadline; elapsed += 5 * time.Minute {
+			clock = failedAt.Add(elapsed)
+			result, live := reconcileAt(r, e.m.Name)
+			Expect(result.RequeueAfter).To(Equal(retryGateInterval))
+			held := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionRetryHeld)
+			Expect(held).NotTo(BeNil())
+			Expect(held.Reason).To(Equal(reasonProbeFailed))
+			Expect(held.Message).To(ContainSubstring("rpgmigrate-retry-"))
+			Expect(live.Status.Phase).To(Equal(v1beta1.PhaseCloning))
+		}
+		Expect(e.retryHelpers).To(Equal(3))
+		clock = failedAt.Add(verdictDeadline)
+		_, live = reconcileAt(r, e.m.Name)
+		Expect(live.Status.RetryGate.Exemption).To(Equal(v1beta1.RetryGateCounted))
+		_, live = reconcileAt(r, e.m.Name)
+		Expect(live.Status.Phase).To(Equal(v1beta1.PhaseFailed))
+		failed := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed).NotTo(BeNil())
+		Expect(failed.Reason).To(Equal(reasonNativeRetryGateUnobserved))
+		Expect(failed.Message).To(ContainSubstring("rpgmigrate-retry-"))
+		for range 3 {
+			clock = clock.Add(time.Hour)
+			result, _ := reconcileAt(r, e.m.Name)
+			Expect(result).To(Equal(reconcile.Result{}))
+		}
+		Expect(e.retryHelpers).To(Equal(4), "a failed Migration kept creating retry-gate helpers")
+		Expect(e.workers).To(BeZero())
+		Expect(e.relays).To(BeZero())
+	})
+
+	It("still admits the retry once the helper reports a qualified observation", func() {
+		e := newNativeFailedWorkerEnv(ctx, "mig-native-retry-qualified", false)
+		e.helperExits = true
+		r := e.reconciler()
+		for range 2 {
+			reconcileAt(r, e.m.Name)
+		}
+		e.mu.Lock()
+		e.helperExits = false
+		e.mu.Unlock()
+		var live *v1beta1.Migration
+		for range 2 {
+			_, live = reconcileAt(r, e.m.Name)
+		}
+		Expect(live.Status.Attempts).To(Equal(int32(2)), "%+v relays=%d workers=%d", live.Status, e.relays, e.workers)
+		Expect(meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionRetryHeld).Reason).To(Equal(reasonGatePassed))
+		Expect(e.relays).To(Equal(2), "one read decides the verdict and one admits the retry")
+		Expect(e.workers).To(Equal(1))
 	})
 })
