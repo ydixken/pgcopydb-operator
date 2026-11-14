@@ -84,7 +84,7 @@ def image_files():
         '/usr/lib/aarch64-linux-gnu/libpq.so.5.18': '470b5e466a8d2a93e6db4046a8c30a192ea8a1984c6da7021286f1ca01f341bf',
         '/usr/lib/aarch64-linux-gnu/libc.so.6': '5' * 64,
         '/usr/bin/python3.13': '6' * 64,
-        '/usr/local/bin/rpgmigrate': '608c34dfbb3b159df7e9fe1af3399e2237a9b4e2d7ec8bf97f69cbbbf490c99c',
+        '/usr/local/bin/rpgmigrate': '9324aa272daa804acd2d84f45d2eac02bdacd6dd7eedb05797e681a49b71bd29',
     }
     return {path: dict(sha256=digest, uid=0, gid=0, mode=0o644, links=1,
                        root_readonly=True, shadow_mounts=[], mount_id='1', size=100,
