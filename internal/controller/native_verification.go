@@ -102,7 +102,7 @@ func nativeVerificationJobUID(m *v1beta1.Migration, check string) string {
 
 func (r *MigrationReconciler) nativeVerificationOriginalUnchanged(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) bool {
 	pod, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
-	return err == nil && ctx.Err() == nil && nativePreflightSamePod(original, pod) && apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) && apiequality.Semantic.DeepEqual(original.Status, pod.Status)
+	return err == nil && ctx.Err() == nil && nativePreflightSamePod(original, pod) && apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) && podexec.SamePodState(original, pod, workerContainer)
 }
 
 func (r *MigrationReconciler) readNativeVerificationCheck(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod, check string) (*nativeVerificationCapture, bool, error) {
@@ -187,7 +187,7 @@ func (r *MigrationReconciler) nativeVerificationCaptureUnchanged(ctx context.Con
 		return false
 	}
 	pod, err := r.nativePreflightPod(ctx, job)
-	return err == nil && pod != nil && ctx.Err() == nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(capture.pod, pod) && apiequality.Semantic.DeepEqual(capture.pod.Spec, pod.Spec) && apiequality.Semantic.DeepEqual(capture.pod.Status, pod.Status)
+	return err == nil && pod != nil && ctx.Err() == nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(capture.pod, pod) && apiequality.Semantic.DeepEqual(capture.pod.Spec, pod.Spec) && podexec.SamePodState(capture.pod, pod, workerContainer)
 }
 
 // Only a known successful Create can enter; a failed persistence leaves the unrecorded helper unusable.

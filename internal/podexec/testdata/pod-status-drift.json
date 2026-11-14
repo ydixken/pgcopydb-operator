@@ -1,0 +1,217 @@
+{
+ "before": {
+  "observedGeneration": 1,
+  "phase": "Succeeded",
+  "conditions": [
+   {
+    "type": "PodReadyToStartContainers",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:38Z"
+   },
+   {
+    "type": "Initialized",
+    "observedGeneration": 1,
+    "status": "True",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:36Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "Ready",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:37Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "ContainersReady",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:37Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "PodScheduled",
+    "observedGeneration": 1,
+    "status": "True",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:36Z"
+   }
+  ],
+  "hostIP": "10.89.0.47",
+  "hostIPs": [
+   {
+    "ip": "10.89.0.47"
+   }
+  ],
+  "podIP": "10.244.2.200",
+  "podIPs": [
+   {
+    "ip": "10.244.2.200"
+   }
+  ],
+  "startTime": "2026-11-13T07:13:36Z",
+  "containerStatuses": [
+   {
+    "name": "pgcopydb",
+    "state": {
+     "terminated": {
+      "exitCode": 0,
+      "reason": "Completed",
+      "startedAt": "2026-11-13T07:13:37Z",
+      "finishedAt": "2026-11-13T07:13:37Z",
+      "containerID": "containerd://812832e947f515b9681dcb83c0ee852d269c96742d02388d0826b15b0ffc723f"
+     }
+    },
+    "lastState": {},
+    "ready": false,
+    "restartCount": 0,
+    "image": "sha256:d17b542f3e889c7ac863c2a9e0c52c8a3c3abbcc9af6de03b38d6009110f36cd",
+    "imageID": "ghcr.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f",
+    "containerID": "containerd://812832e947f515b9681dcb83c0ee852d269c96742d02388d0826b15b0ffc723f",
+    "started": false,
+    "allocatedResources": {
+     "cpu": "500m",
+     "memory": "512Mi"
+    },
+    "resources": {
+     "requests": {
+      "cpu": "500m",
+      "memory": "512Mi"
+     }
+    },
+    "user": {
+     "linux": {
+      "uid": 65532,
+      "gid": 65532,
+      "supplementalGroups": [
+       65532
+      ]
+     }
+    }
+   }
+  ],
+  "qosClass": "Burstable",
+  "allocatedResources": {
+   "cpu": "500m",
+   "memory": "512Mi"
+  },
+  "resources": {
+   "requests": {
+    "cpu": "489m",
+    "memory": "512Mi"
+   }
+  }
+ },
+ "after": {
+  "observedGeneration": 1,
+  "phase": "Succeeded",
+  "conditions": [
+   {
+    "type": "PodReadyToStartContainers",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:38Z"
+   },
+   {
+    "type": "Initialized",
+    "observedGeneration": 1,
+    "status": "True",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:36Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "Ready",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:37Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "ContainersReady",
+    "observedGeneration": 1,
+    "status": "False",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:37Z",
+    "reason": "PodCompleted"
+   },
+   {
+    "type": "PodScheduled",
+    "observedGeneration": 1,
+    "status": "True",
+    "lastProbeTime": null,
+    "lastTransitionTime": "2026-11-13T07:13:36Z"
+   }
+  ],
+  "hostIP": "10.89.0.47",
+  "hostIPs": [
+   {
+    "ip": "10.89.0.47"
+   }
+  ],
+  "podIP": "10.244.2.200",
+  "podIPs": [
+   {
+    "ip": "10.244.2.200"
+   }
+  ],
+  "startTime": "2026-11-13T07:13:36Z",
+  "containerStatuses": [
+   {
+    "name": "pgcopydb",
+    "state": {
+     "terminated": {
+      "exitCode": 0,
+      "reason": "Completed",
+      "startedAt": "2026-11-13T07:13:37Z",
+      "finishedAt": "2026-11-13T07:13:37Z",
+      "containerID": "containerd://812832e947f515b9681dcb83c0ee852d269c96742d02388d0826b15b0ffc723f"
+     }
+    },
+    "lastState": {},
+    "ready": false,
+    "restartCount": 0,
+    "image": "sha256:d17b542f3e889c7ac863c2a9e0c52c8a3c3abbcc9af6de03b38d6009110f36cd",
+    "imageID": "ghcr.io/ydixken/rpgmigrate@sha256:a5bbbbd4b32c9f90c54c11b8709d1c9659f451fa4d985d20d00899dc9348c61f",
+    "containerID": "containerd://812832e947f515b9681dcb83c0ee852d269c96742d02388d0826b15b0ffc723f",
+    "started": false,
+    "allocatedResources": {
+     "cpu": "500m",
+     "memory": "512Mi"
+    },
+    "resources": {
+     "requests": {
+      "cpu": "500m",
+      "memory": "512Mi"
+     }
+    },
+    "user": {
+     "linux": {
+      "uid": 65532,
+      "gid": 65532,
+      "supplementalGroups": [
+       65532
+      ]
+     }
+    }
+   }
+  ],
+  "qosClass": "Burstable",
+  "allocatedResources": {
+   "cpu": "500m",
+   "memory": "512Mi"
+  },
+  "resources": {
+   "requests": {
+    "memory": "512Mi"
+   }
+  }
+ }
+}

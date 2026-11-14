@@ -511,6 +511,16 @@ func TestNativeHelperResultBinding(t *testing.T) {
 			})
 		}
 	})
+	t.Run("captured kubelet drift after success", func(t *testing.T) {
+		s, want := newNativeAPI(t, true)
+		before, after := withCapturedDrift(t, &s.pod)
+		s.pod.Status = before.Status
+		s.after = func(s *nativeAPI) { s.pod.Status = after.Status }
+		out, err := newExec(t, s.URL).JobCompletedNative(context.Background(), "ns", nativeFixtureJobUID, want)
+		if err != nil || !out.Successful() || out.Payload() != nil || s.after != nil || s.gets != 2 {
+			t.Fatalf("successful=%v drift applied=%v pod reads=%d error=%v", out.Successful(), s.after == nil, s.gets, err)
+		}
+	})
 	t.Run("zero outcome", func(t *testing.T) {
 		var out NativeOutcome
 		if out.Successful() || out.Payload() != nil {

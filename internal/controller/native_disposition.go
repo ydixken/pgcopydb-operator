@@ -244,7 +244,7 @@ func (r *MigrationReconciler) closeNativeCompareHelpers(ctx context.Context, m *
 			return nil, errNativeDisposition
 		}
 		pod, err := r.nativePreflightPod(ctx, job)
-		if err != nil || pod == nil || pod.Generation != helper.pod.Generation || !nativePreflightPodMatches(job, pod) || !nativePreflightSamePod(helper.pod, pod) || !apiequality.Semantic.DeepEqual(pod.Spec, helper.pod.Spec) || !apiequality.Semantic.DeepEqual(pod.Status, helper.pod.Status) {
+		if err != nil || pod == nil || pod.Generation != helper.pod.Generation || !nativePreflightPodMatches(job, pod) || !nativePreflightSamePod(helper.pod, pod) || !apiequality.Semantic.DeepEqual(pod.Spec, helper.pod.Spec) || !podexec.SamePodState(pod, helper.pod, workerContainer) {
 			return nil, errNativeDisposition
 		}
 		if r.Delete(ctx, job, client.Preconditions{UID: &job.UID, ResourceVersion: &job.ResourceVersion}, client.PropagationPolicy(metav1.DeletePropagationForeground)) != nil {
@@ -409,7 +409,7 @@ func (r *MigrationReconciler) runNativeDeletionCleanup(ctx context.Context, m *v
 		return errNativeDisposition
 	}
 	finalPod, err := r.nativePreflightPod(work, job)
-	if err != nil || finalPod == nil || !nativePreflightPodMatches(job, finalPod) || !nativePreflightSamePod(pod, finalPod) || !apiequality.Semantic.DeepEqual(pod.Spec, finalPod.Spec) || !apiequality.Semantic.DeepEqual(pod.Status, finalPod.Status) || work.Err() != nil {
+	if err != nil || finalPod == nil || !nativePreflightPodMatches(job, finalPod) || !nativePreflightSamePod(pod, finalPod) || !apiequality.Semantic.DeepEqual(pod.Spec, finalPod.Spec) || !podexec.SamePodState(pod, finalPod, workerContainer) || work.Err() != nil {
 		return errNativeDisposition
 	}
 	return nil

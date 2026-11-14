@@ -205,7 +205,7 @@ func (a *ownedAdmission) same(b *ownedAdmission) bool {
 			return false
 		}
 	}
-	return reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.pvc.Status, b.helper.pvc.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && reflect.DeepEqual(a.workerPod.Status, b.workerPod.Status)
+	return reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.pvc.Status, b.helper.pvc.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName)
 }
 
 // finalizersHeld admits one drift only: the Job controller dropping its tracking

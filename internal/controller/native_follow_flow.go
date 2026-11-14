@@ -51,7 +51,7 @@ func (r *MigrationReconciler) nativeFollowTerminalCurrent(ctx context.Context, m
 		return nil, nil, errNativeFollowCompletion
 	}
 	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
-	if err != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation || !apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !apiequality.Semantic.DeepEqual(original.Status, pod.Status)) {
+	if err != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation || !apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
 		return nil, nil, errNativeFollowCompletion
 	}
 	return live, pod, nil
@@ -134,7 +134,7 @@ func (r *MigrationReconciler) nativeEndposHelperUnchanged(ctx context.Context, c
 	}
 	confirmed, err := r.nativePreflightPod(ctx, after)
 	return err == nil && confirmed != nil && nativePreflightPodMatches(after, confirmed) && nativePreflightSamePod(capture.pod, confirmed) && capture.pod.Generation == confirmed.Generation &&
-		apiequality.Semantic.DeepEqual(capture.pod.Spec, confirmed.Spec) && apiequality.Semantic.DeepEqual(capture.pod.Status, confirmed.Status)
+		apiequality.Semantic.DeepEqual(capture.pod.Spec, confirmed.Spec) && podexec.SamePodState(capture.pod, confirmed, workerContainer)
 }
 
 func (r *MigrationReconciler) nativeEndposHelperTerminal(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod, expected, created *batchv1.Job, binding *podexec.NativeContainerBinding) (*batchv1.Job, *corev1.Pod, error) {

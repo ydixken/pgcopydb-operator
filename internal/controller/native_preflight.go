@@ -349,7 +349,7 @@ func (r *MigrationReconciler) nativePreflightExecutionUnchanged(ctx context.Cont
 		return false
 	}
 	pod, err := r.nativePreflightPod(ctx, job)
-	return err == nil && pod != nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(original, pod) && apiequality.Semantic.DeepEqual(pod.Spec, original.Spec) && apiequality.Semantic.DeepEqual(pod.Status, original.Status) && nativeEvidenceWorkerComplete(job)
+	return err == nil && pod != nil && nativePreflightPodMatches(job, pod) && nativePreflightSamePod(original, pod) && apiequality.Semantic.DeepEqual(pod.Spec, original.Spec) && podexec.SamePodState(pod, original, workerContainer) && nativeEvidenceWorkerComplete(job)
 }
 
 func minDeadline(a, b time.Time) time.Time {

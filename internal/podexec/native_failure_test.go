@@ -247,6 +247,7 @@ func TestNativeJobFailureFinalRecheck(t *testing.T) {
 		{"job terminal lost", func(s *nativeAPI) { s.job.Status.Conditions = nil }},
 		{"pod terminal lost", func(s *nativeAPI) { s.pod.Status.Phase = corev1.PodRunning }},
 		{"exit changed", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.ExitCode = 2 }},
+		{"finish time changed", func(s *nativeAPI) { s.pod.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.Unix(1, 0) }},
 		{"owner changed", func(s *nativeAPI) { s.pod.OwnerReferences[0].UID = nativeFixtureOther }},
 		{"matching env replaced", func(s *nativeAPI) {
 			s.pod.Spec.Containers[0].Env[0].Value = nativeFixtureOther
@@ -269,4 +270,15 @@ func TestNativeJobFailureFinalRecheck(t *testing.T) {
 			}
 		})
 	}
+	t.Run("captured kubelet drift", func(t *testing.T) {
+		s, want := newNativeFailureAPI(t)
+		s.stdout = []byte("synthetic failed worker output\n")
+		before, after := withCapturedDrift(t, &s.pod)
+		s.pod.Status = before.Status
+		s.after = func(s *nativeAPI) { s.pod.Status = after.Status }
+		out, err := nativeFailureCall(t, newExec(t, s.URL))(context.Background(), "ns", nativeFixtureJobUID, want)
+		if err != nil || !out.Successful() || string(out.Payload()) != string(s.stdout) || s.after != nil {
+			t.Fatalf("successful=%v drift applied=%v error=%v", out.Successful(), s.after == nil, err)
+		}
+	})
 }

@@ -8,6 +8,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -27,7 +28,7 @@ func (r *MigrationReconciler) nativeCompletionCurrent(ctx context.Context, m *v1
 	}
 	pod, err := r.nativeQuiescentWorker(ctx, live, current, claim)
 	if err != nil || ctx.Err() != nil || original != nil && (!nativePreflightSamePod(original, pod) || original.Generation != pod.Generation ||
-		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !apiequality.Semantic.DeepEqual(original.Status, pod.Status)) {
+		!apiequality.Semantic.DeepEqual(original.Spec, pod.Spec) || !podexec.SamePodState(original, pod, workerContainer)) {
 		return nil, nil, errNativePreflightUnavailable
 	}
 	return live, pod, nil

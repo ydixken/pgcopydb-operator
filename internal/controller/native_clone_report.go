@@ -44,7 +44,7 @@ func (r *MigrationReconciler) readNativeCloneReport(ctx context.Context, m *v1be
 	}
 	confirmed, err := r.nativeQuiescentWorker(ctx, m, worker, pvc)
 	if err != nil || ctx.Err() != nil || !nativePreflightSamePod(original, confirmed) ||
-		!apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !apiequality.Semantic.DeepEqual(original.Status, confirmed.Status) {
+		!apiequality.Semantic.DeepEqual(original.Spec, confirmed.Spec) || !podexec.SamePodState(original, confirmed, workerContainer) {
 		return nil, errNativeCloneReport
 	}
 	return report, nil

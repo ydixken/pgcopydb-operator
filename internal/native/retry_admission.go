@@ -189,7 +189,7 @@ func retryHelperState(w ExecutionData, job *batchv1.Job, pod *corev1.Pod, comple
 }
 
 func (a *retryAdmission) same(b *retryAdmission) bool {
-	return a != nil && b != nil && a.helper.sameExecution(b.helper) && reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.helper.worker.OwnerReferences, b.helper.worker.OwnerReferences) && a.workerPod.UID == b.workerPod.UID && a.workerPod.Name == b.workerPod.Name && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && reflect.DeepEqual(a.workerPod.Status, b.workerPod.Status) && reflect.DeepEqual(a.workerPod.OwnerReferences, b.workerPod.OwnerReferences)
+	return a != nil && b != nil && a.helper.sameExecution(b.helper) && reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.helper.worker.OwnerReferences, b.helper.worker.OwnerReferences) && a.workerPod.UID == b.workerPod.UID && a.workerPod.Name == b.workerPod.Name && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName) && reflect.DeepEqual(a.workerPod.OwnerReferences, b.workerPod.OwnerReferences)
 }
 
 // RetryMaterialization projects only the target and cannot admit a live execution by itself.

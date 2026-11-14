@@ -93,7 +93,7 @@ func (e *Exec) nativeCompletedOutput(ctx context.Context, namespace string, jobU
 		return NativeOutcome{}, errNativeTransport
 	}
 	after, err := e.nativeOutputIncarnation(ctx, namespace, jobUID, want)
-	if err != nil || !before.same(after) || !after.outputBinding(want, version) || !reflect.DeepEqual(before.pod.Status, after.pod.Status) || !reflect.DeepEqual(before.job.Status, after.job.Status) || ctx.Err() != nil {
+	if err != nil || !before.same(after) || !after.outputBinding(want, version) || !SamePodState(before.pod, after.pod, want.ContainerName) || !reflect.DeepEqual(before.job.Status, after.job.Status) || ctx.Err() != nil {
 		return NativeOutcome{}, errNativeTransport
 	}
 	if ready, err := after.completed(); err != nil || !ready {

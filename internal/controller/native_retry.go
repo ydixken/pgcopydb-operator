@@ -8,6 +8,7 @@ import (
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
+	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -253,7 +254,7 @@ func (r *MigrationReconciler) nativeQuiescentWorker(ctx context.Context, m *v1be
 	}
 	confirmed, err := r.nativePreflightPod(ctx, current)
 	if err != nil || confirmed == nil || ctx.Err() != nil || !nativePreflightSamePod(pod, confirmed) ||
-		!apiequality.Semantic.DeepEqual(pod.Spec, confirmed.Spec) || !apiequality.Semantic.DeepEqual(pod.Status, confirmed.Status) {
+		!apiequality.Semantic.DeepEqual(pod.Spec, confirmed.Spec) || !podexec.SamePodState(pod, confirmed, workerContainer) {
 		return nil, errNativeRecovery
 	}
 	return confirmed, nil
