@@ -741,6 +741,9 @@ func (h *seamsHarness) verdictOf(ctx context.Context, m *v1beta1.Migration) (str
 		}
 		failed = append(failed, result.Check)
 		parts = append(parts, result.Check+" differs: "+strings.TrimSpace(h.cluster.podLogs(ctx, compareJobName(m, result.Check))))
+		if result.Check == compareSchema {
+			parts = append(parts, "dump difference: "+h.schemaDiff(ctx, m))
+		}
 	}
 	data := slices.IndexFunc(m.Status.VerificationProgress, func(p v1beta1.VerificationProgress) bool { return p.Kind == compareData })
 	if data < 0 {
@@ -755,6 +758,57 @@ func (h *seamsHarness) verdictOf(ctx context.Context, m *v1beta1.Migration) (str
 		return strings.Join(parts, "; "), fmt.Errorf("%s did not match", strings.Join(failed, " and "))
 	}
 	return strings.Join(parts, "; "), nil
+}
+
+// schemaDiff names the lines where the two schema dumps differ, because the engine reports only
+// {"matched":false}. It dumps as the engine does: the target major's pg_dump, as the app role, with
+// the flags of rpgmigrate src/schema.rs comparison_dump, the bookkeeping schema left out.
+func (h *seamsHarness) schemaDiff(ctx context.Context, m *v1beta1.Migration) string {
+	pass := "*:*:*:" + seamsAppRole + ":" + h.password + "\n"
+	if _, _, err := seamsPodman(ctx, []byte(pass), seamsExecWord, "-i", h.target, "sh", "-c", "umask 077; cat > /tmp/seams-pgpass"); err != nil {
+		return "unavailable: " + err.Error()
+	}
+	dump := func(host, database string, extra ...string) []string {
+		args := append([]string{seamsExecWord, "--env", "PGPASSFILE=/tmp/seams-pgpass", h.target, "pg_dump", "-h", host, "-U", seamsAppRole, "-d", database,
+			"--format=plain", "--schema-only", "--quote-all-identifiers", "--no-publications", "--no-subscriptions", "--restrict-key=RpgmigrateSchemaComparison"}, extra...)
+		out, _, err := seamsPodman(ctx, nil, args...)
+		if err != nil {
+			return []string{"dump failed: " + err.Error()}
+		}
+		// The engine skips the header through the two version provenance lines.
+		lines := strings.Split(string(out), "\n")
+		return lines[min(len(lines), 8):]
+	}
+	source := dump(h.source+seamsDNSDomain, seamsAppDatabase)
+	target := dump("/tmp", m.Spec.Target.Database, "--exclude-schema=_rpgmigrate_"+runIDFor(m))
+	var diff []string
+	for _, line := range source {
+		if !slices.Contains(target, line) && strings.TrimSpace(line) != "" {
+			diff = append(diff, "source only: "+line)
+		}
+	}
+	for _, line := range target {
+		if !slices.Contains(source, line) && strings.TrimSpace(line) != "" {
+			diff = append(diff, "target only: "+line)
+		}
+	}
+	// The engine compares bytes, so equal line sets can still differ in order.
+	if len(diff) == 0 {
+		for i := range min(len(source), len(target)) {
+			if source[i] != target[i] {
+				end := min(i+6, len(source), len(target))
+				diff = append(diff, fmt.Sprintf("order differs at line %d: source %q, target %q", i+9, strings.Join(source[i:end], "\\n"), strings.Join(target[i:end], "\\n")))
+				break
+			}
+		}
+		if len(source) != len(target) {
+			diff = append(diff, fmt.Sprintf("source has %d lines, target %d", len(source), len(target)))
+		}
+	}
+	if len(diff) == 0 {
+		return "none: the dumps are identical after the header"
+	}
+	return h.cluster.scrub(strings.Join(diff[:min(len(diff), 12)], " | "))
 }
 
 // expectOwned requires exactly this run's slot and publication on the source, the retained workdir,
