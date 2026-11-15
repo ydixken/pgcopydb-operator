@@ -165,6 +165,8 @@ Kubelet applies no `fsGroup` change to a hostPath volume, so a native kind run d
 The internal suite Task requires the exact guard-owned run, context, engine, and that engine's positive label.
 Do not invoke it as a context bypass.
 It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go gate keeps its failing assertion.
+Its timeouts sit inside the guard's 1800-second cap: `go test -timeout 28m` leaves two minutes for the Task start and the build, and `-ginkgo.timeout=25m` leaves three for the failed spec's cleanup, the AfterSuite and the receipt.
+Every Migration phase wait ends six minutes before the Ginkgo timeout, so a stalled follow fails with the phase it stalled at instead of a guard `TimeoutExpired`.
 The ledger records only whether that file exists.
 The stream can contain fixture output, so keep it in the private run directory and do not publish it.
 A run refuses to start over an existing `go-test.json` or `suite-receipt.json`.

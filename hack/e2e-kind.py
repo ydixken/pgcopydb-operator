@@ -74,6 +74,8 @@ IDENTITY = re.compile(r'[0-9a-f]{64}\Z')
 VOLATILE_ROOTS = (Path('/tmp'), Path('/private/tmp'))
 EVIDENCE_ROOT = Path('/var/tmp').resolve()
 SLEEP_ASSERTION_SECONDS = 5
+# The suite Task's go test and Ginkgo timeouts must end inside this cap (test_suite_timeouts_end_inside_the_guard_budget).
+SUITE_BUDGET_SECONDS = 1800
 LEGACY_ORIGINALS = (('evidence', '.json'), ('qualification', '.json'), ('probe', '.stdout'))
 LEGACY_SPEC = 'Kind bootstrap migrates nonempty PostgreSQL 17 fixtures with committed writer load and verified cutover'
 NATIVE_PAIRS = ('16:16', '18:18', '16:18')
@@ -1424,13 +1426,13 @@ class Guard:
             self.environment['E2E_' + env_key + '_IMAGE'] = roles[role]
         if engine == 'rpgmigrate':
             self.environment.update(zip(('E2E_PG_SOURCE', 'E2E_PG_TARGET'), selection['pair'].split(':')))
-        ledger['suite_execution'] = {'budget_seconds': 1800, 'result': 'running',
+        ledger['suite_execution'] = {'budget_seconds': SUITE_BUDGET_SECONDS, 'result': 'running',
                                      'selection': {'engine': engine, 'pair': selection['pair'], 'case': case}}
         self.save(ledger)
         try:
             self.verify_node_limits(ledger)
             self.registry_call(ledger, ['task', 'e2e:kind:suite', 'RUN_DIR=' + str(self.directory), 'EXPECT_CONTEXT=' + ledger['context'],
-                       'E2E_ENGINE=' + engine, 'LABEL=' + selection['label']], timeout=1800)
+                       'E2E_ENGINE=' + engine, 'LABEL=' + selection['label']], timeout=SUITE_BUDGET_SECONDS)
             self.receipt(ledger, selection)
         except Refusal as error:
             failure = getattr(error, 'failure_class', type(error).__name__)
@@ -1461,7 +1463,7 @@ class Guard:
                 except (Refusal, OSError):
                     pass
             self.save(ledger)
-            raise Refusal(f'suite execution failed within 1800s budget: {failure} '
+            raise Refusal(f'suite execution failed within {SUITE_BUDGET_SECONDS}s budget: {failure} '
                           f'(returncode={returncode}, receipt={execution["receipt_status"]}, go_test_json={execution["go_test_json"]})') from None
         # down() runs after the nodes are gone, so it can only prove these exact validated bytes.
         ledger['suite_execution'].update(result='passed', go_test_json=self.go_test_json(),

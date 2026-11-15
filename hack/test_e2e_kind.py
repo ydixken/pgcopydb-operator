@@ -2521,6 +2521,18 @@ class RetainedFailureReplayTests(GuardFixture):
         self.assertIn('go test ./test/e2e -json ', suite)
         self.assertIn('> {{.RUN_DIR | shellQuote}}/go-test.json', suite)
 
+    def test_suite_timeouts_end_inside_the_guard_budget(self):
+        # A stalled spec must end as a Ginkgo failure with its receipt, not as the guard's TimeoutExpired.
+        taskfile = (MODULE.ROOT / 'Taskfile.yml').read_text()
+        suite = taskfile[taskfile.index('  e2e:kind:suite:'):]
+        suite = suite[:suite.index('\n  e2e:') if '\n  e2e:' in suite else len(suite)]
+        go = re.findall(r' -timeout (\d+)m\b', suite)
+        ginkgo = re.findall(r' -ginkgo\.timeout=(\d+)m\b', suite)
+        self.assertEqual((len(go), len(ginkgo)), (1, 1), suite)
+        go, ginkgo = int(go[0]) * 60, int(ginkgo[0]) * 60
+        self.assertLessEqual(go + 120, MODULE.SUITE_BUDGET_SECONDS, 'go test needs room for task start and build')
+        self.assertLessEqual(ginkgo + 180, go, 'the Ginkgo interrupt needs room for cleanup, AfterSuite and the receipt')
+
 
 class SuiteRouteTests(unittest.TestCase):
     setUp, command = RegistryPullTests.setUp, RegistryPullTests.command

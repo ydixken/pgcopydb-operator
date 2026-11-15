@@ -202,7 +202,7 @@ func (c *nativeFaultCase) finish(minAttempts int32) {
 		out, err := psqlDBErr(c.target, appDatabase(c.target), liveMarkerQuery(c.marker))
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(strconv.Atoi(out)).To(BeNumerically(">", before), "no row committed after the fault reached the target")
-	}, migrationTimeout, 2*time.Second).Should(Succeed())
+	}, suiteWait(migrationTimeout), 2*time.Second).Should(Succeed())
 	last := c.stopWriter()
 	if m.Status.Phase != v1beta1.PhaseFailed {
 		Eventually(func(g Gomega) {

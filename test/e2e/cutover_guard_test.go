@@ -392,7 +392,7 @@ func earlyManualCutover() {
 		g.Expect(drain.Status).To(Equal(metav1.ConditionTrue))
 		g.Expect(drain.Reason).To(Equal(drainReason))
 	}, suiteWait(followTimeout), time.Second).Should(Succeed())
-	m = waitPhase(name, nsE2E, suiteWait(followTimeout), v1beta1.PhaseCompleted)
+	m = waitPhase(name, nsE2E, followTimeout, v1beta1.PhaseCompleted)
 	complete := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionComplete)
 	Expect(complete).NotTo(BeNil())
 	Expect(complete.Status).To(Equal(metav1.ConditionTrue))

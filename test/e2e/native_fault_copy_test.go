@@ -179,7 +179,7 @@ func (b *nativeFaultBulk) waitMidCopy(stop func(Gomega) string) nativeFaultCopyS
 		}
 		g.Expect(s.midCopy(b.total)).To(BeTrue(), "the bulk table is not mid-copy: %+v", s)
 		sample = s
-	}, migrationTimeout, 250*time.Millisecond).Should(Succeed())
+	}, suiteWait(migrationTimeout), 250*time.Millisecond).Should(Succeed())
 	return sample
 }
 
