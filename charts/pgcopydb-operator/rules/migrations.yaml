@@ -121,11 +121,11 @@ groups:
             writes it. Sustained lag delays cutover and retains WAL on the
             source.
       # Cutover drain. endpos only exists once cutover has set it, and the
-      # trailing filter drops the series when replay reaches endpos, so a
-      # healthy drain resolves this on its own. Replay is the last sample
-      # before the worker exits, so the gap can stand after the drain ends:
-      # the phase and the CutoverCompleted condition scope it to a drain that
-      # is still unproven.
+      # gap filter drops the series when replay reaches endpos. Replay is the
+      # last sample before the worker exits, so the gap can stand after the
+      # drain ends: native keeps it through CuttingOver, with no
+      # CutoverCompleted until Completed. The changes() term fires only on a
+      # replay that stopped moving, so a long drain that progresses stays quiet.
       - alert: PgcopydbMigrationCutoverStalled
         expr: >-
           ((pgcopydb_migration_endpos_lsn_bytes > 0)
@@ -135,17 +135,19 @@ groups:
           (pgcopydb_migration_phase{phase="CuttingOver"} == 1)
           unless on (namespace, name)
           pgcopydb_migration_condition_transition_timestamp_seconds{type="CutoverCompleted", status="True"}
+          unless on (namespace, name)
+          (changes(pgcopydb_migration_replay_lsn_bytes[5m]) > 0)
         for: 15m
         labels:
           severity: critical
         annotations:
           summary: >-
-            Migration {{ $labels.namespace }}/{{ $labels.name }} has not
-            reached endpos 15m into cutover
+            Migration {{ $labels.namespace }}/{{ $labels.name }} stopped
+            short of endpos for 15m in cutover
           description: >-
-            Cutover set an endpos but the target has not replayed up to it,
-            so the migration cannot complete. Check the worker logs and the
-            target's apply rate.
+            Cutover set an endpos, and the replay position has stayed below it
+            without moving, so the migration cannot complete. Check the worker
+            logs and the target's apply rate.
       # Slot retention is deliberately not covered here: while a follow
       # migration is suspended, failed, or streaming, its replication slot
       # retains WAL on the SOURCE, and the operator's metrics cannot see the
