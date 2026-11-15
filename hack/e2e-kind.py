@@ -424,21 +424,33 @@ class Guard:
         self.each(owned, remaining)
         return remaining
 
-    def volume_inventory(self, ledger):
+    def volume_listing(self):
         listed = decode(self.call(['podman', 'volume', 'ls', '--format', 'json']), 'volume listing')
         if not isinstance(listed, list):
             raise Refusal('invalid volume inventory')
+        if any(not isinstance(record, dict) or not isinstance(record.get('Name'), str) or
+               not isinstance(record.get('Labels'), dict) for record in listed):
+            raise Refusal('invalid volume listing identity')
+        return listed
+
+    def volume_inventory(self, ledger):
         observed = {}
         node_names = {node['name'] for node in ledger['nodes']}
         node_names.update(ledger['cluster'] + suffix for suffix in ('-control-plane', '-worker', '-worker2'))
-        for record in listed:
-            name = record.get('Name')
-            if not isinstance(name, str):
-                raise Refusal('invalid volume listing identity')
-            results = decode(self.call(['podman', 'volume', 'inspect', name]), 'volume inspection')
-            item, = results
+        recorded = {v['name'] for v in ledger.get('volumes', [])}
+        for record in self.volume_listing():
+            name = record['Name']
+            try:
+                raw = self.call(['podman', 'volume', 'inspect', name])
+            except CommandError as error:
+                # Other runs remove their volumes concurrently; only a foreign volume gone from a fresh listing is absent.
+                if (isinstance(error, Cancelled) or node_names & set(record['Labels']) or name in recorded or
+                        any(other['Name'] == name for other in self.volume_listing())):
+                    raise
+                continue
+            item, = decode(raw, 'volume inspection')
             labels = item.get('Labels', {}) or {}
-            if node_names & set(labels) or name in {v['name'] for v in ledger.get('volumes', [])}:
+            if node_names & set(labels) or name in recorded:
                 if not IDENTITY.fullmatch(name) or item.get('Name') != name:
                     raise Refusal('invalid owned volume name')
                 observed[name] = item
