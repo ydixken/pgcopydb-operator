@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"slices"
-	"strconv"
 	"strings"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
@@ -56,16 +55,7 @@ func OwnedInventoryProgram() []byte {
 func OwnedInventoryProgramSHA256() [32]byte { return sha256.Sum256(OwnedInventoryProgram()) }
 
 func OwnedInventoryRequestWriterProgram() []byte {
-	adapter := []byte(ownedInventoryWriterAdapterSource)
-	writer := EvidenceRequestWriterProgram()
-	if len(adapter) == 0 || len(adapter) > 3072 || adapter[len(adapter)-1] != '\n' || bytes.IndexByte(adapter, 0) >= 0 || len(writer) == 0 || len(writer) > 16384 || writer[len(writer)-1] != '\n' || bytes.IndexByte(writer, 0) >= 0 {
-		return nil
-	}
-	program := "import sys,types,base64\nm=types.ModuleType('_rpgmigrate_native_owned_inventory_writer')\nsys.modules[m.__name__]=m\nexec(base64.b64decode('" + base64.StdEncoding.EncodeToString(writer) + "'),m.__dict__)\nexec(" + strconv.Quote(string(adapter)) + ",m.__dict__)\nsys.exit(m.main(sys.argv))\n"
-	if len(program) > 16384 {
-		return nil
-	}
-	return []byte(program)
+	return adaptedRequestWriterProgram("_rpgmigrate_native_owned_inventory_writer", ownedInventoryWriterAdapterSource)
 }
 
 func OwnedInventoryRequestWriterSHA256() [32]byte {

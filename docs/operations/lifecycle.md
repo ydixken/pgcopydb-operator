@@ -259,8 +259,11 @@ If the budget is then empty, the Migration fails as `BackoffLimitExceeded`.
 Otherwise, the gate keeps holding until a probe passes.
 Time behind `WorkerPodRemains` and time suspended count toward the 15 minutes.
 
-With `spec.engine: rpgmigrate`, the probe is a helper Job, `rpgmigrate-retry-<operation>`, that the operator removes after each read.
+With `spec.engine: rpgmigrate`, the probe is a helper Job, `rpgmigrate-retry-<operation>`, that the operator deletes after each read.
 When the helper gives no target observation, `RetryHeld` is True with reason `ProbeFailed`, and the gate reads again.
+The gate reads the target at most one time in 30 seconds.
+Before each read, the operator writes the start time to `status.retryGate.lastReadAt`.
+Thus events from the helper Jobs and a restart of the operator do not cause an earlier read.
 We bound this instead of holding forever, because a helper that never answers would otherwise create helper Jobs without end.
 Once the 15 minutes have passed and the helper still gives no observation, the Migration fails as `NativeRetryGateUnobserved`, whatever budget remains.
 A hold whose last read found sessions (`SessionsRemain`) gets one more read before that.

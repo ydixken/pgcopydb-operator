@@ -104,6 +104,20 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 		r.failNativeRetryBudget(desired)
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
+	now := r.currentTime()
+	if last := rg.LastReadAt; last != nil && !last.After(now) {
+		// The stamp keeps whole seconds, so one more second keeps two reads a full interval apart.
+		if next := last.Add(retryGateInterval + time.Second); now.Before(next) {
+			return ctrl.Result{RequeueAfter: next.Sub(now)}, nil
+		}
+	}
+	// The stamp is durable before the helper Job exists, so neither a requeue nor a restart reads early.
+	stamped := live.DeepCopy()
+	stamped.Status.RetryGate.LastReadAt = &metav1.Time{Time: now}
+	if _, err = r.patchNativeRetry(ctx, m, stamped, base); err != nil {
+		return ctrl.Result{}, err
+	}
+	live, base = stamped, stamped.DeepCopy()
 	var readiness *native.RetryReadiness
 	err = r.runNativeRecoveryRead(ctx, live, worker, pvc, original, native.JobRoleRetryGate, func(ctx context.Context, w native.ExecutionData) error {
 		var readErr error
@@ -172,6 +186,7 @@ func (r *MigrationReconciler) failNativeRetryBudget(m *v1beta1.Migration) {
 	m.Status.Phase = v1beta1.PhaseFailed
 	r.nativeCloneAttemptEnded(m, reasonCloneFailed)
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", "Native retry budget is exhausted")
+	r.endHold(m, reasonHoldMigrationFailed, fmt.Sprintf("Attempt %d does not start: the Migration failed with BackoffLimitExceeded", m.Status.Attempts+1))
 }
 
 func (r *MigrationReconciler) patchNativeRetry(ctx context.Context, m, desired, base *v1beta1.Migration) (ctrl.Result, error) {

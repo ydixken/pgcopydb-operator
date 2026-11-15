@@ -420,6 +420,7 @@ _Appears in:_
 | `failure` _string_ | failure is the attempt's failure text, capped at maxDetailLen; the budget<br />verdict can come much later, after the events expired. |  | Optional: \{\} <br /> |
 | `exemption` _string_ | exemption is the first census's verdict; empty while undecided. |  | Enum: [Exempt Counted] <br />Optional: \{\} <br /> |
 | `cloneDoneSeen` _boolean_ |  |  | Optional: \{\} <br /> |
+| `lastReadAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.36/#time-v1-meta)_ | lastReadAt is when the native retry gate last started a read of the target;<br />the next read waits until a retry-gate interval has passed. |  | Optional: \{\} <br /> |
 
 
 #### RunnerSpec

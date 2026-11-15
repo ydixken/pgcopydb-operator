@@ -70,9 +70,11 @@ type nativeDispositionFixture struct {
 	lostPinPatch             bool
 	helperExits              bool
 	retryHelpers             int
-	cleanupCalled            bool
-	beforeDelete             func(*batchv1.Job)
-	editCleanup              func([]byte) []byte
+	// paced keeps the stored gate read time; otherwise each pass starts after a full gate interval.
+	paced         bool
+	cleanupCalled bool
+	beforeDelete  func(*batchv1.Job)
+	editCleanup   func([]byte) []byte
 }
 
 type nativeHistoricalDeletionFixture struct {
@@ -443,7 +445,7 @@ func newNativeDispositionFixture(t *testing.T, follow bool) *nativeDispositionFi
 	})
 	server := httptest.NewServer(http.HandlerFunc(f.serveRecovery))
 	t.Cleanup(server.Close)
-	checked, err := podexec.New(&rest.Config{Host: server.URL})
+	checked, err := podexec.New(&rest.Config{Host: server.URL, QPS: 1000, Burst: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,11 +552,23 @@ func (f *nativeDispositionFixture) execRecovery(out http.ResponseWriter, request
 	_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
 }
 
+// elapseRetryGateRead moves the stored gate read back by a full interval unless the fixture is paced.
+func (f *nativeDispositionFixture) elapseRetryGateRead(t *testing.T) {
+	t.Helper()
+	if rg := f.m.Status.RetryGate; rg != nil && rg.LastReadAt != nil && !f.paced {
+		rg.LastReadAt = &metav1.Time{Time: rg.LastReadAt.Add(-retryGateInterval - time.Second)}
+		if err := f.store.Status().Update(context.Background(), f.m); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func (f *nativeDispositionFixture) reconcile(t *testing.T) error {
 	t.Helper()
 	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), f.m); err != nil {
 		t.Fatal(err)
 	}
+	f.elapseRetryGateRead(t)
 
 	handled, result, err := f.r.reconcileNativeDisposition(context.Background(), f.m, f.m.DeepCopy(), f.worker, f.pvc)
 	f.lastResult = result
@@ -645,6 +659,79 @@ func nativeRetryGateUnobservedCase(t *testing.T, exits bool) {
 	}
 	if f.retryHelpers != reads+1 || f.workerCreates != 0 {
 		t.Fatal("a failed Migration kept creating retry-gate helpers", f.retryHelpers)
+	}
+}
+
+// TestNativeRetryGatePacing reconciles every 700 ms, as owned Job events do, through a gate that never observes.
+func TestNativeRetryGatePacing(t *testing.T) {
+	f := newNativeDispositionFixture(t, false)
+	f.paced, f.helperExits = true, true
+	failedAt := jobFailedAt(f.worker)
+	clock := failedAt.Add(700 * time.Millisecond)
+	f.r.now = func() time.Time { return clock }
+	f.nativeRetryHold(t)
+	var lastRead time.Time
+	for ; clock.Before(failedAt.Add(verdictDeadline + time.Minute)); clock = clock.Add(700 * time.Millisecond) {
+		before := f.retryHelpers
+		live, _ := f.nativeRetryHold(t)
+		if f.retryHelpers == before {
+			if live.Status.Phase != v1beta1.PhaseFailed && (f.lastResult.RequeueAfter <= 0 || f.lastResult.RequeueAfter > retryGateInterval+time.Second) {
+				t.Fatal("a paced pass did not requeue for the rest of the interval", f.lastResult)
+			}
+			continue
+		}
+		if !lastRead.IsZero() && clock.Sub(lastRead) < retryGateInterval {
+			t.Fatalf("two gate reads %s apart", clock.Sub(lastRead))
+		}
+		if rg := live.Status.RetryGate; rg == nil || rg.LastReadAt == nil || !rg.LastReadAt.Equal(&metav1.Time{Time: clock.Truncate(time.Second)}) {
+			t.Fatal("the gate read left no durable stamp", rg)
+		}
+		lastRead = clock
+	}
+	live, held := f.nativeRetryHold(t)
+	expectNativeRetryGateUnobserved(t, live)
+	if limit := int(verdictDeadline/retryGateInterval) + 1; f.retryHelpers > limit || f.retryHelpers < limit-5 || held.Reason != reasonHoldMigrationFailed {
+		t.Fatalf("a 15-minute gate created %d helpers, want at most %d", f.retryHelpers, limit)
+	}
+}
+
+// A read that ends in an error writes no outcome, so only the stamp from before the read can pace the next one.
+func TestNativeRetryGateStampBeforeRead(t *testing.T) {
+	f := newNativeDispositionFixture(t, false)
+	f.paced = true
+	f.nativeRetryHold(t)
+	f.afterRelay = func() {
+		live := &v1beta1.Migration{}
+		if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), live); err != nil {
+			t.Error(err)
+			return
+		}
+		live.Annotations = map[string]string{"example.invalid/changed": "after-relay"}
+		if err := f.store.Update(context.Background(), live); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := f.reconcile(t); err == nil || f.retryHelpers != 1 {
+		t.Fatal("a Migration changed during the read was admitted", err, f.retryHelpers)
+	}
+	f.afterRelay = nil
+	if err := f.reconcile(t); err != nil || f.retryHelpers != 1 || f.lastResult.RequeueAfter <= 0 {
+		t.Fatal("the gate read again inside the interval after a failed read", err, f.retryHelpers, f.lastResult)
+	}
+}
+
+func TestNativeRetryGateFutureReadStamp(t *testing.T) {
+	f := newNativeDispositionFixture(t, false)
+	f.paced, f.helperExits = true, true
+	clock := jobFailedAt(f.worker).Add(time.Minute)
+	f.r.now = func() time.Time { return clock }
+	live, _ := f.nativeRetryHold(t)
+	live.Status.RetryGate.LastReadAt = &metav1.Time{Time: clock.Add(time.Hour)}
+	if err := f.store.Status().Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if live, _ = f.nativeRetryHold(t); f.retryHelpers != 1 || !live.Status.RetryGate.LastReadAt.Equal(&metav1.Time{Time: clock}) {
+		t.Fatal("a read stamp from the future held the gate", f.retryHelpers, live.Status.RetryGate.LastReadAt)
 	}
 }
 
@@ -763,6 +850,9 @@ func TestNativeRetryBudget(t *testing.T) {
 		}
 		if f.m.Status.Phase != v1beta1.PhaseFailed || f.m.Status.RetryGate.Exemption != v1beta1.RetryGateCounted || f.workerCreates != 0 || f.relays != 1 {
 			t.Fatal("counted native budget did not stop", f.m.Status.Phase, f.workerCreates, f.relays)
+		}
+		if held := meta.FindStatusCondition(f.m.Status.Conditions, v1beta1.ConditionRetryHeld); held == nil || held.Status != metav1.ConditionFalse || held.Reason != reasonHoldMigrationFailed || !strings.Contains(held.Message, "BackoffLimitExceeded") {
+			t.Fatal("an exhausted native budget kept holding the retry", held)
 		}
 	})
 	t.Run("one exemption", func(t *testing.T) {

@@ -176,6 +176,7 @@ type readerAPI struct {
 	afterResult      func(*admissionFixture)
 	writerFault      string
 	writerCalls      int
+	relayArgv        []string
 	relayCalls       int
 	logCalls         int
 	splitLogCalls    int
@@ -317,6 +318,7 @@ func (s *readerAPI) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.input = bytes.Clone(input)
+	s.relayArgv = slices.Clone(r.URL.Query()["command"])
 	s.injected = true
 	s.writerCalls++
 	s.result = readerResult(s.t, s.fixture.want, input)

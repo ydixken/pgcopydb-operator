@@ -298,6 +298,7 @@ func driftDisposition(t *testing.T, f *nativeDispositionFixture) (bool, error) {
 	if err := f.store.Get(context.Background(), client.ObjectKeyFromObject(f.m), f.m); err != nil {
 		t.Fatal(err)
 	}
+	f.elapseRetryGateRead(t)
 	handled, result, err := f.r.reconcileNativeDisposition(context.Background(), f.m, f.m.DeepCopy(), f.worker, f.pvc)
 	f.lastResult = result
 	return handled, err

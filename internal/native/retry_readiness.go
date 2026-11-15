@@ -3,6 +3,7 @@ package native
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,14 @@ import (
 )
 
 const targetRetryKind = "target_retry"
+
+//go:embed retry_request_writer.py
+var retryWriterAdapterSource string
+
+// RetryRequestWriterProgram is the writer that admits only target_retry requests and results.
+func RetryRequestWriterProgram() []byte {
+	return adaptedRequestWriterProgram("_rpgmigrate_native_retry_writer", retryWriterAdapterSource)
+}
 
 var ErrNativeRetryUnavailable = errors.New("native retry observation unavailable")
 
@@ -63,7 +72,7 @@ func (r *Reader) ReadRetryReadiness(ctx context.Context, w ExecutionData, in Ret
 	if err != nil {
 		return nil, ErrNativeRetryUnavailable
 	}
-	relay := EvidenceRequestWriterProgram()
+	relay := RetryRequestWriterProgram()
 	if len(relay) == 0 || len(relay) > 16384 {
 		return nil, ErrNativeRetryUnavailable
 	}
