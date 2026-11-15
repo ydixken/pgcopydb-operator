@@ -65,6 +65,28 @@ tasks:
       - cmd: |-
           if [ -f Makefile ]; then make test; else echo "test: no Go module yet, nothing to test"; fi
 
+  test:native-seams:
+    desc: Run the cluster-free native seam harness on pair 16:16, 18:18 or 16:18.
+    summary: >-
+      IMAGE_LOCK is a schema 2 image lock. The harness runs its native runner and PostgreSQL
+      images in Podman, labels everything it creates with OWNER and removes it at the end.
+      With EVIDENCE_DIR it also writes the verdict table there as JSON.
+    requires: {vars: [PAIR, IMAGE_LOCK]}
+    vars:
+      OWNER: '{{.OWNER | default "native-seams"}}'
+    cmds:
+      # A filter that selects no test passes silently, so the log must show this test passed.
+      - cmd: |-
+          log=$(mktemp)
+          NATIVE_SEAMS_PAIR={{.PAIR | shellQuote}} NATIVE_SEAMS_IMAGE_LOCK={{.IMAGE_LOCK | shellQuote}} \
+            NATIVE_SEAMS_OWNER={{.OWNER | shellQuote}} NATIVE_SEAMS_EVIDENCE={{.EVIDENCE_DIR | default "" | shellQuote}} \
+            go test ./internal/controller -run '^TestNativeSeams$' -count=1 -v -timeout 70m 2>&1 | tee "$log"
+          status=$?
+          ran=$(grep -c '^--- PASS: TestNativeSeams ' "$log")
+          rm -f "$log"
+          test "$status" -eq 0 || exit "$status"
+          test "$ran" -eq 1 || { echo "test:native-seams: TestNativeSeams did not run to a pass" >&2; exit 1; }
+
   docs:
     desc: Regenerate the CRD reference (docs/reference/api.md) from the Go API types.
     cmds:
