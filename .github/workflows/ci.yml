@@ -153,10 +153,13 @@ jobs:
       # The compare-data gate decides its verdict in SQL, and a server is the
       # only place that logic can be exercised. Without one TestCompareDataQuery
       # skips, and the check that exists to stop a blind pass ships unrun.
+      # Services take no command, so initdb -c (PostgreSQL 16+) writes wal_level
+      # into postgresql.conf; the logical slot cases need it.
       postgres:
         image: postgres:16-alpine
         env:
           POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: -c wal_level=logical
         ports:
           - 5432:5432
         options: >-
@@ -170,6 +173,7 @@ jobs:
         image: postgres:18-alpine
         env:
           POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: -c wal_level=logical
         ports:
           - 5433:5432
         options: >-
@@ -238,14 +242,17 @@ jobs:
         # The throwaway service above holds no data; the query only selects.
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          PGCOPYDB_TEST_REQUIRE_LOGICAL: "1"
         run: make test
       - name: Cluster-free tests in test/e2e
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          PGCOPYDB_TEST_REQUIRE_LOGICAL: "1"
         run: go test ./test/e2e -skip '^TestE2E$' -count=1 -race -v
       - name: Coverage cases on PostgreSQL 18
         env:
           PGCOPYDB_TEST_PGURI: postgres://postgres:postgres@127.0.0.1:5433/postgres
+          PGCOPYDB_TEST_REQUIRE_LOGICAL: "1"
         run: go test ./test/e2e -skip '^TestE2E$' -run 'Coverage|StampedSchemas' -count=1 -race -v
       - name: Coverage total
         run: go tool cover -func=cover.out | tail -n 1 >> "$GITHUB_STEP_SUMMARY"

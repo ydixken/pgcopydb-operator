@@ -465,6 +465,9 @@ type workflowJob struct {
 	Steps       []workflowStep      `json:"steps"`
 	Concurrency workflowConcurrency `json:"concurrency"`
 	Environment json.RawMessage     `json:"environment"`
+	Services    map[string]struct {
+		Env map[string]string `json:"env"`
+	} `json:"services"`
 }
 
 type workflow struct {
@@ -1078,6 +1081,36 @@ func TestDependencyReviewPolicy(t *testing.T) {
 	}
 	if strings.Contains(read(t, ciWorkflow), "allow-dependencies-licenses") {
 		t.Error("dependency review must not use an allow-dependencies-licenses exemption")
+	}
+}
+
+// The logical slot live cases skip on a wal_level=replica server, so CI must
+// start every service with logical WAL and tell the tests a skip is a failure.
+func TestCIRunsLogicalSlotCases(t *testing.T) {
+	test, ok := mustParse(t, ciWorkflow).Jobs["test"]
+	if !ok {
+		t.Fatal("ci.yml has no test job")
+	}
+	if len(test.Services) == 0 {
+		t.Fatal("ci.yml test job has no PostgreSQL services")
+	}
+	for name, svc := range test.Services {
+		if got := svc.Env["POSTGRES_INITDB_ARGS"]; got != "-c wal_level=logical" {
+			t.Errorf("service %s must set POSTGRES_INITDB_ARGS to -c wal_level=logical, got %q", name, got)
+		}
+	}
+	steps := 0
+	for _, step := range test.Steps {
+		if step.Env["PGCOPYDB_TEST_PGURI"] == "" {
+			continue
+		}
+		steps++
+		if step.Env["PGCOPYDB_TEST_REQUIRE_LOGICAL"] != "1" {
+			t.Errorf("step %q sets PGCOPYDB_TEST_PGURI without PGCOPYDB_TEST_REQUIRE_LOGICAL=1", step.Name)
+		}
+	}
+	if steps == 0 {
+		t.Fatal("no ci.yml test step sets PGCOPYDB_TEST_PGURI")
 	}
 }
 

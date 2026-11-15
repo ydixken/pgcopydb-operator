@@ -233,7 +233,7 @@ func TestPublicationRetrySQL(t *testing.T) {
 				}
 			}
 			if tc.slot {
-				// Any source slot protects the publication. A physical slot also works on CI's wal_level=replica server.
+				// Any source slot protects the publication. A physical slot also works on a wal_level=replica server.
 				query(t, "SELECT slot_name FROM pg_create_physical_replication_slot('"+name+"')")
 			}
 			cmd, _ := publicationRetryWorker(t, name, uri)
