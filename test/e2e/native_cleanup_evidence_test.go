@@ -18,6 +18,9 @@ package e2e
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"slices"
 	"strings"
@@ -319,6 +322,55 @@ func TestNativeJobRecordKeepsSuccessOfOwnedCleanupJobs(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Errorf("seen = %v, want the owned cleanup Jobs only", seen)
+	}
+}
+
+// A follow spec leaves the engine to E2E_ENGINE, which only Create applies, so create must start the
+// Job watch from migrationEngine or no cleanup Job of that spec is ever recorded (M7-RUN6 automatic-cutover).
+func TestCreateStartsTheJobWatchForTheSuiteEngine(t *testing.T) {
+	native := v1beta1.MigrationEngineRPGMigrate
+	t.Setenv("E2E_ENGINE", string(native))
+	if got := migrationEngine(&v1beta1.Migration{}); got != native {
+		t.Errorf("migrationEngine of a spec without an engine under E2E_ENGINE=%s = %q", native, got)
+	}
+	t.Setenv("E2E_ENGINE", "")
+	explicit := &v1beta1.Migration{}
+	explicit.Spec.Engine = native
+	if got := migrationEngine(explicit); got != native {
+		t.Errorf("migrationEngine without E2E_ENGINE = %q, want the spec's %q", got, native)
+	}
+
+	file, err := parser.ParseFile(token.NewFileSet(), "e2e_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := func(n ast.Node, name string) (found bool) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok {
+				if id, ok := c.Fun.(*ast.Ident); ok && id.Name == name {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	guards := 0
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "create" {
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if s, ok := n.(*ast.IfStmt); ok && calls(s.Body, "startNativeJobRecorder") {
+					guards++
+					if !calls(s.Cond, "migrationEngine") {
+						t.Error("create starts the native Job watch on a condition that does not read migrationEngine")
+					}
+				}
+				return true
+			})
+		}
+	}
+	if guards != 1 {
+		t.Errorf("create starts the native Job watch under %d guards, want 1", guards)
 	}
 }
 

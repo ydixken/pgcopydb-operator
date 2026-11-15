@@ -1280,7 +1280,8 @@ func newMigration(name, ns string, clone v1beta1.CloneOptions) *v1beta1.Migratio
 func create(m *v1beta1.Migration) {
 	GinkgoHelper()
 	volume := ""
-	if m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
+	// The labeling client sets the engine only inside Create, so m may not carry it yet.
+	if migrationEngine(m) == v1beta1.MigrationEngineRPGMigrate {
 		startNativeJobRecorder()
 	}
 	if nativeKindWorkVolume() {

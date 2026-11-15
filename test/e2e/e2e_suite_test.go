@@ -215,6 +215,14 @@ type featureLabelingClient struct {
 	client.Client
 }
 
+// migrationEngine is the engine featureLabelingClient.Create gives m: E2E_ENGINE, when set, replaces the spec's.
+func migrationEngine(m *v1beta1.Migration) v1beta1.MigrationEngine {
+	if engine := os.Getenv("E2E_ENGINE"); engine != "" {
+		return v1beta1.MigrationEngine(engine)
+	}
+	return m.Spec.Engine
+}
+
 func (c featureLabelingClient) Create(
 	ctx context.Context,
 	obj client.Object,
@@ -222,9 +230,7 @@ func (c featureLabelingClient) Create(
 ) error {
 	if migration, ok := obj.(*v1beta1.Migration); ok {
 		migration.Spec.Runner.Image = envDefault("E2E_RUNNER_IMAGE", migration.Spec.Runner.Image)
-		if engine := os.Getenv("E2E_ENGINE"); engine != "" {
-			migration.Spec.Engine = v1beta1.MigrationEngine(engine)
-		}
+		migration.Spec.Engine = migrationEngine(migration)
 		if migration.Spec.Engine == v1beta1.MigrationEngineRPGMigrate {
 			migration.Spec.Clone = nativeClone(migration.Spec.Clone)
 			if external == nil {
