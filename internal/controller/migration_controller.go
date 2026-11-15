@@ -560,8 +560,8 @@ func (r *MigrationReconciler) observeRunningJob(
 	if s := got.sample; s != nil {
 		r.applyStage(m, s, got.copySeen)
 		if s.Counts != nil {
-			applyCounts(m, s.Counts, got.at)
-			counts = s.Counts
+			counts = skippedDataDone(m, s.Counts)
+			applyCounts(m, counts, got.at)
 		}
 	}
 
@@ -665,6 +665,28 @@ func (r *MigrationReconciler) confirmBaseCopy(m *v1beta1.Migration, counts *prog
 	r.setCondition(m, v1beta1.ConditionCloneCompleted, metav1.ConditionTrue, "BaseCopyDone",
 		"base copy finished (worker logged clone completion), replaying changes")
 	return true
+}
+
+// skippedDataDone counts a table whose data the clone skips (excludeTableData, SchemaOnly)
+// as done, because it stays empty on the target by design. Only an exact entry exempts
+// a table, and a list that does not split into the owed count comes back unchanged.
+func skippedDataDone(m *v1beta1.Migration, c *progress.RelationCounts) *progress.RelationCounts {
+	f := pgcopydb.CloneFilters(&m.Spec)
+	owed := strings.Split(c.EmptyOnTarget, ", ")
+	if f == nil || c.EmptyOnTarget == "" || int64(len(owed)) != c.TablesTotal-c.TablesDone {
+		return c
+	}
+	skipped, _ := scopeEntries(f.ExcludeTableData, true)
+	owed = slices.DeleteFunc(owed, func(name string) bool {
+		schema, table, _ := strings.Cut(name, ".")
+		return strings.Count(name, ".") == 1 && slices.ContainsFunc(skipped, func(e []any) bool {
+			return e[0] == schema && e[1] == table
+		})
+	})
+	out := *c
+	out.TablesDone = c.TablesTotal - int64(len(owed))
+	out.EmptyOnTarget = strings.Join(owed, ", ")
+	return &out
 }
 
 // progressSample returns the sampler's latest sample, or one taken now when now is

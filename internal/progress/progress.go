@@ -235,7 +235,7 @@ type SyncRepWait struct {
 
 // RelationCounts is the progress half of a Sample, shaped for CloneProgress.
 // TablesDone counts tables that hold a row on the target or none on the
-// source; EmptyOnTarget names the rest, for the condition message.
+// source; EmptyOnTarget names the rest, joined by ", " (skippedDataDone splits it).
 type RelationCounts struct {
 	TablesTotal   int64
 	TablesDone    int64
