@@ -43,6 +43,11 @@ const finishCleanupRejoinEvidence = "cleanup_rejoin_completed_evidence"
 const finishWrongEndFault = "wrong cleaned E"
 
 const (
+	finishCleanupDiedFault    = "cleanup engine died"
+	finishCleanupRunningFault = "cleanup engine still running"
+)
+
+const (
 	finishCleanedJobKind       = "cleaned"
 	finishEvidenceJobKind      = "evidence"
 	finishInventoryJobKind     = "inventory"
@@ -177,6 +182,15 @@ func (f *nativeFinishFixture) create(ctx context.Context, c client.WithWatch, ob
 		ack := &native.Report{ProtocolVersion: 1, EngineVersion: "1", Command: "stream sentinel set endpos", Capabilities: []native.Capability{native.CapCutover}, Work: &work, Phase: nativeTerminalPhase, Replication: &native.Replication{CertifiedLSN: &certified, DurableReplayLSN: &certified, EndLSN: &e, EndPersisted: &yes, Drained: &yes, CheckpointID: nativeTerminalToken, DrainProof: &native.DrainProof{Kind: proofKind, Work: &work, CheckpointID: nativeTerminalToken, Committed: &yes, EndLSN: e, ReplayLSN: witness}}}
 		f.outputs[pod.Name] = nativeTerminalTestAck(f.t, ack)
 	case jobKindCleanup:
+		if f.fault == finishCleanupDiedFault || f.fault == finishCleanupRunningFault {
+			s := &pod.Status.ContainerStatuses[0]
+			job.Status, pod.Status.Phase, s.State = batchv1.JobStatus{Active: 1}, corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			if f.fault == finishCleanupDiedFault {
+				job.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}
+				pod.Status.Phase, s.State = corev1.PodFailed, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ContainerID: s.ContainerID, ExitCode: 137}}
+			}
+			break
+		}
 		f.outputs[pod.Name] = f.cleanupReport()
 		f.mu.Lock()
 		f.cleaned = true
@@ -636,4 +650,57 @@ func TestNativeFollowFinishWaitsForRefusedProbes(t *testing.T) {
 	if countKind(f.created, finishCleanedJobKind) != 2 || countKind(f.created, finishCleanupRejoinKind) != 1 {
 		t.Fatalf("manager order lost the refused probes: %v", f.created)
 	}
+}
+
+// A refused or failed finish pass disposes each helper once its closure is seen, and only then.
+func TestNativeRefusedFinishHelpersDisposed(t *testing.T) {
+	t.Run("refused ordinary probe", func(t *testing.T) {
+		f := newNativeFinishFixture(t)
+		f.partial = finishSlotRemovedCase
+		if got, err := f.r.readNativeFollowTargetCompletion(context.Background(), f.m, f.worker, f.pvc, f.report); err == nil || got != nil {
+			t.Fatalf("partial cleanup state passed the ordinary probe: %v", err)
+		}
+		for _, kind := range []string{finishEndposKind, finishEvidenceJobKind} {
+			if countKind(f.created, kind) != 1 || countKind(f.deleted, kind) != 1 {
+				t.Fatalf("%s helpers created %v, deleted %v", kind, f.created, f.deleted)
+			}
+		}
+	})
+	t.Run("refused relay whose helper Succeeded is kept", func(t *testing.T) {
+		f := newNativeFinishFixture(t)
+		f.editResult = func(kind string, v map[string]any) {
+			if kind == finishOrdinaryEvidenceKind {
+				v["target_closed"] = false
+			}
+		}
+		if _, err := f.r.readNativeFollowTargetCompletion(context.Background(), f.m, f.worker, f.pvc, f.report); err == nil {
+			t.Fatal("an unclosed target passed the ordinary probe")
+		}
+		if countKind(f.created, finishEvidenceJobKind) != 1 || countKind(f.deleted, finishEvidenceJobKind) != 0 || countKind(f.deleted, finishEndposKind) != 1 {
+			t.Fatalf("mismatched evidence helper disposed or endpos kept: created %v, deleted %v", f.created, f.deleted)
+		}
+	})
+	t.Run("cleanup engine died", func(t *testing.T) {
+		f := newNativeFinishFixture(t)
+		f.fault = finishCleanupDiedFault
+		if done, err := cleanupFlow(t, f).ensureNativeCleanup(context.Background(), f.m, f.worker, f.pvc); err == nil || done {
+			t.Fatal("a dead cleanup engine passed")
+		}
+		if countKind(f.created, jobKindCleanup) != 1 || countKind(f.deleted, jobKindCleanup) != 1 {
+			t.Fatalf("cleanup helpers created %v, deleted %v", f.created, f.deleted)
+		}
+	})
+	t.Run("cleanup engine still running is kept", func(t *testing.T) {
+		f := newNativeFinishFixture(t)
+		f.fault = finishCleanupRunningFault
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cancelWhileActive(f, jobKindCleanup, jobKindCleanup, 5, cancel)
+		if done, err := cleanupFlow(t, f).ensureNativeCleanup(ctx, f.m, f.worker, f.pvc); err == nil || done {
+			t.Fatal("a running cleanup engine passed")
+		}
+		if countKind(f.created, jobKindCleanup) != 1 || countKind(f.deleted, jobKindCleanup) != 0 {
+			t.Fatalf("running cleanup helper disposed: created %v, deleted %v", f.created, f.deleted)
+		}
+	})
 }

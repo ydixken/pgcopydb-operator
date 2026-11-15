@@ -64,7 +64,7 @@ type lifecycleAPI struct {
 	discoveryPod                            *corev1.Pod
 	jobDeleted                              bool
 	cancelWaiting                           context.CancelFunc
-	pendingReads                            int
+	pendingReads, idleReads                 int
 	replacePending                          bool
 	replaceBeforeReader                     bool
 	readinessSeen                           bool
@@ -173,6 +173,7 @@ func (s *lifecycleAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/jobs/"+s.worker.Name):
 		_ = json.NewEncoder(w).Encode(s.worker)
 	case s.job != nil && !s.jobDeleted && strings.HasSuffix(r.URL.Path, "/jobs/"+s.job.Name):
+		s.settleHelper()
 		_ = json.NewEncoder(w).Encode(s.job)
 	case strings.HasSuffix(r.URL.Path, "/pods"):
 		s.listLifecyclePods(w, r)
@@ -253,7 +254,7 @@ func (s *lifecycleAPI) createJob(w http.ResponseWriter, r *http.Request) {
 	s.pod.Labels = maps.Clone(job.Spec.Template.Labels)
 	s.pod.Labels[batchv1.ControllerUidLabel] = string(job.UID)
 	s.pod.Spec.NodeName = finishFixtureNode
-	s.postExecReads = 0
+	s.postExecReads, s.idleReads = 0, 0
 	s.injected = false
 	if s.onCreate != nil {
 		s.onCreate(s)
@@ -282,6 +283,29 @@ func (s *lifecycleAPI) complete() {
 	if s.mainFault == "signal" {
 		status.State.Terminated.Signal = 9
 	}
+}
+
+// settleHelper ends the main program after its relay even when the operator refused it, and fails
+// it at its own input deadline when no relay came, as the real one does.
+func (s *lifecycleAPI) settleHelper() {
+	if s.injected && s.mainFault != lifecycleWaitingMain {
+		if s.relayFault == lifecycleUnknownCommit {
+			s.fail()
+		} else {
+			s.complete()
+		}
+	} else if !s.injected && s.readinessSeen {
+		if s.idleReads++; s.idleReads > 20 {
+			s.fail()
+		}
+	}
+}
+
+func (s *lifecycleAPI) fail() {
+	status := &s.pod.Status.ContainerStatuses[0]
+	s.pod.Status.Phase = corev1.PodFailed
+	status.State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ContainerID: status.ContainerID, ExitCode: 1}}
+	s.job.Status = batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}
 }
 
 func (s *lifecycleAPI) exec(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +715,9 @@ func TestNativeEvidenceFreshOperationSameEnd(t *testing.T) {
 	got, err := lifecycleCall(t, s, r)
 	if got != nil || err == nil || s.creates != 1 || s.relays != 1 || !s.simulatedCommit || s.otherWrites != 0 {
 		t.Fatal("unknown commit yielded observation or outer mutation")
+	}
+	if !s.jobDeleted {
+		t.Fatal("refused helper that ended Failed was kept")
 	}
 	first := s.job.DeepCopy()
 	s.relayFault = ""

@@ -97,11 +97,12 @@ func (r *MigrationReconciler) readNativeCompletedEvidence(ctx context.Context, e
 	if err != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
+	capture := &nativeStateHelper{expected: expected, created: created, pod: helperOriginal, data: native.ExecutionData{PlatformImageID: image, Container: podexec.NativeContainerBinding{ContainerID: original.containerID}}}
 	observation, err := r.NativeEvidence.ReadCompleted(ctx, want, live.Status.Replication.Endpos)
 	if err != nil || observation == nil || ctx.Err() != nil {
+		r.disposeRefusedNativeHelper(ctx, m, capture)
 		return nil, errNativeEvidenceLifecycle
 	}
-	capture := &nativeStateHelper{expected: expected, created: created, pod: helperOriginal, data: native.ExecutionData{PlatformImageID: image, Container: podexec.NativeContainerBinding{ContainerID: original.containerID}}}
 	if err := r.consumeNativeCompletedHelper(ctx, m, worker, pvc, originalWorker, capture); err != nil {
 		return nil, errNativeEvidenceLifecycle
 	}
