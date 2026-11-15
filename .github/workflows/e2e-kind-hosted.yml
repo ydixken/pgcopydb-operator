@@ -39,9 +39,10 @@ jobs:
       - name: Record the rootless node cgroup shape
         if: ${{ !cancelled() }}
         env:
-          HELPER: docker.io/kindest/local-path-helper@sha256:ac7c7f08e86f7bef7d2ad6dee944ed89d3d2e7de0ebc00490d7ddf6c26628a06
+          # The catalog's amd64 legacy runner, which ships coreutils sleep.
+          PROBE: ghcr.io/ydixken/pgcopydb-operator/runner@sha256:81d8e6bd35ad479e9cb67b9e1432748b3fa68edc5ffb45f8145d294ebb1839e3
         run: |
-          id=$(podman run -d --rm --network none --cpus=2 --memory=256m --memory-swap=256m "$HELPER" sleep 120)
+          id=$(podman run -d --rm --network none --cpus=2 --memory=256m --memory-swap=256m --entrypoint sleep "$PROBE" 120)
           trap 'podman rm --force "$id" >/dev/null' EXIT
           pid=$(podman inspect --type container --format '{{.State.Pid}}' "$id")
           echo "cid=$id pid=$pid"
