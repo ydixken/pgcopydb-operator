@@ -78,10 +78,17 @@ jobs:
             echo "GOMODCACHE=/cache/go-mod"
             echo "GOLANGCI_LINT_CACHE=/cache/golangci"
           } >> "$GITHUB_ENV"
-      # The runner image carries Helm. Only a fork's pull request, which lands
-      # on a hosted runner, still needs this.
+      # The runner image carries Helm and Go; only a fork's pull request, on a
+      # hosted runner, needs these. That runner's Go can lag go.mod, and
+      # golangci-lint refuses a module newer than the Go that built it.
       - uses: azure/setup-helm@v5
         if: ${{ github.event.pull_request.head.repo.fork }}
+      - uses: actions/setup-go@v7
+        if: ${{ github.event.pull_request.head.repo.fork }}
+        with:
+          go-version-file: go.mod
+          # A hosted runner runs cold by design: see the header.
+          cache: false
       # The runner image carries these; a hosted runner, which is what a fork's
       # pull request gets, does not. The check makes this a no-op on ours.
       - name: Install what the runner lacks
