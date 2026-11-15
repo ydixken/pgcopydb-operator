@@ -396,10 +396,10 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `slotName` _string_ |  |  | Optional: \{\} <br /> |
-| `writeLSN` _string_ | writeLSN is the walsender's write position, with slot confirmed-flush fallback<br />when the migration role cannot read it. |  | Optional: \{\} <br /> |
-| `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application. |  | Optional: \{\} <br /> |
+| `writeLSN` _string_ | writeLSN is the walsender's write position, with slot confirmed-flush fallback<br />when the migration role cannot read it.<br />With engine rpgmigrate, it is the source WAL insert position read with replayLSN. |  | Optional: \{\} <br /> |
+| `replayLSN` _string_ | replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.<br />It may include certified idle WAL beyond the last applied data transaction.<br />Post-cutover drain verification, not this position, proves target application.<br />With engine rpgmigrate, it is the slot's confirmed_flush_lsn, which only moves on<br />engine feedback for a target-committed transaction end or a certified keepalive. |  | Optional: \{\} <br /> |
 | `endpos` _string_ | endpos is the cutover LSN once set. |  | Optional: \{\} <br /> |
-| `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN. |  | Optional: \{\} <br /> |
+| `lagBytes` _integer_ | lagBytes is the byte distance between the source WAL head and replayLSN.<br />With engine rpgmigrate, it is exactly writeLSN minus replayLSN from one sample. |  | Optional: \{\} <br /> |
 
 
 #### RetryGateStatus

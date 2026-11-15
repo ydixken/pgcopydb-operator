@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	"k8s.io/apimachinery/pkg/util/remotecommand"
 	"k8s.io/client-go/rest"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -27,6 +29,7 @@ type nativeSamplerFixture struct {
 	mu          sync.Mutex
 	now         time.Time
 	lag         int64
+	confirmed   uint64
 	binding     string
 	cache       []byte
 	replay      bool
@@ -41,7 +44,7 @@ func newNativeSamplerFixture(t *testing.T) (*nativeSamplerFixture, *nativeSample
 
 func newNativeSamplerFixtureMode(t *testing.T, follow bool) (*nativeSamplerFixture, *nativeSampler) {
 	t.Helper()
-	f := &nativeSamplerFixture{nativeControlFixture: newNativeControlFixture(t), now: time.Unix(1000, 0), binding: strings.Repeat("a", 64)}
+	f := &nativeSamplerFixture{nativeControlFixture: newNativeControlFixture(t), now: time.Unix(1000, 0), confirmed: 0x40, binding: strings.Repeat("a", 64)}
 	if !follow {
 		f.m.Spec.Follow.Enabled = false
 		f.m.Spec.Cutover.Approved = false
@@ -135,6 +138,8 @@ func (f *nativeSamplerFixture) execSample(w http.ResponseWriter, r *http.Request
 		}
 		delete(result, nativeControlHeadKey)
 		result["lag_bytes"], _ = json.Marshal(f.lag)
+		result["write_lsn"], _ = json.Marshal(testLSN(f.confirmed + uint64(f.lag)))
+		result["replay_lsn"], _ = json.Marshal(testLSN(f.confirmed))
 		result[nativeControlBindingKey], _ = json.Marshal(f.binding)
 		output, err = json.Marshal(result)
 		if err != nil {
@@ -166,6 +171,47 @@ func (f *nativeSamplerFixture) execSample(w http.ResponseWriter, r *http.Request
 	_ = c.WriteMessage(websocket.BinaryMessage, append([]byte{1}, output...))
 	_ = c.WriteMessage(websocket.BinaryMessage, append([]byte{3}, []byte(`{"status":"Success"}`)...))
 	_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+}
+
+func testLSN(v uint64) string { return fmt.Sprintf("%X/%X", v>>32, uint32(v)) }
+
+// nativeSamplePositionsConsistent reports whether lagBytes is exactly writeLSN minus replayLSN.
+func nativeSamplePositionsConsistent(got nativeSample) bool {
+	write, err1 := sentinel.ParseLSN(got.writeLSN)
+	replay, err2 := sentinel.ParseLSN(got.replayLSN)
+	return got.lagBytes != nil && err1 == nil && err2 == nil && replay > 0 && write >= replay && write-replay == uint64(*got.lagBytes)
+}
+
+func TestNativeSamplerPositions(t *testing.T) {
+	f, s := newNativeSamplerFixture(t)
+	for i, c := range []struct {
+		lag           int64
+		confirmed     uint64
+		write, replay string
+	}{{16, 0x40, nativeReplicationTestWrite, nativeControlTestEnd}, {0, 0x1_0000_0100, "1/100", "1/100"}, {8, 0x80, "0/88", "0/80"}} {
+		f.mu.Lock()
+		f.lag, f.confirmed = c.lag, c.confirmed
+		f.mu.Unlock()
+		f.advance(time.Second)
+		got, err := f.sample(s, true, 1<<20)
+		if err != nil || !nativeSamplePositionsConsistent(got) || got.writeLSN != c.write || got.replayLSN != c.replay || *got.lagBytes != c.lag {
+			t.Fatalf("sample %d did not carry its own consistent positions: %+v %v", i, got, err)
+		}
+		if seen := s.Observe(f.m, f.want, true, 1<<20); seen.writeLSN != c.write || seen.replayLSN != c.replay || seen.lagBytes == nil || *seen.lagBytes != c.lag {
+			t.Fatalf("observation %d mixed positions across samples: %+v", i, seen)
+		}
+	}
+	f.mu.Lock()
+	f.lag = -1
+	f.mu.Unlock()
+	f.advance(time.Second)
+	got, err := f.sample(s, true, 1<<20)
+	if err == nil || got.progress == nil || got.lagBytes != nil || got.writeLSN != "" || got.replayLSN != "" {
+		t.Fatalf("unknown lag kept positions: %+v %v", got, err)
+	}
+	if seen := s.Observe(f.m, f.want, true, 1<<20); seen.lagBytes != nil || seen.writeLSN != "" || seen.replayLSN != "" {
+		t.Fatal("unknown lag observation kept positions")
+	}
 }
 
 func TestNativeInformationalLagCatchUp(t *testing.T) {

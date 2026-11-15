@@ -28,7 +28,7 @@ func TestNativeOwnedInventoryProgramCanonicalSource(t *testing.T) {
 	}
 	coreHash := EvidenceProgramSHA256()
 	writerHash := EvidenceRequestWriterSHA256()
-	if hex.EncodeToString(coreHash[:]) != "dcfc60e3d2dae8e97f7bd6e7da2a05fcb7248983f1c190fe47cb8627eb1bdbad" || hex.EncodeToString(writerHash[:]) != "feecccd8f76dec45623f5b51b443ad6a340a0a779b158f36e35b36767baee16b" {
+	if hex.EncodeToString(coreHash[:]) != "52c93e6ce6abfe10010934c51dbc88f2ab36aea63c432b2df3d3277671f61834" || hex.EncodeToString(writerHash[:]) != "feecccd8f76dec45623f5b51b443ad6a340a0a779b158f36e35b36767baee16b" {
 		t.Fatal("canonical source changed")
 	}
 }

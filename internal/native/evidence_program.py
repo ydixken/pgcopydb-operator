@@ -1619,7 +1619,7 @@ def source_position(session, kind, binding):
  source,slot,pub,_=binding; source_publication(session,pub)
  if kind=='source_head':
   rows=session.query('SELECT @pg_current_wal_insert_lsn();'); need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==1 and type(rows[0][0]) is bytes,RESULT)
-  value=lsn(rows[0][0].decode('ascii')); need(value>=slot['consistent_point']>0,RESULT); return lsn_text(value)
+  value=lsn(rows[0][0].decode('ascii')); need(value>=slot['consistent_point']>0,RESULT); return dict(head_lsn=lsn_text(value))
  rows=session.query("SELECT @current_setting('wal_level'),@current_setting('max_slot_wal_keep_size'),@current_setting('old_snapshot_threshold',true),@current_setting('idle_replication_slot_timeout',true);",width=4)
  need(type(rows) is list and len(rows)==1 and type(rows[0]) is list and len(rows[0])==4,RESULT)
  need(rows[0][:2]==[b'logical',b'-1'] and (rows[0][2]==b'-1' if source['major']==16 else rows[0][3]==b'0'),RESULT)
@@ -1632,7 +1632,7 @@ def source_position(session, kind, binding):
   need(type(row[index]) is bytes,RESULT); value=lsn(row[index].decode('ascii')); need(value>0,RESULT); positions.append(value)
  restart,confirmed,insert=positions; need(restart<=confirmed<=insert and confirmed>=slot['consistent_point'],RESULT)
  # This active position snapshot cannot prove slot incarnation, ownership or target progress.
- return uint(insert-confirmed,(1<<63)-1)
+ return dict(lag_bytes=uint(insert-confirmed,(1<<63)-1),write_lsn=lsn_text(insert),replay_lsn=lsn_text(confirmed))
 
 def run_source_observation(kind: str, operation_id: str, program_sha256: str) -> int:
  start=time.monotonic(); deadline=start+25; closing=start+30; diag=None; state=None; materials=None; session=None
@@ -1660,7 +1660,7 @@ def run_source_observation(kind: str, operation_id: str, program_sha256: str) ->
   session.close(); session=None; materials.check(); materials.close(); materials=None; state.close(); state=None; diag.close(); diag=None
   need(time.monotonic()<closing,'timeout'); request_sha,execution_sha=request_digests(raw)
   result=dict(version=1,kind=kind,operation_id=operation_id,program_sha256=program_sha256,request_sha256=request_sha,execution_sha256=execution_sha,work=req['execution']['work'],source_binding_sha256=fingerprint,source_closed=True,private_closed=True,diagnostics_clean=True)
-  result['head_lsn' if kind=='source_head' else 'lag_bytes']=position
+  result.update(position)
   output=json.dumps(result,separators=(',',':'),ensure_ascii=True).encode()+b'\n'; need(len(output)<=CAP,RESULT); os.set_blocking(1,False); offset=0
   while offset<len(output):
    need(time.monotonic()<closing,'timeout')

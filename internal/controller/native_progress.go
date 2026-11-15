@@ -45,6 +45,7 @@ func (r *MigrationReconciler) applyNativeProgress(m *v1beta1.Migration, got nati
 		if got.lagBytes != nil {
 			value := *got.lagBytes
 			m.Status.Replication.LagBytes = &value
+			m.Status.Replication.WriteLSN, m.Status.Replication.ReplayLSN = got.writeLSN, got.replayLSN
 		}
 	}
 	m.Status.Phase = v1beta1.PhaseCloning

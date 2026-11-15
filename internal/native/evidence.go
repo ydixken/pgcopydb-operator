@@ -373,7 +373,7 @@ var nativeWireKeys = map[string]string{
 	"source_request.container":      nativeContainerWireKeys,
 	"source_head":                   "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 head_lsn source_closed private_closed diagnostics_clean",
 	"source_head.work":              sourceWorkWireKeys,
-	"active_lag":                    "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 lag_bytes source_closed private_closed diagnostics_clean",
+	"active_lag":                    "version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 lag_bytes write_lsn replay_lsn source_closed private_closed diagnostics_clean",
 	"active_lag.work":               sourceWorkWireKeys,
 	"native_preflight":              "version kind operation_id program_sha256 source_major target_major pg_dump_major pg_restore_major checks source_closed target_closed materialization_closed diagnostics_clean",
 	"request":                       "version kind operation_id program_sha256 execution pod_name container saved_e",
