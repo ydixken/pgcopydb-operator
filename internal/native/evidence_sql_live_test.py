@@ -5,7 +5,7 @@ import subprocess
 import sys
 import unittest
 
-# Executes the shipped receipt catalog statements on the server PGCOPYDB_TEST_PGURI names.
+# Executes the shipped inventory and receipt catalog statements on the server PGCOPYDB_TEST_PGURI names.
 if sys.flags.optimize:
     raise SystemExit('optimized tests refused')
 
@@ -75,6 +75,66 @@ class EvidenceSQLLive(unittest.TestCase):
         self.addCleanup(self.db.drop)
         self.major = int(self.db.scalar('SHOW server_version_num;')) // 10000
         self.assertIn(self.major, (16, 18))
+        self.slot = self.db.name + '_s'
+        self.pub = self.db.name + '_p'
+        psql(self.db.uri, 'CREATE TABLE public.t1(id int PRIMARY KEY, v text); CREATE TABLE public.t2(id int, w int); CREATE PUBLICATION %s FOR TABLE public.t1, public.t2;' % self.pub)
+        self.patch = mock_identity()
+        self.addCleanup(self.patch)
+
+    def state(self, cleanup=None):
+        oid = lambda sql: int(self.db.scalar(sql))
+        tables = [dict(source_oid=oid("SELECT 'public.%s'::regclass::oid;" % t), name=dict(schema='public', table=t), all_columns=cols)
+                  for t, cols in (('t1', ['id', 'v']), ('t2', ['id', 'w']))]
+        plan = dict(source=dict(identity=dict(database_oid=oid('SELECT oid FROM pg_database WHERE datname=current_database();'))), tables=tables)
+        pub = dict(name=self.pub, oid=oid("SELECT oid FROM pg_publication WHERE pubname='%s';" % self.pub),
+                   owner_oid=oid("SELECT pubowner FROM pg_publication WHERE pubname='%s';" % self.pub))
+        binding = dict(slot=dict(intent=dict(binding=dict(slot_name=self.slot))), publication=pub)
+        manifest = dict(clone_state=dict(plan=plan), follow_state=dict(binding=binding, cleanup=cleanup))
+
+        class State:
+            pass
+        state = State()
+        state.manifest = manifest
+        return state
+
+    def inventory(self, state):
+        session = LiveSession(self.db.uri)
+        try:
+            return SCOPE['inventory_source'](session, state), session.results
+        except SCOPE['Refusal'] as refusal:
+            return refusal, session.results
+
+    def assertRefusedAt(self, outcome, index):
+        verdict, results = outcome
+        self.assertIsInstance(verdict, SCOPE['Refusal'])
+        self.assertEqual(results[1:], [[[b't']]] * (index - 1) + [[[b'f']]])
+
+    def test_InventoryLogicalSlotAndPublication(self):
+        self.assertEqual(self.db.scalar('SHOW wal_level;'), 'logical')
+        psql(self.db.uri, "SELECT pg_catalog.pg_create_logical_replication_slot('%s', 'pgoutput');" % self.slot)
+        verdict, results = self.inventory(self.state())
+        self.assertEqual((verdict, len(results)), ('pinned', 4))
+        state = self.state()
+        state.manifest['clone_state']['plan']['source']['identity']['database_oid'] += 1
+        self.assertRefusedAt(self.inventory(state), 1)
+        self.assertRefusedAt(self.inventory(self.state(dict(slot_removed=True, publication_removed=False))), 1)
+
+    def test_InventoryPublicationVerdicts(self):
+        verdict, results = self.inventory(self.state())
+        self.assertEqual((verdict, len(results)), ('pinned', 4))
+        state = self.state()
+        state.manifest['follow_state']['binding']['publication']['owner_oid'] += 1
+        self.assertRefusedAt(self.inventory(state), 2)
+        for table in (0, 1):
+            with self.subTest(table=table):
+                state = self.state()
+                state.manifest['clone_state']['plan']['tables'][table]['source_oid'] += 1
+                self.assertRefusedAt(self.inventory(state), 3)
+        state = self.state()
+        state.manifest['clone_state']['plan']['tables'][1]['all_columns'] = ['id']
+        self.assertRefusedAt(self.inventory(state), 3)
+        psql(self.db.uri, "SELECT pg_catalog.pg_create_physical_replication_slot('%s');" % self.slot)
+        self.assertRefusedAt(self.inventory(self.state()), 1)
 
     def test_ReceiptCatalogVerdicts(self):
         psql(self.db.uri, RECEIPTS)
@@ -96,6 +156,12 @@ class EvidenceSQLLive(unittest.TestCase):
                 if self.major == 18:
                     # Without the 18 clause, the engine's NOT NULL constraints read as foreign.
                     self.assertEqual(verdict(kind, 16, target), [[b'f']])
+
+
+def mock_identity():
+    original = SCOPE['source_session_identity']
+    SCOPE['source_session_identity'] = lambda session, source: 'pinned'
+    return lambda: SCOPE.__setitem__('source_session_identity', original)
 
 
 if __name__ == '__main__':
