@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	"k8s.io/apimachinery/pkg/types"
@@ -77,6 +78,8 @@ type sourceResultWire struct {
 	SourceBindingSHA256 string       `json:"source_binding_sha256"`
 	HeadLSN             string       `json:"head_lsn,omitempty"`
 	LagBytes            int64        `json:"lag_bytes,omitempty"`
+	WriteLSN            string       `json:"write_lsn,omitempty"`
+	ReplayLSN           string       `json:"replay_lsn,omitempty"`
 	SourceClosed        bool         `json:"source_closed"`
 	PrivateClosed       bool         `json:"private_closed"`
 	DiagnosticsClean    bool         `json:"diagnostics_clean"`
@@ -102,16 +105,31 @@ func parseSourceResult(raw, body []byte, kind string, w ExecutionData) (*sourceR
 		if head, err := sentinel.ParseLSN(v.HeadLSN); err != nil || head == 0 {
 			return nil, errors.New("native source observation unavailable")
 		}
-	} else if v.LagBytes < 0 {
+	} else if !canonicalActiveLag(&v) {
 		return nil, errors.New("native source observation unavailable")
 	}
 	return &v, nil
 }
 
+// canonicalActiveLag requires lag_bytes to be exactly write_lsn minus replay_lsn.
+func canonicalActiveLag(v *sourceResultWire) bool {
+	write, err1 := sentinel.ParseLSN(v.WriteLSN)
+	replay, err2 := sentinel.ParseLSN(v.ReplayLSN)
+	if err1 != nil || err2 != nil || replay == 0 || write < replay || v.LagBytes < 0 || write-replay != uint64(v.LagBytes) {
+		return false
+	}
+	v.WriteLSN, v.ReplayLSN = lsnText(write), lsnText(replay)
+	return true
+}
+
+func lsnText(v uint64) string { return fmt.Sprintf("%X/%X", v>>32, uint32(v)) }
+
 // InformationalLag carries no end boundary or completion evidence.
+// writeLSN and replayLSN are the source insert and slot confirmed-flush positions lagBytes was measured between.
 type InformationalLag struct {
 	valid                bool
 	lagBytes             int64
+	writeLSN, replayLSN  string
 	admissionFingerprint [32]byte
 }
 
@@ -120,6 +138,14 @@ func (l InformationalLag) LagBytes() *int64 {
 		return nil
 	}
 	return &l.lagBytes
+}
+
+// Positions returns writeLSN and replayLSN, empty when the sample is unknown.
+func (l InformationalLag) Positions() (string, string) {
+	if !l.valid {
+		return "", ""
+	}
+	return l.writeLSN, l.replayLSN
 }
 
 func (l InformationalLag) AdmissionFingerprint() [32]byte {

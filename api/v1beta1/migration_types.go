@@ -632,17 +632,21 @@ type ReplicationStatus struct {
 	SlotName string `json:"slotName,omitempty"`
 	// writeLSN is the walsender's write position, with slot confirmed-flush fallback
 	// when the migration role cannot read it.
+	// With engine rpgmigrate, it is the source WAL insert position read with replayLSN.
 	// +optional
 	WriteLSN string `json:"writeLSN,omitempty"`
 	// replayLSN is source-visible replay feedback, with slot confirmed-flush fallback.
 	// It may include certified idle WAL beyond the last applied data transaction.
 	// Post-cutover drain verification, not this position, proves target application.
+	// With engine rpgmigrate, it is the slot's confirmed_flush_lsn, which only moves on
+	// engine feedback for a target-committed transaction end or a certified keepalive.
 	// +optional
 	ReplayLSN string `json:"replayLSN,omitempty"`
 	// endpos is the cutover LSN once set.
 	// +optional
 	Endpos string `json:"endpos,omitempty"`
 	// lagBytes is the byte distance between the source WAL head and replayLSN.
+	// With engine rpgmigrate, it is exactly writeLSN minus replayLSN from one sample.
 	// +optional
 	LagBytes *int64 `json:"lagBytes,omitempty"`
 }

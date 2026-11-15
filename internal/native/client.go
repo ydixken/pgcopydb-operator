@@ -34,7 +34,7 @@ func (c *Client) SampleLag(ctx context.Context, m *v1beta1.Migration, want Execu
 	if err != nil {
 		return nil, err
 	}
-	return &InformationalLag{valid: true, lagBytes: v.LagBytes, admissionFingerprint: sourceAdmissionFingerprint(want, v.SourceBindingSHA256)}, nil
+	return &InformationalLag{valid: true, lagBytes: v.LagBytes, writeLSN: v.WriteLSN, replayLSN: v.ReplayLSN, admissionFingerprint: sourceAdmissionFingerprint(want, v.SourceBindingSHA256)}, nil
 }
 
 func (c *Client) sourceObservation(ctx context.Context, m *v1beta1.Migration, w ExecutionData, kind string) (*sourceResultWire, error) {

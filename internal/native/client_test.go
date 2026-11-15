@@ -151,8 +151,12 @@ func TestNativeInformationalLagSample(t *testing.T) {
 				}
 			} else {
 				value, err := c.SampleLag(context.Background(), s.migration, s.want)
-				if err != nil || value == nil || value.LagBytes() == nil || *value.LagBytes() != 0 || value.AdmissionFingerprint() == ([32]byte{}) {
-					t.Fatal("checked zero lag refused")
+				if err != nil || value == nil {
+					t.Fatal("checked lag refused", err)
+				}
+				write, replay := value.Positions()
+				if value.LagBytes() == nil || *value.LagBytes() != 16 || write != fixtureWitnessLSN || replay != fixtureEndLSN || value.AdmissionFingerprint() == ([32]byte{}) {
+					t.Fatal("checked lag or its positions refused")
 				}
 			}
 			s.mu.Lock()

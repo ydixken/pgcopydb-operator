@@ -664,7 +664,7 @@ class NativePythonTests(unittest.TestCase):
         for kind in ('source_head','active_lag'):
             with self.subTest(kind=kind),SourceFixture(self,kind) as fixture:
                 self.assertEqual(fixture.run(),0);raw=b''.join(fixture.output);result=json.loads(raw)
-                self.assertEqual(set(result),set('version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 source_closed private_closed diagnostics_clean'.split())|{'head_lsn' if kind=='source_head' else 'lag_bytes'})
+                self.assertEqual(set(result),set('version kind operation_id program_sha256 request_sha256 execution_sha256 work source_binding_sha256 source_closed private_closed diagnostics_clean'.split())|({'head_lsn'} if kind=='source_head' else {'lag_bytes','write_lsn','replay_lsn'}))
                 self.assertEqual(result['kind'],kind);self.assertEqual(result['version'],1);self.assertEqual(result['operation_id'],'5'*32)
                 self.assertEqual(result['program_sha256'],fixture.req['program_sha256']);self.assertEqual(result['work'],fixture.req['execution']['work'])
                 digest=hashlib.sha256(fixture.raw).digest();self.assertEqual(result['request_sha256'],digest.hex());self.assertEqual(result['execution_sha256'],hashlib.sha256(b'rpgmigrate.native.execution.v1\0'+digest).hexdigest())
@@ -676,14 +676,14 @@ class NativePythonTests(unittest.TestCase):
                 for field in ('checkpoint','end_lsn','saved_e','certified_lsn','durable_replay_lsn','drained','resources','owned','target_closed'):self.assertNotIn(field,result)
                 for sentinel in (b'target-secret-sentinel',b'private-user',b'private-db',b'native_slot',b'native_publication'):self.assertNotIn(sentinel,raw)
                 if kind=='source_head':self.assertEqual(result['head_lsn'],'0/30')
-                else:self.assertEqual(result['lag_bytes'],16)
+                else:self.assertEqual((result['lag_bytes'],result['write_lsn'],result['replay_lsn']),(16,'0/30','0/20'))
         zero=[[b'pgoutput',b'logical',b'11',b'f',b't',b'1234',b'extended',b'0/8',b'0/30',b'f',b'',b'false',b'false',b'0/30']]
-        with SourceFixture(self,'active_lag',{'slot':zero}) as fixture:self.assertEqual(fixture.run(),0);self.assertEqual(json.loads(b''.join(fixture.output))['lag_bytes'],0)
+        with SourceFixture(self,'active_lag',{'slot':zero}) as fixture:self.assertEqual(fixture.run(),0);result=json.loads(b''.join(fixture.output));self.assertEqual((result['lag_bytes'],result['write_lsn'],result['replay_lsn']),(0,'0/30','0/30'))
         for kind in ('source_head','active_lag'):
             with SourceFixture(self,kind,major=18) as fixture:
                 self.assertEqual(fixture.run(),0);result=json.loads(b''.join(fixture.output))
                 self.assertEqual(result['source_binding_sha256'],'d0ef0c78791e7cc83b77e0c95e7c4415a356ed61b404fa20fb90a2544ae9ae20')
-                self.assertEqual(result['head_lsn' if kind=='source_head' else 'lag_bytes'],'0/30' if kind=='source_head' else 16)
+                self.assertEqual(result['head_lsn'] if kind=='source_head' else (result['lag_bytes'],result['write_lsn'],result['replay_lsn']),'0/30' if kind=='source_head' else (16,'0/30','0/20'))
 
     def test_SourceObservationRefusals(self):
         for kind in ('source_head','active_lag'):

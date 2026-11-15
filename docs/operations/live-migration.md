@@ -204,6 +204,21 @@ This position is one confirmation behind, and the two readings are identical.
 The apply backlog derived from them reads zero.
 Lag and `CaughtUp` follow `replayLSN`, so they inherit the reading that is available.
 
+### What the positions mean with engine `rpgmigrate`
+
+The native engine has no sentinel and does not read `pg_stat_replication`.
+The operator reads the source WAL insert position and the native slot's `confirmed_flush_lsn` in one query, through an exec into the worker pod.
+`writeLSN` is that insert position, and `replayLSN` is that `confirmed_flush_lsn`.
+`lagBytes` is exactly `writeLSN` minus `replayLSN`, and the controller acts on that same value for `CaughtUp`.
+`writeLSN` is therefore a source head, not a receive position of the engine.
+The engine sends flush feedback only for the end of a transaction committed on the target, or for a certified keepalive.
+So `replayLSN` can pass WAL outside the publication, and it is not proof of target application.
+The native drain at cutover is that proof.
+
+Each sample replaces all three fields.
+The operator does not compare a sample with the one before it.
+When a sample is unavailable, the three fields are absent, never zero, and `CaughtUp` is Unknown with reason `NativeLagUnknown`.
+
 ## Manual cutover runbook
 
 Manual is the default mode.

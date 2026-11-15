@@ -39,9 +39,12 @@ type nativeLagObservation struct {
 	fingerprint        [32]byte
 }
 
-// These optional measurements deliberately have no replication frontier or proof fields.
+// These optional measurements deliberately have no engine frontier or proof fields.
+// writeLSN and replayLSN come from the lag sample and are set exactly when lagBytes is.
 type nativeSample struct {
 	lagBytes         *int64
+	writeLSN         string
+	replayLSN        string
 	progress         *native.CopyProgress
 	phase            string
 	observedAt       time.Time
@@ -153,6 +156,7 @@ func (s *nativeSampler) finish(ctx context.Context, serial uint64, scope nativeS
 	} else {
 		value := *lag.LagBytes()
 		got.lagBytes = &value
+		got.writeLSN, got.replayLSN = lag.Positions()
 		if scope.baseCopyComplete && value <= scope.threshold {
 			s.previous = s.current
 			s.current = nativeLagObservation{serial: serial, started: started, completed: completed, fingerprint: lag.AdmissionFingerprint()}

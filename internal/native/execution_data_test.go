@@ -23,6 +23,8 @@ const (
 	sourceRequestSHAKey    = "request_sha256"
 	sourceHeadLSNKey       = "head_lsn"
 	sourceLagBytesKey      = "lag_bytes"
+	sourceWriteLSNKey      = "write_lsn"
+	sourceReplayLSNKey     = "replay_lsn"
 	sourceStderrCase       = "stderr"
 	sourceStdoutOnlyCase   = "stdout_only"
 	sourceTruncatedCase    = "truncated"

@@ -17,7 +17,7 @@ func sourceResult(t *testing.T, kind string, w ExecutionData, body []byte) []byt
 	if kind == sourceHeadKind {
 		v[sourceHeadLSNKey] = fixtureEndLSN
 	} else {
-		v[sourceLagBytesKey] = 0
+		v[sourceLagBytesKey], v[sourceWriteLSNKey], v[sourceReplayLSNKey] = 16, fixtureWitnessLSN, fixtureEndLSN
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -121,12 +121,58 @@ func sourceNestedWireMutations(t *testing.T, raw []byte, path []string, parse fu
 	}
 }
 
+func TestNativeActiveLagPositions(t *testing.T) {
+	w := sourceWant()
+	body, err := sourceRequest(activeLagKind, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := sourceResult(t, activeLagKind, w, body)
+	with := func(lag any, write, replay string) []byte {
+		bad := mutateWire(t, raw, []string{sourceLagBytesKey}, func(m map[string]any, k string) {
+			m[k], m[sourceWriteLSNKey], m[sourceReplayLSNKey] = lag, write, replay
+		})
+		return append(bad, '\n')
+	}
+	for _, c := range []struct {
+		lag                   any
+		write, replay, cw, cr string
+	}{{16, fixtureWitnessLSN, fixtureEndLSN, fixtureWitnessLSN, fixtureEndLSN}, {0, fixtureEndLSN, fixtureEndLSN, fixtureEndLSN, fixtureEndLSN}, {16, "00000000/0000003a", "0/2a", "0/3A", "0/2A"}, {json.Number("4294967296"), "1/10", fixtureEarlierLSN, "1/10", fixtureEarlierLSN}} {
+		v, err := parseSourceResult(with(c.lag, c.write, c.replay), body, activeLagKind, w)
+		if err != nil || v.WriteLSN != c.cw || v.ReplayLSN != c.cr {
+			t.Fatalf("consistent positions %v %s %s refused or not canonical: %+v %v", c.lag, c.write, c.replay, v, err)
+		}
+	}
+	for _, c := range []struct {
+		lag           any
+		write, replay string
+	}{{15, fixtureWitnessLSN, fixtureEndLSN}, {17, fixtureWitnessLSN, fixtureEndLSN}, {0, fixtureWitnessLSN, fixtureEndLSN}, {16, fixtureEndLSN, fixtureWitnessLSN}, {16, fixtureEarlierLSN, sourceZeroLSN}, {0, sourceZeroLSN, sourceZeroLSN}, {16, "0/3G", fixtureEndLSN}, {16, fixtureWitnessLSN, ""}, {16, "", fixtureEndLSN}, {16, "0/30/0", fixtureEndLSN}, {16, "100000000/30", fixtureEndLSN}} {
+		if _, err := parseSourceResult(with(c.lag, c.write, c.replay), body, activeLagKind, w); err == nil {
+			t.Fatalf("inconsistent positions %v %s %s accepted", c.lag, c.write, c.replay)
+		}
+	}
+	for _, value := range []any{0x30, true, nil} {
+		bad := mutateWire(t, raw, []string{sourceWriteLSNKey}, func(m map[string]any, k string) { m[k] = value })
+		if _, err := parseSourceResult(append(bad, '\n'), body, activeLagKind, w); err == nil {
+			t.Fatalf("typed write position %v accepted", value)
+		}
+	}
+	lag := InformationalLag{valid: true, lagBytes: 16, writeLSN: fixtureWitnessLSN, replayLSN: fixtureEndLSN}
+	if write, replay := lag.Positions(); write != fixtureWitnessLSN || replay != fixtureEndLSN {
+		t.Fatal("valid lag dropped its positions")
+	}
+	lag.valid = false
+	if write, replay := lag.Positions(); write != "" || replay != "" || lag.LagBytes() != nil {
+		t.Fatal("unknown lag exposed positions")
+	}
+}
+
 func TestNativeInformationalLagNonAuthority(t *testing.T) {
 	if (InformationalLag{}).LagBytes() != nil || (InformationalLag{}).AdmissionFingerprint() != ([32]byte{}) {
 		t.Fatal("zero lag object is valid")
 	}
 	typeOf := reflect.TypeFor[InformationalLag]()
-	if typeOf.NumField() != 3 || typeOf.NumMethod() != 2 {
+	if typeOf.NumField() != 5 || typeOf.NumMethod() != 3 {
 		t.Fatal("informational lag gained an authority surface")
 	}
 	for _, target := range []reflect.Type{reflect.TypeFor[ConfirmedCheckpoint](), reflect.TypeFor[AdmittedOwnedState](), reflect.TypeFor[CompletedObservation](), reflect.TypeFor[ExecutionRequest]()} {
