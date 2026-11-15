@@ -251,9 +251,9 @@ func TestReconcileEngineDispatchStatusFailure(t *testing.T) {
 }
 
 const (
-	testRunnerTag        = "ghcr.io/ydixken/rpgmigrate:dev-abb3c53077448b04fe73ea068721852991d4aa85"
-	qualifiedRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299"
-	qualifiedRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a73a393e9b62cf760705f6d455c868db068591f865e0fbac748f0d7fca6e71c3"
+	testRunnerTag        = "ghcr.io/ydixken/rpgmigrate:dev-db50bc999319956b2a0b220208c90f0b5fae274b"
+	qualifiedRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87"
+	qualifiedRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:7b6b2112a23f10ed9e93d7e91a77acd625b208dbad42d99052857fbf35cde412"
 	// 908ada6 refuses fsGroup work roots, so its manifests are no longer qualified.
 	retiredRunnerARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:0022bf926b8b128b49330d4cb33b580abb38b09cd279ca04992879827ba0804b"
 	retiredRunnerAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a12cc8561c5a0bb7d4d19a7f69c0f37ae5004a274a193c6b24b78f6027501e1b"
@@ -266,6 +266,9 @@ const (
 	// 2b9b11d reports identical schema dumps as different when the two servers' header lines differ in length.
 	retired2b9b11dARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978"
 	retired2b9b11dAMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f"
+	// abb3c53 opens libpq sessions without the contract application names, so session censuses read zero.
+	retiredabb3c53ARM64 = "ghcr.io/ydixken/rpgmigrate@sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299"
+	retiredabb3c53AMD64 = "ghcr.io/ydixken/rpgmigrate@sha256:a73a393e9b62cf760705f6d455c868db068591f865e0fbac748f0d7fca6e71c3"
 )
 
 func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
@@ -273,8 +276,8 @@ func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
 		{"empty flag", "", ""},
 		{"tag only", testRunnerTag, ""},
 		{"unqualified digest", "ghcr.io/ydixken/rpgmigrate@sha256:" + strings.Repeat("a", 64), ""},
-		{"qualified digest, tag and digest", "ghcr.io/ydixken/rpgmigrate:dev@sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299", ""},
-		{"qualified digest, noncanonical repository", "GHCR.io/ydixken/rpgmigrate@sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299", ""},
+		{"qualified digest, tag and digest", "ghcr.io/ydixken/rpgmigrate:dev@sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87", ""},
+		{"qualified digest, noncanonical repository", "GHCR.io/ydixken/rpgmigrate@sha256:1080cf35c6f6a178aabdf7630044b4650568d2711206fdb9af83e7c1ed166f87", ""},
 		{"qualified digest, extra suffix", qualifiedRunnerARM64 + "0", ""},
 		{"unqualified per-Migration override", qualifiedRunnerARM64, testRunnerTag},
 		{"retired arm64 digest", retiredRunnerARM64, ""},
@@ -289,6 +292,10 @@ func TestReconcileNativeRunnerTupleRefusals(t *testing.T) {
 		{"retired 2b9b11d amd64 digest", retired2b9b11dAMD64, ""},
 		{"retired 2b9b11d arm64 per-Migration override", qualifiedRunnerAMD64, retired2b9b11dARM64},
 		{"retired 2b9b11d amd64 per-Migration override", qualifiedRunnerARM64, retired2b9b11dAMD64},
+		{"retired abb3c53 arm64 digest", retiredabb3c53ARM64, ""},
+		{"retired abb3c53 amd64 digest", retiredabb3c53AMD64, ""},
+		{"retired abb3c53 arm64 per-Migration override", qualifiedRunnerAMD64, retiredabb3c53ARM64},
+		{"retired abb3c53 amd64 per-Migration override", qualifiedRunnerARM64, retiredabb3c53AMD64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := passwordMigration()

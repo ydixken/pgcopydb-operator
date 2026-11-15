@@ -411,8 +411,8 @@ def validate_profile(observation):
         '/usr/lib/aarch64-linux-gnu/libpq.so.5.18': '470b5e466a8d2a93e6db4046a8c30a192ea8a1984c6da7021286f1ca01f341bf',
         '/usr/lib/aarch64-linux-gnu/libc.so.6': None,
         '/usr/bin/python3.13': None,
-        # read off the abb3c53 arm64 runner layers, matching its publication executable_sha256
-        '/usr/local/bin/rpgmigrate': '01ecd4c5b9d9863249c57fb8ffb3073597bac32af5ac641fcdf80227abf32cc5',
+        # read off the db50bc9 arm64 runner layers, matching its publication executable_sha256
+        '/usr/local/bin/rpgmigrate': '914444bf5cc02fd8ad5ed52e1620ddaa63624284902aa08b0c09ec94e286fef8',
     }
     files = closed(runtime.get('image_files'), expected, 'metadata image files')
     fields = set('sha256 device inode uid gid mode links size mount_id root_readonly shadow_mounts'.split())
