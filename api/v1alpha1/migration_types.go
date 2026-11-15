@@ -832,6 +832,10 @@ type RetryGateStatus struct {
 	Exemption string `json:"exemption,omitempty"`
 	// +optional
 	CloneDoneSeen bool `json:"cloneDoneSeen,omitempty"`
+	// lastReadAt is when the native retry gate last started a read of the target;
+	// the next read waits until a retry-gate interval has passed.
+	// +optional
+	LastReadAt *metav1.Time `json:"lastReadAt,omitempty"`
 }
 
 // The retry gate's verdicts, as retryGate.exemption spells them.

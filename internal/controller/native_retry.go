@@ -104,6 +104,20 @@ func (r *MigrationReconciler) reconcileNativeRetry(ctx context.Context, m, base 
 		r.failNativeRetryBudget(desired)
 		return r.patchNativeRetry(ctx, m, desired, base)
 	}
+	now := r.currentTime()
+	if last := rg.LastReadAt; last != nil && !last.After(now) {
+		// The stamp keeps whole seconds, so one more second keeps two reads a full interval apart.
+		if next := last.Add(retryGateInterval + time.Second); now.Before(next) {
+			return ctrl.Result{RequeueAfter: next.Sub(now)}, nil
+		}
+	}
+	// The stamp is durable before the helper Job exists, so neither a requeue nor a restart reads early.
+	stamped := live.DeepCopy()
+	stamped.Status.RetryGate.LastReadAt = &metav1.Time{Time: now}
+	if _, err = r.patchNativeRetry(ctx, m, stamped, base); err != nil {
+		return ctrl.Result{}, err
+	}
+	live, base = stamped, stamped.DeepCopy()
 	var readiness *native.RetryReadiness
 	err = r.runNativeRecoveryRead(ctx, live, worker, pvc, original, native.JobRoleRetryGate, func(ctx context.Context, w native.ExecutionData) error {
 		var readErr error

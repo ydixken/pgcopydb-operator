@@ -362,6 +362,59 @@ var _ = Describe("Native retry gate without a target observation", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, live)).To(Succeed())
 		return result, live
 	}
+	// elapseGateRead moves the stored gate read back by a full interval, so the next pass may read.
+	elapseGateRead := func(name string) {
+		GinkgoHelper()
+		live := &v1beta1.Migration{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNS}, live)).To(Succeed())
+		Expect(live.Status.RetryGate.LastReadAt).NotTo(BeNil())
+		live.Status.RetryGate.LastReadAt = &metav1.Time{Time: live.Status.RetryGate.LastReadAt.Add(-retryGateInterval - time.Second)}
+		Expect(k8sClient.Status().Update(ctx, live)).To(Succeed())
+	}
+
+	It("reads at most once per gate interval while owned Job events requeue it, across a restart", func() {
+		e := newNativeFailedWorkerEnv(ctx, "mig-native-retry-paced", false)
+		e.helperExits = true
+		r := e.reconciler()
+		clock := time.Now()
+		r.now = func() time.Time { return clock }
+		_, live := reconcileAt(r, e.m.Name)
+		failedAt := live.Status.RetryGate.FailedAt.Time
+		var lastRead time.Time
+		restarted := false
+		for clock = failedAt.Add(700 * time.Millisecond); live.Status.Phase != v1beta1.PhaseFailed; clock = clock.Add(5 * time.Second) {
+			Expect(clock.Before(failedAt.Add(verdictDeadline+time.Minute))).To(BeTrue(), "the unobserved gate never failed")
+			before := e.retryHelpers
+			var result reconcile.Result
+			result, live = reconcileAt(r, e.m.Name)
+			if e.retryHelpers == before {
+				if live.Status.Phase != v1beta1.PhaseFailed {
+					Expect(result.RequeueAfter).To(And(BeNumerically(">", 0), BeNumerically("<=", retryGateInterval+time.Second)))
+				}
+				continue
+			}
+			if !lastRead.IsZero() {
+				Expect(clock.Sub(lastRead)).To(BeNumerically(">=", retryGateInterval), "two gate reads too close")
+			}
+			Expect(live.Status.RetryGate.LastReadAt.Time).To(Equal(clock.Truncate(time.Second)))
+			lastRead = clock
+			if !restarted && clock.After(failedAt.Add(5*time.Minute)) {
+				restarted = true
+				r = e.reconciler()
+				r.now = func() time.Time { return clock }
+				clock = clock.Add(10 * time.Second)
+				result, _ = reconcileAt(r, e.m.Name)
+				Expect(e.retryHelpers).To(Equal(before+1), "a restarted controller read inside the interval")
+				Expect(result.RequeueAfter).To(BeNumerically("~", 21*time.Second, time.Second))
+			}
+		}
+		Expect(restarted).To(BeTrue())
+		Expect(e.retryHelpers).To(And(BeNumerically(">=", 25), BeNumerically("<=", int(verdictDeadline/retryGateInterval)+1)))
+		failed := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionFailed)
+		Expect(failed).NotTo(BeNil())
+		Expect(failed.Reason).To(Equal(reasonNativeRetryGateUnobserved))
+		Expect(e.workers).To(BeZero())
+	})
 
 	It("fails terminal after the verdict deadline with a bounded number of helper Jobs", func() {
 		e := newNativeFailedWorkerEnv(ctx, "mig-native-retry-unobserved", false)
@@ -412,8 +465,12 @@ var _ = Describe("Native retry gate without a target observation", func() {
 		e.mu.Lock()
 		e.helperExits = false
 		e.mu.Unlock()
+		result, _ := reconcileAt(r, e.m.Name)
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+		Expect(e.retryHelpers).To(Equal(1), "the gate read again inside the interval")
 		var live *v1beta1.Migration
 		for range 2 {
+			elapseGateRead(e.m.Name)
 			_, live = reconcileAt(r, e.m.Name)
 		}
 		Expect(live.Status.Attempts).To(Equal(int32(2)), "%+v relays=%d workers=%d", live.Status, e.relays, e.workers)

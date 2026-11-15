@@ -2369,6 +2369,12 @@ spec:
                       failure is the attempt's failure text, capped at maxDetailLen; the budget
                       verdict can come much later, after the events expired.
                     type: string
+                  lastReadAt:
+                    description: |-
+                      lastReadAt is when the native retry gate last started a read of the target;
+                      the next read waits until a retry-gate interval has passed.
+                    format: date-time
+                    type: string
                 required:
                 - failedAt
                 - failedAttempt
@@ -4920,6 +4926,12 @@ spec:
                     description: |-
                       failure is the attempt's failure text, capped at maxDetailLen; the budget
                       verdict can come much later, after the events expired.
+                    type: string
+                  lastReadAt:
+                    description: |-
+                      lastReadAt is when the native retry gate last started a read of the target;
+                      the next read waits until a retry-gate interval has passed.
+                    format: date-time
                     type: string
                 required:
                 - failedAt
