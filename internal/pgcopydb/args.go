@@ -141,7 +141,7 @@ func CloneArgs(spec *v1beta1.MigrationSpec, restart, resume, notConsistent bool)
 		}
 	}
 
-	args = append(args, FiltersArgs(c.Filters)...)
+	args = append(args, FiltersArgs(CloneFilters(spec))...)
 	if c.AllDatabases {
 		args = append(args, "--all-databases")
 	}
@@ -238,6 +238,8 @@ func FollowArgs(spec *v1beta1.MigrationSpec, namespace, name string) []string {
 	}
 	if f.Publication != "" {
 		args = append(args, "--publication", f.Publication)
+	} else if names := ManagedPublications(spec, namespace, name); len(names) > 0 {
+		args = append(args, "--publication", strings.Join(names, ","))
 	}
 	// CEL admission restricts this to plugin wal2json, so no plugin check here.
 	if f.Wal2jsonNumericAsString {

@@ -201,6 +201,9 @@ The audit covers all user tables.
 Give each table a primary key, `REPLICA IDENTITY USING INDEX`, or `REPLICA IDENTITY FULL`.
 If a table is read-only or insert-only, acknowledge it in `spec.follow.allowMissingReplicaIdentity` in a new Migration.
 The value `["*"]` acknowledges all of them.
+Acknowledgement does not suppress UPDATE or DELETE.
+For deliberate INSERT-only replication, use [`spec.follow.insertOnlyTables`](configuration.md#partial-table-policies).
+The target then retains rows and values that later DELETE and UPDATE operations change on the source.
 
 ### Row-level security hides rows
 
@@ -223,6 +226,10 @@ Run `ALTER TABLE ... SET LOGGED` on the source, or exclude the tables with `excl
 The list can name tables outside `includeOnlySchemas`.
 Without `includeOnlyTables`, pgcopydb still publishes those tables, so exclude them with `excludeTables`.
 Then create a new Migration.
+
+For an empty table or an initial copy without follow, use [`spec.follow.unloggedTables`](configuration.md#partial-table-policies).
+Each table needs an explicit `SchemaOnly` or `CopyOnce` mode.
+The operator reports these partial policies separately from full content verification.
 
 ### A connection goes through PgBouncer
 

@@ -154,6 +154,63 @@ Table names follow PostgreSQL quoting, and `~/regex/` patterns work.
 `clone.filters` exposes all eight pgcopydb filter sections.
 The [CRD reference](reference/api.md) lists the sections.
 
+## Partial table policies
+
+These policies require `engine: pgcopydb`, `follow.enabled: true`, and the `pgoutput` plugin.
+The source MUST run PostgreSQL 15 or later.
+The operator manages the slot and publications.
+You MUST NOT combine these policies with a custom slot or publication.
+
+```yaml
+spec:
+  follow:
+    enabled: true
+    unloggedTables:
+      - table: app.transient_locks
+        mode: SchemaOnly
+      - table: app.cached_results
+        mode: CopyOnce
+    insertOnlyTables:
+      - app.event_history
+```
+
+`SchemaOnly` restores the table without its rows.
+`CopyOnce` copies the initial rows.
+Neither mode replicates later changes.
+The source tables stay UNLOGGED.
+The selected UNLOGGED tables MUST be ordinary tables, not partitions or extension members.
+
+`insertOnlyTables` requires ordinary LOGGED tables, not partitions or extension members.
+The operator copies their initial rows and publishes later INSERTs through a separate publication.
+It does not publish their UPDATE, DELETE, or TRUNCATE operations.
+The target can retain stale rows and rows that the source deleted.
+Preflight rejects another publication that publishes UPDATE or DELETE for these tables.
+`allowMissingReplicaIdentity` remains an acknowledgement only.
+It does not suppress any source operation or replication action.
+
+Names MUST be exact, lowercase `schema.table` identifiers.
+Table and schema filters MUST also use exact names.
+Each list accepts at most 64 tables.
+The lists MUST NOT overlap.
+At least one ordinary LOGGED table MUST remain fully replicated.
+The policies and `clone.filters` are immutable.
+Create a new Migration to change them.
+
+The operator checks every selected table before the copy.
+It rejects UNLOGGED tables without an explicit policy.
+It checks publication ownership against the Migration UID before reuse or removal.
+Resume preserves established publication membership.
+
+Content verification excludes all partial tables.
+Schema verification still includes their structure.
+`UnsynchronizedTables=True` names each partial policy.
+`Verified=True` applies only to the configured verification scope, not full database equality.
+
+INSERT-only migrations require exact replication-origin progress at a nonzero cutover end position.
+Partial content comparisons cannot prove that the target applied every INSERT.
+If the origin position differs, the drain check fails and retains the slot.
+The operator does not infer a successful drain from partial checksums.
+
 ## Work volume
 
 `spec.workVolume` sizes the PersistentVolumeClaim that holds pgcopydb's dumps and catalogs.
