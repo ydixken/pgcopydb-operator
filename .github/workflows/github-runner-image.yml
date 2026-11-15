@@ -23,9 +23,11 @@ on:
       - "images/github-runner/Dockerfile"
       - "images/github-runner/Dockerfile.dockerignore"
       - "images/github-runner/verify.sh"
-      # The Go and promtool versions are read out of these at build time.
+      # The Go, promtool and golangci-lint versions are read out of these at
+      # build time. A golangci-lint bump moves .custom-gcl.yml with the Makefile.
       - "go.mod"
       - "hack/ensure-promtool.sh"
+      - ".custom-gcl.yml"
 
 # A half-pushed image is worse than a queued second run, matching
 # pgcopydb-builder.yml. It also keeps two buildah runs off one node's storage.
