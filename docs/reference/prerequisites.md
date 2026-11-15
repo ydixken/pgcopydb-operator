@@ -23,7 +23,7 @@ See [All databases](#all-databases).
 | Free replication slot and WAL sender                    | source | follow           |
 | `REPLICATION` role attribute                            | source | follow           |
 | CREATE on the database plus table ownership (publication) | source | follow         |
-| EXECUTE on `pg_replication_origin_*` functions          | target | follow           |
+| EXECUTE on `pg_replication_origin_*` functions (engine `pgcopydb` only) | target | follow |
 | Primary key or replica identity on replicated tables    | source | follow           |
 | No row-level security that filters the migration role  | source | single-database migrations |
 | No unlogged tables in scope                             | source | follow           |
@@ -665,7 +665,8 @@ Target role:
   Apply silently replays nothing and reports success.
   Only a row count comparison exposes the loss.
   Grant it before every live migration.
-- MUST have EXECUTE on the `pg_replication_origin_*` catalog functions (superuser has it implicitly).
+- With engine `pgcopydb`, MUST have EXECUTE on the `pg_replication_origin_*` catalog functions (superuser has it implicitly).
+  pgcopydb tracks apply progress with a replication origin.
   The e2e fixtures use this non-superuser grant:
 
 ```sql
@@ -684,6 +685,27 @@ END $$;
 
   The first runner attempt exposes a missing grant.
   That attempt dies in pgcopydb's setup cleanup with "permission denied for function pg_replication_origin_drop", before any data moves.
+- With engine `rpgmigrate`, MUST NOT have this grant as a non-superuser.
+  The native engine creates no replication origin, so the preflight neither checks nor applies the grant.
+
+> [!warning]
+> The native schema comparison compares the catalog ACLs of source and target.
+> An origin grant left over from a `pgcopydb` setup exists on the target only, so it shows up as a schema difference.
+> Revoke it on the target database before a native migration:
+
+```sql
+DO $$
+DECLARE f oid;
+BEGIN
+  FOR f IN
+    SELECT p.oid FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'pg_catalog' AND p.proname LIKE 'pg_replication_origin%'
+  LOOP
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app', f::regprocedure);
+  END LOOP;
+END $$;
+```
 
 Schema and workload contract:
 
@@ -764,7 +786,7 @@ The preflight then applies the rights that the regular role is missing, with exa
 - `GRANT <owner> TO <role>` on the target, when the migration role cannot `SET ROLE` to `clone.ownerAfterRestore` (single-database migrations).
   The membership carries `SET` on every supported version, and the handover needs that part.
 - `ALTER ROLE <role> REPLICATION` on the source (follow only).
-- `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow only).
+- `GRANT EXECUTE ON FUNCTION pg_replication_origin_* ...` on the target, one grant per missing function (follow with engine `pgcopydb` only).
 - `GRANT SET ON PARAMETER session_replication_role TO <role>` on the target (PostgreSQL 15+, follow only).
   On older targets, the grant fails loudly.
 

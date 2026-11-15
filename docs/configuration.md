@@ -12,6 +12,9 @@ Otherwise it sets `Validated=False` and `Failed=True` with reason `UnsupportedEn
 It also rejects unknown engine values if admission does not reject them first.
 The rejection does not delete, adopt, or clean up existing Jobs, PVCs, or replication resources.
 
+The engines need different target grants for live migration: `rpgmigrate` uses no replication origin and MUST NOT hold the `pgcopydb` origin grant.
+See [Live migration prerequisites](reference/prerequisites.md#live-migration-specfollowenabled-true).
+
 The controller checks the runner image once, at admission, and records the admitted image in `status.nativeRunnerImage`.
 Every later native Job runs the recorded image, including cleanup on deletion.
 A later change to `--rpgmigrate-runner-image` or `spec.runner.image` therefore does not affect an admitted Migration.

@@ -2825,14 +2825,10 @@ func fixtureBytes(pairs int) int64 {
 
 // ensureFollowPrivileges grants the app role the non-superuser follow
 // prerequisites: the REPLICATION attribute on the source (slot creation and
-// WAL sender), EXECUTE on the pg_replication_origin_* functions on the target
-// (origin tracking during apply and cleanup), and SET on
-// session_replication_role on the target (the apply session's preamble;
-// without it pgcopydb 0.18 silently applies nothing while reporting success).
+// WAL sender) and the target grants of targetFollowGrantSQL.
 // Runs on every suite start because kept fixtures skip initdb SQL; every
 // statement is idempotent. docs/reference/prerequisites.md documents the same
-// set for users. GRANT SET ON PARAMETER exists from PG15; init rejects older
-// targets (PG14 is a source only), so the statement always parses here.
+// set for users.
 func ensureFollowPrivileges() {
 	GinkgoHelper()
 	psql(sourceCluster, "ALTER ROLE "+sqlIdent(appRole(sourceCluster))+" REPLICATION")
@@ -2845,19 +2841,33 @@ func grantTargetFollowPrivileges(db string) {
 	grantTargetFollowPrivilegesOn(targetCluster, db)
 }
 
-// grantTargetFollowPrivilegesOn grants the target-side follow prerequisites to
-// the migration role in one database of cluster. EXECUTE on catalog functions is
-// per-database, so a second target database (the chaos fan-out scenario) needs
-// its own pass; the parameter grant is cluster-wide but idempotent and simply
-// rides along.
+// grantTargetFollowPrivilegesOn applies the target follow grants of the selected
+// engine in one database of cluster. EXECUTE on catalog functions is per-database,
+// so a second target database (the chaos fan-out scenario) needs its own pass.
 func grantTargetFollowPrivilegesOn(cluster, db string) {
 	GinkgoHelper()
-	psqlDB(cluster, db, "DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p"+
-		" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'"+
-		" AND p.proname LIKE 'pg_replication_origin%' LOOP"+
-		" EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, "+
-		sqlLiteral(appRole(cluster))+"); END LOOP; END $$")
-	psqlDB(cluster, db, "GRANT SET ON PARAMETER session_replication_role TO "+sqlIdent(appRole(cluster)))
+	for _, sql := range targetFollowGrantSQL(selectedEngine(), appRole(cluster)) {
+		psqlDB(cluster, db, sql)
+	}
+}
+
+// targetFollowGrantSQL is the target follow grant set of docs/reference/prerequisites.md.
+// Only pgcopydb uses replication origins; native revokes the origin grant a kept legacy
+// fixture carries, because the native schema compare reports it as a difference.
+func targetFollowGrantSQL(engine v1beta1.MigrationEngine, role string) []string {
+	verb, prep := "GRANT", "TO"
+	if engine == v1beta1.MigrationEngineRPGMigrate {
+		verb, prep = "REVOKE", "FROM"
+	}
+	return []string{
+		"DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p" +
+			" JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog'" +
+			" AND p.proname LIKE 'pg_replication_origin%' LOOP" +
+			" EXECUTE format('" + verb + " EXECUTE ON FUNCTION %s " + prep + " %I', f::regprocedure, " +
+			sqlLiteral(role) + "); END LOOP; END $$",
+		// GRANT SET ON PARAMETER exists from PG15; init rejects older targets (PG14 is a source only).
+		"GRANT SET ON PARAMETER session_replication_role TO " + sqlIdent(role),
+	}
 }
 
 // resetSourceReplication drops what a crashed follow run left on the source: rows the

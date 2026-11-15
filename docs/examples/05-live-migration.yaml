@@ -17,8 +17,8 @@ spec:
   target:
     host: billing-pg-rw.billing.svc
     database: billing
-    # Needs EXECUTE on pg_replication_origin_* and (PG15+) GRANT SET ON
-    # PARAMETER session_replication_role; see prerequisites.
+    # Needs (PG15+) GRANT SET ON PARAMETER session_replication_role and, with
+    # engine pgcopydb, EXECUTE on pg_replication_origin_*; see prerequisites.
     username: app
     passwordSecretRef: {name: billing-pg-app, key: password}
   # Without clone.dropIfExists, a worker that dies after the slot exists and before the

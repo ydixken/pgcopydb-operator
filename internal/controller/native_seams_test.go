@@ -38,6 +38,8 @@ const (
 	seamsLockEnv     = "NATIVE_SEAMS_IMAGE_LOCK"
 	seamsEvidenceEnv = "NATIVE_SEAMS_EVIDENCE"
 	seamsOwnerEnv    = "NATIVE_SEAMS_OWNER"
+	seamsSourceEnv   = "NATIVE_SEAMS_SOURCE_IMAGE"
+	seamsTargetEnv   = "NATIVE_SEAMS_TARGET_IMAGE"
 	seamsScale       = "0.01"
 	seamsAppRole     = "app"
 	seamsAppDatabase = "app"
@@ -94,6 +96,27 @@ func seamsLockImages(t *testing.T, path, pair string) seamsImages {
 	return images
 }
 
+// seamsOverrideImages replaces the locked PostgreSQL images with digest-pinned ones, such as a newer minor.
+func seamsOverrideImages(images seamsImages, source, target string) (seamsImages, error) {
+	for _, o := range []struct {
+		env, ref string
+		into     *string
+	}{{seamsSourceEnv, source, &images.source}, {seamsTargetEnv, target, &images.target}} {
+		if o.ref == "" {
+			continue
+		}
+		if !nativeEvidenceDirectImage(o.ref) {
+			return images, fmt.Errorf("%s must be a repository@sha256 reference, got %q", o.env, o.ref)
+		}
+		*o.into = o.ref
+	}
+	return images, nil
+}
+
+// seamsTargetGrantSQL is the native target follow grant: only SET on
+// session_replication_role, since native uses no replication origin (prerequisites.md).
+const seamsTargetGrantSQL = `GRANT SET ON PARAMETER session_replication_role TO app;`
+
 type seamsVerdict struct {
 	Step     string            `json:"step"`
 	Program  string            `json:"program"`
@@ -118,6 +141,29 @@ type seamsHarness struct {
 	verdicts []seamsVerdict
 }
 
+// TestSeamsTargetGrant pins the harness to the native grant set of prerequisites.md.
+func TestSeamsTargetGrant(t *testing.T) {
+	if seamsTargetGrantSQL != "GRANT SET ON PARAMETER session_replication_role TO app;" {
+		t.Fatalf("the native harness grants %q, want only SET on session_replication_role", seamsTargetGrantSQL)
+	}
+}
+
+func TestSeamsOverrideImages(t *testing.T) {
+	locked := seamsImages{runner: "r", source: "lock-src", target: "lock-tgt"}
+	pinned := "ghcr.io/cloudnative-pg/postgresql@sha256:" + strings.Repeat("ab", 32)
+	if got, err := seamsOverrideImages(locked, "", ""); err != nil || got != locked {
+		t.Fatalf("no override must keep the lock, got %+v %v", got, err)
+	}
+	if got, err := seamsOverrideImages(locked, "", pinned); err != nil || got != (seamsImages{runner: "r", source: "lock-src", target: pinned}) {
+		t.Fatalf("a target override must replace only the target, got %+v %v", got, err)
+	}
+	for _, bad := range []string{"ghcr.io/cloudnative-pg/postgresql:18.1", "ghcr.io/cloudnative-pg/postgresql:18@sha256:" + strings.Repeat("ab", 32), pinned[:len(pinned)-1]} {
+		if _, err := seamsOverrideImages(locked, bad, ""); err == nil || !strings.Contains(err.Error(), seamsSourceEnv) {
+			t.Fatalf("%q must be refused as unpinned, got %v", bad, err)
+		}
+	}
+}
+
 func TestNativeSeams(t *testing.T) {
 	pair := os.Getenv(seamsPairEnv)
 	if pair == "" {
@@ -130,7 +176,10 @@ func TestNativeSeams(t *testing.T) {
 	if _, err := exec.LookPath("podman"); err != nil {
 		t.Fatal("podman is required")
 	}
-	images := seamsLockImages(t, lock, pair)
+	images, err := seamsOverrideImages(seamsLockImages(t, lock, pair), os.Getenv(seamsSourceEnv), os.Getenv(seamsTargetEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
 	owner := os.Getenv(seamsOwnerEnv)
 	if owner == "" {
 		owner = "native-seams"
@@ -157,6 +206,13 @@ func (h *seamsHarness) prepare() {
 	h.cluster.redact = append(h.cluster.redact, h.password)
 	h.source = h.startDatabase(ctx, seamsSourceSide, h.images.source)
 	h.target = h.startDatabase(ctx, seamsTargetSide, h.images.target)
+	// An override image of the wrong major would run a different pair than PAIR names.
+	majors := strings.Split(h.pair, ":")
+	for i, container := range []string{h.source, h.target} {
+		if got := h.mustSQL(ctx, container, "postgres", "SELECT current_setting('server_version_num')::int / 10000"); got != majors[i] {
+			t.Fatalf("%s runs PostgreSQL %s, the pair %s needs %s", container, got, h.pair, majors[i])
+		}
+	}
 	h.prepareSource(ctx)
 	for _, db := range []string{seamsAppDatabase, seamsRetryDB} {
 		h.prepareTarget(ctx, db)
@@ -273,16 +329,13 @@ func (h *seamsHarness) prepareSource(ctx context.Context) {
 	}
 }
 
-// prepareTarget creates an empty app-owned database with the suite's target follow grants.
+// prepareTarget creates an empty app-owned database with the native target follow grant.
 func (h *seamsHarness) prepareTarget(ctx context.Context, db string) {
 	if db == seamsAppDatabase {
 		h.createRole(ctx, h.target, false)
 	}
 	h.mustSQL(ctx, h.target, "postgres", "CREATE DATABASE "+db+" OWNER "+seamsAppRole+";")
-	h.mustSQL(ctx, h.target, db, `DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'pg_catalog' AND p.proname LIKE 'pg_replication_origin%' LOOP
-EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, 'app'); END LOOP; END $$;
-GRANT SET ON PARAMETER session_replication_role TO app;`)
+	h.mustSQL(ctx, h.target, db, seamsTargetGrantSQL)
 }
 
 // newMigration mirrors the suite's native follow Migration: pgoutput, manual cutover, native clone options.
