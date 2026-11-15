@@ -47,6 +47,16 @@ Read the `Verified` condition and the compare Job logs before you act.
 For follow migrations, the schema and data compares run last, after the operator verifies the drain and drops the slot.
 A rehearsal is the one compare that runs earlier, and for that reason it reports no verdict.
 
+### Empty databases
+
+A successful data compare can return an empty JSON array when the database has no tables.
+The operator then reads the current catalogs on both databases, not the cached selection.
+Both databases MUST have no user tables, sequences, materialized views, foreign tables, or large objects.
+Only then does the empty report pass the drain verify and the final data compare.
+A failed catalog query or a nonempty database keeps the empty report invalid.
+This exception does not apply to empty filtered selections in nonempty databases.
+Keep source and target writes stopped while the compare runs.
+
 ## Rehearsal
 
 On a live migration, the drain verify runs `pgcopydb compare data` inside the write-downtime window ([runbook](live-migration.md#manual-cutover-runbook)).
