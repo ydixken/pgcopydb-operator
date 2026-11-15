@@ -219,6 +219,7 @@ The native drain at cutover is that proof.
 Each sample replaces all three fields.
 The operator does not compare a sample with the one before it.
 When a sample is unavailable, the three fields are absent, never zero, and `CaughtUp` is Unknown with reason `NativeLagUnknown`.
+The pass that saves endpos for a cutover first records the `CaughtUp` True that admitted it.
 
 ## Manual cutover runbook
 

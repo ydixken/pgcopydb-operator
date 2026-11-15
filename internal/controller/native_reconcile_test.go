@@ -253,7 +253,7 @@ func TestNativeReconcileFirstEnd(t *testing.T) {
 					t.Error("native sampler remained active during E selection")
 				}
 			}
-			if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.heads != 1 || f.sets != 0 || f.patches != 1 || nativeControlEnd(f.current()) != nativeControlTestEnd || s.running(key) {
+			if _, err := nativeDispatch(t, f.r, f.m); err != nil || f.heads != 1 || f.sets != 0 || f.patches != 2 || nativeControlEnd(f.current()) != nativeControlTestEnd || s.running(key) {
 				t.Fatalf("first E crossed a persistence/effect boundary: %v heads=%d sets=%d patches=%d", err, f.heads, f.sets, f.patches)
 			}
 			if nativeControlEnd(f.m) != "" || meta.IsStatusConditionTrue(f.current().Status.Conditions, v1beta1.ConditionCutoverComplete) {
