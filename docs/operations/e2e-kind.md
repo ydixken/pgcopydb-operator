@@ -3,6 +3,7 @@
 Use this harness for one owned Podman-backed kind cluster.
 The legacy bootstrap selects PostgreSQL 17 to 17 with one Ginkgo process.
 A native run selects one named spec on the pair 16:16, 18:18 or 16:18 with the native runner, and every other engine and pair is refused.
+Run the cluster-free [native seam harness](native-seams.md) with the same lock on each pair first.
 
 ## Source and image inputs
 

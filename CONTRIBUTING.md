@@ -132,6 +132,7 @@ Nothing goes through GitHub's cache service: a round trip to it cost more than i
 ## Owned kind development checks
 
 See the [owned kind qualification guide](docs/operations/e2e-kind.md) for the private image lock, source binding, guarded lifecycle, and exact cleanup rules.
+Before a native kind run, run `task test:native-seams` on each pair; see the [native seam harness](docs/operations/native-seams.md).
 The development manager workflow calls `task image:dev:publish ARCHITECTURE=<architecture> OUTPUT_DIR=<private-directory>` from its admitted Actions context.
 This target does not dispatch a workflow or push a branch.
 It refuses local publication outside that context.
