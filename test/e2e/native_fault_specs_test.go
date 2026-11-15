@@ -86,6 +86,11 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 			m.Spec.Follow.MaxCatchupLag = ptr.To(resource.MustParse("1Gi"))
 		})
 		c.waitStreaming()
+		Eventually(func(g Gomega) {
+			out, err := psqlDBErr(targetCluster, appDatabase(targetCluster), nativeFaultApplySessionSQL)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).NotTo(Equal("0"), "no session named rpgmigrate[<pid>] apply on the target while streaming")
+		}, time.Minute, time.Second).Should(Succeed())
 		last := c.stopWriter()
 		c.waitApplied(last - 1)
 
@@ -179,7 +184,7 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 			g.Expect(out).To(Equal("1"), "the owned slot is gone or still streaming")
 			out, err = psqlDBErr(c.target, appDatabase(c.target), nativeFaultSessionSQL)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(out).To(Equal("0"), "native sessions remain on the target while suspended")
+			g.Expect(c.sessions.absent(c.target, out)).To(Succeed(), "while suspended")
 		}, 2*time.Minute, 2*time.Second).Should(Succeed())
 		if term != nil {
 			term.complete(nativeTermMigration, nativeTermJob, nativeTermPod, nativeTermPVC)

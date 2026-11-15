@@ -48,9 +48,13 @@ const (
 	nativeFaultKillContainer   = "kill"
 	nativeFaultSIGKILL         = 137
 	nativeFaultSessionSQL      = "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'rpgmigrate[%'"
-	nativeFaultBlockedApplySQL = "SELECT count(*) FROM pg_stat_activity a" +
-		" WHERE a.application_name LIKE 'rpgmigrate[%] apply' AND pg_blocking_pids(a.pid) && ARRAY(" +
+	nativeFaultApplySessionSQL = "SELECT count(*) FROM pg_stat_activity a" +
+		" WHERE a.application_name LIKE 'rpgmigrate[%] apply'"
+	// nativeFaultBlockedApplySQL narrows nativeFaultApplySessionSQL, which the drain spec first sees match.
+	nativeFaultBlockedApplySQL = nativeFaultApplySessionSQL + " AND pg_blocking_pids(a.pid) && ARRAY(" +
 		"SELECT pid FROM pg_stat_activity WHERE application_name = '" + nativeFaultLockApp + "')"
+	nativeFaultReleaseSQL = "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = '" +
+		nativeFaultLockApp + "'"
 	// nativeFaultKillScript runs in the node's PID namespace, where the container's init
 	// takes SIGKILL; from inside the container it would be ignored.
 	nativeFaultKillScript = `until [ -e /tmp/fire ]; do sleep 0.2; done
@@ -113,13 +117,38 @@ type nativeFaultCase struct {
 	writer                    *liveWriter
 	foreign                   *nativeFaultForeign
 	bulk                      *nativeFaultBulk
+	sessions                  nativeSessionControl
+}
+
+// nativeSessionControl records each cluster on which nativeFaultSessionSQL matched the live
+// engine, so a later zero from it can mean the sessions ended rather than went unnamed.
+type nativeSessionControl map[string]bool
+
+func (s nativeSessionControl) observe(cluster, count string) error {
+	if n, err := strconv.Atoi(count); err != nil || n < 1 {
+		return fmt.Errorf("no session named rpgmigrate[<pid>] <role> on %s while the engine runs: count %q",
+			cluster, count)
+	}
+	s[cluster] = true
+	return nil
+}
+
+func (s nativeSessionControl) absent(cluster, count string) error {
+	if !s[cluster] {
+		return fmt.Errorf("no native session was seen on %s before, so a count of %q proves nothing", cluster, count)
+	}
+	if count != "0" {
+		return fmt.Errorf("native sessions remain on %s: count %q", cluster, count)
+	}
+	return nil
 }
 
 // startNativeFault creates the Migration with a writer running from before the base copy.
 // Cleanup stops the writer, deletes the Migration, then drops the bookkeeping cleanup retains.
 func startNativeFault(name, target string, configure func(*v1beta1.Migration)) *nativeFaultCase {
 	GinkgoHelper()
-	c := &nativeFaultCase{name: name, marker: nativeFaultMarkerPrefix + name, target: target}
+	c := &nativeFaultCase{name: name, marker: nativeFaultMarkerPrefix + name, target: target,
+		sessions: nativeSessionControl{}}
 	DeferCleanup(func() { psql(sourceCluster, "DELETE FROM orders WHERE note LIKE "+sqlLiteral(c.marker+"%")) })
 	c.foreign = plantNativeFaultForeign(name, target)
 	m := nativeFaultMigration(name, target)
@@ -164,6 +193,20 @@ func (c *nativeFaultCase) waitStreaming() {
 	Expect(c.ownedSlots()).To(Equal(1), "%s owns no single slot on the source", c.name)
 	Expect(c.ownedPublications()).To(Equal(1), "%s owns no single publication on the source", c.name)
 	c.waitApplied(0)
+	c.expectLiveSessions()
+}
+
+// expectLiveSessions is the positive control for expectNoSessions: the same query sees the
+// running engine's sessions on both sides.
+func (c *nativeFaultCase) expectLiveSessions() {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		for _, cluster := range []string{sourceCluster, c.target} {
+			out, err := psqlDBErr(cluster, appDatabase(cluster), nativeFaultSessionSQL)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(c.sessions.observe(cluster, out)).To(Succeed())
+		}
+	}, time.Minute, 2*time.Second).Should(Succeed())
 }
 
 // waitApplied waits until the target holds a writer row above after.
@@ -203,6 +246,9 @@ func (c *nativeFaultCase) finish(minAttempts int32) {
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(strconv.Atoi(out)).To(BeNumerically(">", before), "no row committed after the fault reached the target")
 	}, migrationTimeout, 2*time.Second).Should(Succeed())
+	if m.Status.Phase != v1beta1.PhaseFailed {
+		c.expectLiveSessions()
+	}
 	last := c.stopWriter()
 	if m.Status.Phase != v1beta1.PhaseFailed {
 		Eventually(func(g Gomega) {
@@ -258,7 +304,7 @@ func (c *nativeFaultCase) expectNoSessions() {
 		for _, cluster := range []string{sourceCluster, c.target} {
 			out, err := psqlDBErr(cluster, appDatabase(cluster), nativeFaultSessionSQL)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(out).To(Equal("0"), "native sessions remain on %s", cluster)
+			g.Expect(c.sessions.absent(cluster, out)).To(Succeed())
 		}
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 }
@@ -446,8 +492,7 @@ func holdNativeFaultLock(cluster, table string) func() {
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			psql(cluster, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = "+
-				sqlLiteral(nativeFaultLockApp))
+			psql(cluster, nativeFaultReleaseSQL)
 			cancel()
 			_ = cmd.Wait() // the terminated session exits nonzero
 		})

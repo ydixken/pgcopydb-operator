@@ -48,6 +48,7 @@ That variable enables `TestCompareDataQuery` and the progress sampler SQL cancel
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 `TestNativeEvidenceSQLLive` also requires the variable and `psql`.
 It executes the native receipt catalog and owned inventory statements against engine-shaped state in a temporary database, then drops that database and its slots.
+It also runs the retry gate's target session census beside sessions named `rpgmigrate[<pid>] <role>` for each contract role, so the census is seen to count a live engine session before its zero counts.
 Its logical slot case needs `wal_level=logical` and skips visibly on a server without it.
 The CI service containers run with `wal_level=logical`, and CI sets `PGCOPYDB_TEST_REQUIRE_LOGICAL=1` so that case fails there instead of skipping.
 Its receipt catalog case also checks that a column option other than the server-owned `pg_attver` is refused, so run it on a PostgreSQL minor that stamps `pg_attver` (16.16 and 18.7 or later) as well as on an earlier one.

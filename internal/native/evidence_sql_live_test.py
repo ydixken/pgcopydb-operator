@@ -3,6 +3,7 @@ from pathlib import Path
 import secrets
 import subprocess
 import sys
+import time
 import unittest
 
 # Executes the shipped inventory and receipt catalog statements on the server PGCOPYDB_TEST_PGURI names.
@@ -25,9 +26,10 @@ REVOKE ALL ON TABLE {SCHEMA}.large_object_done FROM PUBLIC;
 NULL = '\x01'
 
 
-def psql(uri, script):
+def psql(uri, script, application='evidence-sql-live'):
     out = subprocess.run(['psql', uri, '-XAtq', '-v', 'ON_ERROR_STOP=1', '-F', '\x1f', '-P', 'null=' + NULL, '-f', '-'],
-                         input=script.encode(), capture_output=True, timeout=30, check=False)
+                         input=script.encode(), capture_output=True, timeout=30, check=False,
+                         env=dict(os.environ, PGAPPNAME=application))
     if out.returncode:
         raise AssertionError(out.stderr.decode(errors='replace'))
     return out.stdout.decode()
@@ -40,14 +42,15 @@ def literal(value):
 class LiveSession:
     """Sends each statement as Session.query does, through PREPARE and EXECUTE with untyped parameters."""
 
-    def __init__(self, uri):
+    def __init__(self, uri, application='evidence-sql-live'):
         self.uri = uri
+        self.application = application
         self.results = []
 
     def query(self, sql, params=(), tag='SELECT 1', state=0, rows=1, width=1, commit=False):
         body = sql.replace('@', 'pg_catalog.').rstrip().rstrip(';')
         execute = 'EXECUTE q(%s);' % ','.join(map(literal, params)) if params else 'EXECUTE q;'
-        out = psql(self.uri, 'PREPARE q AS %s;\n%s\n' % (body, execute))
+        out = psql(self.uri, 'PREPARE q AS %s;\n%s\n' % (body, execute), self.application)
         result = [[None if cell == NULL else cell.encode() for cell in line.split('\x1f')] for line in out.splitlines()]
         self.results.append(result)
         return result
@@ -135,6 +138,45 @@ class EvidenceSQLLive(unittest.TestCase):
         self.assertRefusedAt(self.inventory(state), 3)
         psql(self.db.uri, "SELECT pg_catalog.pg_create_physical_replication_slot('%s');" % self.slot)
         self.assertRefusedAt(self.inventory(self.state()), 1)
+
+    def test_RetryCensusCountsEngineSessions(self):
+        census = lambda application='pgm-retry-gate': SCOPE['target_retry_census'](LiveSession(self.db.uri, application))
+        sessions = []
+
+        def hold(application):
+            sessions.append(subprocess.Popen(['psql', self.db.uri, '-XAtq', '-c', 'SELECT pg_catalog.pg_sleep(60);'],
+                                             env=dict(os.environ, PGAPPNAME=application), stdout=subprocess.DEVNULL))
+            for _ in range(100):
+                if self.db.scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name=%s;" % literal(application)) == '1':
+                    return
+                time.sleep(0.1)
+            self.fail('session %s never started' % application)
+
+        def end(application):
+            self.assertEqual(self.db.scalar("SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name=%s;" % literal(application)), '1')
+            for _ in range(100):
+                if self.db.scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name=%s;" % literal(application)) == '0':
+                    return
+                time.sleep(0.1)
+            self.fail('session %s never ended' % application)
+
+        def reap():
+            for process in sessions:
+                process.kill()
+                process.wait()
+        self.addCleanup(reap)
+        self.addCleanup(psql, URI, "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE datname=%s;" % literal(self.db.name))
+        result, application = census()
+        self.assertEqual((result['total'], result['application_attribution_known'], application), (0, True, b'pgm-retry-gate'))
+        hold('e2e-decoy')
+        self.assertEqual(census()[0]['total'], 0, 'a session not named like an engine counted under the gate name')
+        self.assertEqual(census('pinned-by-uri')[0]['total'], 1, 'a pinned gate name must count every session of the role')
+        for role in ('copy', 'apply', 'receive', 'compare'):
+            with self.subTest(role=role):
+                hold('rpgmigrate[4242] ' + role)
+                self.assertEqual(census()[0]['total'], 1, 'the census missed the engine %s session' % role)
+                end('rpgmigrate[4242] ' + role)
+                self.assertEqual(census()[0]['total'], 0)
 
     def test_ReceiptCatalogVerdicts(self):
         psql(self.db.uri, RECEIPTS)

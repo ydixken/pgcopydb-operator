@@ -143,10 +143,14 @@ It restores the native fixture afterwards, so other native specs on the same sou
 We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there and still about 15 at twice that rate.
 The spec kills the runner only when the target's `pg_stat_progress_copy` shows that table's COPY with a transaction ID and with bytes processed above zero and below the stream total the source computes.
 It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
+It also fails at once when a COPY into that table runs under any `application_name` other than `rpgmigrate[<pid>] copy`, so an engine that leaves its sessions unnamed cannot pass for a COPY the probe never saw.
 After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
 The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started and the copy window projected from them.
 The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
 The spec drops it from the source after the Migration's own cleanup.
+The fault specs find the engine's sessions by their `rpgmigrate[<pid>] <role>` names.
+Each one first requires that count above zero on the source and the target while the engine runs, and only then admits a later zero as the sessions having ended.
+`fault-drain` also requires a `rpgmigrate[<pid>] apply` session on the target before it waits for that apply to block on its held lock.
 A native follow spec proves its cleanup positively.
 The operator deletes the `rpgmigrate-cleanup-<operation>` Job before the Migration completes, so the suite watches the namespace's Jobs from the first native Migration on and requires one owned by the Migration to have succeeded.
 It also requires the status to record the finalized worker, no `rpgm_s_<run>_` slot, `rpgm_p_<run>_` publication or source `_rpgmigrate_<run>` schema, and the target `_rpgmigrate_<run>` schema that cleanup retains.
