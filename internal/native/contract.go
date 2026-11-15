@@ -127,7 +127,11 @@ type OwnedResource struct {
 	Removed *bool  `json:"removed"`
 }
 
-// Engine 2b9b11d runner publications, one single-platform manifest per architecture.
+// qualifiedRunnerSourceCommit is the engine commit the qualified runner manifests are built from.
+// The v7 receipt catalog fixtures must be rendered from this commit; hack/sync-native-catalogs.py does that.
+const qualifiedRunnerSourceCommit = "2b9b11da305b74172e89e6dcb877372c24f04ccd"
+
+// Runner publications built from qualifiedRunnerSourceCommit, one single-platform manifest per architecture.
 var qualifiedRunnerDigests = []string{
 	"sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978", // arm64
 	"sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f", // amd64

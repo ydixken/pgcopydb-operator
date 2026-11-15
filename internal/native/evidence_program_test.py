@@ -1165,8 +1165,8 @@ class NativePythonTests(unittest.TestCase):
 
         inventory=json.loads((base/'native_m8_source_manifest.json').read_bytes())
         self.assertEqual((inventory['native_format'],inventory['metadata_version']),(9,7))
-        self.assertEqual(inventory['source_commit'],'daeac05a3360defab2671f41e60493bc8168838d')
-        self.assertEqual(inventory['source_sha256'],'1f9e2336817939689ef739e37b46377ba10d41586b1bfdade617373df1a2d9d1')
+        self.assertEqual(inventory['source_commit'],'2b9b11da305b74172e89e6dcb877372c24f04ccd')
+        self.assertEqual(inventory['source_sha256'],'36c83538a48583d55622e58bb99de5128f3eafc4f0704bb7bcd807007fbc9434')
         for name,digest in inventory['files'].items(): self.assertEqual(hashlib.sha256((base/name).read_bytes()).hexdigest(),digest)
         for major in (16,18):
             for kind,marker in (('catalog',False),('marker_catalog',True),('large_object_catalog','large_object')):

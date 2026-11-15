@@ -145,8 +145,19 @@ class EvidenceSQLLive(unittest.TestCase):
                       marker_table_oid=oid("SELECT '%s.copy_done'::regclass::oid;" % SCHEMA), marker_index_oid=index('copy_done'),
                       large_object_table_oid=oid("SELECT '%s.large_object_done'::regclass::oid;" % SCHEMA), large_object_index_oid=index('large_object_done'))
         verdict = lambda kind, major, target: LiveSession(self.db.uri).query(SCOPE['catalog_sql'](kind, major, 7), SCOPE['catalog_params'](target, kind))
-        for kind in (True, 'large_object'):
+        # PGDG 16.16 and 18.7 stamp a server-owned pg_attver on every new column; earlier minors leave attoptions NULL.
+        stamps = int(self.db.scalar('SHOW server_version_num;')) >= {16: 160016, 18: 180007}[self.major]
+        for kind, table in ((True, 'copy_done'), ('large_object', 'large_object_done')):
             with self.subTest(kind=kind):
+                options = "SELECT count(*) FILTER (WHERE attoptions IS NULL), count(*) FILTER (WHERE attoptions::text ~ '^[{]pg_attver=[0-9]+[}]$') FROM pg_attribute WHERE attrelid='%s.%s'::regclass AND attnum>0;" % (SCHEMA, table)
+                width = int(self.db.scalar("SELECT relnatts FROM pg_class WHERE oid='%s.%s'::regclass;" % (SCHEMA, table)))
+                unchanged = '0\x1f%d' % width if stamps else '%d\x1f0' % width
+                self.assertEqual(self.db.scalar(options), unchanged)
+                self.assertEqual(verdict(kind, self.major, target), [[b't']])
+                psql(self.db.uri, 'ALTER TABLE %s.%s ALTER COLUMN magic SET (n_distinct = 1);' % (SCHEMA, table))
+                self.assertEqual(verdict(kind, self.major, target), [[b'f']])
+                psql(self.db.uri, 'ALTER TABLE %s.%s ALTER COLUMN magic RESET (n_distinct);' % (SCHEMA, table))
+                self.assertEqual(self.db.scalar(options), unchanged)
                 self.assertEqual(verdict(kind, self.major, target), [[b't']])
                 other = dict(target, intent=dict(binding=dict(target['intent']['binding'], owner_oid=target['intent']['binding']['owner_oid'] + 1)))
                 self.assertEqual(verdict(kind, self.major, other), [[b'f']])
