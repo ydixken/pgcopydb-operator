@@ -23,8 +23,11 @@ class CleanedState(InventoryState):
   except BaseException:
    if hasattr(self,'fds'): self.close(False)
    raise
-def cleaned_source_absence(state,library,materials,deadline,diag):
- session=Session(library,materials.connection('source'),deadline,diag)
+def cleaned_inputs(materials):
+ # One one-use ConnectionInput per Session: observe claims source and target, each absence pin its own.
+ materials.roles.update(source_before=materials.roles['source'],source_after=materials.roles['source']);return materials
+def cleaned_source_absence(state,library,materials,deadline,diag,role):
+ session=Session(library,materials.connection(role),deadline,diag)
  try:
   for setting,value in [('search_path','pg_catalog'),('statement_timeout','4s'),('lock_timeout','1s'),('idle_in_transaction_session_timeout','6s')]:
    session.query("SET %s TO '%s';"%(setting,value),tag='SET',rows=0,width=0)
@@ -36,9 +39,9 @@ def cleaned_source_absence(state,library,materials,deadline,diag):
  # Each connection authenticates its own PID; only the other identity fields span sessions.
  return pinned[:4]+pinned[5:]
 def observe_cleaned(state,library,materials,deadline,diag):
- pinned=cleaned_source_absence(state,library,materials,deadline,diag)
+ pinned=cleaned_source_absence(state,library,materials,deadline,diag,'source_before')
  checkpoint,guards=observe(state,library,materials,deadline,diag)
- need(cleaned_source_absence(state,library,materials,deadline,diag)==pinned,CONN)
+ need(cleaned_source_absence(state,library,materials,deadline,diag,'source_after')==pinned,CONN)
  state.revalidate();materials.check()
  return checkpoint,guards
 def cleaned_completion_main(argv):
@@ -48,7 +51,7 @@ def cleaned_completion_main(argv):
   resource.setrlimit(resource.RLIMIT_CORE,(0,0));validate_environment(os.environ);need(os.environ.get('PGCONNECT_TIMEOUT')=='10',CAP_ERR)
   channel=InputChannel(op,time.monotonic()+30);channel.route();raw=channel.consume();deadline=time.monotonic()+25
   req=validate_cleaned_request(raw,op,sha);work_environment(req);diag=Diagnostics();need(os.geteuid()==65532)
-  state=CleanedState(req);materials=Materialization(os.environ)
+  state=CleanedState(req);materials=cleaned_inputs(Materialization(os.environ))
   resolver=StableFile('/etc/resolv.conf',CAP);materials.files.append(resolver);resolver.raw.decode('ascii');need(b'\0' not in resolver.raw,CAP_ERR)
   library=load_runtime();materials.prepare(library,deadline);qualified_resolver_policy(resolver);need(time.monotonic()<deadline,'timeout')
   checkpoint,guards=observe_cleaned(state,library,materials,deadline,diag)

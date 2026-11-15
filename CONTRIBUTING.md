@@ -49,6 +49,10 @@ The sampler tests own temporary databases and relation locks, verify cancellatio
 `TestNativeEvidenceSQLLive` also requires the variable and `psql`.
 It executes the native receipt catalog and owned inventory statements against engine-shaped state in a temporary database, then drops that database and its slots.
 Its logical slot case needs `wal_level=logical` and skips visibly on a server without it, such as the CI service containers.
+`TestNativeCompletionSessionsLive` also requires the variable, `psql` and a libpq 16 or later, which it loads from `PQ_LIB_DIR` or from the system library path.
+It runs the cleaned and cleanup-rejoin completion observations with their real one-use connection inputs and real libpq sessions against a source and a target database, then checks that no further session can open.
+The variable must carry a password, and the test connects with `sslmode=disable`, because a passfile or TLS file would need the runner image's filesystem checks.
+Its logical slot cases need `wal_level=logical` in the same way.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret.
 Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job.
