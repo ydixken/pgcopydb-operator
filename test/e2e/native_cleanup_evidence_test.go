@@ -17,6 +17,7 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -32,9 +33,11 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -168,36 +171,133 @@ func nativeCleanupJobs(owner types.UID) (seen, succeeded []string) {
 	return seen, succeeded
 }
 
-// startNativeJobRecorder watches the suite namespace's Jobs for the rest of the run. A watch
-// restart begins from current state, so a Job born and deleted in the gap is lost, never invented.
+// startNativeJobRecorder watches the suite namespace's Jobs for the rest of the run.
 func startNativeJobRecorder() {
 	GinkgoHelper()
 	nativeJobs.once.Do(func() {
 		Expect(suiteRESTConfig).NotTo(BeNil(), "the native Job watch has no API server config")
 		watcher, err := client.NewWithWatch(suiteRESTConfig, client.Options{Scheme: k8sClient.Scheme()})
 		Expect(err).NotTo(HaveOccurred(), "no watch client for native helper Jobs")
-		w, err := watcher.Watch(ctx, &batchv1.JobList{}, client.InNamespace(nsE2E))
+		open := func(rv string) (watch.Interface, error) {
+			return watcher.Watch(ctx, &batchv1.JobList{}, client.InNamespace(nsE2E),
+				&client.ListOptions{Raw: &metav1.ListOptions{ResourceVersion: rv, AllowWatchBookmarks: true}})
+		}
+		var jobs batchv1.JobList
+		Expect(watcher.List(ctx, &jobs, client.InNamespace(nsE2E))).To(Succeed(), "failed to list Jobs in %s", nsE2E)
+		for i := range jobs.Items {
+			recordNativeJob(&jobs.Items[i])
+		}
+		w, err := open(jobs.ResourceVersion)
 		Expect(err).NotTo(HaveOccurred(), "failed to watch Jobs in %s", nsE2E)
-		go func() {
-			for {
-				for event := range w.ResultChan() {
-					if job, ok := event.Object.(*batchv1.Job); ok {
-						recordNativeJob(job)
-					}
+		go recordJobWatch(ctx, jobs.ResourceVersion, w, open, recordNativeJob)
+	})
+}
+
+// recordJobWatch feeds w's Jobs, watched from rv, to record until ctx ends. The client timeout
+// ends each watch about once a minute, so a restart resumes from the last resourceVersion and
+// replays a Job born and deleted in the gap; only an expired version restarts from current state.
+func recordJobWatch(ctx context.Context, rv string, w watch.Interface, open func(rv string) (watch.Interface, error),
+	record func(*batchv1.Job)) {
+	for {
+		for event := range w.ResultChan() {
+			if event.Type == watch.Error {
+				if err := apierrors.FromObject(event.Object); apierrors.IsResourceExpired(err) || apierrors.IsGone(err) {
+					_, _ = fmt.Fprintf(GinkgoWriter, "native Job watch at %s expired; Jobs in the gap are lost\n", rv)
+					rv = ""
 				}
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(time.Second):
-					}
-					if w, err = watcher.Watch(ctx, &batchv1.JobList{}, client.InNamespace(nsE2E)); err == nil {
-						break
-					}
+				continue
+			}
+			if job, ok := event.Object.(*batchv1.Job); ok {
+				rv = job.ResourceVersion
+				if event.Type != watch.Bookmark {
+					record(job)
 				}
 			}
-		}()
-	})
+		}
+		w.Stop()
+		var err error
+		for w, err = open(rv); err != nil; w, err = open(rv) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}
+}
+
+func TestRecordJobWatchResumesFromItsResourceVersion(t *testing.T) {
+	job := func(name, rv string, done bool) *batchv1.Job {
+		j := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name), ResourceVersion: rv}}
+		if done {
+			j.Status.Succeeded = 1
+			j.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+		}
+		return j
+	}
+	// The API server's history: cleanup is born, succeeds and is deleted while no watch runs.
+	// Versions are two digits, so string order is version order.
+	history := []watch.Event{
+		{Type: watch.Added, Object: job("cleanup", "11", false)},
+		{Type: watch.Modified, Object: job("cleanup", "12", true)},
+		{Type: watch.Deleted, Object: job("cleanup", "13", true)},
+	}
+	expired := &metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired}
+	for _, tc := range []struct {
+		name  string
+		first []watch.Event
+		opens []string
+	}{
+		{"resumed", []watch.Event{{Type: watch.Added, Object: job("worker", "10", false)}}, []string{"10"}},
+		{"bookmark", []watch.Event{{Type: watch.Bookmark, Object: job("", "10", false)}}, []string{"10"}},
+		{"quiet", nil, []string{"09"}},
+		{"expired", []watch.Event{{Type: watch.Added, Object: job("worker", "10", false)},
+			{Type: watch.Error, Object: expired}}, []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			replay := func(events []watch.Event) watch.Interface {
+				w := watch.NewFakeWithChanSize(len(events), false)
+				for _, e := range events {
+					w.Action(e.Type, e.Object)
+				}
+				w.Stop()
+				return w
+			}
+			var opens []string
+			open := func(rv string) (watch.Interface, error) {
+				if len(opens) == 1 {
+					cancel()
+					return nil, context.Canceled
+				}
+				opens = append(opens, rv)
+				if rv == "" { // current state: the cleanup Job is already gone
+					return replay(nil), nil
+				}
+				var after []watch.Event
+				for _, e := range history {
+					if e.Object.(*batchv1.Job).ResourceVersion > rv {
+						after = append(after, e)
+					}
+				}
+				return replay(after), nil
+			}
+			seen := map[string]bool{}
+			recordJobWatch(ctx, "09", replay(tc.first), open, func(j *batchv1.Job) {
+				seen[j.Name] = seen[j.Name] || jobSucceeded(j)
+				if j.Name == "" {
+					t.Errorf("recorded a bookmark as a Job")
+				}
+			})
+			if !slices.Equal(opens, tc.opens) {
+				t.Errorf("restarts opened at %q, want %q", opens, tc.opens)
+			}
+			if got, want := seen["cleanup"], tc.name != "expired"; got != want {
+				t.Errorf("cleanup Job seen to succeed: %t, want %t", got, want)
+			}
+		})
+	}
 }
 
 // nativeCompletionError is why m's status records no cleaned native completion, or nil.
