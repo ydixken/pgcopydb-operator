@@ -24,7 +24,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -47,13 +46,14 @@ const (
 	// nativeFaultBulkTotalSQL is the exact text COPY stream: id, tab, hex payload, newline.
 	nativeFaultBulkTotalSQL = "SELECT count(*) || '|' ||" +
 		" coalesce(sum(octet_length(id::text) + octet_length(payload) + 2), 0) FROM ONLY " + nativeFaultBulkTable
+	// nativeFaultBulkCopySQL pairs the COPY's 32-bit xid with a snapshot xmax, from which
+	// nativeFaultFullXID derives the xid8.
 	nativeFaultBulkCopySQL = "SELECT p.bytes_processed || '|' || round(extract(epoch FROM now() - a.query_start), 3)" +
-		" || '|' || coalesce(a.backend_xid::text, '') FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
+		" || '|' || coalesce(a.backend_xid::text, '') || '|' || pg_snapshot_xmax(pg_current_snapshot())" +
+		" FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
 		" WHERE a.application_name LIKE 'rpgmigrate[%] copy' AND p.command = 'COPY FROM'" +
 		" AND p.relid = to_regclass('" + nativeFaultBulkTable + "')"
 )
-
-var nativeFaultXID = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
 
 // nativeFaultBulkSQL creates the bulk table with rows rows, replacing any earlier one.
 func nativeFaultBulkSQL(rows int64) string {
@@ -62,11 +62,9 @@ func nativeFaultBulkSQL(rows int64) string {
 		nativeFaultBulkTable, nativeFaultBulkPayloadRepeat, rows)
 }
 
-// nativeFaultXactStatusSQL reads the commit status of a 32-bit xid in the current epoch window.
+// nativeFaultXactStatusSQL reads the commit status of a full transaction ID; NULL reads as empty.
 func nativeFaultXactStatusSQL(xid string) string {
-	return "SELECT coalesce(pg_xact_status((CASE WHEN t.low <= " + xid + " THEN t.top - t.low + " + xid +
-		" - 4294967296 ELSE t.top - t.low + " + xid + " END)::text::xid8), 'unknown') FROM (SELECT x AS top," +
-		" x % 4294967296 AS low FROM (SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint) s(x)) t"
+	return "SELECT pg_xact_status(" + sqlLiteral(xid) + "::xid8)"
 }
 
 func parseNativeFaultBulkTotal(out string) (rows, total int64, err error) {
@@ -96,10 +94,10 @@ func parseNativeFaultCopy(out string, total int64) (nativeFaultCopySample, error
 		return nativeFaultCopySample{}, nil
 	}
 	fields := strings.Split(out, "|")
-	if len(fields) != 3 || strings.Contains(out, "\n") {
+	if len(fields) != 4 || strings.Contains(out, "\n") {
 		return nativeFaultCopySample{}, fmt.Errorf("COPY progress returned %q, not one COPY into the bulk table", out)
 	}
-	s := nativeFaultCopySample{present: true, xid: fields[2]}
+	s := nativeFaultCopySample{present: true}
 	var err error
 	if s.bytes, err = strconv.ParseInt(fields[0], 10, 64); err != nil || s.bytes < 0 {
 		return s, fmt.Errorf("COPY progress returned bytes %q", fields[0])
@@ -110,10 +108,33 @@ func parseNativeFaultCopy(out string, total int64) (nativeFaultCopySample, error
 	if s.elapsed, err = strconv.ParseFloat(fields[1], 64); err != nil || s.elapsed < 0 {
 		return s, fmt.Errorf("COPY progress returned elapsed %q", fields[1])
 	}
-	if s.xid != "" && !nativeFaultXID.MatchString(s.xid) {
-		return s, fmt.Errorf("COPY progress returned xid %q", s.xid)
+	xmax, err := strconv.ParseUint(fields[3], 10, 64)
+	if err != nil || xmax == 0 {
+		return s, fmt.Errorf("COPY progress returned xmax %q", fields[3])
 	}
+	if fields[2] == "" {
+		return s, nil
+	}
+	xid, err := strconv.ParseUint(fields[2], 10, 32)
+	if err != nil || xid == 0 {
+		return s, fmt.Errorf("COPY progress returned xid %q", fields[2])
+	}
+	full, err := nativeFaultFullXID(uint32(xid), xmax)
+	if err != nil {
+		return s, err
+	}
+	s.xid = strconv.FormatUint(full, 10)
 	return s, nil
+}
+
+// nativeFaultFullXID widens an assigned xid to xid8: an assigned xid lies within 2^31 of
+// any recent snapshot xmax, above it while still in progress or below it once completed.
+func nativeFaultFullXID(xid uint32, xmax uint64) (uint64, error) {
+	delta := int64(int32(xid - uint32(xmax)))
+	if delta < 0 && uint64(-delta) > xmax {
+		return 0, fmt.Errorf("xid %d lies before transaction ID 0 at xmax %d", xid, xmax)
+	}
+	return xmax + uint64(delta), nil
 }
 
 // midCopy is the kill condition: rows are on the way and the transaction that would commit them is known.
@@ -173,7 +194,7 @@ func (b *nativeFaultBulk) expectAborted(xid string) {
 		status = out
 		g.Expect(status).NotTo(Equal("in progress"), "the killed COPY transaction %s is still open", xid)
 	}, 2*time.Minute, time.Second).Should(Succeed())
-	Expect(status).To(Equal("aborted"), "the killed COPY transaction %s ended %s: the kill missed the COPY", xid, status)
+	Expect(status).To(Equal("aborted"), "the killed COPY transaction %s ended %q: the kill missed the COPY", xid, status)
 }
 
 // expectRows holds the bulk table to its row count: always on the source, after a
@@ -209,11 +230,11 @@ func TestNativeFaultCopyProgress(t *testing.T) {
 		mid, complete bool
 	}{
 		{"missing row", "", false, false},
-		{"zero bytes", "0|0.250|7", false, false},
-		{"partial", "400|3.000|7", true, false},
-		{"partial without a transaction", "400|3.000|", false, false},
-		{"last byte pending", "999|9.000|7", true, false},
-		{"complete", "1000|10.000|7", false, true},
+		{"zero bytes", "0|0.250|7|8", false, false},
+		{"partial", "400|3.000|7|8", true, false},
+		{"partial without a transaction", "400|3.000||8", false, false},
+		{"last byte pending", "999|9.000|7|8", true, false},
+		{"complete", "1000|10.000|7|8", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := parseNativeFaultCopy(tc.out, total)
@@ -226,8 +247,8 @@ func TestNativeFaultCopyProgress(t *testing.T) {
 		})
 	}
 	for _, out := range []string{
-		"1001|1.000|7", "-1|1.000|7", "x|1.000|7", "1|x|7", "1|-1|7", "1|1|0", "1|1|7;", "1|1",
-		"1|1|7\n2|1|8", "1|1|7|1",
+		"1001|1|7|8", "-1|1|7|8", "x|1|7|8", "1|x|7|8", "1|-1|7|8", "1|1|0|8", "1|1|7;|8", "1|1|4294967296|8",
+		"1|1|7|0", "1|1|7|x", "1|1|7|", "1|1|4294967295|5", "1|1|7", "1|1|7|8\n2|1|7|8", "1|1|7|8|9",
 	} {
 		if _, err := parseNativeFaultCopy(out, total); err == nil {
 			t.Errorf("COPY progress %q admitted", out)
@@ -236,6 +257,18 @@ func TestNativeFaultCopyProgress(t *testing.T) {
 	for _, out := range []string{"", "1", "0|10", "10|0", "x|10", "10|x", "1|2|3"} {
 		if _, _, err := parseNativeFaultBulkTotal(out); err == nil {
 			t.Errorf("bulk total %q admitted", out)
+		}
+	}
+	for _, tc := range []struct{ xid, xmax, full uint64 }{
+		{4741, 4741, 4741},
+		{4745, 4741, 4745},
+		{4000, 4741, 4000},
+		{1<<32 - 6, 1<<32 + 10, 1<<32 - 6},
+		{2, 1<<32 - 3, 1<<32 + 2},
+		{7, 3<<32 + 5, 3<<32 + 7},
+	} {
+		if full, err := nativeFaultFullXID(uint32(tc.xid), tc.xmax); err != nil || full != tc.full {
+			t.Errorf("xid %d at xmax %d = %d, %v; want %d", tc.xid, tc.xmax, full, err, tc.full)
 		}
 	}
 	if nativeFaultBulkRows*nativeFaultBulkPayloadBytes != nativeFaultBulkBytes {
