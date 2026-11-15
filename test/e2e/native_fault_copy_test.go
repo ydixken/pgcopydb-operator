@@ -47,12 +47,12 @@ const (
 	nativeFaultBulkTotalSQL = "SELECT count(*) || '|' ||" +
 		" coalesce(sum(octet_length(id::text) + octet_length(payload) + 2), 0) FROM ONLY " + nativeFaultBulkTable
 	// nativeFaultBulkCopySQL pairs the COPY's 32-bit xid with a snapshot xmax, from which
-	// nativeFaultFullXID derives the xid8.
+	// nativeFaultFullXID derives the xid8. It reads every session's COPY, and the parser
+	// refuses one not named like the engine's, so an unnamed engine cannot hide its COPY.
 	nativeFaultBulkCopySQL = "SELECT p.bytes_processed || '|' || round(extract(epoch FROM now() - a.query_start), 3)" +
 		" || '|' || coalesce(a.backend_xid::text, '') || '|' || pg_snapshot_xmax(pg_current_snapshot())" +
-		" FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
-		" WHERE a.application_name LIKE 'rpgmigrate[%] copy' AND p.command = 'COPY FROM'" +
-		" AND p.relid = to_regclass('" + nativeFaultBulkTable + "')"
+		" || '|' || a.application_name FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
+		" WHERE p.command = 'COPY FROM' AND p.relid = to_regclass('" + nativeFaultBulkTable + "')"
 )
 
 // nativeFaultBulkSQL creates the bulk table with rows rows, replacing any earlier one.
@@ -93,9 +93,13 @@ func parseNativeFaultCopy(out string, total int64) (nativeFaultCopySample, error
 	if out == "" {
 		return nativeFaultCopySample{}, nil
 	}
-	fields := strings.Split(out, "|")
-	if len(fields) != 4 || strings.Contains(out, "\n") {
+	fields := strings.SplitN(out, "|", 5)
+	if len(fields) != 5 || strings.Contains(out, "\n") {
 		return nativeFaultCopySample{}, fmt.Errorf("COPY progress returned %q, not one COPY into the bulk table", out)
+	}
+	if name := fields[4]; !strings.HasPrefix(name, "rpgmigrate[") || !strings.HasSuffix(name, "] copy") {
+		return nativeFaultCopySample{}, fmt.Errorf("the bulk table COPY runs as application_name %q,"+
+			" not rpgmigrate[<pid>] copy", name)
 	}
 	s := nativeFaultCopySample{present: true}
 	var err error
@@ -223,18 +227,18 @@ func (b *nativeFaultBulk) report(s nativeFaultCopySample) {
 }
 
 func TestNativeFaultCopyProgress(t *testing.T) {
-	const total = 1000
+	const total, engineCopy = 1000, "|rpgmigrate[42] copy"
 	for _, tc := range []struct {
 		name          string
 		out           string
 		mid, complete bool
 	}{
 		{"missing row", "", false, false},
-		{"zero bytes", "0|0.250|7|8", false, false},
-		{"partial", "400|3.000|7|8", true, false},
-		{"partial without a transaction", "400|3.000||8", false, false},
-		{"last byte pending", "999|9.000|7|8", true, false},
-		{"complete", "1000|10.000|7|8", false, true},
+		{"zero bytes", "0|0.250|7|8" + engineCopy, false, false},
+		{"partial", "400|3.000|7|8" + engineCopy, true, false},
+		{"partial without a transaction", "400|3.000||8" + engineCopy, false, false},
+		{"last byte pending", "999|9.000|7|8" + engineCopy, true, false},
+		{"complete", "1000|10.000|7|8" + engineCopy, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := parseNativeFaultCopy(tc.out, total)
@@ -248,8 +252,14 @@ func TestNativeFaultCopyProgress(t *testing.T) {
 	}
 	for _, out := range []string{
 		"1001|1|7|8", "-1|1|7|8", "x|1|7|8", "1|x|7|8", "1|-1|7|8", "1|1|0|8", "1|1|7;|8", "1|1|4294967296|8",
-		"1|1|7|0", "1|1|7|x", "1|1|7|", "1|1|4294967295|5", "1|1|7", "1|1|7|8\n2|1|7|8", "1|1|7|8|9",
+		"1|1|7|0", "1|1|7|x", "1|1|7|", "1|1|4294967295|5", "1|1|7|8" + engineCopy + "\n2|1|7|8",
 	} {
+		if _, err := parseNativeFaultCopy(out+engineCopy, total); err == nil {
+			t.Errorf("COPY progress %q admitted", out+engineCopy)
+		}
+	}
+	for _, out := range []string{"1|1|7", "1|1|7|8", "1|1|7|8|", "1|1|7|8|psql", "1|1|7|8|rpgmigrate[42] apply",
+		"1|1|7|8|pgcopydb[42] copy", "1|1|7|8|xrpgmigrate[42] copy", "1|1|7|8|rpgmigrate[42] copy "} {
 		if _, err := parseNativeFaultCopy(out, total); err == nil {
 			t.Errorf("COPY progress %q admitted", out)
 		}
@@ -308,22 +318,8 @@ func TestNativeFaultCopySQL(t *testing.T) {
 	}
 	half := bytes.Index(stream[len(stream)/2:], []byte("\n")) + len(stream)/2 + 1
 	for _, commit := range []bool{true, false} {
-		cmd := exec.CommandContext(ctx, "psql", uri, "-Xq", "-v", "ON_ERROR_STOP=1")
-		cmd.Env = append(cmd.Environ(), "PGAPPNAME=rpgmigrate[test] copy")
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := io.WriteString(stdin, "BEGIN;\nTRUNCATE "+nativeFaultBulkTable+";\nCOPY "+nativeFaultBulkTable+
-			" (id, payload) FROM STDIN WITH (FORMAT text, FREEZE true);\n"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := stdin.Write(stream[:half]); err != nil {
-			t.Fatal(err)
-		}
+		cmd, stdin := startTestCopy(ctx, t, uri, "rpgmigrate[test] copy", stream[:half])
+		var err error
 		var mid nativeFaultCopySample
 		for deadline := time.Now().Add(30 * time.Second); !mid.midCopy(total); time.Sleep(50 * time.Millisecond) {
 			if time.Now().After(deadline) {
@@ -343,10 +339,7 @@ func TestNativeFaultCopySQL(t *testing.T) {
 				err = cmd.Wait()
 			}
 		} else {
-			err = cmd.Process.Kill()
-			if waitErr := cmd.Wait(); !errors.As(waitErr, new(*exec.ExitError)) {
-				t.Fatalf("killed psql exited %v", waitErr)
-			}
+			err = killTestCopy(t, cmd)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -365,7 +358,68 @@ func TestNativeFaultCopySQL(t *testing.T) {
 			t.Fatalf("a COPY into the bulk table after the session ended: %+v", s)
 		}
 	}
+	expectDecoyCopyRefused(ctx, t, run, uri, stream[:half], total)
 	if got := testQuery(t, run, "SELECT count(*) FROM ONLY "+nativeFaultBulkTable); got != "64" {
 		t.Fatalf("bulk table holds %s rows after one committed and one killed COPY", got)
+	}
+}
+
+// startTestCopy feeds head to a COPY into the bulk table in a session named name.
+func startTestCopy(ctx context.Context, t *testing.T, uri, name string, head []byte) (*exec.Cmd, io.WriteCloser) {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, "psql", uri, "-Xq", "-v", "ON_ERROR_STOP=1")
+	cmd.Env = append(cmd.Environ(), "PGAPPNAME="+name)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(stdin, "BEGIN;\nTRUNCATE "+nativeFaultBulkTable+";\nCOPY "+nativeFaultBulkTable+
+		" (id, payload) FROM STDIN WITH (FORMAT text, FREEZE true);\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write(head); err != nil {
+		t.Fatal(err)
+	}
+	return cmd, stdin
+}
+
+func killTestCopy(t *testing.T, cmd *exec.Cmd) error {
+	t.Helper()
+	err := cmd.Process.Kill()
+	if waitErr := cmd.Wait(); !errors.As(waitErr, new(*exec.ExitError)) {
+		t.Fatalf("killed psql exited %v", waitErr)
+	}
+	return err
+}
+
+// expectDecoyCopyRefused runs the COPY an engine without session names would run: the
+// probe must refuse it, never read it as no COPY.
+func expectDecoyCopyRefused(ctx context.Context, t *testing.T, run psqlScript, uri string, head []byte, total int64) {
+	t.Helper()
+	const decoy = "e2e-decoy-copy"
+	cmd, _ := startTestCopy(ctx, t, uri, decoy, head)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		_, err := parseNativeFaultCopy(testQuery(t, run, nativeFaultBulkCopySQL), total)
+		if err != nil {
+			if !strings.Contains(err.Error(), `application_name "`+decoy+`"`) {
+				t.Fatal(err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the probe never saw the decoy's COPY into the bulk table")
+		}
+	}
+	if err := killTestCopy(t, cmd); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); testQuery(t, run, nativeFaultBulkCopySQL) != ""; {
+		if time.Now().After(deadline) {
+			t.Fatal("the decoy's COPY outlived its session")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
