@@ -298,13 +298,16 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 	if sampleErr != nil {
 		return ctrl.Result{}, sampleErr
 	}
+	if nativeSampleComplete(m, got) {
+		r.applyNativeProgress(m, got)
+	}
+	// Recorded first, so the pass that cuts over also leaves CaughtUp=True behind.
+	if err := r.updateNativeStatus(ctx, m, base); err != nil {
+		return ctrl.Result{}, err
+	}
 	if followEnabled(m) && cutoverWanted(m, got.catchUpConfirmed) {
 		r.stopSampling(key)
 		return r.reconcileNativeFollowCutover(ctx, m, worker, pvc, got.catchUpConfirmed)
-	}
-	r.applyNativeProgress(m, got)
-	if err := r.updateNativeStatus(ctx, m, base); err != nil {
-		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: pollInterval}, nil
 }

@@ -55,6 +55,15 @@ func (r *MigrationReconciler) recordNativeAttempt(ctx context.Context, m, base *
 	if !native.NativeReceiptsMatch(desired, job.UID, pvc.UID) {
 		return ctrl.Result{}, errNativeWorkerAdmission
 	}
+	if desired.Status.Attempts > 1 {
+		// No incomplete sample clears the last attempt's measurements, so the new attempt does.
+		// Streaming stays because copyDoneForGate reads it.
+		desired.Status.Progress = nil
+		if rs := desired.Status.Replication; rs != nil {
+			rs.WriteLSN, rs.ReplayLSN, rs.LagBytes = "", "", nil
+		}
+		meta.RemoveStatusCondition(&desired.Status.Conditions, v1beta1.ConditionCaughtUp)
+	}
 	desired.Status.Phase = attemptPhase(desired)
 	if !meta.IsStatusConditionTrue(desired.Status.Conditions, v1beta1.ConditionCloneCompleted) {
 		r.setCondition(desired, v1beta1.ConditionCloneCompleted, metav1.ConditionFalse, reasonCloneRunning,
