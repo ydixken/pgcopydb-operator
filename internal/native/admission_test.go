@@ -57,7 +57,7 @@ func newAdmissionFixture(t *testing.T) admissionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: admissionBool(false), DNSPolicy: corev1.DNSClusterFirst, SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: admissionBool(true), RunAsUser: admissionI64(65532), RunAsGroup: admissionI64(65532), FSGroup: admissionI64(65532), FSGroupChangePolicy: &[]corev1.PodFSGroupChangePolicy{corev1.FSGroupChangeOnRootMismatch}[0], SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}, Volumes: volumes, Containers: []corev1.Container{{Name: nativeContainerName, Image: w.ImageRef, Command: command, Args: args, Env: env, VolumeMounts: mounts, SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: admissionBool(false), ReadOnlyRootFilesystem: admissionBool(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}}}}
+	spec := corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever, AutomountServiceAccountToken: admissionBool(false), EnableServiceLinks: admissionBool(false), DNSPolicy: corev1.DNSClusterFirst, SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: admissionBool(true), RunAsUser: admissionI64(65532), RunAsGroup: admissionI64(65532), FSGroup: admissionI64(65532), FSGroupChangePolicy: &[]corev1.PodFSGroupChangePolicy{corev1.FSGroupChangeOnRootMismatch}[0], SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}}, Volumes: volumes, Containers: []corev1.Container{{Name: nativeContainerName, Image: w.ImageRef, Command: command, Args: args, Env: env, VolumeMounts: mounts, SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: admissionBool(false), ReadOnlyRootFilesystem: admissionBool(true), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}}}}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: w.JobName, Namespace: w.Namespace, UID: w.JobUID, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: batchv1.JobSpec{BackoffLimit: admissionI32(0), ActiveDeadlineSeconds: admissionI64(90), Template: corev1.PodTemplateSpec{Spec: spec}}}
 	worker := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: m.Status.JobName, Namespace: w.Namespace, UID: w.WorkerJobUID, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: batchv1.JobSpec{Template: *job.Spec.Template.DeepCopy()}, Status: batchv1.JobStatus{Succeeded: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}}}
 	worker.Spec.Template.Spec.Containers[0].Command = []string{nativeShellPath, "-c", "exec \"$0\" \"$@\"", "/usr/local/bin/rpgmigrate"}
@@ -174,7 +174,8 @@ func TestNativeAdmissionEnvironmentDNS(t *testing.T) {
 		p.DNSConfig = &corev1.PodDNSConfig{Options: []corev1.PodDNSConfigOption{{Name: "ndots"}}}
 	}}, {"resolver_shadow", func(p *corev1.PodSpec) {
 		p.Containers[0].VolumeMounts = append(p.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "tmp", MountPath: "/etc/resolv.conf"})
-	}}, {"service_account_token", func(p *corev1.PodSpec) { p.AutomountServiceAccountToken = admissionBool(true) }}} {
+	}}, {"service_account_token", func(p *corev1.PodSpec) { p.AutomountServiceAccountToken = admissionBool(true) }},
+		{"service_links_unset", func(p *corev1.PodSpec) { p.EnableServiceLinks = nil }}, {"service_links_on", func(p *corev1.PodSpec) { p.EnableServiceLinks = admissionBool(true) }}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newAdmissionFixture(t)
 			tc.change(&f.pod.Spec)

@@ -22,7 +22,10 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 )
 
 // The driver runs each program's own entry up to the first step after its environment
@@ -53,6 +56,12 @@ if not reached: print('refused');sys.exit(0)
 if work: m.work_environment({'execution':{'work':json.loads(work)}})
 print('admitted')
 `
+
+// nativeComparisonEntry is the comparison program's entry, which two helper Jobs run.
+const nativeComparisonEntry = "comparison_main"
+
+// nativeKubernetesService is the default namespace's Service that kubelet always links.
+const nativeKubernetesService = "kubernetes"
 
 type nativeHelperEnvCase struct {
 	entry   string
@@ -122,8 +131,8 @@ func nativeHelperEnvCases(t *testing.T) []nativeHelperEnvCase {
 			func(*testing.T) (*batchv1.Job, error) {
 				return data(native.JobRoleEvidence, nativeCleanupRejoinJobPrefix, native.CleanupRejoinCompletionProgramSHA256())
 			}},
-		{"comparison_main", true, native.ComparisonProgram(), []string{comparisonMode, compareSchema, compareOp(t, compareSchema), hash(native.ComparisonProgramSHA256())}, nil, compare(compareSchema)},
-		{"comparison_main", true, native.ComparisonProgram(), []string{comparisonMode, compareData, compareOp(t, compareData), hash(native.ComparisonProgramSHA256())}, nil, compare(compareData)},
+		{nativeComparisonEntry, true, native.ComparisonProgram(), []string{comparisonMode, compareSchema, compareOp(t, compareSchema), hash(native.ComparisonProgramSHA256())}, nil, compare(compareSchema)},
+		{nativeComparisonEntry, true, native.ComparisonProgram(), []string{comparisonMode, compareData, compareOp(t, compareData), hash(native.ComparisonProgramSHA256())}, nil, compare(compareData)},
 	}
 }
 
@@ -168,12 +177,51 @@ func nativeHelperEnvVerdict(t *testing.T, tc nativeHelperEnvCase, prefix, env []
 	return lines[len(lines)-1]
 }
 
+// nativeKubeletServices is a namespace kubelet links into a pod unless service links are off:
+// one Service named ld-* and enough others to pass the programs' 64 KiB environment cap.
+func nativeKubeletServices() []corev1.Service {
+	services := make([]corev1.Service, 0, 301)
+	services = append(services, corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "ld-cache"}})
+	for i := range 300 {
+		services = append(services, corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("svc-%03d", i)}})
+	}
+	for i := range services {
+		services[i].Spec = corev1.ServiceSpec{ClusterIP: fmt.Sprintf("10.96.%d.%d", 1+i/250, 1+i%250), Ports: []corev1.ServicePort{{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP}}}
+	}
+	return services
+}
+
+// nativeKubeletServiceEnv is kubelet's envvars.FromServices: the default namespace's kubernetes
+// Service always, the pod namespace's Services only while enableServiceLinks is unset or true.
+func nativeKubeletServiceEnv(spec *corev1.PodSpec, services []corev1.Service) []string {
+	master := corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nativeKubernetesService}, Spec: corev1.ServiceSpec{ClusterIP: "10.0.0.1", Ports: []corev1.ServicePort{{Name: "https", Port: 443, Protocol: corev1.ProtocolTCP}}}}
+	linked := []corev1.Service{master}
+	if spec.EnableServiceLinks == nil || *spec.EnableServiceLinks {
+		linked = append(linked, services...)
+	}
+	var env []string
+	for _, s := range linked {
+		name, ip := strings.ToUpper(strings.ReplaceAll(s.Name, "-", "_")), s.Spec.ClusterIP
+		env = append(env, fmt.Sprintf("%s_SERVICE_HOST=%s", name, ip), fmt.Sprintf("%s_SERVICE_PORT=%d", name, s.Spec.Ports[0].Port))
+		for i, port := range s.Spec.Ports {
+			proto, url := strings.ToLower(string(port.Protocol)), fmt.Sprintf("%s://%s:%d", strings.ToLower(string(port.Protocol)), ip, port.Port)
+			link := fmt.Sprintf("%s_PORT_%d_%s", name, port.Port, port.Protocol)
+			env = append(env, fmt.Sprintf("%s_SERVICE_PORT_%s=%d", name, strings.ToUpper(port.Name), port.Port), link+"="+url, link+"_PROTO="+proto, fmt.Sprintf("%s_PORT=%d", link, port.Port), link+"_ADDR="+ip)
+			if i == 0 {
+				env = append(env, name+"_PORT="+url)
+			}
+		}
+	}
+	return env
+}
+
+// renderedNativeHelperEnv is the container's environment as kubelet starts it, Service variables included.
 func renderedNativeHelperEnv(t *testing.T, job *batchv1.Job) []string {
 	t.Helper()
 	if len(job.Spec.Template.Spec.Containers) != 1 {
 		t.Fatal("native helper renders one container")
 	}
-	env := make([]string, 0, len(job.Spec.Template.Spec.Containers[0].Env))
+	env := nativeKubeletServiceEnv(&job.Spec.Template.Spec, nativeKubeletServices())
 	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
 		value := e.Value
 		if e.ValueFrom != nil {
@@ -530,5 +578,121 @@ func TestNativeExecEnvironmentMatchesProgramChecks(t *testing.T) {
 				t.Fatalf("driver admitted an environment without %s: %s", tc.needs, got)
 			}
 		})
+	}
+}
+
+// Service links must stay off: the linked namespace gives every native program an LD_ name and
+// more than 64 KiB of environment, which each one refuses, so a linked pod is a stuck pod.
+func TestNativeHelperEnvironmentRefusesServiceLinks(t *testing.T) {
+	linked := nativeKubeletServiceEnv(&corev1.PodSpec{}, nativeKubeletServices())
+	size := 0
+	for _, e := range linked {
+		size += len(e) + 1
+	}
+	if !slices.Contains(linked, "LD_CACHE_SERVICE_HOST=10.96.1.1") || size <= 65536 {
+		t.Fatalf("kubelet stand-in links no ld-* Service or stays under the cap: %d bytes", size)
+	}
+	off := nativeKubeletServiceEnv(&corev1.PodSpec{EnableServiceLinks: ptr.To(false)}, nativeKubeletServices())
+	if len(off) != 8 || slices.ContainsFunc(off, func(e string) bool { return !strings.HasPrefix(e, "KUBERNETES_") }) {
+		t.Fatalf("kubelet stand-in links namespace Services with links off: %v", off)
+	}
+	for i, tc := range nativeHelperEnvCases(t) {
+		t.Run(fmt.Sprint(i, " ", tc.entry), func(t *testing.T) {
+			job, err := tc.build(t)
+			if err != nil || job == nil {
+				t.Fatalf("helper Job unavailable: %v", err)
+			}
+			if links := job.Spec.Template.Spec.EnableServiceLinks; links == nil || *links {
+				t.Fatal("native helper Job leaves service links on")
+			}
+			for _, links := range []*bool{nil, ptr.To(true)} {
+				job.Spec.Template.Spec.EnableServiceLinks = links
+				if got := nativeHelperEnvVerdict(t, tc, nil, renderedNativeHelperEnv(t, job)); got != nativeRuntimeRefused {
+					t.Fatalf("program admitted a linked namespace's environment: %s", got)
+				}
+			}
+		})
+	}
+}
+
+// Every native builder is listed, checked by parsing the package, so a new one cannot skip the setting.
+func TestNativeBuildersDisableServiceLinks(t *testing.T) {
+	builders := map[string]func(*testing.T) (*batchv1.Job, error){
+		"buildNativeVersionJob": func(*testing.T) (*batchv1.Job, error) {
+			m, _ := nativeEndposJobInputs()
+			return buildNativeVersionJob(m, nativeEvidenceTestImage, "rpgmigrate-version-"+probeTestOperation)
+		},
+		"buildNativeWorkerJob": func(*testing.T) (*batchv1.Job, error) {
+			m, pvc := nativeEndposJobInputs()
+			return buildNativeWorkerJob(m, pvc, nativeEvidenceTestImage, 1)
+		},
+		"buildNativeEndposJob": nativeEngineOnlyRoles[native.JobRoleEndpos],
+		"buildNativeOwnedInventoryJob": func(t *testing.T) (*batchv1.Job, error) {
+			m, w := cleanedJobInputs(t)
+			w.Role, w.JobName, w.ProgramSHA256, w.PlatformImageID = native.JobRoleCleanup, nativeInventoryJobPrefix+w.OperationID, native.OwnedInventoryProgramSHA256(), w.ImageRef
+			return buildNativeOwnedInventoryJob(m, nativeEvidenceTestImage, w)
+		},
+		"buildNativeCleanupJob": func(t *testing.T) (*batchv1.Job, error) {
+			f := newCleanupInventoryFixture(t)
+			owned, err := f.read(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return buildNativeCleanupJob(f.migration, f.pvc, f.want.ImageRef, nativeCleanupTestName, owned)
+		},
+	}
+	helpers := map[string]string{"run_native_preflight": "buildNativePreflightJob", "run_completed_evidence": "buildNativeEvidenceJob", "run_target_retry": "buildNativeRecoveryReadJob",
+		"cleaned_completion_main": "buildNativeCleanedCompletionJob", "cleanup_rejoin_completion_main": "buildNativeCleanupRejoinCompletionJob", nativeComparisonEntry: "buildNativeCompareJob"}
+	for _, tc := range nativeHelperEnvCases(t) {
+		if name, ok := helpers[tc.entry]; ok {
+			builders[name] = tc.build
+		}
+	}
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("controller sources unavailable: %v", err)
+	}
+	declared := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "buildNative") {
+				declared++
+				if builders[fn.Name.Name] == nil {
+					t.Errorf("native builder %s has no service links row", fn.Name.Name)
+				}
+			}
+		}
+	}
+	if declared != len(builders) {
+		t.Fatalf("%d native builders declared, %d rows", declared, len(builders))
+	}
+	for name, build := range builders {
+		t.Run(name, func(t *testing.T) {
+			job, err := build(t)
+			if err != nil || job == nil {
+				t.Fatalf("builder refused its fixture: %v", err)
+			}
+			if links := job.Spec.Template.Spec.EnableServiceLinks; links == nil || *links {
+				t.Fatal("native pod leaves service links on")
+			}
+		})
+	}
+	// Legacy pods keep the API default.
+	m := passwordMigration()
+	for name, build := range map[string]func() (*batchv1.Job, error){
+		"buildJob":          func() (*batchv1.Job, error) { return buildJob(m, testRunnerImage, 1) },
+		"buildCleanupJob":   func() (*batchv1.Job, error) { return buildCleanupJob(m, testRunnerImage) },
+		"buildPreflightJob": func() (*batchv1.Job, error) { return buildPreflightJob(m, testRunnerImage) },
+	} {
+		if job, err := build(); err != nil || job.Spec.Template.Spec.EnableServiceLinks != nil {
+			t.Errorf("legacy %s changed service links: %v", name, err)
+		}
 	}
 }

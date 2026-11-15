@@ -151,7 +151,6 @@ func probePod(job *batchv1.Job) *corev1.Pod {
 	p.Spec.NodeName = "fixture-node"
 	p.Spec.ServiceAccountName = nativePreflightDefaultSA
 	p.Spec.DeprecatedServiceAccount = nativePreflightDefaultSA
-	p.Spec.EnableServiceLinks = ptr.To(true)
 	p.Spec.Priority = ptr.To(int32(0))
 	p.Spec.PreemptionPolicy = ptr.To(corev1.PreemptLowerPriority)
 	for _, key := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
@@ -454,7 +453,7 @@ func testProbePodChanges(t *testing.T) {
 
 	mutations := map[string]func(*corev1.Pod){
 		"node name": func(p *corev1.Pod) { p.Spec.NodeName = "invalid/name" }, "service account": func(p *corev1.Pod) { p.Spec.ServiceAccountName = "privileged" }, "deprecated account": func(p *corev1.Pod) { p.Spec.DeprecatedServiceAccount = "privileged" },
-		"service links": func(p *corev1.Pod) { p.Spec.EnableServiceLinks = ptr.To(false) }, "priority": func(p *corev1.Pod) { p.Spec.Priority = ptr.To(int32(1)) }, "preemption": func(p *corev1.Pod) { p.Spec.PreemptionPolicy = ptr.To(corev1.PreemptNever) }, "runtime class": func(p *corev1.Pod) { p.Spec.RuntimeClassName = ptr.To("custom") }, "host users": func(p *corev1.Pod) { p.Spec.HostUsers = ptr.To(false) },
+		"service links": func(p *corev1.Pod) { p.Spec.EnableServiceLinks = ptr.To(true) }, "service links unset": func(p *corev1.Pod) { p.Spec.EnableServiceLinks = nil }, "priority": func(p *corev1.Pod) { p.Spec.Priority = ptr.To(int32(1)) }, "preemption": func(p *corev1.Pod) { p.Spec.PreemptionPolicy = ptr.To(corev1.PreemptNever) }, "runtime class": func(p *corev1.Pod) { p.Spec.RuntimeClassName = ptr.To("custom") }, "host users": func(p *corev1.Pod) { p.Spec.HostUsers = ptr.To(false) },
 		"toleration seconds": func(p *corev1.Pod) { p.Spec.Tolerations[0].TolerationSeconds = ptr.To(int64(301)) }, "toleration effect": func(p *corev1.Pod) { p.Spec.Tolerations[0].Effect = corev1.TaintEffectNoSchedule }, "duplicate default": func(p *corev1.Pod) { p.Spec.Tolerations = append(p.Spec.Tolerations, p.Spec.Tolerations[0]) },
 		"env": func(p *corev1.Pod) {
 			p.Spec.Containers[0].Env = append(p.Spec.Containers[0].Env, corev1.EnvVar{Name: "LD_PRELOAD", Value: "/tmp/foreign"})
@@ -1165,5 +1164,24 @@ func TestNativePreflightRefusalJobPolicy(t *testing.T) {
 	version, err := buildNativeVersionJob(f.m, f.r.RPGMigrateRunnerImage, "rpgmigrate-version-"+op)
 	if err != nil || version.Spec.Template.Spec.Containers[0].TerminationMessagePolicy != "" {
 		t.Fatal("version Job changed its termination message source")
+	}
+}
+
+// A Job and Pod that agree on service links still need them off: agreement is not the guard.
+func TestNativePreflightPodRequiresServiceLinksOff(t *testing.T) {
+	for name, links := range map[string]*bool{"links off": ptr.To(false), "links unset": nil, "links on": ptr.To(true)} {
+		t.Run(name, func(t *testing.T) {
+			m, _ := nativeEndposJobInputs()
+			job, err := buildNativeVersionJob(m, nativeEvidenceTestImage, "rpgmigrate-version-"+probeTestOperation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.UID = "version-job"
+			defaultProbeJob(job)
+			job.Spec.Template.Spec.EnableServiceLinks = links
+			if got := nativePreflightPodMatches(job, probePod(job)); got != (name == "links off") {
+				t.Fatalf("live Pod with %s: matched=%v", name, got)
+			}
+		})
 	}
 }
