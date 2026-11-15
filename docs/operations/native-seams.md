@@ -15,14 +15,22 @@ Podman runs each Pod from the Job that the operator's builder made.
 The harness does these runs:
 
 1. A follow run under a live writer.
-   It reconciles to a running worker, waits for the streaming phase, and samples lag and the source head through the worker exec.
+   It reconciles to a running worker and waits for the streaming phase.
+   Then it censuses the sessions of the app role on both sides, and samples lag and the source head through the worker exec.
    It approves the cutover, saves E, sets endpos and waits for the drain.
    Then it reads each completion helper as its own step.
    These helpers are the clone report, the endpos acknowledgment, the completed evidence, both compares, the owned inventory, the cleanup and the cleaned evidence.
    Last, it reconciles to `Completed`, checks both databases and deletes the Migration.
 2. A retry run.
-   It kills the worker with SIGKILL while it streams, reads the failed worker log and the retry gate, and reconciles to attempt 2.
+   It censuses the sessions while the worker streams, kills the worker with SIGKILL, reads the failed worker log and the retry gate, and reconciles to attempt 2.
+   The retry gate step fails unless the census of the same run passed, because only then does the gate's count of zero show that the killed engine's sessions ended.
    Then it deletes the Migration while attempt 2 streams, so the disposition stops the worker and runs the deletion inventory and cleanup.
+
+The session census is the `session-names` step of each run.
+It requires a walsender named `rpgmigrate[<pid>] receive` on the source and a client backend named `rpgmigrate[<pid>] apply` on the target, the names of `docs/native-protocol.md` in the engine repository.
+Any other session whose name starts with `rpgmigrate` must be `rpgmigrate[<pid>] <role>` with a role of `copy`, `apply`, `receive` or `compare`.
+It also runs the retry gate's own census query, read from the pinned evidence program, as the target role under the name `pgm-retry-gate`, and requires it to count at least one session.
+A runner that leaves its session names empty fails this step.
 
 The target role gets only `SET` on `session_replication_role`, the native follow grant of the [prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true).
 It gets no EXECUTE on the `pg_replication_origin_*` functions, because only the `pgcopydb` engine uses them.

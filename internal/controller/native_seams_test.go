@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -139,12 +141,53 @@ type seamsHarness struct {
 	target   string
 	password string
 	verdicts []seamsVerdict
+	// namedLive holds each Migration whose streaming engine the session-name census saw.
+	namedLive map[string]bool
 }
 
 // TestSeamsTargetGrant pins the harness to the native grant set of prerequisites.md.
 func TestSeamsTargetGrant(t *testing.T) {
 	if seamsTargetGrantSQL != "GRANT SET ON PARAMETER session_replication_role TO app;" {
 		t.Fatalf("the native harness grants %q, want only SET on session_replication_role", seamsTargetGrantSQL)
+	}
+}
+
+func TestSeamsSessionCensus(t *testing.T) {
+	sql, err := seamsRetryCensusSQL()
+	if err != nil || strings.Contains(sql, "@") || !strings.Contains(sql, "a.application_name LIKE 'rpgmigrate%'") ||
+		!strings.Contains(sql, "pg_catalog.pg_stat_activity") {
+		t.Fatalf("the harness does not read the gate's census: %q %v", sql, err)
+	}
+	target := seamsSessionSide{seamsTargetSide, "t", seamsAppDatabase, "client backend", "apply"}
+	source := seamsSessionSide{seamsSourceSide, "s", seamsAppDatabase, "walsender", "receive"}
+	for _, tc := range []struct {
+		side seamsSessionSide
+		out  string
+		ok   bool
+	}{
+		{target, "client backend|rpgmigrate[17] apply\nclient backend|rpgmigrate[17] copy", true},
+		{source, "client backend|\nwalsender|rpgmigrate[9] receive", true},
+		{target, "", false},
+		{target, "client backend|\nclient backend|", false},
+		{source, "client backend|rpgmigrate[9] receive", false},
+		{source, "walsender|rpgmigrate[9] apply", false},
+		{target, "client backend|rpgmigrate[17] apply\nclient backend|rpgmigrate[17] checkpoint", false},
+		{target, "client backend|rpgmigrate[x] apply", false},
+		{target, "client backend|rpgmigrate[17] apply ", false},
+	} {
+		detail, problems := seamsSessionCensus(tc.side, tc.out)
+		if (len(problems) == 0) != tc.ok {
+			t.Errorf("%s %q: %s problems %v", tc.side.side, tc.out, detail, problems)
+		}
+	}
+	row := func(total, named, app string) string { return total + "|0|" + named + "|0|0|on|1|" + app }
+	if p := seamsRetryCensusProblems(row("2", "t", "pgm-retry-gate")); len(p) != 0 {
+		t.Fatalf("a census that counts the engine was refused: %v", p)
+	}
+	for _, bad := range []string{row("0", "t", "pgm-retry-gate"), row("1", "f", "psql"), row("1", "t", "psql"), row("x", "t", "pgm-retry-gate"), "1|0|t", ""} {
+		if p := seamsRetryCensusProblems(bad); len(p) == 0 {
+			t.Errorf("census row %q admitted", bad)
+		}
 	}
 }
 
@@ -184,7 +227,7 @@ func TestNativeSeams(t *testing.T) {
 	if owner == "" {
 		owner = "native-seams"
 	}
-	h := &seamsHarness{t: t, pair: pair, owner: owner, images: images, password: seamsRandom(16)}
+	h := &seamsHarness{t: t, pair: pair, owner: owner, images: images, password: seamsRandom(16), namedLive: map[string]bool{}}
 	h.prepare()
 	h.runFollow()
 	h.runRetry()
@@ -578,6 +621,7 @@ func (h *seamsHarness) runFollow() {
 		return
 	}
 	h.check("follow/streaming", "control exec: rpgmigrate list progress", func() (string, error) { return h.probeStreaming(ctx, name) })
+	h.check("follow/session-names", seamsSessionNamesProgram, func() (string, error) { return h.sessionNames(ctx, name, seamsAppDatabase) })
 	h.check("follow/lag", "source exec: active_lag observation", func() (string, error) {
 		w, o, err := h.execution(ctx, name)
 		if err != nil {
@@ -632,6 +676,102 @@ func (h *seamsHarness) runFollow() {
 	})
 	h.expectCleaned(ctx, run, seamsAppDatabase, "follow")
 	h.deleteMigration(ctx, name, "follow")
+}
+
+const seamsSessionNamesProgram = "SQL: engine session names and the retry-gate census while streaming"
+
+// seamsEngineSession is the protocol's session name; the contract roles are the only roles.
+var seamsEngineSession = regexp.MustCompile(`^rpgmigrate\[[0-9]+\] (copy|apply|receive|compare)$`)
+
+var seamsRetryCensusQuery = regexp.MustCompile(`(?m)^def target_retry_census\(session\):\n rows=session\.query\("([^"\\]+)",width=8\)$`)
+
+// seamsRetryCensusSQL is the retry gate's own target census, read from the pinned evidence program.
+func seamsRetryCensusSQL() (string, error) {
+	m := seamsRetryCensusQuery.FindSubmatch(native.EvidenceProgram())
+	if m == nil {
+		return "", errors.New("the evidence program has no target_retry_census query where the harness reads it")
+	}
+	return strings.ReplaceAll(string(m[1]), "@", "pg_catalog.") + ";", nil
+}
+
+// seamsSessionSide is one side of the census: the backend and role its streaming engine session must show.
+type seamsSessionSide struct{ side, container, database, backend, role string }
+
+// sessionNames censuses the app role's sessions while the engine streams: the source shows a receive walsender,
+// the target an apply backend, every rpgmigrate name follows the protocol, and the retry-gate census counts the target ones.
+func (h *seamsHarness) sessionNames(ctx context.Context, name, database string) (string, error) {
+	const census = "SELECT backend_type || '|' || application_name FROM pg_stat_activity WHERE usename = '" + seamsAppRole +
+		"' AND backend_type IN ('client backend', 'walsender') ORDER BY 1"
+	var details, problems []string
+	for _, s := range []seamsSessionSide{{seamsSourceSide, h.source, seamsAppDatabase, "walsender", "receive"}, {seamsTargetSide, h.target, database, "client backend", "apply"}} {
+		out, err := h.psql(ctx, s.container, s.database, census)
+		if err != nil {
+			return strings.Join(details, "; "), err
+		}
+		detail, problem := seamsSessionCensus(s, out)
+		details = append(details, detail)
+		problems = append(problems, problem...)
+	}
+	sql, err := seamsRetryCensusSQL()
+	if err != nil {
+		return strings.Join(details, "; "), err
+	}
+	// The gate runs as the target role under its own name, so the census takes its name-filtered path.
+	row, err := h.psql(ctx, h.target, database, "SET SESSION AUTHORIZATION "+seamsAppRole+";\nSET application_name TO 'pgm-retry-gate';\n"+sql)
+	if err != nil {
+		return strings.Join(details, "; "), err
+	}
+	details = append(details, "retry census "+row)
+	problems = append(problems, seamsRetryCensusProblems(row)...)
+	if len(problems) > 0 {
+		return strings.Join(details, "; "), errors.New(strings.Join(problems, "; "))
+	}
+	h.namedLive[name] = true
+	return strings.Join(details, "; "), nil
+}
+
+// seamsSessionCensus reads backend_type|application_name lines and names what the side lacks or misnames.
+func seamsSessionCensus(s seamsSessionSide, out string) (string, []string) {
+	var names, problems []string
+	seen := false
+	for line := range strings.SplitSeq(out, "\n") {
+		if line == "" {
+			continue
+		}
+		backend, app, _ := strings.Cut(line, "|")
+		if app == "" {
+			app = "<empty>"
+		}
+		names = append(names, backend+"="+app)
+		if !strings.HasPrefix(app, "rpgmigrate") {
+			continue
+		}
+		if m := seamsEngineSession.FindStringSubmatch(app); m == nil {
+			problems = append(problems, fmt.Sprintf("%s session %q is not rpgmigrate[<pid>] <role>", s.side, app))
+		} else if backend == s.backend && m[1] == s.role {
+			seen = true
+		}
+	}
+	if !seen {
+		problems = append(problems, fmt.Sprintf("no %s named rpgmigrate[<pid>] %s on the %s", s.backend, s.role, s.side))
+	}
+	return fmt.Sprintf("%s [%s]", s.side, strings.Join(names, ", ")), problems
+}
+
+// seamsRetryCensusProblems requires the gate's census row to count at least one session on its name-filtered path.
+func seamsRetryCensusProblems(row string) []string {
+	fields := strings.Split(row, "|")
+	if len(fields) != 8 {
+		return []string{fmt.Sprintf("the retry census returned %q, not one row of 8 columns", row)}
+	}
+	var problems []string
+	if fields[2] != "t" || fields[7] != "pgm-retry-gate" {
+		problems = append(problems, "the retry census did not run under the gate's own application name")
+	}
+	if n, err := strconv.Atoi(fields[0]); err != nil || n < 1 {
+		problems = append(problems, fmt.Sprintf("the retry-gate census counts %q engine sessions on the streaming target", fields[0]))
+	}
+	return problems
 }
 
 func (h *seamsHarness) waitTarget(ctx context.Context, db, note string) error {
@@ -927,6 +1067,7 @@ func (h *seamsHarness) runRetry() {
 		return
 	}
 	h.check("retry/streaming", "control exec: rpgmigrate list progress", func() (string, error) { return h.probeStreaming(ctx, name) })
+	h.check("retry/session-names", seamsSessionNamesProgram, func() (string, error) { return h.sessionNames(ctx, name, seamsRetryDB) })
 	h.check("retry/kill", "SIGKILL to the worker container mid-stream", func() (string, error) {
 		o, err := h.objects(ctx, name)
 		if err != nil {
@@ -976,7 +1117,11 @@ func (h *seamsHarness) runRetry() {
 		if !known {
 			return "", errors.New("gate yielded no observation")
 		}
-		return fmt.Sprintf("observed %d sessions, synchronous_commit %s", observation.Total, observation.TargetSynchronousCommit), nil
+		detail := fmt.Sprintf("observed %d sessions, synchronous_commit %s", observation.Total, observation.TargetSynchronousCommit)
+		if !h.namedLive[name] {
+			return detail, errors.New("retry/session-names never saw this run's engine sessions, so the count proves nothing")
+		}
+		return detail, nil
 	})
 	h.check("retry/attempt-2", "reconcile: retry gate admits attempt 2", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 3*time.Minute, func(o seamsObjects) bool { return o.m.Status.Attempts == 2 && seamsWorkerRunning(o) })
