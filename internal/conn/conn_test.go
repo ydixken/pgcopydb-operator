@@ -411,14 +411,19 @@ func TestPreludeScript_PassfileEscaping(t *testing.T) {
 // TestSecretRefPrelude_PasswordURINeverLeaks proves a rejected password-bearing
 // DB URI leaves the credential in no output, no URI file, and no passfile.
 func TestSecretRefPrelude_PasswordURINeverLeaks(t *testing.T) {
-	_, passfile, urifile, out, err := runSecretRefPrelude(t, secretConn(),
-		map[string]string{envSrcDB: "postgresql://alice:s3cret@db.example.com/app"}, "")
-	if err == nil {
-		t.Fatal("want rejection of a password-bearing DB URI")
-	}
-	for name, got := range map[string]string{"output": out, "URI file": urifile, "passfile": passfile} {
-		if strings.Contains(got, "s3cret") {
-			t.Fatalf("%s leaks the URI password: %q", name, got)
+	for _, db := range []string{
+		"postgresql://alice:s3cret@db.example.com/app",
+		"postgresql://alice@db.example.com/app?password=s3cret",
+		"postgresql://alice@db.example.com/app?sslmode=require&sslpassword=s3cret",
+	} {
+		_, passfile, urifile, out, err := runSecretRefPrelude(t, secretConn(), map[string]string{envSrcDB: db}, tPass)
+		if err == nil {
+			t.Fatalf("want rejection of the credential-bearing DB URI %q", db)
+		}
+		for name, got := range map[string]string{"output": out, "URI file": urifile, "passfile": passfile} {
+			if strings.Contains(got, "s3cret") {
+				t.Fatalf("%s leaks the URI credential of %q: %q", name, db, got)
+			}
 		}
 	}
 }
@@ -966,6 +971,19 @@ func TestSecretRefPrelude(t *testing.T) {
 		{name: "uri query service fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?service=s"}, wantErr: "the URI query sets 'service'"},
 		{name: "percent-encoded uri query key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?%70ort=6432"}, wantErr: "the URI query sets '%70ort'"},
 		{name: "uri empty port fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com:/app"}, wantErr: "port '' is not one decimal port"},
+		{name: "uri query password fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?password=s3cret"}, wantErr: "the URI query sets 'password'"},
+		{name: "uri query sslpassword in mixed case fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=a&SSLPassword=s3cret"}, wantErr: "the URI query sets 'sslpassword'"},
+		{name: "uri query oauth_client_secret fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?oauth_client_secret=s3cret"}, wantErr: "the URI query sets 'oauth_client_secret'"},
+		{name: "uri query scram_client_key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?scram_client_key=s3cret"}, wantErr: "the URI query sets 'scram_client_key'"},
+		{name: "uri query scram_server_key fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?SCRAM_SERVER_KEY=s3cret"}, wantErr: "the URI query sets 'scram_server_key'"},
+		{name: "percent-encoded uri query password fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?pass%77ord=s3cret"}, wantErr: "the URI query sets 'pass%77ord'"},
+		{
+			name:     "uri query value naming a secret key passes",
+			env:      map[string]string{envSrcDB: "postgresql://alice@db.example.com/app?application_name=password"},
+			password: tPass,
+			wantURI:  "postgresql://alice@db.example.com/app?application_name=password&" + tSrcKeep,
+			wantLine: tLine,
+		},
 		{name: "bare non-decimal port fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "db.example.com:64x2", envSrcUser: tUser}, wantErr: "port '64x2' is not one decimal port"},
 		{name: "bare ipv6 host fails", env: map[string]string{envSrcDB: tDB, envSrcHost: "::1", envSrcUser: tUser}, wantErr: tUnbound},
 		{name: "PGPORT list fails", env: map[string]string{envSrcDB: "postgresql://alice@db.example.com/app", envPGPort: "5432,6432"}, wantErr: "port '5432,6432' is not one decimal port"},
@@ -1254,6 +1272,11 @@ func TestSuperPrelude(t *testing.T) {
 			name:    "primary query port fails",
 			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB + "?port=6432"},
 			wantErr: "superuser secret: the URI query sets 'port'",
+		},
+		{
+			name:    "primary query password fails",
+			env:     map[string]string{envSrcPGURI: "postgresql://" + tUser + "@" + tHost + "/" + tDB + "?Password=s3cret"},
+			wantErr: "superuser secret: the URI query sets 'password'",
 		},
 		{
 			name:      "password-bearing primary never leaks into the super URI",

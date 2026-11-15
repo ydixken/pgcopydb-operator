@@ -457,7 +457,8 @@ func fillParams(q string) string {
 
 // endpointShell defines pf_endpoint LABEL HOSTPORT URI: it sets pf_host and pf_port to what
 // libpq matches the passfile against (no port means PGPORT, then 5432), or refuses the endpoint
-// by name when the URI authority or query would make libpq connect somewhere the line does not name.
+// by name when the URI authority or query would make libpq connect somewhere the line does not name,
+// or when the query names a libpq secret key in any letter case (percent-encoded keys never get that far).
 const endpointShell = `pf_endpoint() {
   case "$2" in ''|:*|*,*|*\[*|*\]*|*%*) echo "$1: endpoint '$2' cannot be bound to an exact passfile line; use one host or host:port without IPv6 brackets or percent-encoding" >&2; exit 1 ;; esac
   pf_host=${2%%:*}
@@ -467,6 +468,8 @@ const endpointShell = `pf_endpoint() {
   while [ -n "$pf_q" ]; do
     pf_k=${pf_q%%\&*}; pf_q=${pf_q#*\&}; pf_k=${pf_k%%=*}
     case "$pf_k" in host|port|service|*%*) echo "$1: the URI query sets '$pf_k', which moves the endpoint off its passfile line; name host and port in the URI authority" >&2; exit 1 ;; esac
+    pf_k=$(printf '%s' "$pf_k" | tr 'A-Z' 'a-z')
+    case "$pf_k" in password|sslpassword|oauth_client_secret|scram_client_key|scram_server_key) echo "$1: the URI query sets '$pf_k', which carries a credential; keep credentials out of the URI" >&2; exit 1 ;; esac
   done
 }
 `
