@@ -48,7 +48,8 @@ That variable enables `TestCompareDataQuery` and the progress sampler SQL cancel
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
 `TestNativeEvidenceSQLLive` also requires the variable and `psql`.
 It executes the native receipt catalog and owned inventory statements against engine-shaped state in a temporary database, then drops that database and its slots.
-Its logical slot case needs `wal_level=logical` and skips visibly on a server without it, such as the CI service containers.
+Its logical slot case needs `wal_level=logical` and skips visibly on a server without it.
+The CI service containers run with `wal_level=logical`, and CI sets `PGCOPYDB_TEST_REQUIRE_LOGICAL=1` so that case fails there instead of skipping.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret.
 Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job.

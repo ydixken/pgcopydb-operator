@@ -36,6 +36,10 @@ func TestNativeEvidenceSQLLive(t *testing.T) {
 	for _, method := range []string{"test_InventoryPublicationVerdicts", "test_ReceiptCatalogVerdicts", "test_InventoryLogicalSlotAndPublication"} {
 		t.Run(method, func(t *testing.T) {
 			if method == "test_InventoryLogicalSlotAndPublication" && strings.TrimSpace(string(level)) != "logical" {
+				// CI sets this so a misconfigured service fails instead of skipping the case unseen.
+				if os.Getenv("PGCOPYDB_TEST_REQUIRE_LOGICAL") != "" {
+					t.Fatalf("PGCOPYDB_TEST_REQUIRE_LOGICAL is set but the test server's wal_level is %q", strings.TrimSpace(string(level)))
+				}
 				t.Skip("the logical slot verdict needs a server with wal_level=logical")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
