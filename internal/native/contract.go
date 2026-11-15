@@ -129,12 +129,12 @@ type OwnedResource struct {
 
 // qualifiedRunnerSourceCommit is the engine commit the qualified runner manifests are built from.
 // The v7 receipt catalog fixtures must be rendered from this commit; hack/sync-native-catalogs.py does that.
-const qualifiedRunnerSourceCommit = "2b9b11da305b74172e89e6dcb877372c24f04ccd"
+const qualifiedRunnerSourceCommit = "abb3c53077448b04fe73ea068721852991d4aa85"
 
 // Runner publications built from qualifiedRunnerSourceCommit, one single-platform manifest per architecture.
 var qualifiedRunnerDigests = []string{
-	"sha256:66366372ebda7bd6a5737fca26dfa97bf84d167b103531e2deb0842911f9c978", // arm64
-	"sha256:a619166643ccad8398ac2ab293090b126c014f9d4b9cdf0aa07cd620c91de63f", // amd64
+	"sha256:6ab0d05bb45bb741711889f6c076bf563ba0ebdd3234e382bb4b6e2adca91299", // arm64
+	"sha256:a73a393e9b62cf760705f6d455c868db068591f865e0fbac748f0d7fca6e71c3", // amd64
 }
 
 // QualifiedRunner reports whether image pins a qualified runner manifest by digest; the reference shape is checked separately.
