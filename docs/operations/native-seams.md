@@ -49,6 +49,14 @@ The harness pulls an absent image.
     task test:native-seams PAIR=16:18 IMAGE_LOCK="$LOCK" EVIDENCE_DIR="$EVIDENCE" OWNER=my-run
     ```
 
+3. To run other PostgreSQL images than the lock pins, such as the newest minor of each major, set `SOURCE_IMAGE` and `TARGET_IMAGE`.
+   Each MUST be a `repository@sha256:<digest>` reference, and its major MUST match its side of `PAIR`.
+   The verdict file records the images that ran.
+
+    ```sh
+    task test:native-seams PAIR=16:18 IMAGE_LOCK="$LOCK" SOURCE_IMAGE="$PG16" TARGET_IMAGE="$PG18"
+    ```
+
 The task fails when the test does not run to a pass, also when a filter selects no test.
 Set `NATIVE_SEAMS_TRACE=1` to log each API write and each podexec request.
 
