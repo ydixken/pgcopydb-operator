@@ -210,12 +210,18 @@ jobs:
       # gets, does not. The check makes this a no-op on ours. With PGCOPYDB_TEST_PGURI
       # set, TestCompareDataQuery fails without psql and TestPreflightSyncCommit_Server
       # fails with a psql older than 18, whose \conninfo has no Backend PID.
-      - name: Install make and psql 18, which the runner image lacks
+      - name: Install make, psql 18 and GNU coreutils, which the runner image lacks
         run: |
           if ! command -v make >/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y -qq make
           fi
+          # Ubuntu 26.04 defaults to uutils; the script tests need GNU timeout, as the runner image has.
+          if ! timeout --version 2>/dev/null | grep -q 'GNU coreutils'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --allow-remove-essential coreutils-from-gnu coreutils-from-uutils-
+          fi
+          timeout --version | grep -q 'GNU coreutils' || { timeout --version; echo "GNU coreutils timeout is required" >&2; exit 1; }
           psql_major() {
             v=$(psql --version 2>/dev/null | sed -n 's/^psql (PostgreSQL) \([0-9]*\).*/\1/p')
             echo "${v:-0}"
