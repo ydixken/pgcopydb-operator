@@ -138,6 +138,14 @@ A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legac
 Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
 It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
 It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
+`fault-copy` first creates `public.e2e_nfault_bulk` on the source: a bigint primary key and an 8 KiB text payload per row, 4 GiB of text COPY that pglz keeps near 110 MB on each volume.
+We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there and still about 15 at twice that rate.
+The spec kills the runner only when the target's `pg_stat_progress_copy` shows that table's COPY with a transaction ID and with bytes processed above zero and below the stream total the source computes.
+It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
+After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
+The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started and the copy window projected from them.
+The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
+The spec drops it from the source after the Migration's own cleanup.
 A native follow spec proves its cleanup positively.
 The operator deletes the `rpgmigrate-cleanup-<operation>` Job before the Migration completes, so the suite watches the namespace's Jobs from the first native Migration on and requires one owned by the Migration to have succeeded.
 It also requires the status to record the finalized worker, no `rpgm_s_<run>_` slot, `rpgm_p_<run>_` publication or source `_rpgmigrate_<run>` schema, and the target `_rpgmigrate_<run>` schema that cleanup retains.

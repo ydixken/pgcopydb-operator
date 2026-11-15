@@ -44,12 +44,10 @@ const (
 	nativeFaultLockApp      = "e2e-nfault-lock"
 	nativeFaultForeignName  = "e2e_nfault_foreign"
 	// nativeFaultDecoyRun has a non-4 version nibble, so no Migration UID derives it.
-	nativeFaultDecoyRun      = "ffffffffffffffffffffffffffffffff"
-	nativeFaultKillContainer = "kill"
-	nativeFaultSIGKILL       = 137
-	nativeFaultSessionSQL    = "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'rpgmigrate[%'"
-	nativeFaultCopySQL       = "SELECT count(*) FROM pg_stat_progress_copy p JOIN pg_stat_activity a ON a.pid = p.pid" +
-		" WHERE a.application_name LIKE 'rpgmigrate[%] copy' AND p.command = 'COPY FROM'"
+	nativeFaultDecoyRun        = "ffffffffffffffffffffffffffffffff"
+	nativeFaultKillContainer   = "kill"
+	nativeFaultSIGKILL         = 137
+	nativeFaultSessionSQL      = "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'rpgmigrate[%'"
 	nativeFaultBlockedApplySQL = "SELECT count(*) FROM pg_stat_activity a" +
 		" WHERE a.application_name LIKE 'rpgmigrate[%] apply' AND pg_blocking_pids(a.pid) && ARRAY(" +
 		"SELECT pid FROM pg_stat_activity WHERE application_name = '" + nativeFaultLockApp + "')"
@@ -114,6 +112,7 @@ type nativeFaultCase struct {
 	pvc                       types.UID
 	writer                    *liveWriter
 	foreign                   *nativeFaultForeign
+	bulk                      *nativeFaultBulk
 }
 
 // startNativeFault creates the Migration with a writer running from before the base copy.
@@ -232,8 +231,13 @@ func (c *nativeFaultCase) expectInvariant(m *v1beta1.Migration, sets ...nativeFa
 		Expect(readNativeFaultMarkers(c.target, set).check(set.last, resumed)).
 			To(Succeed(), "INVARIANT VIOLATED: %s rows on the target", set.marker)
 	}
+	tables := []string{kindPublicSchema + "." + kindOrdersTable}
+	if c.bulk != nil {
+		c.bulk.expectRows(c.target, resumed)
+		tables = append(tables, nativeFaultBulkTable)
+	}
 	if resumed {
-		expectNativeFaultDataMatch(c.target)
+		expectNativeFaultDataMatch(c.target, tables...)
 		Expect(c.ownedPublications()).To(BeZero(), "completed with the owned publication left on the source")
 		c.expectNoSessions()
 	} else {
@@ -259,8 +263,9 @@ func (c *nativeFaultCase) expectNoSessions() {
 	}, 2*time.Minute, 2*time.Second).Should(Succeed())
 }
 
-// expectNativeFaultDataMatch compares every table's row count and content hash, independently of the operator.
-func expectNativeFaultDataMatch(target string) {
+// expectNativeFaultDataMatch compares every table's row count and content hash, independently of the
+// operator, and requires the source fingerprint to hold each of tables.
+func expectNativeFaultDataMatch(target string, tables ...string) {
 	GinkgoHelper()
 	read := func(cluster string) map[string]string {
 		readCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -276,7 +281,9 @@ func expectNativeFaultDataMatch(target string) {
 		return data
 	}
 	source := read(sourceCluster)
-	Expect(source).To(HaveKey(kindPublicSchema+"."+kindOrdersTable), "the source fingerprint has no orders data")
+	for _, table := range tables {
+		Expect(source).To(HaveKey(table), "the source fingerprint has no %s data", table)
+	}
 	Expect(read(target)).To(Equal(source), "target table data differs from the source")
 }
 
