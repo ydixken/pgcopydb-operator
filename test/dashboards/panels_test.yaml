@@ -93,6 +93,34 @@ tests:
           - labels: '{namespace="ns", name="m"}'
             value: 500
 
+  # A native drain, with the M7-RUN6 run-02 positions. The pre-endpos sample
+  # stands 56 bytes short until the operator verifies the drain proof and
+  # records its durable replay, endpos itself, while still cutting over.
+  # Verifying then drops the replay series, and the tile reads the proven 0.
+  - interval: 1m
+    input_series:
+      - series: 'pgcopydb_migration_info{namespace="ns", name="m", mode="follow"}'
+        values: "1x10"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="CuttingOver"}'
+        values: "1x4 0x5"
+      - series: 'pgcopydb_migration_phase{namespace="ns", name="m", phase="Verifying"}'
+        values: "0x4 1x5"
+      - series: 'pgcopydb_migration_endpos_lsn_bytes{namespace="ns", name="m"}'
+        values: "172720808x10"
+      - series: 'pgcopydb_migration_replay_lsn_bytes{namespace="ns", name="m"}'
+        values: "172720752x3 172720808 stale"
+    promql_expr_test:
+      - expr: *drain
+        eval_time: 3m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: 56
+      - expr: *drain
+        eval_time: 8m
+        exp_samples:
+          - labels: '{namespace="ns", name="m"}'
+            value: 0
+
   # Synchronous Replication Waits. A sample with no waiter is a reading and
   # stays 0. Once the sampler run stops the series go stale, and the panel
   # reads nothing rather than the last count.

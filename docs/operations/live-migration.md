@@ -222,6 +222,8 @@ Before the worker streams, its slot is not active and the lag cannot be read, so
 A sample that is in flight, missing or failed changes nothing: the phase, `CaughtUp` and the three fields keep what the last complete sample of the attempt set.
 A new attempt clears the three fields, `progress` and `CaughtUp` when it starts.
 The pass that saves endpos for a cutover first records the `CaughtUp` True that admitted it.
+After the worker Job completes and the operator verifies the drain proof, it raises `replayLSN` to the proof's durable replay LSN, in a status write of its own.
+It never lowers `replayLSN`, and `writeLSN` and `lagBytes` keep the last sample.
 
 ## Manual cutover runbook
 

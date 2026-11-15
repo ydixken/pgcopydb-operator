@@ -240,6 +240,12 @@ See [What the positions mean with engine `rpgmigrate`](live-migration.md#what-th
 With replay present, `PgcopydbMigrationCutoverStalled` also covers a native drain that does not bring `confirmed_flush_lsn` to endpos.
 A sample that is unknown deletes all four series, never sets them to zero.
 The four series also disappear outside the sampling phases and when the sampler stops.
+The sampler stops when the cutover saves the endpos, and that status write publishes the last sample again.
+So through the drain, the four series keep the last sample from before the endpos.
+The operator verifies the drain proof on its first pass after the worker Job completes, through the endpos helper Job.
+It then writes the proof's durable replay LSN to `status.replication.replayLSN` in a status write of its own, while the phase is still `CuttingOver`, and `replay_lsn_bytes` follows.
+That write never lowers replay, and an attempt without a replay sample keeps none.
+`write_lsn_bytes` and `replication_lag_bytes` keep the last sample, so after that write the lag is no longer `write - replay`.
 
 ## Dashboards
 
@@ -371,7 +377,11 @@ The tiles read as follows:
   It reads 0 B once source-visible replay feedback reaches the endpos, which is what the screenshot shows.
   Only `CutoverCompleted`, after target-origin or content verification, proves the drain.
   After `CuttingOver`, the LSN series are gone, so the tile reads their last values in the time range.
-  These values come from the last worker sample, which can be before the end of the drain.
+  With engine `pgcopydb`, these values come from the last worker sample, which can be before the end of the drain.
+  With engine `rpgmigrate`, replay is the durable replay of the verified drain proof, so a `keepalive` drain reads 0 B.
+  A `later_begin` drain can prove a durable replay below the endpos, and then the tile keeps that gap.
+  The proven replay stands for one more completion pass, which runs the endpos helper Job again, before the phase leaves `CuttingOver`.
+  A scrape interval longer than that pass can miss it, and then the tile keeps the gap of the last sample.
   If the time range starts after that sample, the tile reads N/A.
   A follow migration that is `Failed` or `Suspended` also reads N/A when the time range has no endpos sample.
   The tile cannot tell if a cutover set an endpos for that migration.
@@ -469,6 +479,7 @@ Both conditions keep their last value while no worker runs, so the rule skips `F
 During the base copy, the lag gauge already exists, a large lag is normal, and nothing can act on it.
 `PgcopydbMigrationCutoverStalled` matches `CuttingOver` alone and stops when `CutoverCompleted` is `True`.
 After the worker exits, the replay gauge keeps its last sample, which can be below the endpos.
+With engine `rpgmigrate`, it keeps the last sample from before the endpos until the operator verifies the drain proof, and then reads the proof's durable replay.
 The phase stays `CuttingOver` through the drain verification, the ownership handover, and the cleanup.
 Without these two limits, a complete drain can fire the alert.
 
