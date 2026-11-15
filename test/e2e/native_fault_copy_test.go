@@ -144,8 +144,12 @@ func (s nativeFaultCopySample) midCopy(total int64) bool {
 
 func (s nativeFaultCopySample) complete(total int64) bool { return s.present && s.bytes == total }
 
-// nativeFaultBulk is the spec-local plan table whose COPY the fault interrupts.
-type nativeFaultBulk struct{ rows, total int64 }
+// nativeFaultBulk is the spec-local plan table whose COPY the fault interrupts. probeGap is
+// the longest time between two probe starts, which bounds how late the probe can see the COPY.
+type nativeFaultBulk struct {
+	rows, total int64
+	probeGap    time.Duration
+}
 
 // createNativeFaultBulk creates the bulk table on the source as the app role, which owns
 // every fixture table; the drop runs after the Migration's own cleanup.
@@ -164,7 +168,13 @@ func createNativeFaultBulk() *nativeFaultBulk {
 func (b *nativeFaultBulk) waitMidCopy(stop func(Gomega) string) nativeFaultCopySample {
 	GinkgoHelper()
 	var sample nativeFaultCopySample
+	var last time.Time
 	Eventually(func(g Gomega) {
+		now := time.Now()
+		if !last.IsZero() {
+			b.probeGap = max(b.probeGap, now.Sub(last))
+		}
+		last = now
 		if reason := stop(g); reason != "" {
 			StopTrying(reason + " before the bulk table was seen mid-copy").Now()
 		}
@@ -218,8 +228,8 @@ func (b *nativeFaultBulk) expectRows(target string, resumed bool) {
 func (b *nativeFaultBulk) report(s nativeFaultCopySample) {
 	window := fmt.Sprintf("%.1fs", s.elapsed*float64(b.total)/float64(s.bytes))
 	AddReportEntry("native fault copy kill", fmt.Sprintf("table=%s rows=%d total_bytes=%d bytes_at_kill=%d (%.1f%%)"+
-		" copy_elapsed=%.3fs projected_window=%s xid=%s", nativeFaultBulkTable, b.rows, b.total, s.bytes,
-		100*float64(s.bytes)/float64(b.total), s.elapsed, window, s.xid))
+		" copy_elapsed=%.3fs projected_window=%s probe_gap_max=%s xid=%s", nativeFaultBulkTable, b.rows, b.total, s.bytes,
+		100*float64(s.bytes)/float64(b.total), s.elapsed, window, b.probeGap.Round(time.Millisecond), s.xid))
 }
 
 func TestNativeFaultCopyProgress(t *testing.T) {
