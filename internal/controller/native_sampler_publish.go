@@ -73,7 +73,7 @@ func (s *Sampler) ObserveNative(key types.NamespacedName, in nativeSamplerInput)
 	base := run.native.scope.baseCopyComplete
 	run.native.mu.Unlock()
 	got := run.native.Observe(in.migration, in.execution, base, in.threshold)
-	metrics.RecordNativeLag(key.Namespace, key.Name, got.lagBytes)
+	metrics.RecordNativeLag(key.Namespace, key.Name, got.lagBytes, got.writeLSN, got.replayLSN)
 	return got, true
 }
 
@@ -132,7 +132,7 @@ func (s *Sampler) sampleNativeRun(ctx context.Context, key types.NamespacedName,
 	if !run.nativeBaseCopyComplete && nativeBaseCopyReady(got) {
 		run.nativeBaseCopyComplete = true
 	}
-	metrics.RecordNativeLag(key.Namespace, key.Name, got.lagBytes)
+	metrics.RecordNativeLag(key.Namespace, key.Name, got.lagBytes, got.writeLSN, got.replayLSN)
 	return got, err
 }
 

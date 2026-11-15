@@ -178,7 +178,7 @@ func (s *Sampler) stopLocked(key types.NamespacedName) {
 		run.cancel()
 		if run.nativeInput != nil {
 			run.native.Stop()
-			metrics.RecordNativeLag(key.Namespace, key.Name, nil)
+			metrics.RecordNativeLag(key.Namespace, key.Name, nil, "", "")
 		}
 		delete(s.runs, key)
 	}

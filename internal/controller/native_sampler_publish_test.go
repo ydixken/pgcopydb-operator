@@ -17,6 +17,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
+	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -111,11 +112,13 @@ func TestNativeSamplerIntegration(t *testing.T) {
 		if err != nil || got.progress == nil || got.lagBytes == nil || got.observedAt != f.now || got.catchUpConfirmed != (i == 2) {
 			t.Fatalf("sample %d did not require the latch then two later lag observations: %+v, %v", i, got, err)
 		}
+		requireNativeGaugesFromSample(t, key, got)
 		for range 3 {
 			observed, ok := s.ObserveNative(key, in)
 			if !ok || observed.catchUpConfirmed != got.catchUpConfirmed || observed.observedAt != got.observedAt {
 				t.Fatal("cached reads changed qualification or measured time")
 			}
+			requireNativeGaugesFromSample(t, key, observed)
 		}
 		f.advance(time.Second)
 	}
@@ -137,9 +140,7 @@ func TestNativeSamplerPublicationUnknown(t *testing.T) {
 	if err == nil || got.lagBytes != nil || got.progress == nil || got.catchUpConfirmed {
 		t.Fatal("unknown lag became known or discarded separately checked progress")
 	}
-	if _, found, err := readGauge("pgcopydb_migration_replication_lag_bytes", map[string]string{testNamespaceLabel: f.m.Namespace, lifecycleNameKey: f.m.Name}); err != nil || found {
-		t.Fatal("unknown native lag retained a gauge", err)
-	}
+	requireNativeGaugesFromSample(t, key, got)
 	s.Stop(key)
 	if got, err := s.SampleNativeNow(context.Background(), key, in); err == nil || got.progress != nil || s.running(key) {
 		t.Fatal("synchronous sampling resurrected a stopped run")
@@ -400,5 +401,29 @@ func TestNativeSamplerPublicationNoMeasurements(t *testing.T) {
 	got, err := s.SampleNativeNow(context.Background(), client.ObjectKeyFromObject(f.m), in)
 	if err != nil || got.progress == nil || !got.observedAt.IsZero() || got.catchUpConfirmed {
 		t.Fatal("missing native counters gained a measurement timestamp", err)
+	}
+}
+
+// requireNativeGaugesFromSample checks the lag and position gauges against the sample that
+// fills status.replication: all four from it when known, none when unknown.
+func requireNativeGaugesFromSample(t *testing.T, key types.NamespacedName, got nativeSample) {
+	t.Helper()
+	labels := map[string]string{testNamespaceLabel: key.Namespace, lifecycleNameKey: key.Name}
+	want := map[string]float64{}
+	if got.lagBytes != nil {
+		write, err1 := sentinel.ParseLSN(got.writeLSN)
+		replay, err2 := sentinel.ParseLSN(got.replayLSN)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("known sample without positions: %+v", got)
+		}
+		want["replication_lag_bytes"], want["replay_lsn_bytes"] = float64(*got.lagBytes), float64(replay)
+		want["write_lsn_bytes"], want["source_lsn_bytes"] = float64(write), float64(write)
+	}
+	for _, name := range []string{"replication_lag_bytes", "source_lsn_bytes", "write_lsn_bytes", "replay_lsn_bytes"} {
+		v, found, err := readGauge("pgcopydb_migration_"+name, labels)
+		expected, known := want[name]
+		if err != nil || found != known || v != expected {
+			t.Fatalf("%s = %v (present %v), want %v (present %v) from the sample: %v", name, v, found, expected, known, err)
+		}
 	}
 }

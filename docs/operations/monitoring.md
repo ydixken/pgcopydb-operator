@@ -230,6 +230,17 @@ See [client tool versions](../reference/prerequisites.md#client-tool-versions).
 Receive batching does not make these LSN slopes into end-to-end throughput measurements.
 It also does not make the [drain-verification gate](live-migration.md#manual-cutover-runbook) unnecessary.
 
+### What the gauges mean with engine `rpgmigrate`
+
+The native engine fills the lag and the three position gauges from the same sample that fills `status.replication`.
+That sample reads the source WAL insert position and the native slot's `confirmed_flush_lsn` in one query.
+`write_lsn_bytes` and `source_lsn_bytes` are both that insert position, so receive lag reads zero and means nothing here.
+`replay_lsn_bytes` is that `confirmed_flush_lsn`, and `replication_lag_bytes` is exactly `write - replay`.
+See [What the positions mean with engine `rpgmigrate`](live-migration.md#what-the-positions-mean-with-engine-rpgmigrate) for why replay is not proof of target application.
+With replay present, `PgcopydbMigrationCutoverStalled` also covers a native drain that does not bring `confirmed_flush_lsn` to endpos.
+A sample that is unknown deletes all four series, never sets them to zero.
+The four series also disappear outside the sampling phases and when the sampler stops.
+
 ## Dashboards
 
 The chart includes three dashboards.
