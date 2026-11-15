@@ -1,9 +1,11 @@
+import ast
 import copy
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import struct
 import sys
@@ -1172,6 +1174,22 @@ class NativePythonTests(unittest.TestCase):
                 self.assertEqual(P.catalog_sql(marker,major,7),expected)
         for version in (5,8,True,7.0):
             with self.subTest(version=version),self.assertRaises(P.Refusal): P.catalog_sql(False,16,version)
+
+    def test_NoEnginePlaceholders(self):
+        # An engine format! placeholder such as {pg18} left in SQL is a syntax error on every major.
+        placeholder=re.compile(r'\{[A-Za-z_][A-Za-z0-9_]*\}')
+        embedded=sorted({name for go in HERE.glob('*.go') if not go.name.endswith('_test.go') for name in re.findall(r'^//go:embed (\S+\.py)$',go.read_text(),re.M)})
+        self.assertTrue({'evidence_program.py','owned_inventory_program.py'}<=set(embedded))
+        for name in embedded:
+            strings=[node.value for node in ast.walk(ast.parse((HERE/name).read_bytes())) if isinstance(node,ast.Constant) and type(node.value) is str]
+            self.assertTrue(strings,name)
+            for value in strings:
+                with self.subTest(program=name): self.assertIsNone(placeholder.search(value),value[:200])
+        fixtures=sorted((HERE/'testdata'/'evidence').glob('*.sql'))
+        self.assertGreaterEqual(len(fixtures),10)
+        rendered=[P.catalog_sql(marker,major,version) for major in (16,18) for version,markers in ((6,(False,True)),(7,(False,True,'large_object'))) for marker in markers]
+        for label,sql in [(f.name,f.read_text()) for f in fixtures]+[('rendered',sql) for sql in rendered]:
+            with self.subTest(sql=label): self.assertIsNone(placeholder.search(sql))
 
     def test_RuntimeMetadata(self):
         value=dict(version=1,architecture='arm64',library_path='/usr/lib/aarch64-linux-gnu/libpq.so.5.18',library_sha256='a'*64,libpq_version=180006,package_name='libpq5',package_version='18.6-1.pgdg13+1')

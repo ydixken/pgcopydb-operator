@@ -46,6 +46,8 @@ The two `ownerAfterRestore` tests run the handover's candidate query and the pre
 That variable enables `TestCompareDataQuery` and the progress sampler SQL cancellation regressions; without it those tests skip.
 `TestProgressSQLBounds` also needs psql 15 or later, because older psql prints only the last result of a multi-statement `-c`.
 The sampler tests own temporary databases and relation locks, verify cancellation and recovery, and remove their fixtures afterward.
+`TestNativeEvidenceSQLLive` also requires the variable and `psql`.
+It executes the native receipt catalog statements against engine-shaped tables in a temporary database and drops that database afterward.
 
 Coverage goes to Codecov, gated on the `CODECOV_TOKEN` repository secret.
 Codecov rejects tokenless uploads even from public repositories, so without the secret the upload step skips visibly rather than passing quietly; with it set, a failed upload fails the job.
