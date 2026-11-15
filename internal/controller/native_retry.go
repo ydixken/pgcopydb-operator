@@ -172,6 +172,7 @@ func (r *MigrationReconciler) failNativeRetryBudget(m *v1beta1.Migration) {
 	m.Status.Phase = v1beta1.PhaseFailed
 	r.nativeCloneAttemptEnded(m, reasonCloneFailed)
 	r.setCondition(m, v1beta1.ConditionFailed, metav1.ConditionTrue, "BackoffLimitExceeded", "Native retry budget is exhausted")
+	r.endHold(m, reasonHoldMigrationFailed, fmt.Sprintf("Attempt %d does not start: the Migration failed with BackoffLimitExceeded", m.Status.Attempts+1))
 }
 
 func (r *MigrationReconciler) patchNativeRetry(ctx context.Context, m, desired, base *v1beta1.Migration) (ctrl.Result, error) {

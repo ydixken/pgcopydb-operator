@@ -764,6 +764,9 @@ func TestNativeRetryBudget(t *testing.T) {
 		if f.m.Status.Phase != v1beta1.PhaseFailed || f.m.Status.RetryGate.Exemption != v1beta1.RetryGateCounted || f.workerCreates != 0 || f.relays != 1 {
 			t.Fatal("counted native budget did not stop", f.m.Status.Phase, f.workerCreates, f.relays)
 		}
+		if held := meta.FindStatusCondition(f.m.Status.Conditions, v1beta1.ConditionRetryHeld); held == nil || held.Status != metav1.ConditionFalse || held.Reason != reasonHoldMigrationFailed || !strings.Contains(held.Message, "BackoffLimitExceeded") {
+			t.Fatal("an exhausted native budget kept holding the retry", held)
+		}
 	})
 	t.Run("one exemption", func(t *testing.T) {
 		f := newNativeDispositionFixture(t, false)
