@@ -73,6 +73,7 @@ func seamsRejoinDatabases() []string {
 // runs while the injector still holds a source lock.
 type seamsCrash struct {
 	kind   string
+	run    string
 	mu     sync.Mutex
 	killed bool
 	done   chan struct{}
@@ -117,7 +118,7 @@ func (h *seamsHarness) runRejoinCase(c seamsRejoinCase) {
 	}
 	for _, point := range c.crashes {
 		if !h.check(c.prefix+"/crash-"+point.kind, "reconcile: finishNativeFollow until SIGKILL interrupts its cleanup Job", func() (string, error) {
-			return h.crashCleanup(ctx, name, point.kind)
+			return h.crashCleanup(ctx, name, run, point.kind)
 		}) {
 			return
 		}
@@ -147,8 +148,8 @@ func (h *seamsHarness) runRejoinCase(c seamsRejoinCase) {
 
 // crashCleanup arms one crash for the next cleanup Job and reconciles until it fired. Every crash
 // follows a state without cleanup intent, so each rejoin probe before it must refuse.
-func (h *seamsHarness) crashCleanup(ctx context.Context, name, kind string) (string, error) {
-	crash := &seamsCrash{kind: kind, done: make(chan struct{})}
+func (h *seamsHarness) crashCleanup(ctx context.Context, name, run, kind string) (string, error) {
+	crash := &seamsCrash{kind: kind, run: run, done: make(chan struct{})}
 	h.crashMu.Lock()
 	h.crashes = append(h.crashes, crash)
 	h.crashMu.Unlock()
@@ -208,7 +209,7 @@ func (h *seamsHarness) arm(crash *seamsCrash, job string) {
 		// Inspection's last query reads pg_publication_tables, which opens every member table.
 		_, err = hold.do("BEGIN; LOCK TABLE orders IN ACCESS EXCLUSIVE MODE;")
 	case seamsCrashBeforePublication:
-		if publication, err = hold.do("SELECT quote_ident(pubname) FROM pg_publication;"); err == nil {
+		if publication, err = hold.do("SELECT quote_ident(pubname) FROM pg_publication WHERE pubname LIKE 'rpgm_p_" + crash.run + "_%';"); err == nil {
 			_, err = hold.do("BEGIN; COMMENT ON PUBLICATION " + publication + " IS NULL;")
 		}
 	case seamsCrashBeforeTombstone:
@@ -345,7 +346,7 @@ func (h *seamsHarness) inject(ctx context.Context, crash *seamsCrash, job string
 		}
 		// The released commit makes the DROP visible; the engine never recorded its flag.
 		for {
-			out, err := hold.do("SELECT count(*) FROM pg_publication;")
+			out, err := hold.do("SELECT count(*) FROM pg_publication WHERE pubname LIKE 'rpgm_p_" + crash.run + "_%';")
 			if err != nil || out == "0" {
 				return "SIGKILL while the committed DROP PUBLICATION waited for a synchronous standby", err
 			}
