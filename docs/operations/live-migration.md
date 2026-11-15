@@ -117,6 +117,7 @@ Each connection times out after 10 seconds, and the full preflight times out aft
 A black-holed endpoint fails and does not hang.
 `PGCONNECT_TIMEOUT` sets that connect timeout on every operator control Job.
 It never sets the timeout on the pgcopydb worker, because the data path of the worker must not race a connect cap.
+The native source observation that the operator execs into the worker container sets it in its own argv, so the worker process stays uncapped.
 
 A preflight failure is terminal.
 These failures are configuration errors on the databases, so a retry of the Migration cannot fix them.

@@ -157,7 +157,7 @@ func TestNativeInformationalLagSample(t *testing.T) {
 			}
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if s.calls != 1 || s.targetBytes > nativeWireLimit || len(s.input) > nativeWireLimit || len(s.argv) != 14 || s.argv[10] != kind {
+			if s.calls != 1 || s.targetBytes > nativeWireLimit || len(s.input) > nativeWireLimit || len(s.argv) != 15 || s.argv[5] != "PGCONNECT_TIMEOUT=10" || s.argv[11] != kind {
 				t.Fatal("checked source command did not preserve framing")
 			}
 			t.Logf("actual Go checked-exec request target=%d stdin=%d", s.targetBytes, len(s.input))

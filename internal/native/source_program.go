@@ -55,7 +55,8 @@ func sourceExecArgv(kind string, w ExecutionData) ([]string, error) {
 	if writeErr != nil || closeErr != nil {
 		return nil, errors.New("native source delivery unavailable")
 	}
-	argv := []string{nativeEnvExecutable, "-u", nativePreloadEnv, "-u", nativeLibraryPathEnv, nativePythonExecutable, "-I", "-B", "-c", sourceBootstrap, kind, w.OperationID, hex.EncodeToString(w.ProgramSHA256[:]), base64.StdEncoding.EncodeToString(compressed.Bytes())}
+	// The worker env omits the connect cap (its data path must not race it); the observation program requires one.
+	argv := []string{nativeEnvExecutable, "-u", nativePreloadEnv, "-u", nativeLibraryPathEnv, "PGCONNECT_TIMEOUT=10", nativePythonExecutable, "-I", "-B", "-c", sourceBootstrap, kind, w.OperationID, hex.EncodeToString(w.ProgramSHA256[:]), base64.StdEncoding.EncodeToString(compressed.Bytes())}
 	if !sourceExecFits(w, argv) {
 		return nil, errors.New("native source delivery unavailable")
 	}
