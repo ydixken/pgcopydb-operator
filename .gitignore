@@ -42,3 +42,6 @@ site/
 # Local-only design notes, kept out of the public repo.
 docs/superpowers/
 tasks/work-packages/
+
+# Python bytecode from the hack/ offline tests.
+__pycache__/
