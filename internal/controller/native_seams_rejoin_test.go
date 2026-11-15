@@ -290,7 +290,7 @@ func (h *seamsHarness) inject(ctx context.Context, crash *seamsCrash, job string
 		if err := h.cluster.kill(ctx, job, "KILL"); err != nil {
 			return err
 		}
-		return h.cluster.waitJob(ctx, job, func(j *batchv1.Job) bool { return j.Status.Failed > 0 })
+		return h.cluster.waitFailedExit(ctx, job)
 	}
 	switch crash.kind {
 	case seamsCrashBeforeIntent:

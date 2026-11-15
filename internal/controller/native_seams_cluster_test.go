@@ -1152,6 +1152,24 @@ func (c *seamsCluster) waitJob(ctx context.Context, name string, done func(*batc
 	}
 }
 
+// waitFailedExit polls until the kubelet recorded a nonzero exit of the Job's container, which it
+// records only after writing the Failed status; the operator may delete a Failed helper at once.
+func (c *seamsCluster) waitFailedExit(ctx context.Context, name string) error {
+	for {
+		c.mu.Lock()
+		failed := slices.ContainsFunc(c.exits, func(e seamsExit) bool { return e.job == name && e.code != 0 })
+		c.mu.Unlock()
+		if failed {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("job %s has no failed exit: %w", name, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 // podLogs returns a Pod's complete log for diagnostics.
 func (c *seamsCluster) podLogs(ctx context.Context, jobName string) string {
 	p := c.podFor(jobName)
