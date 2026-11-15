@@ -140,12 +140,16 @@ Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait f
 It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
 It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
 `fault-copy` first creates `public.e2e_nfault_bulk` on the source: a bigint primary key and an 8 KiB text payload per row, 4 GiB of text COPY that pglz keeps near 110 MB on each volume.
-We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there and still about 15 at twice that rate.
+We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there.
+On kind it is shorter: in M7-RUN5 the worker took about 18 seconds from start to streaming with the table and M7-RUN4 took 3.3 without it, which puts the table's COPY near 14 seconds.
+The probe reads the target every 250 ms plus the time one `psql` exec takes.
+During a COPY of this table on the podman VM the longest time between two probe starts was 1.15 seconds, so the window is still about ten times that once the probe starts.
 The spec kills the runner only when the target's `pg_stat_progress_copy` shows that table's COPY with a transaction ID and with bytes processed above zero and below the stream total the source computes.
 It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
 It also fails at once when a COPY into that table runs under any `application_name` other than `rpgmigrate[<pid>] copy`, so an engine that leaves its sessions unnamed cannot pass for a COPY the probe never saw.
 After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
-The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started and the copy window projected from them.
+The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, and the longest time between two probe starts (`probe_gap_max`).
+Keep the projected window at least four times `probe_gap_max`, and grow the table if a run shows less.
 The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
 The spec drops it from the source after the Migration's own cleanup.
 The fault specs find the engine's sessions by their `rpgmigrate[<pid>] <role>` names.
@@ -169,6 +173,8 @@ Kubelet applies no `fsGroup` change to a hostPath volume, so a native kind run d
 The internal suite Task requires the exact guard-owned run, context, engine, and that engine's positive label.
 Do not invoke it as a context bypass.
 It writes the `go test -json` stream to `RUN_DIR/go-test.json`, so a failed Go gate keeps its failing assertion.
+Its timeouts sit inside the guard's 1800-second cap: `go test -timeout 28m` leaves two minutes for the Task start and the build, and `-ginkgo.timeout=25m` leaves three for the failed spec's cleanup, the AfterSuite and the receipt.
+Every Migration phase wait ends six minutes before the Ginkgo timeout, so a stalled follow fails with the phase it stalled at instead of a guard `TimeoutExpired`.
 The ledger records only whether that file exists.
 The stream can contain fixture output, so keep it in the private run directory and do not publish it.
 A run refuses to start over an existing `go-test.json` or `suite-receipt.json`.

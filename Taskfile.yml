@@ -436,9 +436,11 @@ tasks:
         msg: E2E_CONTEXT Task variable conflicts with the guard-owned context.
       - sh: test -z "${E2E_CONTEXT:-}" || test "$E2E_CONTEXT" = {{.EXPECT_CONTEXT | shellQuote}}
         msg: E2E_CONTEXT conflicts with the guard-owned context.
+    # Inside the guard's 1800 s cap, -timeout leaves 2m for task start and build (12 s cold), and the
+    # Ginkgo interrupt leaves 3m for the failed spec's cleanup, AfterSuite and receipt (53 s in M7-RUN5).
     cmds:
       - >-
         E2E_CONTEXT={{.EXPECT_CONTEXT | shellQuote}} E2E_ENGINE={{.E2E_ENGINE | shellQuote}} E2E_SMALL=true
-        go test ./test/e2e -json -run '^TestE2E$' -count=1 -v -timeout 30m
-        -ginkgo.v -ginkgo.timeout=30m -ginkgo.label-filter={{.LABEL | shellQuote}} -ginkgo.fail-on-empty
+        go test ./test/e2e -json -run '^TestE2E$' -count=1 -v -timeout 28m
+        -ginkgo.v -ginkgo.timeout=25m -ginkgo.label-filter={{.LABEL | shellQuote}} -ginkgo.fail-on-empty
         > {{.RUN_DIR | shellQuote}}/go-test.json

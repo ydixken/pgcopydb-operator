@@ -1327,7 +1327,7 @@ func waitCompleted(name, ns string) *v1beta1.Migration {
 
 // waitPhase waits until the Migration reaches one of the wanted phases and
 // bails out early on Failed so a broken run reports the operator's failure
-// message instead of a timeout.
+// message instead of a timeout. suiteWait caps timeout inside the suite's own.
 func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.MigrationPhase) *v1beta1.Migration {
 	GinkgoHelper()
 	m := &v1beta1.Migration{}
@@ -1338,7 +1338,7 @@ func waitPhase(name, ns string, timeout time.Duration, want ...v1beta1.Migration
 		}
 		g.Expect(want).To(ContainElement(m.Status.Phase),
 			"migration %s/%s at phase %q, attempts %d", ns, name, m.Status.Phase, m.Status.Attempts)
-	}, timeout, time.Second).Should(Succeed())
+	}, suiteWait(timeout), time.Second).Should(Succeed())
 	return m
 }
 

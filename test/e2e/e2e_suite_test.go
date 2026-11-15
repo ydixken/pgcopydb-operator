@@ -1430,6 +1430,36 @@ func TestBoundedWait(t *testing.T) {
 	}
 }
 
+// A follow stalled at CuttingOver must fail its own wait inside the suite timeout,
+// not run on until the guard kills the process with no failure line.
+func TestFollowWaitsEndInsideTheSuiteTimeout(t *testing.T) {
+	oldCtx, oldClient, oldDeadline := ctx, k8sClient, suiteDeadline
+	t.Cleanup(func() { ctx, k8sClient, suiteDeadline = oldCtx, oldClient, oldDeadline })
+	scheme := runtime.NewScheme()
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	stalled := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Name: "e2e-follow-stalled", Namespace: nsE2E},
+		Status: v1beta1.MigrationStatus{Phase: v1beta1.PhaseCuttingOver, Attempts: 1}}
+	ctx = context.Background()
+	k8sClient = clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(stalled).
+		WithStatusSubresource(stalled).Build()
+	RegisterTestingT(t)
+	for name, wait := range map[string]func(){
+		"waitPhase":    func() { waitPhase(stalled.Name, nsE2E, followTimeout, v1beta1.PhaseCompleted) },
+		"waitTerminal": func() { waitTerminal(stalled.Name, followTimeout) },
+	} {
+		suiteDeadline = time.Now().Add(suiteCleanupReserve + 3*time.Second)
+		start := time.Now()
+		err := InterceptGomegaFailure(wait)
+		if elapsed := time.Since(start); err == nil || elapsed > time.Minute ||
+			!strings.Contains(err.Error(), `phase "CuttingOver"`) {
+			t.Errorf("%s on a stalled follow: err %v after %s, want its own phase failure within the suite deadline",
+				name, err, elapsed)
+		}
+	}
+}
+
 // connectSuite builds this process's API client.
 func connectSuite() {
 	GinkgoHelper()
@@ -3741,7 +3771,7 @@ func waitFailed(name, reason string) *v1beta1.Migration {
 		c := apimeta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionFailed)
 		g.Expect(c).NotTo(BeNil(), "Failed condition missing on %s", name)
 		g.Expect(c.Reason).To(Equal(reason), "Failed reason is %q, message: %s", c.Reason, c.Message)
-	}, migrationTimeout, time.Second).Should(Succeed())
+	}, suiteWait(migrationTimeout), time.Second).Should(Succeed())
 	return m
 }
 

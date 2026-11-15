@@ -339,6 +339,6 @@ func waitTerminal(name string, timeout time.Duration) *v1beta1.Migration {
 		g.Expect([]v1beta1.MigrationPhase{v1beta1.PhaseCompleted, v1beta1.PhaseFailed}).
 			To(ContainElement(m.Status.Phase),
 				"migration %s at phase %q, attempts %d", name, m.Status.Phase, m.Status.Attempts)
-	}, timeout, 2*time.Second).Should(Succeed())
+	}, suiteWait(timeout), 2*time.Second).Should(Succeed())
 	return m
 }
