@@ -18,10 +18,10 @@ func TestNativeSourceProgramDelivery(t *testing.T) {
 	w := sourceWant()
 	for _, kind := range []string{sourceHeadKind, activeLagKind} {
 		argv, err := sourceExecArgv(kind, w)
-		if err != nil || len(argv) != 14 || argv[0] != nativeEnvExecutable || argv[5] != nativePythonExecutable || argv[9] != sourceBootstrap || argv[10] != kind || argv[11] != w.OperationID {
+		if err != nil || len(argv) != 15 || argv[0] != nativeEnvExecutable || argv[5] != "PGCONNECT_TIMEOUT=10" || argv[6] != nativePythonExecutable || argv[10] != sourceBootstrap || argv[11] != kind || argv[12] != w.OperationID {
 			t.Fatal("fixed source argv not rendered")
 		}
-		compressed, err := base64.StdEncoding.Strict().DecodeString(argv[13])
+		compressed, err := base64.StdEncoding.Strict().DecodeString(argv[14])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -36,7 +36,7 @@ func TestNativeSourceProgramDelivery(t *testing.T) {
 		if len(sourceBootstrap) > 2048 || !sourceExecFits(w, argv) {
 			t.Fatal("complete encoded command exceeds bound")
 		}
-		t.Logf("%s canonical=%d compressed=%d padded_base64=%d bootstrap=%d", kind, len(raw), len(compressed), len(argv[13]), len(sourceBootstrap))
+		t.Logf("%s canonical=%d compressed=%d padded_base64=%d bootstrap=%d", kind, len(raw), len(compressed), len(argv[14]), len(sourceBootstrap))
 	}
 	for _, kind := range []string{"", "observe", "completed_evidence", "source_head;bad"} {
 		if _, err := sourceExecArgv(kind, w); err == nil {
@@ -47,11 +47,11 @@ func TestNativeSourceProgramDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	argv[13] = strings.Repeat("+", nativeWireLimit)
+	argv[14] = strings.Repeat("+", nativeWireLimit)
 	if sourceExecFits(w, argv) {
 		t.Fatal("percent-encoded framing overflow accepted")
 	}
-	argv[13] = "\x00"
+	argv[14] = "\x00"
 	if sourceExecFits(w, argv) {
 		t.Fatal("NUL argument accepted")
 	}
@@ -75,8 +75,9 @@ func testCanonicalSourceLoader(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, python, argv[6:]...)
-	command.Env = []string{"LANG=C", "LC_ALL=C", "PGCONNECT_TIMEOUT=10"}
+	// The rendered env prefix runs for real; only the interpreter path is the local one.
+	command := exec.CommandContext(ctx, argv[0], append(append(argv[1:6:6], python), argv[7:]...)...)
+	command.Env = []string{"LANG=C", "LC_ALL=C"}
 	command.Stdin = strings.NewReader("{}")
 	var output, diagnostic bytes.Buffer
 	command.Stdout, command.Stderr = &output, &diagnostic
