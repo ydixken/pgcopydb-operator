@@ -35,8 +35,11 @@ class CleanupRejoinState(InventoryState):
    InventoryState.revalidate(self)
    validate_control(inventory_json(self.end_file.raw,4096),self.manifest,self.req)
   finally:self.unlock_control()
-def cleanup_rejoin_source(state,library,materials,deadline,diag):
- session=Session(library,materials.connection('source'),deadline,diag)
+def rejoin_inputs(materials):
+ # One one-use ConnectionInput per Session: observe claims source and target, each source pin its own.
+ materials.roles.update(source_before=materials.roles['source'],source_after=materials.roles['source']);return materials
+def cleanup_rejoin_source(state,library,materials,deadline,diag,role):
+ session=Session(library,materials.connection(role),deadline,diag)
  try:
   for setting,value in [('search_path','pg_catalog'),('statement_timeout','4s'),('lock_timeout','1s'),('idle_in_transaction_session_timeout','6s')]:
    session.query("SET %s TO '%s';"%(setting,value),tag='SET',rows=0,width=0)
@@ -51,9 +54,9 @@ def cleanup_rejoin_source(state,library,materials,deadline,diag):
  # PID belongs to one connection; every other field and resource presence must stay fixed.
  return pinned[:4]+pinned[5:],tuple(rows[0])
 def observe_cleanup_rejoin(state,library,materials,deadline,diag):
- pinned=cleanup_rejoin_source(state,library,materials,deadline,diag)
+ pinned=cleanup_rejoin_source(state,library,materials,deadline,diag,'source_before')
  checkpoint,guards=observe(state,library,materials,deadline,diag)
- need(cleanup_rejoin_source(state,library,materials,deadline,diag)==pinned,CONN)
+ need(cleanup_rejoin_source(state,library,materials,deadline,diag,'source_after')==pinned,CONN)
  state.revalidate();materials.check()
  return checkpoint,guards
 def cleanup_rejoin_completion_main(argv):
@@ -63,7 +66,7 @@ def cleanup_rejoin_completion_main(argv):
   resource.setrlimit(resource.RLIMIT_CORE,(0,0));validate_environment(os.environ);need(os.environ.get('PGCONNECT_TIMEOUT')=='10',CAP_ERR)
   channel=InputChannel(op,time.monotonic()+30);channel.route();raw=channel.consume();deadline=time.monotonic()+25
   req=validate_cleanup_rejoin_request(raw,op,sha);work_environment(req);diag=Diagnostics();need(os.geteuid()==65532)
-  state=CleanupRejoinState(req);materials=Materialization(os.environ)
+  state=CleanupRejoinState(req);materials=rejoin_inputs(Materialization(os.environ))
   resolver=StableFile('/etc/resolv.conf',CAP);materials.files.append(resolver);resolver.raw.decode('ascii');need(b'\0' not in resolver.raw,CAP_ERR)
   library=load_runtime();materials.prepare(library,deadline);qualified_resolver_policy(resolver);need(time.monotonic()<deadline,'timeout')
   checkpoint,guards=observe_cleanup_rejoin(state,library,materials,deadline,diag)

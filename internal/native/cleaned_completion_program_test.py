@@ -59,6 +59,44 @@ def candidate(t):
     t.write()
 
 
+class OneUseInput(S['ConnectionInput']):
+    # Keeps the real one-use claim, check and close; only libpq option parsing and file snapshots are left out.
+    def __init__(self, library, raw, envb, materialization, deadline):
+        self.raw, self.materialization, self.deadline = raw, materialization, deadline
+        self.closed = self.started = self.absent = False
+        self.snapshots, self.overrides = [], {}
+        self.keywords, self.values = (b'dbname',), (raw,)
+
+
+class Quiet:
+    # Diagnostics that leave this process's stderr alone; wait_fd still selects on a real descriptor.
+    def __init__(self): self.fd, self.writer = os.pipe()
+    def check(self): pass
+    def close(self): os.close(self.fd); os.close(self.writer)
+
+
+def prepared(program_inputs, roles=None, library=None, deadline=60):
+    """The program's own input layout, prepared and handed out by the real Materialization methods."""
+    m = types.SimpleNamespace(roles=dict(roles or {'source': b'source', 'target': b'target'}), envb={}, inputs={}, prepared=False, check=lambda: None)
+    for name in ('prepare', 'connection'): setattr(m, name, types.MethodType(S['Materialization'].__dict__[name], m))
+    program_inputs(m)
+    with mock.patch.dict(S, ConnectionInput=S['ConnectionInput'] if library else OneUseInput): m.prepare(library, time.monotonic() + deadline)
+    return m
+
+
+def assert_spent(test, m):
+    """Each prepared input served exactly one Session, and no further Session can open on any of them."""
+    test.assertEqual(set(m.inputs), {'source', 'target', 'source_before', 'source_after'})
+    test.assertTrue(all(item.started for item in m.inputs.values()))
+    quiet = Quiet()
+    try:
+        for role in list(m.inputs) + ['source_extra']:
+            with test.subTest(extra_session=role), test.assertRaises(S['Refusal']) as caught:
+                S['Session'](None, m.connection(role), time.monotonic() + 5, quiet)
+            test.assertEqual(caught.exception.error_class, S['CAP_ERR'])
+    finally: quiet.close()
+
+
 class Sessions:
     def __init__(self, state, fault=None):
         self.state, self.fault, self.events = state, fault, []
@@ -72,7 +110,7 @@ class Sessions:
 
     def session(self, library, connection, deadline, diag):
         owner = self
-        role = connection
+        role = connection.claim()[1][0]
         owner.next_backend += 1; backend = owner.next_backend
         owner.events.append(('open', role))
         if role == b'source': owner.sources += 1
@@ -179,10 +217,11 @@ class CleanedTests(unittest.TestCase):
                 prepare(t)
                 if candidate_format: candidate(t)
                 state = S['CleanedState'](t.req)
-                material = types.SimpleNamespace(connection=lambda role: role.encode(), check=lambda: None)
+                material = lambda: prepared(S['cleaned_inputs'])
                 try:
-                    sessions = Sessions(state)
-                    with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
+                    sessions = Sessions(state); spent = material()
+                    with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, spent, time.monotonic()+25, None)
+                    assert_spent(self, spent)
                     self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
                     self.assertEqual(sessions.events[-1], ('close', b'source', True))
                     self.assertEqual(sessions.sources, 3)
@@ -196,7 +235,7 @@ class CleanedTests(unittest.TestCase):
                     self.assertEqual(sessions.next_backend, 104)
                     for mode in ['source_present', 'source_reappeared', 'unknown_commit', 'unlock', 'catalog', 'close', 'row_mutation', 'own_pid_changed', 'source_system', 'source_database', 'source_timeline', 'source_version', 'source_role', 'source_session_role', 'source_recovery', 'source_readonly']:
                         sessions = Sessions(state, mode)
-                        with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                        with self.subTest(mode=mode), mock.patch.dict(S, Session=sessions.session), self.assertRaises(S['Refusal']): observe(state, None, material(), time.monotonic()+25, None)
                 finally: state.close()
 
     def test_StateReplacement(self):
@@ -261,7 +300,8 @@ class CleanedTests(unittest.TestCase):
                 return close
             channel = mock.Mock(); channel.consume.return_value = raw
             state = types.SimpleNamespace(revalidate=lambda: None, close=closed('state'), resources=lambda: [])
-            materials = types.SimpleNamespace(files=[], prepare=lambda *a:None, check=lambda:None, close=closed('materials'))
+            layouts = []
+            materials = types.SimpleNamespace(files=[], roles={'source': b'source-uri', 'target': b'target-uri'}, prepare=lambda *a: layouts.append(dict(materials.roles)), check=lambda:None, close=closed('materials'))
             resolver = types.SimpleNamespace(raw=b'fixture', check=lambda:None)
             diag = types.SimpleNamespace(close=closed('diagnostics'))
             def policy(retained):
@@ -277,6 +317,7 @@ class CleanedTests(unittest.TestCase):
                 code = main(['-', req['kind'], req['operation_id'], req['program_sha256']])
             if fault is None:
                 self.assertEqual(code, 0); self.assertEqual(events, ['admission', 'barrier', 'closure', 'materials', 'state', 'diagnostics'])
+                self.assertEqual(layouts, [dict(source=b'source-uri', target=b'target-uri', source_before=b'source-uri', source_after=b'source-uri')])
                 result = json.loads(channel.finish.call_args.args[0]); self.assertTrue(result['cleanup_complete'] and result['source_resources_absent'])
             else:
                 self.assertEqual(code, 1); self.assertEqual(channel.finish.call_args.args, ())

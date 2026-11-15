@@ -42,7 +42,7 @@ class Sessions:
         self.present = [not absent and not flags[key] for key in ('slot_removed', 'publication_removed')]
 
     def session(self, library, connection, deadline, diag):
-        owner = self; role = connection
+        owner = self; role = connection.claim()[1][0]
         owner.next += 1; backend = 100 + owner.next
         if role == b'source': owner.sources += 1
         source_number = owner.sources
@@ -179,10 +179,11 @@ class CleanupRejoinTests(unittest.TestCase):
             for absent in (False, True):
                 with self.subTest(flags=flags, absent=absent), C.tree() as t:
                     prepare(t, flags); state = S['CleanupRejoinState'](t.req)
-                    material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
+                    material = lambda: C.prepared(S['rejoin_inputs'])
                     try:
-                        sessions = Sessions(state, absent=absent)
-                        with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, material, time.monotonic()+25, None)
+                        sessions = Sessions(state, absent=absent); spent = material()
+                        with mock.patch.dict(S, Session=sessions.session): checkpoint, guards = observe(state, None, spent, time.monotonic()+25, None)
+                        C.assert_spent(self, spent)
                         self.assertEqual(checkpoint['checkpoint_id'], '1:0:7'); self.assertEqual(guards, S['GUARDS'])
                         self.assertEqual(sessions.sources, 3)
                         backends = [e[2] for e in sessions.events if e[0]=='open' and e[1]==b'source']
@@ -194,11 +195,11 @@ class CleanupRejoinTests(unittest.TestCase):
                         self.assertEqual(len(updates), 1); self.assertEqual(updates[0][3], sessions.row)
                         for fault in ('foreign_slot', 'foreign_publication', 'active_slot', 'source_identity', 'own_pid_changed', 'source_close', 'source_close_after_barrier'):
                             bad = Sessions(state, fault, absent)
-                            with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                            with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material(), time.monotonic()+25, None)
                         for fault, absent_before in [('reappearance', True), ('disappearance', False)]:
                             if fault=='disappearance' and all(flags): continue
                             bad = Sessions(state, fault, absent_before)
-                            with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                            with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material(), time.monotonic()+25, None)
                     finally: state.close()
 
     def test_TargetAuthority(self):
@@ -208,7 +209,7 @@ class CleanupRejoinTests(unittest.TestCase):
                 prepare(t)
                 if candidate_format: C.candidate(t)
                 state = S['CleanupRejoinState'](t.req)
-                material = types.SimpleNamespace(connection=lambda role:role.encode(), check=lambda:None)
+                material = lambda: C.prepared(S['rejoin_inputs'])
                 try:
                     sessions = Sessions(state)
                     proof = S['validate_control_row'](sessions.row, state)
@@ -221,7 +222,7 @@ class CleanupRejoinTests(unittest.TestCase):
                         with self.subTest(index=index), self.assertRaises(S['Refusal']): S['validate_control_row'](row, state)
                     for fault in ('unknown_commit', 'unlock', 'catalog', 'target_close', 'row_mutation'):
                         bad = Sessions(state, fault)
-                        with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material, time.monotonic()+25, None)
+                        with self.subTest(fault=fault), mock.patch.dict(S, Session=bad.session), self.assertRaises(S['Refusal']): observe(state, None, material(), time.monotonic()+25, None)
                 finally: state.close()
 
     def test_RoutesStayNarrow(self):
@@ -256,7 +257,8 @@ class CleanupRejoinTests(unittest.TestCase):
                 return check
             resources=[dict(kind='replication_slot',name='native_slot',owned=True,retain=False),dict(kind='publication',name='native_publication',owned=True,retain=False),dict(kind='workdir',name='/work/pgcopydb',owned=True,retain=True)]
             state=types.SimpleNamespace(revalidate=checked('private_check'),close=closed('state'),resources=lambda:resources)
-            materials=types.SimpleNamespace(files=[],prepare=lambda *a:None,check=checked('material_check'),close=closed('materials'))
+            layouts=[]
+            materials=types.SimpleNamespace(files=[],roles={'source':b'source-uri','target':b'target-uri'},prepare=lambda *a:layouts.append(dict(materials.roles)),check=checked('material_check'),close=closed('materials'))
             resolver=types.SimpleNamespace(raw=b'fixture',check=checked('resolver_check'));diag=types.SimpleNamespace(close=closed('diagnostics'))
             def policy(retained):
                 self.assertIs(retained, resolver); self.assertEqual(materials.files, [resolver])
@@ -271,6 +273,7 @@ class CleanupRejoinTests(unittest.TestCase):
                 code=main(['-',req['kind'],req['operation_id'],req['program_sha256']])
             if fault is None:
                 self.assertEqual(code,0);self.assertEqual(events,['admission','barrier','closure','materials','state','diagnostics'])
+                self.assertEqual(layouts,[dict(source=b'source-uri',target=b'target-uri',source_before=b'source-uri',source_after=b'source-uri')])
                 result=json.loads(channel.finish.call_args.args[0]);self.assertTrue(result['cleanup_pending'] and result['source_resources_checked'])
                 self.assertNotIn('cleanup_complete',result);self.assertNotIn('source_resources_absent',result)
             else:
