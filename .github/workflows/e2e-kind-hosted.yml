@@ -1,0 +1,74 @@
+name: Kind hosted runtime admission
+
+on:
+  push:
+    branches: [ci/m7-hosted-kind-20261115]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kind-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+# A hosted kind run needs this runner to pass the guard's fixed capacity profile first.
+jobs:
+  admission:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Record the host facts the guard admits on
+        run: |
+          set -x
+          uname -m
+          nproc
+          grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+          df -B1 --output=avail /var
+          podman --version
+          skopeo --version || echo 'skopeo absent'
+          docker --version
+          id -u
+          stat -fc %T /sys/fs/cgroup
+          cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers" || echo 'no user delegation'
+          podman info --format '{{.Host.CPUs}} {{.Host.MemTotal}} {{.Host.CgroupManager}} {{.Host.CgroupsVersion}}'
+          podman info --format '{{.Host.Security.Rootless}} {{.Host.ServiceIsRemote}}' || echo 'rootless field absent'
+      - name: Record the rootless node cgroup shape
+        if: ${{ !cancelled() }}
+        env:
+          HELPER: docker.io/kindest/local-path-helper@sha256:ac7c7f08e86f7bef7d2ad6dee944ed89d3d2e7de0ebc00490d7ddf6c26628a06
+        run: |
+          id=$(podman run -d --rm --network none --cpus=2 --memory=256m --memory-swap=256m "$HELPER" sleep 120)
+          trap 'podman rm --force "$id" >/dev/null' EXIT
+          pid=$(podman inspect --type container --format '{{.State.Pid}}' "$id")
+          echo "cid=$id pid=$pid"
+          cat "/proc/$pid/cgroup"
+          scope=$(sed -n 's/^0:://p' "/proc/$pid/cgroup")
+          cat "/sys/fs/cgroup$scope/cpu.max" "/sys/fs/cgroup$scope/memory.max" || true
+          cat "/sys/fs/cgroup${scope%/container}/cpu.max" "/sys/fs/cgroup${scope%/container}/memory.max" || true
+      - name: Admit the fixed kind lease profiles through the guard
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I -B - "$GITHUB_WORKSPACE/hack/e2e-kind.py" <<'PY'
+          import importlib.util, json, sys, uuid
+          spec = importlib.util.spec_from_file_location('kind_guard', sys.argv[1])
+          kind = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(kind)
+          guard = kind.Guard(kind.EVIDENCE_ROOT / ('rpgmigrate-m7-hosted-admission-' + uuid.uuid4().hex))
+          # The host is the runtime here, so the guard's VM reads run locally.
+          local = lambda args, timeout=120, **_: kind.execute(args, timeout=timeout)
+          profiles = {'preparation': (3, 5120, 8, 12288), 'up': (6, 12288, 8, 12288), 'steady': (6, 12288, 6, 6144)}
+          results = {}
+          for name, values in profiles.items():
+              lease = dict(zip(('m7_cpus', 'm7_memory_mib', 'm3_reserved_cpus', 'm3_reserved_memory_mib'), values))
+              try:
+                  guard.capacity(lease, local)
+                  results[name] = 'passed'
+              except kind.Refusal as error:
+                  results[name] = 'refused: ' + str(error)
+          print(json.dumps(results, indent=2))
+          sys.exit(0 if all(value == 'passed' for value in results.values()) else 1)
+          PY
