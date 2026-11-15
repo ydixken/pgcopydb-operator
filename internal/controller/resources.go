@@ -1429,7 +1429,10 @@ func preflightScriptFor(m *v1beta1.Migration) string {
 		b.WriteString(slotHeadroomBlock)
 		b.WriteString(walSenderTimeoutBlock)
 		b.WriteString(replicationAttrBlock(superSrc, dry))
-		b.WriteString(originGrantsBlock(superTgt, dry))
+		// Native creates no replication origin, so it must not need or receive the grant.
+		if m.Spec.Engine != v1beta1.MigrationEngineRPGMigrate {
+			b.WriteString(originGrantsBlock(superTgt, dry))
+		}
 		b.WriteString(srrBlock(superTgt, dry))
 		b.WriteString(unloggedAuditBlock)
 		b.WriteString(riAuditBlock)

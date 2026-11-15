@@ -1162,6 +1162,21 @@ func TestPreflightScriptFor_Structure(t *testing.T) {
 		mustPrecede(t, s, `echo "ok: superuser source verified"`, `echo "ok: superuser target connected"`)
 		mustPrecede(t, s, `echo "ok: superuser target verified"`, walLevelProbe)
 	})
+	t.Run("only the pgcopydb engine checks or grants the origin functions", func(t *testing.T) {
+		legacy := superMigration()
+		native := superMigration()
+		native.Spec.Engine = v1beta1.MigrationEngineRPGMigrate
+		if !strings.Contains(preflightScriptFor(legacy), originGrantsQuery) {
+			t.Fatal("the pgcopydb follow preflight must check the origin function grants")
+		}
+		s := preflightScriptFor(native)
+		if strings.Contains(s, "pg_replication_origin") {
+			t.Fatalf("the native follow preflight must not check or grant the origin functions:\n%s", s)
+		}
+		if !strings.Contains(s, "GRANT SET ON PARAMETER session_replication_role") {
+			t.Fatalf("the native follow preflight keeps the session_replication_role check:\n%s", s)
+		}
+	})
 	t.Run("super on one side mixes remediation and hint", func(t *testing.T) {
 		m := superMigration()
 		m.Spec.Target.SuperuserSecretRef = nil

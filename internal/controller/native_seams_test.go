@@ -94,6 +94,10 @@ func seamsLockImages(t *testing.T, path, pair string) seamsImages {
 	return images
 }
 
+// seamsTargetGrantSQL is the native target follow grant: only SET on
+// session_replication_role, since native uses no replication origin (prerequisites.md).
+const seamsTargetGrantSQL = `GRANT SET ON PARAMETER session_replication_role TO app;`
+
 type seamsVerdict struct {
 	Step     string            `json:"step"`
 	Program  string            `json:"program"`
@@ -116,6 +120,13 @@ type seamsHarness struct {
 	target   string
 	password string
 	verdicts []seamsVerdict
+}
+
+// TestSeamsTargetGrant pins the harness to the native grant set of prerequisites.md.
+func TestSeamsTargetGrant(t *testing.T) {
+	if seamsTargetGrantSQL != "GRANT SET ON PARAMETER session_replication_role TO app;" {
+		t.Fatalf("the native harness grants %q, want only SET on session_replication_role", seamsTargetGrantSQL)
+	}
 }
 
 func TestNativeSeams(t *testing.T) {
@@ -273,16 +284,13 @@ func (h *seamsHarness) prepareSource(ctx context.Context) {
 	}
 }
 
-// prepareTarget creates an empty app-owned database with the suite's target follow grants.
+// prepareTarget creates an empty app-owned database with the native target follow grant.
 func (h *seamsHarness) prepareTarget(ctx context.Context, db string) {
 	if db == seamsAppDatabase {
 		h.createRole(ctx, h.target, false)
 	}
 	h.mustSQL(ctx, h.target, "postgres", "CREATE DATABASE "+db+" OWNER "+seamsAppRole+";")
-	h.mustSQL(ctx, h.target, db, `DO $$ DECLARE f oid; BEGIN FOR f IN SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = 'pg_catalog' AND p.proname LIKE 'pg_replication_origin%' LOOP
-EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f::regprocedure, 'app'); END LOOP; END $$;
-GRANT SET ON PARAMETER session_replication_role TO app;`)
+	h.mustSQL(ctx, h.target, db, seamsTargetGrantSQL)
 }
 
 // newMigration mirrors the suite's native follow Migration: pgoutput, manual cutover, native clone options.

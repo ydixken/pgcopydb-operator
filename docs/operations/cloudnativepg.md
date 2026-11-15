@@ -62,7 +62,8 @@ kubectl exec -it -n shop shop-pg-1 -c postgres -- psql -U postgres app
 ```
 
 ```sql
--- Let app manage replication origins (pgcopydb tracks apply progress with them).
+-- Engine pgcopydb only: let app manage replication origins (pgcopydb tracks apply progress with them).
+-- Skip this block for engine rpgmigrate, see the prerequisites.
 DO $$
 DECLARE f oid;
 BEGIN
@@ -81,7 +82,8 @@ GRANT SET ON PARAMETER session_replication_role TO app;
 
 The second grant is the dangerous one to skip.
 Without it, pgcopydb 0.18 reports success but applies nothing.
-The [preflight](live-migration.md#preflight) probes both grants before any data moves.
+The [preflight](live-migration.md#preflight) probes these grants before any data moves, the origin grant only with engine `pgcopydb`.
+With engine `rpgmigrate`, revoke an origin grant left from a `pgcopydb` setup, as the [prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true) describe.
 
 To skip the manual step, set `spec.target.superuserSecretRef` to a Secret with superuser credentials.
 CNPG creates `<cluster>-superuser` when `enableSuperuserAccess` is on.

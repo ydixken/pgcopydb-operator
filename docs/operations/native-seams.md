@@ -24,6 +24,9 @@ The harness does these runs:
    It kills the worker with SIGKILL while it streams, reads the failed worker log and the retry gate, and reconciles to attempt 2.
    Then it deletes the Migration while attempt 2 streams, so the disposition stops the worker and runs the deletion inventory and cleanup.
 
+The target role gets only `SET` on `session_replication_role`, the native follow grant of the [prerequisites](../reference/prerequisites.md#live-migration-specfollowenabled-true).
+It gets no EXECUTE on the `pg_replication_origin_*` functions, because only the `pgcopydb` engine uses them.
+
 Each step gives a verdict and the harness continues after a failed step.
 When the controller cannot save E because the source head read fails, the harness saves `pg_current_wal_lsn()` from the source and marks the step with a fallback.
 The test fails when one or more steps fail.

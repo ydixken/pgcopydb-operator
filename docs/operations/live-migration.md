@@ -80,7 +80,7 @@ Each success prints an `ok:` line in the Job log.
    See [prerequisites](../reference/prerequisites.md#base-clone-every-migration) for the details.
 8. The follow prerequisites.
    These are `wal_level`, free replication-slot headroom, `wal_sender_timeout` (a warning only), and the `REPLICATION` attribute of the source role.
-   They also include `EXECUTE` on the `pg_replication_origin_*` functions of the target and the `session_replication_role` SET privilege.
+   They also include the `session_replication_role` SET privilege and, with engine `pgcopydb` only, `EXECUTE` on the `pg_replication_origin_*` functions of the target.
    The replica-identity audit of every user table is also a follow prerequisite.
    Two of these lose data and raise no error.
 
