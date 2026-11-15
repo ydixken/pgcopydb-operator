@@ -943,6 +943,8 @@ type MigrationStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// The status-level rules do not run when the whole status goes, so the root guards that too.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.nativeRunnerImage) || (has(self.status) && has(self.status.nativeRunnerImage) && self.status.nativeRunnerImage == oldSelf.status.nativeRunnerImage)",message="status.nativeRunnerImage cannot be removed or changed once recorded, including by removing the status"
 // +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=pgm
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`

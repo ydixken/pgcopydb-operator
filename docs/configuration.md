@@ -19,7 +19,7 @@ The controller checks the runner image once, at admission, and records the admit
 Every later native Job runs the recorded image, including cleanup on deletion.
 A later change to `--rpgmigrate-runner-image` or `spec.runner.image` therefore does not affect an admitted Migration.
 We pin it because failing an in-flight Migration would skip native cleanup and leave its replication slot and publication on the source.
-The API server rejects a status write that changes or removes the record.
+Once the record exists, the API server rejects any write that changes or removes it, including one that removes the whole status, on both served API versions.
 
 > [!warning]
 > A native Migration past admission without a qualified `status.nativeRunnerImage` is refused, not failed and not admitted again.

@@ -2582,6 +2582,12 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: status.nativeRunnerImage cannot be removed or changed once recorded,
+            including by removing the status
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.nativeRunnerImage) ||
+            (has(self.status) && has(self.status.nativeRunnerImage) && self.status.nativeRunnerImage
+            == oldSelf.status.nativeRunnerImage)'
     served: true
     storage: false
     subresources:
@@ -5145,6 +5151,12 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: status.nativeRunnerImage cannot be removed or changed once recorded,
+            including by removing the status
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.nativeRunnerImage) ||
+            (has(self.status) && has(self.status.nativeRunnerImage) && self.status.nativeRunnerImage
+            == oldSelf.status.nativeRunnerImage)'
     served: true
     storage: true
     subresources:
