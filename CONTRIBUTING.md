@@ -110,6 +110,7 @@ Pinning it to `local` deadlocks: the image rebuilds only once a bump is on `main
 
 `setup-helm`, `setup-python` and `setup-go` survive in [ci.yml](.github/workflows/ci.yml) alone, gated on `github.event.pull_request.head.repo.fork`, because that is the one workflow whose jobs can land on a hosted runner, and `ubuntu-latest` has neither Helm nor a guaranteed Python.
 The hosted runner's Go can lag `go.mod`, and `GOTOOLCHAIN` does not cover the lint job: `go install pkg@version` builds golangci-lint with the local Go, and golangci-lint refuses a module newer than its own Go.
+Ubuntu 26.04 ships uutils coreutils by default, so the test job switches a hosted runner to GNU coreutils, which the script tests need for `timeout` and the runner image already has.
 
 The CI `lint` job runs [actionlint](https://github.com/rhysd/actionlint) on all workflows; yamllint alone cannot detect a step that lost its `uses:`.
 If the runner lacks actionlint, CI installs the version pinned in `images/github-runner/Dockerfile` and fails if installation or linting fails.
