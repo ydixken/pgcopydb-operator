@@ -328,6 +328,8 @@ var _ = Describe("Migration", func() {
 			psqlDB(cluster, postgresContainer,
 				"CREATE DATABASE "+db+" OWNER "+sqlIdent(appRole(cluster))+" TEMPLATE template0")
 		}
+		// The origin function grants are per-database; the source needs only the role-wide REPLICATION.
+		grantTargetFollowPrivileges(db)
 		m := newFollowMigration(name, v1beta1.CutoverManual)
 		m.Spec.Source.Database = db
 		m.Spec.Target.Database = db
