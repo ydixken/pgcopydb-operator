@@ -1125,3 +1125,25 @@ func (c *seamsCluster) podLogs(ctx context.Context, jobName string) string {
 	_ = command.Run()
 	return c.scrub(out.String())
 }
+
+// The cases follow kubelet's own expansion tests (third_party/forked/golang/expansion).
+func TestSeamsExpandMatchesKubelet(t *testing.T) {
+	values := map[string]string{"VAR_A": "A", "VAR_EMPTY": ""}
+	for in, want := range map[string]string{
+		"$(VAR_A)":           "A",
+		"___$(VAR_A)___":     "___A___",
+		"$(VAR_EMPTY)":       "",
+		"$(UNKNOWN)":         "$(UNKNOWN)",
+		"$$(VAR_A)":          "$(VAR_A)",
+		"$$$(VAR_A)":         "$A",
+		"$$":                 "$",
+		"$1 and $2":          "$1 and $2",
+		"$(VAR_A":            "$(VAR_A",
+		"trailing $":         "trailing $",
+		"$(sed -e 's/x/y/')": "$(sed -e 's/x/y/')",
+	} {
+		if got := seamsExpand(in, values); got != want {
+			t.Errorf("seamsExpand(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
