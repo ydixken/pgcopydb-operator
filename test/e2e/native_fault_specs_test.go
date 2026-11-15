@@ -45,23 +45,25 @@ var _ = Describe("Native faults", Label(nativeFaultLabel), func() {
 
 	It("resumes or fails closed when the runner is killed mid-copy", Label("native-fault-copy"), func() {
 		const name = "e2e-nfault-copy"
+		bulk := createNativeFaultBulk()
 		c := startNativeFault(name, targetCluster, nil)
+		c.bulk = bulk
 		kill := armNativeFaultKill(name)
 
-		By("waiting for a native COPY into the target")
-		Eventually(func(g Gomega) {
+		By("waiting until the target shows the bulk table mid-copy")
+		sample := bulk.waitMidCopy(func(g Gomega) string {
 			m := &v1beta1.Migration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: nsE2E, Name: name}, m)).To(Succeed())
 			if m.Status.Phase == v1beta1.PhaseFailed || slices.Contains(followStreamingPhases, m.Status.Phase) {
-				StopTrying(fmt.Sprintf("%s reached %s before a COPY was observed", name, m.Status.Phase)).Now()
+				return fmt.Sprintf("%s reached %s", name, m.Status.Phase)
 			}
-			out, err := psqlDBErr(targetCluster, appDatabase(targetCluster), nativeFaultCopySQL)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(out).NotTo(Equal("0"), "no native COPY into the target yet")
-		}, migrationTimeout, 250*time.Millisecond).Should(Succeed())
+			return ""
+		})
 
-		By("killing the runner inside the COPY")
+		By("killing the runner inside the bulk table's COPY")
 		kill.fire()
+		bulk.report(sample)
+		bulk.expectAborted(sample.xid)
 		c.finish(kill.attempt + 1)
 	})
 
