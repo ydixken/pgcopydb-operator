@@ -334,6 +334,8 @@ A URI without a port resolves to `PGPORT`, then 5432, the way libpq does.
 The worker rejects, by name, an endpoint it cannot bind to one line: IPv6 literals, several hosts, a missing host, percent-encoding in the host or a query key, and `host`, `port`, or `service` in the URI query.
 The inline `host` follows the same rule and accepts only a DNS name or an IPv4 address.
 `uriSecretRef` carries its own credentials and has none of these limits, unless the side also sets `superuserSecretRef`.
+The inline `username` is used literally, whatever characters the role name holds.
+A role name with a line break cannot authenticate through the passfile, because a passfile line cannot hold one.
 
 Each side MAY also set `superuserSecretRef`, a Secret in the same convention that names a superuser on the same endpoint.
 For single-database migrations, preflight checks that Secret.

@@ -19,6 +19,7 @@ package conn
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"maps"
 	"net/url"
 	"os"
@@ -419,6 +420,74 @@ func TestSecretRefPrelude_PasswordURINeverLeaks(t *testing.T) {
 		if strings.Contains(got, "s3cret") {
 			t.Fatalf("%s leaks the URI password: %q", name, got)
 		}
+	}
+}
+
+// TestPreludes_PasswordKeyIsQuoted proves a remapped password key name reaches
+// the error text literally: the API server does not restrict a volume item key.
+func TestPreludes_PasswordKeyIsQuoted(t *testing.T) {
+	const key = `x"$(echo pwned >&2)'y`
+	c := secretConn()
+	c.SecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: key}
+	for _, tc := range []struct{ env map[string]string }{
+		{map[string]string{envSrcDB: tDB, envSrcHost: tHost, envSrcUser: tUser}},
+		{map[string]string{envSrcDB: "postgresql://alice:pw@db.example.com/app"}},
+	} {
+		_, _, _, out, err := runSecretRefPrelude(t, c, tc.env, "")
+		if err == nil || !strings.Contains(out, key) || strings.Count(out, "pwned") != 1 {
+			t.Fatalf("want one failure naming the key %q literally, got %v: %q", key, err, out)
+		}
+	}
+	s := superConn()
+	s.SuperuserSecretRef.Keys = &v1beta1.ConnectionSecretKeys{Password: key}
+	_, _, _, out, err := runSuperPrelude(t, Source, s,
+		map[string]string{envSrcPGURI: tURI6432, envSrcSuperUser: tSuperUser}, "", "")
+	if err == nil || !strings.Contains(out, "password key "+key+" missing") || strings.Count(out, "pwned") != 1 {
+		t.Fatalf("want the superuser failure naming the key %q literally, got %v: %q", key, err, out)
+	}
+}
+
+// TestPreludeScript_UsernameIsLiteral runs inline-form passfile entries whose
+// user carries shell and passfile syntax: each must land as one escaped field
+// and no part of it may run as shell.
+func TestPreludeScript_UsernameIsLiteral(t *testing.T) {
+	for i, user := range []string{
+		"o'brien",
+		`a"b`,
+		"semi;colon",
+		`back\slash`,
+		"co:lon",
+		"x'; echo INJECTED >&2; '",
+		"$(echo INJECTED >&2)`echo INJECTED >&2`",
+		"x'\necho INJECTED >&2\n'",
+	} {
+		// Indexed names: t.TempDir embeds the name in the path the script carries.
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			dir := t.TempDir()
+			pw := filepath.Join(dir, "pw")
+			if err := os.WriteFile(pw, []byte("p:w"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pgpass := filepath.Join(dir, "pgpass")
+			script := strings.ReplaceAll(PreludeScript(nil, []Passfile{{Host: tHost, Port: 5432, User: user, File: pw}}, ""), PgpassPath, pgpass)
+			out, err := exec.Command(shellPath(t), "-c", script, "true").CombinedOutput()
+			if err != nil || len(out) != 0 {
+				t.Fatalf("user %q: prelude failed or printed: %v %q", user, err, out)
+			}
+			raw, err := os.ReadFile(pgpass)
+			if err != nil {
+				t.Fatal(err)
+			}
+			esc := strings.NewReplacer(`\`, `\\`, ":", `\:`).Replace(user)
+			if want := tHost + ":5432:*:" + esc + `:p\:w` + "\n"; string(raw) != want {
+				t.Fatalf("user %q: passfile %q, want %q", user, raw, want)
+			}
+			if !strings.Contains(user, "\n") {
+				if f := libpqPassfileFields(strings.TrimSuffix(string(raw), "\n")); len(f) != 5 || f[3] != user || f[4] != "p:w" {
+					t.Fatalf("user %q: passfile line parses to %q", user, f)
+				}
+			}
+		})
 	}
 }
 
