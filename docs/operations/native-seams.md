@@ -17,9 +17,9 @@ The harness does these runs:
 1. A follow run under a live writer.
    It reconciles to a running worker, waits for the streaming phase, and samples lag and the source head through the worker exec.
    It approves the cutover, saves E, sets endpos and waits for the drain.
-   Then it reads each completion helper as its own step.
-   These helpers are the clone report, the endpos acknowledgment, the completed evidence, both compares, the owned inventory, the cleanup and the cleaned evidence.
-   Last, it reconciles to `Completed`, checks both databases and deletes the Migration.
+   It checks that the source holds this run's slot and publication and the target its bookkeeping schema.
+   Then it reconciles straight to `Completed`, in the manager's order: the first pass probes the cleaned completion before cleanup, so a refused probe has to close against its real helper Job.
+   Last, it checks that no state or cleanup helper Job outlived the finish, reads the compare verdicts that the finish recorded, checks both databases and deletes the Migration.
 2. A retry run.
    It kills the worker with SIGKILL while it streams, reads the failed worker log and the retry gate, and reconciles to attempt 2.
    Then it deletes the Migration while attempt 2 streams, so the disposition stops the worker and runs the deletion inventory and cleanup.

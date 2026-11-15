@@ -663,7 +663,11 @@ func testNativeFinalizationWriterClosure(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			f := newNativeFinishFixture(t)
 			f.fault = fault
-			if _, err := nativeFinish(t, f); err == nil || f.current().Status.NativeFinalizedJobUID != "" {
+			// A probe that never ends holds closure until its context ends.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cancelWhileActive(f, finishCleanedJobKind, finishCleanedEvidenceKind, 5, cancel)
+			if _, err := nativeFinishCtx(ctx, t, f); err == nil || f.current().Status.NativeFinalizedJobUID != "" {
 				t.Fatal("unknown cleanup gained final receipt")
 			}
 		})

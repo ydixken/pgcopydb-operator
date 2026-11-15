@@ -165,8 +165,21 @@ func (r *MigrationReconciler) nativeStateHelperClosed(ctx context.Context, m *v1
 	if capture == nil || capture.pod == nil {
 		return nil, errNativeCleanupFlow
 	}
-	job, err := r.nativeEvidenceLiveJob(ctx, capture.created, m)
-	if err != nil || !nativePreflightJobMatches(capture.expected, job) || job.Generation != capture.created.Generation || job.Status.Active != 0 || successful && !nativeEvidenceWorkerComplete(job) || !successful && !nativeEvidenceWorkerComplete(job) && !nativeRecoveryWorkerFailed(job) {
+	// A refused relay returns before its Job turns terminal, so wait for the end that matches the
+	// relay outcome; a changed Job or the opposite end fails at once.
+	var job *batchv1.Job
+	if wait.PollUntilContextCancel(ctx, nativePreflightPoll, true, func(ctx context.Context) (bool, error) {
+		live, err := r.nativeEvidenceLiveJob(ctx, capture.created, m)
+		if err != nil || !nativePreflightJobMatches(capture.expected, live) || live.Generation != capture.created.Generation {
+			return false, errNativeCleanupFlow
+		}
+		complete, failed := nativeEvidenceWorkerComplete(live), nativeRecoveryWorkerFailed(live)
+		if successful && failed || !successful && complete {
+			return false, errNativeCleanupFlow
+		}
+		job = live
+		return successful && complete || !successful && failed, nil
+	}) != nil {
 		return nil, errNativeCleanupFlow
 	}
 	pod, err := r.nativePreflightPod(ctx, job)

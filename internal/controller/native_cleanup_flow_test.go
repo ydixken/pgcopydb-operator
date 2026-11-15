@@ -44,6 +44,8 @@ const finishWrongEndFault = "wrong cleaned E"
 
 const (
 	finishCleanedJobKind       = "cleaned"
+	finishEvidenceJobKind      = "evidence"
+	finishInventoryJobKind     = "inventory"
 	finishVerificationJobKind  = "verification"
 	finishOrdinaryEvidenceKind = "completed_evidence"
 )
@@ -131,7 +133,7 @@ func newNativeFinishFixture(t *testing.T) *nativeFinishFixture {
 }
 
 func finishJobKind(name string) string {
-	for _, kind := range []string{probeTestVersionCommand, "preflight", finishCleanupRejoinKind, "inventory", finishCleanedJobKind, "evidence", finishEndposKind, jobKindCleanup} {
+	for _, kind := range []string{probeTestVersionCommand, "preflight", finishCleanupRejoinKind, finishInventoryJobKind, finishCleanedJobKind, finishEvidenceJobKind, finishEndposKind, jobKindCleanup} {
 		if strings.HasPrefix(name, "rpgmigrate-"+kind+"-") {
 			return kind
 		}
@@ -182,7 +184,7 @@ func (f *nativeFinishFixture) create(ctx context.Context, c client.WithWatch, ob
 		if f.afterEffect != nil {
 			f.afterEffect()
 		}
-	case "inventory", finishCleanedJobKind, "evidence", finishCleanupRejoinKind:
+	case finishInventoryJobKind, finishCleanedJobKind, finishEvidenceJobKind, finishCleanupRejoinKind:
 		job.Status = batchv1.JobStatus{Active: 1}
 		pod.Status.Phase = corev1.PodRunning
 		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
@@ -476,5 +478,162 @@ func TestNativeFollowCleanupRejoinProof(t *testing.T) {
 	checkpoint := observation.Checkpoint().Evidence()
 	if checkpoint.DrainEndLSN != lifecycleEnd || checkpoint.CertifiedLSN != nativeTerminalEarlierLSN || checkpoint.DrainReplayLSN != nativeTerminalLaterLSN || f.patches != 0 || f.cleaned {
 		t.Fatal("partial proof lost same-E witness or changed completion/cleanup")
+	}
+}
+
+// nativeClosureReader is the controller's own reader; the helper relay keeps the plain store.
+type nativeClosureReader struct {
+	client.Reader
+	view func(*batchv1.Job)
+}
+
+func (r nativeClosureReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if job, ok := obj.(*batchv1.Job); ok {
+		r.view(job)
+	}
+	return nil
+}
+
+// settleLater shows each helper of kinds still Active on its first hidden reads after the relay
+// made it terminal, as a lagging Job controller does, then hands later reads to turn. It ends ctx
+// (stop) after 20 such reads so a wait that never ends is seen at once; it returns the read count.
+func settleLater(f *nativeFinishFixture, kinds []string, hidden int, turn func(*batchv1.Job), stop context.CancelFunc) func() int {
+	reads := map[string]int{}
+	total := 0
+	f.r.APIReader = nativeClosureReader{Reader: f.r.APIReader, view: func(job *batchv1.Job) {
+		if !slices.Contains(kinds, finishJobKind(job.Name)) || job.Status.Active != 0 {
+			return
+		}
+		f.mu.Lock()
+		reads[job.Name]++
+		total++
+		n, all := reads[job.Name], total
+		f.mu.Unlock()
+		if all >= 20 && stop != nil {
+			stop()
+		}
+		if hidden < 0 || n <= hidden {
+			job.Status = batchv1.JobStatus{Active: 1}
+		} else if turn != nil {
+			turn(job)
+		}
+	}}
+	return func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return total
+	}
+}
+
+// cancelWhileActive ends ctx once the relay has run and the Job of kind was then read Active n times.
+func cancelWhileActive(f *nativeFinishFixture, kind, proof string, n int, stop context.CancelFunc) {
+	reads := 0
+	f.r.APIReader = nativeClosureReader{Reader: f.r.APIReader, view: func(job *batchv1.Job) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if finishJobKind(job.Name) == kind && job.Status.Active != 0 && slices.Contains(f.steps, proof) {
+			if reads++; reads >= n {
+				stop()
+			}
+		}
+	}}
+}
+
+func countKind(kinds []string, kind string) int {
+	n := 0
+	for _, k := range kinds {
+		if k == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func TestNativeStateHelperClosureWaitsForTerminal(t *testing.T) {
+	failed := batchv1.JobStatus{Failed: 1, Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}}
+	for _, tc := range []struct {
+		name   string
+		hidden int
+		turn   func(f *nativeFinishFixture) func(*batchv1.Job)
+		closed bool
+	}{
+		{name: "refused helper turns Failed", hidden: 1, closed: true},
+		{name: "refused helper turns Succeeded", hidden: 1, turn: func(f *nativeFinishFixture) func(*batchv1.Job) {
+			return func(job *batchv1.Job) { job.Status = *f.worker.Status.DeepCopy() }
+		}},
+		{name: "refused helper never terminates", hidden: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNativeFinishFixture(t)
+			var turn func(*batchv1.Job)
+			if tc.turn != nil {
+				turn = tc.turn(f)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reads := settleLater(f, []string{finishCleanedJobKind}, tc.hidden, turn, cancel)
+			observation, closed, err := f.r.captureNativeCleanedCompletedEvidence(ctx, f.m, f.worker, f.pvc)
+			if err == nil || observation != nil || closed != tc.closed {
+				t.Fatalf("closure=%t err=%v, want closure %t and a refusal: created %v steps %v", closed, err, tc.closed, f.created, f.steps)
+			}
+			if countKind(f.created, finishCleanedJobKind) != 1 || !slices.Contains(f.steps, finishCleanedEvidenceKind) || slices.Contains(f.created, jobKindCleanup) || f.patches != 0 {
+				t.Fatalf("one refused probe made helpers %v, steps %v, patches %d", f.created, f.steps, f.patches)
+			}
+			if got, want := countKind(f.deleted, finishCleanedJobKind), map[bool]int{true: 1, false: 0}[tc.closed]; got != want {
+				t.Fatalf("deleted %d closed probes, want %d: %v", got, want, f.deleted)
+			}
+			// The Active read, the terminal read, and for a closed probe the disposal read.
+			want := 2 + countKind(f.deleted, finishCleanedJobKind)
+			if tc.hidden < 0 {
+				want = 20
+			}
+			if reads() < want || tc.hidden > 0 && reads() != want {
+				t.Fatalf("judged after %d post-relay reads, want %d", reads(), want)
+			}
+		})
+	}
+	t.Run("expected success, helper turns Failed", func(t *testing.T) {
+		f := newNativeFinishFixture(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		reads := settleLater(f, []string{finishInventoryJobKind}, 1, func(job *batchv1.Job) { job.Status = *failed.DeepCopy() }, cancel)
+		if _, err := f.r.readNativeOwnedInventory(ctx, f.m, f.worker, f.pvc); err == nil {
+			t.Fatal("failed inventory helper closed as a success")
+		}
+		if reads() != 2 || countKind(f.created, finishInventoryJobKind) != 1 || slices.Contains(f.deleted, finishInventoryJobKind) {
+			t.Fatalf("failed helper judged after %d reads, created %v, deleted %v", reads(), f.created, f.deleted)
+		}
+	})
+}
+
+// The manager's order: the first pass probes cleaned completion before cleanup, so each refused
+// probe must close and be disposed in the same pass.
+func TestNativeFollowFinishWaitsForRefusedProbes(t *testing.T) {
+	base := newNativeFinishFixture(t)
+	base.laterBegin = true
+	if _, err := nativeFinish(t, base); err != nil {
+		t.Fatalf("instant terminal finish: %v", err)
+	}
+	f := newNativeFinishFixture(t)
+	f.laterBegin = true
+	kinds := []string{finishInventoryJobKind, finishCleanedJobKind, finishCleanupRejoinKind, finishEvidenceJobKind}
+	reads := settleLater(f, kinds, 1, nil, nil)
+	if result, err := nativeFinish(t, f); err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("finish with lagging helper status: %v %+v steps=%v", err, result, f.steps)
+	}
+	assertNativeFinished(t, f)
+	if reads() == 0 || !slices.Equal(f.created, base.created) {
+		t.Fatalf("helpers per pass changed: %v, instant %v (post-relay reads %d)", f.created, base.created, reads())
+	}
+	for _, kind := range kinds {
+		if countKind(f.created, kind) != countKind(f.deleted, kind) {
+			t.Fatalf("%s helpers created %v, deleted %v", kind, f.created, f.deleted)
+		}
+	}
+	if countKind(f.created, finishCleanedJobKind) != 2 || countKind(f.created, finishCleanupRejoinKind) != 1 {
+		t.Fatalf("manager order lost the refused probes: %v", f.created)
 	}
 }

@@ -47,11 +47,8 @@ const (
 	seamsRetryDB     = "seams_retry"
 	seamsLiveMarker  = "seams-live-"
 	seamsPortNumber  = 5432
-	seamsSlotKind    = "replication_slot"
 	seamsSourceSide  = "source"
 	seamsTargetSide  = "target"
-	// seamsPublicationKind names the owned-inventory resource kind of the source publication.
-	seamsPublicationKind = "publication"
 )
 
 type seamsImages struct{ runner, source, target string }
@@ -560,7 +557,7 @@ func (h *seamsHarness) probeStreaming(ctx context.Context, name string) (string,
 }
 
 // runFollow is the M7 live-writer path: clone and follow under a writer, sample lag, set endpos, drain,
-// read every completion helper, verify, clean up, finish and delete.
+// finish in the manager's order (verify, clean up, complete) and delete.
 func (h *seamsHarness) runFollow() {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
@@ -623,12 +620,33 @@ func (h *seamsHarness) runFollow() {
 	h.check("follow/drain", "reconcile: control exec sets endpos, the worker drains and exits 0", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 4*time.Minute, func(o seamsObjects) bool { return o.worker != nil && nativeEvidenceWorkerComplete(o.worker) })
 	})
-	h.completionReads(ctx, name, run)
+	h.check("follow/owned", "source and target SQL: this run's slot, publication and bookkeeping schema", func() (string, error) {
+		return h.expectOwned(ctx, run, seamsAppDatabase)
+	})
+	// Finish runs straight from the drain, as the manager does: its first pass probes cleaned
+	// completion before cleanup, so the refused probe and its closure run against real Jobs.
 	h.check("follow/finish", "reconcile: finishNativeFollow to Completed", func() (string, error) {
 		return h.reconcileUntil(ctx, name, 6*time.Minute, func(o seamsObjects) bool {
 			c := apimeta.FindStatusCondition(o.m.Status.Conditions, v1beta1.ConditionCutoverComplete)
 			return o.m.Status.Phase == v1beta1.PhaseCompleted && c != nil && c.Reason == "NativeDrainConfirmed"
 		})
+	})
+	h.check("follow/helpers", "API store: no state or cleanup helper Job outlives Completed", func() (string, error) { return h.expectNoStateHelpers(ctx, name) })
+	h.check("follow/verification", "compare verdicts that finishNativeFollow recorded", func() (string, error) {
+		o, err := h.objects(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		var checks []string
+		for _, result := range o.m.Status.Verification {
+			checks = append(checks, result.Check)
+		}
+		slices.Sort(checks)
+		out, err := h.verdictOf(ctx, o.m)
+		if err == nil && !slices.Equal(checks, []string{compareData, compareSchema}) {
+			err = fmt.Errorf("recorded checks %v, want data and schema", checks)
+		}
+		return out, err
 	})
 	h.expectCleaned(ctx, run, seamsAppDatabase, "follow")
 	h.deleteMigration(ctx, name, "follow")
@@ -680,108 +698,6 @@ func (h *seamsHarness) saveEndFallback(ctx context.Context, name string) {
 		h.t.Fatal(err)
 	}
 	h.fallback("E " + end + " saved from pg_current_wal_lsn() on the source")
-}
-
-// completionReads runs each post-drain helper on its own, in the order finishNativeFollow uses them.
-func (h *seamsHarness) completionReads(ctx context.Context, name, run string) {
-	var clone *native.Report
-	var ack []byte
-	h.check("follow/clone-report", "worker log: clone report", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		clone, err = h.r.readNativeCloneReport(ctx, o.m, o.worker, o.pvc)
-		if err != nil {
-			return h.cluster.podLogs(ctx, o.m.Status.JobName), err
-		}
-		return "phase " + clone.Phase, nil
-	})
-	h.check("follow/endpos-ack", "endpos helper Job: rpgmigrate stream sentinel set endpos", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		ack, err = h.r.readNativeEndposAck(ctx, o.m, o.worker, o.pvc)
-		return strings.TrimSpace(string(ack)), err
-	})
-	h.check("follow/completed-evidence", "evidence helper Job: completed evidence after drain", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		got, err := h.r.readNativeFollowCompletion(ctx, o.m, o.worker, o.pvc, clone, ack)
-		if err != nil {
-			return "", err
-		}
-		e := got.Checkpoint().Evidence()
-		if !sameLSNText(e.DrainEndLSN, nativeControlEnd(o.m)) || !e.BarrierConfirmed {
-			return "", fmt.Errorf("checkpoint drain end %s, barrier %v, saved E %s", e.DrainEndLSN, e.BarrierConfirmed, nativeControlEnd(o.m))
-		}
-		return fmt.Sprintf("drained to %s by %s, resources %v", e.DrainEndLSN, e.DrainKind, got.OwnedState().Resources()), nil
-	})
-	h.check("follow/verification", "compare helper Jobs: schema and data", func() (string, error) { return h.verify(ctx, name) })
-	h.check("follow/inventory", "inventory helper Job: owned inventory", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		owned, err := h.r.readNativeOwnedInventory(ctx, o.m, o.worker, o.pvc)
-		if err != nil {
-			return "", err
-		}
-		return h.expectOwned(ctx, owned, run, seamsAppDatabase)
-	})
-	h.check("follow/cleanup", "inventory, cleanup and inventory helper Jobs", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		done, err := h.r.ensureNativeCleanup(ctx, o.m, o.worker, o.pvc)
-		if err == nil && !done {
-			err = errors.New("cleanup not done")
-		}
-		return "", err
-	})
-	h.check("follow/cleaned-evidence", "cleaned completion helper Job", func() (string, error) {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		got, err := h.r.readNativeCleanedCompletedEvidence(ctx, o.m, o.worker, o.pvc)
-		if err != nil {
-			return "", err
-		}
-		return "drained to " + got.Checkpoint().Evidence().DrainEndLSN, nil
-	})
-}
-
-func sameLSNText(a, b string) bool {
-	return a != "" && strings.EqualFold(strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0"))
-}
-
-// verify drives ensureNativeVerification until both captures are recorded, as successive passes would.
-func (h *seamsHarness) verify(ctx context.Context, name string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	for {
-		o, err := h.objects(ctx, name)
-		if err != nil {
-			return "", err
-		}
-		done, err := h.r.ensureNativeVerification(ctx, o.m, o.worker, o.pvc)
-		if err != nil {
-			return "", err
-		}
-		if done {
-			return h.verdictOf(ctx, o.m)
-		}
-		select {
-		case <-ctx.Done():
-			return "", errors.New("comparison never finished")
-		case <-time.After(2 * time.Second):
-		}
-	}
 }
 
 // verdictOf requires both compares to match and the data compare's final progress to cover every planned byte.
@@ -864,21 +780,49 @@ func (h *seamsHarness) schemaDiff(ctx context.Context, m *v1beta1.Migration) str
 	return h.cluster.scrub(strings.Join(diff[:min(len(diff), 12)], " | "))
 }
 
-// expectOwned requires exactly this run's slot and publication on the source, the retained workdir,
-// and the run's bookkeeping schema on the target that the inventory read.
-func (h *seamsHarness) expectOwned(ctx context.Context, owned native.AdmittedOwnedState, run, database string) (string, error) {
-	kinds := map[string]string{}
-	for _, r := range owned.Resources() {
-		kinds[r.Kind] = r.Name
-	}
+// expectOwned requires exactly this run's slot and one publication on the source and the run's
+// bookkeeping schema on the target, so the later cleaned checks have something to have removed.
+func (h *seamsHarness) expectOwned(ctx context.Context, run, database string) (string, error) {
 	slot := h.mustSQL(ctx, h.source, seamsAppDatabase, "SELECT string_agg(slot_name, ',') FROM pg_replication_slots;")
 	pub := h.mustSQL(ctx, h.source, seamsAppDatabase, "SELECT string_agg(pubname, ',') FROM pg_publication;")
 	schema := h.mustSQL(ctx, h.target, database, "SELECT count(*) FROM pg_namespace WHERE nspname = '_rpgmigrate_"+run+"';")
-	if kinds[seamsSlotKind] == "" || kinds[seamsSlotKind] != slot || !strings.Contains(slot, run) || kinds[seamsPublicationKind] == "" || kinds[seamsPublicationKind] != pub ||
-		kinds[workdirVolume] != nativeCleanupTestWorkdir || len(kinds) != 3 || schema != "1" {
-		return "", fmt.Errorf("inventory %v does not match the source slots %q, publications %q and target schema count %s", kinds, slot, pub, schema)
+	if slot == "" || strings.Contains(slot, ",") || !strings.Contains(slot, run) || pub == "" || strings.Contains(pub, ",") || schema != "1" {
+		return "", fmt.Errorf("source slots %q, publications %q and target schema count %s are not this run's", slot, pub, schema)
 	}
-	return fmt.Sprintf("slot %s, publication %s, workdir retained, target _rpgmigrate_%s present", slot, pub, run), nil
+	return fmt.Sprintf("slot %s, publication %s, target _rpgmigrate_%s present", slot, pub, run), nil
+}
+
+// expectNoStateHelpers requires that every inventory, cleaned, rejoin, evidence and cleanup Job was
+// disposed; the retained worker Job in the same listing proves the listing saw this Migration's Jobs.
+func (h *seamsHarness) expectNoStateHelpers(ctx context.Context, name string) (string, error) {
+	o, err := h.objects(ctx, name)
+	if err != nil || o.worker == nil {
+		return "", fmt.Errorf("no worker Job to anchor the listing: %v", err)
+	}
+	jobs := &batchv1.JobList{}
+	if err := h.cluster.store.List(ctx, jobs, client.InNamespace(seamsNamespace)); err != nil {
+		return "", err
+	}
+	var left, all []string
+	worker := false
+	for _, job := range jobs.Items {
+		all = append(all, job.Name)
+		worker = worker || job.UID == o.worker.UID
+		for _, prefix := range []string{nativeInventoryJobPrefix, nativeCleanedJobPrefix, nativeCleanupRejoinJobPrefix, "rpgmigrate-evidence-", "rpgmigrate-cleanup-"} {
+			if strings.HasPrefix(job.Name, prefix) {
+				left = append(left, job.Name)
+				break
+			}
+		}
+	}
+	detail := fmt.Sprintf("%d Jobs listed (%s)", len(all), strings.Join(all, ", "))
+	if !worker {
+		return detail, errors.New("the listing does not hold the retained worker Job")
+	}
+	if len(left) > 0 {
+		return detail, fmt.Errorf("%d helper Jobs left: %s", len(left), strings.Join(left, ", "))
+	}
+	return detail, nil
 }
 
 // expectCleaned requires the source to keep no slot or publication and the target to keep _rpgmigrate_<run>.
