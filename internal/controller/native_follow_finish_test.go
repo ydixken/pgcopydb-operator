@@ -23,11 +23,16 @@ type nativeFollowFinishConsumer interface {
 
 func nativeFinish(t *testing.T, f *nativeFinishFixture) (ctrl.Result, error) {
 	t.Helper()
+	return nativeFinishCtx(context.Background(), t, f)
+}
+
+func nativeFinishCtx(ctx context.Context, t *testing.T, f *nativeFinishFixture) (ctrl.Result, error) {
+	t.Helper()
 	consumer, ok := any(f.r).(nativeFollowFinishConsumer)
 	if !ok {
 		t.Fatal("native follow finalization is missing")
 	}
-	return consumer.finishNativeFollow(context.Background(), f.m, f.m.DeepCopy(), f.worker, f.pvc)
+	return consumer.finishNativeFollow(ctx, f.m, f.m.DeepCopy(), f.worker, f.pvc)
 }
 
 func assertNativeFinished(t *testing.T, f *nativeFinishFixture) {
@@ -147,7 +152,11 @@ func TestNativeFollowFinishRefusals(t *testing.T) {
 					v["target_closed"] = false
 				}
 			}
-			if _, err := nativeFinish(t, f); err == nil {
+			// A probe that never ends holds closure until its context ends.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cancelWhileActive(f, finishCleanedJobKind, finishCleanedEvidenceKind, 5, cancel)
+			if _, err := nativeFinishCtx(ctx, t, f); err == nil {
 				t.Fatal("unknown cleanup or completion became successful")
 			}
 			if f.patches != 0 {
