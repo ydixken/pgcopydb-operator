@@ -84,6 +84,37 @@ func TestConfirmBaseCopy_NamesTheTables(t *testing.T) {
 	}
 }
 
+// Only an exact excludeTableData entry exempts a table. The rest stay owed, so the
+// base-copy gate never opens on a table that was meant to receive rows.
+func TestSkippedDataDone(t *testing.T) {
+	const sessions, pattern, dotted, split = "app.sessions", "app.~sessions", "a.b.c", "app.sessions, app.x, y"
+	for name, tc := range map[string]struct {
+		skip, owed, remain string
+		done, wantDone     int64
+	}{
+		"exact entry":      {sessions, sessions + ", " + appOrders, appOrders, 55, 56},
+		"pattern entry":    {pattern, pattern, pattern, 56, 56},
+		"dotted name":      {dotted, dotted, dotted, 56, 56},
+		"list off count":   {sessions, split, split, 55, 55},
+		"no data excluded": {"", sessions, sessions, 56, 56},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &v1beta1.Migration{}
+			if tc.skip != "" {
+				m.Spec.Clone.Filters = &v1beta1.Filters{ExcludeTableData: []string{tc.skip}}
+			}
+			in := &progress.RelationCounts{TablesTotal: 57, TablesDone: tc.done, EmptyOnTarget: tc.owed}
+			got := skippedDataDone(m, in)
+			if got.TablesDone != tc.wantDone || got.EmptyOnTarget != tc.remain {
+				t.Fatalf("got %d done owing %q, want %d owing %q", got.TablesDone, got.EmptyOnTarget, tc.wantDone, tc.remain)
+			}
+			if in.TablesDone != tc.done || in.EmptyOnTarget != tc.owed {
+				t.Fatal("the sampler's own sample was changed")
+			}
+		})
+	}
+}
+
 // Every path into Failed ends a hold; a Migration that never held gains no RetryHeld.
 func TestFail_EndsRetryHold(t *testing.T) {
 	r := &MigrationReconciler{Recorder: events.NewFakeRecorder(10)}

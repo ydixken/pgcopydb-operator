@@ -395,6 +395,40 @@ var _ = Describe("Migration Controller progress sampling", func() {
 		Expect(got.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
 	})
 
+	It("does not wait for rows in a table whose data the clone skips", func() {
+		const name = "mig-skipped-data"
+		defer removeMigration(ctx, name)
+		defer metrics.Forget(testNS, name)
+		// A SchemaOnly table reaches pgcopydb as excludeTableData, so it stays
+		// empty on the target while its source holds rows.
+		fake := &fakeProgress{src: int64p(9000), relations: &progress.RelationCounts{
+			TablesTotal: 57, TablesDone: 55, EmptyOnTarget: "public.cache, public.documents"}}
+		sent := &fakeSentinel{state: &sentinel.State{
+			WriteLSN: caughtUpLSN, ReplayLSN: caughtUpLSN, SourceHead: caughtUpLSN,
+		}}
+		r := newReconciler()
+		r.Progress, r.Sentinel, r.Logs = fake, sent, cloneDoneLogs()
+		m := followMigration(name)
+		m.Spec.Follow.UnloggedTables = []v1beta1.UnloggedTable{{Table: "public.cache", Mode: v1beta1.UnloggedSchemaOnly}}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		passGate(ctx, r, name)
+
+		got := reconcileAndGet(ctx, r, name)
+		c := meta.FindStatusCondition(got.Status.Conditions, v1beta1.ConditionCloneCompleted)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Reason).To(Equal(reasonTablesEmptyOnTarget), "a table that is owed still holds the gate")
+		Expect(c.Message).To(ContainSubstring("1 of 57"))
+		Expect(c.Message).To(ContainSubstring("none on the target: public.documents"))
+		Expect(c.Message).NotTo(ContainSubstring("public.cache"))
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(56)))
+
+		fake.setRelations(&progress.RelationCounts{TablesTotal: 57, TablesDone: 56, EmptyOnTarget: "public.cache"})
+		got = reconcileAndGet(ctx, r, name)
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCloneCompleted)).To(BeTrue())
+		Expect(got.Status.Phase).To(Equal(v1beta1.PhaseStreaming))
+		Expect(got.Status.Progress.TablesDone).To(Equal(int64(57)))
+	})
+
 	It("fails a plain clone whose catalog counts a table not done", func() {
 		const name = "mig-catalog-short"
 		defer removeMigration(ctx, name)

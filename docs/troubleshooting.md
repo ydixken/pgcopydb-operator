@@ -679,6 +679,11 @@ The sample tests whether each table holds a row, not how many rows it holds.
 The reason is that the source runs ahead of the copy's snapshot until the stream catches up.
 A table that got its first source rows after that snapshot reads this way until the stream delivers one of them.
 
+The sample does not count a table when the Migration tells the clone not to copy its rows.
+This applies to a `SchemaOnly` table in `follow.unloggedTables` and to a table that `clone.filters.excludeTableData` names exactly.
+A `~/regex/` pattern or a quoted name does not make a table exempt.
+To exempt such a table, also put its exact `schema.table` name in `excludeTableData`.
+
 Determine when the named tables got their rows on the source.
 Rows written after the base copy's snapshot arrive through the stream.
 The condition clears on the first sample that finds one of these rows on the target.
