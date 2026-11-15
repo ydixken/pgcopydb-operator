@@ -221,6 +221,19 @@ func testPSQL(t *testing.T) psqlScript {
 	return localPSQL(psqlPath, uri)
 }
 
+// testOwnDatabasePSQL is testPSQL on a database only this test uses. The leak check
+// reads per-database catalogs, so another test process on the server cannot add to it.
+func testOwnDatabasePSQL(t *testing.T) psqlScript {
+	t.Helper()
+	run := testPSQL(t)
+	db := "cov_apply_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	testQuery(t, run, "CREATE DATABASE "+db)
+	t.Cleanup(func() { testQuery(t, run, "DROP DATABASE IF EXISTS "+db+" WITH (FORCE)") })
+	return func(ctx context.Context, script string) (string, error) {
+		return run(ctx, `\connect `+db+"\n"+script)
+	}
+}
+
 // testQuery runs one script on the test server and fails the test on error.
 func testQuery(t *testing.T, run psqlScript, script string) string {
 	t.Helper()
@@ -456,7 +469,7 @@ func TestCaseFingerprintNormalizesSchemaNames(t *testing.T) {
 // a syntax error or a stray schema reference fails CI instead of a release
 // candidate, and the fingerprint is proven to read what each section changes.
 func TestCoverageCasesApply(t *testing.T) {
-	run := testPSQL(t)
+	run := testOwnDatabasePSQL(t)
 	cases, err := loadCoverageCases(coverageFS, coverageOutcomes)
 	if err != nil {
 		t.Fatal(err)
@@ -507,7 +520,7 @@ func TestCoverageCasesApply(t *testing.T) {
 }
 
 func TestApplyCoverageCaseRejectsObjectsOutsideItsSchemas(t *testing.T) {
-	run := testPSQL(t)
+	run := testOwnDatabasePSQL(t)
 	identity := strconv.FormatInt(time.Now().UnixNano(), 10)
 	c, err := parseCoverageCase("coverage/test/leak.sql",
 		"-- coverage: group=clone expect=identical schemas=1 min_pg=14\n-- @setup\n"+
