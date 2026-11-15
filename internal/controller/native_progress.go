@@ -8,6 +8,12 @@ import (
 
 const nativeProgressStreamingPhase = "streaming"
 
+// nativeSampleComplete is false for a sample in flight, missing or failed, which must not
+// repaint the attempt's status; an active follow slot only exists while streaming.
+func nativeSampleComplete(m *v1beta1.Migration, got nativeSample) bool {
+	return got.phase != "" && (got.lagBytes != nil || !followEnabled(m) || got.phase != nativeProgressStreamingPhase)
+}
+
 func (r *MigrationReconciler) applyNativeProgress(m *v1beta1.Migration, got nativeSample) {
 	m.Status.Progress = nil
 	if nativeCopyMeasured(got.progress) && !got.observedAt.IsZero() {

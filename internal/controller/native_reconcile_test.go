@@ -281,7 +281,7 @@ func TestNativeReconcileSavedEndWithoutSampler(t *testing.T) {
 func TestNativeReconcileUnknownProgress(t *testing.T) {
 	f := nativeFollowFlowFixture(t)
 	f.r.Sampler = nil
-	f.m.Status.Progress = &v1beta1.CloneProgress{TablesDone: 7}
+	f.m.Status.Phase, f.m.Status.Progress = v1beta1.PhaseStreaming, &v1beta1.CloneProgress{TablesDone: 7}
 	f.m.Status.Replication = &v1beta1.ReplicationStatus{LagBytes: new(int64)}
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
@@ -290,8 +290,8 @@ func TestNativeReconcileUnknownProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := f.current()
-	if got.Status.Progress != nil || got.Status.Replication.LagBytes != nil || got.Status.Replication.WriteLSN != "" || got.Status.Replication.ReplayLSN != "" || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCaughtUp) || f.heads != 0 || f.sets != 0 {
-		t.Fatal("unknown native progress retained old measurements or drove cutover")
+	if got.Status.Progress == nil || got.Status.Progress.TablesDone != 7 || got.Status.Replication == nil || got.Status.Replication.LagBytes == nil || got.Status.Phase == v1beta1.PhaseCloning || meta.IsStatusConditionTrue(got.Status.Conditions, v1beta1.ConditionCaughtUp) || f.heads != 0 || f.sets != 0 {
+		t.Fatal("unknown native progress repainted this attempt's measurements or drove cutover")
 	}
 }
 

@@ -216,9 +216,11 @@ The engine sends flush feedback only for the end of a transaction committed on t
 So `replayLSN` can pass WAL outside the publication, and it is not proof of target application.
 The native drain at cutover is that proof.
 
-Each sample replaces all three fields.
+Each complete sample replaces all three fields.
 The operator does not compare a sample with the one before it.
-When a sample is unavailable, the three fields are absent, never zero, and `CaughtUp` is Unknown with reason `NativeLagUnknown`.
+Before the worker streams, its slot is not active and the lag cannot be read, so the three fields are absent, never zero, and `CaughtUp` is Unknown with reason `NativeLagUnknown`.
+A sample that is in flight, missing or failed changes nothing: the phase, `CaughtUp` and the three fields keep what the last complete sample of the attempt set.
+A new attempt clears the three fields, `progress` and `CaughtUp` when it starts.
 The pass that saves endpos for a cutover first records the `CaughtUp` True that admitted it.
 
 ## Manual cutover runbook

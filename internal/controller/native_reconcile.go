@@ -298,7 +298,9 @@ func (r *MigrationReconciler) reconcileNativeRunning(ctx context.Context, m, bas
 	if sampleErr != nil {
 		return ctrl.Result{}, sampleErr
 	}
-	r.applyNativeProgress(m, got)
+	if nativeSampleComplete(m, got) {
+		r.applyNativeProgress(m, got)
+	}
 	// Recorded first, so the pass that cuts over also leaves CaughtUp=True behind.
 	if err := r.updateNativeStatus(ctx, m, base); err != nil {
 		return ctrl.Result{}, err
