@@ -238,7 +238,6 @@ func TestNativeRetryReadinessAdmission(t *testing.T) {
 		name  string
 		setup func(*readerAPI)
 	}{
-		{"missing_worker_pod", func(a *readerAPI) { a.extraPods = nil }},
 		{"extra_worker_pod", func(a *readerAPI) {
 			p := *a.extraPods[0].DeepCopy()
 			p.UID = "extra-pod"

@@ -61,12 +61,10 @@ func TestNativeCleanupRejoinAdmission(t *testing.T) {
 			}
 		})
 	}
-	for _, mode := range []string{"missing_original_pod", "duplicate_original_pod", "duplicate_helper_pod", "foreign_original_owner"} {
+	for _, mode := range []string{"duplicate_original_pod", "duplicate_helper_pod", "foreign_original_owner"} {
 		t.Run(mode, func(t *testing.T) {
 			api, r, w := newCleanupRejoinReaderAPI(t)
 			switch mode {
-			case "missing_original_pod":
-				api.extraPods = nil
 			case "duplicate_original_pod":
 				api.extraPods = append(api.extraPods, *api.extraPods[0].DeepCopy())
 			case "duplicate_helper_pod":

@@ -181,7 +181,6 @@ func ownedAdmissionTransportRefusals(t *testing.T) {
 		name  string
 		setup func(*readerAPI)
 	}{
-		{"missing_worker_pod", func(a *readerAPI) { a.extraPods = nil }},
 		{"duplicate_worker_pod", func(a *readerAPI) {
 			p := *a.extraPods[0].DeepCopy()
 			p.Name = "other-worker"

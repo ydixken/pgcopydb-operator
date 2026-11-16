@@ -63,10 +63,13 @@ func (r *Reader) admitOwned(ctx context.Context, w ExecutionData, completed bool
 			}
 		}
 	}
-	if helperPod == nil || workerPod == nil {
+	if helperPod == nil {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	for _, selected := range []*corev1.Pod{helperPod, workerPod} {
+		if selected == nil {
+			continue
+		}
 		observed := &corev1.Pod{}
 		if r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: selected.Name}, observed) != nil || observed.UID != selected.UID {
 			return nil, ErrNativeOwnedStateUnavailable
@@ -77,7 +80,7 @@ func (r *Reader) admitOwned(ctx context.Context, w ExecutionData, completed bool
 }
 
 func validateOwnedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, job, worker *batchv1.Job, pod, workerPod *corev1.Pod, completed bool) (*ownedAdmission, error) {
-	if !validOwnedExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil || workerPod == nil {
+	if !validOwnedExecution(w) || m == nil || pvc == nil || job == nil || worker == nil || pod == nil {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	if !ownedMigrationMatches(w, m, worker) || !retryPVCMatches(w, m, pvc) || !retryHelperJobMatches(w, m, job) {
@@ -135,7 +138,7 @@ func ownedHelperState(w ExecutionData, job *batchv1.Job, pod *corev1.Pod, comple
 }
 
 func ownedTerminalWorker(w ExecutionData, m *v1beta1.Migration, job *batchv1.Job, pod *corev1.Pod) bool {
-	return ownedTerminalWorkerJob(w, m, job) && ownedTerminalWorkerPod(w, m, job, pod)
+	return ownedTerminalWorkerJob(w, m, job) && (pod == nil && (successfulJob(job) || retryFailedWorkerJob(w, m, job)) || pod != nil && ownedTerminalWorkerPod(w, m, job, pod))
 }
 
 func ownedTerminalWorkerJob(w ExecutionData, m *v1beta1.Migration, job *batchv1.Job) bool {
@@ -193,19 +196,26 @@ func ownedHelperSpecs(m *v1beta1.Migration, w ExecutionData, job *batchv1.Job, p
 }
 
 func (a *ownedAdmission) same(b *ownedAdmission) bool {
-	if a == nil || b == nil || !a.helper.sameExecution(b.helper) {
+	if a == nil || b == nil || !a.helper.sameExecution(b.helper) || (a.workerPod == nil) != (b.workerPod == nil) {
 		return false
 	}
-	for _, pair := range []struct {
+	pairs := []struct {
 		x, y metav1.Object
 		job  *batchv1.Job
-	}{{a.helper.migration, b.helper.migration, nil}, {a.helper.pvc, b.helper.pvc, nil}, {a.helper.job, b.helper.job, nil}, {a.helper.worker, b.helper.worker, nil}, {a.helper.pod, b.helper.pod, b.helper.job}, {a.workerPod, b.workerPod, b.helper.worker}} {
+	}{{a.helper.migration, b.helper.migration, nil}, {a.helper.pvc, b.helper.pvc, nil}, {a.helper.job, b.helper.job, nil}, {a.helper.worker, b.helper.worker, nil}, {a.helper.pod, b.helper.pod, b.helper.job}}
+	if a.workerPod != nil {
+		pairs = append(pairs, struct {
+			x, y metav1.Object
+			job  *batchv1.Job
+		}{a.workerPod, b.workerPod, b.helper.worker})
+	}
+	for _, pair := range pairs {
 		x, y := pair.x, pair.y
 		if x.GetNamespace() != y.GetNamespace() || x.GetName() != y.GetName() || x.GetUID() != y.GetUID() || x.GetGeneration() != y.GetGeneration() || !reflect.DeepEqual(x.GetDeletionTimestamp(), y.GetDeletionTimestamp()) || !reflect.DeepEqual(x.GetDeletionGracePeriodSeconds(), y.GetDeletionGracePeriodSeconds()) || !finalizersHeld(x, y, pair.job) || !reflect.DeepEqual(x.GetOwnerReferences(), y.GetOwnerReferences()) || !reflect.DeepEqual(x.GetLabels(), y.GetLabels()) || !reflect.DeepEqual(x.GetAnnotations(), y.GetAnnotations()) {
 			return false
 		}
 	}
-	return reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.pvc.Status, b.helper.pvc.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName)
+	return reflect.DeepEqual(a.helper.migration.Status, b.helper.migration.Status) && reflect.DeepEqual(a.helper.pvc.Status, b.helper.pvc.Status) && reflect.DeepEqual(a.helper.worker.Status, b.helper.worker.Status) && (a.workerPod == nil || reflect.DeepEqual(a.workerPod.Spec, b.workerPod.Spec) && podexec.SamePodState(a.workerPod, b.workerPod, nativeContainerName))
 }
 
 // finalizersHeld admits one drift only: the Job controller dropping its tracking
