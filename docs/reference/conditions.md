@@ -150,6 +150,7 @@ This table lists every reason that the controller sets, spelled exactly as it ap
 | `Blocked` | `True` | `WorkerModified` | The running worker Job no longer matches the Job admitted for its attempt. Restore it, or suspend or delete the Migration, which drops it. |
 | `Blocked` | `True` | `CleanupUnavailable` | Deletion could run native cleanup but it did not finish, for example because the source is unreachable. The finalizer stays and the operator retries. |
 | `Blocked` | `True` | `EvidenceUnavailable` | A finish pass cannot read the completion evidence it needs from the admitted worker or a pinned compare Job. The message names the Job. |
+| `Blocked` | `True` | `CompareFailed` | A pinned native compare Job ended `Failed` and kept its pod. A failed Job does not run again, so the operator does not create the compare again while that Job exists. The message names the Job. Delete the Job, and a later pass creates a new compare. |
 | `Blocked` | `True` | `StatusIntegrity` | A native receipt contradicts the live objects, for example a worker Job for the next attempt while the recorded one has not ended. The operator does not record or remove it. |
 | `Blocked` | `False` | `Proceeding` | The first pass after a hold that could act did so. |
 | `CleanupFailed` | `True` | `NamespaceTerminating` | A dry-run create of the next cleanup helper Job was refused because the namespace is being deleted, so no cleanup pod can start. The API server also refuses the warning event there, so the operator log carries the slot and publication prefixes as well. |

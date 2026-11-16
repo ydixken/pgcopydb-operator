@@ -312,8 +312,13 @@ func (r *MigrationReconciler) reconcileNativeCompare(ctx context.Context, m, bas
 		return true, ctrl.Result{RequeueAfter: pollInterval}, nil
 	case pod == nil:
 		return r.dropNativeCompare(ctx, m, base, check, job, true)
+	case nativePreflightJobFailed(job):
+		// A Failed Job has used its backoff, so it is never recreated while it remains (dh); once someone
+		// deletes it, the next pass takes the "pinned, missing" row and creates a new compare.
+		return r.holdNative(ctx, m, base, v1beta1.ReasonCompareFailed, fmt.Sprintf(
+			"Compare Job %s failed and keeps pod %s; native verification waits, and deleting the Job runs the compare again", job.Name, pod.Name))
 	}
-	// Pinned and ended with its pod: ensureNativeVerification reads it after the drain observation.
+	// Pinned and Complete with its pod: ensureNativeVerification reads it after the drain observation.
 	return false, ctrl.Result{}, nil
 }
 

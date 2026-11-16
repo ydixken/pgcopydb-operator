@@ -869,6 +869,7 @@ Each reason has its own way out:
 - `ForegroundDeletion`: the garbage collector is still deleting the Jobs of a foreground deletion. Wait.
 - `ForeignObject`: a Job or PVC under one of the Migration's names belongs to something else. Delete or rename that object; the operator never touches it.
 - `WorkerModified`: someone edited the running worker Job. Restore it, or suspend or delete the Migration, which deletes the worker.
+- `CompareFailed`: a native compare Job ended `Failed` and kept its pod. Read its log, then delete the Job. A later pass creates a new compare.
 - `CleanupUnavailable`: deletion could run cleanup, but the inventory or cleanup helper did not finish. Usually the source or the target is unreachable. Fix the connection, and the operator retries.
 - `StatusIntegrity` or `EvidenceUnavailable`: the receipts in the status contradict the objects. Read the message, and report it with the status and the Job list.
 

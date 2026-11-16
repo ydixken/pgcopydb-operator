@@ -473,9 +473,9 @@ func (r *MigrationReconciler) reconcileNativeLiveWorker(ctx context.Context, m, 
 		}
 		return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 	}
-	// The finish path owns an EvidenceUnavailable hold of a Complete worker and clears it when it proceeds.
+	// The finish path owns the EvidenceUnavailable and CompareFailed holds of a Complete worker and clears them when it proceeds.
 	if b := meta.FindStatusCondition(m.Status.Conditions, v1beta1.ConditionBlocked); b != nil && b.Status == metav1.ConditionTrue &&
-		(b.Reason != v1beta1.ReasonEvidenceUnavailable || s.worker == nil || !nativeEvidenceWorkerComplete(s.worker)) {
+		(b.Reason != v1beta1.ReasonEvidenceUnavailable && b.Reason != v1beta1.ReasonCompareFailed || s.worker == nil || !nativeEvidenceWorkerComplete(s.worker)) {
 		desired := m.DeepCopy()
 		r.clearNativeBlocked(desired)
 		return r.patchNativeWorkerState(ctx, m, base, desired)

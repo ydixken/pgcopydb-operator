@@ -812,6 +812,7 @@ const (
 	ReasonCleanupUnavailable  = "CleanupUnavailable"
 	ReasonEvidenceUnavailable = "EvidenceUnavailable"
 	ReasonStatusIntegrity     = "StatusIntegrity"
+	ReasonCompareFailed       = "CompareFailed"
 	ReasonProceeding          = "Proceeding"
 )
 

@@ -73,6 +73,11 @@ The compare Job includes the generation of the Migration, so a spec change also 
 When the Job with the recorded UID is gone, the operator clears the UID in the status, and a later pass creates a new Job.
 The operator never reads the output of a compare Job that it deletes.
 
+A compare Job that ended `Failed` and kept its pod sets `Blocked=True` with reason `CompareFailed`.
+A failed Job does not run again, so the operator does not delete that Job or create a new compare while the Job exists.
+Delete the Job to run the compare again.
+The next pass then clears the UID, and a later pass creates a new Job.
+
 A Job with the compare name that the Migration does not control sets `Blocked=True` with reason `EvidenceUnavailable`.
 The operator does not read or delete that Job.
 Delete it to let the verification continue.
