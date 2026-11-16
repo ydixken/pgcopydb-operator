@@ -180,7 +180,7 @@ func TestNativePythonNativePreflightBounds(t *testing.T) {
 }
 
 func TestNativePythonSourceObservation(t *testing.T) {
-	for _, method := range []string{"test_SourceObservationWire", "test_SourceObservationState", "test_SourceObservationMaterialization", "test_SourceObservationClosedResult", "test_SourceObservationRefusals", "test_SourceObservationIO"} {
+	for _, method := range []string{"test_SourceObservationWire", "test_SourceObservationState", "test_SourceObservationMaterialization", "test_MaterializationCredentialDirectory", "test_SourceObservationClosedResult", "test_SourceObservationRefusals", "test_SourceObservationIO"} {
 		t.Run(method, func(t *testing.T) { pythonMechanismCase(t, method) })
 	}
 }
@@ -290,7 +290,7 @@ print(json.dumps(unittest.defaultTestLoader.getTestCaseNames(m.NativePythonTests
 	defer cancel()
 	output, err := exec.CommandContext(ctx, python, "-I", "-B", "-W", "error", "-c", inventory, path).Output()
 	var actual []string
-	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 68 || len(registered) != 68 {
+	if err != nil || json.Unmarshal(output, &actual) != nil || len(actual) != 69 || len(registered) != 69 {
 		t.Fatalf("required Python mechanism inventory is unavailable or incomplete: Go=%d Python=%d", len(registered), len(actual))
 	}
 	slices.Sort(registered)

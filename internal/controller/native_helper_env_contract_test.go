@@ -628,8 +628,8 @@ func returnsJob(fn *ast.FuncDecl) bool {
 	return false
 }
 
-// Every native builder is listed, checked by parsing the package, so a new one cannot skip the setting.
-func TestNativeBuildersDisableServiceLinks(t *testing.T) {
+// nativeBuilderRows builds every native Job from its fixture; TestNativeBuildersDisableServiceLinks proves the list complete.
+func nativeBuilderRows(t *testing.T) map[string]func(*testing.T) (*batchv1.Job, error) {
 	builders := map[string]func(*testing.T) (*batchv1.Job, error){
 		"buildNativeVersionJob": func(*testing.T) (*batchv1.Job, error) {
 			m, _ := nativeEndposJobInputs()
@@ -661,6 +661,12 @@ func TestNativeBuildersDisableServiceLinks(t *testing.T) {
 			builders[name] = tc.build
 		}
 	}
+	return builders
+}
+
+// Every native builder is listed, checked by parsing the package, so a new one cannot skip the setting.
+func TestNativeBuildersDisableServiceLinks(t *testing.T) {
+	builders := nativeBuilderRows(t)
 	files, err := filepath.Glob("*.go")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("controller sources unavailable: %v", err)

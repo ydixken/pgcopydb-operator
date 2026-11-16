@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -282,17 +283,19 @@ func EvidenceMaterialization(m *v1beta1.Migration, w ExecutionRequest) ([]string
 	if m == nil || m.UID == "" || w.Role != JobRoleEvidence || !validIdentity(w.Work) || w.MigrationUID != m.UID || w.Work.MigrationUID != string(m.UID) || w.Work.WorkdirID != string(w.PVCUID) || len(validation.IsDNS1123Subdomain(w.PVCName)) != 0 || w.PVCName != m.Name+"-work" || !lowerHex(w.OperationID, 32) || w.ProgramSHA256 != EvidenceProgramSHA256() {
 		return nil, nil, nil, nil, nil, errors.New("native evidence materialization refused")
 	}
-	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
+	// The disk-backed /tmp stays for scratch; the passwords go to the memory volume.
+	src, err := conn.MaterializeIn(conn.MemoryCredentials, conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, nil, nil, nil, nil, errors.New("native connection materialization invalid")
 	}
-	tgt, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	tgt, err := conn.MaterializeIn(conn.MemoryCredentials, conn.Target, &m.Spec.Target)
 	if err != nil {
 		return nil, nil, nil, nil, nil, errors.New("native connection materialization invalid")
 	}
 	env := []corev1.EnvVar{}
-	volumes := []corev1.Volume{{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName}}}, {Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
-	mounts := []corev1.VolumeMount{{Name: resourceKindWorkdir, MountPath: "/work"}, {Name: "tmp", MountPath: "/tmp"}}
+	credentials, credentialsMount := conn.MemoryCredentialsVolume()
+	volumes := []corev1.Volume{{Name: resourceKindWorkdir, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: w.PVCName}}}, {Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}, credentials}
+	mounts := []corev1.VolumeMount{{Name: resourceKindWorkdir, MountPath: "/work"}, {Name: "tmp", MountPath: "/tmp"}, credentialsMount}
 	var preludes []string
 	var passfiles []conn.Passfile
 	for _, material := range []*conn.Materialized{src, tgt} {
@@ -308,12 +311,12 @@ func EvidenceMaterialization(m *v1beta1.Migration, w ExecutionRequest) ([]string
 	}
 	env = append(env, corev1.EnvVar{Name: "PGCOPYDB_LOG_JSON", Value: "on"})
 	if len(preludes) > 0 || len(passfiles) > 0 {
-		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
+		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.MemoryCredentials.Pgpass()})
 	}
 	env = append(env, corev1.EnvVar{Name: "PGCONNECT_TIMEOUT", Value: "10"})
 	env = append(env, identityEnv(w.Work)...)
 	env = append(env, corev1.EnvVar{Name: "LC_ALL", Value: "C"}, corev1.EnvVar{Name: "LANG", Value: "C"})
-	command, args, err := renderEvidenceScripts(EvidenceProgram(), w, conn.PreludeScript(preludes, passfiles, ""))
+	command, args, err := renderEvidenceScripts(EvidenceProgram(), w, conn.PreludeScriptIn(conn.MemoryCredentials, preludes, passfiles, ""))
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -377,7 +380,7 @@ func sameEnvironment(a, b []corev1.EnvVar) bool {
 }
 
 func admittedPodSpec(spec *corev1.PodSpec, image string) bool {
-	if !admittedPodIsolation(spec) {
+	if !admittedPodIsolation(spec) || !CredentialsInMemory(spec) {
 		return false
 	}
 	uid, nonroot, deny, readonly, fsPolicy := int64(65532), true, false, true, corev1.FSGroupChangeOnRootMismatch
@@ -402,6 +405,51 @@ func admittedPodSpec(spec *corev1.PodSpec, image string) bool {
 		}
 	}
 	return locale["LANG"] && locale["LC_ALL"]
+}
+
+// CredentialsInMemory reports whether every container's PGPASSFILE directory, which also holds the
+// composed URIs, is the mount of a size-limited memory emptyDir with nothing mounted below it.
+func CredentialsInMemory(spec *corev1.PodSpec) bool {
+	volumes := map[string]corev1.Volume{}
+	for _, v := range spec.Volumes {
+		volumes[v.Name] = v
+	}
+	for _, c := range spec.Containers {
+		file := ""
+		for _, e := range c.Env {
+			if e.Name == nativePreflightPassfileEnv {
+				if e.ValueFrom != nil || e.Value == "" {
+					return false
+				}
+				file = e.Value
+			}
+		}
+		if file == "" {
+			continue
+		}
+		dir := path.Dir(file)
+		if !path.IsAbs(file) || path.Clean(file) != file {
+			return false
+		}
+		var holder *corev1.VolumeMount
+		for i, m := range c.VolumeMounts {
+			switch {
+			case m.MountPath == dir:
+				holder = &c.VolumeMounts[i]
+			case strings.HasPrefix(m.MountPath, dir+"/"), strings.HasPrefix(dir, m.MountPath+"/"):
+				// A mount below would shadow a credential file; one above means dir is not the volume root.
+				return false
+			}
+		}
+		if holder == nil || holder.ReadOnly || holder.SubPath != "" || holder.SubPathExpr != "" {
+			return false
+		}
+		v, ok := volumes[holder.Name]
+		if !ok || v.EmptyDir == nil || v.EmptyDir.Medium != corev1.StorageMediumMemory || v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.Sign() <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func admittedPodIsolation(spec *corev1.PodSpec) bool {

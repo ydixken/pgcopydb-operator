@@ -22,8 +22,8 @@ func TestNativeStructuralConnectionReferenceParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Captured from the evidence wrapper before extracting its projection.
-	const baseline = "0a7f52f53f48626056478d70aadbd5ce6e82576e96762904a9102192e60966fe"
+	// Captured from the evidence wrapper once the memory credential volume joined its projection.
+	const baseline = "fda878b6d2d19665f39ee4249bff72536920933c0e70df5f4cc66b2e84ecd134"
 	if structural != evidence || hex.EncodeToString(structural[:]) != baseline {
 		t.Fatal("structural extraction changed the existing evidence digest")
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/conn"
 )
 
 // explicitArgvExportEnv names the file hack/native-explicit-file-qualify.py reads the rendered argv from.
@@ -36,7 +37,7 @@ type explicitArgvCase struct {
 func explicitSyntheticProgram(t *testing.T, size int, marker string) []byte {
 	t.Helper()
 	head := "import json, os, sys\n"
-	tail := "print(json.dumps({'marker': '" + marker + "', 'argv': [len(a.encode()) for a in sys.argv], 'env_bytes': sum(len(k) + len(v) + 2 for k, v in os.environb.items()), 'env_count': len(os.environb), 'pgpass': os.path.isfile('/tmp/pgpass')}))\n"
+	tail := "print(json.dumps({'marker': '" + marker + "', 'argv': [len(a.encode()) for a in sys.argv], 'env_bytes': sum(len(k) + len(v) + 2 for k, v in os.environb.items()), 'env_count': len(os.environb), 'pgpass': os.path.isfile('" + conn.MemoryCredentials.Pgpass() + "')}))\n"
 	pad := size - len(head) - len(tail)
 	if pad < 2 {
 		t.Fatal("synthetic program size too small")
