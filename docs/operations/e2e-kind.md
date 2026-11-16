@@ -148,8 +148,9 @@ The spec kills the runner only when the target's `pg_stat_progress_copy` shows t
 It fails if it sees that COPY only complete, or if the Migration fails or starts streaming first.
 It also fails at once when a COPY into that table runs under any `application_name` other than `rpgmigrate[<pid>] copy`, so an engine that leaves its sessions unnamed cannot pass for a COPY the probe never saw.
 After the kill it requires that transaction to end aborted, which proves the kill landed before the table committed.
-The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, and the longest time between two probe starts (`probe_gap_max`).
-Keep the projected window at least four times `probe_gap_max`, and grow the table if a run shows less.
+The `native fault copy kill` entry in `go-test.json` records the bytes processed at the kill, the seconds since the COPY started, the copy window projected from them, the number of probes, the longest time between two probe starts (`probe_gap_max`), and the longest single `psql` exec (`probe_exec_max`).
+When the first probe already sees the COPY there is no gap to measure, so `probe_gap_max` reads `unmeasured`; one probe cycle then takes about `probe_exec_max` plus the 250 ms poll.
+Keep the projected window at least four times `probe_gap_max` (or that cycle when it is unmeasured), and grow the table if a run shows less.
 The invariant counts the table too: every row on the source, every row on a resumed target, and none or all of them on a target that failed closed.
 The spec drops it from the source after the Migration's own cleanup.
 The fault specs find the engine's sessions by their `rpgmigrate[<pid>] <role>` names.

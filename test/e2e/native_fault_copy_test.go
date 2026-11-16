@@ -151,8 +151,9 @@ func (s nativeFaultCopySample) complete(total int64) bool { return s.present && 
 // nativeFaultBulk is the spec-local plan table whose COPY the fault interrupts. probeGap is
 // the longest time between two probe starts, which bounds how late the probe can see the COPY.
 type nativeFaultBulk struct {
-	rows, total int64
-	probeGap    time.Duration
+	rows, total         int64
+	probes              int
+	probeGap, probeExec time.Duration
 }
 
 // createNativeFaultBulk creates the bulk table on the source as the app role, which owns
@@ -179,10 +180,13 @@ func (b *nativeFaultBulk) waitMidCopy(stop func(Gomega) string) nativeFaultCopyS
 			b.probeGap = max(b.probeGap, now.Sub(last))
 		}
 		last = now
+		b.probes++
 		if reason := stop(g); reason != "" {
 			StopTrying(reason + " before the bulk table was seen mid-copy").Now()
 		}
+		start := time.Now()
 		out, err := psqlDBErr(targetCluster, appDatabase(targetCluster), nativeFaultBulkCopySQL)
+		b.probeExec = max(b.probeExec, time.Since(start))
 		g.Expect(err).NotTo(HaveOccurred())
 		s, err := parseNativeFaultCopy(out, b.total)
 		if err != nil {
@@ -232,8 +236,29 @@ func (b *nativeFaultBulk) expectRows(target string, resumed bool) {
 func (b *nativeFaultBulk) report(s nativeFaultCopySample) {
 	window := fmt.Sprintf("%.1fs", s.elapsed*float64(b.total)/float64(s.bytes))
 	AddReportEntry("native fault copy kill", fmt.Sprintf("table=%s rows=%d total_bytes=%d bytes_at_kill=%d (%.1f%%)"+
-		" copy_elapsed=%.3fs projected_window=%s probe_gap_max=%s xid=%s", nativeFaultBulkTable, b.rows, b.total, s.bytes,
-		100*float64(s.bytes)/float64(b.total), s.elapsed, window, b.probeGap.Round(time.Millisecond), s.xid))
+		" copy_elapsed=%.3fs projected_window=%s %s xid=%s", nativeFaultBulkTable, b.rows, b.total, s.bytes,
+		100*float64(s.bytes)/float64(b.total), s.elapsed, window, b.probeTimes(), s.xid))
+}
+
+// probeTimes reports the probe timings. A single probe has no gap, so its gap reads
+// unmeasured, never 0s.
+func (b *nativeFaultBulk) probeTimes() string {
+	gap := "unmeasured"
+	if b.probes > 1 {
+		gap = b.probeGap.Round(time.Millisecond).String()
+	}
+	return fmt.Sprintf("probes=%d probe_gap_max=%s probe_exec_max=%s", b.probes, gap, b.probeExec.Round(time.Millisecond))
+}
+
+func TestNativeFaultBulkProbeTimes(t *testing.T) {
+	first := &nativeFaultBulk{probes: 1, probeExec: 1148 * time.Millisecond}
+	if got, want := first.probeTimes(), "probes=1 probe_gap_max=unmeasured probe_exec_max=1.148s"; got != want {
+		t.Errorf("a first-probe hit reports %q, want %q", got, want)
+	}
+	later := &nativeFaultBulk{probes: 3, probeGap: 1400 * time.Millisecond, probeExec: 1148 * time.Millisecond}
+	if got, want := later.probeTimes(), "probes=3 probe_gap_max=1.4s probe_exec_max=1.148s"; got != want {
+		t.Errorf("a later hit reports %q, want %q", got, want)
+	}
 }
 
 func TestNativeFaultCopyProgress(t *testing.T) {
