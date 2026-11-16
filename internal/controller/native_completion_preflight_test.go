@@ -148,6 +148,7 @@ func newCompletionProbe(t *testing.T, follow bool) (*preflightFixture, *batchv1.
 		f.m.Status.Replication = &v1beta1.ReplicationStatus{Endpos: caughtUpLSN}
 	}
 	_, pvc := nativeWorkerJobInputs()
+	nativeBindTestClaim(f.m, pvc)
 	pvc.Status.Phase = corev1.ClaimBound
 	f.m.Status.Attempts, f.m.Status.JobName, f.m.Status.Phase = 1, jobName(f.m, 1), v1beta1.PhaseCompleted
 	worker, err := buildNativeWorkerJob(f.m, pvc, f.r.RPGMigrateRunnerImage, 1)

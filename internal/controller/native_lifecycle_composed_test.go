@@ -130,7 +130,7 @@ func TestNativeComposedLifecycleExactUID(t *testing.T) {
 	l.refuseWorkerReplacement(t)
 	l.finalDelete(t)
 	for _, uid := range l.deleted {
-		if uid != l.worker.UID && (!slices.Contains(l.created, uid) || !strings.HasPrefix(string(uid), "finish-helper-")) {
+		if uid != l.worker.UID && uid != l.pvc.UID && (!slices.Contains(l.created, uid) || !strings.HasPrefix(string(uid), "finish-helper-")) {
 			t.Fatalf("Delete reached UID %s that this lifecycle did not create", uid)
 		}
 	}
@@ -221,15 +221,14 @@ func (l *composedLifecycle) finalDelete(t *testing.T) {
 	if result, err := l.dispatch(t); err != nil || result != (ctrl.Result{}) {
 		t.Fatal("finalized deletion did not settle", result, err)
 	}
-	if got := l.deleted[deletes:]; !slices.Equal(got, []types.UID{l.worker.UID}) {
-		t.Fatalf("finalized deletion disposed %v, want only the recorded worker", got)
+	if got := l.deleted[deletes:]; !slices.Equal(got, []types.UID{l.worker.UID, l.pvc.UID}) {
+		t.Fatalf("finalized deletion disposed %v, want the recorded worker and then the work PVC", got)
 	}
 	if err := l.store.Get(context.Background(), client.ObjectKeyFromObject(l.m), &v1beta1.Migration{}); !apierrors.IsNotFound(err) {
 		t.Fatal("finalizer was not released", err)
 	}
-	claim := &corev1.PersistentVolumeClaim{}
-	if err := l.store.Get(context.Background(), client.ObjectKeyFromObject(l.pvc), claim); err != nil || claim.UID != l.pvc.UID {
-		t.Fatal("work PVC was deleted instead of left to owner GC", err)
+	if err := l.store.Get(context.Background(), client.ObjectKeyFromObject(l.pvc), &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatal("the unowned follow work PVC outlived its Migration", err)
 	}
 }
 

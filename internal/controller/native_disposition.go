@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -16,12 +17,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var errNativeDisposition = errors.New("native disposition authority unavailable")
@@ -38,6 +41,11 @@ func (r *MigrationReconciler) reconcileNativeDisposition(ctx context.Context, m,
 	if r.APIReader == nil || r.Client == nil || ctx.Err() != nil || !nativeDispositionSnapshotMatches(m, base) {
 		return true, ctrl.Result{}, errNativeDisposition
 	}
+	if deleting && !controllerutil.ContainsFinalizer(m, finalizerName) {
+		// Without the operator finalizer, owner-reference garbage collection removes everything.
+		metrics.Forget(m.Namespace, m.Name)
+		return true, ctrl.Result{}, nil
+	}
 	if deleting && m.Status.NativeFinalizedJobUID != "" && m.Status.NativeFinalizedJobUID != m.Status.NativeJobUID {
 		return true, ctrl.Result{}, errNativeDisposition
 	}
@@ -50,9 +58,15 @@ func (r *MigrationReconciler) reconcileNativeDisposition(ctx context.Context, m,
 			return true, ctrl.Result{}, err
 		}
 		if deleting {
+			if pvc != nil && followEnabled(m) && r.deleteNativeWorkClaim(ctx, m, pvc) != nil {
+				return true, ctrl.Result{}, errNativeDisposition
+			}
 			return r.finishNativeDeletion(ctx, m)
 		}
-		return r.recordNativeSuspended(ctx, m, base)
+		return r.recordNativeSuspended(ctx, m, base, nil)
+	}
+	if deleting || m.Spec.Suspend {
+		return r.reconcileNativeRetainedDisposition(ctx, m, base, worker, pvc)
 	}
 	if pvc == nil {
 		return true, ctrl.Result{}, errNativeDisposition
@@ -60,9 +74,6 @@ func (r *MigrationReconciler) reconcileNativeDisposition(ctx context.Context, m,
 	live, current, claim, err := r.nativeRecoveryCurrent(ctx, m, worker, pvc)
 	if err != nil {
 		return true, ctrl.Result{}, errNativeDisposition
-	}
-	if deleting || live.Spec.Suspend {
-		return r.reconcileNativeRetainedDisposition(ctx, live, current, claim)
 	}
 	result, err := r.reconcileNativeFailedWorker(ctx, live, current, claim)
 	return true, result, err
@@ -73,46 +84,324 @@ func nativeDispositionSnapshotMatches(m, base *v1beta1.Migration) bool {
 		apiequality.Semantic.DeepEqual(m.Spec, base.Spec) && apiequality.Semantic.DeepEqual(m.Status, base.Status)
 }
 
-func (r *MigrationReconciler) reconcileNativeRetainedDisposition(ctx context.Context, live *v1beta1.Migration, worker *batchv1.Job, claim *corev1.PersistentVolumeClaim) (bool, ctrl.Result, error) {
-	deleting := !live.DeletionTimestamp.IsZero()
-	current, original, err := r.nativeRetainedDispositionTerminal(ctx, live, worker, claim)
+// reconcileNativeDeletionGuards runs before the worker tables on a deletion pass. Without the operator
+// finalizer, garbage collection owns every object; R9 releases a terminating namespace at once, and R8
+// waits out foreground deletion before any helper Job, since the garbage collector would delete it too.
+func (r *MigrationReconciler) reconcileNativeDeletionGuards(ctx context.Context, m, base *v1beta1.Migration, s nativeWorkerState) (bool, ctrl.Result, error) {
+	if m.DeletionTimestamp.IsZero() || m.Spec.Engine != v1beta1.MigrationEngineRPGMigrate {
+		return false, ctrl.Result{}, nil
+	}
+	if !controllerutil.ContainsFinalizer(m, finalizerName) {
+		r.stopSampling(client.ObjectKeyFromObject(m))
+		metrics.Forget(m.Namespace, m.Name)
+		return true, ctrl.Result{}, nil
+	}
+	// Before a worker could have run there is nothing to clean up, and the release needs no helper.
+	if m.Status.Attempts == 0 && m.Status.NativeWorkerIntent == "" && s.n == nextAbsent {
+		return false, ctrl.Result{}, nil
+	}
+	if r.nativeNamespaceTerminating(ctx, m) {
+		r.stopSampling(client.ObjectKeyFromObject(m))
+		return r.releaseNativeCleanupFailed(ctx, m, v1beta1.ReasonNamespaceTerminating, s.pvc)
+	}
+	if slices.Contains(m.Finalizers, metav1.FinalizerDeleteDependents) {
+		r.stopSampling(client.ObjectKeyFromObject(m))
+		return r.holdNative(ctx, m, base, v1beta1.ReasonForegroundDeletion,
+			"Foreground deletion is removing this Migration's Jobs; native cleanup starts once the garbage collector has deleted them and removed the foregroundDeletion finalizer")
+	}
+	return false, ctrl.Result{}, nil
+}
+
+// nativeNamespaceTerminating is R9: a dry-run create of the next helper Job runs admission and
+// persists nothing. Only Forbidden with cause NamespaceTerminating counts; any other refusal, such
+// as a quota or a webhook that refuses dry-run, leaves the pass on its normal path.
+func (r *MigrationReconciler) nativeNamespaceTerminating(ctx context.Context, m *v1beta1.Migration) bool {
+	op, err := nativeRecoveryOperationID()
+	if err != nil || r.Scheme == nil {
+		return false
+	}
+	probe, err := buildNativeVersionJob(m, r.RPGMigrateRunnerImage, "rpgmigrate-version-"+op)
+	if err != nil || controllerutil.SetControllerReference(m, probe, r.Scheme) != nil {
+		return false
+	}
+	err = r.Create(ctx, probe, client.DryRunAll)
+	return apierrors.IsForbidden(err) && apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause)
+}
+
+var errNativeCleanupFailed = errors.New("native cleanup did not run; the finalizer is released")
+
+// releaseNativeCleanupFailed is CF: CleanupFailed=True before the finalizer patch, an event attempt,
+// and an error log line that names the slot and publication where the API server refuses the event (I4).
+// The work PVC is deleted when it is still this Migration's bound claim.
+func (r *MigrationReconciler) releaseNativeCleanupFailed(ctx context.Context, m *v1beta1.Migration, reason string, pvc *corev1.PersistentVolumeClaim) (bool, ctrl.Result, error) {
+	msg, err := nativeCleanupFailedMessage(m, reason)
+	run, runErr := nativeRunID(m)
+	if err != nil || runErr != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	desired := m.DeepCopy()
+	r.setCondition(desired, v1beta1.ConditionCleanupFailed, metav1.ConditionTrue, reason, msg)
+	if !apiequality.Semantic.DeepEqual(desired.Status, m.Status) {
+		if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(m, client.MergeFromWithOptimisticLock{})); err != nil {
+			return true, ctrl.Result{}, nativeWorkerError(err)
+		}
+		desired.DeepCopyInto(m)
+	}
+	logf.FromContext(ctx).Error(errNativeCleanupFailed, msg, "reason", reason, "slots", "rpgm_s_"+run+"_*", "publications", "rpgm_p_"+run+"_*",
+		"sourceHost", m.Spec.Source.Host, "sourceDatabase", m.Spec.Source.Database)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(m, nil, corev1.EventTypeWarning, v1beta1.ConditionCleanupFailed, "Cleanup", "%s", truncate(msg, maxDetailLen))
+	}
+	if pvc != nil && r.deleteNativeWorkClaim(ctx, m, pvc) != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	return r.finishNativeDeletion(ctx, m)
+}
+
+// reconcileNativeRetainedDisposition is the suspend and delete columns of the W, V and C tables for a
+// recorded worker: stop or drop a worker that has not ended, then suspend, or clean up and release.
+func (r *MigrationReconciler) reconcileNativeRetainedDisposition(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (bool, ctrl.Result, error) {
+	deleting := !m.DeletionTimestamp.IsZero()
+	if deleting && pvc == nil && followEnabled(m) {
+		// A missing, deleting or replaced work PVC cannot be mounted, so cleanup cannot read its receipts.
+		return r.releaseNativeCleanupFailed(ctx, m, v1beta1.ReasonWorkVolumeLost, nil)
+	}
+	missing := nativeWorkerMissing(worker)
+	admitted := !missing && nativeWorkerAdmitted(m, worker)
+	if !missing && (!worker.DeletionTimestamp.IsZero() || worker.Status.Terminating != nil && *worker.Status.Terminating != 0) {
+		return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerPodRemains, fmt.Sprintf(
+			"Native worker Job %s is being deleted or has terminating pods; the operator waits until they are gone", worker.Name))
+	}
+	if !missing && !nativeWorkerEnded(worker) {
+		return r.stopNativeDispositionWorker(ctx, m, base, worker, pvc, admitted)
+	}
+	if !missing && !admitted && deleting {
+		// Recovery reads bind only an admitted worker, so an ended modified one is dropped and cleanup follows a gone W.
+		return r.dropNativeDispositionJob(ctx, m, base, worker)
+	}
+	// W has ended or is gone; R1 holds, with the same pod or none, before and after the compare disposal.
+	original, err := r.nativeDispositionEngineFree(ctx, m, worker, pvc, nil)
+	if err != nil {
+		return r.holdNativeBusy(ctx, m, base, err)
+	}
+	if !deleting || !followEnabled(m) {
+		unpin, held, err := r.disposeNativeCompareHelpers(ctx, m, pvc, !deleting)
+		if held != nil || err != nil {
+			return r.holdNativeCompare(ctx, m, base, held, err)
+		}
+		if _, err := r.nativeDispositionEngineFree(ctx, m, worker, pvc, original); err != nil {
+			return r.holdNativeBusy(ctx, m, base, err)
+		}
+		if deleting {
+			return r.finishNativeDeletion(ctx, m)
+		}
+		return r.recordNativeSuspended(ctx, m, base, unpin)
+	}
+	live, current, claim, err := r.nativeRecoveryCurrent(ctx, m, worker, pvc)
 	if err != nil {
 		return true, ctrl.Result{}, errNativeDisposition
 	}
-	if !deleting {
-		if _, err := r.admitNativeCompareHelpers(ctx, live, current, claim, original); err != nil {
-			return true, ctrl.Result{}, errNativeDisposition
-		}
-		return r.recordNativeSuspended(ctx, live, live.DeepCopy())
+	if _, held, err := r.disposeNativeCompareHelpers(ctx, live, claim, false); held != nil || err != nil {
+		return r.holdNativeCompare(ctx, live, live.DeepCopy(), held, err)
 	}
-	if _, err := r.admitNativeCompareHelpers(ctx, live, current, claim, original); err != nil {
-		return true, ctrl.Result{}, errNativeDisposition
-	}
-	if followEnabled(live) {
-		if err := r.cleanupNativeDeletion(ctx, live, current, claim, original); err != nil {
-			return true, ctrl.Result{}, err
-		}
-	}
-	if _, err := r.admitNativeCompareHelpers(ctx, live, current, claim, original); err != nil {
-		return true, ctrl.Result{}, errNativeDisposition
+	if err := r.cleanupNativeDeletion(ctx, live, current, claim, original); err != nil {
+		return r.holdNativeCleanupUnavailable(ctx, live, err)
 	}
 	if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, live, current, claim, original); err != nil {
 		return true, ctrl.Result{}, errNativeDisposition
 	}
+	if r.deleteNativeWorkClaim(ctx, live, claim) != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
 	return r.finishNativeDeletion(ctx, live)
-
 }
 
-type nativeRetainedCompare struct {
-	expected, job *batchv1.Job
-	pod           *corev1.Pod
+// stopNativeDispositionWorker is the stop of lifecycle 7. A worker whose container never started is
+// dropped, and suspend first records that its attempt was never fresh-started (E1); a bound running
+// container gets TERM, and a drop when it has not ended within the pass. The next pass re-reads W.
+func (r *MigrationReconciler) stopNativeDispositionWorker(ctx context.Context, m, base *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, admitted bool) (bool, ctrl.Result, error) {
+	unstarted, err := r.nativeWorkerUnstarted(ctx, worker)
+	if err != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	if unstarted && m.Spec.Suspend && m.DeletionTimestamp.IsZero() && m.Status.Attempts == nativeFreshAttempt(m) {
+		desired := m.DeepCopy()
+		desired.Status.NativeFreshAttempt = m.Status.Attempts + 1
+		if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return true, ctrl.Result{}, nativeWorkerError(err)
+		}
+		desired.DeepCopyInto(m)
+		base = m.DeepCopy()
+	}
+	if !admitted {
+		return r.dropNativeDispositionJob(ctx, m, base, worker)
+	}
+	// A container that never started is never bound, so this drops it rather than sending TERM.
+	done, err := r.stopOrDropNativeWorker(ctx, m, worker, pvc)
+	if err != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	if !done {
+		return true, ctrl.Result{RequeueAfter: pollInterval}, nil
+	}
+	// The stop ended W or dropped it; this pass continues from a fresh read of the recorded Job.
+	current := &batchv1.Job{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(worker), current); apierrors.IsNotFound(err) {
+		current = nativeMissingWorker(m)
+	} else if err != nil || current.UID != worker.UID || !nativeWorkerEnded(current) {
+		return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+	return r.reconcileNativeRetainedDisposition(ctx, m, base, current, pvc)
 }
 
-type nativeClosedCompareHelpers struct {
-	migrationUID, workerUID, pvcUID types.UID
-	generation                      int64
-	pins                            [2]string
-	removed                         []nativeRetainedCompare
+// nativeDispositionEngineFree is R1 for W observed twice, anchored to original: through the recovery
+// reads when W is admitted or gone and its claim is bound, and on the Job itself otherwise.
+func (r *MigrationReconciler) nativeDispositionEngineFree(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (*corev1.Pod, error) {
+	if pvc != nil && (nativeWorkerMissing(worker) || nativeWorkerAdmitted(m, worker)) {
+		_, pod, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, original)
+		return pod, err
+	}
+	pod, err := r.nativeWorkerEngineFree(ctx, worker)
+	if err != nil {
+		return nil, err
+	}
+	confirmed, err := r.nativeWorkerEngineFree(ctx, worker)
+	if err != nil {
+		return nil, err
+	}
+	if !nativeSameWorkerPod(pod, confirmed) || !nativeSameWorkerPod(original, confirmed) {
+		return nil, errNativeRecovery
+	}
+	return confirmed, nil
+}
+
+func (r *MigrationReconciler) holdNativeBusy(ctx context.Context, m, base *v1beta1.Migration, err error) (bool, ctrl.Result, error) {
+	if busy, ok := errors.AsType[*nativeWorkerBusy](err); ok {
+		return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerPodRemains, busy.message(m.Status.Attempts+1))
+	}
+	return true, ctrl.Result{}, errNativeDisposition
+}
+
+func (r *MigrationReconciler) dropNativeDispositionJob(ctx context.Context, m, base *v1beta1.Migration, job *batchv1.Job) (bool, ctrl.Result, error) {
+	done, err := r.dropNativeWorker(ctx, m, job)
+	if err != nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	if !done {
+		return r.holdNative(ctx, m, base, v1beta1.ReasonWorkerPodRemains, fmt.Sprintf(
+			"Job %s was deleted and it or its pods are still terminating; the operator waits until they are gone", job.Name))
+	}
+	return true, ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+}
+
+// nativeWorkerUnstarted reports a worker Job that has not ended and whose engine never ran: no pod
+// that carries its UID has a container that started, and the Job counts no ready or finished pod.
+func (r *MigrationReconciler) nativeWorkerUnstarted(ctx context.Context, job *batchv1.Job) (bool, error) {
+	if nativeWorkerMissing(job) || nativeWorkerEnded(job) || job.Status.Succeeded != 0 || job.Status.Failed != 0 || job.Status.Ready != nil && *job.Status.Ready != 0 {
+		return false, nil
+	}
+	pods, err := r.nativePreflightPods(ctx, job.Namespace)
+	if err != nil {
+		return false, err
+	}
+	for i := range pods {
+		p := &pods[i]
+		if !slices.ContainsFunc(p.OwnerReferences, func(o metav1.OwnerReference) bool { return o.UID == job.UID }) &&
+			p.Labels[batchv1.ControllerUidLabel] != string(job.UID) && p.Labels[nativeWorkerLegacyControllerLabel] != string(job.UID) {
+			continue
+		}
+		for _, c := range append(slices.Clone(p.Status.InitContainerStatuses), p.Status.ContainerStatuses...) {
+			if c.ContainerID != "" || c.State.Running != nil || c.State.Terminated != nil || c.RestartCount != 0 {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// nativeCompareHeld is a C-table cell that waits or holds: a compare Job that is not this
+// Migration's, or one that is still terminating after its drop.
+type nativeCompareHeld struct{ reason, message string }
+
+// disposeNativeCompareHelpers is the C table's suspend and delete columns. It drops every owned
+// compare Job at its canonical name by UID, with no spec match (R4), except the ended pinned compare
+// that suspend keeps; it returns the checks whose pin suspend clears.
+func (r *MigrationReconciler) disposeNativeCompareHelpers(ctx context.Context, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, suspend bool) ([]string, *nativeCompareHeld, error) {
+	var unpin []string
+	for _, check := range []string{compareSchema, compareData} {
+		pin := nativeVerificationJobUID(m, check)
+		job := &batchv1.Job{}
+		err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: compareJobName(m, check)}, job)
+		switch {
+		case apierrors.IsNotFound(err):
+			if pin == "" {
+				continue
+			}
+			// Pinned and gone: the pin is released only once no pod of that Job can still run.
+			if _, err := r.nativeWorkerEngineFree(ctx, nativeGoneJob(m.Namespace, compareJobName(m, check), types.UID(pin))); err != nil {
+				if busy, ok := errors.AsType[*nativeWorkerBusy](err); ok {
+					return nil, &nativeCompareHeld{v1beta1.ReasonWorkerPodRemains, fmt.Sprintf("Pod %s of compare Job %s is %s on node %s; the operator waits until it has ended", busy.pod, busy.job, busy.phase, busy.node)}, nil
+				}
+				return nil, nil, errNativeDisposition
+			}
+			unpin = append(unpin, check)
+			continue
+		case err != nil:
+			return nil, nil, errNativeDisposition
+		case !nativeEvidenceOwnedBy(job, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()):
+			return nil, &nativeCompareHeld{v1beta1.ReasonForeignObject, fmt.Sprintf("Job %s is not controlled by this Migration; the operator neither reads nor removes it", job.Name)}, nil
+		}
+		if suspend && pin != "" && string(job.UID) == pin && r.nativeCompareKept(ctx, m, pvc, job, check) {
+			continue
+		}
+		done, err := r.dropNativeWorker(ctx, m, job)
+		if err != nil {
+			return nil, nil, errNativeDisposition
+		}
+		if !done {
+			return nil, &nativeCompareHeld{v1beta1.ReasonWorkerPodRemains, fmt.Sprintf("Compare Job %s was deleted and it or its pod is still terminating; the operator waits until they are gone", job.Name)}, nil
+		}
+		if pin != "" {
+			unpin = append(unpin, check)
+		}
+	}
+	return unpin, nil, nil
+}
+
+// nativeCompareKept is the suspend cell "pinned, ended, pod": the pinned Job still matches the Job
+// this Migration builds, has ended, and keeps its terminal pod, so a resumed finish can read it.
+func (r *MigrationReconciler) nativeCompareKept(ctx context.Context, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim, job *batchv1.Job, check string) bool {
+	if pvc == nil || !job.DeletionTimestamp.IsZero() {
+		return false
+	}
+	expected, err := r.nativeRemovalCompareJob(m, pvc, job, check)
+	if err != nil || !nativePreflightJobMatches(expected, job) {
+		return false
+	}
+	pod, err := r.nativePreflightPod(ctx, job)
+	return err == nil && pod != nil && nativePreflightPodMatches(job, pod) &&
+		nativeStopTerminal(nativeStopFacts{worker: job, pod: pod, binding: podexec.NativeContainerBinding{ImageID: runnerImageFor(m, r.RPGMigrateRunnerImage)}})
+}
+
+func (r *MigrationReconciler) holdNativeCompare(ctx context.Context, m, base *v1beta1.Migration, held *nativeCompareHeld, err error) (bool, ctrl.Result, error) {
+	if err != nil || held == nil {
+		return true, ctrl.Result{}, errNativeDisposition
+	}
+	return r.holdNative(ctx, m, base, held.reason, held.message)
+}
+
+// holdNativeCleanupUnavailable keeps the finalizer when cleanup could run but did not finish, for
+// example on an unreachable source: Blocked=True CleanupUnavailable, and the error keeps its backoff.
+func (r *MigrationReconciler) holdNativeCleanupUnavailable(ctx context.Context, m *v1beta1.Migration, cause error) (bool, ctrl.Result, error) {
+	desired := m.DeepCopy()
+	r.setNativeBlocked(desired, v1beta1.ReasonCleanupUnavailable,
+		"Native cleanup of the source slot and publication did not finish; the finalizer stays and the operator retries")
+	if !apiequality.Semantic.DeepEqual(desired.Status, m.Status) {
+		if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(m, client.MergeFromWithOptimisticLock{})); err != nil {
+			return true, ctrl.Result{}, nativeWorkerError(err)
+		}
+	}
+	return true, ctrl.Result{}, cause
 }
 
 // The old operation is used only to reconstruct a pinned immutable helper for removal.
@@ -143,114 +432,75 @@ func (r *MigrationReconciler) nativeRemovalCompareJob(m *v1beta1.Migration, pvc 
 	return expected, nil
 }
 
-func (r *MigrationReconciler) admitNativeCompareHelpers(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) ([]nativeRetainedCompare, error) {
-	var helpers []nativeRetainedCompare
+// nativeClosedCompareHelpers is the retry column of the C table, closed: the compare Jobs it dropped
+// and the pins it saw, which the retry receipt then clears.
+type nativeClosedCompareHelpers struct {
+	migrationUID, workerUID, pvcUID types.UID
+	generation                      int64
+	pins                            [2]string
+	removed                         []types.UID
+}
+
+// closeNativeCompareHelpers is the retry column of the C table: every owned compare Job is dropped
+// by UID, pinned or not and with no spec match, a missing one needs nothing, and a foreign one holds.
+func (r *MigrationReconciler) closeNativeCompareHelpers(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (*nativeClosedCompareHelpers, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*nativeWorkerDropWait+10*time.Second)
+	defer cancel()
+	if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, original); err != nil {
+		return nil, errNativeDisposition
+	}
+	closed := &nativeClosedCompareHelpers{migrationUID: m.UID, generation: m.Generation, workerUID: worker.UID, pvcUID: pvc.UID, pins: [2]string{m.Status.NativeSchemaJobUID, m.Status.NativeDataJobUID}}
 	for _, check := range []string{compareSchema, compareData} {
-		if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, original); err != nil {
-			return nil, errNativeDisposition
-		}
 		job := &batchv1.Job{}
 		err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: compareJobName(m, check)}, job)
-		pin := nativeVerificationJobUID(m, check)
-		if pin == "" {
-			if !apierrors.IsNotFound(err) {
-				return nil, errNativeDisposition
-			}
+		if apierrors.IsNotFound(err) {
 			continue
 		}
-		if err != nil || job.UID != types.UID(pin) || job.ResourceVersion == "" || job.UID == worker.UID {
+		if err != nil || job.UID == worker.UID {
 			return nil, errNativeDisposition
 		}
-		expected, err := r.nativeRemovalCompareJob(m, pvc, job, check)
-		if err != nil || !nativePreflightJobMatches(expected, job) {
+		if !nativeEvidenceOwnedBy(job, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()) {
+			desired := m.DeepCopy()
+			r.setNativeBlocked(desired, v1beta1.ReasonForeignObject, fmt.Sprintf("Job %s is not controlled by this Migration; the operator neither reads nor removes it, and the retry waits until it is gone", job.Name))
+			if !apiequality.Semantic.DeepEqual(desired.Status, m.Status) {
+				_ = r.Status().Patch(ctx, desired, client.MergeFromWithOptions(m, client.MergeFromWithOptimisticLock{}))
+			}
 			return nil, errNativeDisposition
 		}
-		pod, err := r.nativePreflightPod(ctx, job)
-		if err != nil || pod == nil || !nativePreflightPodMatches(job, pod) || !nativeStopTerminal(nativeStopFacts{worker: job, pod: pod, binding: podexec.NativeContainerBinding{ImageID: runnerImageFor(m, r.RPGMigrateRunnerImage)}}) {
+		if done, err := r.dropNativeWorker(ctx, m, job); err != nil || !done {
 			return nil, errNativeDisposition
 		}
-		helpers = append(helpers, nativeRetainedCompare{expected: expected, job: job, pod: pod})
+		closed.removed = append(closed.removed, job.UID)
 	}
 	if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, original); err != nil {
 		return nil, errNativeDisposition
 	}
-	return helpers, nil
-}
-
-func (r *MigrationReconciler) closeNativeCompareHelpers(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim, original *corev1.Pod) (*nativeClosedCompareHelpers, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	helpers, err := r.admitNativeCompareHelpers(ctx, m, worker, pvc, original)
-	if err != nil {
-		return nil, errNativeDisposition
-	}
-	for _, helper := range helpers {
-		if _, _, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, original); err != nil {
-			return nil, errNativeDisposition
-		}
-		job := &batchv1.Job{}
-		if r.APIReader.Get(ctx, client.ObjectKeyFromObject(helper.job), job) != nil || job.UID != helper.job.UID || job.ResourceVersion != helper.job.ResourceVersion || !nativePreflightJobMatches(helper.expected, job) || !apiequality.Semantic.DeepEqual(job.Status, helper.job.Status) {
-			return nil, errNativeDisposition
-		}
-		pod, err := r.nativePreflightPod(ctx, job)
-		if err != nil || pod == nil || pod.Generation != helper.pod.Generation || !nativePreflightPodMatches(job, pod) || !nativePreflightSamePod(helper.pod, pod) || !apiequality.Semantic.DeepEqual(pod.Spec, helper.pod.Spec) || !podexec.SamePodState(pod, helper.pod, workerContainer) {
-			return nil, errNativeDisposition
-		}
-		if r.Delete(ctx, job, client.Preconditions{UID: &job.UID, ResourceVersion: &job.ResourceVersion}, client.PropagationPolicy(metav1.DeletePropagationForeground)) != nil {
-			return nil, errNativeDisposition
-		}
-		if r.nativePreflightCleanup(ctx, m, helper.job, helper.pod) != nil {
-			return nil, errNativeDisposition
-		}
-	}
-	closed := &nativeClosedCompareHelpers{migrationUID: m.UID, generation: m.Generation, workerUID: worker.UID, pvcUID: pvc.UID, pins: [2]string{m.Status.NativeSchemaJobUID, m.Status.NativeDataJobUID}, removed: helpers}
 	if r.nativeCompareClosureCurrent(ctx, m, closed) != nil {
 		return nil, errNativeDisposition
 	}
 	return closed, nil
 }
 
+// nativeCompareClosureCurrent proves the closure still holds: the same Migration, worker, claim and
+// pins, no Job at either compare name, and no unfinished pod of a dropped or pinned compare.
 func (r *MigrationReconciler) nativeCompareClosureCurrent(ctx context.Context, m *v1beta1.Migration, closed *nativeClosedCompareHelpers) error {
 	if closed == nil || m == nil || closed.migrationUID != m.UID || closed.generation != m.Generation || string(closed.workerUID) != m.Status.NativeJobUID || string(closed.pvcUID) != m.Status.NativePVCUID || closed.pins != [2]string{m.Status.NativeSchemaJobUID, m.Status.NativeDataJobUID} {
 		return errNativeDisposition
 	}
-	remaining := len(closed.removed)
-	for i, check := range []string{compareSchema, compareData} {
-		if closed.pins[i] != "" {
-			matched := 0
-			for _, helper := range closed.removed {
-				if helper.job != nil && helper.pod != nil && helper.expected != nil && string(helper.job.UID) == closed.pins[i] && helper.job.Name == compareJobName(m, check) && helper.pod.UID != "" && nativePreflightJobMatches(helper.expected, helper.job) {
-					matched++
-				}
-			}
-			if matched != 1 {
-				return errNativeDisposition
-			}
-			remaining--
-		}
+	for _, check := range []string{compareSchema, compareData} {
 		if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: compareJobName(m, check)}, &batchv1.Job{}); !apierrors.IsNotFound(err) {
 			return errNativeDisposition
 		}
 	}
-	if remaining != 0 {
-		return errNativeDisposition
-	}
-	if len(closed.removed) > 0 {
-		pods, err := r.nativePreflightPods(ctx, m.Namespace)
-		if err != nil {
-			return errNativeDisposition
+	uids := slices.Clone(closed.removed)
+	for _, pin := range closed.pins {
+		if pin != "" {
+			uids = append(uids, types.UID(pin))
 		}
-		for _, pod := range pods {
-			for _, helper := range closed.removed {
-				if pod.Name == helper.pod.Name || pod.UID == helper.pod.UID {
-					return errNativeDisposition
-				}
-				for _, owner := range pod.OwnerReferences {
-					if owner.UID == helper.job.UID {
-						return errNativeDisposition
-					}
-				}
-			}
+	}
+	for _, uid := range uids {
+		if _, err := r.nativeWorkerEngineFree(ctx, nativeGoneJob(m.Namespace, "compare", uid)); err != nil {
+			return errNativeDisposition
 		}
 	}
 	if ctx.Err() != nil {
@@ -384,10 +634,24 @@ func (r *MigrationReconciler) nativeDispositionUnstarted(ctx context.Context, ex
 	return nil
 }
 
-func (r *MigrationReconciler) recordNativeSuspended(ctx context.Context, m, base *v1beta1.Migration) (bool, ctrl.Result, error) {
+// recordNativeSuspended records Suspended once W is engine-free. A compare suspend dropped loses its
+// pin, its progress item and Verified, so a resumed finish creates a fresh one (lifecycle 9).
+func (r *MigrationReconciler) recordNativeSuspended(ctx context.Context, m, base *v1beta1.Migration, unpin []string) (bool, ctrl.Result, error) {
 	desired := m.DeepCopy()
 	desired.Status.Phase, desired.Status.ObservedGeneration = v1beta1.PhaseSuspended, desired.Generation
 	r.endHold(desired, reasonHoldSuspended, "Native worker is quiescent; retained state is preserved")
+	for _, check := range unpin {
+		if check == compareSchema {
+			desired.Status.NativeSchemaJobUID = ""
+		} else {
+			desired.Status.NativeDataJobUID = ""
+			desired.Status.VerificationProgress = slices.DeleteFunc(desired.Status.VerificationProgress, func(p v1beta1.VerificationProgress) bool {
+				return p.Kind == v1beta1.VerificationProgressData && p.JobName == compareJobName(m, compareData)
+			})
+		}
+		meta.RemoveStatusCondition(&desired.Status.Conditions, v1beta1.ConditionVerified)
+	}
+	r.clearNativeBlocked(desired)
 	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return true, ctrl.Result{}, nativeWorkerError(err)
 	}
@@ -457,29 +721,4 @@ func nativeDeletionCleanupReportMatches(raw []byte, owned native.AdmittedOwnedSt
 
 	return true
 
-}
-
-func (r *MigrationReconciler) nativeRetainedDispositionTerminal(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (*batchv1.Job, *corev1.Pod, error) {
-	current := worker.DeepCopy()
-	var original *corev1.Pod
-	if !nativeEvidenceWorkerComplete(current) && !nativeRecoveryWorkerFailed(current) {
-		before, err := r.nativeStopCurrent(ctx, m, current, pvc, nil)
-		if err != nil {
-			return nil, nil, errNativeDisposition
-		}
-		done, err := r.stopNativeRetained(ctx, m, current, pvc)
-		if err != nil || !done {
-			return nil, nil, errNativeDisposition
-		}
-		after, err := r.nativeStopCurrent(ctx, m, current, pvc, &before)
-		if err != nil || !nativeStopTerminal(after) {
-			return nil, nil, errNativeDisposition
-		}
-		current, original = after.worker, after.pod
-	}
-	_, pod, err := r.nativeRecoveryQuiescentCurrent(ctx, m, current, pvc, original)
-	if err != nil {
-		return nil, nil, errNativeDisposition
-	}
-	return current, pod, nil
 }

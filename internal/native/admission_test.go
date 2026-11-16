@@ -52,7 +52,7 @@ func newAdmissionFixture(t *testing.T) admissionFixture {
 	w.ProgramSHA256 = EvidenceProgramSHA256()
 	m := &v1beta1.Migration{ObjectMeta: metav1.ObjectMeta{Name: w.MigrationName, Namespace: w.Namespace, UID: w.MigrationUID, Generation: w.MigrationGeneration}, Spec: v1beta1.MigrationSpec{Engine: v1beta1.MigrationEngineRPGMigrate, Source: v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "source"}, Key: admissionURIKey}}, Target: v1beta1.PostgresConnection{URISecretRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "target"}, Key: admissionURIKey}}, Follow: &v1beta1.FollowOptions{Enabled: true}}, Status: v1beta1.MigrationStatus{Attempts: 1, JobName: "migration-run-1", NativeJobUID: string(w.WorkerJobUID), NativePVCUID: string(w.PVCUID), Replication: &v1beta1.ReplicationStatus{Endpos: fixtureEndLSN}}}
 	owner := admissionOwner("Migration", m.Name, m.UID)
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: w.PVCName, Namespace: w.Namespace, UID: w.PVCUID, OwnerReferences: []metav1.OwnerReference{owner}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: w.PVCName, Namespace: w.Namespace, UID: w.PVCUID, Labels: map[string]string{WorkClaimMigrationUIDLabel: string(m.UID)}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	command, args, env, volumes, mounts, err := EvidenceMaterialization(m, w)
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +84,11 @@ func TestNativeAdmissionObjects(t *testing.T) {
 		{"generation", func(f *admissionFixture) { f.m.Generation++ }},
 		{"pvc_replaced", func(f *admissionFixture) { f.pvc.UID = readerReplacementUID }},
 		{"pvc_unbound", func(f *admissionFixture) { f.pvc.Status.Phase = corev1.ClaimPending }},
+		{"pvc_owner_referenced", func(f *admissionFixture) {
+			f.pvc.OwnerReferences = []metav1.OwnerReference{admissionOwner("Migration", f.m.Name, f.m.UID)}
+		}},
+		{"pvc_unlabelled", func(f *admissionFixture) { f.pvc.Labels = nil }},
+		{"pvc_other_migration", func(f *admissionFixture) { f.pvc.Labels[WorkClaimMigrationUIDLabel] = readerReplacementUID }},
 		{"job_replaced", func(f *admissionFixture) { f.job.UID = readerReplacementUID }},
 		{"wrong_helper_owner", func(f *admissionFixture) { f.job.OwnerReferences[0].UID = readerReplacementUID }},
 		{"wrong_pod_controller", func(f *admissionFixture) { f.pod.OwnerReferences[0].UID = readerReplacementUID }},

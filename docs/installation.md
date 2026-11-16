@@ -35,6 +35,20 @@ With `rbac.create=false` the cluster admin supplies the manager's role, and that
   verbs: ["create", "get"]
 ```
 
+The manager also needs `delete` on `persistentvolumeclaims`.
+The work PVC of a native live Migration has no owner reference, because native cleanup reads its receipts from that volume and garbage collection must not delete it first.
+The manager deletes the claim itself after cleanup, with a UID precondition.
+Config maps get no `delete`, so the claims have a rule of their own:
+
+```yaml
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["create", "delete", "get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "get", "list", "watch"]
+```
+
 ## CRD lifecycle
 
 The CRD renders as a regular chart template, so `helm upgrade` updates it in place.
@@ -59,8 +73,8 @@ Each operator release compiles in the runner digests it qualifies, and every nat
 > A release that drops that runner refuses the Migration on every reconcile, deletion included, and its source slot and publication stay in place.
 > Rolling back to the admitting release resumes it.
 
-With `rbac.create=false`, add `get` on `pods/exec` to the manager's role before the upgrade, as [Manager RBAC](#manager-rbac) describes.
-`helm upgrade` adds it for you when the chart creates the RBAC.
+With `rbac.create=false`, add `get` on `pods/exec` and `delete` on `persistentvolumeclaims` to the manager's role before the upgrade, as [Manager RBAC](#manager-rbac) describes.
+`helm upgrade` adds them for you when the chart creates the RBAC.
 
 ### Downgrades
 

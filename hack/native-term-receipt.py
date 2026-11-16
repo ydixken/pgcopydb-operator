@@ -19,6 +19,8 @@ ENGINE_EXIT_CODES = {1, 2, 3, 4, 5, 6, 7, 9, 12, 122}
 # The 90 s retained-stop poll bound plus 30 s for the next reconcile to observe the intent.
 TERM_WINDOW_SECONDS = 120
 DIGEST = re.compile(r'@(sha256:[0-9a-f]{64})$')
+# The follow work PVC carries this label and no owner reference (operator internal/native/work_claim.go).
+CLAIM_LABEL = 'pgcopydb-operator.io/migration-uid'
 
 
 def _time(value):
@@ -34,6 +36,11 @@ def _uid(obj):
 def _controller(obj, kind, uid):
     refs = [r for r in obj.get('metadata', {}).get('ownerReferences', []) if r.get('controller')]
     return len(refs) == 1 and refs[0].get('kind') == kind and refs[0].get('uid') == uid
+
+
+def _claim_bound(pvc, uid):
+    meta = pvc.get('metadata', {})
+    return uid is not None and not meta.get('ownerReferences') and meta.get('labels', {}).get(CLAIM_LABEL) == uid
 
 
 def _worker(pod):
@@ -69,7 +76,7 @@ def check(receipt):
     m, job, pod, pvc = before['migration'], before['job'], before['pod'], before['pvc']
 
     need(_receipts(m)[:2] == (_uid(job), _uid(pvc)) and None not in _receipts(m)[:2], 'before-receipts')
-    need(_controller(job, 'Migration', _uid(m)) and _controller(pvc, 'Migration', _uid(m)) and _controller(pod, 'Job', _uid(job)), 'before-ownership')
+    need(_controller(job, 'Migration', _uid(m)) and _claim_bound(pvc, _uid(m)) and _controller(pod, 'Job', _uid(job)), 'before-ownership')
     running = _worker(pod)
     need(pod.get('status', {}).get('phase') == 'Running' and 'running' in running.get('state', {}) and running.get('restartCount') == 0, 'before-running')
     need(digest is None or running.get('imageID', '').endswith(digest.group(1)), 'before-image')

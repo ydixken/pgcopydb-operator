@@ -78,6 +78,7 @@ func newNativeCloneFixture(t *testing.T, follow bool, verification *v1beta1.Veri
 	m.Generation, m.ResourceVersion = 1, "1"
 	m.Spec.Source, m.Spec.Target = passwordMigration().Spec.Source, passwordMigration().Spec.Target
 	m.Spec.Follow = &v1beta1.FollowOptions{Enabled: follow}
+	nativeBindTestClaim(m, pvc)
 	m.Spec.Verification = verification
 	m.Status.Attempts, m.Status.JobName, m.Status.Phase = 1, jobName(m, 1), v1beta1.PhaseCloning
 	pvc.Status.Phase = corev1.ClaimBound
@@ -333,6 +334,9 @@ func TestNativeCloneOnlyCompletionReport(t *testing.T) {
 }
 
 func (f *nativeCloneFixture) createNativeCloneFixtureJob(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if nativeDryRun(opts) {
+		return c.Create(ctx, obj, opts...)
+	}
 	if strings.HasPrefix(obj.GetName(), probeVersion) {
 		job := obj.(*batchv1.Job)
 		job.UID = types.UID("clone-discovery-" + job.Name)

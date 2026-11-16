@@ -59,7 +59,7 @@ func newCleanupInventoryFixture(t *testing.T) *cleanupInventoryFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job.Name, job.UID, job.OwnerReferences = w.JobName, w.JobUID, s.pvc.OwnerReferences
+	job.Name, job.UID, job.OwnerReferences = w.JobName, w.JobUID, s.worker.OwnerReferences
 	job.Spec.Template.Spec.Volumes = volumes
 	c := &job.Spec.Template.Spec.Containers[0]
 	c.Command, c.Args, c.Env, c.VolumeMounts = command, args, env, mounts
@@ -329,8 +329,11 @@ func cleanupJobRefusals(t *testing.T, f *cleanupInventoryFixture, owned native.A
 		{"foreign_work", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _ *string) {
 			(*p).UID = workerForeignIdentity
 		}},
-		{"foreign_owner", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _ *string) {
-			(*p).OwnerReferences[0].UID = workerForeignIdentity
+		{"foreign_binding", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _ *string) {
+			(*p).Labels[native.WorkClaimMigrationUIDLabel] = workerForeignIdentity
+		}},
+		{"owner_referenced", func(m **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _ *string) {
+			(*p).OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(*m, v1beta1.GroupVersion.WithKind("Migration"))}
 		}},
 		{"unbound_pvc", func(_ **v1beta1.Migration, p **corev1.PersistentVolumeClaim, _ *string) {
 			(*p).Status.Phase = corev1.ClaimPending

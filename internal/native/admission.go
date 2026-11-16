@@ -204,7 +204,7 @@ func admittedMigration(w ExecutionRequest, m *v1beta1.Migration, worker *batchv1
 }
 
 func admittedPVC(w ExecutionRequest, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) bool {
-	return pvc.Namespace == w.Namespace && pvc.Name == w.PVCName && pvc.Name == m.Name+"-work" && pvc.UID == w.PVCUID && pvc.DeletionTimestamp.IsZero() && pvc.Status.Phase == corev1.ClaimBound && controlledBy(pvc, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String())
+	return pvc.Namespace == w.Namespace && pvc.Name == w.PVCName && pvc.Name == m.Name+"-work" && pvc.UID == w.PVCUID && pvc.DeletionTimestamp.IsZero() && pvc.Status.Phase == corev1.ClaimBound && WorkClaimBound(m, pvc)
 }
 
 func admittedHelperJob(w ExecutionRequest, m *v1beta1.Migration, job *batchv1.Job) bool {
@@ -226,6 +226,23 @@ func admittedPodIdentity(w ExecutionRequest, job *batchv1.Job, pod *corev1.Pod) 
 func controlledBy(object metav1.Object, kind, name string, uid types.UID, version string) bool {
 	owner := metav1.GetControllerOf(object)
 	return owner != nil && owner.Kind == kind && owner.Name == name && owner.UID == uid && owner.APIVersion == version
+}
+
+// WorkClaimMigrationUIDLabel binds a native follow work PVC to its Migration. That claim has no
+// owner reference, so the garbage collector cannot remove the workdir that native cleanup reads.
+const WorkClaimMigrationUIDLabel = "pgcopydb-operator.io/migration-uid"
+
+// WorkClaimBound reports whether pvc is bound to m: a follow claim by m's UID label and no owner
+// reference, a clone-only claim by m as its controller. Callers still bind the incarnation by UID.
+// It lives here, not in a file of its own, because the qualification source inventory caps its files.
+func WorkClaimBound(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) bool {
+	if m == nil || pvc == nil || m.UID == "" {
+		return false
+	}
+	if m.Spec.Follow != nil && m.Spec.Follow.Enabled {
+		return len(pvc.OwnerReferences) == 0 && pvc.Labels[WorkClaimMigrationUIDLabel] == string(m.UID)
+	}
+	return controlledBy(pvc, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String())
 }
 func oneJob(job *batchv1.Job) bool {
 	return (job.Spec.Completions == nil || *job.Spec.Completions == 1) && (job.Spec.Parallelism == nil || *job.Spec.Parallelism == 1) && (job.Spec.Suspend == nil || !*job.Spec.Suspend)

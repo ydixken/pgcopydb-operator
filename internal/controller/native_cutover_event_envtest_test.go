@@ -56,7 +56,7 @@ func newNativeCutoverEnv(ctx context.Context, name string) *nativeControlFixture
 		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
 	}}
-	Expect(controllerutil.SetControllerReference(m, pvc, c.Scheme())).To(Succeed())
+	nativeBindTestClaim(m, pvc)
 	Expect(c.Create(ctx, pvc)).To(Succeed())
 	pvc.Status.Phase = corev1.ClaimBound
 	Expect(c.Status().Update(ctx, pvc)).To(Succeed())

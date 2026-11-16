@@ -184,6 +184,7 @@ func TestNativeReconcileFirstFinalizerPatchReturns(t *testing.T) {
 	if err := f.store.Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)
 	}
+	f.updatePVC(func(pvc *corev1.PersistentVolumeClaim) { nativeBindTestClaim(f.m, pvc) })
 	f.m.Status.Phase = v1beta1.PhasePending
 	if err := f.store.Status().Update(context.Background(), f.m); err != nil {
 		t.Fatal(err)

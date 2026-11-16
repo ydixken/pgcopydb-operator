@@ -130,7 +130,7 @@ func (r *MigrationReconciler) nativeEvidenceMigration(ctx context.Context, expec
 	if e, err := sentinel.ParseLSN(live.Status.Replication.Endpos); err != nil || e == 0 {
 		return nil, errNativeEvidenceLifecycle
 	}
-	if pvc.UID == "" || pvc.UID != expectedPVC.UID || pvc.Namespace != live.Namespace || pvc.Name != workPVCName(live) || pvc.Status.Phase != corev1.ClaimBound || !pvc.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(pvc.Spec, expectedPVC.Spec) || !nativeEvidenceOwnedBy(pvc, "Migration", live.Name, live.UID, v1beta1.GroupVersion.String()) {
+	if pvc.UID == "" || pvc.UID != expectedPVC.UID || pvc.Namespace != live.Namespace || pvc.Name != workPVCName(live) || pvc.Status.Phase != corev1.ClaimBound || !pvc.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(pvc.Spec, expectedPVC.Spec) {
 		return nil, errNativeEvidenceLifecycle
 	}
 	if worker.UID == "" || worker.UID != expectedWorker.UID || worker.Namespace != live.Namespace || !worker.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(worker.Spec, expectedWorker.Spec) || !nativeEvidenceOwnedBy(worker, "Migration", live.Name, live.UID, v1beta1.GroupVersion.String()) || !nativeEvidenceWorkerComplete(worker) {

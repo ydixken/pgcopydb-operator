@@ -24,6 +24,7 @@ import (
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/native"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,7 +57,7 @@ func nativeTermFixture(t *testing.T, exitCode int32) nativeTermReceipt {
 			Replication: &v1beta1.ReplicationStatus{Endpos: "0/16B3748"}}}
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{UID: "job-1", OwnerReferences: controller("Migration", "mig-1")}}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{UID: "pvc-1",
-		OwnerReferences: controller("Migration", "mig-1")}}
+		Labels: map[string]string{native.WorkClaimMigrationUIDLabel: string(m.UID)}}}
 	status := func(state corev1.ContainerState) []corev1.ContainerStatus {
 		return []corev1.ContainerStatus{{Name: publicationRetryWorkerContainer, ContainerID: "containerd://one",
 			ImageID: "runner@" + digest, State: state}}
@@ -124,5 +125,17 @@ func TestNativeTermForeignSkipsOwned(t *testing.T) {
 		{Kind: "Job", Namespace: nsE2E, Name: "bare", UID: "bare-uid", ResourceVersion: "3"}}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("foreign inventory = %+v, want %+v", got, want)
+	}
+	// The follow work claim is bound by label, not owned, and the operator deletes it; another Migration's stays foreign.
+	const migration = "mig-1"
+	claim, other := item("claim"), item("other-claim")
+	claim.SetLabels(map[string]string{native.WorkClaimMigrationUIDLabel: migration})
+	other.SetLabels(map[string]string{native.WorkClaimMigrationUIDLabel: "mig-2"})
+	got = nativeTermForeign("PersistentVolumeClaim", migration, []unstructured.Unstructured{claim, other})
+	if len(got) != 1 || got[0].Name != "other-claim" {
+		t.Fatalf("claim inventory = %+v, want only other-claim", got)
+	}
+	if got = nativeTermForeign("Job", migration, []unstructured.Unstructured{claim}); len(got) != 1 {
+		t.Fatalf("a labelled Job was skipped as the work claim: %+v", got)
 	}
 }

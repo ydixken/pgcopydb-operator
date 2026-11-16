@@ -236,14 +236,24 @@ func (f *nativeFinishFixture) cleanupReport() []byte {
 }
 
 func (f *nativeFinishFixture) delete(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+	options := &client.DeleteOptions{}
+	for _, opt := range opts {
+		opt.ApplyToDelete(options)
+	}
+	if claim, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+		// R5: only deletion removes the unowned follow claim, last and by UID.
+		live := &v1beta1.Migration{}
+		if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != f.pvc.UID || claim.UID != f.pvc.UID ||
+			c.Get(ctx, client.ObjectKeyFromObject(f.m), live) != nil || live.DeletionTimestamp.IsZero() {
+			f.t.Error("work PVC removed outside deletion or without its UID")
+			return errBoom
+		}
+		return c.Delete(ctx, obj, opts...)
+	}
 	job, ok := obj.(*batchv1.Job)
 	if !ok || job.UID == f.worker.UID {
 		f.t.Error("finish deleted original evidence")
 		return errBoom
-	}
-	options := &client.DeleteOptions{}
-	for _, opt := range opts {
-		opt.ApplyToDelete(options)
 	}
 	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != job.UID {
 		f.t.Error("helper deletion lacks exact UID")

@@ -134,7 +134,7 @@ func retryWorkerGone(worker *batchv1.Job) bool {
 }
 
 func retryPVCMatches(w ExecutionData, m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim) bool {
-	return pvc.Namespace == w.Namespace && pvc.Name == w.PVCName && pvc.Name == m.Name+"-work" && pvc.UID == w.PVCUID && pvc.DeletionTimestamp.IsZero() && pvc.Status.Phase == corev1.ClaimBound && controlledBy(pvc, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String())
+	return pvc.Namespace == w.Namespace && pvc.Name == w.PVCName && pvc.Name == m.Name+"-work" && pvc.UID == w.PVCUID && pvc.DeletionTimestamp.IsZero() && pvc.Status.Phase == corev1.ClaimBound && WorkClaimBound(m, pvc)
 }
 
 func retryHelperJobMatches(w ExecutionData, m *v1beta1.Migration, job *batchv1.Job) bool {

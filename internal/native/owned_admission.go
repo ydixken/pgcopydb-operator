@@ -93,7 +93,7 @@ func validateOwnedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.Per
 	if !ownedMigrationMatches(w, m, worker) || !retryPVCMatches(w, m, pvc) || !retryHelperJobMatches(w, m, job) {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
-	if len(pvc.OwnerReferences) != 1 || len(job.OwnerReferences) != 1 || !ownedTerminalWorker(w, m, worker, workerPod) || !ownedHelperPodIdentity(w, job, pod) {
+	if len(job.OwnerReferences) != 1 || !ownedTerminalWorker(w, m, worker, workerPod) || !ownedHelperPodIdentity(w, job, pod) {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	template := podexec.NativeTemplateSHA256(job.Spec.Template)

@@ -95,6 +95,9 @@ func (r *MigrationReconciler) reconcileNative(ctx context.Context, m, base *v1be
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if handled, result, err := r.reconcileNativeDeletionGuards(ctx, m, base, state); handled {
+		return result, err
+	}
 	if handled, result, err := r.reconcileNativeWorkerState(ctx, m, base, state); handled {
 		return result, err
 	}
@@ -404,10 +407,7 @@ func (r *MigrationReconciler) reconcileNativeWorkerState(ctx context.Context, m,
 			"Native worker Job %s is being deleted or has terminating pods; the operator waits until they are gone", s.worker.Name))
 	}
 	if !m.DeletionTimestamp.IsZero() || m.Spec.Suspend {
-		// The suspend and delete columns for a modified W and a lost V belong to disposition.
-		if s.w == workerModified || m.Status.Attempts > 0 && s.v != volumeBound {
-			return true, ctrl.Result{}, errNativeReconcile
-		}
+		// The suspend and delete columns, a modified W and a lost V included, belong to disposition.
 		return false, ctrl.Result{}, nil
 	}
 	if s.v == volumeLost {

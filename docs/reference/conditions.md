@@ -74,8 +74,9 @@ Zero on both counts is the unknown answer, not the tail, so the phase stays wher
 
 We named each type for what `True` means.
 Eight are normal-true: True is the desired state.
-Three are abnormal-true: True reports a problem.
-`Failed` means the migration ended in failure, while `CommitsBlocked` and `RetryHeld` report a wait that clears once its cause is gone.
+Five are abnormal-true: True reports a problem.
+`Failed` means the migration ended in failure, while `CommitsBlocked`, `RetryHeld` and `Blocked` report a wait that clears once its cause is gone.
+`CleanupFailed` reports a release without native cleanup, and the object keeps it until the API server removes the object.
 
 | Type | Polarity | True means |
 |---|---|---|
@@ -90,6 +91,8 @@ Three are abnormal-true: True reports a problem.
 | `Failed` | abnormal-true | The migration failed for good. Terminal and absorbing. |
 | `CommitsBlocked` | abnormal-true | Two progress samples in a row found a target session of the migration role whose commit waits for a synchronous standby. That wait is 30 seconds or more. The condition is present from the first sample on. |
 | `RetryHeld` | abnormal-true | The [retry gate](../operations/lifecycle.md#the-retry-gate) holds the next attempt. The condition is present from the first retry or resume on. |
+| `Blocked` | abnormal-true | Engine `rpgmigrate`: the requested action waits or refuses until something outside the operator changes. The message names the object. The condition is present from the first hold on. |
+| `CleanupFailed` | abnormal-true | Engine `rpgmigrate`: the operator released the finalizer of a deleted follow Migration without native cleanup, because Kubernetes made the cleanup pod impossible. The message names the slot and publication prefixes to drop by hand. |
 
 ## Reasons
 
@@ -141,6 +144,16 @@ This table lists every reason that the controller sets, spelled exactly as it ap
 | `RetryHeld` | `False` | `GatePassed` | The probe passed, and the next attempt's worker Job exists. |
 | `RetryHeld` | `False` | `Suspended` | `spec.suspend` stopped the hold. The resume runs the gate again. |
 | `RetryHeld` | `False` | `MigrationFailed` | The Migration failed instead of retrying. |
+| `Blocked` | `True` | `WorkerPodRemains` | A worker or compare Job, or one of its pods, is being deleted or has not ended, and the action waits until it is gone. The message names the Job and, where known, the pod and its node. A pod stuck on a lost node keeps it until the node object is deleted or tainted out of service. |
+| `Blocked` | `True` | `ForegroundDeletion` | The Migration is deleted with foreground propagation, and native cleanup waits until the garbage collector has deleted its Jobs and removed the `foregroundDeletion` finalizer. |
+| `Blocked` | `True` | `ForeignObject` | A Job or PVC under a name the operator uses is not this Migration's (another owner or UID). The operator neither runs nor removes it, and the action waits until it is gone. |
+| `Blocked` | `True` | `WorkerModified` | The running worker Job no longer matches the Job admitted for its attempt. Restore it, or suspend or delete the Migration, which drops it. |
+| `Blocked` | `True` | `CleanupUnavailable` | Deletion could run native cleanup but it did not finish, for example because the source is unreachable. The finalizer stays and the operator retries. |
+| `Blocked` | `True` | `EvidenceUnavailable` | A finish pass cannot read the completion evidence it needs from the admitted worker or a pinned compare Job. The message names the Job. |
+| `Blocked` | `True` | `StatusIntegrity` | A native receipt contradicts the live objects, for example a worker Job for the next attempt while the recorded one has not ended. The operator does not record or remove it. |
+| `Blocked` | `False` | `Proceeding` | The first pass after a hold that could act did so. |
+| `CleanupFailed` | `True` | `NamespaceTerminating` | A dry-run create of the next cleanup helper Job was refused because the namespace is being deleted, so no cleanup pod can start. The API server also refuses the warning event there, so the operator log carries the slot and publication prefixes as well. |
+| `CleanupFailed` | `True` | `WorkVolumeLost` | The work PVC is missing, deleting, or replaced by a claim with another UID, so cleanup cannot read the receipts in its workdir. A claim with another UID is left in place. |
 | `Failed` | `True` | `InvalidSpec` | Spec validation failed. A retry cannot help (source and target are immutable, except `target.synchronousCommit`). |
 | `Failed` | `True` | `PreflightFailed` | The preflight failed before any data moved. |
 | `Failed` | `True` | `BackoffLimitExceeded` | The Migration has no retry budget left: `backoffLimit` + 1 counted attempts. Attempts that the retry gate exempted (`status.exemptAttempts`) do not count. The message reads `retry budget exhausted after N attempts (M exempt)`, followed by the last failed attempt's error when the gate recorded one. |
@@ -176,6 +189,8 @@ Events record each transition.
 Reasons are stable.
 Messages are not.
 Terminal failures also emit a Warning event whose reason equals the `Failed` condition reason above.
+`CleanupFailed` is both a condition type and an event reason, and they are separate fields.
+The condition exists only for engine `rpgmigrate`, and its native event uses the same reason; the event reason alone is also what engine `pgcopydb` emits when its cleanup Job gives up.
 
 | Reason | Type | Appears when |
 |---|---|---|
@@ -196,7 +211,8 @@ Terminal failures also emit a Warning event whose reason equals the `Failed` con
 | `CutoverRetry` | Warning | Setting the cutover LSN failed transiently. The controller tries again on the next pass. |
 | `RehearsalPodRemains` | Warning | The drain verify waits for the pod of a canceled verification rehearsal (action `Cutover`): once when the wait starts, with the condition's message. |
 | `CleanupStarted` | Normal | The controller created the cleanup Job (slot, publication, origin). |
-| `CleanupFailed` | Warning | Cleanup exhausted its retries. The named slot may still hold WAL on the source, and it needs manual removal. |
+| `CleanupFailed` | Warning | Cleanup exhausted its retries (engine `pgcopydb`), or the operator released a native follow Migration without cleanup (engine `rpgmigrate`, action `Cleanup`, the message of the `CleanupFailed` condition). The named slot may still hold WAL on the source, and it needs manual removal. |
+| `Blocked` | Warning | Engine `rpgmigrate`: `Blocked` turned `True`, or its reason changed (action `Hold`), with the condition's message. A repeated hold emits nothing. |
 | `OwnershipStarted` | Normal | The controller created the `<name>-reown` handover Job. |
 | `OwnershipApplied` | Normal | The handover finished. The restored objects belong to `clone.ownerAfterRestore`. |
 | `Suspended` | Normal | `spec.suspend` deleted the worker, and a running handover Job with it. The work volume stays. |
