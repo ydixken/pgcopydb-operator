@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	gotypes "go/types"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -615,6 +616,18 @@ func TestNativeHelperEnvironmentRefusesServiceLinks(t *testing.T) {
 	}
 }
 
+func returnsJob(fn *ast.FuncDecl) bool {
+	if fn.Type.Results == nil {
+		return false
+	}
+	for _, r := range fn.Type.Results.List {
+		if gotypes.ExprString(r.Type) == "*batchv1.Job" {
+			return true
+		}
+	}
+	return false
+}
+
 // Every native builder is listed, checked by parsing the package, so a new one cannot skip the setting.
 func TestNativeBuildersDisableServiceLinks(t *testing.T) {
 	builders := map[string]func(*testing.T) (*batchv1.Job, error){
@@ -652,6 +665,8 @@ func TestNativeBuildersDisableServiceLinks(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("controller sources unavailable: %v", err)
 	}
+	// Builders of objects without a pod template, each one named so a new builder cannot skip the row.
+	podless := map[string]bool{"buildNativeWorkClaim": true}
 	declared := 0
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -663,12 +678,22 @@ func TestNativeBuildersDisableServiceLinks(t *testing.T) {
 		}
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && strings.HasPrefix(fn.Name.Name, "buildNative") {
+				if podless[fn.Name.Name] {
+					if returnsJob(fn) {
+						t.Errorf("native builder %s returns a Job but is listed as podless", fn.Name.Name)
+					}
+					delete(podless, fn.Name.Name)
+					continue
+				}
 				declared++
 				if builders[fn.Name.Name] == nil {
 					t.Errorf("native builder %s has no service links row", fn.Name.Name)
 				}
 			}
 		}
+	}
+	if len(podless) != 0 {
+		t.Fatalf("podless builders not declared: %v", podless)
 	}
 	if declared != len(builders) {
 		t.Fatalf("%d native builders declared, %d rows", declared, len(builders))
