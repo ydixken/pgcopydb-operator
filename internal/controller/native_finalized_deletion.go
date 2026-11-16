@@ -34,7 +34,7 @@ func (r *MigrationReconciler) reconcileNativeFinalizedDeletion(ctx context.Conte
 	if err != nil || r.disposeNativeFinalizedVerificationHelpers(cleanup, live) != nil {
 		return r.nativeFinalizedDeletionPending(m)
 	}
-	if r.disposeNativeFinalizedWorker(cleanup, live) != nil || r.nativeFinalizedDeletionPVC(cleanup, live) != nil {
+	if r.disposeNativeFinalizedWorker(cleanup, live) != nil || r.disposeNativeWorkClaim(cleanup, live) != nil {
 		return r.nativeFinalizedDeletionPending(m)
 	}
 	live, err = r.nativeFinalizedDeletionCurrent(cleanup, m)
@@ -83,18 +83,4 @@ func (r *MigrationReconciler) disposeNativeFinalizedWorker(ctx context.Context, 
 	}
 	_, err = r.nativeFinalizedDeletionCurrent(ctx, m)
 	return err
-}
-
-func (r *MigrationReconciler) nativeFinalizedDeletionPVC(ctx context.Context, m *v1beta1.Migration) error {
-	claim := &corev1.PersistentVolumeClaim{}
-	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: workPVCName(m)}, claim)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil || claim.UID != types.UID(m.Status.NativePVCUID) || claim.Name != workPVCName(m) || claim.Namespace != m.Namespace || len(claim.OwnerReferences) != 1 ||
-		!nativeEvidenceOwnedBy(claim, "Migration", m.Name, m.UID, v1beta1.GroupVersion.String()) || ctx.Err() != nil {
-		return errNativeDisposition
-	}
-	// Migration owner-reference GC is the existing work-PVC deletion policy.
-	return nil
 }

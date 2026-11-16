@@ -11,7 +11,6 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/pgcopydb"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func engineExecutable(m *v1beta1.Migration) (string, error) {
@@ -33,32 +32,37 @@ func nativeWorkIdentity(m *v1beta1.Migration, pvc *corev1.PersistentVolumeClaim)
 	if engine != v1beta1.MigrationEngineRPGMigrate {
 		return native.WorkIdentity{}, errors.New("native identity requires the native engine")
 	}
-	uid := string(m.UID)
-	if len(uid) != 36 || uid[8] != '-' || uid[13] != '-' || uid[18] != '-' || uid[23] != '-' {
-		return native.WorkIdentity{}, errors.New("native Migration UID is not a canonical UUID")
+	run, err := nativeRunID(m)
+	if err != nil {
+		return native.WorkIdentity{}, err
 	}
-	run := strings.ReplaceAll(uid, "-", "")
-	if len(run) != 32 || strings.ContainsFunc(run, func(c rune) bool {
-		return (c < '0' || c > '9') && (c < 'a' || c > 'f')
-	}) {
-		return native.WorkIdentity{}, errors.New("native Migration UID is not a canonical UUID")
-	}
-	if run == "00000000000000000000000000000000" {
-		return native.WorkIdentity{}, errors.New("native Migration UID must be nonzero")
-	}
-	if pvc == nil || pvc.Namespace != m.Namespace || pvc.Name != workPVCName(m) || !pvc.DeletionTimestamp.IsZero() {
-		return native.WorkIdentity{}, errors.New("native work PVC is absent, foreign, or deleting")
-	}
-	owner := metav1.GetControllerOf(pvc)
-	if owner == nil || owner.UID != m.UID || owner.Name != m.Name || owner.Kind != "Migration" || owner.APIVersion != v1beta1.GroupVersion.String() {
-		return native.WorkIdentity{}, errors.New("native work PVC is not controlled by this Migration")
+	if err := nativeWorkClaimBound(m, pvc); err != nil {
+		return native.WorkIdentity{}, err
 	}
 	workdir := string(pvc.UID)
 	if workdir == "" || len(workdir) > 256 || !utf8.ValidString(workdir) || strings.TrimSpace(workdir) != workdir ||
 		strings.ContainsFunc(workdir, unicode.IsControl) || strings.ContainsAny(workdir, `/\`) {
 		return native.WorkIdentity{}, errors.New("native work PVC UID is invalid")
 	}
-	return native.WorkIdentity{MigrationUID: uid, RunID: run, WorkdirID: workdir, CheckpointGeneration: 1}, nil
+	return native.WorkIdentity{MigrationUID: string(m.UID), RunID: run, WorkdirID: workdir, CheckpointGeneration: 1}, nil
+}
+
+// nativeRunID is the engine run ID: the Migration UID, a canonical nonzero UUID, without hyphens.
+func nativeRunID(m *v1beta1.Migration) (string, error) {
+	uid := string(m.UID)
+	if len(uid) != 36 || uid[8] != '-' || uid[13] != '-' || uid[18] != '-' || uid[23] != '-' {
+		return "", errors.New("native Migration UID is not a canonical UUID")
+	}
+	run := strings.ReplaceAll(uid, "-", "")
+	if len(run) != 32 || strings.ContainsFunc(run, func(c rune) bool {
+		return (c < '0' || c > '9') && (c < 'a' || c > 'f')
+	}) {
+		return "", errors.New("native Migration UID is not a canonical UUID")
+	}
+	if run == "00000000000000000000000000000000" {
+		return "", errors.New("native Migration UID must be nonzero")
+	}
+	return run, nil
 }
 
 func nativeIdentityEnv(work native.WorkIdentity) []corev1.EnvVar {

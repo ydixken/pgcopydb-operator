@@ -254,8 +254,8 @@ func (r *MigrationReconciler) reconcileNativeStart(ctx context.Context, m, base 
 		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
 	}
 	if pvc == nil {
-		claim := buildWorkPVC(m)
-		if controllerutil.SetControllerReference(m, claim, r.Scheme) != nil || r.Create(ctx, claim) != nil || claim.UID == "" {
+		claim, err := buildNativeWorkClaim(m, r.Scheme)
+		if err != nil || r.Create(ctx, claim) != nil || claim.UID == "" {
 			return ctrl.Result{}, errNativeReconcile
 		}
 		if _, err := nativeWorkIdentity(m, claim); err != nil {

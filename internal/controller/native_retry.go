@@ -8,6 +8,7 @@ import (
 	"time"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
+	"github.com/ydixken/pgcopydb-operator/internal/metrics"
 	"github.com/ydixken/pgcopydb-operator/internal/native"
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	"github.com/ydixken/pgcopydb-operator/internal/sentinel"
@@ -30,6 +31,67 @@ type nativeRetryAdmission struct {
 	readiness      *native.RetryReadiness
 	closed         *nativeClosedCompareHelpers
 	used, recorded bool
+}
+
+// nativeRetryRouted reports whether a pass that is neither deleting nor suspended routes to the failed-worker retry.
+func nativeRetryRouted(worker *batchv1.Job) bool {
+	return worker != nil && nativeRecoveryWorkerFailed(worker)
+}
+
+// reconcileNativeFailedWorker ends the Migration on a terminal worker failure, or else runs the retry gate.
+func (r *MigrationReconciler) reconcileNativeFailedWorker(ctx context.Context, live *v1beta1.Migration, current *batchv1.Job, claim *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	if terminal, err := r.reconcileNativeFailure(ctx, live, current, claim); terminal || err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.reconcileNativeRetry(ctx, live, live.DeepCopy(), current, claim)
+}
+
+type nativeFailureReader interface {
+	JobFailureNative(context.Context, string, types.UID, podexec.NativeContainerBinding) (podexec.NativeOutcome, error)
+}
+
+func (r *MigrationReconciler) reconcileNativeFailure(ctx context.Context, m *v1beta1.Migration, worker *batchv1.Job, pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	live, original, err := r.nativeRecoveryQuiescentCurrent(ctx, m, worker, pvc, nil)
+	if err != nil || !nativeRecoveryWorkerFailed(worker) || live.Status.NativeFinalizedJobUID != "" {
+		return false, errNativeDisposition
+	}
+	if condition := meta.FindStatusCondition(live.Status.Conditions, v1beta1.ConditionFailed); condition != nil && condition.Status == metav1.ConditionTrue && live.Status.Phase == v1beta1.PhaseFailed && live.Status.ObservedGeneration == live.Generation {
+		switch condition.Reason {
+		case nativeFailureBadArgs, nativeFailureBadConfig, nativeFailureBadState:
+			return true, nil
+		}
+	}
+	reader, available := r.NativeJobs.(nativeFailureReader)
+	if !available {
+		return false, nil
+	}
+	status := original.Status.ContainerStatuses[0]
+	binding := podexec.NativeContainerBinding{PodUID: original.UID, ContainerName: workerContainer, ContainerID: status.ContainerID, ImageID: runnerImageFor(live, r.RPGMigrateRunnerImage), TemplateSHA256: podexec.NativeTemplateSHA256(worker.Spec.Template), ExecutionSHA256: podexec.NativeExecutionSHA256(worker.Spec.Template)}
+	output, captureErr := reader.JobFailureNative(ctx, live.Namespace, worker.UID, binding)
+	confirmed, _, err := r.nativeRecoveryQuiescentCurrent(ctx, live, worker, pvc, original)
+	if err != nil {
+		return false, errNativeDisposition
+	}
+	if captureErr != nil || !output.Successful() {
+		return false, nil
+	}
+	reason, terminal := nativeWorkerTerminalFailure(output.Payload())
+	if !terminal {
+		return false, nil
+	}
+	desired := confirmed.DeepCopy()
+	desired.Status.Phase, desired.Status.ObservedGeneration = v1beta1.PhaseFailed, desired.Generation
+	r.nativeCloneAttemptEnded(desired, reasonCloneFailed)
+	r.setCondition(desired, v1beta1.ConditionFailed, metav1.ConditionTrue, reason, "Native worker reported a terminal failure; retained state is preserved")
+	r.setCondition(desired, v1beta1.ConditionComplete, metav1.ConditionFalse, reason, "Native worker did not complete")
+	if err := r.Status().Patch(ctx, desired, client.MergeFromWithOptions(confirmed, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, nativeWorkerError(err)
+	}
+	desired.DeepCopyInto(m)
+	metrics.Record(desired)
+	return true, nil
 }
 
 func nativeRetryPolicyValid(m *v1beta1.Migration) bool {
