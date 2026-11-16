@@ -10,6 +10,7 @@ import (
 	"github.com/ydixken/pgcopydb-operator/internal/podexec"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,7 +36,13 @@ func (r *Reader) admitOwned(ctx context.Context, w ExecutionData, completed bool
 			return nil, ErrNativeOwnedStateUnavailable
 		}
 	}
-	if m.Status.JobName == "" || r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: m.Status.JobName}, worker) != nil {
+	if m.Status.JobName == "" {
+		return nil, ErrNativeOwnedStateUnavailable
+	}
+	if err := r.api.Get(ctx, types.NamespacedName{Namespace: w.Namespace, Name: m.Status.JobName}, worker); apierrors.IsNotFound(err) {
+		// Deletion cleans up after a recorded worker that is gone; ownedTerminalWorker admits it only without a pod.
+		worker = &batchv1.Job{}
+	} else if err != nil {
 		return nil, ErrNativeOwnedStateUnavailable
 	}
 	pods := &corev1.PodList{}
@@ -46,7 +53,7 @@ func (r *Reader) admitOwned(ctx context.Context, w ExecutionData, completed bool
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		for _, owner := range p.OwnerReferences {
-			if owner.Name == w.JobName && owner.UID != w.JobUID || owner.Name == worker.Name && owner.UID != w.WorkerJobUID {
+			if owner.Name == w.JobName && owner.UID != w.JobUID || owner.Name == m.Status.JobName && owner.UID != w.WorkerJobUID {
 				return nil, ErrNativeOwnedStateUnavailable
 			}
 			switch owner.UID {
@@ -113,7 +120,8 @@ func validateOwnedObjects(w ExecutionData, m *v1beta1.Migration, pvc *corev1.Per
 }
 
 func ownedMigrationMatches(w ExecutionData, m *v1beta1.Migration, worker *batchv1.Job) bool {
-	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && !m.Spec.Clone.AllDatabases && m.Status.Attempts == w.Attempt && m.Status.JobName == worker.Name
+	return NativeReceiptsMatch(m, w.WorkerJobUID, w.PVCUID) && m.Namespace == w.Namespace && m.Name == w.MigrationName && m.UID == w.MigrationUID && m.Generation == w.MigrationGeneration && m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate && m.Spec.Follow != nil && m.Spec.Follow.Enabled && !m.Spec.Clone.AllDatabases && m.Status.Attempts == w.Attempt &&
+		(m.Status.JobName == worker.Name || retryWorkerGone(worker) && m.Status.JobName == m.Name+"-run-"+strconv.FormatInt(int64(w.Attempt), 10))
 }
 
 func ownedHelperPodIdentity(w ExecutionData, job *batchv1.Job, pod *corev1.Pod) bool {
@@ -138,6 +146,9 @@ func ownedHelperState(w ExecutionData, job *batchv1.Job, pod *corev1.Pod, comple
 }
 
 func ownedTerminalWorker(w ExecutionData, m *v1beta1.Migration, job *batchv1.Job, pod *corev1.Pod) bool {
+	if retryWorkerGone(job) {
+		return pod == nil
+	}
 	return ownedTerminalWorkerJob(w, m, job) && (pod == nil && (successfulJob(job) || retryFailedWorkerJob(w, m, job)) || pod != nil && ownedTerminalWorkerPod(w, m, job, pod))
 }
 
