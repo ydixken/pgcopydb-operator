@@ -133,12 +133,17 @@ macOS pauses the monotonic clock while the host sleeps, so a wall-only expiry is
 On macOS, `up`, `pull`, and the legacy and native runs require AC power and hold a `caffeinate -dims` child for the command's lifetime.
 The guard refuses when `pmset` does not show that child's system-sleep assertions.
 The assertions do not stop a lid-close sleep, so keep the lid open and stay attended for the whole lease.
-`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
+`CASE` names one entry of `NATIVE_SPECS` in `hack/e2e-kind.py`: `fresh-clone`, `early-manual`, `live-writer`, `automatic-cutover`, `native-refusal`, `native-widening`, or `fault-copy`, `fault-stream`, `fault-drain`, `fault-failover`, `fault-suspend` and `fault-delete`.
 A native run seeds the native fixture, which leaves out `test/e2e/fixtures/legacy.sql`: the objects the native engine refuses before any database change.
 `native-refusal`, which the guard admits on pair 16:16 only, applies that file to the source and expects the Migration to fail with reason `NativeBadConfig`, with neither database changed.
 Its budget for the refusal is 15 minutes: the 10 minutes a worker pod may wait for a node, plus 5 for the preflight.
 It then deletes the Migration and expects the finalizer to clear within five minutes after an owned inventory, with no cleanup Job and no `rpgm_` slot, publication or `_rpgmigrate_` schema left on either side.
 It restores the native fixture afterwards, so other native specs on the same source see the shape they expect.
+`native-widening`, which the guard admits on all three native pairs, applies the same file to the source and runs a Manual follow Migration with schema and data verification.
+While it streams, the spec writes one row through the domain `CHECK`, the citext `UNIQUE` index, the expression and partial indexes and the generated column, then approves the cutover.
+It expects one attempt, `CutoverComplete` and `Verified`, the native cleanup and drain proofs, every widened object and the populated materialized view on the target, and the written rows, seed counts, large objects and sequences equal on both sides.
+It deletes its rows and restores the native fixture afterwards.
+It passes only on a runner whose follow and clone admit those objects, so it needs the M8 engine widening in the runner and a lock that pins it.
 `fault-copy` first creates `public.e2e_nfault_bulk` on the source: a bigint primary key and an 8 KiB text payload per row, 4 GiB of text COPY that pglz keeps near 110 MB on each volume.
 We sized it from one text COPY of that shape on the shared podman VM, about 135 MB/s over loopback without TLS, so its copy window is about 30 seconds there.
 On kind it is shorter: in M7-RUN5 the worker took about 18 seconds from start to streaming with the table and M7-RUN4 took 3.3 without it, which puts the table's COPY near 14 seconds.

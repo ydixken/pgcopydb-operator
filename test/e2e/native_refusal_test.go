@@ -17,11 +17,9 @@ limitations under the License.
 package e2e
 
 import (
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,14 +41,6 @@ const (
 	// nativeRefusalBudget covers a worker pod waiting for a node (workerRunningTimeout)
 	// plus the preflight before it; the refusal itself takes about a second.
 	nativeRefusalBudget = workerRunningTimeout + 5*time.Minute
-	// nativeRefusalRestoreSQL undoes fixtures/legacy.sql, so the source is the native fixture again.
-	nativeRefusalRestoreSQL = `DROP MATERIALIZED VIEW IF EXISTS event_daily_counts;
-DROP INDEX IF EXISTS app_users_name_lower_idx, readings_recent_partial_idx, documents_title_lower_idx;
-ALTER TABLE readings DROP COLUMN IF EXISTS total_price;
-ALTER TABLE app_users DROP CONSTRAINT IF EXISTS app_users_email_key;
-ALTER TABLE app_users ALTER COLUMN quota_percent TYPE numeric;
-DROP DOMAIN IF EXISTS e2e_percent;
-`
 	// nativeStateSQL counts every slot, publication, origin and native schema, so a refusal
 	// that changed anything on a side reads differently afterwards.
 	nativeStateSQL = "SELECT 'slots=' || (SELECT count(*) FROM pg_replication_slots)" +
@@ -65,23 +55,6 @@ DROP DOMAIN IF EXISTS e2e_percent;
 	// nativeStateNoneOwned matches a nativeStateSQL row with no native slot, publication or schema.
 	nativeStateNoneOwned = ` rpgm_slots=0 pubs=[0-9]+ rpgm_pubs=0 rpgm_schemas=0 `
 )
-
-// applyLegacyFixture runs fixtures/legacy.sql on the source as the app role, which owns
-// every fixture object, and registers the restore of the native fixture.
-func applyLegacyFixture() {
-	GinkgoHelper()
-	legacy, err := fixturesFS.ReadFile("fixtures/legacy.sql")
-	Expect(err).NotTo(HaveOccurred(), "failed to read the legacy fixture part")
-	role := "SET ROLE " + sqlIdent(appRole(sourceCluster)) + ";\n"
-	DeferCleanup(func() {
-		_, err := psqlIdempotentScript(sourceCluster, "native fixture restore", role+nativeRefusalRestoreSQL)
-		Expect(err).NotTo(HaveOccurred(), "failed to restore the native fixture")
-		Expect(fixtureObjects(sourceCluster)).To(Equal(nativeFixtureObjects), "the native fixture was not restored")
-	})
-	_, err = psqlIdempotentScript(sourceCluster, "legacy fixture part", role+string(legacy))
-	Expect(err).NotTo(HaveOccurred(), "failed to apply the legacy fixture part")
-	Expect(fixtureObjects(sourceCluster)).To(Equal(legacyFixtureObjects), "the legacy fixture part is incomplete")
-}
 
 var _ = Describe("Migration", func() {
 	BeforeEach(resetMigrationPair)
@@ -162,29 +135,4 @@ func deleteWatchingOwnedJobs(name string, uid types.UID) []string {
 	}
 	slices.Sort(names)
 	return names
-}
-
-// TestNativeRefusalRestoreUndoesTheLegacyPart ties legacy.sql to the restore the
-// spec runs and to the object check, so an object added to one cannot be missed by the others.
-func TestNativeRefusalRestoreUndoesTheLegacyPart(t *testing.T) {
-	legacy, err := fixturesFS.ReadFile("fixtures/legacy.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	created := regexp.MustCompile(`(?:CREATE DOMAIN|ADD CONSTRAINT|ADD COLUMN IF NOT EXISTS|CREATE INDEX IF NOT EXISTS|`+
-		`CREATE MATERIALIZED VIEW IF NOT EXISTS|ALTER COLUMN)\s+(\w+)`).FindAllStringSubmatch(string(legacy), -1)
-	if len(created) != 8 {
-		t.Fatalf("legacy.sql creates or retypes %d objects, want the 8 this test pins", len(created))
-	}
-	for _, m := range created {
-		if !strings.Contains(nativeRefusalRestoreSQL, m[1]) {
-			t.Errorf("the native fixture restore never undoes %s", m[1])
-		}
-		if !strings.Contains(fixtureObjectSQL, "'"+m[1]+"'") && !strings.Contains(fixtureObjectSQL, "public."+m[1]+"'") {
-			t.Errorf("fixtureObjectSQL never checks %s", m[1])
-		}
-	}
-	if !strings.HasPrefix(legacyFixtureObjects, nativeFixtureObjects+",") {
-		t.Errorf("the legacy objects %q do not extend the native ones %q", legacyFixtureObjects, nativeFixtureObjects)
-	}
 }
