@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	v1beta1 "github.com/ydixken/pgcopydb-operator/api/v1beta1"
 )
@@ -57,6 +58,33 @@ var passfileField = strings.NewReplacer(`\`, `\\`, `:`, `\:`)
 // PgpassPath is where the runner prelude assembles the passfile. It must be
 // writable in the runner image (the work volume is, and /tmp is).
 const PgpassPath = "/tmp/pgpass"
+
+// CredentialDir is where a prelude writes the passfile and the composed URIs.
+type CredentialDir string
+
+const (
+	// TmpCredentials serves legacy pods and the native helpers, whose /tmp is memory-backed.
+	TmpCredentials CredentialDir = "/tmp"
+	// MemoryCredentials is the native worker's and evidence Job's memory volume: their /tmp is on node disk.
+	MemoryCredentials CredentialDir = "/run/rpgmigrate-credentials"
+)
+
+// Pgpass is the passfile path in d.
+func (d CredentialDir) Pgpass() string { return string(d) + "/pgpass" }
+
+// URIFile is where a secretRef prelude writes the composed URI so commands
+// exec'd into the pod can recover what the spec env cannot carry.
+func (d CredentialDir) URIFile(s Side) string { return string(d) + "/pgm-" + string(s) + "-uri" }
+
+// MemoryCredentialsVolume is the volume and mount behind MemoryCredentials. Two URIs of at most
+// 64 KiB each and the passfile fit in 1 MiB, which counts against the pod's memory.
+// MustParse, not NewQuantity: a decoded "1Mi" caches its string, and admission compares with reflect.DeepEqual.
+func MemoryCredentialsVolume() (corev1.Volume, corev1.VolumeMount) {
+	limit := resource.MustParse("1Mi")
+	return corev1.Volume{Name: "credentials", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+			Medium: corev1.StorageMediumMemory, SizeLimit: &limit}}},
+		corev1.VolumeMount{Name: "credentials", MountPath: string(MemoryCredentials)}
+}
 
 // credsDir holds projected password files, one per side.
 const credsDir = "/etc/pgcopydb/creds"
@@ -104,9 +132,8 @@ type Materialized struct {
 	Prelude string
 }
 
-// URIFile is where a secretRef prelude writes the composed URI so commands
-// exec'd into the pod can recover what the spec env cannot carry.
-func URIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-uri" }
+// URIFile is TmpCredentials.URIFile, the legacy location.
+func URIFile(s Side) string { return TmpCredentials.URIFile(s) }
 
 // SuperURIFile is the superuser counterpart of URIFile.
 func SuperURIFile(s Side) string { return "/tmp/pgm-" + string(s) + "-super-uri" }
@@ -131,8 +158,13 @@ func syncCommitLocal(s Side, c *v1beta1.PostgresConnection) bool {
 	return s == Target && c.SynchronousCommit == v1beta1.SynchronousCommitLocal
 }
 
-// Materialize renders one side of the migration.
+// Materialize renders one side of the migration into TmpCredentials.
 func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
+	return MaterializeIn(TmpCredentials, s, c)
+}
+
+// MaterializeIn renders one side whose prelude writes its credential files into d.
+func MaterializeIn(d CredentialDir, s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 	// The CEL rules reject both shapes at admission; this covers a CRD without them.
 	if c.SynchronousCommit != "" {
 		switch {
@@ -143,7 +175,7 @@ func Materialize(s Side, c *v1beta1.PostgresConnection) (*Materialized, error) {
 		}
 	}
 	if c.SecretRef != nil {
-		return materializeSecretRef(s, c), nil
+		return materializeSecretRef(d, s, c), nil
 	}
 	if c.URISecretRef != nil {
 		return &Materialized{
@@ -243,7 +275,7 @@ func effectiveKeys(k *v1beta1.ConnectionSecretKeys) v1beta1.ConnectionSecretKeys
 // materializeSecretRef wires one Secret's keys into the pod by reference: the
 // operator only picks which keys feed which env vars and mounts; the runner's
 // prelude composes the URI and passfile line from their values at start.
-func materializeSecretRef(s Side, c *v1beta1.PostgresConnection) *Materialized {
+func materializeSecretRef(d CredentialDir, s Side, c *v1beta1.PostgresConnection) *Materialized {
 	sr := c.SecretRef
 	keys := effectiveKeys(sr.Keys)
 	hostKey := keys.URL
@@ -266,7 +298,7 @@ func materializeSecretRef(s Side, c *v1beta1.PostgresConnection) *Materialized {
 	vol, mount, file := passwordVolume(string(s), sr.Name, keys.Password, true)
 	m.Volumes = append(m.Volumes, vol)
 	m.Mounts = append(m.Mounts, mount)
-	m.Prelude = secretRefPrelude(s, sslParam(c), tlsParams(s, c), file, keys.Password, syncCommitLocal(s, c))
+	m.Prelude = secretRefPrelude(d, s, sslParam(c), tlsParams(s, c), file, keys.Password, syncCommitLocal(s, c))
 	return m
 }
 
@@ -479,7 +511,7 @@ const endpointShell = `pf_endpoint() {
 // rejected by name, because they would compose a wrong URI or a passfile line
 // libpq never matches; uriSecretRef is the escape hatch.
 // Host parsing accepts host or host:port; pf_endpoint refuses the rest by name.
-func secretRefPrelude(s Side, sslmode, tls, pwFile, pwKey string, syncLocal bool) string {
+func secretRefPrelude(d CredentialDir, s Side, sslmode, tls, pwFile, pwKey string, syncLocal bool) string {
 	const template = `pf_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'; }
 db=$@DB@
 case "$db" in
@@ -543,9 +575,9 @@ pf_endpoint "@SIDE@ connection secret" "$hostport" "$uri"
 `
 	}
 	b += `export ` + uriEnv(s) + `="$uri"
-printf '%s' "$uri" > ` + URIFile(s) + `
+printf '%s' "$uri" > ` + d.URIFile(s) + `
 [ -f ` + pwFile + ` ] || { echo "` + string(s) + ` connection secret: password key ` + quotedInDouble(pwKey) + ` missing" >&2; exit 1; }
-printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + PgpassPath + `
+printf '%s:%s:*:%s:%s\n' "$(pf_esc "$pf_host")" "$pf_port" "$(pf_esc "$user")" "$(pf_esc "$(cat ` + pwFile + `)")" >> ` + d.Pgpass() + `
 `
 	return b
 }
@@ -598,6 +630,12 @@ func tlsVolume(s Side, tls *v1beta1.TLSSecretRefs) (corev1.Volume, corev1.Volume
 // the spec carries; the file path is operator-composed. setup runs last so it
 // can authenticate, and must be trusted operator-composed shell.
 func PreludeScript(preludes []string, entries []Passfile, setup string) string {
+	return PreludeScriptIn(TmpCredentials, preludes, entries, setup)
+}
+
+// PreludeScriptIn is PreludeScript with the passfile in d, which the pod MUST mount writable.
+func PreludeScriptIn(d CredentialDir, preludes []string, entries []Passfile, setup string) string {
+	pgpass := d.Pgpass()
 	var pre []string
 	for _, p := range preludes {
 		if p != "" {
@@ -608,13 +646,13 @@ func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 	b.WriteString("set -eu\n")
 	if len(entries)+len(pre) > 0 {
 		// Truncate before the snippets: they append their own lines.
-		b.WriteString("umask 077\n: > " + PgpassPath + "\n")
+		b.WriteString("umask 077\n: > " + pgpass + "\n")
 		for _, e := range entries {
 			// sed escapes backslashes first, then colons; $(cat ...) would strip
 			// trailing newlines which sed does not, so sed reads the file itself.
 			fmt.Fprintf(&b,
 				"printf '%%s:%d:*:%%s:%%s\\n' %s %s \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' %s)\" >> %s\n",
-				e.Port, shellQuote(passfileField.Replace(e.Host)), shellQuote(passfileField.Replace(e.User)), e.File, PgpassPath)
+				e.Port, shellQuote(passfileField.Replace(e.Host)), shellQuote(passfileField.Replace(e.User)), e.File, pgpass)
 		}
 		for _, p := range pre {
 			b.WriteString(p)
@@ -622,7 +660,7 @@ func PreludeScript(preludes []string, entries []Passfile, setup string) string {
 				b.WriteByte('\n')
 			}
 		}
-		b.WriteString("export PGPASSFILE=" + PgpassPath + "\n")
+		b.WriteString("export PGPASSFILE=" + pgpass + "\n")
 	}
 	if setup != "" {
 		b.WriteString(setup)

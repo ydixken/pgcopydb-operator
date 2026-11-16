@@ -89,7 +89,7 @@ try:
    value.extend(block)
    if len(value)>65536:raise ValueError()
  for role in roles:
-  path='/tmp/pgm-'+role+'-uri';key=('PGCOPYDB_'+role.upper()+'_PGURI').encode('ascii')
+  path='/run/rpgmigrate-credentials/pgm-'+role+'-uri';key=('PGCOPYDB_'+role.upper()+'_PGURI').encode('ascii')
   try:fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
   except FileNotFoundError:
    if key not in env:raise ValueError()

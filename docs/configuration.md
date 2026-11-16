@@ -281,8 +281,14 @@ The worker commands and the comparison helper also refuse an environment larger 
 We turn the links off rather than relax those checks.
 The native pods still receive the `kubernetes` Service variables, and they reach the databases by the hosts in the Migration.
 
+The native worker and evidence Jobs write the passfile and the composed connection URIs to `/run/rpgmigrate-credentials`, a memory-backed `emptyDir` capped at 1 MiB.
+Their `/tmp` stays on node disk for scratch files, and the worker pod is kept until the Migration is deleted, so plaintext passwords there would outlive the copy.
+The other native helpers keep these files in `/tmp`, which is already memory-backed in their pods.
+Native admission refuses a native pod whose `PGPASSFILE` directory is not the mount of a size-limited memory `emptyDir`.
+The 1 MiB counts against the pod's memory.
+
 > [!warning]
-> A native pod created by an operator build that left service links unset no longer matches, so the controller refuses to act on it.
+> A native pod created by an operator build that left service links unset, or that kept the passfile on a disk-backed `/tmp`, no longer matches, so the controller refuses to act on it.
 > Let native Migrations finish before you upgrade from such a build.
 
 > [!important]

@@ -334,11 +334,11 @@ def run_integration(P):
     diag = P.Diagnostics()
     c = Checks()
     # Host and port fields only; the hosts carry no escaped colon.
-    with open('/tmp/pgpass') as handle:
+    with open(P.MEMORY_CREDENTIALS + '/pgpass') as handle:
         c.add('passfile_host_ports', [line.split(':')[:3] for line in handle.read().splitlines()],
               [['localhost', '5418', '*'], ['localhost', '5416', '*']])
     library = P.load_runtime()
-    materials = P.Materialization(os.environ)
+    materials = P.Materialization(os.environ, credentials=P.MEMORY_CREDENTIALS)
     try:
         materials.prepare(library, deadline())
         majors = []
@@ -358,7 +358,7 @@ def run_integration(P):
     finally:
         materials.close()
     diag.close()
-    return c.report(stage='integration', pgpass_mode=oct(os.stat('/tmp/pgpass').st_mode & 0o777))
+    return c.report(stage='integration', pgpass_mode=oct(os.stat(P.MEMORY_CREDENTIALS + '/pgpass').st_mode & 0o777))
 
 
 def main(argv):

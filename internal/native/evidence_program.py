@@ -19,6 +19,7 @@ RESULT='result'
 INPUT='input'
 CLOSE='closure'
 CONN='connection'
+MEMORY_CREDENTIALS='/run/rpgmigrate-credentials'
 TX_STATE='transaction_state'
 U64 = (1 << 64)-1
 GUARDS = 'target_settings target_identity configure_durability target_fence idle_guard begin lock_checkpoint lock_marker catalog_checkpoint catalog_marker row_read same_value_update deferred_effects row_comparison precommit_guard commit idle_guard unlock closure_guard'.split()
@@ -1085,8 +1086,9 @@ def catalog_params(target,marker):
  params=(target['schema_oid'],target['table_oid'],b['target_database_oid'],b['owner_oid'],b['schema_name'],b['table_name'],target['marker_table_oid'],target['marker_index_oid'])
  return params+(target['large_object_table_oid'],target['large_object_index_oid']) if b['metadata_version']==7 else params
 class Materialization:
-    def __init__(self, env, source_only=False, target_only=False):
+    def __init__(self, env, source_only=False, target_only=False, credentials='/tmp'):
         need(type(source_only) is bool and type(target_only) is bool and not (source_only and target_only), CAP_ERR)
+        need(credentials in ('/tmp', MEMORY_CREDENTIALS) and env.get('PGPASSFILE', credentials + '/pgpass') == credentials + '/pgpass', CONN)
         self.source_only = source_only
         self.target_only = target_only
         self.env = self.selected_environment(env)
@@ -1105,12 +1107,12 @@ class Materialization:
             if source_only or target_only:
                 role = 'source' if source_only else 'target'
                 try:
-                    self.roles[role] = self.pin('/tmp/pgm-' + role + '-uri').raw
+                    self.roles[role] = self.pin(credentials + '/pgm-' + role + '-uri').raw
                 except OSError as error:
                     if error.errno not in (errno.ENOENT, errno.ENOTDIR):
                         raise Refusal(CONN) from None
             need(all(self.roles.values()) and not any(b'\0' in value for value in self.roles.values()), CONN)
-            paths = [] if source_only or target_only else ['/tmp/pgm-source-uri', '/tmp/pgm-target-uri', '/tmp/pgpass']
+            paths = [] if source_only or target_only else [credentials + name for name in ('/pgm-source-uri', '/pgm-target-uri', '/pgpass')]
             for root in (() if source_only or target_only else ('/etc/pgcopydb/creds', '/etc/pgcopydb/tls')):
                 if os.path.isdir(root):
                     for directory, _, names in os.walk(root, followlinks=False):
@@ -1313,7 +1315,7 @@ def run_completed_evidence(operation_id: str,program_sha256: str) -> int:
   channel=InputChannel(op,start+30); channel.route(); raw=channel.consume()
   req=validate_request(raw,op,sha); deadline=time.monotonic()+25
   diag=Diagnostics(); need(os.geteuid()==65532,'admission')
-  state=PrivateState(req); materials=Materialization(os.environ)
+  state=PrivateState(req); materials=Materialization(os.environ,credentials=MEMORY_CREDENTIALS)
   resolver=StableFile('/etc/resolv.conf',CAP); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR); materials.files.append(resolver)
   library=load_runtime(); materials.prepare(library,deadline)
   qualified_resolver_policy(resolver); need(time.monotonic()<deadline,'timeout')
@@ -1650,7 +1652,7 @@ def run_source_observation(kind: str, operation_id: str, program_sha256: str) ->
    if not part: break
    raw.extend(part); need(len(raw)<=CAP,INPUT)
   raw=bytes(raw); req=validate_source_request(raw,kind,operation_id,program_sha256); work_environment(req)
-  state=SourceState(req); materials=Materialization(os.environ,source_only=True)
+  state=SourceState(req); materials=Materialization(os.environ,source_only=True,credentials=MEMORY_CREDENTIALS)
   resolver=StableFile('/etc/resolv.conf',CAP); materials.files.append(resolver); resolver.raw.decode('ascii'); need(b'\0' not in resolver.raw,CAP_ERR)
   library=load_runtime(); materials.prepare(library,deadline); qualified_resolver_policy(resolver); state.revalidate()
   session=Session(library,materials.connection('source'),min(deadline,time.monotonic()+10),diag); session.deadline=deadline

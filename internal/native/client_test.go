@@ -298,7 +298,7 @@ const controlRecoveryHarness = `import sys,os,stat,types,signal
 from unittest.mock import patch
 code,case=sys.argv[1:];mode='set_endpos' if case=='set_endpos' else 'progress'
 raw=b"postgresql://private.invalid/db?password=secret-canary\n\xff"
-files={'/tmp/pgm-source-uri':raw,'/tmp/pgm-target-uri':raw};offset={};opened=[];closed=[];executed=[]
+files={'/run/rpgmigrate-credentials/pgm-source-uri':raw,'/run/rpgmigrate-credentials/pgm-target-uri':raw};offset={};opened=[];closed=[];executed=[]
 env={b'PGCOPYDB_SOURCE_PGURI':b'opaque-source-env\n',b'PGCOPYDB_TARGET_PGURI':b'opaque-target-env\n'}
 info=types.SimpleNamespace(st_dev=1,st_ino=2,st_mode=stat.S_IFREG|0o600,st_nlink=1,st_uid=65532,st_gid=65532,st_size=len(raw),st_mtime_ns=1,st_ctime_ns=1)
 if case=='fifo':info.st_mode=stat.S_IFIFO|0o600
@@ -348,7 +348,7 @@ else:
  expected=['/usr/local/bin/rpgmigrate']+(['stream','sentinel','set','endpos','0/20'] if mode=='set_endpos' else ['list','progress'])+['--json','--dir','/work/pgcopydb']
  if path!='/usr/local/bin/rpgmigrate' or args!=expected:raise RuntimeError('command boundary changed')
  roles=('target',) if mode=='set_endpos' else ('source','target')
- if opened!=['/tmp/pgm-'+r+'-uri' for r in roles]:raise RuntimeError('unselected role consumed')
+ if opened!=['/run/rpgmigrate-credentials/pgm-'+r+'-uri' for r in roles]:raise RuntimeError('unselected role consumed')
  for role in roles:
   key=('PGCOPYDB_'+role.upper()+'_PGURI').encode('ascii')
   if values[key]!=(env[key] if case=='fallback' else raw):raise RuntimeError('opaque bytes changed')

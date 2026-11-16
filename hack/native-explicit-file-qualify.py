@@ -21,7 +21,7 @@ VERIFIER = 'native-explicit-file-verify.py'
 CAPS = ['--cpus', '1', '--memory', '512m', '--pids-limit', '256']
 # The production evidence container profile: UID 65532, read-only rootfs, no capabilities.
 RUNNER = ['--user', '65532:65532', '--read-only', '--cap-drop', 'all', '--security-opt', 'no-new-privileges',
-          '--tmpfs', '/tmp:rw,size=16m,mode=1777',
+          '--tmpfs', '/tmp:rw,size=16m,mode=1777', '--tmpfs', '/run/rpgmigrate-credentials:rw,size=1m,mode=1777',
           '--mount', 'type=tmpfs,destination=/work,tmpfs-size=16m,tmpfs-mode=0700,U=true', '-w', '/work']
 PORTS = {18: 5418, 16: 5416}
 

@@ -18,6 +18,7 @@ package conn
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1494,7 +1496,7 @@ func TestSecretRefPrelude_SynchronousCommit(t *testing.T) {
 			}
 			// Materialize refuses the field on the source before any prelude
 			// exists, so the source row checks the prelude's own side guard.
-			m := materializeSecretRef(tc.side, c)
+			m := materializeSecretRef(TmpCredentials, tc.side, c)
 			uri, _, _, out, err := runSidePrelude(t, tc.side, m.Prelude, tc.env, tPass)
 			if tc.wantErr {
 				var exit *exec.ExitError
@@ -1701,5 +1703,41 @@ func TestComposeURI_RefusesUnbindableHost(t *testing.T) {
 	c.Host = "Pg-1.ns_x.svc.cluster.local"
 	if _, err := Materialize(Source, c); err != nil {
 		t.Fatalf("plain DNS name refused: %v", err)
+	}
+}
+
+// Admission compares the live volume with reflect.DeepEqual, so the decoded form must equal the built one.
+func TestMemoryCredentialsVolumeRoundTrip(t *testing.T) {
+	vol, mount := MemoryCredentialsVolume()
+	raw, err := json.Marshal(vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back corev1.Volume
+	if err := json.Unmarshal(raw, &back); err != nil || !reflect.DeepEqual(vol, back) {
+		t.Fatalf("decoded credential volume differs: %s", raw)
+	}
+	if vol.EmptyDir.Medium != corev1.StorageMediumMemory || vol.EmptyDir.SizeLimit.Value() != 1<<20 || mount.MountPath != string(MemoryCredentials) || mount.ReadOnly {
+		t.Fatalf("credential volume %+v at %+v", vol, mount)
+	}
+}
+
+// The memory directory changes only where credentials land: the prelude text is otherwise identical.
+func TestPreludeCredentialDirectory(t *testing.T) {
+	m, err := MaterializeIn(MemoryCredentials, Target, secretConn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Materialize(Target, secretConn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := PreludeScriptIn(MemoryCredentials, []string{m.Prelude}, []Passfile{{Host: "h", Port: 5432, User: "u", File: "/f"}}, "")
+	if strings.Contains(script, "/tmp/") || !strings.Contains(script, "> "+MemoryCredentials.URIFile(Target)+"\n") || strings.Count(script, MemoryCredentials.Pgpass()) != 4 {
+		t.Fatalf("credential files outside %s:\n%s", MemoryCredentials, script)
+	}
+	same := strings.NewReplacer(string(MemoryCredentials)+"/", "/tmp/").Replace(script)
+	if same != PreludeScript([]string{legacy.Prelude}, []Passfile{{Host: "h", Port: 5432, User: "u", File: "/f"}}, "") {
+		t.Fatal("memory prelude differs from the legacy one beyond its directory")
 	}
 }

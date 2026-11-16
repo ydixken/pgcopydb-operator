@@ -491,7 +491,7 @@ func nativePreflightPodMatches(job *batchv1.Job, pod *corev1.Pod) bool {
 		got.DeprecatedServiceAccount = ""
 	}
 	// Linked Service variables reach every exec, and unset means true; the DeepEqual below holds the Pod to this.
-	if want.EnableServiceLinks == nil || *want.EnableServiceLinks {
+	if want.EnableServiceLinks == nil || *want.EnableServiceLinks || !native.CredentialsInMemory(want) {
 		return false
 	}
 	if want.Priority == nil {

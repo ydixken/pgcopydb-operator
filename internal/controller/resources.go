@@ -1726,7 +1726,13 @@ func runnerImageFor(m *v1beta1.Migration, runnerImage string) string {
 // is shell the prelude runs after the passfile is assembled (conn.PreludeScript).
 // extras are credential sets whose preludes run after the primary sides'.
 func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, setup string, backoff int32, syncCommit bool, extras ...*conn.Materialized) (*batchv1.Job, error) {
-	src, err := conn.Materialize(conn.Source, &m.Spec.Source)
+	// A native pod's /tmp here is on node disk, so its passwords go to a memory volume instead.
+	nativePod := m.Spec.Engine == v1beta1.MigrationEngineRPGMigrate
+	credentials := conn.TmpCredentials
+	if nativePod {
+		credentials = conn.MemoryCredentials
+	}
+	src, err := conn.MaterializeIn(credentials, conn.Source, &m.Spec.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -1735,7 +1741,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 	if !syncCommit {
 		target.SynchronousCommit = ""
 	}
-	tgt, err := conn.Materialize(conn.Target, &target)
+	tgt, err := conn.MaterializeIn(credentials, conn.Target, &target)
 	if err != nil {
 		return nil, err
 	}
@@ -1762,7 +1768,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 		// PGPASSFILE must live in the container spec, not only in the prelude
 		// shell: commands the operator execs into the pod inherit the spec env
 		// and fail password authentication without it. The prelude export stays.
-		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: conn.PgpassPath})
+		env = append(env, corev1.EnvVar{Name: "PGPASSFILE", Value: credentials.Pgpass()})
 	}
 
 	volumes := []corev1.Volume{
@@ -1774,13 +1780,17 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 				},
 			},
 		},
-		// The root filesystem is read-only; /tmp holds the assembled
-		// passfile and pgcopydb scratch files.
+		// The root filesystem is read-only; /tmp holds scratch files and,
+		// for legacy pods, the assembled passfile.
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	mounts := []corev1.VolumeMount{
 		{Name: workdirVolume, MountPath: pgcopydb.WorkMount},
 		{Name: "tmp", MountPath: "/tmp"},
+	}
+	if nativePod {
+		vol, mount := conn.MemoryCredentialsVolume()
+		volumes, mounts = append(volumes, vol), append(mounts, mount)
 	}
 	for _, mat := range sets {
 		volumes = append(volumes, mat.Volumes...)
@@ -1839,7 +1849,7 @@ func jobSkeleton(m *v1beta1.Migration, runnerImage, name string, args []string, 
 						// The prelude assembles the passfile, runs setup, then
 						// execs "$0" "$@": $0 is "pgcopydb" here, and scriptJob
 						// swaps it for /bin/sh.
-						Command:      []string{shellPath, "-c", conn.PreludeScript(preludes, passfiles, setup), "pgcopydb"},
+						Command:      []string{shellPath, "-c", conn.PreludeScriptIn(credentials, preludes, passfiles, setup), "pgcopydb"},
 						Args:         args,
 						Env:          env,
 						VolumeMounts: mounts,

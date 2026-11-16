@@ -31,6 +31,13 @@
             "emptyDir": {}
           },
           {
+            "name": "credentials",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            }
+          },
+          {
             "name": "source-password",
             "secret": {
               "secretName": "sec",
@@ -51,7 +58,7 @@
             "command": [
               "/bin/sh",
               "-c",
-              "set -eu\numask 077\n: \u003e /tmp/pgpass\nprintf '%s:5432:*:%s:%s\\n' 's' 'u' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' /etc/pgcopydb/creds/source-mnt/source-password)\" \u003e\u003e /tmp/pgpass\nexport PGPASSFILE=/tmp/pgpass\nexec \"$0\" \"$@\"",
+              "set -eu\numask 077\n: \u003e /run/rpgmigrate-credentials/pgpass\nprintf '%s:5432:*:%s:%s\\n' 's' 'u' \"$(sed -e 's/\\\\/\\\\\\\\/g' -e 's/:/\\\\:/g' /etc/pgcopydb/creds/source-mnt/source-password)\" \u003e\u003e /run/rpgmigrate-credentials/pgpass\nexport PGPASSFILE=/run/rpgmigrate-credentials/pgpass\nexec \"$0\" \"$@\"",
               "/usr/local/bin/rpgmigrate"
             ],
             "args": [
@@ -81,7 +88,7 @@
               },
               {
                 "name": "PGPASSFILE",
-                "value": "/tmp/pgpass"
+                "value": "/run/rpgmigrate-credentials/pgpass"
               },
               {
                 "name": "RPGMIGRATE_MIGRATION_UID",
@@ -122,6 +129,10 @@
               {
                 "name": "tmp",
                 "mountPath": "/tmp"
+              },
+              {
+                "name": "credentials",
+                "mountPath": "/run/rpgmigrate-credentials"
               },
               {
                 "name": "source-password",

@@ -794,11 +794,11 @@ func checkConstructionPolicy(t *testing.T, m *v1beta1.Migration, w ExecutionRequ
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := conn.Materialize(conn.Source, &m.Spec.Source)
+	source, err := conn.MaterializeIn(conn.MemoryCredentials, conn.Source, &m.Spec.Source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := conn.Materialize(conn.Target, &m.Spec.Target)
+	target, err := conn.MaterializeIn(conn.MemoryCredentials, conn.Target, &m.Spec.Target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,16 +808,19 @@ func checkConstructionPolicy(t *testing.T, m *v1beta1.Migration, w ExecutionRequ
 	}
 	expectedVolumes := append(append([]corev1.Volume{}, source.Volumes...), target.Volumes...)
 	expectedMounts := append(append([]corev1.VolumeMount{}, source.Mounts...), target.Mounts...)
-	if len(volumes) != 2+len(expectedVolumes) || len(mounts) != 2+len(expectedMounts) {
+	if len(volumes) != 3+len(expectedVolumes) || len(mounts) != 3+len(expectedMounts) {
 		t.Fatal("connection volume/mount inventory changed")
 	}
+	if credentials, mount := conn.MemoryCredentialsVolume(); !reflect.DeepEqual(volumes[2], credentials) || !reflect.DeepEqual(mounts[2], mount) {
+		t.Fatal("memory credential volume changed")
+	}
 	for i, v := range expectedVolumes {
-		if !reflect.DeepEqual(volumes[i+2], v) {
+		if !reflect.DeepEqual(volumes[i+3], v) {
 			t.Fatal("connection projection changed")
 		}
 	}
 	for i, v := range expectedMounts {
-		if !reflect.DeepEqual(mounts[i+2], v) {
+		if !reflect.DeepEqual(mounts[i+3], v) {
 			t.Fatal("connection mount changed")
 		}
 	}
@@ -831,7 +834,7 @@ func checkConstructionPolicy(t *testing.T, m *v1beta1.Migration, w ExecutionRequ
 			passfiles = append(passfiles, *material.Passfile)
 		}
 	}
-	if len(command) != 4 || command[0] != nativeShellPath || command[1] != "-c" || command[2] != conn.PreludeScript(preludes, passfiles, "") || command[3] != nativeShellPath || len(args) != 2 || args[0] != "-c" || !strings.Contains(args[1], string(EvidenceProgram())) {
+	if len(command) != 4 || command[0] != nativeShellPath || command[1] != "-c" || command[2] != conn.PreludeScriptIn(conn.MemoryCredentials, preludes, passfiles, "") || command[3] != nativeShellPath || len(args) != 2 || args[0] != "-c" || !strings.Contains(args[1], string(EvidenceProgram())) {
 		t.Fatal("canonical prelude/main delivery changed")
 	}
 	launch := strings.Join(append(command, args...), "\n")

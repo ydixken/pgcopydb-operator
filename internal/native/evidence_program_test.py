@@ -307,7 +307,7 @@ class SourceFixture:
             def revalidate(self):outer.event('private-check')
             def close(self,recheck=True):outer.closes.append('private');outer.event('private-close')
         class Material:
-            def __init__(self,env,source_only=False):outer.case.assertIs(source_only,True);self.files=[];outer.event('material-open')
+            def __init__(self,env,source_only=False,credentials='/tmp'):outer.case.assertIs(source_only,True);outer.case.assertEqual(credentials,'/run/rpgmigrate-credentials');self.files=[];outer.event('material-open')
             def prepare(self,library,deadline):outer.deadlines.append(deadline);outer.event('prepare')
             def connection(self,role):outer.case.assertEqual(role,'source');outer.event('source-input');return role
             def check(self):outer.event('material-check')
@@ -561,6 +561,25 @@ class NativePythonTests(unittest.TestCase):
                 material=P.Materialization(env,target_only=True)
                 try:self.assertEqual(material.roles,{'target':b'env-target'});material.check()
                 finally:material.close()
+
+    def test_MaterializationCredentialDirectory(self):
+        memory='/run/rpgmigrate-credentials';self.assertEqual(P.MEMORY_CREDENTIALS,memory)
+        env={'PGCOPYDB_SOURCE_PGURI':'env-source','PGCOPYDB_TARGET_PGURI':'env-target'}
+        for credentials,kwargs,want in ((memory,{},[memory+'/pgm-source-uri',memory+'/pgm-target-uri',memory+'/pgpass']),('/tmp',{},['/tmp/pgm-source-uri','/tmp/pgm-target-uri','/tmp/pgpass']),
+                                        (memory,{'source_only':True},[memory+'/pgm-source-uri']),('/tmp',{'target_only':True},['/tmp/pgm-target-uri'])):
+            opened=[]
+            def missing(path,fd):opened.append(path.decode());raise FileNotFoundError(2,'not provisioned')
+            for passfile in (None,credentials+'/pgpass'):
+                selected=dict(env) if passfile is None else dict(env,PGPASSFILE=passfile);opened.clear()
+                with self.subTest(credentials=credentials,kwargs=kwargs,passfile=passfile),mock.patch.dict(os.environ,selected,clear=True),mock.patch.object(P,'open_connection_file',side_effect=missing),mock.patch.object(P.os.path,'isdir',return_value=False):
+                    material=P.Materialization(selected,credentials=credentials,**kwargs)
+                    try:self.assertEqual(opened,want);material.check()
+                    finally:material.close()
+        # A passfile outside the selected directory means a caller passed the wrong one for its pod.
+        for credentials,passfile in ((memory,'/tmp/pgpass'),('/tmp',memory+'/pgpass'),('/var/tmp','/var/tmp/pgpass'),(memory+'/',memory+'//pgpass'),(memory,'')):
+            with self.subTest(credentials=credentials,passfile=passfile),mock.patch.object(P,'open_connection_file',side_effect=AssertionError('credential read before refusal')):
+                with self.assertRaises(P.Refusal) as refused:P.Materialization(dict(env,PGPASSFILE=passfile),credentials=credentials)
+                self.assertEqual(refused.exception.error_class,'connection')
 
     def test_SourceObservationWire(self):
         self.assertIsNotNone(getattr(P,'run_source_observation',None),'fixed source observation role is absent')
